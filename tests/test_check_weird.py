@@ -86,7 +86,9 @@ def main():
     #    each other -- caps overlap ((w1+w2)/2 = 0.2 > 0.05 > min gap 0.01).
     pads = [_pad(0, 0, num='1'), _pad(10, 0, num='2', ref='U2')]
     pcb = _pcb([_seg(0, 0, 5, 0), _seg(5.05, 0, 10, 0)], pads=pads)
-    f, _ = check_weird(pcb)
+    # gap 0.05 < default tolerance 0.1: detection is exercised at tolerance=0,
+    # and the default-filter behavior is asserted right after.
+    f, _ = check_weird(pcb, tolerance=0)
     c = _cats(f)
     results.append(("soft joint flagged", c['soft-joint'] == 1))
     results.append(("soft-joint ends not double-reported as dangling",
@@ -154,6 +156,11 @@ def main():
     c = _cats(f)
     results.append(("coincident vias flagged as stacked-copper",
                     c['stacked-copper'] == 1))
+
+    # Default tolerance hides sub-0.1mm findings (the same 0.05mm soft joint).
+    f_tol, _ = check_weird(pcb)
+    results.append(("default 0.1mm tolerance hides the 0.05mm soft joint",
+                    len([x for x in f_tol if x['category'] == 'soft-joint']) == 0))
 
     passed = 0
     for name, ok in results:

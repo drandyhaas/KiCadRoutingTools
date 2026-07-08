@@ -61,9 +61,12 @@ _VIA_COINCIDENT_MM = 0.01  # stacked-via center distance
 _DUP_SEG_DECIMALS = 3      # ~1um endpoint quantization for exact duplicates
 
 
-def _finding(category, net, layer, x, y, detail):
+def _finding(category, net, layer, x, y, detail, size=None):
+    # size = the finding's characteristic magnitude in mm (dangle length,
+    # gap, duplicated-copper length, via diameter ...). The --tolerance
+    # filter drops findings smaller than the threshold; None = always report.
     return {'category': category, 'net': net, 'layer': layer,
-            'x': x, 'y': y, 'detail': detail}
+            'x': x, 'y': y, 'detail': detail, 'size': size}
 
 
 def _net_name(pcb_data: PCBData, net_id: int) -> str:
@@ -124,7 +127,8 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads, findings):
                     findings.append(_finding(
                         'soft-joint', name, layer, xi, yi,
                         f"endpoint gap {gap:.3f}mm to ({xj:.3f}, {yj:.3f}), "
-                        f"caps overlap {cap - gap:.3f}mm (fragile near-open)"))
+                        f"caps overlap {cap - gap:.3f}mm (fragile near-open)",
+                        size=gap))
                     k1 = (layer,) + rk(xi, yi)
                     k2 = (layer,) + rk(xj, yj)
                     soft_pts.add(k1)
@@ -197,7 +201,7 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
             findings.append(_finding(
                 'dangling-end', name, s.layer, fx, fy,
                 f"isolated fragment {seg_len:.3f}mm long, "
-                f"other end at ({ox:.3f}, {oy:.3f})"))
+                f"other end at ({ox:.3f}, {oy:.3f})", size=seg_len))
             continue
         free_is_start, fx, fy = free_ends[0]
         # Mid-body anchors (trim_dangles_past_body_anchor geometry): a same-net
@@ -231,13 +235,14 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
             findings.append(_finding(
                 'dangling-end', name, s.layer, fx, fy,
                 f"half-segment tail dangling {tail:.3f}mm past body anchor "
-                f"at ({nx:.3f}, {ny:.3f})"))
+                f"at ({nx:.3f}, {ny:.3f})", size=tail))
         else:
             findings.append(_finding(
                 'dangling-end', name, s.layer, fx, fy,
                 f"free end, dangling segment {seg_len:.3f}mm "
                 f"(rooted at ({s.end_x if free_is_start else s.start_x:.3f}, "
-                f"{s.end_y if free_is_start else s.start_y:.3f}))"))
+                f"{s.end_y if free_is_start else s.start_y:.3f}))",
+                size=seg_len))
 
 
 def _check_cycles(net_id, name, net_segs, net_vias, net_pads, has_zone,
@@ -259,7 +264,8 @@ def _check_cycles(net_id, name, net_segs, net_vias, net_pads, has_zone,
             'redundant-cycle', name, s.layer, mx, my,
             f"loop edge ({s.start_x:.3f}, {s.start_y:.3f})-"
             f"({s.end_x:.3f}, {s.end_y:.3f}); removal leaves connectivity "
-            f"identical"))
+            f"identical",
+            size=math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)))
 
 
 def _check_removable(net_id, name, net_segs, net_vias, net_pads, net_zones,
@@ -308,7 +314,8 @@ def _check_removable(net_id, name, net_segs, net_vias, net_pads, net_zones,
                 'removable-segment', name, s.layer, mx, my,
                 f"segment ({s.start_x:.3f}, {s.start_y:.3f})-"
                 f"({s.end_x:.3f}, {s.end_y:.3f}) w{s.width:.3f}: removal "
-                f"does not change net connectivity"))
+                f"does not change net connectivity",
+                size=math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)))
 
 
 def _check_stacked(net_id, name, net_segs, net_vias, findings):
@@ -324,7 +331,8 @@ def _check_stacked(net_id, name, net_segs, net_vias, findings):
             findings.append(_finding(
                 'stacked-copper', name, layer, lo[0], lo[1],
                 f"{len(ss)} duplicate segments stacked on "
-                f"({lo[0]:.3f}, {lo[1]:.3f})-({hi[0]:.3f}, {hi[1]:.3f})"))
+                f"({lo[0]:.3f}, {lo[1]:.3f})-({hi[0]:.3f}, {hi[1]:.3f})",
+                size=math.hypot(hi[0] - lo[0], hi[1] - lo[1])))
     # Coincident vias: bucket at the coincidence radius, scan 3x3 neighbors.
     cell = _VIA_COINCIDENT_MM
     grid = defaultdict(list)
@@ -347,7 +355,8 @@ def _check_stacked(net_id, name, net_segs, net_vias, findings):
                         findings.append(_finding(
                             'stacked-copper', name, layer_str, v.x, v.y,
                             f"coincident vias {d * 1000:.1f}um apart "
-                            f"(other at ({o.x:.4f}, {o.y:.4f}))"))
+                            f"(other at ({o.x:.4f}, {o.y:.4f}))",
+                            size=getattr(v, 'size', None)))
 
 
 def _check_unsupported_vias(net_id, name, net_segs, net_vias, net_pads,
@@ -386,16 +395,19 @@ def _check_unsupported_vias(net_id, name, net_segs, net_vias, net_pads,
             layer_str = ','.join(v.layers) if v.layers else '*.Cu'
             findings.append(_finding(
                 'unsupported-via', name, layer_str, v.x, v.y,
-                "floating via: no same-net track, pad, or zone reaches it"))
+                "floating via: no same-net track, pad, or zone reaches it",
+                size=getattr(v, 'size', None)))
 
 
 def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
-                thorough: bool = False, quiet: bool = True
+                thorough: bool = False, quiet: bool = True,
+                tolerance: float = 0.1
                 ) -> Tuple[List[Dict], List[Tuple[str, int]]]:
     """Run every check. Returns (findings, skipped_nets) where each finding is
-    {'category', 'net', 'layer', 'x', 'y', 'detail'} and skipped_nets lists
-    (net_name, segment_count) nets the removable-segment scan skipped.
-    Read-only: pcb_data is not modified."""
+    {'category', 'net', 'layer', 'x', 'y', 'detail', 'size'} and skipped_nets
+    lists (net_name, segment_count) nets the removable-segment scan skipped.
+    Findings whose characteristic size (mm) is below `tolerance` are dropped
+    (0 = report everything). Read-only: pcb_data is not modified."""
     findings: List[Dict] = []
     skipped_nets: List[Tuple[str, int]] = []
 
@@ -446,6 +458,9 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
         _check_unsupported_vias(net_id, name, net_segs, net_vias, net_pads,
                                 net_zones, copper_layers, findings)
 
+    if tolerance and tolerance > 0:
+        findings = [f for f in findings
+                    if f.get('size') is None or f['size'] + 1e-9 >= tolerance]
     return findings, skipped_nets
 
 
@@ -491,6 +506,11 @@ def main():
     parser.add_argument('--thorough', action='store_true',
                         help='Run the removable-segment scan on nets with '
                              f'>{MAX_SEGS_PER_NET} segments too (slow)')
+    parser.add_argument('--tolerance', type=float, default=0.1,
+                        help='Minimum finding size in mm (dangle/tail length, '
+                             'gap, duplicated-copper length, via diameter); '
+                             'smaller findings are dropped. Default 0.1; use '
+                             '0 to report everything.')
     parser.add_argument('--max-print', type=int, default=20,
                         help='Max findings printed per category '
                              '(<=0 prints all; default 20)')
@@ -499,6 +519,7 @@ def main():
     print(f"Loading PCB file: {args.pcb}")
     pcb_data = parse_kicad_pcb(args.pcb)
     findings, skipped_nets = check_weird(pcb_data, args.nets,
+                                          tolerance=args.tolerance,
                                          thorough=args.thorough, quiet=False)
     print_report(findings, skipped_nets, max_print=args.max_print)
     sys.exit(1 if findings else 0)
