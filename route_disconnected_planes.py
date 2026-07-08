@@ -40,6 +40,10 @@ from terminal_colors import GREEN, RED, RESET
 import routing_defaults as defaults
 import re
 
+# Outcome of the end-of-run self-reconnect of rip-blocker-nets casualties
+# (#347); read by main() for the JSON_SUMMARY. None = no reconnect ran.
+LAST_RIPPED_RECONNECT: Optional[Dict] = None
+
 
 
 def _rip_net_from_pcb(pcb_data: PCBData, rip_net_id: int):
@@ -1000,6 +1004,43 @@ def route_planes(
     if ripped_net_ids and not dry_run:
         _report_unrouted_ripped_nets(pcb_data, ripped_net_ids)
 
+    # #347 (core1106 CLK1P): a net ripped or partially dropped for a pad
+    # repair must not depend on a LATER chain step existing to reconnect it.
+    # When this repair is the chain's FINAL command, the "reconnect them with
+    # route.py" note used to be the end of the story and the net shipped OPEN
+    # -- route.py connects the core1106 casualty in <1s when actually asked.
+    # Self-run the standard route.py reconnect on the written output, scoped
+    # to this run's own casualties. The routing is FRESH against the live
+    # board (batch_route's own obstacle map + rip-up); the #141-revert hazard
+    # (restoring stale ripped copper on top of newer routes) does not apply.
+    # GUI (return_results) keeps its documented contract: ripped ids are
+    # returned and the user reconnects via the routing tab.
+    global LAST_RIPPED_RECONNECT
+    LAST_RIPPED_RECONNECT = None
+    _casualties = list(dict.fromkeys(ripped_net_ids + partial_ids))
+    if _casualties and not dry_run and not return_results:
+        _cnames = [pcb_data.nets[n].name for n in _casualties if n in pcb_data.nets]
+        if _cnames:
+            print(f"\nReconnecting {len(_cnames)} net(s) this run ripped for pad "
+                  f"repairs: {', '.join(_cnames)}")
+            try:
+                from route import batch_route
+                _ok, _fail, _t = batch_route(
+                    output_file, output_file, _cnames,
+                    layers=routing_layers,
+                    track_width=track_width, clearance=clearance,
+                    via_size=via_size, via_drill=via_drill,
+                    grid_step=grid_step, max_iterations=max_iterations,
+                    power_nets=power_nets, power_nets_widths=power_nets_widths,
+                    disable_bga_zones=([] if no_bga_zone else None))
+                LAST_RIPPED_RECONNECT = {'nets': _cnames,
+                                         'successful': _ok, 'failed': _fail}
+                if _fail:
+                    print(f"{RED}  {_fail} ripped net(s) could NOT be reconnected "
+                          f"-- the board ships with them open{RESET}")
+            except Exception as _e:
+                print(f"{RED}  ripped-net reconnect pass failed: {_e}{RESET}")
+
     return (total_routes, total_regions)
 
 
@@ -1307,11 +1348,14 @@ Examples:
     import json as _json, clearance_ledger as _cl
     _routes, _regions = (_rdp_result if isinstance(_rdp_result, tuple)
                          and len(_rdp_result) >= 2 else (0, 0))
-    print("JSON_SUMMARY: " + _json.dumps({
+    _summary = {
         "total_routes": _routes,
         "total_regions": _regions,
         "min_clearance_used": _cl.effective(args.clearance),
-    }))
+    }
+    if LAST_RIPPED_RECONNECT is not None:
+        _summary["ripped_reconnect"] = LAST_RIPPED_RECONNECT
+    print("JSON_SUMMARY: " + _json.dumps(_summary))
 
 
 if __name__ == "__main__":
