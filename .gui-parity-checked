@@ -1,1 +1,1 @@
-3c249aef270a57c0d6296eacc62367b53582aebf 2026-07-07 no gaps found (audited 3f17a3e..HEAD)
+c90dd09d7e5ab1d55f8db92fc4f3f69a74d28607 2026-07-07 audited 3c249ae..HEAD; 3 gaps fixed (#313 fanout via-nudge, #334 plane soft-joint dry-run, #340 per-class swap segments) in c90dd09; release parity gate added
