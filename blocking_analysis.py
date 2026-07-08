@@ -74,15 +74,30 @@ _NET_CELLS_MEMO: Dict[Tuple[int, float], Tuple[tuple, Tuple[frozenset, frozenset
 
 
 def _net_geometry_signature(net_id, path, segments, vias, config, extra_clearance):
-    """Value-based signature of every input compute_net_obstacle_cells reads."""
+    """Value-based signature of every input compute_net_obstacle_cells reads.
+
+    Numeric geometry is stored as raw numpy byte blobs rather than tuples of
+    Python numbers: exact same value-equality (identical floats/ints have
+    identical bit patterns; a -0.0/0.0 flip merely forces a spurious
+    recompute), at ~7x less retained memory per path point / segment.
+    """
     params = (config.grid_step, config.clearance, config.track_width,
               config.via_size, tuple(config.layers),
               tuple(config.get_track_width(l) for l in config.layers),
               extra_clearance)
-    path_sig = tuple(map(tuple, path)) if path else None
-    seg_sig = tuple((s.start_x, s.start_y, s.end_x, s.end_y, s.width, s.layer)
-                    for s in segments)
-    via_sig = tuple((v.x, v.y, v.size) for v in vias)
+    if path:
+        path_arr = np.asarray(path)
+        if path_arr.dtype == object:  # ragged/exotic contents: keep exact tuples
+            path_sig = tuple(map(tuple, path))
+        else:
+            path_sig = (path_arr.dtype.str, path_arr.shape, path_arr.tobytes())
+    else:
+        path_sig = None
+    seg_sig = (np.array([(s.start_x, s.start_y, s.end_x, s.end_y, s.width)
+                         for s in segments], dtype=np.float64).tobytes(),
+               tuple(s.layer for s in segments))
+    via_sig = np.array([(v.x, v.y, v.size) for v in vias],
+                       dtype=np.float64).tobytes()
     return (params, path_sig, seg_sig, via_sig)
 
 
