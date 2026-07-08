@@ -405,7 +405,8 @@ def _restored_piece_collides(seg: Optional[Dict], via: Optional[Dict],
 
 def _settle_ripped_nets(ripped_data, pcb_data, via_obstacle_cache, obstacles,
                         routing_obstacles_cache, plane_vias, plane_segments,
-                        via_size, clearance, new_via_pos=None, new_segments=None):
+                        via_size, clearance, new_via_pos=None, new_segments=None,
+                        config=None, all_copper_layers=None):
     """Collision-checked restore of ripped nets (#88.1, extended to the tap
     SUCCESS path -- the route_planes side of the #329 fix): restore every
     ripped net whose copper overlaps neither the plane copper placed this run
@@ -465,12 +466,20 @@ def _settle_ripped_nets(ripped_data, pcb_data, via_obstacle_cache, obstacles,
         restored.append((blocker_id, keep_segs, keep_vias, dropped))
         if dropped:
             partial.append((blocker_id, dropped))
-        # Re-add the net's obstacle footprint. The cache covers the FULL
-        # pre-rip net; for a partial restore this over-blocks slightly around
-        # the dropped pieces -- conservative (blocks placement where copper no
-        # longer is), never a short.
+        # Re-add the net's obstacle footprint. The cache covers the FULL pre-rip
+        # net, which is exact for a FULL restore. For a PARTIAL restore, re-adding
+        # the full cache leaked the DROPPED pieces' keep-out cells -- blocked in
+        # the maintained map but open in a fresh rebuild (#342: 242 leaked cells
+        # on the balance test). Recompute the keep-out from the net's now-KEPT
+        # pcb_data copper (restore_net_to_pcb_data above already put the kept
+        # pieces back) so the map == fresh rebuild, and REPLACE the cache so a
+        # later re-rip removes exactly what was added.
         if blocker_id in via_obstacle_cache:
             cache = via_obstacle_cache[blocker_id]
+            if dropped and config is not None:
+                cache = precompute_via_placement_obstacles(
+                    pcb_data, blocker_id, config, all_copper_layers or [])
+                via_obstacle_cache[blocker_id] = cache
             if len(cache.blocked_vias) > 0:
                 obstacles.add_blocked_vias_batch(cache.blocked_vias)
             for layer, cells in cache.blocked_cells_by_layer.items():
@@ -572,7 +581,8 @@ def try_place_via_with_ripup(
                     still, restored = _settle_ripped_nets(
                         ripped_data, pcb_data, via_obstacle_cache, obstacles,
                         routing_obstacles_cache, plane_vias, plane_segments,
-                        via_size, clearance, new_via_pos=via_pos)
+                        via_size, clearance, new_via_pos=via_pos,
+                        config=config, all_copper_layers=all_copper_layers)
                     return ViaPlacementResult(
                         success=True, via_pos=via_pos, segments=[],
                         ripped_net_ids=still, via_at_pad_center=via_at_pad_center,
@@ -594,7 +604,8 @@ def try_place_via_with_ripup(
                         ripped_data, pcb_data, via_obstacle_cache, obstacles,
                         routing_obstacles_cache, plane_vias, plane_segments,
                         via_size, clearance, new_via_pos=via_pos,
-                        new_segments=route_result.segments)
+                        new_segments=route_result.segments,
+                        config=config, all_copper_layers=all_copper_layers)
                     return ViaPlacementResult(
                         success=True, via_pos=via_pos, segments=route_result.segments,
                         ripped_net_ids=still, via_at_pad_center=False,
@@ -655,7 +666,7 @@ def try_place_via_with_ripup(
     still_ripped, _restored = _settle_ripped_nets(
         ripped_data, pcb_data, via_obstacle_cache, obstacles,
         routing_obstacles_cache, plane_vias, plane_segments,
-        via_size, clearance)
+        via_size, clearance, config=config, all_copper_layers=all_copper_layers)
 
     return ViaPlacementResult(
         success=False, via_pos=None, segments=[],
