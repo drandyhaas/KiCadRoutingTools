@@ -1032,6 +1032,137 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
     return segs_removed, len(removed_via_ids), original_to_remove
 
 
+def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None,
+                                  tol: float = None) -> Tuple[int, List[Segment]]:
+    """Shorten a dead-end segment back to the LAST same-net anchor on its BODY
+    (#347, core1106 CLK1P tail).
+
+    sweep_dead_ends works at SEGMENT granularity: a segment whose free end
+    dangles but whose body is T-anchored mid-span (a via sits ON the trace, or
+    another trace tees into it) is load-bearing THROUGH the anchor, so the
+    whole-segment prune correctly keeps it -- and the copper past the anchor
+    ships as a dangling antenna (a partial-restore kept piece that a reconnect
+    joined mid-body). The correct cleanup is a split: trim the free end back
+    to the anchor point.
+
+    Only trims when the free end has degree 1 and is itself unanchored (the
+    same tests the pruner uses), and only back to a same-net via on the body
+    or another same-net segment endpoint teeing into the body. In-run
+    segments are shortened in place; original input segments are replaced
+    (old one returned for the writer's strip list, shortened copy appended to
+    ``results`` as cleanup copper). Returns (n_trimmed, originals_to_strip).
+    """
+    from collections import defaultdict
+    if tol is None:
+        from connectivity import COINCIDENCE_TOL
+        tol = COINCIDENCE_TOL
+
+    routed_seg_ids = set()
+    for r in results:
+        for s in r.get('new_segments') or []:
+            routed_seg_ids.add(id(s))
+
+    def key(x, y, layer):
+        return (round(x, 3), round(y, 3), layer)
+
+    segs_by_net = defaultdict(list)
+    for s in pcb_data.segments:
+        if (scope_net_ids is None or s.net_id in scope_net_ids) \
+                and not getattr(s, 'graphic', False):
+            segs_by_net[s.net_id].append(s)
+
+    n_trimmed = 0
+    originals_to_strip: List[Segment] = []
+    replacements: List[Segment] = []
+    _CELL = 1.0
+    for net_id, net_segs in segs_by_net.items():
+        vias = [v for v in pcb_data.vias if v.net_id == net_id]
+        via_pts = [(v.x, v.y, getattr(v, 'size', 0.6)) for v in vias]
+        pad_pts = []
+        for p in pcb_data.pads_by_net.get(net_id, []):
+            px = getattr(p, 'global_x', getattr(p, 'x', 0.0))
+            py = getattr(p, 'global_y', getattr(p, 'y', 0.0))
+            psize = max(getattr(p, 'size_x', 0.5), getattr(p, 'size_y', 0.5))
+            pad_pts.append((px, py, psize, getattr(p, 'layers', [])))
+        degree = defaultdict(int)
+        seg_index = defaultdict(list)
+        for s in net_segs:
+            degree[key(s.start_x, s.start_y, s.layer)] += 1
+            degree[key(s.end_x, s.end_y, s.layer)] += 1
+            lo_x = int(min(s.start_x, s.end_x) // _CELL)
+            hi_x = int(max(s.start_x, s.end_x) // _CELL)
+            lo_y = int(min(s.start_y, s.end_y) // _CELL)
+            hi_y = int(max(s.start_y, s.end_y) // _CELL)
+            for cx in range(lo_x, hi_x + 1):
+                for cy in range(lo_y, hi_y + 1):
+                    seg_index[(s.layer, cx, cy)].append(s)
+
+        for s in list(net_segs):
+            dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+            L2 = dx * dx + dy * dy
+            if L2 < 1e-9:
+                continue
+            for free_is_start in (True, False):
+                fx, fy = (s.start_x, s.start_y) if free_is_start else (s.end_x, s.end_y)
+                if degree[key(fx, fy, s.layer)] != 1:
+                    continue
+                if _point_anchored(fx, fy, s.layer, via_pts, pad_pts,
+                                   seg_index, _CELL, s, tol):
+                    continue
+                # Anchors on the body: same-net via barrels overlapping the
+                # centerline, and other same-net segments' endpoints teeing in.
+                # t is measured from start; pick the anchor NEAREST the free
+                # end (minimal trim keeps everything through-connected).
+                cands = []  # t values
+                for vx, vy, vsize in via_pts:
+                    t = ((vx - s.start_x) * dx + (vy - s.start_y) * dy) / L2
+                    if t <= 0.02 or t >= 0.98:
+                        continue
+                    cx_, cy_ = s.start_x + t * dx, s.start_y + t * dy
+                    if math.hypot(vx - cx_, vy - cy_) < (vsize + s.width) / 2 - 1e-6:
+                        cands.append(t)
+                for o in net_segs:
+                    if o is s or o.layer != s.layer:
+                        continue
+                    for ox, oy in ((o.start_x, o.start_y), (o.end_x, o.end_y)):
+                        t = ((ox - s.start_x) * dx + (oy - s.start_y) * dy) / L2
+                        if t <= 0.02 or t >= 0.98:
+                            continue
+                        cx_, cy_ = s.start_x + t * dx, s.start_y + t * dy
+                        if math.hypot(ox - cx_, oy - cy_) < (o.width + s.width) / 2 - 1e-6:
+                            cands.append(t)
+                if not cands:
+                    continue
+                t_anchor = min(cands) if free_is_start else max(cands)
+                nx, ny = s.start_x + t_anchor * dx, s.start_y + t_anchor * dy
+                tail_len = math.hypot(fx - nx, fy - ny)
+                if tail_len <= max(tol, 3 * s.width):
+                    continue  # sub-visible nib; not worth churn
+                if id(s) in routed_seg_ids:
+                    if free_is_start:
+                        s.start_x, s.start_y = nx, ny
+                    else:
+                        s.end_x, s.end_y = nx, ny
+                else:
+                    trimmed = Segment(
+                        start_x=(nx if free_is_start else s.start_x),
+                        start_y=(ny if free_is_start else s.start_y),
+                        end_x=(s.end_x if free_is_start else nx),
+                        end_y=(s.end_y if free_is_start else ny),
+                        width=s.width, layer=s.layer, net_id=s.net_id)
+                    originals_to_strip.append(s)
+                    replacements.append(trimmed)
+                    pcb_data.segments = [x for x in pcb_data.segments if x is not s]
+                    pcb_data.segments.append(trimmed)
+                n_trimmed += 1
+                break  # one trim per segment is enough per pass
+
+    if replacements:
+        results.append({'new_segments': replacements, 'new_vias': [],
+                        'cleanup': 'dangle_trim'})
+    return n_trimmed, originals_to_strip
+
+
 def _pt_seg_dist(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
     """Shortest distance from point (px,py) to segment (x1,y1)-(x2,y2)."""
     dx, dy = x2 - x1, y2 - y1

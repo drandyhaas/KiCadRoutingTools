@@ -41,6 +41,7 @@ from pcb_modification import (
     nudge_grazing_vias,
     prune_redundant_cycles,
     sweep_dead_ends,
+    trim_dangles_past_body_anchor,
     neck_wide_segments_grazing_pads,
     close_soft_joints,
 )
@@ -246,6 +247,18 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     if _de_segs or _de_vias:
         print(f"{label}Dead-end sweep: trimmed {_de_segs} dead-end segment(s) "
               f"and {_de_vias} unsupported via(s)")
+
+    # Half-segment dangles the sweep cannot touch (#347 core1106 CLK1P tail):
+    # a dead-end segment T-anchored mid-BODY (a via ON the trace, or a tee) is
+    # load-bearing through the anchor, so the whole-segment prune keeps it and
+    # the copper past the anchor ships as an antenna. Split-trim to the anchor.
+    _dt_n, _dt_strip = trim_dangles_past_body_anchor(results, pcb_data, scope_net_ids)
+    counts['dangles_trimmed'] = _dt_n
+    _trace('dangle_trim')
+    strip.extend(_dt_strip)
+    if _dt_n:
+        print(f"{label}Dangle trim: cut {_dt_n} dead-end tail(s) back to their "
+              f"mid-body anchor")
 
     if neck:
         _necked = neck_wide_segments_grazing_pads(results, pcb_data, config)
