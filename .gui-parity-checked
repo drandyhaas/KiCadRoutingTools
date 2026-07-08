@@ -1,1 +1,1 @@
-e90313c32df2b908281d7e851bac5ec4884ca5da 2026-07-07 audited 3c249ae..HEAD; parity gaps fixed (#313 fanout via-nudge, #334 plane soft-joint, #340 per-class swap segs) + full plane cleanup-pipeline parity (e90313c); release parity gate added
+8b8bdf80f0e25a0e0eb5afa313ee498d3491e910 2026-07-08 audited e90313c..HEAD; 1 gap fixed (GUI fanout via-move net-aware removal); rest shared-engine (#339/M1-M4/#342) or already mirrored (H1)
