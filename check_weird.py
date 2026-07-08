@@ -278,7 +278,21 @@ def _check_removable(net_id, name, net_segs, net_vias, net_pads, net_zones,
     if len(net_segs) > MAX_SEGS_PER_NET and not thorough:
         skipped_nets.append((name, len(net_segs)))
         return
-    r = check_net_connectivity(net_id, net_segs, net_vias, net_pads,
+    # STRICT width-clamped graph (#322): the physical overlap model credits a
+    # one-grid-cell jog as removable because its neighbours' end caps overlap
+    # across the 0.07mm gap -- but removing it would SHIP that fragile
+    # cap-overlap joint (the class close_soft_joints exists to bridge). Grade
+    # removability on width-clamped twins so only copper whose removal leaves
+    # a genuinely coincident path counts (median 'removable' length on the
+    # 0708b sweep was exactly one 0.05-grid diagonal -- load-bearing jogs).
+    import copy as _copy
+    from connectivity import COINCIDENCE_TOL as _STRICT_W
+    clamped = []
+    for s in net_segs:
+        c = _copy.copy(s)
+        c.width = min(c.width, _STRICT_W)
+        clamped.append(c)
+    r = check_net_connectivity(net_id, clamped, net_vias, net_pads,
                                net_zones, return_graph=True)
     graph = r.get('graph')
     if not graph or not graph['pad_ids']:
