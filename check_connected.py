@@ -596,7 +596,8 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     # ids 2i / 2i+1). Used by the multipoint component grouping (issue #317).
     graph = ({'num_points': point_id, 'pad_ids': list(pad_ids),
               'pad_locations': list(pad_locations), 'edges': edges,
-              'pad_index_repr': dict(pad_repr_id)}
+              'pad_index_repr': dict(pad_repr_id),
+              'via_index_repr': dict(via_repr_id)}
              if return_graph else None)
 
     # Check if all pads are in the same component

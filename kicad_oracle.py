@@ -89,6 +89,83 @@ def kicad_unconnected(board_file: str, kicad_cli: str) -> Optional[List[Tuple]]:
     return links
 
 
+def _net_track_components(pcb_data, net_id):
+    """Track+via components of a net, graded with NO zone-fill credit.
+    Returns (comp_of_seg: list[root per segment], comp_of_via, segs, vias,
+    comp_len: {root: total_mm})."""
+    from check_connected import check_net_connectivity
+    from geometry_utils import UnionFind
+    from collections import defaultdict
+    segs = [s for s in pcb_data.segments if s.net_id == net_id]
+    vias = [v for v in pcb_data.vias if v.net_id == net_id]
+    if not segs:
+        return [], [], segs, vias, {}
+    r = check_net_connectivity(net_id, segs, vias, [], [], return_graph=True)
+    graph = r.get('graph')
+    if not graph:
+        return [], [], segs, vias, {}
+    uf = UnionFind()
+    for a, b in graph.get('edges', []):
+        uf.union(a, b)
+    comp_of_seg = [uf.find(2 * i) for i in range(len(segs))]
+    n2 = 2 * len(segs)
+    via_ids = graph.get('via_index_repr', {})
+    comp_of_via = []
+    for j, v in enumerate(vias):
+        rep = via_ids.get(j)
+        comp_of_via.append(uf.find(rep) if rep is not None else None)
+    comp_len = defaultdict(float)
+    for i, s in enumerate(segs):
+        comp_len[comp_of_seg[i]] += math.hypot(s.end_x - s.start_x,
+                                               s.end_y - s.start_y)
+    return comp_of_seg, comp_of_via, segs, vias, comp_len
+
+
+def _component_points(segs, vias, comp_of_seg, comp_of_via, root,
+                      max_pts: int = 40):
+    """Sample (x, y, layer) / (x, y) points across one component."""
+    pts = []
+    for i, s in enumerate(segs):
+        if comp_of_seg[i] == root:
+            pts.append((s.start_x, s.start_y, s.layer))
+            pts.append((s.end_x, s.end_y, s.layer))
+    for j, v in enumerate(vias):
+        if comp_of_via[j] == root:
+            pts.append((v.x, v.y))  # via: all layers
+    if len(pts) > max_pts:
+        stride = len(pts) // max_pts + 1
+        pts = pts[::stride]
+    return pts
+
+
+def _cluster_points(pcb_data, net_id, x, y, layer, comps, tol=0.06):
+    """Expand a reported endpoint to its WHOLE copper cluster: any copper
+    of the island is an equally good attachment, and the reported nib is
+    often the worst (boxed into the very pocket that caused the gap). Falls
+    back to the single point when no track/via contains it (bare fill)."""
+    comp_of_seg, comp_of_via, segs, vias, _ = comps
+    root = None
+    for i, s in enumerate(segs):
+        if layer is not None and s.layer != layer:
+            continue
+        dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+        L2 = dx * dx + dy * dy
+        t = max(0.0, min(1.0, ((x - s.start_x) * dx + (y - s.start_y) * dy) / L2)) if L2 else 0.0
+        if math.hypot(x - (s.start_x + t * dx),
+                      y - (s.start_y + t * dy)) <= s.width / 2 + tol:
+            root = comp_of_seg[i]
+            break
+    if root is None:
+        for j, v in enumerate(vias):
+            if math.hypot(x - v.x, y - v.y) <= v.size / 2 + tol:
+                root = comp_of_via[j]
+                break
+    if root is None:
+        return [(x, y, layer)] if layer else [(x, y)], None
+    return (_component_points(segs, vias, comp_of_seg, comp_of_via, root)
+            or ([(x, y, layer)] if layer else [(x, y)])), root
+
+
 def _largest_track_component_points(pcb_data, net_id, max_pts: int = 40):
     """Sample points (x, y, layer) on the net's largest track+via copper
     component, graded WITHOUT any zone-fill credit. The biggest genuine
@@ -194,8 +271,14 @@ def oracle_reconnect(board_file: str, net_names, config,
                 hole_to_hole_clearance=hole_to_hole_clearance)
             net_vias = [(v.x, v.y) for v in pcb_data.vias
                         if v.net_id == net_id]
-            src = [(ax, ay, al)] if al else [(ax, ay)]
-            tgt = [(bx, by, bl)] if bl else [(bx, by)]
+            comps = _net_track_components(pcb_data, net_id)
+            src, root_a = _cluster_points(pcb_data, net_id, ax, ay, al, comps)
+            tgt, root_b = _cluster_points(pcb_data, net_id, bx, by, bl, comps)
+            if root_a is not None and root_a == root_b:
+                # Both reported points sit on the same track cluster; the
+                # split must be fill-side. Fall back to the raw points.
+                src = [(ax, ay, al)] if al else [(ax, ay)]
+                tgt = [(bx, by, bl)] if bl else [(bx, by)]
             if abs(ax - bx) < 1e-6 and abs(ay - by) < 1e-6:
                 # Zone|Zone items carry ONE ratsnest position for both ends
                 # (the isolated island). Target copper provably in the MAIN
