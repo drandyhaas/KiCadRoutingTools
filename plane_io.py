@@ -376,18 +376,28 @@ def _pt_seg_dist_sq(px: float, py: float, x1: float, y1: float, x2: float, y2: f
 
 def _remove_vias_at_positions(content: str, positions: List[Tuple[float, float]],
                               tol: float = 2e-3,
-                              net_ids: Optional[List[int]] = None) -> Tuple[str, int]:
+                              net_ids: Optional[List[int]] = None,
+                              net_names: Optional[List[Optional[str]]] = None
+                              ) -> Tuple[str, int]:
     """Remove `(via ...)` elements whose `(at x y)` matches any of `positions`.
 
     Used to drop plane stitching vias that would short against restored signal
     copper (issue #88). Matching is positional with a small tolerance because
     vias are written with fixed 6-decimal precision.
 
-    net_ids (parallel to positions, #313): when given, a via is dropped only if
-    its net ALSO matches -- so a via-nudge rewrite that re-emits ONE net's moved
-    via can't collaterally delete a DIFFERENT net's via that happens to sit
-    within `tol` of the old position (net-agnostic positional removal was a
-    silent +open-net path).
+    net_ids / net_names (parallel to positions, #313/#344): when given, a via
+    is dropped only if its net ALSO matches -- so a via-nudge rewrite that
+    re-emits ONE net's moved via can't collaterally delete a DIFFERENT net's
+    via that happens to sit within `tol` of the old position (net-agnostic
+    positional removal was a silent +open-net path). KiCad 9 vias carry a
+    numeric `(net N)`, KiCad 10 vias carry the net NAME `(net "/FOO")` -- the
+    id-only guard read every name-based via as net None, never matched, and
+    turned removal into a no-op: the moved via was re-emitted WITHOUT removing
+    the original, shipping a stacked duplicate and the very graze the nudge
+    was clearing (#344 C6.1/GPIO26, same file-format class as #264). The net
+    guard therefore only skips on a POSITIVE mismatch of whichever form the
+    file carries; a via whose net cannot be compared falls back to positional
+    matching (pre-#313 behavior).
     """
     if not positions:
         return content, 0
@@ -409,13 +419,24 @@ def _remove_vias_at_positions(content: str, positions: List[Tuple[float, float]]
             m = re.search(r'\(at\s+(-?[\d.]+)\s+(-?[\d.]+)', element_text)
             nm = re.search(r'\(net\s+(\d+)', element_text)
             v_net = int(nm.group(1)) if nm else None
+            v_net_name = None
+            if v_net is None:
+                nn = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"', element_text)
+                if nn:
+                    from kicad_parser import _unescape_kicad_string
+                    v_net_name = _unescape_kicad_string(nn.group(1))
             drop = False
             if m:
                 vx, vy = float(m.group(1)), float(m.group(2))
                 for k, (px, py) in enumerate(positions):
                     if abs(vx - px) < tol and abs(vy - py) < tol:
-                        if net_ids is not None and v_net != net_ids[k]:
+                        if (net_ids is not None and v_net is not None
+                                and v_net != net_ids[k]):
                             continue  # right spot, wrong net: leave it
+                        if (net_names is not None and v_net_name is not None
+                                and net_names[k] is not None
+                                and v_net_name != net_names[k]):
+                            continue  # name-based file, wrong net name
                         drop = True
                         break
             if drop:
