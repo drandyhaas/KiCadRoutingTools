@@ -27,7 +27,6 @@ from diff_pair_routing import get_diff_pair_endpoints
 from geometry_utils import point_to_segment_distance
 from connectivity import get_net_endpoints, get_multipoint_net_pads
 
-from routing_defaults import PLACEMENT_QUANTIZATION_MARGIN as _PLACEMENT_QUANTIZATION_MARGIN
 
 _DRC_CLEARANCE_MARGIN = 0.05
 
@@ -96,12 +95,15 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
         for sg in pcb_data.segments:
             if sg.net_id == v.net_id:
                 continue
-            # placement validation, NOT grading: require the full clearance
-            # (minus only ~quantization noise). Borrowing the DRC grading
-            # margin here admitted a swap via 39um short of a foreign track
-            # (cynthion MEZZANINE6, #339).
-            need = (vr + sg.width / 2.0 + clearance
-                    - _PLACEMENT_QUANTIZATION_MARGIN)
+            # Same tolerance as the other checks in this function (via-via,
+            # via-drill, ...): a swap via grazing foreign copper by up to the
+            # grading margin is accepted here and cleaned by the post-route
+            # via-nudge (nudge_grazing_vias moves it to full clearance without
+            # disconnecting). Demanding near-full clearance at placement instead
+            # only rejected swaps the nudge would have fixed -- and the earlier
+            # tightening was misattributed to cynthion MEZZANINE6, which is an
+            # UNBLOCK via handled by the #339 refit, not a swap via.
+            need = vr + sg.width / 2.0 + clearance - margin
             # cheap bbox reject before the exact distance
             if (v.x < min(sg.start_x, sg.end_x) - need or
                     v.x > max(sg.start_x, sg.end_x) + need or

@@ -216,7 +216,12 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         _vn_moved, _vn_nets, _ = nudge_grazing_vias(
             results, pcb_data, scope_net_ids, clearance=config.clearance,
             hole_to_hole=config.hole_to_hole_clearance,
-            max_shift=config.grid_step / 2)
+            # #339 rework: one grid cell (was grid_step/2), capped per-via at
+            # via_size/4 inside the fn. grid_step/2 (~0.025 at fine grid) was too
+            # short to clear the ~40um grazes the looser UNBLOCK_REFIT_MARGIN now
+            # leaves; a full cell reaches them while a via never moves more than
+            # one cell. Moves the via (still connected), never shrinks it.
+            max_shift=config.grid_step)
         counts['vias_nudged'] = _vn_moved
         _trace('via_nudge')
         if _vn_moved:

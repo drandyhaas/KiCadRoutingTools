@@ -28,6 +28,15 @@ DIAGONAL_MARGIN = 0.25  # mm
 # (nearly) full clearance or it ships real grazes (#339).
 PLACEMENT_QUANTIZATION_MARGIN = 0.005  # mm
 
+# Clearance slack the #189/#339 via-in-pad UNBLOCK refit tolerates before it
+# shrinks/rejects a rescue via. The tight PLACEMENT_QUANTIZATION_MARGIN stranded
+# pads (ulx3s -11, butterstick -7) because a via grazing by a few tens of um was
+# shrunk/rejected until the unblock failed. Tolerate up to this much sub-clearance
+# at PLACEMENT and let the post-route via-nudge (nudge_grazing_vias) move the
+# residual graze to full clearance instead -- a nudged via stays connected; a
+# stranded pad does not. Matches check_drc's default grading margin.
+UNBLOCK_REFIT_MARGIN = 0.05  # mm
+
 # Cost parameters
 VIA_COST = 50
 VIA_PROXIMITY_COST = 10

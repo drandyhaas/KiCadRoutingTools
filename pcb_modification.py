@@ -2466,6 +2466,12 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
         # The via moves ALONE: cap the move so the attached track ends stay
         # connected on both models (KiCad copper overlap: move << via radius;
         # check_net_connectivity joins within via_size/4).
+        # Two bounds, take the smaller: via_size/4 is the connectivity-safe
+        # reach (attached track ends stay buried at the via's mid-radius -- deep
+        # overlap, not a graze -- and both KiCad and check_net_connectivity join
+        # within it), and max_shift bounds the move to the caller's budget (the
+        # route write path passes one grid cell, so a via never wanders more than
+        # a cell). A via needing more than this is genuinely mis-placed.
         cap = min(max_shift, v.size / 4.0)
         if shortfall + MARGIN > cap:
             continue    # genuinely mis-placed: leave it visible in DRC
