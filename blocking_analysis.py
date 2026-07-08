@@ -61,6 +61,46 @@ def invalidate_obstacle_cache(cache: Dict, net_id: int) -> None:
         del cache[k]
 
 
+# Geometry-keyed memo under the per-loop obstacle_cache dicts (#341). Those
+# dicts are recreated per loop (and the nested phase-3 rip/reroute calls pass
+# obstacle_cache=None), so every new dict re-rasterizes every routed net even
+# though almost none of their copper changed. This memo keeps the last computed
+# cell sets per (net_id, extra_clearance) TOGETHER WITH the exact geometry +
+# config values they were computed from; a hit requires the stored signature to
+# equal the net's current signature, so a reused value is byte-for-byte what a
+# fresh compute_net_obstacle_cells call would return. It only serves MISSES of
+# the caller's obstacle_cache -- cache-hit semantics there are untouched.
+_NET_CELLS_MEMO: Dict[Tuple[int, float], Tuple[tuple, Tuple[frozenset, frozenset]]] = {}
+
+
+def _net_geometry_signature(net_id, path, segments, vias, config, extra_clearance):
+    """Value-based signature of every input compute_net_obstacle_cells reads.
+
+    Numeric geometry is stored as raw numpy byte blobs rather than tuples of
+    Python numbers: exact same value-equality (identical floats/ints have
+    identical bit patterns; a -0.0/0.0 flip merely forces a spurious
+    recompute), at ~7x less retained memory per path point / segment.
+    """
+    params = (config.grid_step, config.clearance, config.track_width,
+              config.via_size, tuple(config.layers),
+              tuple(config.get_track_width(l) for l in config.layers),
+              extra_clearance)
+    if path:
+        path_arr = np.asarray(path)
+        if path_arr.dtype == object:  # ragged/exotic contents: keep exact tuples
+            path_sig = tuple(map(tuple, path))
+        else:
+            path_sig = (path_arr.dtype.str, path_arr.shape, path_arr.tobytes())
+    else:
+        path_sig = None
+    seg_sig = (np.array([(s.start_x, s.start_y, s.end_x, s.end_y, s.width)
+                         for s in segments], dtype=np.float64).tobytes(),
+               tuple(s.layer for s in segments))
+    via_sig = np.array([(v.x, v.y, v.size) for v in vias],
+                       dtype=np.float64).tobytes()
+    return (params, path_sig, seg_sig, via_sig)
+
+
 @dataclass
 class BlockingInfo:
     """Information about how much a net blocks a route."""
@@ -81,9 +121,14 @@ def compute_net_obstacle_cells(
     path: Optional[List[Tuple[int, int, int]]],
     config: GridRouteConfig,
     extra_clearance: float = 0.0,
+    net_segments: Optional[List[Segment]] = None,
+    net_vias: Optional[List[Via]] = None,
 ) -> Tuple["np.ndarray", "np.ndarray"]:
     """
     Compute all obstacle cells for a net (tracks and vias).
+
+    net_segments/net_vias: this net's copper, pre-bucketed by the caller (in
+    pcb_data list order) to skip the full pcb_data scan; None = scan here.
 
     Returns (track_keys, via_keys): sorted unique int64 arrays of packed
     (gx, gy, layer) cell keys (see _pack_cells).
@@ -135,9 +180,9 @@ def compute_net_obstacle_cells(
                 add_track_segment(x1, y1, x2, y2, layer1, config.track_width)
 
     # Add cells from original stubs
-    for seg in pcb_data.segments:
-        if seg.net_id != net_id:
-            continue
+    if net_segments is None:
+        net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+    for seg in net_segments:
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
@@ -145,9 +190,9 @@ def compute_net_obstacle_cells(
         add_track_segment(seg.start_x, seg.start_y, seg.end_x, seg.end_y, layer_idx, seg_width)
 
     # Add cells from existing vias (block all layers)
-    for via in pcb_data.vias:
-        if via.net_id != net_id:
-            continue
+    if net_vias is None:
+        net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+    for via in net_vias:
         via_size = via.size if getattr(via, 'size', 0) > 0 else config.via_size
         add_via_keepout(via.x, via.y, via_size)
 
@@ -218,6 +263,12 @@ def analyze_frontier_blocking(
     # intersect1d did -- byte-for-byte identical blocker counts/ranking.
     blocked_fs = frozenset(blocked_keys.tolist())
 
+    # One pass over pcb_data buckets every candidate net's copper (#341); built
+    # lazily on the first obstacle_cache miss, since a fully-cached call needs
+    # neither the buckets nor the signatures.
+    segs_by_net = None
+    vias_by_net = None
+
     for net_id, path in routed_net_paths.items():
         if net_id in exclude_net_ids:
             continue
@@ -228,10 +279,35 @@ def analyze_frontier_blocking(
         cache_key = (net_id, extra_clearance)
         cached = local_cache.get(cache_key)
         if cached is None:
-            track_keys, via_keys = compute_net_obstacle_cells(
-                pcb_data, net_id, path, config, extra_clearance
-            )
-            cached = (frozenset(track_keys.tolist()), frozenset(via_keys.tolist()))
+            if segs_by_net is None:
+                candidate_ids = set(routed_net_paths) - exclude_net_ids
+                segs_by_net = {nid: [] for nid in candidate_ids}
+                for seg in pcb_data.segments:
+                    bucket = segs_by_net.get(seg.net_id)
+                    if bucket is not None:
+                        bucket.append(seg)
+                vias_by_net = {nid: [] for nid in candidate_ids}
+                for via in pcb_data.vias:
+                    bucket = vias_by_net.get(via.net_id)
+                    if bucket is not None:
+                        bucket.append(via)
+            net_segments = segs_by_net.get(net_id, [])
+            net_vias = vias_by_net.get(net_id, [])
+            # Rasterizing is the phase-3 hot path (#341); the geometry-keyed
+            # memo returns the identical cell sets when nothing this net's
+            # cells depend on has changed since they were last computed.
+            sig = _net_geometry_signature(net_id, path, net_segments, net_vias,
+                                          config, extra_clearance)
+            memo_entry = _NET_CELLS_MEMO.get(cache_key)
+            if memo_entry is not None and memo_entry[0] == sig:
+                cached = memo_entry[1]
+            else:
+                track_keys, via_keys = compute_net_obstacle_cells(
+                    pcb_data, net_id, path, config, extra_clearance,
+                    net_segments=net_segments, net_vias=net_vias
+                )
+                cached = (frozenset(track_keys.tolist()), frozenset(via_keys.tolist()))
+                _NET_CELLS_MEMO[cache_key] = (sig, cached)
             local_cache[cache_key] = cached
         track_set, via_set = cached
 
