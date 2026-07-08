@@ -167,8 +167,20 @@ def _kicad_grade(pcb, clearance):
 
 
 def grade(pcb, clearance):
-    drc = subprocess.run([sys.executable, "-X", "utf8", str(REPO / "check_drc.py"), pcb,
-                          "-c", clearance, "--quiet"], capture_output=True, text=True)
+    # Grade at the board's OWN recorded floors when the sibling .kicad_pro
+    # exists (check_drc auto-grades from it -- the Stage-C clearance ledger
+    # writes the true minimum every step used, including legitimate fine-tap
+    # escalations BELOW the manifest --clearance). Grading such copper at the
+    # manifest clearance manufactures phantom violations: nrfmicro's plane
+    # repair fine-tapped R5.2 at a recorded 0.127 floor and the 0.2 manifest
+    # grade counted +13 "regressions" on a board whose auto-grade is clean
+    # (#347 A/B). The manifest clearance stays as the fallback for finals
+    # shipped without a .kicad_pro (the daisho gap, #217).
+    pro = Path(pcb).with_suffix(".kicad_pro")
+    drc_args = [sys.executable, "-X", "utf8", str(REPO / "check_drc.py"), pcb, "--quiet"]
+    if not pro.exists():
+        drc_args[-1:-1] = ["-c", clearance]
+    drc = subprocess.run(drc_args, capture_output=True, text=True)
     # NOT --quiet: the "Checking N routed nets" total (needed for completion %)
     # only prints in non-quiet mode; the unrouted/connectivity-issue counts print
     # either way.
