@@ -1068,6 +1068,8 @@ def route_disconnected_regions(
     previous_routes: List[List[Tuple[float, float]]] = []
 
     # Create a single reusable router for all MST edges
+    narrow_obstacles = None       # lazily-built map stamped at config.track_width
+    routes_added_replay = []      # connections added this loop, replayed onto it
     plane_router = GridRouter(
         via_cost=config.via_cost_units(),
         h_weight=config.heuristic_weight,
@@ -1119,6 +1121,48 @@ def route_disconnected_regions(
             print(f"{YELLOW}retry-full{RESET} ", end="", flush=True)
             result, track_width, open_space_via = _connect(anchors_i, anchors_j)
 
+        # Last resort (#217 castor +3.3VA): the corridor between two regions
+        # can be narrower than REPAIR_MIN_TRACK_WIDTH while still fitting the
+        # run's own signal --track-width (Andy hand-bridged the failing edge
+        # at exactly 0.127). The base map's keep-outs are stamped at
+        # min_track_width, so a narrower attempt needs a map stamped at the
+        # narrow width -- built lazily once per net and kept in sync with the
+        # connections already added this loop. A narrow bridge beats a split
+        # plane.
+        if result is None and config.track_width < min_track_width - 1e-9:
+            if narrow_obstacles is None:
+                print(f"{YELLOW}narrow-map{RESET} ", end="", flush=True)
+                narrow_obstacles, _ = build_base_obstacles(
+                    exclude_net_ids={net_id},
+                    routing_layers=routing_layers,
+                    pcb_data=pcb_data,
+                    config=config,
+                    track_width=config.track_width,
+                    track_via_clearance=track_via_clearance,
+                    hole_to_hole_clearance=hole_to_hole_clearance)
+                for (_rp, _vp, _tw) in routes_added_replay:
+                    add_route_to_obstacles(
+                        narrow_obstacles, _rp, _vp, layer_map, _tw,
+                        config.clearance, track_via_clearance, config,
+                        hole_to_hole_clearance)
+            print(f"{YELLOW}narrow-width {config.track_width:.3f}{RESET} ",
+                  end="", flush=True)
+            result, track_width, open_space_via = _try_route_between_regions(
+                anchors_i, anchors_j,
+                base_obstacles=narrow_obstacles,
+                plane_layer_idx=plane_layer_idx,
+                routing_layers=routing_layers,
+                config=config,
+                bounds=zone_bounds,
+                net_vias=net_vias,
+                max_track_width=config.track_width,
+                min_track_width=config.track_width,
+                max_iterations=max_iterations,
+                coord=coord,
+                verbose=verbose,
+                router=plane_router
+            )
+
         if result is None:
             print(f"{RED}FAILED{RESET}")
             routes_failed += 1
@@ -1149,6 +1193,13 @@ def route_disconnected_regions(
             track_width, config.clearance, track_via_clearance, config,
             hole_to_hole_clearance
         )
+        routes_added_replay.append((route_points, via_positions, track_width))
+        if narrow_obstacles is not None:
+            add_route_to_obstacles(
+                narrow_obstacles, route_points, via_positions, layer_map,
+                track_width, config.clearance, track_via_clearance, config,
+                hole_to_hole_clearance
+            )
 
         # Keep track of route for debug output
         previous_routes.append([(p[0], p[1]) for p in route_points])
