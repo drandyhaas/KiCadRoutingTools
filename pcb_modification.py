@@ -423,6 +423,8 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
     for s in pcb_data.segments:
         if scope_net_ids is not None and s.net_id not in scope_net_ids:
             continue
+        if getattr(s, 'graphic', False):
+            continue  # #337: immutable art -- its termini are not dangles
         ep_count[(s.net_id, s.layer, rk(s.start_x, s.start_y))] += 1
         ep_count[(s.net_id, s.layer, rk(s.end_x, s.end_y))] += 1
     via_by_net = defaultdict(list)
@@ -520,6 +522,8 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
     # Same-net copper grouped for fast lookup.
     segs_by_net_layer = {}
     for s in pcb_data.segments:
+        if getattr(s, 'graphic', False):
+            continue  # #337: never snap an immutable-art endpoint
         segs_by_net_layer.setdefault((s.net_id, s.layer), []).append(s)
 
     for net_id in scope_net_ids:
