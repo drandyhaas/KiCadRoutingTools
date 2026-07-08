@@ -195,6 +195,13 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
             if _point_anchored(fx, fy, s.layer, via_pts, pad_pts,
                                seg_index, _CELL, s, tol):
                 continue
+            # _point_anchored's pad test is RADIAL (center distance vs the
+            # max half-dimension) and misses rectangular pad corners: a stub
+            # ending exactly on a 1.4x1.2 crystal pad's corner copper read
+            # as a dangle. Exact outline test (glasgow XTALOUT/C11).
+            if any(point_to_pad_distance(fx, fy, p) <= s.width / 2
+                   for p in net_pads):
+                continue
             if any(point_in_polygon(fx, fy, z.polygon)
                    for z in zones_by_layer.get(s.layer, ())):
                 continue  # lands in a same-net zone fill outline

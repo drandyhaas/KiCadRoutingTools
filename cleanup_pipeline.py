@@ -40,6 +40,7 @@ from pcb_modification import (
     nudge_grazing_microshift,
     nudge_grazing_vias,
     prune_redundant_cycles,
+    collapse_strict_redundant,
     remove_orphan_islands,
     sweep_dead_ends,
     trim_dangles_past_body_anchor,
@@ -239,6 +240,17 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         if _cy_segs:
             print(f"{label}Cycle prune: removed {_cy_segs} redundant loop "
                   f"segment(s) across {_cy_nets} net(s)")
+
+    # Strict-redundant collapse (#217 classes 1-2): superseded parallel
+    # chains and pad/via-buried tails that are redundant under the strict
+    # width-clamped graph. Before the sweep so freed this-run vias drop.
+    _sc_n, _sc_strip = collapse_strict_redundant(results, pcb_data, scope_net_ids)
+    counts['strict_collapsed'] = _sc_n
+    _trace('strict_collapse')
+    strip.extend(_sc_strip)
+    if _sc_n:
+        print(f"{label}Strict collapse: removed {_sc_n} redundant segment(s) "
+              f"(superseded parallel/buried copper)")
 
     # Orphan islands (#217): track-copper components reaching NO pad of
     # their net -- rip/reroute leftovers connected to nothing. Runs before

@@ -1032,6 +1032,160 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
     return segs_removed, len(removed_via_ids), original_to_remove
 
 
+def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None
+                              ) -> Tuple[int, List[Segment]]:
+    """Remove segments that are redundant under the STRICT width-clamped
+    connectivity graph (#217 removable-segment classes 1-2): superseded
+    parallel chains (glasgow /CLKREF: a 5.2mm leftover B.Cu run still
+    touching live copper at both ends after a reroute took another path) and
+    superseded tails ending inside a pad/via (glasgow /SCL: 5.7mm on In2).
+
+    The strict graph (widths clamped to COINCIDENCE_TOL, the #322 gate)
+    connects endpoints only when genuinely coincident -- vias, T-junctions,
+    and pad/via-barrel copper still count physically -- so anything removable
+    under it leaves coincident-connected copper behind: removal can never
+    manufacture a cap-overlap (soft) joint by construction.
+
+    Greedy batch per net on ONE prebuilt graph: each candidate is validated
+    with every already-accepted removal excluded too (analyze_conn_excluding
+    composes), so two parallel twins can never both be removed. Exemptions:
+      * in-pad/in-via wiggles (both endpoints inside same-net pad copper or a
+        same-net via barrel) -- harmless by-design copper Andy chose to keep;
+      * graphics copper (#337 immutable art);
+      * zoned nets (the zone-outline union over-credits vs the real fill --
+        the castor_pollux lesson -- so 'redundant' cannot be trusted there).
+
+    Returns (segments_removed, original_segments_to_strip); write-list /
+    strip / pcb_data mutation contracts match the other subtractive passes.
+    """
+    import copy as _copy
+    from collections import defaultdict
+    from check_connected import check_net_connectivity, analyze_conn_excluding
+    from check_drc import point_to_pad_distance
+
+    seg_owner = set()
+    for r in results:
+        for s in r.get('new_segments') or []:
+            seg_owner.add(id(s))
+
+    zones_by_net = defaultdict(list)
+    for z in getattr(pcb_data, 'zones', []) or []:
+        zones_by_net[z.net_id].append(z)
+
+    net_ids = {s.net_id for s in pcb_data.segments
+               if scope_net_ids is None or s.net_id in scope_net_ids}
+    net_ids.discard(0)
+
+    removed_ids = set()
+    originals: List[Segment] = []
+    for net_id in sorted(net_ids):
+        if zones_by_net.get(net_id):
+            continue
+        pads = pcb_data.pads_by_net.get(net_id, [])
+        if len(pads) < 2:
+            continue
+        net_segs = [s for s in pcb_data.segments if s.net_id == net_id]
+        if len(net_segs) < 2:
+            continue
+        net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+
+        def _buried(px, py):
+            for p in pads:
+                if point_to_pad_distance(px, py, p) <= 0:
+                    return True
+            return any(math.hypot(px - v.x, py - v.y) <= v.size / 2
+                       for v in net_vias)
+
+        clamped = []
+        for s in net_segs:
+            c = _copy.copy(s)
+            c.width = min(c.width, _STRICT_GATE_WIDTH)
+            clamped.append(c)
+        r = check_net_connectivity(net_id, clamped, net_vias, pads, [],
+                                   return_graph=True)
+        graph = r.get('graph')
+        if not graph or not graph.get('pad_ids'):
+            continue
+        # Physical-width graph alongside the strict one: a removal must keep
+        # every pad connected under BOTH. Strict-only acceptance removed a
+        # bridge whose downstream branch was strictly dead but PHYSICALLY
+        # carrying an overlap-credited pad connection -- the branch then
+        # survived the (physically-gated) dead-end sweep as a flagged dangle
+        # (glasgow P2/P5/P6/Z4).
+        r_phys = check_net_connectivity(net_id, net_segs, net_vias, pads, [],
+                                        return_graph=True)
+        graph_phys = r_phys.get('graph')
+        if not graph_phys:
+            continue
+        base = analyze_conn_excluding(graph, ())
+        if base['num_components'] != 1 or base['disconnected_pads']:
+            # The net is not fully connected even under the strict graph (a
+            # mid-path soft joint or a real open): 'key unchanged' could
+            # then license removing LOAD-BEARING physical copper on the
+            # already-broken side. Only collapse strictly-complete nets.
+            continue
+
+        accepted: List[int] = []
+        # Acceptance requires, jointly with everything already accepted:
+        #  * the STRICT graph keeps ONE component and no disconnected pads
+        #    (no new islands or stubs are ever created -- a mid-chain
+        #    removal that would split the leftover run is rejected, and the
+        #    run instead peels end-in across rounds);
+        #  * the PHYSICAL graph keeps every pad connected (a branch carrying
+        #    an overlap-credited pad connection stays whole).
+        # Longest candidates first so a redundant twin drops the long
+        # leftover run and keeps the short live path. Multiple rounds until
+        # a full pass accepts nothing (chains peel one end-piece per test,
+        # so one pass in peel order usually suffices; rounds guarantee it).
+        order = sorted(range(len(net_segs)),
+                       key=lambda i: -math.hypot(
+                           net_segs[i].end_x - net_segs[i].start_x,
+                           net_segs[i].end_y - net_segs[i].start_y))
+        while True:
+            progress = False
+            for i in order:
+                if i in accepted:
+                    continue
+                s = net_segs[i]
+                if getattr(s, 'graphic', False):
+                    continue
+                if _buried(s.start_x, s.start_y) and _buried(s.end_x, s.end_y):
+                    continue  # in-pad/in-via wiggle: kept by choice
+                excl = tuple(accepted) + (i,)
+                t = analyze_conn_excluding(graph, excl)
+                if t['num_components'] != 1 or t['disconnected_pads']:
+                    continue
+                t_phys = analyze_conn_excluding(graph_phys, excl)
+                if t_phys['disconnected_pads']:
+                    continue
+                accepted.append(i)
+                progress = True
+            if not progress:
+                break
+        # Pipeline contract: subtractive passes must not manufacture soft
+        # joints -- run the same restore guard the sweep uses, so a removal
+        # that would leave a cap-overlap-only junction is put back instead
+        # of close_soft_joints patching it with bridge copper afterwards.
+        acc_set = {id(net_segs[i]) for i in accepted}
+        kept = [s for s in net_segs if id(s) not in acc_set]
+        removed = [net_segs[i] for i in accepted]
+        kept, removed = _restore_soft_joint_bridges(kept, removed, net_vias, pads)
+        for s in removed:
+            removed_ids.add(id(s))
+            if id(s) not in seg_owner:
+                originals.append(s)
+
+    if not removed_ids:
+        return 0, []
+    for r in results:
+        segs = r.get('new_segments')
+        if segs:
+            r['new_segments'] = [s for s in segs if id(s) not in removed_ids]
+    pcb_data.segments = [s for s in pcb_data.segments
+                         if id(s) not in removed_ids]
+    return len(removed_ids), originals
+
+
 def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None
                           ) -> Tuple[int, int, List[Segment]]:
     """Remove same-net track-copper components that reach NO pad of the net
