@@ -2158,6 +2158,67 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                 width=w, layer=layer, net_id=nid,
                 uuid=m.group(10), graphic=True))
 
+    # gr_poly / gr_rect / gr_circle on copper (#337): FILLED copper areas (a
+    # hand-drawn pour, a copper keep-in). Trace the OUTLINE as graphic=True
+    # segments -- the router cannot cross the perimeter, so blocking it blocks
+    # the interior too, and a track approaching the area grazes the boundary
+    # edge (the DRC/obstacle purpose). Interior fill is not zone-modelled (no
+    # corpus board carries these yet); the outline is the effective obstacle.
+    def _emit_outline(pts, w, layer, nid, uuid, closed=True):
+        if len(pts) < 2:
+            return
+        ew = w if w > 0 else defaults.TRACK_WIDTH
+        seq = pts + [pts[0]] if closed else pts
+        for a, b in zip(seq, seq[1:]):
+            segments.append(Segment(
+                start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1],
+                width=ew, layer=layer, net_id=nid, uuid=uuid, graphic=True))
+
+    def _blk_fields(blk):
+        lm = re.search(r'\(layer\s+"([^"]+)"\)', blk)
+        wm = re.search(r'\(width\s+([-\d.]+)\)', blk)
+        nm = re.search(r'\(net\s+("[^"]*"|\d+)\)', blk)
+        um = re.search(r'\(uuid\s+"([^"]+)"\)', blk)
+        layer = lm.group(1) if lm else None
+        return (layer, float(wm.group(1)) if wm else 0.0,
+                _resolve_net(nm.group(1)) if nm else 0,
+                um.group(1) if um else '')
+
+    for tag in ('gr_poly', 'gr_rect', 'gr_circle'):
+        pos = 0
+        needle = '(' + tag
+        while True:
+            i = content.find(needle, pos)
+            if i < 0:
+                break
+            j = find_matching_paren(content, i)
+            blk = content[i:j]
+            pos = j
+            layer, w, nid, uuid = _blk_fields(blk)
+            if not layer or not layer.endswith('.Cu'):
+                continue
+            if tag == 'gr_poly':
+                pts = [(float(a), float(b)) for a, b in
+                       re.findall(r'\(xy\s+([-\d.]+)\s+([-\d.]+)\)', blk)]
+                _emit_outline(pts, w, layer, nid, uuid, closed=True)
+            elif tag == 'gr_rect':
+                sm = re.search(r'\(start\s+([-\d.]+)\s+([-\d.]+)\)', blk)
+                em = re.search(r'\(end\s+([-\d.]+)\s+([-\d.]+)\)', blk)
+                if sm and em:
+                    x1, y1 = float(sm.group(1)), float(sm.group(2))
+                    x2, y2 = float(em.group(1)), float(em.group(2))
+                    _emit_outline([(x1, y1), (x2, y1), (x2, y2), (x1, y2)],
+                                  w, layer, nid, uuid, closed=True)
+            elif tag == 'gr_circle':
+                cm = re.search(r'\(center\s+([-\d.]+)\s+([-\d.]+)\)', blk)
+                em = re.search(r'\(end\s+([-\d.]+)\s+([-\d.]+)\)', blk)
+                if cm and em:
+                    cx, cy = float(cm.group(1)), float(cm.group(2))
+                    r = math.hypot(float(em.group(1)) - cx, float(em.group(2)) - cy)
+                    poly = [(cx + r * math.cos(k * math.pi / 8),
+                             cy + r * math.sin(k * math.pi / 8)) for k in range(16)]
+                    _emit_outline(poly, w, layer, nid, uuid, closed=True)
+
     return segments
 
 
@@ -2990,15 +3051,28 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 _w = to_mm(_d.GetWidth())
             except Exception:
                 continue
-            if _w <= 0:
-                continue
             _nid = _d.GetNetCode() if hasattr(_d, 'GetNetCode') else 0
+            _POLY = getattr(_pcbnew_g, 'SHAPE_T_POLY', -10)
+            _RECT = getattr(_pcbnew_g, 'SHAPE_T_RECT', -11)
+            _CIRC = getattr(_pcbnew_g, 'SHAPE_T_CIRCLE', -12)
+
+            def _emit_outline_b(pts, ew):
+                seq = list(pts) + [pts[0]]
+                for _a, _b in zip(seq, seq[1:]):
+                    segments.append(Segment(
+                        start_x=_a[0], start_y=_a[1], end_x=_b[0], end_y=_b[1],
+                        width=ew, layer=_ln, net_id=_nid, graphic=True))
+
             if _shape == getattr(_pcbnew_g, 'SHAPE_T_SEGMENT', 0):
+                if _w <= 0:
+                    continue
                 segments.append(Segment(
                     start_x=to_mm(_d.GetStart().x), start_y=to_mm(_d.GetStart().y),
                     end_x=to_mm(_d.GetEnd().x), end_y=to_mm(_d.GetEnd().y),
                     width=_w, layer=_ln, net_id=_nid, graphic=True))
             elif _shape == getattr(_pcbnew_g, 'SHAPE_T_ARC', 2):
+                if _w <= 0:
+                    continue
                 try:
                     _s0 = (to_mm(_d.GetStart().x), to_mm(_d.GetStart().y))
                     _m0 = (to_mm(_d.GetArcMid().x), to_mm(_d.GetArcMid().y))
@@ -3009,6 +3083,33 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                     segments.append(Segment(
                         start_x=_p0[0], start_y=_p0[1], end_x=_p1[0], end_y=_p1[1],
                         width=_w, layer=_ln, net_id=_nid, graphic=True))
+            elif _shape in (_POLY, _RECT, _CIRC):
+                # FILLED copper areas (#337): outline as graphic segments (parity
+                # with the text parser). Filled shapes may have 0 stroke width.
+                _ow = _w if _w > 0 else defaults.TRACK_WIDTH
+                try:
+                    if _shape == _POLY:
+                        _ps = _d.GetPolyShape()
+                        _ol = _ps.Outline(0)
+                        _pts = [(to_mm(_ol.CPoint(k).x), to_mm(_ol.CPoint(k).y))
+                                for k in range(_ol.PointCount())]
+                        if len(_pts) >= 2:
+                            _emit_outline_b(_pts, _ow)
+                    elif _shape == _RECT:
+                        _s0 = _d.GetStart(); _e0 = _d.GetEnd()
+                        _x1, _y1 = to_mm(_s0.x), to_mm(_s0.y)
+                        _x2, _y2 = to_mm(_e0.x), to_mm(_e0.y)
+                        _emit_outline_b([(_x1, _y1), (_x2, _y1),
+                                         (_x2, _y2), (_x1, _y2)], _ow)
+                    elif _shape == _CIRC:
+                        _c = _d.GetCenter(); _cx, _cy = to_mm(_c.x), to_mm(_c.y)
+                        _r = to_mm(_d.GetRadius())
+                        _emit_outline_b(
+                            [(_cx + _r * math.cos(k * math.pi / 8),
+                              _cy + _r * math.sin(k * math.pi / 8))
+                             for k in range(16)], _ow)
+                except Exception:
+                    pass
     except Exception:
         pass  # older pcbnew APIs: best-effort
 
