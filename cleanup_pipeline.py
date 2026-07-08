@@ -40,6 +40,7 @@ from pcb_modification import (
     nudge_grazing_microshift,
     nudge_grazing_vias,
     prune_redundant_cycles,
+    remove_orphan_islands,
     sweep_dead_ends,
     trim_dangles_past_body_anchor,
     neck_wide_segments_grazing_pads,
@@ -238,6 +239,18 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         if _cy_segs:
             print(f"{label}Cycle prune: removed {_cy_segs} redundant loop "
                   f"segment(s) across {_cy_nets} net(s)")
+
+    # Orphan islands (#217): track-copper components reaching NO pad of
+    # their net -- rip/reroute leftovers connected to nothing. Runs before
+    # the dead-end sweep so the sweep's unsupported-via pass drops the
+    # islands' freed this-run vias.
+    _oi_n, _oi_segs, _oi_strip = remove_orphan_islands(results, pcb_data, scope_net_ids)
+    counts['orphan_islands'] = _oi_n
+    _trace('orphan_islands')
+    strip.extend(_oi_strip)
+    if _oi_n:
+        print(f"{label}Orphan islands: removed {_oi_n} pad-less copper "
+              f"island(s) ({_oi_segs} segment(s))")
 
     _de_segs, _de_vias, _de_strip = sweep_dead_ends(results, pcb_data, scope_net_ids)
     counts['dead_ends_swept'] = _de_segs

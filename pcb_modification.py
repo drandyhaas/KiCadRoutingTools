@@ -1032,6 +1032,88 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
     return segs_removed, len(removed_via_ids), original_to_remove
 
 
+def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None
+                          ) -> Tuple[int, int, List[Segment]]:
+    """Remove same-net track-copper components that reach NO pad of the net
+    (#217 orphan-island class): dead copper stranded by rip/reroute churn
+    (hackrf VREGMODE: 4 segments / 2.84mm connected to nothing).
+
+    Detection rides check_net_connectivity's own graph -- vias, T-junctions,
+    cap overlap, and zone-outline membership all count as connections -- so a
+    removed island is one the authoritative model calls pad-less. Removing it
+    cannot change any pad's connectivity by construction (maximal component
+    with no pad in it). Components containing graphics copper (#337 immutable
+    art) are skipped whole. Nets with no pads at all are left alone.
+
+    Returns (islands_removed, segments_removed, original_segments_to_strip);
+    this-run segments are dropped from their result's write-list in place,
+    original input segments are returned for the writer's strip list. The
+    freed this-run vias are dropped by the sweep_dead_ends unsupported-via
+    pass that runs right after this one.
+    """
+    from collections import defaultdict
+    from check_connected import check_net_connectivity
+    from geometry_utils import UnionFind
+
+    seg_owner = {}
+    for r in results:
+        for s in r.get('new_segments') or []:
+            seg_owner[id(s)] = r
+
+    net_ids = {s.net_id for s in pcb_data.segments
+               if scope_net_ids is None or s.net_id in scope_net_ids}
+    net_ids.discard(0)
+
+    islands_removed = 0
+    removed_ids = set()
+    originals: List[Segment] = []
+    for net_id in net_ids:
+        pads = pcb_data.pads_by_net.get(net_id, [])
+        if not pads:
+            continue
+        net_segs = [s for s in pcb_data.segments if s.net_id == net_id]
+        net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+        net_zones = [z for z in (getattr(pcb_data, 'zones', []) or [])
+                     if z.net_id == net_id]
+        if not net_segs:
+            continue
+        r = check_net_connectivity(net_id, net_segs, net_vias, pads,
+                                   net_zones, return_graph=True)
+        graph = r.get('graph')
+        if not graph:
+            continue
+        uf = UnionFind()
+        for a, b in graph.get('edges', []):
+            uf.union(a, b)
+        pad_roots = {uf.find(rep)
+                     for rep in graph.get('pad_index_repr', {}).values()}
+        comp_segs = defaultdict(list)
+        for i, s in enumerate(net_segs):
+            comp_segs[uf.find(2 * i)].append(s)
+        for root, segs in comp_segs.items():
+            if root in pad_roots:
+                continue
+            if any(getattr(s, 'graphic', False) for s in segs):
+                continue  # immutable input art anchors the island
+            islands_removed += 1
+            for s in segs:
+                removed_ids.add(id(s))
+                if id(s) in seg_owner:
+                    pass  # dropped from the write-list below
+                else:
+                    originals.append(s)
+
+    if not removed_ids:
+        return 0, 0, []
+    for r in results:
+        segs = r.get('new_segments')
+        if segs:
+            r['new_segments'] = [s for s in segs if id(s) not in removed_ids]
+    pcb_data.segments = [s for s in pcb_data.segments
+                         if id(s) not in removed_ids]
+    return islands_removed, len(removed_ids), originals
+
+
 def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None,
                                   tol: float = None) -> Tuple[int, List[Segment]]:
     """Shorten a dead-end segment back to the LAST same-net anchor on its BODY
