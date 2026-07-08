@@ -517,6 +517,11 @@ def find_disconnected_zone_regions(
     assert blocked_plane is not None, "plane_layer should have been processed in the loop"
     assert net_plane_segment_cells is not None, "plane_layer should have been processed in the loop"
     plane_visited: Set[Tuple[int, int]] = set()
+    # Per-flood fill cells, keyed by the starting anchor index: these ARE the
+    # region's modeled fill on the plane layer, and the join uses them as
+    # pseudo-anchor material (castor +3.3VA: the region's only real anchor
+    # sat 20mm from where its island nearly touches the neighbour).
+    flood_cells_by_start: Dict[int, Set[Tuple[int, int]]] = {}
     for start_anchor_idx in range(len(anchor_points)):
         start_gx, start_gy = anchor_grid_points[start_anchor_idx]
 
@@ -528,9 +533,12 @@ def find_disconnected_zone_regions(
 
         queue = deque([(start_gx, start_gy)])
         plane_visited.add((start_gx, start_gy))
+        this_flood: Set[Tuple[int, int]] = {(start_gx, start_gy)}
+        flood_cells_by_start[start_anchor_idx] = this_flood
 
         while queue:
             gx, gy = queue.popleft()
+            this_flood.add((gx, gy))
 
             if (gx, gy) in grid_to_anchors:
                 for anchor_idx in grid_to_anchors[(gx, gy)]:
@@ -570,7 +578,12 @@ def find_disconnected_zone_regions(
 
     for root, indices in groups.items():
         anchors = [anchor_points[i] for i in indices]
+        # The region's modeled FILL cells: union of its member anchors' plane
+        # floods (previously just the anchor grid points, which starved the
+        # join of pseudo-anchor material).
         cells = set(anchor_grid_points[i] for i in indices)
+        for i in indices:
+            cells |= flood_cells_by_start.get(i, set())
         region_anchors.append(anchors)
         region_cells.append(cells)
 
@@ -632,6 +645,96 @@ def _block_pad_cells(
             blocked.add((gx, gy))
 
 
+def _interior_cells(cells):
+    """Cells eroded by one analysis cell: the flood model approximates the
+    fill at coarse resolution, so interior cells are far likelier to carry
+    real copper -- a pseudo-anchor on a boundary cell can land where the
+    actual fill was carved away, emitting a join that connects to nothing.
+    Erosion ladder: 8-neighbor interior, else 4-neighbor (thin strip
+    islands at a coarse grid have no 8-interior at all), else nothing (the
+    join falls back to plain anchors)."""
+    full = []
+    ortho = []
+    for (gx, gy) in cells:
+        ok4 = all((gx + dx, gy + dy) in cells
+                  for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)))
+        if not ok4:
+            continue
+        ortho.append((gx, gy))
+        if all((gx + dx, gy + dy) in cells
+               for dx in (-1, 0, 1) for dy in (-1, 0, 1)):
+            full.append((gx, gy))
+    return full or ortho
+
+
+def _subsample_cell_points(cells, coord, max_pts: int = 400):
+    """INTERIOR region fill cells as float points, subsampled."""
+    interior = _interior_cells(cells)
+    pts = [coord.to_float(gx, gy) for gx, gy in interior]
+    if len(pts) > max_pts:
+        stride = len(pts) // max_pts + 1
+        pts = pts[::stride]
+    return pts
+
+
+def _real_fill_point(pt, net_id, pcb_data, zone_polys, plane_layer,
+                     margin: float) -> bool:
+    from check_connected import point_in_polygon
+    """True when a disc of radius `margin` around pt provably sits in REAL
+    zone fill: fully inside one outline and at least `margin` clear of every
+    foreign copper item on the plane layer (the coarse flood model blurs the
+    fill's clearance carving; joins attached to modeled-but-absent fill ship
+    floating vias -- kicad-cli 'Via | Zone unconnected')."""
+    x, y = pt
+    probes = ((x, y), (x + margin, y), (x - margin, y),
+              (x, y + margin), (x, y - margin))
+    if not any(all(point_in_polygon(px, py, poly) for px, py in probes)
+               for poly in zone_polys):
+        return False
+    m2 = margin
+    for v in pcb_data.vias:
+        if v.net_id != net_id and \
+                math.hypot(x - v.x, y - v.y) < v.size / 2 + m2:
+            return False
+    for s in pcb_data.segments:
+        if s.net_id == net_id or s.layer != plane_layer:
+            continue
+        dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+        L2 = dx * dx + dy * dy
+        t = max(0.0, min(1.0, ((x - s.start_x) * dx + (y - s.start_y) * dy) / L2)) if L2 else 0.0
+        if math.hypot(x - (s.start_x + t * dx), y - (s.start_y + t * dy)) < s.width / 2 + m2:
+            return False
+    for pads in pcb_data.pads_by_net.values():
+        for p in pads:
+            if p.net_id == net_id:
+                continue
+            if p.drill <= 0 and plane_layer not in p.layers and '*.Cu' not in p.layers:
+                continue
+            if math.hypot(x - p.global_x, y - p.global_y) < \
+                    max(p.size_x, p.size_y) / 2 + m2:
+                return False
+    return True
+
+
+def _nearest_cell_points(cells, coord, near_pt, k: int = 8,
+                         validity=None):
+    """The k INTERIOR region fill cells closest to near_pt, as float points.
+    A deep fill cell is electrically the region (new copper starting there
+    lands in the zone fill), so these serve as pseudo-anchors. `validity`
+    (optional callable) filters candidates to provably-real fill points."""
+    pts = _subsample_cell_points(cells, coord, max_pts=2000)
+    pts.sort(key=lambda p: (p[0] - near_pt[0]) ** 2 + (p[1] - near_pt[1]) ** 2)
+    if validity is None:
+        return pts[:k]
+    out = []
+    for p in pts:
+        if validity(p):
+            out.append(p)
+            if len(out) >= k:
+                break
+    return out
+
+
 def find_region_connection_points(
     region_anchors: List[List[Tuple[float, float]]],
     region_cells: List[Set[Tuple[int, int]]],
@@ -652,7 +755,18 @@ def find_region_connection_points(
     if n_regions < 2:
         return []
 
-    # Find closest points between each pair of regions
+    # Closest approach between regions is measured over the regions' FILL
+    # CELLS (subsampled) plus their anchors -- not anchors alone. A region's
+    # only anchor can sit 20mm from where its island nearly touches the
+    # other region (castor +3.3VA: RV1's pad at (58.5,66.9) vs the 4mm hop
+    # at (55,87) Andy bridged by hand); anchor-only selection then asks the
+    # router for the long way through the dense middle and fails.
+    region_pts: List[List[Tuple[float, float]]] = []
+    for i in range(n_regions):
+        pts = list(region_anchors[i])
+        pts.extend(_subsample_cell_points(region_cells[i] if i < len(region_cells) else (), coord))
+        region_pts.append(pts)
+
     edges: List[Tuple[float, int, int, Tuple[float, float], Tuple[float, float]]] = []
 
     for i in range(n_regions):
@@ -661,8 +775,8 @@ def find_region_connection_points(
             best_pi = None
             best_pj = None
 
-            for pi in region_anchors[i]:
-                for pj in region_anchors[j]:
+            for pi in region_pts[i]:
+                for pj in region_pts[j]:
                     dist = math.sqrt((pi[0] - pj[0])**2 + (pi[1] - pj[1])**2)
                     if dist < best_dist:
                         best_dist = dist
@@ -1088,7 +1202,30 @@ def route_disconnected_regions(
         # point (fix: giant regions otherwise feed thousands of seeds per attempt).
         seed_i = _nearest_anchors(anchors_i, point_i)
         seed_j = _nearest_anchors(anchors_j, point_j)
-        reduced = (len(seed_i) < len(anchors_i)) or (len(seed_j) < len(anchors_j))
+        # Pseudo-anchors on the fill nearest the closest approach: a new via
+        # anywhere on a region's fill IS the region (castor +3.3VA -- the
+        # human's bridge started at a bare fill spot 20mm from the anchor).
+        _zone_polys = [z.polygon for z in (getattr(pcb_data, 'zones', []) or [])
+                       if z.net_id == net_id and getattr(z, 'polygon', None)]
+        _plane_layer_name = [l for l, i in layer_map.items()
+                             if i == plane_layer_idx][0]
+        _margin = zone_clearance
+
+        def _valid_fill(pt):
+            return _real_fill_point(pt, net_id, pcb_data, _zone_polys,
+                                    _plane_layer_name, _margin)
+
+        cells_i = _nearest_cell_points(
+            region_cells[region_i] if region_i < len(region_cells) else (),
+            coord, point_i, validity=_valid_fill)
+        cells_j = _nearest_cell_points(
+            region_cells[region_j] if region_j < len(region_cells) else (),
+            coord, point_j, validity=_valid_fill)
+        seed_i = seed_i + [p for p in cells_i if p not in seed_i]
+        seed_j = seed_j + [p for p in cells_j if p not in seed_j]
+        full_i = anchors_i + [p for p in cells_i if p not in anchors_i]
+        full_j = anchors_j + [p for p in cells_j if p not in anchors_j]
+        reduced = (len(seed_i) < len(full_i)) or (len(seed_j) < len(full_j))
 
         # Progress indicator
         seed_note = f" (seed {len(seed_i)}x{len(seed_j)})" if reduced else ""
@@ -1119,7 +1256,7 @@ def route_disconnected_regions(
         # connection that the full set would have found.
         if result is None and reduced:
             print(f"{YELLOW}retry-full{RESET} ", end="", flush=True)
-            result, track_width, open_space_via = _connect(anchors_i, anchors_j)
+            result, track_width, open_space_via = _connect(full_i, full_j)
 
         # Last resort (#217 castor +3.3VA): the corridor between two regions
         # can be narrower than REPAIR_MIN_TRACK_WIDTH while still fitting the
@@ -1148,7 +1285,7 @@ def route_disconnected_regions(
             print(f"{YELLOW}narrow-width {config.track_width:.3f}{RESET} ",
                   end="", flush=True)
             result, track_width, open_space_via = _try_route_between_regions(
-                anchors_i, anchors_j,
+                full_i, full_j,
                 base_obstacles=narrow_obstacles,
                 plane_layer_idx=plane_layer_idx,
                 routing_layers=routing_layers,
