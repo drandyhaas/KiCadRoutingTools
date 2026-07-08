@@ -58,6 +58,15 @@ def move_copper_graphics_to_silkscreen_board(board):
         # graphics (unified onto PCB_SHAPE in modern KiCad).
         if not isinstance(item, pcbnew.PCB_SHAPE):
             return
+        # #337: a NET-TIED copper graphic is functional copper the router models
+        # as an immutable obstacle -- LEAVE it (moving it deletes a real
+        # connection). Only net-less decoration (a copper logo) is relocated.
+        # Mirrors the net guard in kicad_writer.move_copper_graphics_to_silkscreen.
+        try:
+            if item.GetNetCode() > 0:
+                return
+        except Exception:
+            pass  # older PCB_SHAPE without a net accessor: treat as net-less
         layer = item.GetLayer()
         if layer == pcbnew.F_Cu:
             item.SetLayer(pcbnew.F_SilkS)

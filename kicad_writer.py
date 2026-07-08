@@ -109,10 +109,13 @@ def move_copper_graphics_to_silkscreen(content: str) -> str:
     from copper layers to silkscreen, mirroring move_copper_text_to_silkscreen:
     F.Cu -> F.SilkS, B.Cu -> B.SilkS.
 
-    A net-less copper graphic (e.g. a copper OSHW logo) is not modelled as an
-    obstacle by the router, so plane pours and routed copper run straight over it
-    and short against it (orangecrab: one F.Cu logo shorted ~30 plane traces/vias).
-    Relocating it to silkscreen preserves it visually while taking it out of copper.
+    Only NET-LESS copper graphics (e.g. a copper OSHW logo, net 0 / no net) are
+    moved: unmodelled by the router, plane pours and routed copper run straight
+    over them and short (orangecrab: one F.Cu logo shorted ~30 plane traces/vias);
+    relocating to silkscreen preserves them visually while taking them out of
+    copper. A NET-TIED copper graphic is real functional copper (#337 models it
+    as an immutable obstacle and DRC treats it as copper) and is LEFT IN PLACE --
+    moving it would delete a real connection.
     """
     count = 0
     for tag in _COPPER_GRAPHIC_TAGS:
@@ -142,7 +145,15 @@ def move_copper_graphics_to_silkscreen(content: str) -> str:
                         break
             block = content[start:end]
             layer_match = re.search(r'\(layer\s+"(F\.Cu|B\.Cu)"\)', block)
-            if layer_match:
+            # #337: a NET-TIED copper graphic is FUNCTIONAL copper (the router
+            # models it as an immutable obstacle and check_drc treats it as
+            # copper) -- relocating it to silk would DELETE a real connection and
+            # re-expose the shorts #337 catches. Only net-less decoration (a
+            # copper logo, net 0 / no net) is safe to move off copper.
+            net_match = re.search(r'\(net\s+(\d+)(?:\s+"([^"]*)")?\)', block)
+            net_tied = net_match and (int(net_match.group(1)) != 0
+                                      or (net_match.group(2) or '') != '')
+            if layer_match and not net_tied:
                 layer = layer_match.group(1)
                 new_layer = 'F.SilkS' if layer == 'F.Cu' else 'B.SilkS'
                 block = block.replace(f'(layer "{layer}")', f'(layer "{new_layer}")')
