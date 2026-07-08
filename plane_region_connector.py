@@ -448,9 +448,21 @@ def find_disconnected_zone_regions(
                                 debug_paths.append((path_points, layer))
                         cl_uf.union(start_cl_idx, cl_idx)
 
-                # Expand to neighbors (4-connected for flood fill)
-                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                # Expand to neighbors: 4-connected through zone copper, plus
+                # diagonal steps ALONG the net's own segment cells -- segment
+                # rasterization is a Bresenham line, so a 45-degree repair
+                # route is a diagonal cell chain a 4-connected flood cannot
+                # walk. The previous repair invocation's region-connection
+                # routes were therefore invisible to the next invocation's
+                # model, which re-routed the SAME connections onto identical
+                # coordinates (castor_pollux: 293 stacked duplicate GND
+                # segments). A diagonal into own-copper cells is physically
+                # real copper continuity, never a corner-cut through a gap.
+                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0),
+                               (1, 1), (1, -1), (-1, 1), (-1, -1)]:
                     nx, ny = gx + dx, gy + dy
+                    if dx != 0 and dy != 0 and (nx, ny) not in net_segment_cells:
+                        continue
                     if (nx, ny) in layer_visited:
                         continue
                     if nx < min_gx or nx > max_gx or ny < min_gy or ny > max_gy:
@@ -524,8 +536,13 @@ def find_disconnected_zone_regions(
                 for anchor_idx in grid_to_anchors[(gx, gy)]:
                     anchor_uf.union(start_anchor_idx, anchor_idx)
 
-            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0),
+                           (1, 1), (1, -1), (-1, 1), (-1, -1)]:
                 nx, ny = gx + dx, gy + dy
+                # Diagonals only along own segment copper (Bresenham chains),
+                # same as the cross-layer flood above.
+                if dx != 0 and dy != 0 and (nx, ny) not in net_plane_segment_cells:
+                    continue
                 if (nx, ny) in plane_visited:
                     continue
                 if nx < min_gx or nx > max_gx or ny < min_gy or ny > max_gy:
