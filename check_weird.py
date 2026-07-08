@@ -137,7 +137,7 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads, findings):
 
 
 def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
-                   soft_pts, findings):
+                   soft_pts, findings, join_tol: float = 0.0):
     """Degree-1 endpoints that _point_anchored calls unanchored and that are
     not inside a same-net zone outline. Half-segment tails past a mid-body
     anchor reuse trim_dangles_past_body_anchor's geometry (report-only)."""
@@ -191,6 +191,28 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
             if any(point_in_polygon(fx, fy, z.polygon)
                    for z in zones_by_layer.get(s.layer, ())):
                 continue  # lands in a same-net zone fill outline
+            # Two long tracks whose ends miss each other by a few um (a
+            # nudge/micro-shift split pair) are OFF BY that microgap, not by
+            # their segment lengths: within join_tol they are connected
+            # copper, not dangles.
+            if join_tol > 0:
+                joined = False
+                cx0, cy0 = int(fx // _CELL), int(fy // _CELL)
+                for ncx in (cx0 - 1, cx0, cx0 + 1):
+                    for ncy in (cy0 - 1, cy0, cy0 + 1):
+                        for o in seg_index.get((s.layer, ncx, ncy), ()):
+                            if o is s:
+                                continue
+                            if (math.hypot(o.start_x - fx, o.start_y - fy) <= join_tol
+                                    or math.hypot(o.end_x - fx, o.end_y - fy) <= join_tol):
+                                joined = True
+                                break
+                        if joined:
+                            break
+                    if joined:
+                        break
+                if joined:
+                    continue
             free_ends.append((free_is_start, fx, fy))
         if not free_ends:
             continue
@@ -449,7 +471,7 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
         soft_pts = _check_soft_joints(net_id, name, net_segs, net_vias,
                                       net_pads, findings)
         _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
-                       soft_pts, findings)
+                       soft_pts, findings, join_tol=tolerance or 0.0)
         _check_cycles(net_id, name, net_segs, net_vias, net_pads, has_zone,
                       findings)
         _check_removable(net_id, name, net_segs, net_vias, net_pads,
