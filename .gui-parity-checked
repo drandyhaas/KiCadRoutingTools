@@ -1,1 +1,21 @@
-8b8bdf80f0e25a0e0eb5afa313ee498d3491e910 2026-07-08 audited e90313c..HEAD; 1 gap fixed (GUI fanout via-move net-aware removal); rest shared-engine (#339/M1-M4/#342) or already mirrored (H1)
+767ef1e936d6173cd4d2dd6a4b867560b0569e5e 2026-07-08 audited 8b8bdf8..HEAD (21 commits); 0 gaps needing fixes.
+- Shared-engine (both fronts automatically): #341 memo (7cc22a2/c0d29fd), exact pad-pad
+  connectivity (3bc09a1), via-barrel credit (cb2286d), phase-3 ordering + victim rip-up
+  (f2c260b), phase-1-exhausted island fallback + ledger per-run scoping (657e892), pose
+  budget cap (d29ab1c), plane region fixes (129ed8f zone-outline gate, 8663a27 diagonal
+  walk, 767ef1e narrow rung -- GUI planes tab calls the same engine functions).
+- New cleanup passes (b31fb35 dangle trim, d0212a2 orphan islands, 5c862c3 strict
+  collapse) run inside run_post_route_cleanup; VERIFIED their input-copper strips flow
+  to the GUI via results_data['segments_to_remove'] (route.py:1100->1426,
+  swig_gui.py:3067) and to the plane fronts via clean_plane_copper.
+- Deliberate CLI-only (documented in commits, GUI return_results contract unchanged):
+  route.py end-of-run reconciliation (8d2d29a), route_disconnected_planes rip-casualty
+  self-reconnect (44ff697) -- GUI keeps 'ripped ids returned, user reroutes via the
+  routing tab' semantics per the #141-revert design.
+- No GUI action needed: 4457343 (text-writer via removal; GUI removes via objects
+  net-aware since 8b8bdf8), ef75435/3200b45 (stress tooling), check_weird.py + tests
+  (135d351/26d920c/6838095/f109349/105427f -- standalone read-only checker; candidate
+  for a future GUI validate-tab integration).
+- No new argparse flags on routing CLIs in this range (final_reconcile is a kwarg,
+  default True, guarded off for return_results), so no options-panel /
+  settings_persistence wiring required.
