@@ -1517,6 +1517,7 @@ class FanoutTab(wx.Panel):
         try:
             from kicad_parser import build_pcb_data_from_board
             from placement.fanout_clearance import repair_fanout_clearance
+            from .swig_gui import _build_layer_mappings
 
             self.status_text.SetLabel("Optimizing decoupling cap placement...")
             wx.Yield()
@@ -1548,9 +1549,59 @@ class FanoutTab(wx.Panel):
                 fp.SetPosition(pcbnew.VECTOR2I(
                     pcbnew.FromMM(p['new_x']), pcbnew.FromMM(p['new_y'])))
 
+            # Via-nudge with reconnect (#313): the shared engine also moves a
+            # boxed-in cap's offending fanout via off the pad and adds connector
+            # segment(s) back to the stub start. The CLI applies these via
+            # write_placed_output; on the live board we must mirror it (else the
+            # via stays put and the graze the summary claims to have fixed
+            # persists). GUI parity for placement/writer.py:119-141.
+            name_to_id, _ = _build_layer_mappings()
+
+            def _layer_id(layer_name):
+                return name_to_id.get(layer_name, pcbnew.F_Cu)
+
+            via_moves = result.get('via_moves', []) or []
+            for old_x, old_y, vd in via_moves:
+                # remove the via at its OLD position (match within 1um)
+                for track in list(board.GetTracks()):
+                    if track.GetClass() != 'PCB_VIA':
+                        continue
+                    pos = track.GetPosition()
+                    if (abs(pcbnew.ToMM(pos.x) - old_x) < 1e-3 and
+                            abs(pcbnew.ToMM(pos.y) - old_y) < 1e-3):
+                        board.Remove(track)
+                        break
+                nv = pcbnew.PCB_VIA(board)
+                nv.SetPosition(pcbnew.VECTOR2I(
+                    pcbnew.FromMM(vd['x']), pcbnew.FromMM(vd['y'])))
+                nv.SetWidth(pcbnew.FromMM(vd['size']))
+                nv.SetDrill(pcbnew.FromMM(vd['drill']))
+                nv.SetNetCode(vd['net_id'])
+                if len(vd.get('layers', [])) >= 2:
+                    nv.SetLayerPair(_layer_id(vd['layers'][0]),
+                                    _layer_id(vd['layers'][1]))
+                board.Add(nv)
+
+            for nsd in (result.get('new_segments', []) or []):
+                nt = pcbnew.PCB_TRACK(board)
+                nt.SetStart(pcbnew.VECTOR2I(
+                    pcbnew.FromMM(nsd['start'][0]), pcbnew.FromMM(nsd['start'][1])))
+                nt.SetEnd(pcbnew.VECTOR2I(
+                    pcbnew.FromMM(nsd['end'][0]), pcbnew.FromMM(nsd['end'][1])))
+                nt.SetWidth(pcbnew.FromMM(nsd['width']))
+                nt.SetLayer(_layer_id(nsd['layer']))
+                nt.SetNetCode(nsd['net_id'])
+                board.Add(nt)
+
+            if via_moves:
+                board.BuildConnectivity()
+
             moved = len(result.get('placements', []))
+            nudged = len(via_moves)
             unresolved = result.get('unresolved', [])
             summary = f"Decoupling caps optimized: {moved} moved"
+            if nudged:
+                summary += f"; {nudged} via(s) nudged with reconnect (#313)"
             if unresolved:
                 summary += (f"; {len(unresolved)} could not clear a foreign via "
                             f"(manual: {', '.join(sorted(unresolved))})")

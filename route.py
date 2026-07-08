@@ -1414,6 +1414,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         results_data = {
             'results': results,
             'all_swap_vias': all_swap_vias,
+            'all_swap_segments': all_swap_segments,
             'pad_swaps': pad_swaps,
             'single_ended_target_swap_info': single_ended_target_swap_info,
             'all_segment_modifications': all_segment_modifications,

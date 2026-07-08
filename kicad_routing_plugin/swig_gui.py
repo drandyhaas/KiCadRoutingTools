@@ -2825,7 +2825,7 @@ class RoutingDialog(wx.Dialog):
                 # Route each net class group with its own parameters
                 total_successful = 0
                 total_failed = 0
-                all_results = {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': [], 'segments_to_remove': []}
+                all_results = {'results': [], 'all_swap_vias': [], 'all_swap_segments': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': [], 'segments_to_remove': []}
 
                 class_names = list(config['nets_by_class'].keys())
                 total_classes = len(class_names)
@@ -2939,6 +2939,10 @@ class RoutingDialog(wx.Dialog):
                     if results_data:
                         all_results['results'].extend(results_data.get('results', []))
                         all_results['all_swap_vias'].extend(results_data.get('all_swap_vias', []))
+                        # #340 swap reuse-connector copper (same channel the
+                        # standard path draws) -- omitting it leaves a swapped
+                        # net open in the per-class GUI route.
+                        all_results['all_swap_segments'].extend(results_data.get('all_swap_segments', []))
                         all_results['exclusion_zone_lines'].extend(results_data.get('exclusion_zone_lines', []))
                         all_results['boundary_debug_labels'].extend(results_data.get('boundary_debug_labels', []))
                         # Original-board loop/dead-end segments flagged for removal
@@ -3126,6 +3130,27 @@ class RoutingDialog(wx.Dialog):
         for via in results_data.get('all_swap_vias', []):
             self._add_via_to_board(board, via, get_layer_id)
             vias_added += 1
+
+        # Add reuse-connector segments from layer swapping (#340): when a swap
+        # anchors its layer transition on an existing same-net via instead of
+        # drilling a new pad-via hole, the pad->via connector copper rides the
+        # all_swap_segments channel -- draw it or the swapped net is left open
+        # in the GUI (CLI parity: write_routed_output emits these too).
+        for seg in results_data.get('all_swap_segments', []):
+            track = pcbnew.PCB_TRACK(board)
+            track.SetStart(pcbnew.VECTOR2I(
+                pcbnew.FromMM(round(seg.start_x, POSITION_DECIMALS)),
+                pcbnew.FromMM(round(seg.start_y, POSITION_DECIMALS))
+            ))
+            track.SetEnd(pcbnew.VECTOR2I(
+                pcbnew.FromMM(round(seg.end_x, POSITION_DECIMALS)),
+                pcbnew.FromMM(round(seg.end_y, POSITION_DECIMALS))
+            ))
+            track.SetWidth(pcbnew.FromMM(round(seg.width, POSITION_DECIMALS)))
+            track.SetLayer(get_layer_id(seg.layer))
+            track.SetNetCode(seg.net_id)
+            board.Add(track)
+            tracks_added += 1
 
         # Add debug visualization lines if enabled
         if config.get('debug_lines', False):

@@ -51,7 +51,35 @@ You do **not** need to update `metadata.json` — Python deps live entirely outs
 
 ## Cutting a release
 
-### 1. Bump and edit metadata
+### 1. Confirm CLI/GUI parity
+
+The CLI scripts and the `kicad_routing_plugin/` GUI call the same routing
+engine, but a new engine parameter, results-data key, writer argument, or
+changed default has to be threaded through **both** the argparse layer and
+every GUI call site (and file-text `parse_kicad_pcb` fixes must be mirrored in
+`build_pcb_data_from_board`). A release must not ship an engine fix the GUI
+silently drops. Audit every commit since the last-confirmed SHA:
+
+```bash
+LAST=$(awk '{print $1}' .gui-parity-checked)
+git log --oneline $LAST..HEAD
+git diff $LAST..HEAD -- route.py route_diff.py route_planes.py \
+    route_disconnected_planes.py bga_fanout.py place_fanout_clearance.py \
+    placement/ single_ended_routing.py layer_swap_optimization.py \
+    stub_layer_switching.py obstacle_map.py kicad_parser.py
+```
+
+For each new engine parameter / results key / writer arg / changed default,
+confirm the matching `kicad_routing_plugin/` call site was updated (see the
+parity rules in `CLAUDE.md`). Fix any gap and commit it, then update
+`.gui-parity-checked` to the new HEAD (SHA + date + outcome) and commit that.
+
+`check_release_version.py --tag vX.Y.Z` (step 2 and the first CI gate) **fails
+the release** unless `.gui-parity-checked` references the current HEAD, so this
+audit is mandatory. For a release that provably touches no engine/GUI code
+(docs-only), pass `--skip-parity-check` to bypass the gate.
+
+### 2. Bump and edit metadata
 
 ```bash
 # Edit:
@@ -73,7 +101,7 @@ python3 check_release_version.py --tag v0.15.5
 It must print `OK:`. (A `VERSION`-only bump that forgets `metadata.json` is the
 exact mistake that failed the v0.17.0 release.)
 
-### 2. Commit and tag
+### 3. Commit and tag
 
 ```bash
 git add -u
@@ -85,7 +113,7 @@ git push origin v0.15.5
 
 The tag push triggers `.github/workflows/release.yml`.
 
-### 3. Watch the CI
+### 4. Watch the CI
 
 ```bash
 gh run watch $(gh run list --workflow=release.yml --limit 1 --json databaseId -q '.[0].databaseId')
