@@ -1177,6 +1177,9 @@ Examples:
                         help="Grid step for connectivity analysis in mm (coarser = faster, default: 0.5)")
 
     # Routing options
+    parser.add_argument("--no-kicad-recheck", action="store_true",
+                        help="Skip the kicad-cli-verified reconnect pass on the output "
+                             "(runs by default when kicad-cli is installed)")
     parser.add_argument("--max-iterations", type=int, default=defaults.MAX_ITERATIONS,
                         help="Maximum A* iterations per route attempt (default: 200000)")
 
@@ -1320,6 +1323,22 @@ Examples:
                                                 args.clearance, args.grid_step)
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
+
+    # KiCad-oracle recheck (#217): our fill model over-credits, so gaps
+    # KiCad's REAL fill produces can survive every model-based pass (castor
+    # +3.3VA bare island, lumenpnp U5 pocket). Ask kicad-cli for the exact
+    # missing links on the processed nets and route precisely those.
+    if not args.dry_run and not args.no_kicad_recheck and args.output_file:
+        from kicad_oracle import oracle_reconnect
+        from routing_config import GridRouteConfig
+        _ocfg = GridRouteConfig(
+            clearance=args.clearance, track_width=args.track_width,
+            via_size=args.via_size, via_drill=args.via_drill,
+            grid_step=args.grid_step)
+        oracle_reconnect(args.output_file, net_names, _ocfg,
+                         track_via_clearance=args.track_via_clearance,
+                         hole_to_hole_clearance=args.hole_to_hole_clearance,
+                         verbose=args.verbose)
 
     # Make the output project's DRC design rules consistent with the floors we
     # just routed to (issue #160), mirroring route_planes.py, so a manual DRC in

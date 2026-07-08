@@ -564,6 +564,39 @@ def find_disconnected_zone_regions(
                 plane_visited.add((nx, ny))
                 queue.append((nx, ny))
 
+    # Anchor-less fill islands (#217 castor +3.3VA): a bare patch of modeled
+    # fill with no via/pad/track anywhere on it never seeds a flood, so it
+    # stayed invisible to region detection -- yet KiCad fills it and its DRC
+    # connectivity flags it against the rest of the net. Sweep the leftover
+    # inside-outline unblocked cells into anchor-less regions (cells only,
+    # walked with the same gates as the anchor flood); the join's validated
+    # fill-cell pseudo-anchors give them connectable points. Tiny slivers
+    # (<1mm^2 at the analysis grid) are model noise, not real islands.
+    orphan_patches: List[Set[Tuple[int, int]]] = []
+    if inside_plane is not None:
+        min_patch_cells = max(4, int(1.0 / (analysis_grid_step * analysis_grid_step)))
+        for start in inside_plane:
+            if start in plane_visited or start in blocked_plane:
+                continue
+            patch: Set[Tuple[int, int]] = {start}
+            plane_visited.add(start)
+            queue = deque([start])
+            while queue:
+                gx, gy = queue.popleft()
+                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                    nx, ny = gx + dx, gy + dy
+                    if (nx, ny) in plane_visited:
+                        continue
+                    if nx < min_gx or nx > max_gx or ny < min_gy or ny > max_gy:
+                        continue
+                    if (nx, ny) in blocked_plane or (nx, ny) not in inside_plane:
+                        continue
+                    plane_visited.add((nx, ny))
+                    patch.add((nx, ny))
+                    queue.append((nx, ny))
+            if len(patch) >= min_patch_cells:
+                orphan_patches.append(patch)
+
     # Group anchors by their root
     groups: Dict[int, List[int]] = {}
     for i in range(len(anchor_points)):
@@ -586,6 +619,12 @@ def find_disconnected_zone_regions(
             cells |= flood_cells_by_start.get(i, set())
         region_anchors.append(anchors)
         region_cells.append(cells)
+
+    # Anchor-less islands become regions with cells only; the join seeds
+    # them purely from validated fill-cell pseudo-anchors.
+    for patch in orphan_patches:
+        region_anchors.append([])
+        region_cells.append(patch)
 
     return region_anchors, region_cells, debug_paths
 
@@ -957,6 +996,9 @@ def _try_route_between_regions(
         _total_route_time += _dt
         _attempt_details.append(f"{label} {'OK' if result else 'fail'} {_dt:.2f}s/{used_iters}it")
         return result, used_iters
+
+    if not anchors_i or not anchors_j:
+        return None, min_track_width, None
 
     # Generate width steps: min, min*2, min*4, ..., up to max
     track_widths_narrow_first = [min_track_width]
@@ -1763,34 +1805,39 @@ def route_plane_connection_wide(
         """Check if a point is at a via location (connects all layers)."""
         return (round(x, POSITION_DECIMALS), round(y, POSITION_DECIMALS)) in via_positions
 
-    # Set up sources - all anchor points from source region
-    # For vias (which connect all layers), set source on ALL layers
-    sources = []
-    for sx, sy in source_points:
-        gx, gy = coord.to_grid(sx, sy)
-        if is_at_via(sx, sy):
-            # Via connects all layers - set source on all layers
-            for layer_idx in range(n_layers):
-                obstacles.add_source_target_cell(gx, gy, layer_idx)
-                sources.append((gx, gy, layer_idx))
-        else:
-            # SMD pad - only on plane layer
-            obstacles.add_source_target_cell(gx, gy, plane_layer_idx)
-            sources.append((gx, gy, plane_layer_idx))
+    # Set up sources - all anchor points from source region.
+    # Points are (x, y) -- stamped on the plane layer, or all layers when at
+    # a via -- or (x, y, layer_name) for an explicit layer (the kicad-oracle
+    # reconnect feeds endpoints on arbitrary layers).
+    layer_name_to_idx = {name: i for i, name in enumerate(routing_layers)}
 
-    # Set up targets - all anchor points from target region
+    def _stamp(points, out):
+        for pt in points:
+            if len(pt) == 3:
+                sx, sy, lname = pt
+                li = layer_name_to_idx.get(lname)
+                gx, gy = coord.to_grid(sx, sy)
+                if li is None:
+                    continue
+                obstacles.add_source_target_cell(gx, gy, li)
+                out.append((gx, gy, li))
+                continue
+            sx, sy = pt
+            gx, gy = coord.to_grid(sx, sy)
+            if is_at_via(sx, sy):
+                # Via connects all layers - set on all layers
+                for layer_idx in range(n_layers):
+                    obstacles.add_source_target_cell(gx, gy, layer_idx)
+                    out.append((gx, gy, layer_idx))
+            else:
+                # SMD pad - only on plane layer
+                obstacles.add_source_target_cell(gx, gy, plane_layer_idx)
+                out.append((gx, gy, plane_layer_idx))
+
+    sources = []
+    _stamp(source_points, sources)
     targets = []
-    for tx, ty in target_points:
-        gx, gy = coord.to_grid(tx, ty)
-        if is_at_via(tx, ty):
-            # Via connects all layers - set target on all layers
-            for layer_idx in range(n_layers):
-                obstacles.add_source_target_cell(gx, gy, layer_idx)
-                targets.append((gx, gy, layer_idx))
-        else:
-            # SMD pad - only on plane layer
-            obstacles.add_source_target_cell(gx, gy, plane_layer_idx)
-            targets.append((gx, gy, plane_layer_idx))
+    _stamp(target_points, targets)
 
     # Create router if not provided
     if router is None:
