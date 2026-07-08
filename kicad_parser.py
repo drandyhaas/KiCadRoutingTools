@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 import math
 import json
+import routing_defaults as defaults  # fab-floor outline width for 0-stroke copper polys (#337/M2)
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
