@@ -119,11 +119,12 @@ The tag push triggers `.github/workflows/release.yml`.
 gh run watch $(gh run list --workflow=release.yml --limit 1 --json databaseId -q '.[0].databaseId')
 ```
 
-The workflow has three jobs:
+The workflow has four jobs:
 
-1. **`build`** (matrix, ~2–3 min each): builds the Rust binary for `linux-x86_64`, `macos-arm64`, `macos-x86_64`, and `windows-x86_64`. The macOS x86_64 build is cross-compiled from the macOS arm64 runner (cheaper / available capacity than `macos-13`).
-2. **`package`** (~1 min): runs `package_pcm.py` to produce one `KiCadRoutingTools-<ver>.zip` bundling all 4 binaries under platform-suffix filenames, then runs `update_metadata.py` to patch the real sha256 / size into `metadata.json`.
-3. **`release`**: creates / updates the GitHub Release at `v<VERSION>` with all 4 raw binaries, the PCM zip, and the patched `metadata.json` attached.
+1. **`validate`**: runs `check_release_version.py` to gate the release on VERSION/metadata/tag consistency and GUI parity before anything is built.
+2. **`build`** (matrix, ~2–3 min each): builds the Rust binary for `linux-x86_64`, `macos-arm64`, `macos-x86_64`, and `windows-x86_64`. The macOS x86_64 build is cross-compiled from the macOS arm64 runner (cheaper / available capacity than `macos-13`).
+3. **`package`** (~1 min): runs `package_pcm.py` to produce one `KiCadRoutingTools-<ver>.zip` bundling all 4 binaries under platform-suffix filenames, then runs `update_metadata.py` to patch the real sha256 / size into `metadata.json`.
+4. **`release`**: creates / updates the GitHub Release at `v<VERSION>` with all 4 raw binaries, the PCM zip, and the patched `metadata.json` attached.
 
 When `release` completes successfully, the public Release URL is:
 

@@ -26,9 +26,13 @@ Two mechanisms start a rip-up:
 - Nets that are the **sole blocker** of every cell they block come first — ripping them is guaranteed to open the frontier.
 - Otherwise nets are scored by `unique_cells + near_endpoint_unique + 0.5 × shared_cells`, where `near_endpoint_unique` counts uniquely-blocked cells within 3mm of the failing net's source or target (blockages near endpoints are usually the decisive ones).
 
-`filter_rippable_blockers()` removes candidates that can't be ripped: nets not actually routed in this run (pre-existing tracks are never touched), and diff pair members whose partner isn't routed. Differential pairs are treated as one unit — P and N are always ripped and restored together.
+`filter_rippable_blockers()` removes candidates that can't be ripped: nets not actually routed in this run (by default, pre-existing tracks are left untouched — see [Ripping Pre-Existing Routes](#ripping-pre-existing-routes) for the `--rip-existing-nets` exception), and diff pair members whose partner isn't routed. Differential pairs are treated as one unit — P and N are always ripped and restored together.
 
 The failure report printed to the console comes from this analysis ("Route stuck at (x, y) on F.Cu, blocked by: …").
+
+## Ripping Pre-Existing Routes
+
+By default only nets routed **in the current run** are rip-up candidates; tracks and vias already committed on the input board are left untouched, so re-running the router never disturbs existing routing. `route.py --rip-existing-nets PATTERN [PATTERN …]` opts specific pre-existing routed nets into the rip-up machinery: when one of them blocks a net the router is trying to route, it may be ripped up and re-routed like an in-run net. Use it on a board that a previous run (or another tool) already routed and that now needs a new net threaded through congested copper. Pass `'*'` to allow any non-plane net. Without the flag the default holds — pre-existing committed tracks are never ripped.
 
 ## Progressive N+1 Escalation
 

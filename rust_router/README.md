@@ -63,7 +63,7 @@ router, build with cargo via `python build_router.py --from-source`.
 ## Release process (maintainers)
 
 Tagging a commit `vX.Y.Z` triggers `.github/workflows/release.yml`, which
-builds the router on three runners and attaches the binaries to a GitHub
+builds the router on four runners and attaches the binaries to a GitHub
 Release of the same name:
 
 ```bash

@@ -271,7 +271,7 @@ get_footprint_bounds(footprint: Footprint, margin: float = 0.0)
 
 detect_bga_pitch(footprint: Footprint) -> float   # mm; 1.0 if undetectable
 
-auto_detect_bga_exclusion_zones(pcb_data: PCBData, margin: float = 0.5)
+auto_detect_bga_exclusion_zones(pcb_data: PCBData, margin: float = 0.0)
     -> List[Tuple[float, float, float, float, float]]
     # (min_x, min_y, max_x, max_y, edge_tolerance) per BGA
 ```

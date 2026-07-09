@@ -556,7 +556,7 @@ With `--debug-lines`, debug geometry is output on User layers as graphic lines:
 | `User.3` | Connectors (stub to P/N track) |
 | `User.4` | Stub direction arrows (1mm arrows from midpoint at src/tgt) |
 | `User.5` | BGA exclusion-zone rectangles (inner zone + proximity outer) and stub/pad proximity circles |
-| `User.6` | Boundary position labels (from `--mps-unroll`) |
+| `User.6` | Boundary position labels |
 | `User.7` | DRC violation lines (from `check_drc.py --debug-lines`) |
 | `User.8` | Simplified centerline path |
 | `User.9` | Raw A* centerline path |
@@ -567,8 +567,7 @@ This helps visualize the routing structure without affecting the actual routed c
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--diff-pairs` | - | Glob patterns for diff pair nets |
-| `--diff-pair-gap` | 0.1 | Gap between P and N traces (mm) |
+| `--diff-pair-gap` | 0.101 | Gap between P and N traces (mm) |
 | `--diff-pair-centerline-setback` | 2x P-N dist | Distance in front of stubs to start centerline (mm) |
 | `--min-turning-radius` | 0.2 | Minimum turning radius for pose-based routing (mm) |
 | `--max-turn-angle` | 180 | Max cumulative turn angle (degrees) to prevent U-turns |
@@ -579,7 +578,7 @@ This helps visualize the routing structure without affecting the actual routed c
 | `--debug-lines` | false | Output debug geometry on User.3/4/5/6/8/9 layers |
 | `--stub-proximity-radius` | 2.0 | Radius around stubs to penalize routing (mm) |
 | `--stub-proximity-cost` | 0.2 | Cost penalty near stubs (mm equivalent) |
-| `--bga-proximity-radius` | 10.0 | Radius around BGA edges to penalize routing (mm) |
+| `--bga-proximity-radius` | 7.0 | Radius around BGA edges to penalize routing (mm) |
 | `--bga-proximity-cost` | 0.2 | Cost penalty near BGA edges (mm equivalent) |
 | `--track-proximity-distance` | 2.0 | Radius around routed tracks to penalize (mm, same layer) |
 | `--track-proximity-cost` | 0.0 | Cost penalty near routed tracks (0 = disabled) |

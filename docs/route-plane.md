@@ -74,7 +74,7 @@ When specifying multiple nets, each net is paired with its corresponding plane l
 | `--grid-step` | 0.1 | Grid resolution in mm |
 | `--max-search-radius` | 10.0 | Maximum radius to search for valid via position in mm |
 | `--max-via-reuse-radius` | 1.0 | Prefer reusing existing vias within this radius in mm |
-| `--hole-to-hole-clearance` | 0.25 | Minimum clearance between drill holes in mm (fab floor) |
+| `--hole-to-hole-clearance` | 0.2 | Minimum clearance between drill holes in mm (fab floor) |
 | `--same-net-pad-clearance` | -1.0 | Edge-to-edge clearance (mm) between stitching vias and same-net pads. `-1` allows via-in-pad placement (the default for the CLI). Any value `>= 0` forces vias to be placed outside same-net pads with that clearance |
 | `--layers`, `-l` | F.Cu + plane-layers + B.Cu | All copper layers for routing and via span (auto-computed) |
 | `--layer-costs` | 1.0 per layer (4+) or F.Cu=1.0/B.Cu=3.0 (2-layer) | Per-layer routing cost multipliers (1.0-1000) |
@@ -567,7 +567,7 @@ python route_disconnected_planes.py input.kicad_pcb --max-iterations 500000
 | `--clearance` | 0.25 | Trace-to-trace clearance (mm) |
 | `--zone-clearance` | 0.2 | Zone fill clearance around obstacles (mm) |
 | `--track-via-clearance` | 0.8 | Clearance from tracks to other nets' vias (mm) |
-| `--hole-to-hole-clearance` | 0.25 | Minimum clearance between drill holes (mm, fab floor) |
+| `--hole-to-hole-clearance` | 0.2 | Minimum clearance between drill holes (mm, fab floor) |
 | `--board-edge-clearance` | 0.5 | Clearance from board edge (mm) |
 | `--via-size` | 0.5 | Via outer diameter (mm) |
 | `--via-drill` | 0.3 | Via drill diameter (mm) |

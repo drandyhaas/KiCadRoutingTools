@@ -40,6 +40,28 @@ python route.py in.kicad_pcb out.kicad_pcb --nets "Net-(*CLK*)" "Net-(*DATA*)"
 python route.py in.kicad_pcb out.kicad_pcb --component U1
 ```
 
+### Ripping Pre-Existing Routes
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--rip-existing-nets` | off (untouched) | Net name patterns of **pre-existing** routed nets that may be ripped up and re-routed when they block a net being routed |
+
+By default the router **never** rips committed tracks that were already on the
+input board — only nets it routed *in this run* are candidates for rip-up (see
+[Rip-Up and Reroute](rip-up-reroute.md)). `--rip-existing-nets PATTERN` lifts
+that restriction for the matching pre-existing routed nets, so the router may
+tear them up and re-route them when they block a net it is trying to route (for
+example on a board already routed by a previous run). Use `'*'` to allow any
+non-plane net.
+
+```bash
+# Let the router rip and re-route any pre-existing DATA net that gets in the way
+python route.py in.kicad_pcb out.kicad_pcb --nets "*CLK*" --rip-existing-nets "*DATA*"
+
+# Allow ripping any pre-existing (non-plane) net
+python route.py in.kicad_pcb out.kicad_pcb --nets "*" --rip-existing-nets "*"
+```
+
 ### Geometry Options
 
 | Option | Default | Description |
@@ -119,6 +141,23 @@ instead **pins** the corresponding Basic-tab spin control to the floor and warns
 verification (`check_drc.py`) defaults its size/clearance floors to the same tier, so
 legitimately-escalated fine geometry is not flagged.
 
+### Post-Route DRC Settings
+
+As their final step, all four routing CLIs (`route.py`, `route_diff.py`,
+`route_planes.py`, `route_disconnected_planes.py`) rewrite the output's sibling
+`.kicad_pro` so KiCad's Board Setup floors match the clearances/sizes just routed
+— a manual DRC in KiCad then flags only genuine problems instead of stock-default
+noise (issue #160). The [DRC Settings Fixer](utilities.md#drc-settings-fixer-fix_kicad_drc_settingspy)
+does the work; these flags tune it. The GUI plugin applies the equivalent on the
+live board via the pcbnew API.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--no-fix-drc-settings` | off (fix is on) | Do **not** adjust the output's `.kicad_pro` DRC constraints afterwards; leave KiCad's stock floors |
+| `--keep-thermal` | off | Leave `starved_thermal` (thermal-relief) severity untouched instead of demoting it to a warning |
+| `--no-clamp-netclasses` | off (clamp is on) | Do **not** clamp non-Default net classes' clearance/track/via floors down to the routed values (issue #295). Pass this for a **final** board whose net-class rules *are* the spec and must survive |
+| `--enable-used-layers` | off | Add any layer the board uses but is missing from its `(layers)` table back into the `.kicad_pcb`, so KiCad stops flagging `item_on_disabled_layer`. Off by default because it edits the board, not just DRC settings |
+
 ### Power Net Options
 
 | Option | Default | Description |
@@ -151,7 +190,6 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 | `--heuristic-weight` | 1.9 | A* greediness (>1 = faster, <1 = more optimal) |
 | `--turn-cost` | 1000 | Penalty for direction changes (encourages straighter paths) |
 | `--max-ripup` | 3 | Max blockers to rip up at once during rip-up and retry |
-| `--max-setback-angle` | 45.0 | Maximum angle for setback position search (degrees) |
 | `--routing-clearance-margin` | 1.0 | Multiplier on track-via clearance (1.0 = minimum DRC) |
 | `--hole-to-hole-clearance` | 0.20 | Minimum drill hole edge-to-edge clearance (mm) |
 | `--board-edge-clearance` | 0.0 | Clearance from board edge in mm (0 = use track clearance) |
@@ -167,7 +205,7 @@ See [Rip-Up and Reroute](rip-up-reroute.md) for how failed routes trigger rip-up
 |--------|---------|-------------|
 | `--ordering` / `-o` | mps | Net ordering: `mps`, `inside_out`, or `original` |
 | `--direction` / `-d` | forward | Direction: `forward` or `backward` |
-| `--layers` / `-l` | F.Cu B.Cu | Routing layers |
+| `--layers` / `-l` | all copper layers | Routing layers. For `route.py` the default is all of the board's copper layers; `route_diff.py` and `bga_fanout.py` default to `F.Cu B.Cu` |
 | `--layer-costs` | (see below) | Per-layer cost multipliers (1.0-1000). Default: all 1.0 for 4+ layers; F.Cu=1.0, B.Cu=3.0 for 2 layers |
 | `--no-bga-zones [REFS...]` | (auto-detect) | Disable BGA exclusion zones. No args = all. With refs (U1 U3) = only those |
 
@@ -404,7 +442,7 @@ Available in `route.py` only (not `route_diff.py` or `route_planes.py`). See the
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--debug-lines` | false | Output debug geometry on User.3/4/5/6/8/9 layers (zones + proximity circles on User.5) |
+| `--debug-lines` | false | Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*) |
 | `--verbose` / `-v` | false | Print detailed diagnostic output (setback checks, bus routing order, etc.) |
 | `--skip-routing` | false | Skip actual routing, only do swaps and write debug info |
 | `--debug-memory` | false | Print memory usage statistics at key points during routing |
