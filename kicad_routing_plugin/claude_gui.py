@@ -541,6 +541,12 @@ class ClaudeTab(wx.Panel):
         self.diagnose_btn.Enable(self._claude_path is not None)
         ctrl_sizer.Add(self.diagnose_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        # Visual break above the activity area (elapsed + progress bar)
+        ctrl_sizer.AddSpacer(6)
+        ctrl_sizer.Add(wx.StaticLine(self), 0,
+                       wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
+        ctrl_sizer.AddSpacer(6)
+
         # Activity: elapsed time + pulsing gauge while Claude runs
         self.elapsed_label = wx.StaticText(self, label="")
         ctrl_sizer.Add(self.elapsed_label, 0, wx.LEFT | wx.RIGHT, 5)
