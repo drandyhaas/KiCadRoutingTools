@@ -2732,20 +2732,6 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     # of a cleaner (usually inner) layer, but a pair that self-grazes on EVERY layer
     # still couples on its least-bad layer instead of dropping to single-ended.
     _selfgraze_fallback = None
-    # Cumulative FULL-budget pose allowance for this pair (#341 follow-up, pose
-    # churn): a failing pair used to burn the full 8x-max-iterations pose budget
-    # TWICE per layer-combo (straight heading + the promising retry) -- up to
-    # ~6 multi-GB, multi-second Rust searches for a pair that ships
-    # single-ended anyway, re-paid on every retry step of the chain. Allow at
-    # most two full budgets' worth of FAILED pose iterations per invocation;
-    # past that, combos still get probe-budget attempts (a middle findable
-    # within the probe budget still couples) but no more full-budget burns.
-    # Successful searches return early and never consume the allowance.
-    # 3 budgets, not 2: at 2 the corpus diff-stage A/B lost exactly two pairs
-    # that coupled on a later layer-combo after two full-budget failures
-    # (core1106 /USB_D at step 25, ecp5_mini /PD04); 3 recovers both while
-    # still halving the old worst case (2 full burns x 3 combos).
-    full_pose_budget = 3 * max_iters
     for a_layer, b_layer in layer_pairs:
         # Couple as close to each terminal as this candidate's launch layer allows.
         _sl = _closest_launch(s_gx0, s_gy0, t_gx0, t_gy0, a_layer)
@@ -2786,18 +2772,14 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             return pr.route_pose_with_frontier(
                 obstacles, s_gx, s_gy, a_layer, st, t_gx, t_gy, b_layer, tt,
                 budget, diff_pair_via_spacing=via_spacing_grid)
-        straight_budget = min(max_iters, full_pose_budget) \
-            if full_pose_budget > probe_cap else probe_cap
-        path, iters, _b, _g = _pose(straight_t, straight_t, straight_budget)
+        path, iters, _b, _g = _pose(straight_t, straight_t, max_iters)
         iters = iters or 0
         if path is None:
-            if straight_budget > probe_cap:
-                full_pose_budget -= iters
             promising = None
             for st in src_thetas:
                 for tt in tgt_thetas:
                     if st == straight_t and tt == straight_t:
-                        continue                 # already tried above
+                        continue                 # already tried at full budget
                     p, it, _b, _g = _pose(st, tt, probe_cap)
                     iters += it
                     if p:
@@ -2807,13 +2789,11 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                         promising = (st, tt)
                 if path:
                     break
-            if path is None and promising is not None and full_pose_budget > probe_cap:
+            if path is None and promising is not None:
                 st, tt = promising
-                p, it, _b, _g = _pose(st, tt, min(max_iters, full_pose_budget))
+                p, it, _b, _g = _pose(st, tt, max_iters)
                 iters += it
                 path = p
-                if p is None:
-                    full_pose_budget -= it or 0
         obstacles.clear_allowed_cells()
         obstacles.clear_source_target_cells()
         if not path:
