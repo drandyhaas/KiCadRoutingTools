@@ -3102,7 +3102,8 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
                                scope_net_ids=None, clearance: float = 0.1,
                                max_shift: float = 0.025,
                                all_new_vias: Optional[List[Dict]] = None,
-                               hole_to_hole: float = 0.20):
+                               hole_to_hole: float = 0.20,
+                               protected_pads=None):
     """Apply prune_grazing_segments + nudge_grazing_octolinear + sweep_dead_ends to a
     PLANE script's write-list (issue #224).
 
@@ -3139,9 +3140,60 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
                if sig(d['start'][0], d['start'][1], d['end'][0], d['end'][1], d['layer']) not in rm]
         return out, len(segs) - len(out)
 
+    # Copper protection for pads the repair ITSELF proved fill-unreachable
+    # (Andy's bitaxe: the graze prune's connectivity gate credits the pour
+    # OUTLINE, so it graded Q2's fresh GND taps 'redundant' and shredded
+    # them into 0.05mm fragments -- the fill never reaches Q2; that is WHY
+    # they were tapped). The zone-less connected component of each protected
+    # pad -- its tap trace and via -- is off-limits to REMOVAL here; nudges
+    # (which preserve connectivity) remain allowed.
+    _prot_ids = set()
+    if protected_pads:
+        from collections import defaultdict as _dd
+        from check_connected import check_net_connectivity as _cnc
+        from geometry_utils import UnionFind as _UF
+        _by_net = _dd(list)
+        for _p in protected_pads:
+            _by_net[_p.net_id].append(_p)
+        for _nid, _plist in _by_net.items():
+            _segs = [s for s in pcb_data.segments if s.net_id == _nid]
+            _vias = [v for v in pcb_data.vias if v.net_id == _nid]
+            _pads = pcb_data.pads_by_net.get(_nid, [])
+            _r = _cnc(_nid, _segs, _vias, _pads, [], return_graph=True)
+            _g = _r.get('graph')
+            if not _g:
+                continue
+            _uf = _UF()
+            for _a, _b in _g.get('edges', []):
+                _uf.union(_a, _b)
+            _prot_pad_keys = {(round(_p.global_x, 3), round(_p.global_y, 3))
+                              for _p in _plist}
+            _roots = set()
+            for _i, _pd in enumerate(_pads):
+                if (round(_pd.global_x, 3), round(_pd.global_y, 3)) \
+                        in _prot_pad_keys and _i in _g.get('pad_index_repr', {}):
+                    _roots.add(_uf.find(_g['pad_index_repr'][_i]))
+            for _i, _s in enumerate(_segs):
+                if _uf.find(2 * _i) in _roots:
+                    _prot_ids.add(id(_s))
+            for _j, _v in enumerate(_vias):
+                _rep = _g.get('via_index_repr', {}).get(_j)
+                if _rep is not None and _uf.find(_rep) in _roots:
+                    _prot_ids.add(id(_v))
+
+    def _veto(removed_list):
+        """Restore protected removals to pcb_data; return the survivors."""
+        if not _prot_ids or not removed_list:
+            return removed_list
+        vetoed = [s for s in removed_list if id(s) in _prot_ids]
+        if vetoed:
+            pcb_data.segments.extend(vetoed)
+        return [s for s in removed_list if id(s) not in _prot_ids]
+
     # Drop redundant grazing taps -- against a foreign pad/via OR a foreign track.
     _, _, removed = prune_grazing_segments([], pcb_data, scope_net_ids, clearance,
                                            check_foreign_segments=True)
+    removed = _veto(removed)
     all_new_segments, n_removed = strip(all_new_segments, removed)
 
     # Re-bend the load-bearing ones around the pad.
@@ -3217,6 +3269,7 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
             [z for z in all_zones if z.net_id == net_id],
             anchor_segments=anchor, aggressive=True)
         de_removed.extend(removed)
+    de_removed = _veto(de_removed)
     all_new_segments, n_swept = strip(all_new_segments, de_removed)
     if de_removed:
         rm_ids = {id(s) for s in de_removed}

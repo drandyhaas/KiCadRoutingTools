@@ -475,6 +475,11 @@ def route_planes(
     total_regions = 0
     total_vias = 0
     total_pads_unconnected = 0
+    # Pads the repair taps are fill-unreachable BY DIAGNOSIS -- their tap
+    # copper must never be removed by the graze/dead-end cleanup (whose
+    # connectivity gate credits the pour OUTLINE and would grade the taps
+    # redundant: Andy's bitaxe Q2 shredded-stub opens).
+    _tapped_pads = []
     total_pads_repaired = 0
     failed_repair_pads: List[str] = []
 
@@ -561,6 +566,7 @@ def route_planes(
                 # Cross-pad via-obstacle-map reuse for this net's repair pass (#263).
                 shared_maps = SharedViaMaps(pcb_data, net_id)
                 for pad, pad_layer in unconnected:
+                    _tapped_pads.append(pad)
                     print(f"    Pad {pad.component_ref}.{pad.pad_number} ({pad_layer})...", end=" ", flush=True)
                     result = tap_pad_with_escalation(
                         pad, pad_layer, net_id, pcb_data, tap_config,
@@ -860,7 +866,8 @@ def route_planes(
         all_new_segments, _gz_rm, _gz_nudge, _gz_swept = cleanup_plane_taps_grazing(
             pcb_data, all_new_segments, _scope, clearance=clearance,
             max_shift=config.grid_step / 2, all_new_vias=all_new_vias,
-            hole_to_hole=config.hole_to_hole_clearance)
+            hole_to_hole=config.hole_to_hole_clearance,
+            protected_pads=_tapped_pads)
         if _gz_rm:
             print(f"  Graze prune: removed {_gz_rm} grazing repair segment(s)")
         if _gz_nudge:
