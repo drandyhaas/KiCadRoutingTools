@@ -174,32 +174,35 @@ def _make_route_shim(swig_gui, board, board_path):
 
 
 def _gui_route_config(step):
-    """The swig_gui _on_route config, at GUI-panel defaults except for the
-    fields apply_step_params can set from a plan step."""
+    """The swig_gui _on_route config, at GUI-panel defaults except the
+    fields a plan step can set. Every default sourced from routing_defaults
+    exactly as the real panels initialize -- hardcoded copies here already
+    caused two phantom divergences (ordering 'inside_out', track proximity
+    cost 0.2)."""
     import routing_defaults as defaults
     return {
         'layers': None,  # filled by caller from the board
-        'grid_step': defaults.GRID_STEP,
-        'via_cost': 50,
+        'grid_step': step.get('grid_step', defaults.GRID_STEP),
+        'via_cost': defaults.VIA_COST,
         'impedance': None,
         'max_iterations': step.get('max_iterations',
                                     defaults.MAX_ITERATIONS),
-        'max_probe_iterations': 5000,
-        'heuristic_weight': 1.9,
-        'proximity_heuristic_factor': 0.02,
-        'turn_cost': 1000,
-        'direction_preference_cost': 50,
-        'max_ripup': step.get('max_ripup', 3),
-        'ordering_strategy': 'mps',  # the real GUI default (Choice idx 0)
+        'max_probe_iterations': defaults.MAX_PROBE_ITERATIONS,
+        'heuristic_weight': defaults.HEURISTIC_WEIGHT,
+        'proximity_heuristic_factor': defaults.PROXIMITY_HEURISTIC_FACTOR,
+        'turn_cost': defaults.TURN_COST,
+        'direction_preference_cost': defaults.DIRECTION_PREFERENCE_COST,
+        'max_ripup': step.get('max_ripup', defaults.MAX_RIPUP),
+        'ordering_strategy': defaults.DEFAULT_ORDERING_STRATEGY,
         'direction': None,
-        'stub_proximity_radius': 2.0,
-        'stub_proximity_cost': 0.2,
-        'via_proximity_cost': 10.0,
-        'track_proximity_distance': 2.0,
-        'track_proximity_cost': 0.2,
-        'routing_clearance_margin': 1.0,
+        'stub_proximity_radius': defaults.STUB_PROXIMITY_RADIUS,
+        'stub_proximity_cost': defaults.STUB_PROXIMITY_COST,
+        'via_proximity_cost': defaults.VIA_PROXIMITY_COST,
+        'track_proximity_distance': defaults.TRACK_PROXIMITY_DISTANCE,
+        'track_proximity_cost': defaults.TRACK_PROXIMITY_COST,
+        'routing_clearance_margin': defaults.ROUTING_CLEARANCE_MARGIN,
         'hole_to_hole_clearance': defaults.HOLE_TO_HOLE_CLEARANCE,
-        'board_edge_clearance': 0.0,
+        'board_edge_clearance': defaults.BOARD_EDGE_CLEARANCE,
         'enable_layer_switch': True,
         'debug_lines': False,
         'verbose': False,

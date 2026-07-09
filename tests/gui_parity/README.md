@@ -47,3 +47,28 @@ by both fronts (open follow-up).
   parity is unaffected. Bit-identical copper would require engine-level
   order canonicalization (sort nets/pads/segments deterministically before
   routing) -- a follow-up decision, not a bug.
+
+## Parameter-identity verification (KICAD_DUMP_BATCH_KWARGS)
+
+route.py's batch_route dumps its FULL parameter set (76 keys) and returns
+when KICAD_DUMP_BATCH_KWARGS=<file> is set -- diffing a CLI invocation
+against the GUI leg's call verifies the two fronts hand the engine the
+same parameters. Current state: only `return_results` (definitional) and
+`layer_costs` [] vs None (proven equivalent via get_layer_costs) differ.
+
+The probe found two phantom forks in this harness itself (both the exact
+CLAUDE.md 'defaults must match in both places' class): ordering_strategy
+'inside_out' vs the real mps default, and track_proximity_cost 0.2 vs the
+real 0.0. Copper-overlap ladder on splitflap as each fork was removed:
+
+    300/1200 segments common   (initial)
+    381/1200                   (+ ordering matched)
+    914/1200, 135/165 vias     (+ track_proximity_cost matched = all params)
+    1168/1190, 164/165 vias    (+ GUI_PARITY_INPUT=parser: same text-parsed
+                                representation -- 98.2% identical copper)
+
+Residual ~2%: pcbnew re-save normalization (element order/precision of the
+temp file vs the original bytes), per-step .kicad_pro floor carryover, and
+in-memory vs file-based post-pass sequencing. The production GUI path
+(builder representation) sits at ~77% copper identity with full grade
+parity; closing it to ~98% is the order-canonicalization follow-up.

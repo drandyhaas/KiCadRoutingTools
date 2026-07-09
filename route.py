@@ -337,6 +337,28 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _reconcile_kwargs = dict(locals())
     for _k in ('input_file', 'output_file', 'net_names', 'pcb_data'):
         _reconcile_kwargs.pop(_k, None)
+    if os.environ.get('KICAD_DUMP_BATCH_KWARGS'):
+        # Parameter-parity probe: dump THIS call's full parameter set and
+        # return without routing, so the CLI front (argparse->main) and the
+        # GUI front (plan setters->tab config->call site) can be diffed key
+        # by key on identical inputs.
+        import json as _json
+        _dump = {}
+        for _k, _v in sorted(_reconcile_kwargs.items()):
+            if callable(_v) or _k in ('vis_callback', 'cancel_check',
+                                      'progress_callback'):
+                continue
+            try:
+                _json.dumps(_v)
+                _dump[_k] = _v
+            except (TypeError, ValueError):
+                _dump[_k] = repr(_v)
+        _dump['net_names'] = net_names
+        with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'w') as _f:
+            _json.dump(_dump, _f, indent=1, sort_keys=True)
+        if return_results:
+            return 0, 0, 0.0, {'results': [], 'segments_to_remove': []}
+        return 0, 0, 0.0
     visualize = vis_callback is not None
 
     # Track memory if debug_memory enabled
