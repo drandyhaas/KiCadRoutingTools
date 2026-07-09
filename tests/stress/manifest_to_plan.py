@@ -84,6 +84,7 @@ def parse_command(argv):
         return None
     action = TOOL_ACTIONS[tool]
     step = {'action': action, 'params': {}}
+    step['_files'] = []  # positional .kicad_pcb args (input/output), for pruning
     lists = {}
     i = argv.index([a for a in argv if os.path.basename(a) == tool][0]) + 1
     positional = []
@@ -122,6 +123,8 @@ def parse_command(argv):
                 step['params'][key] = True
         else:
             positional.append(a)
+            if a.endswith('.kicad_pcb'):
+                step['_files'].append(a)
             i += 1
 
     nets = lists.get('--nets', [])
@@ -175,6 +178,34 @@ def main():
                     step['assignments'] = [dict(a) for a in prev['assignments']]
                     break
         steps.append(step)
+
+    # Prune to the file-dependency chain of the FINAL board (mirror
+    # redo_stress_test): a recorded retry that was superseded (same input,
+    # its output never consumed downstream) is dropped -- without this the
+    # GUI would run e.g. the '*' route twice.
+    kept = []
+    if steps and any(s.get('_files') for s in steps):
+        need = None
+        for s in reversed(steps):
+            files = s.get('_files') or []
+            ins, outp = files[:-1], (files[-1] if len(files) > 1 else None)
+            if not files:
+                kept.append(s)
+                continue
+            if need is None or (outp and os.path.basename(outp) == need) \
+                    or outp is None:
+                kept.append(s)
+                if ins:
+                    need = os.path.basename(ins[0])
+                elif outp is None and files:
+                    need = os.path.basename(files[0])
+        kept.reverse()
+        if len(kept) != len(steps):
+            print(f"pruned {len(steps) - len(kept)} superseded step(s) "
+                  f"(retries not on the final board's file chain)")
+        steps = kept
+    for s in steps:
+        s.pop('_files', None)
     with open(out, 'w', encoding='utf-8') as f:
         json.dump({'steps': steps}, f, indent=2)
     print(f"{len(steps)} step(s) written to {out} ({skipped} non-routing "
