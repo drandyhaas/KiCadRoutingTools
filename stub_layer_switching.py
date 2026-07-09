@@ -284,7 +284,9 @@ def _reuse_nearby_same_net_via(pcb_data, stub, new_layer, config, segment_mods,
     back to the normal new-via path (whose fit funnel decides). Extends
     issue #282 barrel-covers-pad reuse to the near-miss case. Returns True
     on reuse."""
-    h2h = 0.2  # JLC via-hole-to-hole floor (see fab_tiers / jlcpcb floors)
+    # Fab-tier-aware floor (the old hardcoded 0.2 ignored --fab-tier /
+    # --hole-to-hole-clearance overrides).
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.2) or 0.2
     best = None
     for ev in pcb_data.vias:
         if ev.net_id != stub.net_id:

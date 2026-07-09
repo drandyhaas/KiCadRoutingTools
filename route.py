@@ -328,6 +328,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         If return_results=False: (successful_count, failed_count, total_time)
         If return_results=True: (successful_count, failed_count, total_time, results_data)
     """
+    # Snapshot of THIS call's parameters, taken before any body code runs:
+    # the end-of-run reconciliation self-invocation forwards every parameter
+    # verbatim (only overriding the self-referential ones) so a rescue pass
+    # can never route with different rules than the run it is rescuing --
+    # forwarding a hand-picked subset silently dropped board_edge_clearance,
+    # impedance, net_clearances, ordering and more (review finding).
+    _reconcile_kwargs = dict(locals())
+    for _k in ('input_file', 'output_file', 'net_names', 'pcb_data'):
+        _reconcile_kwargs.pop(_k, None)
     visualize = vis_callback is not None
 
     # Track memory if debug_memory enabled
@@ -1531,20 +1540,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(f"\nFinal reconciliation: retrying {len(_rec_names)} incomplete "
               f"net(s) against the finished board: {', '.join(_rec_names)}")
         try:
+            _rk = dict(_reconcile_kwargs)
+            _rk.update(final_reconcile=False, return_results=False,
+                       skip_routing=False)
             _rok, _rfail, _rt = batch_route(
-                output_file, output_file, _rec_names,
-                layers=layers,
-                track_width=track_width, clearance=clearance,
-                via_size=via_size, via_drill=via_drill,
-                grid_step=grid_step, via_cost=via_cost,
-                max_iterations=max_iterations,
-                hole_to_hole_clearance=hole_to_hole_clearance,
-                layer_costs=layer_costs,
-                power_nets=power_nets, power_nets_widths=power_nets_widths,
-                bga_exclusion_zones=bga_exclusion_zones,
-                disable_bga_zones=disable_bga_zones,
-                max_rip_up_count=max_rip_up_count,
-                final_reconcile=False)
+                output_file, output_file, _rec_names, **_rk)
+            print("Note: the JSON_SUMMARY above covers only the "
+                  "reconciliation subset; the run's full tally is the "
+                  "earlier JSON_SUMMARY plus these recoveries.")
             if _rok:
                 successful += _rok
                 failed = max(0, failed - _rok)

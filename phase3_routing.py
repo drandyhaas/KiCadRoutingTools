@@ -890,7 +890,11 @@ def _retry_victim_main_with_ripup(
         else:
             result = route_net_with_obstacles(pcb_data, victim_id, config, obstacles)
 
-        if result and not result.get('failed') and result.get('path'):
+        if result and not result.get('failed') \
+                and (result.get('path') or result.get('phase1_exhausted')):
+            # phase1_exhausted (#348) is a SUCCESS shape: no new main copper,
+            # but the net's island copper sources its Phase-3 taps. Reading
+            # it as failure burned further rip-up rounds for nothing.
             print(f"    {victim_name}: main re-route rip-up SUCCESS (N={N})")
             return result, nested_ripped
         last_blocked = list(dict.fromkeys(
@@ -997,7 +1001,19 @@ def _reroute_phase3_ripped_nets(
             if retry is not None:
                 result = retry
 
-        if result and not result.get('failed') and result.get('path'):
+        if result and not result.get('failed') \
+                and result.get('phase1_exhausted'):
+            # #348 island-source synthetic (path=[], no new copper): the
+            # victim's pad terminals are boxed in but its existing copper
+            # islands can source Phase-3 taps. Mirror the normal-flow
+            # handling (single_ended_loop) instead of reading the empty
+            # path as failure -- that stranded the exact net the fallback
+            # was built to save and killed its pending taps.
+            if ripped_net_id in state.pending_multipoint_nets:
+                state.pending_multipoint_nets[ripped_net_id] = result
+            record_net_event(state, ripped_net_id, "reroute_phase1_exhausted",
+                             {"taps_pending": True})
+        elif result and not result.get('failed') and result.get('path'):
             main_vias = result.get('new_vias', [])
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
             _commit_net_result(results, routed_results, ripped_net_id, result,

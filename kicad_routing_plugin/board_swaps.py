@@ -125,6 +125,26 @@ def _apply_segment_layer_mods(pcbnew, board, segment_mods):
     """Apply stub layer-switch modifications to existing board tracks."""
     count = 0
     for mod in segment_mods:
+        # #340 via-reuse connector: an ADDED segment, not a layer change --
+        # the engine's writer path skips these records and emits the copper;
+        # the GUI must CREATE the track (indexing mod['start'] raised
+        # KeyError('start') and aborted the apply midway, leaving the live
+        # board half-modified).
+        seg = mod.get('added_seg')
+        if seg is not None:
+            track = pcbnew.PCB_TRACK(board)
+            track.SetStart(pcbnew.VECTOR2I(
+                pcbnew.FromMM(round(seg.start_x, 4)),
+                pcbnew.FromMM(round(seg.start_y, 4))))
+            track.SetEnd(pcbnew.VECTOR2I(
+                pcbnew.FromMM(round(seg.end_x, 4)),
+                pcbnew.FromMM(round(seg.end_y, 4))))
+            track.SetWidth(pcbnew.FromMM(round(seg.width, 4)))
+            track.SetLayer(board.GetLayerID(seg.layer))
+            track.SetNetCode(mod.get('net_id', seg.net_id))
+            board.Add(track)
+            count += 1
+            continue
         start_key = pos_key(mod['start'][0], mod['start'][1])
         end_key = pos_key(mod['end'][0], mod['end'][1])
         net_id = mod['net_id']
