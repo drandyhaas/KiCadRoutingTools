@@ -53,10 +53,13 @@ def _parse_item(item: dict) -> Optional[Tuple[str, float, float, Optional[str]]]
     if m is None or 'x' not in pos:
         return None
     lm = None if ' - ' in desc else _LAYER_RE.search(desc)
+    kind = 'zone' if desc.startswith('Zone') else \
+        'via' if desc.startswith('Via') else \
+        'pad' if 'pad' in desc.lower().split('[')[0] else 'track'
     # Vias span layers ("on F.Cu - B.Cu"); layer None lets the router stamp
     # all layers at a via position.
     return (m.group(1), float(pos['x']), float(pos['y']),
-            lm.group(1) if lm else None)
+            lm.group(1) if lm else None, kind)
 
 
 def kicad_unconnected(board_file: str, kicad_cli: str) -> Optional[List[Tuple]]:
@@ -88,7 +91,8 @@ def kicad_unconnected(board_file: str, kicad_cli: str) -> Optional[List[Tuple]]:
         a = _parse_item(items[0])
         b = _parse_item(items[1])
         if a and b and a[0] == b[0]:
-            links.append((a[0], (a[1], a[2], a[3]), (b[1], b[2], b[3])))
+            links.append((a[0], (a[1], a[2], a[3], a[4]),
+                          (b[1], b[2], b[3], b[4])))
     return links
 
 
@@ -388,7 +392,7 @@ def oracle_reconnect(board_file: str, net_names, config,
     names = set(net_names)
     routed = failed = rounds = 0
     remaining = -1
-    attempted = set()  # (net, endpoints) already routed once -- never twice
+    attempted = {}  # (net, endpoints) -> attempt count (graduated retries)
     for rnd in range(max_rounds):
         links = kicad_unconnected(board_file, kicad_cli)
         if links is None:
@@ -415,20 +419,42 @@ def oracle_reconnect(board_file: str, net_names, config,
         new_sexprs = []
         progress = False
 
-        for net_name, (ax, ay, al), (bx, by, bl) in ours:
+        # A Zone|Zone link with two DISTINCT ratsnest anchors can span the
+        # whole board (castor +3.3V: opposite corners, 63mm -- the A*
+        # exhausts 1M iterations twice). Both islands bonding to the net's
+        # main track harness connects them transitively with two SHORT
+        # links instead of one impossible haul.
+        work = []
+        for net_name, A, B in ours:
+            ax_, ay_, al_, ak_ = A
+            bx_, by_, bl_, bk_ = B
+            if ak_ == 'zone' and bk_ == 'zone' and \
+                    (abs(ax_ - bx_) > 1e-6 or abs(ay_ - by_) > 1e-6):
+                work.append((net_name, A, (ax_, ay_, al_, 'main')))
+                work.append((net_name, B, (bx_, by_, bl_, 'main')))
+            else:
+                work.append((net_name, A, B))
+        for net_name, (ax, ay, al, akind), (bx, by, bl, bkind) in work:
             net_id = name_to_id.get(net_name)
             if net_id is None:
                 failed += 1
                 continue
             _key = (net_name, round(ax, 2), round(ay, 2),
                     round(bx, 2), round(by, 2))
-            if _key in attempted:
-                # Copper for this link was already emitted and KiCad still
-                # reports it: re-routing the same link would stack
-                # near-identical copper every round. Leave it flagged.
+            _attempt = attempted.get(_key, 0)
+            if _attempt >= 2:
+                # Two strategies already spent (expanded, then raw): stacking
+                # more copper each round helps nobody. Leave it flagged.
+                print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
+                      f"<->({bx:.2f},{by:.2f})  already attempted, leaving "
+                      f"flagged")
                 failed += 1
                 continue
-            attempted.add(_key)
+            attempted[_key] = _attempt + 1
+            force_raw = _attempt == 1  # smart expansion didn't satisfy KiCad
+            if force_raw:
+                print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
+                      f"<->({bx:.2f},{by:.2f})  retry with raw endpoints")
             base_obstacles, _ = build_base_obstacles(
                 exclude_net_ids={net_id},
                 routing_layers=routing_layers,
@@ -443,12 +469,80 @@ def oracle_reconnect(board_file: str, net_names, config,
             comps = _net_track_components(pcb_data, net_id)
             src, root_a = _cluster_points(pcb_data, net_id, ax, ay, al, comps)
             tgt, root_b = _cluster_points(pcb_data, net_id, bx, by, bl, comps)
+
+            def _zone_expand(x, y, layer):
+                # A Zone endpoint is a whole fill island, wherever KiCad
+                # anchored the ratsnest -- trace the REAL fill and seed from
+                # everything on it (vias, THT, track ends, fill cells). The
+                # same-pos-only trigger missed the two-distinct-points form
+                # and shipped a raw 15mm point-to-point shot (castor wave).
+                if not layer:
+                    return None
+                zp = [z.polygon for z in (getattr(pcb_data, 'zones', []) or [])
+                      if z.net_id == net_id and z.layer == layer
+                      and getattr(z, 'polygon', None)]
+                if not zp:
+                    return None
+                # Fill-flow margin ladder: KiCad's fill cannot pass a neck
+                # narrower than its clearance + min_thickness, so the trace
+                # prefers a wide disc (0.15 walked straight across the very
+                # gap that splits the islands). But a ratsnest anchor in a
+                # tight pocket finds NO clear cell at the wide margin
+                # (castor +3.3V corner) -- ladder down, and when a trace
+                # runs away to the max_cells cap (over-flood), trust only
+                # the BFS-local cells near the reported point.
+                _cap = 40000
+                cells = None
+                for _m in (max(config.clearance, 0.2) + 0.1, 0.2, 0.15):
+                    cells = _trace_real_island((x, y), net_id, layer,
+                                               pcb_data, zp, _m,
+                                               max_cells=_cap)
+                    if cells:
+                        break
+                if not cells:
+                    return None
+                if len(cells) >= _cap:
+                    step_ = 0.25
+                    cells = {(gx, gy) for (gx, gy) in cells
+                             if abs(gx * step_ - x) <= 10
+                             and abs(gy * step_ - y) <= 10}
+                    if not cells:
+                        return None
+                return _island_seed_points(cells, 0.25, pcb_data, net_id,
+                                           layer, routing_layers, (x, y))
+
+            if force_raw:
+                # The expanded attempt routed copper KiCad still grades as
+                # unconnected (an over-flooded trace can attach island-to-
+                # same-island). The RAW reported points are guaranteed to
+                # lie on the two real clusters; a direct bridge is ugly but
+                # bonding, and only fires after the smart attempt failed.
+                src = [(ax, ay, al)] if al else [(ax, ay)]
+                if bkind != 'main':
+                    tgt = [(bx, by, bl)] if bl else [(bx, by)]
+            elif akind == 'zone':
+                src = _zone_expand(ax, ay, al) or src
+            if bkind == 'main':
+                tgt = _largest_track_component_points(pcb_data, net_id)
+                if not tgt:
+                    for p in pcb_data.pads_by_net.get(net_id, []):
+                        cu = [l for l in p.layers if l.endswith('.Cu')]
+                        if p.drill > 0 or '*.Cu' in p.layers:
+                            tgt.append((p.global_x, p.global_y, routing_layers[0]))
+                            tgt.append((p.global_x, p.global_y, routing_layers[-1]))
+                        elif cu:
+                            tgt.append((p.global_x, p.global_y, cu[0]))
+                if not tgt:
+                    failed += 1
+                    continue
+            elif not force_raw and bkind == 'zone':
+                tgt = _zone_expand(bx, by, bl) or tgt
             if root_a is not None and root_a == root_b:
                 # Both reported points sit on the same track cluster; the
                 # split must be fill-side. Fall back to the raw points.
                 src = [(ax, ay, al)] if al else [(ax, ay)]
                 tgt = [(bx, by, bl)] if bl else [(bx, by)]
-            if abs(ax - bx) < 1e-6 and abs(ay - by) < 1e-6:
+            if abs(ax - bx) < 1e-6 and abs(ay - by) < 1e-6 and not force_raw:
                 # Zone|Zone items carry ONE ratsnest position for both ends
                 # (the isolated island). Target copper provably in the MAIN
                 # cluster: the net's largest track+via component, graded
@@ -476,7 +570,7 @@ def oracle_reconnect(board_file: str, net_names, config,
                                   if z.net_id == net_id and z.layer == al
                                   and getattr(z, 'polygon', None)]
                     if zone_polys:
-                        _margin = max(config.clearance, 0.15)
+                        _margin = max(config.clearance, 0.2) + 0.1
                         _cells = _trace_real_island(
                             (ax, ay), net_id, al, pcb_data, zone_polys,
                             _margin)
@@ -550,6 +644,32 @@ def oracle_reconnect(board_file: str, net_names, config,
                 failed += 1
                 continue
             route_points, via_positions = result
+            if len(route_points) < 2 and not via_positions:
+                # Degenerate 'success' (source and target expansion overlap:
+                # an over-flooded island trace, or a stale report): no copper
+                # would be emitted. Retry once with the RAW reported points
+                # before giving up -- a point-to-point bridge is better than
+                # a silent no-op marked as success.
+                raw_src = [(ax, ay, al)] if al else [(ax, ay)]
+                raw_tgt = [(bx, by, bl)] if bl else [(bx, by)]
+                result2, _ = route_plane_connection_wide(
+                    raw_src, raw_tgt,
+                    plane_layer_idx=anchor_layer,
+                    routing_layers=routing_layers,
+                    base_obstacles=rung_obstacles,
+                    config=rung_cfg,
+                    net_vias=net_vias,
+                    track_margin=0,
+                    max_iterations=max_iterations,
+                    verbose=verbose)
+                if result2 and (len(result2[0]) >= 2 or result2[1]):
+                    result = result2
+                    route_points, via_positions = result
+                else:
+                    print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
+                          f"<->({bx:.2f},{by:.2f})  FAILED (degenerate)")
+                    failed += 1
+                    continue
             _via_keys = {(round(vx, 3), round(vy, 3)) for vx, vy in via_positions}
             route_points = _merge_collinear(route_points, keep=_via_keys)
             n_segs = 0

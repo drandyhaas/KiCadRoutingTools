@@ -1271,12 +1271,26 @@ def route_disconnected_regions(
             return _real_fill_point(pt, net_id, pcb_data, _zone_polys,
                                     _plane_layer_name, _margin)
 
-        cells_i = _nearest_cell_points(
-            region_cells[region_i] if region_i < len(region_cells) else (),
-            coord, point_i, validity=_valid_fill)
-        cells_j = _nearest_cell_points(
-            region_cells[region_j] if region_j < len(region_cells) else (),
-            coord, point_j, validity=_valid_fill)
+        def _valid_fill_relaxed(pt):
+            return _real_fill_point(pt, net_id, pcb_data, _zone_polys,
+                                    _plane_layer_name, zone_clearance)
+
+        def _cells_for(region_idx, near_pt):
+            cells = region_cells[region_idx] \
+                if region_idx < len(region_cells) else ()
+            pts = _nearest_cell_points(cells, coord, near_pt,
+                                       validity=_valid_fill)
+            if not pts:
+                # The track-width-padded margin starves thin pockets of
+                # seeds entirely ('seed 16x0' -> guaranteed FAILED edge);
+                # fall back to the bare zone clearance -- the A* still
+                # routes against the real obstacle map either way.
+                pts = _nearest_cell_points(cells, coord, near_pt,
+                                           validity=_valid_fill_relaxed)
+            return pts
+
+        cells_i = _cells_for(region_i, point_i)
+        cells_j = _cells_for(region_j, point_j)
         seed_i = seed_i + [p for p in cells_i if p not in seed_i]
         seed_j = seed_j + [p for p in cells_j if p not in seed_j]
         full_i = anchors_i + [p for p in cells_i if p not in anchors_i]
