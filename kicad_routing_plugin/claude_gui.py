@@ -506,16 +506,6 @@ class ClaudeTab(wx.Panel):
         ctrl_sizer.Add(wx.StaticLine(self), 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         # Execution: run/stop the planned steps
-        self.reset_defaults_check = wx.CheckBox(
-            self, label="Reset other options to defaults")
-        self.reset_defaults_check.SetValue(True)
-        self.reset_defaults_check.SetToolTip(
-            "Before each step, reset every option the plan does not specify "
-            "to its default -- so a loaded plan replays deterministically "
-            "instead of inheriting this session's panel tweaks. Uncheck to "
-            "deliberately run the plan with your current panel settings.")
-        ctrl_sizer.Add(self.reset_defaults_check, 0,
-                       wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
         self.run_plan_btn = wx.Button(self, label="Run Selected Steps")
         self.run_plan_btn.SetToolTip(
             "Execute the checked steps in order through the tabs' own routing "
@@ -832,6 +822,19 @@ class ClaudeTab(wx.Panel):
         file): populate the checklist and pre-fill the tabs."""
         from .claude_plan import step_label, apply_step_params, \
             apply_step_selection
+        # A new plan supersedes the session's panel tweaks: reset every
+        # routing parameter to defaults BEFORE applying the plan's values,
+        # so options the plan does not specify run at CLI-default-
+        # equivalent state (the add_gnd_vias leak, generalized). Applies to
+        # both a fresh Claude plan and a Load...-ed file.
+        try:
+            if self.routing_dialog is not None and \
+                    hasattr(self.routing_dialog, 'reset_params_to_defaults'):
+                self.routing_dialog.reset_params_to_defaults()
+                self._log("Claude plan: options reset to defaults before "
+                          "applying the plan")
+        except Exception as e:
+            self._log(f"Claude plan: defaults reset skipped: {e}")
         self._plan_steps = steps
         self.plan_list.Set([step_label(i + 1, s) for i, s in enumerate(steps)])
         self.plan_list.SetCheckedItems(range(len(steps)))
@@ -922,8 +925,7 @@ class ClaudeTab(wx.Panel):
             on_status=self._on_plan_step_status,
             on_finished=self._on_plan_finished,
             log=self._log,
-            on_progress=self._on_plan_step_progress,
-            reset_defaults=self.reset_defaults_check.GetValue())
+            on_progress=self._on_plan_step_progress)
         self._plan_executor.start()
 
     def _on_stop_plan(self, event):

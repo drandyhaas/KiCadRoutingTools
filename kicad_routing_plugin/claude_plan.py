@@ -502,14 +502,13 @@ class PlanExecutor:
     START_GRACE_POLLS = 5
 
     def __init__(self, dialog, steps, indices, on_status, on_finished,
-                 log=None, on_progress=None, reset_defaults=True):
+                 log=None, on_progress=None):
         self.dialog = dialog
         self.steps = steps
         self.indices = list(indices)
         self.on_status = on_status
         self.on_finished = on_finished
         self.on_progress = on_progress
-        self.reset_defaults = reset_defaults
         self.log = log or (lambda message: None)
         self._queue = []
         self._completed = 0
@@ -701,17 +700,6 @@ class PlanExecutor:
             # track_width/clearance/via/diff-pair geometry in place. Without this
             # re-apply, e.g. a fine-pitch route step and a general route step
             # would both run at whichever was applied last.
-            if getattr(self, 'reset_defaults', True):
-                # Start each step from CLI-default-equivalent state: any
-                # option the plan does not specify runs at its default, not
-                # at whatever the session/persisted panels last had (the
-                # add_gnd_vias leak, generalized). Selections are re-applied
-                # from the step below either way.
-                try:
-                    if hasattr(self.dialog, 'reset_params_to_defaults'):
-                        self.dialog.reset_params_to_defaults()
-                except Exception as e:
-                    self.log(f"Claude plan: defaults reset skipped: {e}")
             notes = apply_step_params(step, self.dialog)
             notes += apply_step_selection(step, self.dialog)
             for note in notes:
