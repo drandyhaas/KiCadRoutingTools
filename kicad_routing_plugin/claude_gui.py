@@ -541,22 +541,35 @@ class ClaudeTab(wx.Panel):
         self.diagnose_btn.Enable(self._claude_path is not None)
         ctrl_sizer.Add(self.diagnose_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
-        # Visual break above the activity area (elapsed + progress bar)
+        ctrl_sizer.AddStretchSpacer(1)
+
+        # Close pinned at the column bottom (same behavior as the other
+        # tabs' Close buttons).
         ctrl_sizer.AddSpacer(6)
         ctrl_sizer.Add(wx.StaticLine(self), 0,
                        wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
         ctrl_sizer.AddSpacer(6)
+        self.close_btn = wx.Button(self, label="Close")
+        self.close_btn.SetToolTip("Close dialog")
+        self.close_btn.Bind(wx.EVT_BUTTON, self._on_close)
+        ctrl_sizer.Add(self.close_btn, 0,
+                       wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
-        # Activity: elapsed time + pulsing gauge while Claude runs
-        self.elapsed_label = wx.StaticText(self, label="")
-        ctrl_sizer.Add(self.elapsed_label, 0, wx.LEFT | wx.RIGHT, 5)
-        self.gauge = wx.Gauge(self, range=100)
-        ctrl_sizer.Add(self.gauge, 0, wx.EXPAND | wx.ALL, 5)
-
-        ctrl_sizer.AddStretchSpacer(1)
         top_sizer.Add(ctrl_sizer, 0, wx.EXPAND)
 
         sizer.Add(top_sizer, 1, wx.EXPAND | wx.ALL, 8)
+
+        # Status bar: elapsed/step text + progress gauge, full width between
+        # the Planned Steps box and the parsed-result line -- it mirrors the
+        # working tab's status during plan steps, so give it room.
+        activity_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.elapsed_label = wx.StaticText(self, label="")
+        activity_sizer.Add(self.elapsed_label, 0,
+                           wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        self.gauge = wx.Gauge(self, range=100)
+        activity_sizer.Add(self.gauge, 1, wx.EXPAND)
+        sizer.Add(activity_sizer, 0,
+                  wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         # Parsed machine-readable result (RESULT= line of the last run)
         parsed_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -905,6 +918,10 @@ class ClaudeTab(wx.Panel):
         mins, secs = divmod(self._elapsed_seconds, 60)
         self.elapsed_label.SetLabel(f"{mins}m {secs:02d}s" if mins else f"{secs}s")
         self.gauge.Pulse()
+
+    def _on_close(self, event):
+        """Close the parent dialog (matches the other tabs' Close button)."""
+        self.GetTopLevelParent().EndModal(wx.ID_CANCEL)
 
     def _log(self, message):
         if self.log_callback:
