@@ -174,24 +174,81 @@ def parse_command(argv):
     return step
 
 
+# place_fanout_clearance.py has no standalone CLI-tool action, but in the GUI it
+# IS a plan step in its own right: the live Claude-plan format (claude_plan.py's
+# KNOWN_ACTIONS + _insert_cap_optimization) represents "Optimize decoupling cap
+# placement" (#130) as a SEPARATE `optimize_caps` step placed right after the last
+# BGA fanout, run via fanout_tab.run_cap_optimization() -- NOT as a param on the
+# fanout step. So a recorded place_fanout_clearance emits the same standalone step
+# (in its manifest position, i.e. after the fanout it followed), for parity with a
+# live-generated plan. Flag -> fanout-tab cap-placement control name:
+CAP_FLAG_PARAMS = {
+    '--capture-radius': 'cap_capture_radius',
+    '--near-margin': 'cap_near_margin',
+    '--step': 'cap_step',
+    '--max-displacement': 'cap_max_displacement',
+    '--max-displacement-cap': 'cap_max_displacement_cap',
+    '--displacement-growth': 'cap_displacement_growth',
+    '--max-passes': 'cap_max_passes',
+    '--cap-prefix': 'cap_prefix',
+}
+CAP_BOOL_FLAGS = {'--no-rotate': ('cap_allow_rotation', False)}  # inverted sense
+
+
+def cap_optimization_step(argv):
+    """A place_fanout_clearance.py invocation -> a standalone `optimize_caps` plan
+    step (matching claude_plan.py's live format), carrying the non-default cap_*
+    knobs so a loaded plan optimizes caps the way the recorded run did."""
+    params = {}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in CAP_FLAG_PARAMS and i + 1 < len(argv):
+            params[CAP_FLAG_PARAMS[a]] = _num(argv[i + 1]); i += 2
+        elif a in CAP_BOOL_FLAGS:
+            key, val = CAP_BOOL_FLAGS[a]; params[key] = val; i += 1
+        else:
+            i += 1
+    step = {'action': 'optimize_caps'}
+    if params:
+        step['params'] = params
+    return step
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
     manifest, out = sys.argv[1], sys.argv[2]
+
+    # Prune with redo_stress_test's canonical file-dependency logic so the plan
+    # is EXACTLY the simplified/deduplicated chain a replay runs -- the same
+    # "N of M commands" set, with superseded retries and dead-end branches
+    # dropped. Pruning on the FULL command set (before GUI-mapping) is what makes
+    # this correct: a kept command the GUI can't represent as a step
+    # (place_fanout_clearance.py, board_image.py) must still hold the file chain
+    # together. The old inline pruner walked only GUI-recognized steps, so a
+    # skipped intermediate (e.g. place_fanout_clearance) BROKE the chain and
+    # silently dropped legitimate upstream steps (e.g. the whole bga_fanout).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from redo_stress_test import parse_manifest, compute_prune_keep, is_check_cmd
+
+    cmds = parse_manifest(manifest)
+    keep, _info = compute_prune_keep(cmds)
+
     steps = []
     skipped = 0
-    for line in open(manifest, encoding='utf-8'):
-        line = line.strip()
-        if not line or line.startswith('#') or line.startswith('set '):
-            continue
-        try:
-            argv = shlex.split(line)
-        except ValueError:
-            skipped += 1
+    for i, (_cwd, argv) in enumerate(cmds):
+        if i not in keep or is_check_cmd(argv):
+            continue  # pruned out, or a check/grade command (no GUI step)
+        if any(os.path.basename(a) == 'place_fanout_clearance.py' for a in argv):
+            # standalone optimize_caps step, matching the live GUI plan (see above)
+            steps.append(cap_optimization_step(argv))
             continue
         step = parse_command(argv)
         if step is None:
+            # kept-but-not-GUI-representable (place_fanout_clearance, board_image,
+            # --help, ...): pruning already accounted for it -- just emit no step.
             skipped += 1
             continue
         if step['action'] == 'repair_planes' and 'assignments' not in step:
@@ -203,37 +260,12 @@ def main():
                     break
         steps.append(step)
 
-    # Prune to the file-dependency chain of the FINAL board (mirror
-    # redo_stress_test): a recorded retry that was superseded (same input,
-    # its output never consumed downstream) is dropped -- without this the
-    # GUI would run e.g. the '*' route twice.
-    kept = []
-    if steps and any(s.get('_files') for s in steps):
-        need = None
-        for s in reversed(steps):
-            files = s.get('_files') or []
-            ins, outp = files[:-1], (files[-1] if len(files) > 1 else None)
-            if not files:
-                kept.append(s)
-                continue
-            if need is None or (outp and os.path.basename(outp) == need) \
-                    or outp is None:
-                kept.append(s)
-                if ins:
-                    need = os.path.basename(ins[0])
-                elif outp is None and files:
-                    need = os.path.basename(files[0])
-        kept.reverse()
-        if len(kept) != len(steps):
-            print(f"pruned {len(steps) - len(kept)} superseded step(s) "
-                  f"(retries not on the final board's file chain)")
-        steps = kept
     for s in steps:
         s.pop('_files', None)
     with open(out, 'w', encoding='utf-8') as f:
         json.dump({'steps': steps}, f, indent=2)
-    print(f"{len(steps)} step(s) written to {out} ({skipped} non-routing "
-          f"line(s) skipped)")
+    print(f"{len(steps)} step(s) written to {out} "
+          f"({skipped} kept-but-non-GUI command(s) skipped)")
     print("Load it in the Claude tab (Load... next to 'Parsed result') and "
           "press 'Run Selected Steps'.")
     return 0
