@@ -1653,6 +1653,14 @@ def _finalize_plane_copper(all_new_segments, all_new_vias, pcb_data, clearance,
     Returns the (possibly replaced) all_new_segments list; the caller must
     rebind its own reference to it.
     """
+    # 0. reuse same-net vias that violate hole-to-hole (two independently-placed
+    #    plane taps landing a grid cell apart -> overlapping drills). MUST run before
+    #    the graze/soft-joint passes so they see the merged via set + reconnected
+    #    segment endpoints.
+    from pcb_modification import merge_close_same_net_vias
+    merge_close_same_net_vias(all_new_vias, all_new_segments, pcb_data,
+                              hole_to_hole_clearance)
+
     # 1. neck grazing taps (mutates all_new_segments in place)
     _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers)
 
@@ -3218,27 +3226,15 @@ Examples:
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
 
-    # KiCad-oracle recheck (#217): parity with route_disconnected_planes --
-    # this front writes the very plane copper the oracle was built to verify.
-    if not args.dry_run and not args.no_kicad_recheck and args.output_file:
-        from kicad_oracle import oracle_reconnect
-        from routing_config import GridRouteConfig as _GRC
-        _ocfg = _GRC(clearance=args.clearance, track_width=args.track_width,
-                     via_size=args.via_size, via_drill=args.via_drill,
-                     grid_step=args.grid_step)
-        _orc = oracle_reconnect(
-            args.output_file, net_names, _ocfg,
-            track_via_clearance=getattr(args, 'track_via_clearance', 0.2) or 0.2,
-            hole_to_hole_clearance=args.hole_to_hole_clearance)
-        try:
-            import json as _json
-            print('JSON_ORACLE: ' + _json.dumps(_orc))
-        except Exception:
-            pass
-        if not _orc.get('available'):
-            print('NOTE: kicad-cli not found -- the oracle reconnect pass '
-                  'did not run; output may differ from machines that have '
-                  'KiCad installed (replay-determinism caveat).')
+    # NO KiCad-oracle recheck here (#217): the plane this step just poured has NOT
+    # yet been stitched -- tying pads/islands into the pour is route_disconnected_
+    # planes' job, the very next step. At the route_planes stage KiCad reports every
+    # not-yet-stitched pad as a missing link (hackrf: 26 plane links / 42 total),
+    # so an oracle pass here thrashes routing links that don't exist as failures
+    # (18 routed, 77 failed, 3 kicad-cli rounds) -- a 2-8x route_planes regression
+    # for work route_disconnected_planes does properly. The oracle runs ONCE, as an
+    # end-of-pipeline fallback at the end of route_disconnected_planes, on the
+    # already-repaired board -- do not re-add it here.
 
     # Make the output project's KiCad DRC constraints consistent with the routed
     # clearances/sizes (issue #160); only edits the .kicad_pro, never the board.

@@ -155,6 +155,31 @@ def apply_step_params(step, dialog):
     notes = []
     action = step["action"]
     params = step.get("params") or {}
+    # Options-panel fields shared by route/route_diff steps: the CLI chains
+    # set these routinely (--max-iterations 1000000, --max-ripup 10,
+    # --grid-step 0.05 ...); silently dropping them made a GUI plan run at
+    # panel defaults and diverge from the stress chain (parity gap #3).
+    _OPTION_FIELDS = ("max_iterations", "max_ripup", "grid_step",
+                      "board_edge_clearance", "hole_to_hole_clearance",
+                      "via_cost", "heuristic_weight", "max_probe_iterations",
+                      "turn_cost")
+    if action in ("route", "route_diff"):
+        for name in _OPTION_FIELDS:
+            if name in params:
+                ctrl = getattr(dialog, name, None)
+                if ctrl is None:
+                    notes.append(f"no control for {name}, ignored")
+                    continue
+                try:
+                    val = float(params[name])
+                    ctrl.SetValue(int(val) if val == int(val)
+                                  and name in ("max_iterations", "max_ripup",
+                                               "via_cost", "turn_cost",
+                                               "max_probe_iterations")
+                                  else val)
+                    notes.append(f"set {name}={params[name]}")
+                except (TypeError, ValueError):
+                    notes.append(f"ignored non-numeric {name}={params[name]!r}")
     if action == "route":
         for name in ("track_width", "clearance", "via_size", "via_drill"):
             if name in params:
@@ -465,7 +490,39 @@ class PlanExecutor:
 
     def _finish(self, aborted_reason):
         self.dialog._suppress_plane_offer = False
+        self._write_drc_floors()
         self.on_finished(self._completed, aborted_reason)
+
+    def _write_drc_floors(self):
+        """CLI parity (gap #2): every CLI step records its routed floors in
+        the sibling .kicad_pro (fix_project_for_output); a GUI plan run used
+        to leave the project file untouched, so a manual DRC graded at stock
+        defaults. Best-effort; never blocks plan completion."""
+        try:
+            import os
+            import clearance_ledger
+            from fix_kicad_drc_settings import fix_project_for_output
+            board_file = getattr(self.dialog, 'board_filename', None)
+            if not board_file or not os.path.isfile(board_file):
+                return
+            clearance = None
+            track_width = None
+            for step in self.steps:
+                p = step.get('params') or {}
+                if p.get('clearance'):
+                    clearance = float(p['clearance'])
+                if p.get('track_width'):
+                    track_width = float(p['track_width'])
+            if clearance is None:
+                return
+            eff = clearance_ledger.effective(clearance)
+            fix_project_for_output(board_file, input_pcb=board_file,
+                                   clearance=eff,
+                                   track_width=track_width)
+            self.log(f"Claude plan: recorded DRC floors in the project file "
+                     f"(clearance {eff:.4g})")
+        except Exception as e:
+            self.log(f"Claude plan: DRC floor write skipped: {e}")
 
     def _next_step(self):
         if self._stop_requested:

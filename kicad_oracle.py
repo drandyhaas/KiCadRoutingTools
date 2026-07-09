@@ -24,6 +24,8 @@ import subprocess
 import tempfile
 from typing import List, Optional, Tuple
 
+from kicad_parser import Segment as _Seg, Via as _Via
+
 KICAD_CLI_CANDIDATES = [
     shutil.which('kicad-cli'),
     '/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli',
@@ -392,6 +394,8 @@ def oracle_reconnect(board_file: str, net_names, config,
     names = set(net_names)
     routed = failed = rounds = 0
     remaining = -1
+    emitted_segments = []  # parser objects, for callers that apply results
+    emitted_vias = []      # to a live board instead of reading the file
     attempted = {}  # (net, endpoints) -> attempt count (graduated retries)
     for rnd in range(max_rounds):
         links = kicad_unconnected(board_file, kicad_cli)
@@ -670,6 +674,38 @@ def oracle_reconnect(board_file: str, net_names, config,
                           f"<->({bx:.2f},{by:.2f})  FAILED (degenerate)")
                     failed += 1
                     continue
+            # Same-net drill guard (#282 class): the link's obstacle map
+            # excludes the net's OWN copper, so a new via can land within
+            # hole-to-hole of an existing same-net via (0.355mm overlaps on
+            # splitflap GND). Reuse the existing via instead: skip the new
+            # hole and bridge to the existing barrel with short connectors
+            # on the two layers the path changes between (#340 style).
+            _own_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+            _extra_conn = []
+            _kept_vias = []
+            for vx, vy in via_positions:
+                _near = None
+                for _ev in _own_vias:
+                    _lim = (used_via_drill + (_ev.drill or used_via_drill)) / 2 \
+                        + hole_to_hole_clearance
+                    if math.hypot(vx - _ev.x, vy - _ev.y) < _lim:
+                        _near = _ev
+                        break
+                if _near is None or (abs(_near.x - vx) < 1e-6
+                                     and abs(_near.y - vy) < 1e-6):
+                    _kept_vias.append((vx, vy))
+                    continue
+                _lys = set()
+                for k in range(len(route_points) - 1):
+                    x1, y1, l1 = route_points[k]
+                    x2, y2, l2 = route_points[k + 1]
+                    if (abs(x1 - vx) < 1e-6 and abs(y1 - vy) < 1e-6) or \
+                            (abs(x2 - vx) < 1e-6 and abs(y2 - vy) < 1e-6):
+                        _lys.add(l1)
+                        _lys.add(l2)
+                for _l in _lys:
+                    _extra_conn.append(((vx, vy), (_near.x, _near.y), _l))
+            via_positions = _kept_vias
             _via_keys = {(round(vx, 3), round(vy, 3)) for vx, vy in via_positions}
             route_points = _merge_collinear(route_points, keep=_via_keys)
             n_segs = 0
@@ -682,6 +718,16 @@ def oracle_reconnect(board_file: str, net_names, config,
                     (x1, y1), (x2, y2), used_width, l1, net_id,
                     net_name if v10 else None))
                 n_segs += 1
+            for (p1, p2, _l) in _extra_conn:
+                new_sexprs.append(generate_segment_sexpr(
+                    p1, p2, used_width, _l, net_id,
+                    net_name if v10 else None))
+                _cobj = _Seg(start_x=p1[0], start_y=p1[1],
+                             end_x=p2[0], end_y=p2[1],
+                             width=used_width, layer=_l, net_id=net_id)
+                pcb_data.segments.append(_cobj)
+                emitted_segments.append(_cobj)
+                n_segs += 1
             for vx, vy in via_positions:
                 new_sexprs.append(generate_via_sexpr(
                     vx, vy, used_via_size, used_via_drill,
@@ -691,20 +737,22 @@ def oracle_reconnect(board_file: str, net_names, config,
             # this round rebuild their obstacle maps from pcb_data, so the
             # copper just routed must exist there -- two different-net links
             # squeezing through one congested pocket otherwise cross.
-            from kicad_parser import Segment as _Seg, Via as _Via
             for k in range(len(route_points) - 1):
                 x1, y1, l1 = route_points[k]
                 x2, y2, l2 = route_points[k + 1]
                 if l1 != l2 or (abs(x1 - x2) < 1e-9 and abs(y1 - y2) < 1e-9):
                     continue
-                pcb_data.segments.append(_Seg(
-                    start_x=x1, start_y=y1, end_x=x2, end_y=y2,
-                    width=used_width, layer=l1, net_id=net_id))
+                _sobj = _Seg(start_x=x1, start_y=y1, end_x=x2, end_y=y2,
+                             width=used_width, layer=l1, net_id=net_id)
+                pcb_data.segments.append(_sobj)
+                emitted_segments.append(_sobj)
             for vx, vy in via_positions:
-                pcb_data.vias.append(_Via(
-                    x=vx, y=vy, size=used_via_size, drill=used_via_drill,
-                    layers=[routing_layers[0], routing_layers[-1]],
-                    net_id=net_id))
+                _vobj = _Via(x=vx, y=vy, size=used_via_size,
+                             drill=used_via_drill,
+                             layers=[routing_layers[0], routing_layers[-1]],
+                             net_id=net_id)
+                pcb_data.vias.append(_vobj)
+                emitted_vias.append(_vobj)
             print(f"    {net_name}: ({ax:.2f},{ay:.2f})<->({bx:.2f},{by:.2f})"
                   f"  OK {n_segs} seg(s), {len(via_positions)} via(s), "
                   f"w={used_width:.2f}mm")
@@ -728,4 +776,5 @@ def oracle_reconnect(board_file: str, net_names, config,
         print(f"  KiCad-oracle recheck: {remaining} link(s) still "
               f"unconnected per KiCad after {rounds} round(s)")
     return {'available': True, 'rounds': rounds, 'links_routed': routed,
-            'links_failed': failed, 'remaining': remaining}
+            'links_failed': failed, 'remaining': remaining,
+            'new_segments': emitted_segments, 'new_vias': emitted_vias}

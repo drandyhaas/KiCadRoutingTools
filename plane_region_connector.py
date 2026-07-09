@@ -574,7 +574,12 @@ def find_disconnected_zone_regions(
     # (<1mm^2 at the analysis grid) are model noise, not real islands.
     orphan_patches: List[Set[Tuple[int, int]]] = []
     if inside_plane is not None:
-        min_patch_cells = max(4, int(1.0 / (analysis_grid_step * analysis_grid_step)))
+        # High bar: >=25mm^2. The model's fill is approximate (thermal
+        # spokes, coarse carves) and a low bar manufactured DOZENS of
+        # phantom 0-anchor regions on zone-heavy boards -- 75 join edges of
+        # copper spam on the kit board. Small REAL islands are the
+        # kicad-oracle recheck's job (it sees the authoritative fill).
+        min_patch_cells = max(100, int(25.0 / (analysis_grid_step * analysis_grid_step)))
         for start in inside_plane:
             if start in plane_visited or start in blocked_plane:
                 continue
@@ -622,7 +627,9 @@ def find_disconnected_zone_regions(
 
     # Anchor-less islands become regions with cells only; the join seeds
     # them purely from validated fill-cell pseudo-anchors.
-    for patch in orphan_patches:
+    # Largest few only: each extra region is an MST edge someone must route.
+    orphan_patches.sort(key=len, reverse=True)
+    for patch in orphan_patches[:4]:
         region_anchors.append([])
         region_cells.append(patch)
 

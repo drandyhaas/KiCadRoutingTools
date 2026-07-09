@@ -970,14 +970,139 @@ def route_planes(
               f"dropped for pad repairs); reconnect them with route.py: "
               f"{', '.join(_pnames)}")
 
+    # Reuse same-net vias that violate hole-to-hole (a region join can place a via a
+    # grid cell from an existing same-net one). After ALL vias are collected (incl.
+    # partial-restore kept vias above) and before both the GUI-return and file-write
+    # paths, so CLI and GUI emit the same merged set.
+    from pcb_modification import merge_close_same_net_vias
+    merge_close_same_net_vias(all_new_vias, all_new_segments, pcb_data,
+                              config.hole_to_hole_clearance)
+
     if return_results:
         if ripped_net_ids:
             _report_unrouted_ripped_nets(pcb_data, ripped_net_ids)
+        # GUI/stress parity (gap closure): the CLI main runs three
+        # post-passes on its written file that the GUI path used to skip --
+        # rip-casualty self-reconnect, the shared plane-copper cleanup, and
+        # the kicad-oracle recheck (the oracle runs in the planes tab after
+        # apply, where the LIVE board can be temp-saved). The first two run
+        # here, in memory.
+        _cas = list(dict.fromkeys(ripped_net_ids + partial_ids))
+        # (GUI passes dry_run=True meaning 'no file write'; routing already
+        # happened, so the reconnect still runs.)
+        if _cas:
+            _cnames = [pcb_data.nets[n].name for n in _cas
+                       if n in pcb_data.nets]
+            if _cnames:
+                print(f"\nReconnecting {len(_cnames)} net(s) this run ripped "
+                      f"for pad repairs (in-memory): {', '.join(_cnames)}")
+                try:
+                    from route import batch_route
+                    _ok, _fail, _t, _rdata = batch_route(
+                        input_file, "", _cnames,
+                        layers=routing_layers,
+                        track_width=track_width, clearance=clearance,
+                        via_size=via_size, via_drill=via_drill,
+                        grid_step=grid_step, max_iterations=max_iterations,
+                        power_nets=power_nets,
+                        power_nets_widths=power_nets_widths,
+                        disable_bga_zones=([] if no_bga_zone else None),
+                        return_results=True, pcb_data=pcb_data)
+                    def _sd(_s):
+                        return {'start': (_s.start_x, _s.start_y),
+                                'end': (_s.end_x, _s.end_y),
+                                'width': _s.width, 'layer': _s.layer,
+                                'net_id': _s.net_id}
+
+                    def _vd(_v):
+                        return {'x': _v.x, 'y': _v.y, 'size': _v.size,
+                                'drill': _v.drill, 'layers': _v.layers,
+                                'net_id': _v.net_id}
+                    for _r in _rdata.get('results', []):
+                        all_new_segments.extend(
+                            _sd(_s) for _s in (_r.get('new_segments') or []))
+                        all_new_vias.extend(
+                            _vd(_v) for _v in (_r.get('new_vias') or []))
+                    all_new_vias.extend(
+                        _vd(_v) for _v in (_rdata.get('all_swap_vias') or []))
+                    all_new_segments.extend(
+                        _sd(_s) for _s in
+                        (_rdata.get('all_swap_segments') or []))
+                    if _fail:
+                        print(f"{RED}  {_fail} ripped net(s) could NOT be "
+                              f"reconnected{RESET}")
+                except Exception as _e:
+                    print(f"{RED}  in-memory reconnect failed: {_e}{RESET}")
+        # Shared plane-copper cleanup, in memory (the CLI runs
+        # clean_plane_copper on its written file). Removed emissions drop
+        # from all_new_* in place; removed INPUT copper is returned in the
+        # new strip channel for the GUI applier.
+        _strip_segments = []
+        try:
+            from types import SimpleNamespace
+            from cleanup_pipeline import run_post_route_cleanup
+            _scope = set()
+            for _nname in net_names:
+                for _nid, _net in pcb_data.nets.items():
+                    if _net.name == _nname:
+                        _scope.add(_nid)
+            # The emissions here are DICTS for the GUI applier, but this
+            # run's copper also lives in pcb_data as real objects (the
+            # engine appends as it routes) -- so run the pipeline against
+            # pcb_data with an empty write-list: every removal comes back
+            # as an input strip, and additions come back as cleanup result
+            # entries. Strips matching an emission dict drop that dict
+            # (the applier adds AFTER it deletes, so a strip of not-yet-
+            # added copper would no-op and the deleted copper would ship);
+            # the rest go to the GUI strip channel.
+            _res_wrap = []
+            _out = run_post_route_cleanup(
+                _res_wrap, pcb_data, _scope,
+                SimpleNamespace(clearance=clearance, grid_step=grid_step),
+                label='Plane ', phantom=False, via_nudge=False, neck=False,
+                microshift_max_shift=grid_step)
+            for _r in _res_wrap:
+                for _s in (_r.get('new_segments') or []):
+                    all_new_segments.append(
+                        {'start': (_s.start_x, _s.start_y),
+                         'end': (_s.end_x, _s.end_y),
+                         'width': _s.width, 'layer': _s.layer,
+                         'net_id': _s.net_id})
+                for _v in (_r.get('new_vias') or []):
+                    all_new_vias.append(
+                        {'x': _v.x, 'y': _v.y, 'size': _v.size,
+                         'drill': _v.drill, 'layers': _v.layers,
+                         'net_id': _v.net_id})
+
+            def _skey(_s):
+                return (round(_s.start_x, 3), round(_s.start_y, 3),
+                        round(_s.end_x, 3), round(_s.end_y, 3), _s.net_id)
+
+            def _dkey(_d):
+                return (round(_d['start'][0], 3), round(_d['start'][1], 3),
+                        round(_d['end'][0], 3), round(_d['end'][1], 3),
+                        _d['net_id'])
+            _stripped = {}
+            for _s in _out.input_strip_segments:
+                _stripped[_skey(_s)] = _s
+                _stripped[(_skey(_s)[2], _skey(_s)[3], _skey(_s)[0],
+                           _skey(_s)[1], _skey(_s)[4])] = _s
+            _kept_dicts = []
+            for _d in all_new_segments:
+                _hit = _stripped.pop(_dkey(_d), None)
+                if _hit is None:
+                    _kept_dicts.append(_d)
+            all_new_segments[:] = _kept_dicts
+            _strip_segments = list(
+                {id(_s): _s for _s in _stripped.values()}.values())
+            _strip_segments += list(getattr(_out, 'input_strip_vias', []) or [])
+        except Exception as _e:
+            print(f"{RED}  in-memory plane cleanup failed: {_e}{RESET}")
         # The GUI deletes every returned net's old board copper before adding
         # all_new_*; partial nets' kept pieces ride the emissions, so include
         # them in the deletion set (strip-and-replace parity).
         return (total_routes, total_regions, all_new_vias, all_new_segments,
-                ripped_net_ids + partial_ids)
+                ripped_net_ids + partial_ids, _strip_segments)
 
     if dry_run:
         print("\nDry run - no output file written")
@@ -1341,7 +1466,9 @@ Examples:
                                 verbose=args.verbose)
         try:
             import json as _json
-            print('JSON_ORACLE: ' + _json.dumps(_orc))
+            print('JSON_ORACLE: ' + _json.dumps(
+                {k: v for k, v in _orc.items()
+                 if k not in ('new_segments', 'new_vias')}))
         except Exception:
             pass
         if not _orc.get('available'):

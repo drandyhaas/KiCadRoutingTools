@@ -1532,19 +1532,58 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # mirroring route_disconnected_planes' rip-casualty self-reconnect. The
     # reconcile pass prints its own summary/JSON_SUMMARY scoped to the
     # retried nets; the failure lists in that LAST summary are the honest
-    # still-open set. CLI path only (GUI return_results keeps its contract).
-    if (final_reconcile and not return_results and not skip_routing
-            and output_file and (failed_single or failed_multipoint)):
+    # still-open set. Runs on BOTH fronts: CLI re-invokes on the written
+    # file; GUI (return_results) re-invokes on the in-memory board and
+    # merges the sub-run's results (claude-tab/stress parity gap closure).
+    if (final_reconcile and not skip_routing
+            and (output_file or return_results)
+            and (failed_single or failed_multipoint)):
         _rec_names = list(dict.fromkeys(
             failed_single + [m['net_name'] for m in failed_multipoint]))
         print(f"\nFinal reconciliation: retrying {len(_rec_names)} incomplete "
               f"net(s) against the finished board: {', '.join(_rec_names)}")
         try:
             _rk = dict(_reconcile_kwargs)
-            _rk.update(final_reconcile=False, return_results=False,
-                       skip_routing=False)
-            _rok, _rfail, _rt = batch_route(
-                output_file, output_file, _rec_names, **_rk)
+            _rk.update(final_reconcile=False, skip_routing=False)
+            if return_results:
+                # GUI-parity reconciliation (gap-closure): re-invoke against
+                # the SAME in-memory board (the copper this run just
+                # committed lives in pcb_data, not in any file) and merge
+                # the sub-run's results into ours. An inner strip that
+                # targets copper THIS run emitted must instead drop it from
+                # our write-lists (the GUI applier adds before it removes,
+                # so a strip of a not-yet-added segment would no-op and the
+                # deleted copper would ship).
+                _rk.update(return_results=True, pcb_data=pcb_data)
+                _rok, _rfail, _rt, _rdata = batch_route(
+                    input_file, "", _rec_names, **_rk)
+                _our_new_segs = set()
+                for _r in results_data.get('results', []):
+                    for _s in (_r.get('new_segments') or []):
+                        _our_new_segs.add(id(_s))
+                _inner_strips = _rdata.get('segments_to_remove') or []
+                _strip_ours = {id(_s) for _s in _inner_strips
+                               if id(_s) in _our_new_segs}
+                if _strip_ours:
+                    for _r in results_data.get('results', []):
+                        _r['new_segments'] = [
+                            _s for _s in (_r.get('new_segments') or [])
+                            if id(_s) not in _strip_ours]
+                results_data.setdefault('results', []).extend(
+                    _rdata.get('results', []))
+                results_data.setdefault('segments_to_remove', []).extend(
+                    _s for _s in _inner_strips if id(_s) not in _strip_ours)
+                if _rdata.get('vias_to_remove'):
+                    results_data.setdefault('vias_to_remove', []).extend(
+                        _rdata['vias_to_remove'])
+                for _key in ('all_swap_vias', 'all_swap_segments',
+                             'exclusion_zone_lines', 'boundary_debug_labels'):
+                    if _rdata.get(_key):
+                        results_data.setdefault(_key, []).extend(_rdata[_key])
+            else:
+                _rk.update(return_results=False)
+                _rok, _rfail, _rt = batch_route(
+                    output_file, output_file, _rec_names, **_rk)
             print("Note: the JSON_SUMMARY above covers only the "
                   "reconciliation subset; the run's full tally is the "
                   "earlier JSON_SUMMARY plus these recoveries.")

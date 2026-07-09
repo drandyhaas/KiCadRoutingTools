@@ -1050,7 +1050,8 @@ class PlanesTab(wx.Panel):
         print(f"Repairing zones: {list(zip(net_names, plane_layers))}")
 
         try:
-            routes_added, regions_connected, new_vias, new_segments, ripped_net_ids = repair_planes(
+            (routes_added, regions_connected, new_vias, new_segments,
+             ripped_net_ids, strip_segments) = repair_planes(
                 input_file=self.board_filename,
                 output_file="",
                 net_names=net_names,
@@ -1089,6 +1090,9 @@ class PlanesTab(wx.Panel):
             # re-routed (their new copper is in new_segments/new_vias); the apply
             # step deletes the old tracks before adding the new ones.
             self._ripped_net_ids = ripped_net_ids
+            # Input copper the in-memory cleanup removed (dead-end trims on
+            # non-ripped plane nets): the applier deletes these individually.
+            self._strip_segments = strip_segments
             self._operation_result = {
                 'mode': 'repair',
                 'routes_added': routes_added,
@@ -1195,6 +1199,82 @@ class PlanesTab(wx.Panel):
         # Refresh net list
         self.net_panel.refresh()
 
+    def _run_kicad_oracle_after_apply(self, board):
+        """GUI/stress parity (gap closure): the CLI plane fronts finish with
+        the kicad-oracle recheck on their written file. Here the LIVE board
+        is temp-saved, the same oracle routes the exact links kicad-cli
+        reports missing, and the returned copper is applied to the board.
+        Skips quietly when kicad-cli is unavailable."""
+        try:
+            import tempfile
+            import pcbnew
+            from kicad_oracle import oracle_reconnect, find_kicad_cli
+            import routing_defaults as defaults
+            if find_kicad_cli() is None:
+                return
+            cfg_src = getattr(self, '_plane_drc_config', {}) or {}
+            result = getattr(self, '_operation_result', {}) or {}
+            nets = []
+            for a in (cfg_src.get('assignments') or []):
+                nets.extend(a[0])
+            for n in (cfg_src.get('power_nets') or []):
+                nets.append(n)
+            if not nets:
+                return
+            from routing_config import GridRouteConfig
+            ocfg = GridRouteConfig(
+                clearance=cfg_src.get('clearance', defaults.CLEARANCE),
+                track_width=cfg_src.get('track_width', defaults.TRACK_WIDTH),
+                via_size=cfg_src.get('via_size', defaults.VIA_SIZE),
+                via_drill=cfg_src.get('via_drill', defaults.VIA_DRILL),
+                grid_step=cfg_src.get('grid_step', defaults.GRID_STEP))
+            with tempfile.NamedTemporaryFile(suffix='.kicad_pcb',
+                                             delete=False) as f:
+                tmp = f.name
+            pcbnew.SaveBoard(tmp, board)
+            orc = oracle_reconnect(
+                tmp, nets, ocfg,
+                track_via_clearance=cfg_src.get(
+                    'track_via_clearance',
+                    defaults.PLANE_TRACK_VIA_CLEARANCE),
+                hole_to_hole_clearance=cfg_src.get(
+                    'hole_to_hole_clearance',
+                    defaults.HOLE_TO_HOLE_CLEARANCE))
+            import os as _os
+            try:
+                _os.unlink(tmp)
+            except OSError:
+                pass
+            for s in orc.get('new_segments') or []:
+                track = pcbnew.PCB_TRACK(board)
+                track.SetStart(pcbnew.VECTOR2I(
+                    pcbnew.FromMM(round(s.start_x, 4)),
+                    pcbnew.FromMM(round(s.start_y, 4))))
+                track.SetEnd(pcbnew.VECTOR2I(
+                    pcbnew.FromMM(round(s.end_x, 4)),
+                    pcbnew.FromMM(round(s.end_y, 4))))
+                track.SetWidth(pcbnew.FromMM(round(s.width, 4)))
+                track.SetLayer(board.GetLayerID(s.layer))
+                track.SetNetCode(s.net_id)
+                board.Add(track)
+            for v in orc.get('new_vias') or []:
+                via = pcbnew.PCB_VIA(board)
+                via.SetPosition(pcbnew.VECTOR2I(
+                    pcbnew.FromMM(round(v.x, 4)),
+                    pcbnew.FromMM(round(v.y, 4))))
+                via.SetDrill(pcbnew.FromMM(round(v.drill, 4)))
+                via.SetWidth(pcbnew.FromMM(round(v.size, 4)))
+                via.SetNetCode(v.net_id)
+                lys = v.layers or ['F.Cu', 'B.Cu']
+                via.SetLayerPair(board.GetLayerID(lys[0]),
+                                 board.GetLayerID(lys[-1]))
+                board.Add(via)
+            if orc.get('links_routed'):
+                print(f"KiCad-oracle (GUI): routed {orc['links_routed']} "
+                      f"missing link(s), applied to the live board")
+        except Exception as e:
+            print(f"KiCad-oracle (GUI) skipped: {e}")
+
     def _apply_results_to_board(self):
         """Apply operation results to the pcbnew board."""
         import pcbnew
@@ -1215,6 +1295,40 @@ class PlanesTab(wx.Panel):
         # Delete the tracks/vias of nets that were ripped to clear a blocked pad
         # repair - their re-routed copper is in _new_segments/_new_vias below, so
         # the old (blocking) copper must go first or it would short the repair.
+        # Individually-stripped input copper from the in-memory cleanup
+        # (dead-end trims on plane nets that were NOT ripped): positional
+        # match, same tolerance style as the route tab's removal loop.
+        strips = getattr(self, '_strip_segments', None) or []
+        if strips:
+            import pcbnew as _p
+            _keys = set()
+            for s in strips:
+                if hasattr(s, 'start_x'):
+                    _keys.add((round(s.start_x, 3), round(s.start_y, 3),
+                               round(s.end_x, 3), round(s.end_y, 3),
+                               s.net_id))
+                else:  # via
+                    _keys.add((round(s.x, 3), round(s.y, 3), s.net_id))
+            _removed = 0
+            for item in list(board.GetTracks()):
+                if item.Type() == _p.PCB_VIA_T:
+                    k = (round(_p.ToMM(item.GetPosition().x), 3),
+                         round(_p.ToMM(item.GetPosition().y), 3),
+                         item.GetNetCode())
+                else:
+                    k = (round(_p.ToMM(item.GetStart().x), 3),
+                         round(_p.ToMM(item.GetStart().y), 3),
+                         round(_p.ToMM(item.GetEnd().x), 3),
+                         round(_p.ToMM(item.GetEnd().y), 3),
+                         item.GetNetCode())
+                    if k not in _keys:
+                        k = (k[2], k[3], k[0], k[1], k[4])  # reversed ends
+                if k in _keys:
+                    board.RemoveNative(item)
+                    _removed += 1
+            if _removed:
+                print(f"Removed {_removed} cleanup-stripped segment(s)/via(s)")
+
         ripped = set(getattr(self, '_ripped_net_ids', None) or [])
         if ripped:
             removed = 0
@@ -1396,6 +1510,12 @@ class PlanesTab(wx.Panel):
         # Sync pcb_data
         if self.sync_pcb_data_callback:
             self.sync_pcb_data_callback()
+
+        # LAST: with every zone/via/track now on the live board, run the
+        # kicad-oracle recheck exactly like the CLI mains do on their
+        # written output (temp-save the board, route the reported links,
+        # apply the copper).
+        self._run_kicad_oracle_after_apply(board)
 
     def get_assignments(self):
         """Get list of net→layer assignments."""

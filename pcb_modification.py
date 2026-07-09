@@ -3003,6 +3003,101 @@ def _pt_seg_dist_t(x, y, s):
     return math.hypot(x - (s.start_x + t * dx), y - (s.start_y + t * dy)), t
 
 
+def merge_close_same_net_vias(all_new_vias, all_new_segments, pcb_data,
+                              hole_to_hole_clearance, verbose: bool = True):
+    """Merge newly-placed plane vias that violate hole-to-hole clearance against a
+    SAME-NET via into the existing/kept one (REUSE), reconnecting attached segments
+    to the survivor. Returns the number of vias merged away.
+
+    Same-net copper is not an obstacle, so the per-net via-placement map's
+    hole-to-hole block (block_via_position) never fires between two same-net vias.
+    Independently-routed plane taps / region joins can therefore drop two same-net
+    vias a single grid cell apart, overlapping their drills -- e.g. hackrf VCC at
+    decoupling cap C133.1: two F.Cu-B.Cu through-vias 0.05mm apart, a check_drc
+    via-drill-hole overlap KiCad net-unifies and hides. A via must respect
+    hole-to-hole ALWAYS, even same-net; when a same-net via already sits within
+    range, reuse it instead of shipping an overlapping duplicate.
+
+    A NEW via is dropped in favor of a survivor of the SAME net when
+        center_dist < drill_a/2 + drill_b/2 + hole_to_hole_clearance
+    AND the survivor's layer span covers the dropped via's span (so connectivity is
+    preserved). The survivor is preferentially a pre-existing pcb_data via, else an
+    earlier-kept new via. Segment endpoints coincident with a dropped via are moved
+    onto the survivor. Same-net violators whose span the survivor does NOT cover are
+    left in place and warned (can't reuse without dropping a layer connection).
+    """
+    if not all_new_vias:
+        return 0
+    EPS = 1e-4
+
+    def _span(layers):
+        return frozenset(layers or [])
+
+    def _seg_ends(s):
+        if isinstance(s, dict):
+            return s.get('start'), s.get('end')
+        return (s.start_x, s.start_y), (s.end_x, s.end_y)
+
+    def _set_end(s, which, xy):
+        if isinstance(s, dict):
+            s[which] = xy
+        elif which == 'start':
+            s.start_x, s.start_y = xy
+        else:
+            s.end_x, s.end_y = xy
+
+    # Survivors start as every pre-existing same-net board via (reuse targets).
+    # CRITICAL: route_planes/route_disconnected stamp the new vias INTO pcb_data
+    # during routing, so pcb_data.vias already contains all_new_vias -- exclude
+    # those positions or each new via matches its own copy at distance 0 and every
+    # via gets "merged" away (hackrf: 358 false merges, planes disconnected).
+    new_pos = {(round(nv['x'], 4), round(nv['y'], 4)) for nv in all_new_vias}
+    survivors_by_net = {}  # net_id -> [(x, y, drill, span)]
+    for v in pcb_data.vias:
+        if (round(v.x, 4), round(v.y, 4)) in new_pos:
+            continue
+        survivors_by_net.setdefault(v.net_id, []).append(
+            (v.x, v.y, v.drill, _span(v.layers)))
+
+    kept, merged, unmergeable = [], 0, 0
+    for nv in all_new_vias:
+        nid = nv['net_id']
+        nx, ny = nv['x'], nv['y']
+        ndrill = nv.get('drill', 0.0)
+        nspan = _span(nv.get('layers'))
+        survivor = None
+        blocked = False
+        for (sx, sy, sdrill, sspan) in survivors_by_net.get(nid, []):
+            if math.hypot(nx - sx, ny - sy) < (ndrill + sdrill) / 2 + hole_to_hole_clearance - EPS:
+                if nspan <= sspan:
+                    survivor = (sx, sy)
+                    break
+                blocked = True  # within range but survivor doesn't cover our layers
+        if survivor is not None:
+            for s in all_new_segments:
+                a, b = _seg_ends(s)
+                if a and abs(a[0] - nx) < EPS and abs(a[1] - ny) < EPS:
+                    _set_end(s, 'start', survivor)
+                if b and abs(b[0] - nx) < EPS and abs(b[1] - ny) < EPS:
+                    _set_end(s, 'end', survivor)
+            merged += 1
+            continue
+        if blocked:
+            unmergeable += 1
+        kept.append(nv)
+        survivors_by_net.setdefault(nid, []).append((nx, ny, ndrill, nspan))
+
+    if merged:
+        all_new_vias[:] = kept
+        if verbose:
+            print(f"  Via reuse: merged {merged} same-net via(s) within hole-to-hole "
+                  f"clearance ({hole_to_hole_clearance}mm) onto an existing same-net via")
+    if unmergeable and verbose:
+        print(f"  WARNING: {unmergeable} same-net via(s) violate hole-to-hole but the "
+              f"nearby via does not span their layers -- left in place (needs a nudge)")
+    return merged
+
+
 def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
                                scope_net_ids=None, clearance: float = 0.1,
                                max_shift: float = 0.025,
