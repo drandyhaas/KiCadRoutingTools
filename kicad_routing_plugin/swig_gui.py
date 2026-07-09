@@ -2060,7 +2060,7 @@ class RoutingDialog(wx.Dialog):
         # Reset basic options
         self.enable_layer_switch.SetValue(True)
         self.move_text_check.SetValue(True)
-        self.add_teardrops_check.SetValue(True)
+        self.add_teardrops_check.SetValue(False)  # match creation default + CLI (--add-teardrops off)
         self.power_nets_ctrl.SetValue("")
         self.power_widths_ctrl.SetValue("")
         self.no_bga_zones_ctrl.SetValue("")  # empty == CLI default (None: keep BGA zones)
@@ -2100,17 +2100,19 @@ class RoutingDialog(wx.Dialog):
         self.board_edge_clearance.Enable(False)
         self.direction_choice.SetSelection(0)
 
-        # Reset advanced options
-        self.mps_reverse_rounds.SetValue(True)
-        self.mps_layer_swap.SetValue(True)
-        self.mps_segment_intersection.SetValue(True)
+        # Reset advanced options. mps_*/can_swap default OFF to match the checkbox
+        # creation state, the CLI (--mps-*/--can-swap-to-top-layer are store_true),
+        # and the engine signature (batch_route defaults all False).
+        self.mps_reverse_rounds.SetValue(False)
+        self.mps_layer_swap.SetValue(False)
+        self.mps_segment_intersection.SetValue(False)
         self.bus_enabled.SetValue(False)
         self.bus_detection_radius.SetValue(defaults.BUS_DETECTION_RADIUS)
         self.bus_attraction_radius.SetValue(defaults.BUS_ATTRACTION_RADIUS)
         self.bus_attraction_bonus.SetValue(defaults.BUS_ATTRACTION_BONUS)
         self.bus_min_nets.SetValue(defaults.BUS_MIN_NETS)
         self.no_crossing_layer_check.SetValue(False)
-        self.can_swap_to_top.SetValue(True)
+        self.can_swap_to_top.SetValue(False)  # match creation default + CLI/engine (off)
         self.crossing_penalty.SetValue(defaults.CROSSING_PENALTY)
         self.length_match_groups_ctrl.SetValue("")
         self.length_match_tolerance.SetValue(defaults.LENGTH_MATCH_TOLERANCE)
