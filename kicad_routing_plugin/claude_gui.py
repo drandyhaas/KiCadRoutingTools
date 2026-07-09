@@ -853,7 +853,7 @@ class ClaudeTab(wx.Panel):
                           "(or Load a plan file).", "Claude",
                           wx.OK | wx.ICON_WARNING)
             return
-        with wx.FileDialog(self, "Save plan", wildcard="Plan JSON (*.json)|*.json",
+        with wx.FileDialog(self, "Save plan", wildcard="*.json",
                            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
             if dlg.ShowModal() != wx.ID_OK:
                 return
@@ -870,7 +870,7 @@ class ClaudeTab(wx.Panel):
 
     def _on_load_plan(self, event):
         from .claude_plan import parse_plan_result
-        with wx.FileDialog(self, "Load plan", wildcard="Plan JSON (*.json)|*.json",
+        with wx.FileDialog(self, "Load plan", wildcard="*.json",
                            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
             if dlg.ShowModal() != wx.ID_OK:
                 return
