@@ -1205,6 +1205,14 @@ class PlanesTab(wx.Panel):
         is temp-saved, the same oracle routes the exact links kicad-cli
         reports missing, and the returned copper is applied to the board.
         Skips quietly when kicad-cli is unavailable."""
+        import sys
+        _orig_stdout = sys.stdout
+        if getattr(self, 'append_log', None):
+            # The worker-thread redirect has already been unwound by the
+            # time apply runs (main thread) -- without this, the oracle's
+            # output goes to the invisible console instead of the Log tab
+            # and the user cannot tell it ran.
+            sys.stdout = StdoutRedirector(self.append_log, _orig_stdout)
         try:
             import tempfile
             import pcbnew
@@ -1274,6 +1282,8 @@ class PlanesTab(wx.Panel):
                       f"missing link(s), applied to the live board")
         except Exception as e:
             print(f"KiCad-oracle (GUI) skipped: {e}")
+        finally:
+            sys.stdout = _orig_stdout
 
     def _apply_results_to_board(self):
         """Apply operation results to the pcbnew board."""
