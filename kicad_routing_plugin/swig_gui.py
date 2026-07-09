@@ -1003,8 +1003,11 @@ class RoutingDialog(wx.Dialog):
         # No BGA zones
         bga_sizer = wx.BoxSizer(wx.HORIZONTAL)
         bga_sizer.Add(wx.StaticText(options_scroll, label="No BGA Zones:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
-        self.no_bga_zones_ctrl = wx.TextCtrl(options_scroll, value="ALL")
-        self.no_bga_zones_ctrl.SetToolTip("Disable BGA exclusion zones: component refs (e.g., U1 U3), ALL, or leave empty to exclude none")
+        # Default empty == CLI route.py's --no-bga-zones default (None): auto-detect
+        # and ENABLE BGA exclusion zones. "ALL" here would disable them all, which
+        # diverged from the CLI (GUI/CLI default parity).
+        self.no_bga_zones_ctrl = wx.TextCtrl(options_scroll, value="")
+        self.no_bga_zones_ctrl.SetToolTip("Disable BGA exclusion zones: component refs (e.g., U1 U3), ALL, or leave empty (default) to keep all BGA zones")
         bga_sizer.Add(self.no_bga_zones_ctrl, 1, wx.EXPAND)
         options_inner.Add(bga_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
@@ -2060,7 +2063,7 @@ class RoutingDialog(wx.Dialog):
         self.add_teardrops_check.SetValue(True)
         self.power_nets_ctrl.SetValue("")
         self.power_widths_ctrl.SetValue("")
-        self.no_bga_zones_ctrl.SetValue("ALL")
+        self.no_bga_zones_ctrl.SetValue("")  # empty == CLI default (None: keep BGA zones)
         self.rip_existing_nets_ctrl.SetValue("")
         self.layer_costs_ctrl.SetValue("")
 
