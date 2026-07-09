@@ -248,23 +248,20 @@ def _net_pads_connected_by_overlap(pads: List[Pad], copper_layers, tolerance: fl
 def _point_in_pad(px: float, py: float, pad: Pad, margin: float = 0.0) -> bool:
     """True if (px, py) lies within `pad`'s copper outline (+margin).
 
-    Handles pad rotation; circle/oval by radius, everything else as a rectangle
-    (roundrect corners are treated as square, which is fine for a via-in-pad
-    membership test). Used to credit an offset via-in-pad as connected (#89)."""
+    EXACT shape test via check_drc.point_to_pad_distance (custom-pad
+    polygons, roundrect corners, rotation). The old rectangle fallback
+    treated a CUSTOM pad as its full bounding box: bitaxe Q2.5 (a 9.1x10mm
+    FET tab) then phantom-connected a track endpoint 4mm from its real
+    copper, and collapse_strict_redundant trusted the graph and removed the
+    genuinely load-bearing bridge segment (0708d regression). A cheap bbox
+    prefilter keeps the hot path fast."""
     dx = px - pad.global_x
     dy = py - pad.global_y
-    # size_x/size_y are board-resolved; the rectangle's residual tilt is
-    # rect_rotation (0 for orthogonal pads), not the total pad rotation.
-    rot = math.radians(getattr(pad, 'rect_rotation', 0.0) or 0.0)
-    c, s = math.cos(-rot), math.sin(-rot)
-    lx = dx * c - dy * s
-    ly = dx * s + dy * c
-    hx = pad.size_x / 2 + margin
-    hy = pad.size_y / 2 + margin
-    if pad.shape == 'circle':
-        r = pad.size_x / 2 + margin
-        return lx * lx + ly * ly <= r * r
-    return abs(lx) <= hx and abs(ly) <= hy
+    reach = max(pad.size_x, pad.size_y) / 2 + margin
+    if dx * dx + dy * dy > reach * reach * 2:  # bbox-diagonal prefilter
+        return False
+    from check_drc import point_to_pad_distance
+    return point_to_pad_distance(px, py, pad) <= margin
 
 
 def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via],
@@ -406,13 +403,14 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         for layer in expanded_layers:
             if layer not in copper_layers:
                 continue
-            # Connection tolerance is size/4 (below). Use the pad's real size so a
-            # track landing inside a large through-hole/connector pad (but not at
-            # its center) is credited as connected, matching KiCad -- the residual
-            # over-report on hand-routed boards. Floored at 0.4 so small pads keep
-            # the previous 0.1mm tolerance (no regression on router output, whose
-            # tracks land at pad centers).
-            pad_size = max(pad.size_x, pad.size_y, 0.4)
+            # Generic point-point tolerance is size/4 (below). The pad's REAL
+            # size here radially over-credited large/elongated pads (a 9mm
+            # custom tab pulled anything within 2.3mm of its CENTER into the
+            # net -- the 0708d collapse regression); every large-pad case the
+            # real size was for is now covered by the EXACT rules below
+            # (#195 endpoint-in-pad, #89 via-in-pad, #346 pad-pad overlap),
+            # so pad points keep only the small flat tolerance.
+            pad_size = 0.4
             all_points.append((pad.global_x, pad.global_y, layer, point_id, pad_size))
             point_info[point_id] = ('pad', pad_idx, layer, pad.global_x, pad.global_y, pad.component_ref)
             pad_ids.append(point_id)
@@ -540,9 +538,15 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             pad = pads[pad_idx]
             reach = max(pad.size_x, pad.size_y) / 2 + tolerance
             for layer in pad_copper_layers[pad_idx]:
-                for ex, ey, eid, _ in endpoint_index.query_nearby(
+                for ex, ey, eid, ewidth in endpoint_index.query_nearby(
                         pad.global_x, pad.global_y, layer, reach):
-                    if _point_in_pad(ex, ey, pad, margin=tolerance):
+                    # The endpoint's round cap (radius width/2) physically
+                    # overlaps the pad whenever it reaches the outline --
+                    # same overlap-credit semantics as the #285 endpoint-cap
+                    # rule (the strict twin clamps widths, so the strict
+                    # graph keeps its tight gate automatically).
+                    _m = max(ewidth / 2 - 1e-6, tolerance)
+                    if _point_in_pad(ex, ey, pad, margin=_m):
                         _union(pad_repr_id[pad_idx], eid)
 
     # Build spatial index for segments
@@ -597,7 +601,8 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     graph = ({'num_points': point_id, 'pad_ids': list(pad_ids),
               'pad_locations': list(pad_locations), 'edges': edges,
               'pad_index_repr': dict(pad_repr_id),
-              'via_index_repr': dict(via_repr_id)}
+              'via_index_repr': dict(via_repr_id),
+              'num_segments': len(segments)}
              if return_graph else None)
 
     # Check if all pads are in the same component
@@ -713,6 +718,34 @@ def analyze_conn_excluding(graph: Dict, excluded_seg_indices=()) -> Dict:
         return {'connected': True, 'num_components': 0, 'disconnected_pads': []}
     pad_roots = [uf.find(pid) for pid in pad_ids]
     unique_roots = set(pad_roots)
+    # Copper components over ALL points (pads + vias + non-excluded segment
+    # endpoints): 'num_components' below is PAD components only, which lets
+    # a removal strand a pad-less sliver unnoticed (castor POLLUX_SUB_IN's
+    # 28um dangle, 0708d). Consumers that must not create islands or stubs
+    # gate on this count instead.
+    excluded = set(excluded_seg_indices)
+    copper_roots = set(unique_roots)
+    for vid in graph.get('via_index_repr', {}).values():
+        copper_roots.add(uf.find(vid))
+    n_segs_total = graph.get('num_segments', 0)
+    for i_ in range(n_segs_total):
+        if i_ in excluded:
+            continue
+        copper_roots.add(uf.find(2 * i_))
+    # Copper components over ALL points (pads + vias + non-excluded segment
+    # endpoints): 'num_components' below is PAD components only, which lets
+    # a removal strand a pad-less sliver unnoticed (castor POLLUX_SUB_IN's
+    # 28um dangle, 0708d). Consumers that must not create islands or stubs
+    # gate on this count instead.
+    excluded = set(excluded_seg_indices)
+    copper_roots = set(unique_roots)
+    for vid in graph.get('via_index_repr', {}).values():
+        copper_roots.add(uf.find(vid))
+    n_segs_total = graph.get('num_segments', 0)
+    for i_ in range(n_segs_total):
+        if i_ in excluded:
+            continue
+        copper_roots.add(uf.find(2 * i_))
     root_counts = defaultdict(int)
     for r in pad_roots:
         root_counts[r] += 1

@@ -58,6 +58,8 @@ class CleanupOutcome:
     # Original INPUT-FILE segments removed by any pass: the writer must strip
     # these blocks from its verbatim copy of the input file.
     input_strip_segments: List = field(default_factory=list)
+    # Original INPUT-FILE vias removed (orphan islands take their barrels).
+    input_strip_vias: List = field(default_factory=list)
     counts: dict = field(default_factory=dict)
 
 
@@ -256,7 +258,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # their net -- rip/reroute leftovers connected to nothing. Runs before
     # the dead-end sweep so the sweep's unsupported-via pass drops the
     # islands' freed this-run vias.
-    _oi_n, _oi_segs, _oi_strip = remove_orphan_islands(results, pcb_data, scope_net_ids)
+    _oi_n, _oi_segs, _oi_strip, _oi_via_strip = remove_orphan_islands(results, pcb_data, scope_net_ids)
+    out.input_strip_vias.extend(_oi_via_strip)
     counts['orphan_islands'] = _oi_n
     _trace('orphan_islands')
     strip.extend(_oi_strip)

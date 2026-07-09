@@ -1139,6 +1139,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     stale_input_vias = compute_stale_input_vias(
         _orig_via_by_net, sweep_scope_ids, _committed_vias, _emitted_vias,
         final_ids=_committed_via_ids)
+    # Orphan-island removals happen AFTER the freeze snapshot, so their vias
+    # look 'committed' to the stale computation -- merge their strip list
+    # explicitly (an island's barrel would otherwise ship floating).
+    _oi_vias = getattr(_cleanup, 'input_strip_vias', None) or []
+    if _oi_vias:
+        _known = {id(v) for v in stale_input_vias}
+        stale_input_vias = list(stale_input_vias) + \
+            [v for v in _oi_vias if id(v) not in _known]
     if stale_input_vias:
         print(f"Stripping {len(stale_input_vias)} stale input via(s) of "
               f"ripped/re-routed nets not on the final board")

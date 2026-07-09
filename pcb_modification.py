@@ -747,15 +747,22 @@ def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1
         microshift_max_shift=grid_step)
     snapped = _outcome.counts.get('stub_gaps_snapped', 0)
     to_remove = _outcome.input_strip_segments
+    vias_to_remove = getattr(_outcome, 'input_strip_vias', None) or []
     connectors = [s for r in plane_results for s in (r.get('new_segments') or [])]
 
-    if not (connectors or to_remove):
+    if not (connectors or to_remove or vias_to_remove):
         return 0, 0
 
     n2n = getattr(pcb, 'net_id_to_name', {}) or {}
     v10 = is_kicad_10(content)
     if to_remove:
         content, _ = remove_segments_from_content(content, to_remove, n2n if v10 else None)
+    if vias_to_remove:
+        from plane_io import _remove_vias_at_positions
+        content, _ = _remove_vias_at_positions(
+            content, [(v.x, v.y) for v in vias_to_remove],
+            net_ids=[v.net_id for v in vias_to_remove],
+            net_names=[n2n.get(v.net_id) for v in vias_to_remove])
     if connectors:
         sexprs = [generate_segment_sexpr((s.start_x, s.start_y), (s.end_x, s.end_y),
                                          s.width, s.layer, s.net_id,
@@ -1087,6 +1094,11 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None
         net_segs = [s for s in pcb_data.segments if s.net_id == net_id]
         if len(net_segs) < 2:
             continue
+        if len(net_segs) > 400:
+            # O(segments x edges) per acceptance test: a 18k-segment GND
+            # harness would take minutes-to-hours for copper savings that
+            # only matter on signal nets. Big nets keep their copper.
+            continue
         net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
 
         def _buried(px, py):
@@ -1118,6 +1130,7 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None
         if not graph_phys:
             continue
         base = analyze_conn_excluding(graph, ())
+        base_copper = base.get('num_copper_components', 1)
         if base['num_components'] != 1 or base['disconnected_pads']:
             # The net is not fully connected even under the strict graph (a
             # mid-path soft joint or a real open): 'key unchanged' could
@@ -1141,7 +1154,11 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None
                        key=lambda i: -math.hypot(
                            net_segs[i].end_x - net_segs[i].start_x,
                            net_segs[i].end_y - net_segs[i].start_y))
+        _rounds = 0
         while True:
+            _rounds += 1
+            if _rounds > 4:
+                break
             progress = False
             for i in order:
                 if i in accepted:
@@ -1155,9 +1172,21 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None
                 t = analyze_conn_excluding(graph, excl)
                 if t['num_components'] != 1 or t['disconnected_pads']:
                     continue
+                if t.get('num_copper_components', 1) > base_copper:
+                    # The pads survive but a pad-less sliver/island would be
+                    # stranded (castor POLLUX_SUB_IN 28um dangle, 0708d) --
+                    # 'num_components' alone counts PAD roots only.
+                    continue
                 t_phys = analyze_conn_excluding(graph_phys, excl)
                 if t_phys['disconnected_pads']:
                     continue
+                if os.environ.get('KICAD_COLLAPSE_DEBUG'):
+                    _nm = pcb_data.nets.get(net_id)
+                    if _nm and _nm.name == os.environ['KICAD_COLLAPSE_DEBUG']:
+                        print(f"[COLLAPSE_DEBUG] net {_nm.name}: ACCEPT seg "
+                              f"({s.start_x},{s.start_y})->({s.end_x},{s.end_y}) {s.layer} "
+                              f"strict=({t['num_components']},{len(t['disconnected_pads'])}) "
+                              f"phys_disc={len(t_phys['disconnected_pads'])}")
                 accepted.append(i)
                 progress = True
             if not progress:
@@ -1199,11 +1228,10 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None
     with no pad in it). Components containing graphics copper (#337 immutable
     art) are skipped whole. Nets with no pads at all are left alone.
 
-    Returns (islands_removed, segments_removed, original_segments_to_strip);
-    this-run segments are dropped from their result's write-list in place,
-    original input segments are returned for the writer's strip list. The
-    freed this-run vias are dropped by the sweep_dead_ends unsupported-via
-    pass that runs right after this one.
+    Returns (islands_removed, segments_removed, original_segments_to_strip,
+    original_vias_to_strip); this-run copper is dropped from its result's
+    write-list in place, original input copper is returned for the writer's
+    strip lists (an island's via barrel would otherwise ship floating).
     """
     from collections import defaultdict
     from check_connected import check_net_connectivity
@@ -1213,6 +1241,10 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None
     for r in results:
         for s in r.get('new_segments') or []:
             seg_owner[id(s)] = r
+    via_owner = {}
+    for r in results:
+        for v in r.get('new_vias') or []:
+            via_owner[id(v)] = r
 
     net_ids = {s.net_id for s in pcb_data.segments
                if scope_net_ids is None or s.net_id in scope_net_ids}
@@ -1220,7 +1252,9 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None
 
     islands_removed = 0
     removed_ids = set()
+    removed_via_ids = set()
     originals: List[Segment] = []
+    original_vias: List = []
     for net_id in net_ids:
         pads = pcb_data.pads_by_net.get(net_id, [])
         if not pads:
@@ -1244,6 +1278,7 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None
         comp_segs = defaultdict(list)
         for i, s in enumerate(net_segs):
             comp_segs[uf.find(2 * i)].append(s)
+        via_reprs = graph.get('via_index_repr', {})
         for root, segs in comp_segs.items():
             if root in pad_roots:
                 continue
@@ -1256,16 +1291,29 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None
                     pass  # dropped from the write-list below
                 else:
                     originals.append(s)
+            # The island's vias go with it (a barrel with its tracks removed
+            # would ship floating).
+            for j, v in enumerate(net_vias):
+                rep = via_reprs.get(j)
+                if rep is not None and uf.find(rep) == root:
+                    removed_via_ids.add(id(v))
+                    if id(v) not in via_owner:
+                        original_vias.append(v)
 
-    if not removed_ids:
-        return 0, 0, []
+    if not removed_ids and not removed_via_ids:
+        return 0, 0, [], []
     for r in results:
         segs = r.get('new_segments')
         if segs:
             r['new_segments'] = [s for s in segs if id(s) not in removed_ids]
+        rv = r.get('new_vias')
+        if rv:
+            r['new_vias'] = [v for v in rv if id(v) not in removed_via_ids]
     pcb_data.segments = [s for s in pcb_data.segments
                          if id(s) not in removed_ids]
-    return islands_removed, len(removed_ids), originals
+    pcb_data.vias = [v for v in pcb_data.vias
+                     if id(v) not in removed_via_ids]
+    return islands_removed, len(removed_ids), originals, original_vias
 
 
 def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None,
@@ -1303,26 +1351,38 @@ def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None
 
     segs_by_net = defaultdict(list)
     for s in pcb_data.segments:
-        if (scope_net_ids is None or s.net_id in scope_net_ids) \
-                and not getattr(s, 'graphic', False):
+        if scope_net_ids is None or s.net_id in scope_net_ids:
             segs_by_net[s.net_id].append(s)
+
+    from check_connected import check_net_connectivity
+    from check_drc import point_to_pad_distance
 
     n_trimmed = 0
     originals_to_strip: List[Segment] = []
     replacements: List[Segment] = []
     _CELL = 1.0
-    for net_id, net_segs in segs_by_net.items():
+    for net_id, all_net_segs in segs_by_net.items():
+        # Graphics copper (#337) is immutable but CONDUCTS: it participates in
+        # the degree map, the tee-anchor scan and the connectivity gate; only
+        # non-graphic segments are trim candidates.
+        net_segs = [s for s in all_net_segs if not getattr(s, 'graphic', False)]
+        if not net_segs:
+            continue
         vias = [v for v in pcb_data.vias if v.net_id == net_id]
         via_pts = [(v.x, v.y, getattr(v, 'size', 0.6)) for v in vias]
+        pads_n = pcb_data.pads_by_net.get(net_id, [])
+        zones_n = [z for z in (getattr(pcb_data, 'zones', []) or [])
+                   if z.net_id == net_id]
         pad_pts = []
-        for p in pcb_data.pads_by_net.get(net_id, []):
+        for p in pads_n:
             px = getattr(p, 'global_x', getattr(p, 'x', 0.0))
             py = getattr(p, 'global_y', getattr(p, 'y', 0.0))
             psize = max(getattr(p, 'size_x', 0.5), getattr(p, 'size_y', 0.5))
             pad_pts.append((px, py, psize, getattr(p, 'layers', [])))
+        base_disc = None  # lazily computed only when a trim is proposed
         degree = defaultdict(int)
         seg_index = defaultdict(list)
-        for s in net_segs:
+        for s in all_net_segs:
             degree[key(s.start_x, s.start_y, s.layer)] += 1
             degree[key(s.end_x, s.end_y, s.layer)] += 1
             lo_x = int(min(s.start_x, s.end_x) // _CELL)
@@ -1345,24 +1405,50 @@ def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None
                 if _point_anchored(fx, fy, s.layer, via_pts, pad_pts,
                                    seg_index, _CELL, s, tol):
                     continue
+                # Exact pad anchoring: _point_anchored's pad test is RADIAL
+                # (max-half-dim), which both over- and under-credits (a stub
+                # ending on a rect pad's corner read as dangling, and a stub
+                # merely NEAR an elongated pad read as anchored). The free
+                # end touching real pad copper is never a dangle.
+                if any(point_to_pad_distance(fx, fy, p) <= s.width / 2
+                       for p in pads_n):
+                    continue
+                # A free end inside a same-net zone outline may be carried by
+                # the FILL (plane region-join tracks end bare in fill by
+                # design); the connectivity gate below re-checks with zones,
+                # but skip early so we never even propose the trim.
+                if zones_n:
+                    from check_connected import point_in_polygon
+                    if any(z.layer == s.layer
+                           and point_in_polygon(fx, fy, z.polygon)
+                           for z in zones_n):
+                        continue
                 # Anchors on the body: same-net via barrels overlapping the
                 # centerline, and other same-net segments' endpoints teeing in.
-                # t is measured from start; pick the anchor NEAREST the free
-                # end (minimal trim keeps everything through-connected).
+                # Absolute distance bands (not the old relative 2%, which on a
+                # long segment hid real anchors millimetres from the ends):
+                # an anchor counts when it sits at least `tol` from the far
+                # end and at least the minimum tail from the free end.
+                seg_len = math.sqrt(L2)
+                lo_d = max(tol, 0.05)
                 cands = []  # t values
                 for vx, vy, vsize in via_pts:
                     t = ((vx - s.start_x) * dx + (vy - s.start_y) * dy) / L2
-                    if t <= 0.02 or t >= 0.98:
+                    d_from_start = t * seg_len
+                    d_from_end = (1 - t) * seg_len
+                    if d_from_start <= lo_d or d_from_end <= lo_d:
                         continue
                     cx_, cy_ = s.start_x + t * dx, s.start_y + t * dy
                     if math.hypot(vx - cx_, vy - cy_) < (vsize + s.width) / 2 - 1e-6:
                         cands.append(t)
-                for o in net_segs:
+                for o in all_net_segs:
                     if o is s or o.layer != s.layer:
                         continue
                     for ox, oy in ((o.start_x, o.start_y), (o.end_x, o.end_y)):
                         t = ((ox - s.start_x) * dx + (oy - s.start_y) * dy) / L2
-                        if t <= 0.02 or t >= 0.98:
+                        d_from_start = t * seg_len
+                        d_from_end = (1 - t) * seg_len
+                        if d_from_start <= lo_d or d_from_end <= lo_d:
                             continue
                         cx_, cy_ = s.start_x + t * dx, s.start_y + t * dy
                         if math.hypot(ox - cx_, oy - cy_) < (o.width + s.width) / 2 - 1e-6:
@@ -1374,6 +1460,25 @@ def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None
                 tail_len = math.hypot(fx - nx, fy - ny)
                 if tail_len <= max(tol, 3 * s.width):
                     continue  # sub-visible nib; not worth churn
+                # Connectivity gate (parity with every other subtractive
+                # pass): the trim must not strand a pad under the
+                # authoritative model INCLUDING zones. The anchor heuristics
+                # above are a proposal; this is the safety.
+                _twin = Segment(
+                    start_x=(nx if free_is_start else s.start_x),
+                    start_y=(ny if free_is_start else s.start_y),
+                    end_x=(s.end_x if free_is_start else nx),
+                    end_y=(s.end_y if free_is_start else ny),
+                    width=s.width, layer=s.layer, net_id=s.net_id)
+                if base_disc is None:
+                    base_disc = len(check_net_connectivity(
+                        net_id, all_net_segs, vias, pads_n,
+                        zones_n)['disconnected_pads'])
+                _trial = [x for x in all_net_segs if x is not s] + [_twin]
+                if len(check_net_connectivity(
+                        net_id, _trial, vias, pads_n,
+                        zones_n)['disconnected_pads']) > base_disc:
+                    continue
                 if id(s) in routed_seg_ids:
                     if free_is_start:
                         s.start_x, s.start_y = nx, ny
