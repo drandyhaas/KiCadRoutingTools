@@ -270,11 +270,87 @@ def _point_in_pad(px: float, py: float, pad: Pad, margin: float = 0.0) -> bool:
     return point_to_pad_distance(px, py, pad) <= margin
 
 
+def make_real_fill_validator(pcb_data, net_id, margin: float = 0.25):
+    """Factory for a zone-credit validator: validate(x, y, layer) -> True iff
+    a `margin`-radius disc at (x, y) is clear of every FOREIGN copper item on
+    `layer` -- i.e. real zone fill can provably exist there.
+
+    The zone credit in check_net_connectivity otherwise trusts the pour
+    OUTLINE, which over-credits: a pad inside the outline but in a
+    clearance-carved pocket grades 'plane-connected', and a REMOVAL pass
+    trusting that grade deletes the pad's genuinely load-bearing tap (the
+    bitaxe Q2 shredded-stub opens). Removal gates pass this validator so
+    outline credit only applies where fill can actually flow. Conservative
+    by construction: a False only DENIES credit, which blocks a removal.
+
+    Foreign geometry is bucketed per layer on first use (1mm cells), so each
+    validate() is O(local)."""
+    import math as _m
+    _buckets = {}
+
+    def _build(layer):
+        b = {}
+
+        def _add(x1, y1, x2, y2, reach, obj):
+            for bx in range(int(min(x1, x2) - reach) - 1,
+                            int(max(x1, x2) + reach) + 2):
+                for by in range(int(min(y1, y2) - reach) - 1,
+                                int(max(y1, y2) + reach) + 2):
+                    b.setdefault((bx, by), []).append(obj)
+        for v in pcb_data.vias:
+            if v.net_id != net_id:
+                _add(v.x, v.y, v.x, v.y, v.size / 2 + margin,
+                     ('c', v.x, v.y, v.size / 2))
+        for s in pcb_data.segments:
+            if s.net_id != net_id and s.layer == layer:
+                _add(s.start_x, s.start_y, s.end_x, s.end_y,
+                     s.width / 2 + margin, ('s', s))
+        for plist in pcb_data.pads_by_net.values():
+            for p in plist:
+                if p.net_id == net_id:
+                    continue
+                if p.drill <= 0 and layer not in p.layers \
+                        and '*.Cu' not in p.layers:
+                    continue
+                r = max(p.size_x, p.size_y) / 2
+                _add(p.global_x, p.global_y, p.global_x, p.global_y,
+                     r + margin, ('p', p))
+        return b
+
+    def validate(x, y, layer):
+        b = _buckets.get(layer)
+        if b is None:
+            b = _buckets[layer] = _build(layer)
+        from check_drc import point_to_pad_distance
+        for obj in b.get((int(x), int(y)), ()):
+            kind = obj[0]
+            if kind == 'c':
+                _, cx, cy, r = obj
+                if _m.hypot(x - cx, y - cy) < r + margin:
+                    return False
+            elif kind == 's':
+                s = obj[1]
+                dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+                L2 = dx * dx + dy * dy
+                t = max(0.0, min(1.0, ((x - s.start_x) * dx +
+                                       (y - s.start_y) * dy) / L2)) if L2 else 0.0
+                if _m.hypot(x - (s.start_x + t * dx),
+                            y - (s.start_y + t * dy)) < s.width / 2 + margin:
+                    return False
+            else:
+                if point_to_pad_distance(x, y, obj[1]) < margin:
+                    return False
+        return True
+
+    return validate
+
+
 def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via],
                            pads: List[Pad], zones: List[Zone] = None,
                            tolerance: float = 0.02,
                            verbose: bool = False,
-                           return_graph: bool = False) -> Dict:
+                           return_graph: bool = False,
+                           zone_credit_validator=None) -> Dict:
     """Check connectivity for a single net.
 
     Args:
@@ -443,6 +519,13 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         points_in_zone = []
         for x, y, layer, pid, size in points_on_layer:
             if point_in_polygon(x, y, zone.polygon):
+                # Removal gates pass a fill validator (#outline-over-credit,
+                # bitaxe Q2): outline membership only counts where real fill
+                # can provably exist. GRADING callers pass None and keep the
+                # permissive outline credit.
+                if zone_credit_validator is not None and \
+                        not zone_credit_validator(x, y, zone.layer):
+                    continue
                 points_in_zone.append(pid)
 
         # Connect all points inside this zone together

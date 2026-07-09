@@ -219,7 +219,8 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
 from connectivity import COINCIDENCE_TOL as _STRICT_GATE_WIDTH  # one constant (#320)
 
 
-def _strict_conn_graph(net_id, universe, vias, pads, zones):
+def _strict_conn_graph(net_id, universe, vias, pads, zones,
+                       zone_credit_validator=None):
     """check_net_connectivity graph over width-clamped copies of ``universe``
     (same order, so analyze_conn_excluding indices are interchangeable with
     the physical graph's). Returns (result_dict, graph_or_None)."""
@@ -231,12 +232,14 @@ def _strict_conn_graph(net_id, universe, vias, pads, zones):
         c.width = min(c.width, _STRICT_GATE_WIDTH)
         clamped.append(c)
     r = check_net_connectivity(net_id, clamped, vias, pads, zones,
-                               return_graph=True)
+                               return_graph=True,
+                               zone_credit_validator=zone_credit_validator)
     return r, r.get('graph')
 
 
 def _safe_prune_net(net_id, prunable, vias, pads, zones,
-                    anchor_segments=None, aggressive=False, tol=None):
+                    anchor_segments=None, aggressive=False, tol=None,
+                    zone_credit_validator=None):
     """Prune a net's dead ends, but never at the cost of pad connectivity.
 
     prune_dead_end_segments works on an endpoint-coincidence model that does not
@@ -272,11 +275,14 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
     # daisho plane-repair run on its 18k-segment GND net). PRUNE_CONN_VERIFY=1
     # checks every fast-path count against a real recompute.
     universe = anchor + list(prunable)
-    graph = check_net_connectivity(net_id, universe, vias, pads, zones,
-                                   return_graph=True).get('graph')
+    graph = check_net_connectivity(
+        net_id, universe, vias, pads, zones, return_graph=True,
+        zone_credit_validator=zone_credit_validator).get('graph')
     # Strict twin (#322): removals must ALSO not worsen coincidence-level
     # connectivity, or fat-cap lenses let a chain be chipped hole by hole.
-    _, graph_strict = _strict_conn_graph(net_id, universe, vias, pads, zones)
+    _, graph_strict = _strict_conn_graph(
+        net_id, universe, vias, pads, zones,
+        zone_credit_validator=zone_credit_validator)
     seg_pos = {id(s): i for i, s in enumerate(universe)}
     prunable_ids = [id(s) for s in prunable]
     _verify = os.environ.get('PRUNE_CONN_VERIFY')
@@ -287,15 +293,17 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
             excl = {seg_pos[pid] for pid in prunable_ids if pid not in keep}
             n = len(analyze_conn_excluding(graph, excl)['disconnected_pads'])
             if _verify:
-                ref = len(check_net_connectivity(net_id, anchor + segs, vias, pads,
-                                                 zones)['disconnected_pads'])
+                ref = len(check_net_connectivity(
+                    net_id, anchor + segs, vias, pads, zones,
+                    zone_credit_validator=zone_credit_validator)['disconnected_pads'])
                 assert n == ref, \
                     f"safe-prune fast-path mismatch: net {net_id} ({n} vs {ref})"
             ns = (len(analyze_conn_excluding(graph_strict, excl)['disconnected_pads'])
                   if graph_strict is not None else 0)
             return (n, ns)
-        return (len(check_net_connectivity(net_id, anchor + segs, vias, pads,
-                                           zones)['disconnected_pads']), 0)
+        return (len(check_net_connectivity(
+            net_id, anchor + segs, vias, pads, zones,
+            zone_credit_validator=zone_credit_validator)['disconnected_pads']), 0)
 
     base = disconnected(list(prunable))
     kept = list(prunable)
@@ -922,7 +930,12 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
         vias = [v for v in pcb_data.vias if v.net_id == net_id]
         pads = pcb_data.pads_by_net.get(net_id, [])
         zones = [z for z in all_zones if z.net_id == net_id]
+        _zcv = None
+        if zones:
+            from check_connected import make_real_fill_validator
+            _zcv = make_real_fill_validator(pcb_data, net_id)
         kept, removed = _safe_prune_net(net_id, net_segs, vias, pads, zones,
+                                        zone_credit_validator=_zcv,
                                         aggressive=True, tol=tol)
         # #319: never delete a coincident bridge and leave a soft joint.
         kept, removed = _restore_soft_joint_bridges(kept, removed, vias, pads)
@@ -998,9 +1011,15 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
                 continue
             pads = pcb_data.pads_by_net.get(net_id, [])
             zones = [z for z in all_zones if z.net_id == net_id]
-            before = check_net_connectivity(net_id, kept, net_vias_all, pads, zones)
+            _zcv3 = None
+            if zones:
+                from check_connected import make_real_fill_validator
+                _zcv3 = make_real_fill_validator(pcb_data, net_id)
+            before = check_net_connectivity(net_id, kept, net_vias_all, pads,
+                                            zones, zone_credit_validator=_zcv3)
             keep_v = [v for v in net_vias_all if id(v) not in removed_via_ids]
-            after = check_net_connectivity(net_id, kept, keep_v, pads, zones)
+            after = check_net_connectivity(net_id, kept, keep_v, pads, zones,
+                                           zone_credit_validator=_zcv3)
             if (before.get('connected') and not after.get('connected')) or \
                len(after.get('disconnected_pads') or []) > len(before.get('disconnected_pads') or []) or \
                (after.get('num_components') or 1) > (before.get('num_components') or 1):
@@ -1471,13 +1490,19 @@ def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None
                     end_y=(s.end_y if free_is_start else ny),
                     width=s.width, layer=s.layer, net_id=s.net_id)
                 if base_disc is None:
+                    _zcv_t = None
+                    if zones_n:
+                        from check_connected import make_real_fill_validator
+                        _zcv_t = make_real_fill_validator(pcb_data, net_id)
+                    _trim_zcv = _zcv_t
                     base_disc = len(check_net_connectivity(
-                        net_id, all_net_segs, vias, pads_n,
-                        zones_n)['disconnected_pads'])
+                        net_id, all_net_segs, vias, pads_n, zones_n,
+                        zone_credit_validator=_trim_zcv)['disconnected_pads'])
                 _trial = [x for x in all_net_segs if x is not s] + [_twin]
                 if len(check_net_connectivity(
-                        net_id, _trial, vias, pads_n,
-                        zones_n)['disconnected_pads']) > base_disc:
+                        net_id, _trial, vias, pads_n, zones_n,
+                        zone_credit_validator=_trim_zcv)['disconnected_pads']) \
+                        > base_disc:
                     continue
                 if id(s) in routed_seg_ids:
                     if free_is_start:
@@ -2018,14 +2043,20 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
         # back to per-candidate recompute if the graph is unavailable, and an
         # env-gated assertion (PRUNE_CONN_VERIFY=1) checks the fast path against a
         # real recompute on every trial during verification.
+        _zcv = None
+        if net_zones:
+            from check_connected import make_real_fill_validator
+            _zcv = make_real_fill_validator(pcb_data, net_id)
         before = check_net_connectivity(net_id, net_segs, net_vias, net_pads,
-                                        net_zones, return_graph=True)
+                                        net_zones, return_graph=True,
+                                        zone_credit_validator=_zcv)
         graph = before.get('graph')
         # Strict twin (#322): see _STRICT_GATE_WIDTH. A mid-chain removal whose
         # hole is lens-bridged by fat caps passes the physical gate; the strict
         # gate sees the split immediately.
         before_strict, graph_strict = _strict_conn_graph(
-            net_id, net_segs, net_vias, net_pads, net_zones)
+            net_id, net_segs, net_vias, net_pads, net_zones,
+            zone_credit_validator=_zcv)
         seg_pos = {id(s): i for i, s in enumerate(net_segs)}
         _verify = os.environ.get('PRUNE_CONN_VERIFY')
         dropped = []
@@ -3392,7 +3423,12 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
         net_vias.extend([v for v in pcb_data.vias if v.net_id == net_id])
         net_pads = pcb_data.pads_by_net.get(net_id, [])
         net_zones = [z for z in all_zones if z.net_id == net_id]
+        _zcv2 = None
+        if net_zones:
+            from check_connected import make_real_fill_validator
+            _zcv2 = make_real_fill_validator(pcb_data, net_id)
         kept_net, _ = _safe_prune_net(net_id, net_new, net_vias, net_pads, net_zones,
+                                      zone_credit_validator=_zcv2,
                                       anchor_segments=anchor, aggressive=False)
         pruned_segments.extend(kept_net)
     cleaned_segments = pruned_segments
