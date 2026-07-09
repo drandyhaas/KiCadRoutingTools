@@ -719,6 +719,14 @@ def _subsample_cell_points(cells, coord, max_pts: int = 400):
 def _real_fill_point(pt, net_id, pcb_data, zone_polys, plane_layer,
                      margin: float) -> bool:
     from check_connected import point_in_polygon
+    # A point inside a FOREIGN zone outline on this layer may be copper owned
+    # by a higher-priority foreign pour (Zone has no parsed priority yet, so
+    # reject conservatively -- the join falls back to real anchors).
+    for z in (getattr(pcb_data, 'zones', []) or []):
+        if z.net_id != net_id and z.layer == plane_layer \
+                and getattr(z, 'polygon', None) \
+                and point_in_polygon(pt[0], pt[1], z.polygon):
+            return False
     """True when a disc of radius `margin` around pt provably sits in REAL
     zone fill: fully inside one outline and at least `margin` clear of every
     foreign copper item on the plane layer (the coarse flood model blurs the
@@ -974,6 +982,7 @@ def _try_route_between_regions(
     _attempt_count = 0
     _total_route_time = 0.0
     _attempt_details = []
+    _any_exhausted = False
 
     def _try_route(src, tgt, margin, iters, label):
         """Helper to attempt one route and track stats."""
@@ -994,11 +1003,14 @@ def _try_route_between_regions(
         _dt = _time.time() - _t0
         _attempt_count += 1
         _total_route_time += _dt
+        nonlocal _any_exhausted
+        if not result and used_iters >= iters * 0.95:
+            _any_exhausted = True
         _attempt_details.append(f"{label} {'OK' if result else 'fail'} {_dt:.2f}s/{used_iters}it")
         return result, used_iters
 
     if not anchors_i or not anchors_j:
-        return None, min_track_width, None
+        return None, min_track_width, None, False
 
     # Generate width steps: min, min*2, min*4, ..., up to max
     track_widths_narrow_first = [min_track_width]
@@ -1107,7 +1119,7 @@ def _try_route_between_regions(
     if verbose:
         print(f"({_attempt_count} attempts, {_total_route_time:.1f}s: {'; '.join(_attempt_details)}) ", end="", flush=True)
 
-    return result, track_width, open_space_via
+    return result, track_width, open_space_via, _any_exhausted
 
 
 # Cap on how many anchors of a region are fed into the connection A* as
@@ -1253,7 +1265,7 @@ def route_disconnected_regions(
                        if z.net_id == net_id and getattr(z, 'polygon', None)]
         _plane_layer_name = [l for l, i in layer_map.items()
                              if i == plane_layer_idx][0]
-        _margin = zone_clearance
+        _margin = zone_clearance + min_track_width / 2
 
         def _valid_fill(pt):
             return _real_fill_point(pt, net_id, pcb_data, _zone_polys,
@@ -1293,23 +1305,27 @@ def route_disconnected_regions(
             )
 
         # Try routing with multiple track widths using helper function
-        result, track_width, open_space_via = _connect(seed_i, seed_j)
+        result, track_width, open_space_via, _exhausted = _connect(seed_i, seed_j)
 
         # Fallback: if the reduced-anchor route failed, retry with the full
         # region anchor sets (the original, slower behavior) so we never miss a
         # connection that the full set would have found.
         if result is None and reduced:
             print(f"{YELLOW}retry-full{RESET} ", end="", flush=True)
-            result, track_width, open_space_via = _connect(full_i, full_j)
+            result, track_width, open_space_via, _ex2 = _connect(full_i, full_j)
+            _exhausted = _exhausted or _ex2
 
         # Budget escalation (#217 castor +3.3VA): every failing attempt above
         # exhausted the default 200k cap without exhausting the SPACE -- at
         # 1M the same edges route. Boost once before giving up; a join is a
         # rare last-resort event, so the extra budget costs nothing on
         # healthy boards.
-        if result is None and max_iterations < 1_000_000:
+        # Escalate ONLY when some attempt actually ran out of budget: a
+        # fast fail means walls, and 5x the budget just burns ~12M
+        # iterations per genuinely-impossible edge (review finding).
+        if result is None and max_iterations < 1_000_000 and _exhausted:
             print(f"{YELLOW}budget-x5{RESET} ", end="", flush=True)
-            result, track_width, open_space_via = _try_route_between_regions(
+            result, track_width, open_space_via, _ = _try_route_between_regions(
                 full_i, full_j,
                 base_obstacles=base_obstacles,
                 plane_layer_idx=plane_layer_idx,
@@ -1351,7 +1367,7 @@ def route_disconnected_regions(
                         hole_to_hole_clearance)
             print(f"{YELLOW}narrow-width {config.track_width:.3f}{RESET} ",
                   end="", flush=True)
-            result, track_width, open_space_via = _try_route_between_regions(
+            result, track_width, open_space_via, _ = _try_route_between_regions(
                 full_i, full_j,
                 base_obstacles=narrow_obstacles,
                 plane_layer_idx=plane_layer_idx,
@@ -1375,6 +1391,13 @@ def route_disconnected_regions(
             continue
 
         route_points, via_positions = result
+        # Collapse same-layer collinear grid steps into long segments (the
+        # oracle's emission got this; joins shipped raw 0.05mm stubs). Via
+        # positions stay as vertices.
+        from kicad_oracle import _merge_collinear
+        route_points = _merge_collinear(
+            route_points,
+            keep={(round(vx, 3), round(vy, 3)) for vx, vy in via_positions})
 
         # Calculate actual route length
         route_length = 0.0

@@ -1335,10 +1335,19 @@ Examples:
             clearance=args.clearance, track_width=args.track_width,
             via_size=args.via_size, via_drill=args.via_drill,
             grid_step=args.grid_step)
-        oracle_reconnect(args.output_file, net_names, _ocfg,
-                         track_via_clearance=args.track_via_clearance,
-                         hole_to_hole_clearance=args.hole_to_hole_clearance,
-                         verbose=args.verbose)
+        _orc = oracle_reconnect(args.output_file, net_names, _ocfg,
+                                track_via_clearance=args.track_via_clearance,
+                                hole_to_hole_clearance=args.hole_to_hole_clearance,
+                                verbose=args.verbose)
+        try:
+            import json as _json
+            print('JSON_ORACLE: ' + _json.dumps(_orc))
+        except Exception:
+            pass
+        if not _orc.get('available'):
+            print('NOTE: kicad-cli not found -- the oracle reconnect pass '
+                  'did not run; output may differ from machines that have '
+                  'KiCad installed (replay-determinism caveat).')
 
     # Make the output project's DRC design rules consistent with the floors we
     # just routed to (issue #160), mirroring route_planes.py, so a manual DRC in

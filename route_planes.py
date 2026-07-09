@@ -3029,6 +3029,9 @@ Examples:
                         help="Keep an existing same-net zone (don't recreate) and only place stitching vias; "
                              "tolerate other-net zones on the same layer (e.g. a GND island under an RF feed)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Print detailed DEBUG messages")
+    parser.add_argument("--no-kicad-recheck", action="store_true",
+                        help="Skip the kicad-cli-verified reconnect pass on the output "
+                             "(runs by default when kicad-cli is installed)")
     parser.add_argument("--debug-lines", action="store_true", help="Output MST routes on User.1, User.2, etc. per net")
     parser.add_argument("--add-teardrops", action="store_true", help="Add teardrop settings to all pads in output file")
 
@@ -3214,6 +3217,28 @@ Examples:
                                                 args.clearance, args.grid_step)
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
+
+    # KiCad-oracle recheck (#217): parity with route_disconnected_planes --
+    # this front writes the very plane copper the oracle was built to verify.
+    if not args.dry_run and not args.no_kicad_recheck and args.output_file:
+        from kicad_oracle import oracle_reconnect
+        from routing_config import GridRouteConfig as _GRC
+        _ocfg = _GRC(clearance=args.clearance, track_width=args.track_width,
+                     via_size=args.via_size, via_drill=args.via_drill,
+                     grid_step=args.grid_step)
+        _orc = oracle_reconnect(
+            args.output_file, net_names, _ocfg,
+            track_via_clearance=getattr(args, 'track_via_clearance', 0.2) or 0.2,
+            hole_to_hole_clearance=args.hole_to_hole_clearance)
+        try:
+            import json as _json
+            print('JSON_ORACLE: ' + _json.dumps(_orc))
+        except Exception:
+            pass
+        if not _orc.get('available'):
+            print('NOTE: kicad-cli not found -- the oracle reconnect pass '
+                  'did not run; output may differ from machines that have '
+                  'KiCad installed (replay-determinism caveat).')
 
     # Make the output project's KiCad DRC constraints consistent with the routed
     # clearances/sizes (issue #160); only edits the .kicad_pro, never the board.
