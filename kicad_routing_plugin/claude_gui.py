@@ -565,9 +565,10 @@ class ClaudeTab(wx.Panel):
         activity_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.elapsed_label = wx.StaticText(self, label="")
         activity_sizer.Add(self.elapsed_label, 0,
-                           wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+                           wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16)
         self.gauge = wx.Gauge(self, range=100)
         activity_sizer.Add(self.gauge, 1, wx.EXPAND)
+        self._activity_sizer = activity_sizer
         sizer.Add(activity_sizer, 0,
                   wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
@@ -580,6 +581,18 @@ class ClaudeTab(wx.Panel):
             "The machine-readable last line of Claude's reply (RESULT=...), "
             "demonstrating how skill output will populate GUI fields.")
         parsed_sizer.Add(self.parsed_ctrl, 1, wx.EXPAND)
+        self.save_plan_btn = wx.Button(self, label="Save...")
+        self.save_plan_btn.SetToolTip(
+            "Save the current plan steps to a JSON file (replay later with "
+            "Load - no Claude run needed)")
+        self.save_plan_btn.Bind(wx.EVT_BUTTON, self._on_save_plan)
+        parsed_sizer.Add(self.save_plan_btn, 0, wx.LEFT, 5)
+        self.load_plan_btn = wx.Button(self, label="Load...")
+        self.load_plan_btn.SetToolTip(
+            "Load plan steps from a JSON file (a saved plan, or one exported "
+            "by tests/stress/manifest_to_plan.py from a stress-test manifest)")
+        self.load_plan_btn.Bind(wx.EVT_BUTTON, self._on_load_plan)
+        parsed_sizer.Add(self.load_plan_btn, 0, wx.LEFT, 5)
         sizer.Add(parsed_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         # Full output across the whole width at the bottom
@@ -802,9 +815,17 @@ class ClaudeTab(wx.Panel):
             self.output_ctrl.AppendText("\nPlan was unusable - nothing applied.\n")
             return
 
+        self._install_plan_steps(steps)
+
+    def _install_plan_steps(self, steps):
+        """Adopt a validated step list (from a fresh plan OR a loaded plan
+        file): populate the checklist and pre-fill the tabs."""
+        from .claude_plan import step_label, apply_step_params, \
+            apply_step_selection
         self._plan_steps = steps
         self.plan_list.Set([step_label(i + 1, s) for i, s in enumerate(steps)])
         self.plan_list.SetCheckedItems(range(len(steps)))
+        self.run_plan_btn.Enable(bool(steps) and self.routing_dialog is not None)
 
         # Fill the tabs so each step can be reviewed in its native controls.
         # (Selections of same-action steps overwrite each other here; they are
@@ -825,6 +846,52 @@ class ClaudeTab(wx.Panel):
             "press 'Run Selected Steps'.\n")
         self.run_plan_btn.Enable()
         self._log(f"Claude plan: {len(steps)} steps loaded")
+
+    def _on_save_plan(self, event):
+        if not self._plan_steps:
+            wx.MessageBox("No plan steps to save. Run Plan Routing first "
+                          "(or Load a plan file).", "Claude",
+                          wx.OK | wx.ICON_WARNING)
+            return
+        with wx.FileDialog(self, "Save plan", wildcard="Plan JSON (*.json)|*.json",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            path = dlg.GetPath()
+        try:
+            import json
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"steps": self._plan_steps}, f, indent=2)
+            self._log(f"Claude plan: saved {len(self._plan_steps)} step(s) to {path}")
+            self.output_ctrl.AppendText(f"\nPlan saved to {path}\n")
+        except Exception as e:
+            wx.MessageBox(f"Could not save plan:\n{e}", "Claude",
+                          wx.OK | wx.ICON_ERROR)
+
+    def _on_load_plan(self, event):
+        from .claude_plan import parse_plan_result
+        with wx.FileDialog(self, "Load plan", wildcard="Plan JSON (*.json)|*.json",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            path = dlg.GetPath()
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except Exception as e:
+            wx.MessageBox(f"Could not read plan file:\n{e}", "Claude",
+                          wx.OK | wx.ICON_ERROR)
+            return
+        steps, errors = parse_plan_result(text)
+        for message in errors:
+            self.output_ctrl.AppendText(f"plan: {message}\n")
+        if steps is None:
+            wx.MessageBox("The file is not a usable plan (see the transcript "
+                          "for details).", "Claude", wx.OK | wx.ICON_ERROR)
+            return
+        self.parsed_ctrl.SetValue(f"Loaded from {path}")
+        self._log(f"Claude plan: loaded {len(steps)} step(s) from {path}")
+        self._install_plan_steps(steps)
 
     def _on_run_selected(self, event):
         from .claude_plan import PlanExecutor
@@ -867,6 +934,7 @@ class ClaudeTab(wx.Panel):
         if label and label != 'Ready':
             text += f" - {label}"
         self.elapsed_label.SetLabel(text)
+        self.Layout()
         try:
             if self.gauge.GetRange() != rng and rng > 0:
                 self.gauge.SetRange(rng)
@@ -917,6 +985,7 @@ class ClaudeTab(wx.Panel):
         self._elapsed_seconds += 1
         mins, secs = divmod(self._elapsed_seconds, 60)
         self.elapsed_label.SetLabel(f"{mins}m {secs:02d}s" if mins else f"{secs}s")
+        self.Layout()
         self.gauge.Pulse()
 
     def _on_close(self, event):
