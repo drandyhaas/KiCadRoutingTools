@@ -46,6 +46,11 @@ PLAN_RESULT_SCHEMA = (
     '"grid_step": <mm>, "analysis_grid_step": <mm>, "repair_pads": true|false, '
     '"rip_blocker_nets": true|false}} '
     ']} '
+    'In any step, params MAY additionally include ANY option shown on that '
+    'tab or the shared options panel, keyed by its snake_case field name '
+    '(e.g. max_iterations, max_ripup, grid_step, board_edge_clearance, '
+    'hole_to_hole_clearance, via_cost, heuristic_weight, turn_cost, '
+    'ordering_strategy) - unknown names are ignored with a note. '
     'List steps in execution order: fanout first, then route_diff, then route, '
     'then route_planes, then repair_planes - signals route before planes because '
     'plane stitching vias can adapt around tracks, but a via placed early can '
@@ -155,31 +160,85 @@ def apply_step_params(step, dialog):
     notes = []
     action = step["action"]
     params = step.get("params") or {}
-    # Options-panel fields shared by route/route_diff steps: the CLI chains
-    # set these routinely (--max-iterations 1000000, --max-ripup 10,
-    # --grid-step 0.05 ...); silently dropping them made a GUI plan run at
-    # panel defaults and diverge from the stress chain (parity gap #3).
-    _OPTION_FIELDS = ("max_iterations", "max_ripup", "grid_step",
-                      "board_edge_clearance", "hole_to_hole_clearance",
-                      "via_cost", "heuristic_weight", "max_probe_iterations",
-                      "turn_cost")
-    if action in ("route", "route_diff"):
-        for name in _OPTION_FIELDS:
-            if name in params:
-                ctrl = getattr(dialog, name, None)
-                if ctrl is None:
-                    notes.append(f"no control for {name}, ignored")
-                    continue
-                try:
-                    val = float(params[name])
-                    ctrl.SetValue(int(val) if val == int(val)
-                                  and name in ("max_iterations", "max_ripup",
-                                               "via_cost", "turn_cost",
-                                               "max_probe_iterations")
-                                  else val)
-                    notes.append(f"set {name}={params[name]}")
-                except (TypeError, ValueError):
-                    notes.append(f"ignored non-numeric {name}={params[name]!r}")
+    # ANY GUI parameter (Andy): a plan step's params may name any control
+    # on the step's tab or the shared options panels; resolve by attribute
+    # name and coerce by control type. Composite fields with special
+    # formatting (power_nets pairs, diff geometry, assignments) are handled
+    # by the action-specific blocks below, which run AFTER and win.
+    _GENERIC_SKIP = {
+        "route": {"track_width", "clearance", "via_size", "via_drill",
+                  "power_nets", "power_nets_widths", "layer_costs"},
+        "route_diff": {"diff_pair_width", "diff_pair_gap", "impedance",
+                       "layer_costs"},
+        "route_planes": {"add_gnd_vias", "gnd_via_distance", "gnd_via_net"},
+        "repair_planes": set(),
+        "fanout": set(),
+    }
+
+    def _owners():
+        d = dialog
+        if action == "route_diff":
+            t = getattr(d, "differential_tab", None)
+            return [t, d] if t is not None else [d]
+        if action == "fanout":
+            t = getattr(d, "fanout_tab", None)
+            return [t, d] if t is not None else [d]
+        if action in ("route_planes", "repair_planes"):
+            t = getattr(d, "planes_tab", None)
+            subs = []
+            if t is not None:
+                for sub in ("create_options", "repair_options"):
+                    s = getattr(t, sub, None)
+                    if s is not None:
+                        subs.append(s)
+                subs.append(t)
+            subs.append(d)
+            return subs
+        return [d]
+
+    def _set_control(owner, name, value):
+        ctrl = getattr(owner, name, None)
+        if ctrl is None:
+            return False
+        import wx
+        try:
+            if isinstance(ctrl, wx.CheckBox):
+                ctrl.SetValue(bool(value))
+            elif isinstance(ctrl, (wx.SpinCtrl,)):
+                ctrl.SetValue(int(float(value)))
+            elif isinstance(ctrl, wx.SpinCtrlDouble):
+                ctrl.SetValue(float(value))
+            elif isinstance(ctrl, wx.Choice):
+                idx = ctrl.FindString(str(value))
+                if idx == wx.NOT_FOUND:
+                    return False
+                ctrl.SetSelection(idx)
+            elif hasattr(ctrl, "SetValue"):
+                if isinstance(value, (list, tuple)):
+                    ctrl.SetValue(" ".join(str(v) for v in value))
+                elif isinstance(value, bool):
+                    ctrl.SetValue(value)
+                else:
+                    ctrl.SetValue(str(value))
+            else:
+                return False
+            return True
+        except Exception:
+            return False
+
+    _skip = _GENERIC_SKIP.get(action, set())
+    for name, value in list(params.items()):
+        if name in _skip:
+            continue
+        placed = False
+        for owner in _owners():
+            if owner is not None and _set_control(owner, name, value):
+                notes.append(f"set {name}={value}")
+                placed = True
+                break
+        if not placed and name not in _skip:
+            notes.append(f"no control for {name}, ignored")
+
     if action == "route":
         for name in ("track_width", "clearance", "via_size", "via_drill"):
             if name in params:
@@ -501,10 +560,7 @@ class PlanExecutor:
         try:
             import os
             import clearance_ledger
-            from fix_kicad_drc_settings import fix_project_for_output
             board_file = getattr(self.dialog, 'board_filename', None)
-            if not board_file or not os.path.isfile(board_file):
-                return
             clearance = None
             track_width = None
             for step in self.steps:
@@ -516,11 +572,39 @@ class PlanExecutor:
             if clearance is None:
                 return
             eff = clearance_ledger.effective(clearance)
-            fix_project_for_output(board_file, input_pcb=board_file,
-                                   clearance=eff,
-                                   track_width=track_width)
-            self.log(f"Claude plan: recorded DRC floors in the project file "
-                     f"(clearance {eff:.4g})")
+            # LIVE settings first: KiCad holds project settings in memory,
+            # so editing the .kicad_pro on disk is invisible to a DRC run
+            # right after the plan (and liable to be clobbered when KiCad
+            # saves the project). The design-settings API updates the open
+            # session immediately and persists on the user's next save.
+            try:
+                import pcbnew
+                board = pcbnew.GetBoard()
+                if board is not None:
+                    bds = board.GetDesignSettings()
+                    bds.m_MinClearance = pcbnew.FromMM(eff)
+                    if track_width:
+                        bds.m_TrackMinWidth = pcbnew.FromMM(track_width)
+                    try:
+                        for _name, _nc in board.GetNetClasses().items():
+                            if _name == 'Default':
+                                _nc.SetClearance(pcbnew.FromMM(eff))
+                    except Exception:
+                        pass
+                    self.log(f"Claude plan: live DRC settings updated "
+                             f"(min clearance {eff:.4g}mm)")
+            except Exception as e:
+                self.log(f"Claude plan: live DRC settings skipped: {e}")
+            # Best-effort persistence for a later close/reopen; note KiCad
+            # may overwrite this if it saves its in-memory project state.
+            if board_file and os.path.isfile(board_file):
+                from fix_kicad_drc_settings import fix_project_for_output
+                fix_project_for_output(board_file, input_pcb=board_file,
+                                       clearance=eff,
+                                       track_width=track_width)
+                self.log(f"Claude plan: recorded DRC floors in the project "
+                         f"file (clearance {eff:.4g}; live session already "
+                         f"updated via the API)")
         except Exception as e:
             self.log(f"Claude plan: DRC floor write skipped: {e}")
 

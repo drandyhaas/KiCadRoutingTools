@@ -3037,9 +3037,6 @@ Examples:
                         help="Keep an existing same-net zone (don't recreate) and only place stitching vias; "
                              "tolerate other-net zones on the same layer (e.g. a GND island under an RF feed)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Print detailed DEBUG messages")
-    parser.add_argument("--no-kicad-recheck", action="store_true",
-                        help="Skip the kicad-cli-verified reconnect pass on the output "
-                             "(runs by default when kicad-cli is installed)")
     parser.add_argument("--debug-lines", action="store_true", help="Output MST routes on User.1, User.2, etc. per net")
     parser.add_argument("--add-teardrops", action="store_true", help="Add teardrop settings to all pads in output file")
 

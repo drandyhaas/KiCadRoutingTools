@@ -210,6 +210,16 @@ Pass the computed `--via-size via --via-drill via_drill --track-width track
 escape even at the fab floor → switch to `--escape-method underpad` and/or add
 escape layers; don't ship the graze.
 
+**Plan params can set ANY GUI option:** in the GUI's RESULT schema, each
+step's `params` may include any option shown on that step's tab or the shared
+options panel, keyed by its snake_case field name (`max_iterations`,
+`max_ripup`, `grid_step`, `board_edge_clearance`, `hole_to_hole_clearance`,
+`via_cost`, `heuristic_weight`, `turn_cost`, `ordering_strategy`, ...).
+Unknown names are ignored with a note in the plan log. Use this to carry the
+same values the equivalent CLI chain would pass (e.g. `--max-iterations
+1000000 --max-ripup 10 --grid-step 0.05`), so a GUI plan run matches a stress
+run step for step.
+
 **Why this heuristic matters for the GUI:** the plugin runs `/plan-pcb-routing` in
 *plan-only* mode — it never executes the fanout and never runs the DRC↔smaller-via
 retry loop, so it cannot discover a too-big via after the fact and shrink it. The

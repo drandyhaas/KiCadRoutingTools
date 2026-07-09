@@ -1512,10 +1512,15 @@ class PlanesTab(wx.Panel):
             self.sync_pcb_data_callback()
 
         # LAST: with every zone/via/track now on the live board, run the
-        # kicad-oracle recheck exactly like the CLI mains do on their
+        # kicad-oracle recheck exactly like the CLI repair front does on its
         # written output (temp-save the board, route the reported links,
-        # apply the copper).
-        self._run_kicad_oracle_after_apply(board)
+        # apply the copper). REPAIR MODE ONLY -- after plane CREATION the
+        # gaps are the repair step's job, and stitching them early is
+        # premature copper (the CLI create front dropped its oracle hook
+        # for the same reason).
+        _result = getattr(self, '_operation_result', {}) or {}
+        if _result.get('mode') == 'repair':
+            self._run_kicad_oracle_after_apply(board)
 
     def get_assignments(self):
         """Get list of net→layer assignments."""
