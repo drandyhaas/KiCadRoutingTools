@@ -190,7 +190,7 @@ def _gui_route_config(step):
         'turn_cost': 1000,
         'direction_preference_cost': 50,
         'max_ripup': step.get('max_ripup', 3),
-        'ordering_strategy': 'inside_out',
+        'ordering_strategy': 'mps',  # the real GUI default (Choice idx 0)
         'direction': None,
         'stub_proximity_radius': 2.0,
         'stub_proximity_cost': 0.2,
@@ -215,10 +215,30 @@ def _resolve_nets(pcb_data, globs):
     return _match_net_names(pcb_data, globs)
 
 
+GUI_INPUT_MODE = os.environ.get('GUI_PARITY_INPUT', 'builder')
+
+
+def _gui_pcb_data(board, board_path):
+    """builder = the real GUI path (build_pcb_data_from_board).
+    parser = DIAGNOSTIC: temp-save the board and text-parse it, isolating
+    the input-representation fork from everything else."""
+    from kicad_parser import build_pcb_data_from_board, parse_kicad_pcb
+    if GUI_INPUT_MODE == 'parser':
+        import pcbnew
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.kicad_pcb',
+                                         delete=False) as f:
+            tmp = f.name
+        pcbnew.SaveBoard(tmp, board)
+        data = parse_kicad_pcb(tmp)
+        os.unlink(tmp)
+        return data
+    return build_pcb_data_from_board(board)
+
+
 def _gui_route_step(swig_gui, board, board_path, step):
-    from kicad_parser import build_pcb_data_from_board
     from route import batch_route
-    pcb_data = build_pcb_data_from_board(board)
+    pcb_data = _gui_pcb_data(board, board_path)
     config = _gui_route_config(step)
     config['layers'] = list(pcb_data.board_info.copper_layers)
     step = dict(step, nets=_resolve_nets(pcb_data, step['nets']))
@@ -285,8 +305,7 @@ def _make_planes_shim(planes_gui, board, board_path, pcb_data):
 
 
 def _gui_planes_step(planes_gui, board, board_path, step, mode):
-    from kicad_parser import build_pcb_data_from_board
-    pcb_data = build_pcb_data_from_board(board)
+    pcb_data = _gui_pcb_data(board, board_path)
     tab = _make_planes_shim(planes_gui, board, board_path, pcb_data)
     if mode == 'create':
         config = {

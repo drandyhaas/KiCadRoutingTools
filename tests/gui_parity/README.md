@@ -30,3 +30,20 @@ A* tie-breaks diverge on the first sub-micron difference, and the .kicad_pro
 floor carryover differs per step. Both outputs are equally valid; making
 them bit-identical would require a canonical PCBData representation shared
 by both fronts (open follow-up).
+
+## Command/input identity findings (2026-07-08)
+
+- Harness bug found by asking 'were the commands the same?': the GUI leg
+  hardcoded ordering_strategy='inside_out' while the real GUI default (and
+  CLI default) is 'mps'. Fixed; the two legs now run the same effective
+  parameters.
+- With commands matched: 381/~1200 segments common. With the
+  GUI_PARITY_INPUT=parser diagnostic (GUI leg text-parses a temp-saved
+  board, isolating the builder-vs-parser representation): 444/~1200.
+- Conclusion: the dominant copper fork is NOT parameters and NOT coordinate
+  representation -- it is item ORDERING (pcbnew re-save normalizes element
+  order; MPS ordering, spatial-index insertion and A* tie-breaks all follow
+  it) plus the CLI chain's per-step .kicad_pro floor carryover. Grade
+  parity is unaffected. Bit-identical copper would require engine-level
+  order canonicalization (sort nets/pads/segments deterministically before
+  routing) -- a follow-up decision, not a bug.
