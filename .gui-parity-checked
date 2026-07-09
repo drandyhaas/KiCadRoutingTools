@@ -1,21 +1,25 @@
-d5a9d90cc1170ba2c8c1c4d057bde47bc1856493 2026-07-08 audited 767ef1e..HEAD (14 commits); 0 gaps needing fixes (1 GUI fix landed in-range).
-- Shared-engine, both fronts automatically: region-join fill-cell seeding/closest-approach/
-  budget-escalation/validity (8a967d3/602c7d9/d5a9d90), cleanup-pass hardening + collapse
-  copper-component gate + trim_dangles connectivity gate (763736d), phase-3 synthetic-result
-  acceptance (2c9c64e), checker fixes (763736d/ae0f614).
-- VERIFIED parity-critical details:
-  * exact custom-pad geometry in check_connected._point_in_pad depends on pad.polygons --
-    build_pcb_data_from_board populates it via GetEffectivePolygon (kicad_parser.py:2953),
-    so GUI-built boards get the same exact-shape grading as parsed files;
-  * orphan-island via strips flow to the GUI: cleanup input_strip_vias -> route.py
-    stale_input_vias merge (route.py:~1147) -> results_data['vias_to_remove'] (route.py:1444)
-    -> swig_gui.py:3091 removal loop.
-- GUI-side fix landed in-range: board_swaps handles #340 'added_seg' connector mods by
-  creating the track (was KeyError('start') aborting apply midway) (2c9c64e).
-- Deliberate CLI-only (documented): kicad-oracle reconnect + --no-kicad-recheck flags on both
-  plane fronts (597943c..993a5f7, d5a9d90) -- the GUI runs inside pcbnew where real fills are
-  native; a future GUI equivalent should use them directly, not shell kicad-cli. route.py
-  end-of-run reconciliation remains guarded off for return_results (GUI contract unchanged).
-- No GUI action needed: JSON_ORACLE summary lines and the kicad-cli-absent determinism NOTE
-  (CLI stdout only); stub_layer_switching h2h now reads config.hole_to_hole_clearance with a
-  0.2 fallback (GUI configs lacking the field degrade to the old constant, no wiring needed).
+280009bdfb4c25bae980451ab8fcebbbed3c00ac 2026-07-09 audited d5a9d90..HEAD (30 commits); 0 gaps needing fixes.
+- Most of the range IS GUI-side work (claude tab: status mirror/relocation, model aliases,
+  Save/Load plan + .json wildcard, plan-install defaults reset incl. tab panels + fanout,
+  any-parameter mapping with aliases/special fields, per-step live DRC floors, oracle
+  Log-tab visibility, added_seg fix, plan log symmetry) or dual-front features built for
+  parity (in-engine reconciliation for return_results, in-memory repair cleanup +
+  self-reconnect + 6-tuple strip channel with the planes-applier unpack updated in the
+  same commit, repair-only oracle both fronts).
+- Shared-engine changes ride both fronts automatically: outline-over-credit closure
+  (zone_credit_validator + make_real_fill_validator in check_connected, wired through
+  every removal gate in pcb_modification), base-disconnected-component protection
+  (b696305), tap protected_pads (inside the route_disconnected_planes engine fn),
+  oracle rework (zone-kind expansion, fill-flow margins, two-short-links, drill guard),
+  GND-stitching fixes in add_gnd_vias (ring shortfall, grid snap).
+- VERIFIED parity details:
+  * GUI stitching already used ALL board copper layers (_get_all_copper_layers), so the
+    5c4a9f8 route_planes all-layers fix brought the CLI UP TO the GUI's behavior;
+  * route_planes' create-front cleanup_plane_taps_grazing call passes no protected_pads
+    -- covered by the generic gate-level base-disconnected protection (defense layer the
+    repair front has in addition);
+  * changed signatures (_safe_prune_net zone_credit_validator, cleanup_plane_taps_grazing
+    protected_pads) default-compat: external callers (tests, route_planes) unchanged pass.
+- CLI-only by design: KICAD_DUMP_BATCH_KWARGS probe (env-gated), manifest_to_plan.py
+  (produces GUI-loadable plans -- the tool exists to CROSS the fronts),
+  route_planes --no-kicad-recheck flag removed (its consumer was removed in-range).
