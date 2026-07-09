@@ -38,8 +38,11 @@ def find_kicad_cli() -> Optional[str]:
     return None
 
 
-_NET_RE = re.compile(r'\[([^\]]+)\]')
-_LAYER_RE = re.compile(r'\bon ([A-Za-z0-9_.]+\.Cu)\b')
+# Greedy: a net name may itself contain ']' (the old lazy match truncated
+# 'BUS[3]' to 'BUS[3' and the link silently vanished). Descriptions carry
+# exactly one bracket pair around the net, so greedy is safe.
+_NET_RE = re.compile(r'\[(.*)\]')
+_LAYER_RE = re.compile(r'\bon ([A-Za-z0-9_.]+\.Cu)\b(?!\s*-)')
 
 
 def _parse_item(item: dict) -> Optional[Tuple[str, float, float, Optional[str]]]:
@@ -49,9 +52,9 @@ def _parse_item(item: dict) -> Optional[Tuple[str, float, float, Optional[str]]]
     m = _NET_RE.search(desc)
     if m is None or 'x' not in pos:
         return None
-    lm = _LAYER_RE.search(desc)
-    # Vias span layers ("on F.Cu - B.Cu" doesn't match the single-layer re);
-    # layer None lets the router stamp all layers at a via position.
+    lm = None if ' - ' in desc else _LAYER_RE.search(desc)
+    # Vias span layers ("on F.Cu - B.Cu"); layer None lets the router stamp
+    # all layers at a via position.
     return (m.group(1), float(pos['x']), float(pos['y']),
             lm.group(1) if lm else None)
 
@@ -296,9 +299,11 @@ def _island_seed_points(cells, step, pcb_data, net_id, layer,
     return pts
 
 
-def _merge_collinear(route_points):
+def _merge_collinear(route_points, keep=frozenset()):
     """Collapse same-layer collinear runs of raw grid steps into single
-    long segments, matching how other tracks are written."""
+    long segments, matching how other tracks are written. Points in `keep`
+    (via positions) always stay as vertices so every via sits on a segment
+    endpoint."""
     if len(route_points) < 3:
         return route_points
     out = [route_points[0]]
@@ -307,7 +312,9 @@ def _merge_collinear(route_points):
             x1, y1, l1 = out[-2]
             x2, y2, l2 = out[-1]
             x3, y3, l3 = p
-            if l1 == l2 == l3:
+            if (round(x2, 3), round(y2, 3)) in keep:
+                pass  # via vertex: never merged away
+            elif l1 == l2 == l3:
                 cross = (x2 - x1) * (y3 - y2) - (y2 - y1) * (x3 - x2)
                 dot = (x2 - x1) * (x3 - x2) + (y2 - y1) * (y3 - y2)
                 if abs(cross) < 1e-9 and dot >= 0:
@@ -381,6 +388,7 @@ def oracle_reconnect(board_file: str, net_names, config,
     names = set(net_names)
     routed = failed = rounds = 0
     remaining = -1
+    attempted = set()  # (net, endpoints) already routed once -- never twice
     for rnd in range(max_rounds):
         links = kicad_unconnected(board_file, kicad_cli)
         if links is None:
@@ -412,6 +420,15 @@ def oracle_reconnect(board_file: str, net_names, config,
             if net_id is None:
                 failed += 1
                 continue
+            _key = (net_name, round(ax, 2), round(ay, 2),
+                    round(bx, 2), round(by, 2))
+            if _key in attempted:
+                # Copper for this link was already emitted and KiCad still
+                # reports it: re-routing the same link would stack
+                # near-identical copper every round. Leave it flagged.
+                failed += 1
+                continue
+            attempted.add(_key)
             base_obstacles, _ = build_base_obstacles(
                 exclude_net_ids={net_id},
                 routing_layers=routing_layers,
@@ -456,7 +473,7 @@ def oracle_reconnect(board_file: str, net_names, config,
                 if al:
                     zone_polys = [z.polygon for z in
                                   (getattr(pcb_data, 'zones', []) or [])
-                                  if z.net_id == net_id
+                                  if z.net_id == net_id and z.layer == al
                                   and getattr(z, 'polygon', None)]
                     if zone_polys:
                         _margin = max(config.clearance, 0.15)
@@ -533,7 +550,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                 failed += 1
                 continue
             route_points, via_positions = result
-            route_points = _merge_collinear(route_points)
+            _via_keys = {(round(vx, 3), round(vy, 3)) for vx, vy in via_positions}
+            route_points = _merge_collinear(route_points, keep=_via_keys)
             n_segs = 0
             for k in range(len(route_points) - 1):
                 x1, y1, l1 = route_points[k]
@@ -549,6 +567,24 @@ def oracle_reconnect(board_file: str, net_names, config,
                     vx, vy, used_via_size, used_via_drill,
                     [routing_layers[0], routing_layers[-1]], net_id,
                     net_name=net_name if v10 else None))
+            # Same-round visibility (cross-net short fix): later links in
+            # this round rebuild their obstacle maps from pcb_data, so the
+            # copper just routed must exist there -- two different-net links
+            # squeezing through one congested pocket otherwise cross.
+            from kicad_parser import Segment as _Seg, Via as _Via
+            for k in range(len(route_points) - 1):
+                x1, y1, l1 = route_points[k]
+                x2, y2, l2 = route_points[k + 1]
+                if l1 != l2 or (abs(x1 - x2) < 1e-9 and abs(y1 - y2) < 1e-9):
+                    continue
+                pcb_data.segments.append(_Seg(
+                    start_x=x1, start_y=y1, end_x=x2, end_y=y2,
+                    width=used_width, layer=l1, net_id=net_id))
+            for vx, vy in via_positions:
+                pcb_data.vias.append(_Via(
+                    x=vx, y=vy, size=used_via_size, drill=used_via_drill,
+                    layers=[routing_layers[0], routing_layers[-1]],
+                    net_id=net_id))
             print(f"    {net_name}: ({ax:.2f},{ay:.2f})<->({bx:.2f},{by:.2f})"
                   f"  OK {n_segs} seg(s), {len(via_positions)} via(s), "
                   f"w={used_width:.2f}mm")
