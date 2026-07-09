@@ -119,6 +119,14 @@ if [ -f "$RESULT" ]; then
   MIS=$(python3 -c "import json; print('MISGRADE' if json.load(open('$RUNDIR/authoritative_grade.json')).get('misgrade') else '')" 2>/dev/null)
 fi
 
+# GUI-loadable plan JSON from the recorded manifest (non-fatal). Lets this board's
+# routing chain be replayed through the Claude tab's Load... button with no LLM run
+# (same file-dependency pruning as redo_stress_test / the Claude-tab plan executor).
+if [ -f "$REDO_MANIFEST" ]; then
+  python3 "$REPO/tests/stress/manifest_to_plan.py" "$REDO_MANIFEST" \
+      "$RUNDIR/${BOARD}_plan.json" >> "$RUNDIR/worker.log" 2>&1 || true
+fi
+
 if [ -f "$RESULT" ]; then echo "ok rc=$rc $MIS"   > "$RUNDIR/.worker_done";
 else                       echo "NORESULT rc=$rc" > "$RUNDIR/.worker_done"; fi
 exit $rc

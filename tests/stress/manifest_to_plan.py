@@ -94,6 +94,10 @@ def parse_command(argv):
             break
     if tool is None:
         return None
+    # A `--help` invocation (the agent inspecting a tool during the run) is not a
+    # routing step -- skip it so the plan doesn't carry no-op `help: true` steps.
+    if '--help' in argv or '-h' in argv:
+        return None
     action = TOOL_ACTIONS[tool]
     step = {'action': action, 'params': {}}
     step['_files'] = []  # positional .kicad_pcb args (input/output), for pruning
