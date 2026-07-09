@@ -3172,7 +3172,11 @@ Examples:
             track_width=args.track_width,
             clearance=args.clearance,
             grid_step=args.grid_step,
-            layers=args.layers,
+            # A THROUGH via must clear copper on EVERY board layer, not just
+            # the configured routing layers: with --layers omitting an inner
+            # layer, stitching vias were placed straight through its tracks
+            # (0.3-0.46mm overlaps on In2 in the bitaxe repro).
+            layers=list(pcb_data.board_info.copper_layers),
             # Thread the fab hole-to-hole minimum through so GND-via placement
             # enforces the real drill spacing (issue #125), not the 0.2mm default.
             hole_to_hole_clearance=args.hole_to_hole_clearance

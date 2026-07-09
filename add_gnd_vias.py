@@ -95,7 +95,15 @@ def add_gnd_vias_to_existing_board(
     # via pad, since the obstacle map expansion already accounts for clearance.
     # Ceil (not floor) the hole radius so this circular clear-check doesn't miss the
     # outermost ring and let the GND-via hole land ~1 cell into a keep-out (#154 class).
-    via_check_radius_grid = max(1, coord.to_grid_dist_safe(config.via_drill / 2))
+    # The obstacle map expands each obstacle by (its_half + clearance +
+    # TRACK_width/2) -- the body it models is a TRACK. A via's copper ring is
+    # via_size/2 wide, so scanning only the DRILL radius under-enforced by
+    # (via_size - track_width)/2 ~ 0.19mm and shipped 35-99um sub-clearance
+    # grazes against tracks and SMD pads (Andy's bitaxe DRC2.rpt: every
+    # violation was a stitching via). Scan the full ring shortfall.
+    _ring_shortfall = max(config.via_drill / 2,
+                          config.via_size / 2 - config.track_width / 2)
+    via_check_radius_grid = max(1, coord.to_grid_dist_safe(_ring_shortfall))
 
     def is_via_position_clear(x_mm: float, y_mm: float, sig_via_x: float, sig_via_y: float) -> tuple:
         """Check if a via can be placed at the given position.
@@ -185,8 +193,14 @@ def add_gnd_vias_to_existing_board(
             # Try all angles at this distance
             for angle_deg in angles_deg:
                 angle_rad = math.radians(angle_deg)
-                gnd_x = sx + distance * math.cos(angle_rad)
-                gnd_y = sy + distance * math.sin(angle_rad)
+                # Snap to the routing grid: the clearance check works on
+                # grid CELLS, so an off-grid candidate can sit up to half a
+                # cell (25um at 0.05) inside an obstacle the check calls
+                # clear -- the residual 12-22um stitching-via overlaps.
+                gnd_x = round((sx + distance * math.cos(angle_rad))
+                              / config.grid_step) * config.grid_step
+                gnd_y = round((sy + distance * math.sin(angle_rad))
+                              / config.grid_step) * config.grid_step
 
                 is_clear, reason = is_via_position_clear(gnd_x, gnd_y, sx, sy)
                 if is_clear:

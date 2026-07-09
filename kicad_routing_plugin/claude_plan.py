@@ -290,8 +290,13 @@ def apply_step_params(step, dialog):
                 notes.append(f"ignored non-numeric layer_costs={costs!r}")
     elif action == "route_planes":
         opts = dialog.planes_tab.create_options
-        if "add_gnd_vias" in params:
-            opts.add_gnd_vias_check.SetValue(bool(params["add_gnd_vias"]))
+        # A plan step is a COMPLETE spec of feature toggles: absent means
+        # OFF. Leaving the persisted/panel state in place let a previously
+        # enabled 'Add GND vias' leak into a loaded stress-manifest plan
+        # that never asked for stitching (Andy's bitaxe DRC2 grazes).
+        opts.add_gnd_vias_check.SetValue(bool(params.get("add_gnd_vias")))
+        if not params.get("add_gnd_vias"):
+            notes.append("add_gnd_vias off (not in plan step)")
         if "gnd_via_distance" in params:
             try:
                 opts.gnd_via_distance.SetValue(float(params["gnd_via_distance"]))
