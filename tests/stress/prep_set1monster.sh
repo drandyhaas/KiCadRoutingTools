@@ -17,6 +17,14 @@ MAP=(
   "hackrf_pro|gsg__hackrf_pro"
   "artix_dc_scm|antmicro__artix_dc_scm"
   "urti|gsg__urti_mainboard"
+  "jetson_orin|antmicro__jetson_orin_baseboard"
+  "jetson_nano_bb|antmicro__jetson_nano_baseboard"
+  "cm4_baseboard|antmicro__cm4_baseboard"
+  "sonata_one|newae__sonata_one"
+  "lpddr4_tester|antmicro__lpddr4_test_board"
+  "gpu_backplane|antmicro__gpu_cluster_backplane"
+  "tb_gpu_adapter|antmicro__thunderbolt_gpu_adapter"
+  "tb_pcie_adapter|antmicro__thunderbolt_pcie_adapter"
 )
 for entry in "${MAP[@]}"; do
   IFS='|' read -r name frag <<< "$entry"
