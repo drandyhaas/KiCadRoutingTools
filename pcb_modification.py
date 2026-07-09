@@ -237,6 +237,42 @@ def _strict_conn_graph(net_id, universe, vias, pads, zones,
     return r, r.get('graph')
 
 
+def _base_disconnected_component_ids(graph, base_result_pads=None):
+    """Segment ids protected because their component holds a pad the model
+    could NOT prove connected even with all copper present.
+
+    The subtractive gates compare disconnected-pad COUNTS before/after a
+    removal; when a pad is already counted disconnected in BASE (e.g. the
+    fill validator denies zone credit in a dense pocket where fill in fact
+    reaches), removing its tap keeps the count unchanged and the gate waves
+    it through -- Andy's Q2 GND stubs, round two. Such pads' entire copper
+    components are off-limits instead: that copper is their only hope.
+
+    Returns a set of ROOTS in the graph's union-find id space; callers test
+    segment i via uf.find(2*i)."""
+    from check_connected import analyze_conn_excluding
+    from geometry_utils import UnionFind
+    if not graph:
+        return set(), None
+    uf = UnionFind()
+    for a, b in graph.get('edges', []):
+        uf.union(a, b)
+    base = analyze_conn_excluding(graph, ())
+    disc = base.get('disconnected_pads') or []
+    if not disc:
+        return set(), uf
+    disc_keys = {(round(x, 3), round(y, 3)) for (x, y, _l, _r) in disc}
+    roots = set()
+    reprs = graph.get('pad_index_repr', {})
+    locs = graph.get('pad_locations', [])
+    pad_ids = graph.get('pad_ids', [])
+    # pad_locations parallels pad_ids (per-layer points); map back to roots
+    for pid, (x, y, _layer, _ref) in zip(pad_ids, locs):
+        if (round(x, 3), round(y, 3)) in disc_keys:
+            roots.add(uf.find(pid))
+    return roots, uf
+
+
 def _safe_prune_net(net_id, prunable, vias, pads, zones,
                     anchor_segments=None, aggressive=False, tol=None,
                     zone_credit_validator=None):
@@ -306,6 +342,16 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
             zone_credit_validator=zone_credit_validator)['disconnected_pads']), 0)
 
     base = disconnected(list(prunable))
+    # Protect components of base-disconnected pads (see helper docstring):
+    # index space here is the UNIVERSE list (anchor + prunable).
+    _prot_roots, _prot_uf = _base_disconnected_component_ids(graph)
+    if _prot_roots and _prot_uf is not None:
+        _keep_ids = set()
+        for _i, _s in enumerate(universe):
+            if _prot_uf.find(2 * _i) in _prot_roots:
+                _keep_ids.add(id(_s))
+        if _keep_ids:
+            candidates = [c for c in candidates if id(c) not in _keep_ids]
     kept = list(prunable)
     kept_ids = {id(s) for s in kept}
     removed = []
@@ -1495,9 +1541,19 @@ def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None
                         from check_connected import make_real_fill_validator
                         _zcv_t = make_real_fill_validator(pcb_data, net_id)
                     _trim_zcv = _zcv_t
-                    base_disc = len(check_net_connectivity(
+                    _base_r = check_net_connectivity(
                         net_id, all_net_segs, vias, pads_n, zones_n,
-                        zone_credit_validator=_trim_zcv)['disconnected_pads'])
+                        zone_credit_validator=_trim_zcv, return_graph=True)
+                    base_disc = len(_base_r['disconnected_pads'])
+                    _tprot_roots, _tprot_uf = \
+                        _base_disconnected_component_ids(_base_r.get('graph'))
+                if _tprot_roots and _tprot_uf is not None:
+                    try:
+                        _si = all_net_segs.index(s)
+                        if _tprot_uf.find(2 * _si) in _tprot_roots:
+                            continue  # protected component: never trim
+                    except ValueError:
+                        pass
                 _trial = [x for x in all_net_segs if x is not s] + [_twin]
                 if len(check_net_connectivity(
                         net_id, _trial, vias, pads_n, zones_n,
@@ -2051,6 +2107,9 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                                         net_zones, return_graph=True,
                                         zone_credit_validator=_zcv)
         graph = before.get('graph')
+        # Components holding base-disconnected pads are off-limits (their
+        # copper is that pad's only hope -- Q2 GND stubs round two).
+        _prot_roots, _prot_uf = _base_disconnected_component_ids(graph)
         # Strict twin (#322): see _STRICT_GATE_WIDTH. A mid-chain removal whose
         # hole is lens-bridged by fat caps passes the physical gate; the strict
         # gate sees the split immediately.
@@ -2074,6 +2133,9 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
         # clear. Baseline joints (pre-existing) never block a removal.
         baseline_joints = _soft_joint_pairs(net_segs, net_vias, net_pads)
         for s in sorted(grazing, key=lambda s: math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)):
+            if _prot_roots and _prot_uf is not None and \
+                    _prot_uf.find(2 * seg_pos[id(s)]) in _prot_roots:
+                continue  # base-disconnected pad's component: off-limits
             trial_excl = dropped_idx | {seg_pos[id(s)]}
             if graph is not None:
                 after = analyze_conn_excluding(graph, trial_excl)

@@ -2004,6 +2004,36 @@ class RoutingDialog(wx.Dialog):
         except Exception:
             pass
         try:
+            _ft = self.fanout_tab
+            for _name, _val in (
+                    ('exit_margin', defaults.BGA_EXIT_MARGIN),
+                    ('extension', defaults.QFN_EXTENSION),
+                    ('differential_check', False),
+                    ('force_escape', False),
+                    ('rebalance_escape', False),
+                    ('check_previous', False),
+                    ('no_inner_top', False),
+                    ('optimize_caps', False),
+                    ('cap_allow_rotation', True),
+                    ('cap_max_passes', 30),
+                    ('underpad_escape', False),
+                    ('allow_via_in_pad', False)):
+                _ctl = getattr(_ft, _name, None)
+                if _ctl is not None:
+                    try:
+                        _ctl.SetValue(_val)
+                    except Exception:
+                        pass
+            for _name in ('escape_method_choice',):
+                _ctl = getattr(_ft, _name, None)
+                if _ctl is not None:
+                    try:
+                        _ctl.SetSelection(0)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
             _dt = self.differential_tab
             if hasattr(_dt, 'diff_pair_width'):
                 _dt.diff_pair_width.SetValue(defaults.DIFF_PAIR_WIDTH)
