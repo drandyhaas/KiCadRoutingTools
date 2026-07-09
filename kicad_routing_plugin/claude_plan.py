@@ -226,17 +226,59 @@ def apply_step_params(step, dialog):
         except Exception:
             return False
 
+    # Params whose GUI home is not a same-named control.
+    _SPECIAL = {'layers', 'no_bga_zone', 'power_nets', 'power_nets_widths'}
+    _ALIASES = {'rip_blocker_nets': 'rip_blocker_check',
+                'repair_pads': 'repair_pads',
+                'analysis_grid_step': 'analysis_grid'}
+
+    def _apply_special(name, value):
+        if name == 'layers' and isinstance(value, (list, tuple)):
+            checks = getattr(dialog, 'layer_checks', None)
+            if not checks:
+                return False
+            wanted = {str(v) for v in value}
+            for layer, cb in checks.items():
+                cb.SetValue(layer in wanted)
+            return True
+        if name == 'no_bga_zone':
+            ctl = getattr(dialog, 'no_bga_zones_ctrl', None)
+            if ctl is None:
+                return False
+            ctl.SetValue('ALL' if value else '')
+            return True
+        if name == 'power_nets' and isinstance(value, (list, tuple)):
+            ctl = getattr(dialog, 'power_nets_ctrl', None)
+            if ctl is None:
+                return False
+            ctl.SetValue(' '.join(str(v) for v in value))
+            return True
+        if name == 'power_nets_widths' and isinstance(value, (list, tuple)):
+            ctl = getattr(dialog, 'power_widths_ctrl', None)
+            if ctl is None:
+                return False
+            ctl.SetValue(' '.join(str(v) for v in value))
+            return True
+        return False
+
     _skip = _GENERIC_SKIP.get(action, set())
     for name, value in list(params.items()):
         if name in _skip:
             continue
+        if name in _SPECIAL:
+            if _apply_special(name, value):
+                notes.append(f"set {name}={value}")
+            else:
+                notes.append(f"no control for {name}, ignored")
+            continue
+        lookup = _ALIASES.get(name, name)
         placed = False
         for owner in _owners():
-            if owner is not None and _set_control(owner, name, value):
+            if owner is not None and _set_control(owner, lookup, value):
                 notes.append(f"set {name}={value}")
                 placed = True
                 break
-        if not placed and name not in _skip:
+        if not placed:
             notes.append(f"no control for {name}, ignored")
 
     if action == "route":

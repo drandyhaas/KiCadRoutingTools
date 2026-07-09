@@ -52,6 +52,7 @@ FLAG_PARAMS = {
     '--analysis-grid-step': 'analysis_grid_step',
 }
 LIST_FLAGS = {
+    '--layers': 'layers',
     '--power-nets': 'power_nets',
     '--power-nets-widths': 'power_nets_widths',
     '--layer-costs': 'layer_costs',
@@ -62,6 +63,17 @@ LIST_FLAGS = {
 BOOL_FLAGS = {
     '--rip-blocker-nets': 'rip_blocker_nets',
     '--add-gnd-vias': 'add_gnd_vias',
+    '--no-bga-zone': 'no_bga_zone',
+}
+
+# Flags whose values are file paths / bookkeeping -- consumed, never params.
+# --output still feeds the chain-pruning file list.
+IGNORE_FLAGS = {'--output', '--summary-json', '--schematic-dir', '--report'}
+
+# Per-tool flag renames: qfn/bga_fanout call the trace width --width.
+TOOL_FLAG_ALIASES = {
+    'qfn_fanout.py': {'--width': '--track-width'},
+    'bga_fanout.py': {'--width': '--track-width'},
 }
 
 
@@ -88,9 +100,16 @@ def parse_command(argv):
     lists = {}
     i = argv.index([a for a in argv if os.path.basename(a) == tool][0]) + 1
     positional = []
+    aliases = TOOL_FLAG_ALIASES.get(tool, {})
     while i < len(argv):
-        a = argv[i]
-        if a in BOOL_FLAGS:
+        a = aliases.get(argv[i], argv[i])
+        if a in IGNORE_FLAGS:
+            i += 1
+            while i < len(argv) and not argv[i].startswith('--'):
+                if argv[i].endswith('.kicad_pcb'):
+                    step['_files'].append(argv[i])
+                i += 1
+        elif a in BOOL_FLAGS:
             step['params'][BOOL_FLAGS[a]] = True
             i += 1
         elif a in FLAG_PARAMS:
@@ -144,7 +163,8 @@ def parse_command(argv):
     elif action == 'fanout':
         step['kind'] = 'bga' if tool == 'bga_fanout.py' else 'qfn'
         step['nets'] = [str(n) for n in nets] or ['*']
-    for k in ('--power-nets', '--power-nets-widths', '--layer-costs'):
+    for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
+              '--layers'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step
