@@ -19,6 +19,16 @@ if ROOT_DIR not in sys.path:
 
 import routing_defaults as defaults
 from kicad_parser import POSITION_DECIMALS
+
+def _via_width(via):
+    """KiCad 9/10 padstack vias can refuse layerless GetWidth() ('result
+    with an error set', seen on vias ADDED in-session then re-synced);
+    GetFrontWidth() is the stable outer-annulus accessor."""
+    try:
+        return via.GetWidth()
+    except Exception:
+        return via.GetFrontWidth()
+
 from .fanout_gui import NetSelectionPanel
 from .gui_utils import StdoutRedirector
 from .settings_persistence import get_dialog_settings, restore_dialog_settings
@@ -230,7 +240,7 @@ class RoutingDialog(wx.Dialog):
                     v = Via(
                         x=pcbnew.ToMM(via.GetPosition().x),
                         y=pcbnew.ToMM(via.GetPosition().y),
-                        size=pcbnew.ToMM(via.GetWidth()),
+                        size=pcbnew.ToMM(_via_width(via)),
                         drill=pcbnew.ToMM(via.GetDrill()),
                         layers=[get_layer_name(top_layer), get_layer_name(bot_layer)],
                         net_id=via.GetNetCode(),

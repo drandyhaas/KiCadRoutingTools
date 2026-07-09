@@ -3004,10 +3004,18 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                     net_id=track.GetNetCode(),
                 ))
         elif track_class == "PCB_VIA":
+            # KiCad 9/10 padstack vias can refuse layerless GetWidth() with
+            # 'result with an error set' (seen on vias ADDED in-session by
+            # the plugin, then re-synced); GetFrontWidth() is the stable
+            # accessor for the outer-annulus size.
+            try:
+                _vw = track.GetWidth()
+            except Exception:
+                _vw = track.GetFrontWidth()
             v = Via(
                 x=to_mm(track.GetPosition().x),
                 y=to_mm(track.GetPosition().y),
-                size=to_mm(track.GetWidth()),
+                size=to_mm(_vw),
                 drill=to_mm(track.GetDrill()),
                 layers=[get_layer_name(track.TopLayer()), get_layer_name(track.BottomLayer())],
                 net_id=track.GetNetCode(),
