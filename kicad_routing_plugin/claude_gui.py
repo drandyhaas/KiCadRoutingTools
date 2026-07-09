@@ -36,13 +36,16 @@ _CLAUDE_CANDIDATES = [
 DEFAULT_ALLOWED_TOOLS = "Read,Glob,Grep,Bash,WebSearch"
 
 # Main models offered in the model dropdown: (label, --model value).
-# None = let the CLI use the user's configured default.
+# None = let the CLI use the user's configured default. ALIASES, not pinned
+# version IDs: the CLI resolves 'fable'/'opus'/'sonnet'/'haiku' to the
+# newest model of each tier, so this list never goes stale ('Sonnet 4.6'
+# style entries were outdated the day a new Sonnet shipped).
 MODEL_CHOICES = [
     ("Default", None),
-    ("Fable 5", "claude-fable-5"),
-    ("Opus 4.8", "claude-opus-4-8"),
-    ("Sonnet 4.6", "claude-sonnet-4-6"),
-    ("Haiku 4.5", "claude-haiku-4-5"),
+    ("Fable (latest)", "fable"),
+    ("Opus (latest)", "opus"),
+    ("Sonnet (latest)", "sonnet"),
+    ("Haiku (latest)", "haiku"),
 ]
 
 # --effort levels accepted by the CLI ("Default" = don't pass the flag).
