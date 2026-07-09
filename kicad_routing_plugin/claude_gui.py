@@ -487,9 +487,8 @@ class ClaudeTab(wx.Panel):
                        wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
         ctrl_sizer.AddSpacer(6)
 
-        # Planning: the headline action (bold) with its Cancel right under it
+        # Planning: the headline action with its Cancel right under it
         self.plan_btn = wx.Button(self, label="Plan Routing")
-        self.plan_btn.SetFont(self.plan_btn.GetFont().Bold())
         self.plan_btn.SetToolTip(
             "Run the /plan-pcb-routing skill headless on the current board. The "
             "plan fills the tabs' parameter fields and appears in the step list "
