@@ -1968,6 +1968,14 @@ class RoutingDialog(wx.Dialog):
         self.planes_tab.net_panel._checked_nets = set()
         self.differential_tab.pair_panel._checked_pairs = set()
 
+        self.reset_params_to_defaults()
+
+    def reset_params_to_defaults(self):
+        """Reset every routing PARAMETER control to routing_defaults --
+        selections and the log untouched. The plan executor calls this
+        before each step (when 'reset other options' is on) so a plan run
+        starts from CLI-default-equivalent state instead of inheriting
+        stale session tweaks (the add_gnd_vias leak, generalized)."""
         # Reset basic parameters to defaults
         self.track_width.SetValue(defaults.TRACK_WIDTH)
         self.clearance.SetValue(defaults.CLEARANCE)

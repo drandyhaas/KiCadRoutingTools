@@ -506,6 +506,16 @@ class ClaudeTab(wx.Panel):
         ctrl_sizer.Add(wx.StaticLine(self), 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         # Execution: run/stop the planned steps
+        self.reset_defaults_check = wx.CheckBox(
+            self, label="Reset other options to defaults")
+        self.reset_defaults_check.SetValue(True)
+        self.reset_defaults_check.SetToolTip(
+            "Before each step, reset every option the plan does not specify "
+            "to its default -- so a loaded plan replays deterministically "
+            "instead of inheriting this session's panel tweaks. Uncheck to "
+            "deliberately run the plan with your current panel settings.")
+        ctrl_sizer.Add(self.reset_defaults_check, 0,
+                       wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
         self.run_plan_btn = wx.Button(self, label="Run Selected Steps")
         self.run_plan_btn.SetToolTip(
             "Execute the checked steps in order through the tabs' own routing "
@@ -912,7 +922,8 @@ class ClaudeTab(wx.Panel):
             on_status=self._on_plan_step_status,
             on_finished=self._on_plan_finished,
             log=self._log,
-            on_progress=self._on_plan_step_progress)
+            on_progress=self._on_plan_step_progress,
+            reset_defaults=self.reset_defaults_check.GetValue())
         self._plan_executor.start()
 
     def _on_stop_plan(self, event):
