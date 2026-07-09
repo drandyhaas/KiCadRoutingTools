@@ -561,14 +561,28 @@ class PlanExecutor:
             import os
             import clearance_ledger
             board_file = getattr(self.dialog, 'board_filename', None)
-            clearance = None
-            track_width = None
+            # Gather every floor the CLI records (route.py passes clearance,
+            # hole_to_hole, edge_clearance, track_width, via size/drill;
+            # route_diff adds the pair geometry) from the plan's steps --
+            # smallest value wins where steps disagree, like the ledger.
+            floors = {}
+
+            def _take(key, val, smallest=True):
+                try:
+                    v = float(val)
+                except (TypeError, ValueError):
+                    return
+                if key not in floors or (smallest and v < floors[key]):
+                    floors[key] = v
             for step in self.steps:
                 p = step.get('params') or {}
-                if p.get('clearance'):
-                    clearance = float(p['clearance'])
-                if p.get('track_width'):
-                    track_width = float(p['track_width'])
+                for k in ('clearance', 'track_width', 'via_size', 'via_drill',
+                          'hole_to_hole_clearance', 'board_edge_clearance',
+                          'diff_pair_width', 'diff_pair_gap'):
+                    if p.get(k) is not None:
+                        _take(k, p[k])
+            clearance = floors.get('clearance')
+            track_width = floors.get('track_width')
             if clearance is None:
                 return
             eff = clearance_ledger.effective(clearance)
@@ -585,23 +599,57 @@ class PlanExecutor:
                     bds.m_MinClearance = pcbnew.FromMM(eff)
                     if track_width:
                         bds.m_TrackMinWidth = pcbnew.FromMM(track_width)
+                    if floors.get('via_size'):
+                        bds.m_ViasMinSize = pcbnew.FromMM(floors['via_size'])
+                    if floors.get('via_drill'):
+                        bds.m_MinThroughDrill = pcbnew.FromMM(
+                            floors['via_drill'])
+                    if floors.get('hole_to_hole_clearance'):
+                        bds.m_HoleToHoleMin = pcbnew.FromMM(
+                            floors['hole_to_hole_clearance'])
+                    if floors.get('board_edge_clearance'):
+                        bds.m_CopperEdgeClearance = pcbnew.FromMM(
+                            floors['board_edge_clearance'])
                     try:
                         for _name, _nc in board.GetNetClasses().items():
                             if _name == 'Default':
                                 _nc.SetClearance(pcbnew.FromMM(eff))
+                                if track_width:
+                                    _nc.SetTrackWidth(
+                                        pcbnew.FromMM(track_width))
+                                if floors.get('via_size'):
+                                    _nc.SetViaDiameter(
+                                        pcbnew.FromMM(floors['via_size']))
+                                if floors.get('via_drill'):
+                                    _nc.SetViaDrill(
+                                        pcbnew.FromMM(floors['via_drill']))
+                                if floors.get('diff_pair_width'):
+                                    _nc.SetDiffPairWidth(pcbnew.FromMM(
+                                        floors['diff_pair_width']))
+                                if floors.get('diff_pair_gap'):
+                                    _nc.SetDiffPairGap(pcbnew.FromMM(
+                                        floors['diff_pair_gap']))
                     except Exception:
                         pass
                     self.log(f"Claude plan: live DRC settings updated "
-                             f"(min clearance {eff:.4g}mm)")
+                             f"(min clearance {eff:.4g}mm, "
+                             f"{len(floors)} floor(s))")
             except Exception as e:
                 self.log(f"Claude plan: live DRC settings skipped: {e}")
             # Best-effort persistence for a later close/reopen; note KiCad
             # may overwrite this if it saves its in-memory project state.
             if board_file and os.path.isfile(board_file):
                 from fix_kicad_drc_settings import fix_project_for_output
-                fix_project_for_output(board_file, input_pcb=board_file,
-                                       clearance=eff,
-                                       track_width=track_width)
+                fix_project_for_output(
+                    board_file, input_pcb=board_file,
+                    clearance=eff,
+                    track_width=track_width,
+                    via_diameter=floors.get('via_size'),
+                    via_drill=floors.get('via_drill'),
+                    hole_to_hole=floors.get('hole_to_hole_clearance'),
+                    edge_clearance=floors.get('board_edge_clearance'),
+                    diff_pair_width=floors.get('diff_pair_width'),
+                    diff_pair_gap=floors.get('diff_pair_gap'))
                 self.log(f"Claude plan: recorded DRC floors in the project "
                          f"file (clearance {eff:.4g}; live session already "
                          f"updated via the API)")
