@@ -53,9 +53,11 @@ DEFAULT_BOARD = os.path.expanduser(
 #    panels' defaults, exactly as a real "run selected steps" would.
 SIGNAL = dict(nets=['*', '!GND'], clearance=0.15, track_width=0.127,
               via_size=0.45, via_drill=0.2,
-              power_nets=['+3V3', '+12V'], power_nets_widths=[0.4, 0.4])
+              power_nets=['+3V3', '+12V'], power_nets_widths=[0.4, 0.4],
+              max_iterations=1000000, max_ripup=10)
 GND_FIX = dict(nets=['GND'], clearance=0.127, track_width=0.127,
-               via_size=0.45, via_drill=0.2)
+               via_size=0.45, via_drill=0.2,
+               max_iterations=1000000, max_ripup=10)
 PLANES = dict(nets=['GND'], layers=['B.Cu'], clearance=0.15,
               via_size=0.45, via_drill=0.2)
 REPAIR = dict(clearance=0.15, via_size=0.45, via_drill=0.2,
@@ -180,13 +182,14 @@ def _gui_route_config(step):
         'grid_step': defaults.GRID_STEP,
         'via_cost': 50,
         'impedance': None,
-        'max_iterations': defaults.MAX_ITERATIONS,
+        'max_iterations': step.get('max_iterations',
+                                    defaults.MAX_ITERATIONS),
         'max_probe_iterations': 5000,
         'heuristic_weight': 1.9,
         'proximity_heuristic_factor': 0.02,
         'turn_cost': 1000,
         'direction_preference_cost': 50,
-        'max_ripup': 3,
+        'max_ripup': step.get('max_ripup', 3),
         'ordering_strategy': 'inside_out',
         'direction': None,
         'stub_proximity_radius': 2.0,
@@ -377,6 +380,44 @@ def grade(pcb, label):
                 kicad=kicad_n)
 
 
+def compare_copper(cli_pcb, gui_pcb):
+    """Canonical copper-set comparison: segments as (net NAME, layer,
+    sorted rounded endpoints, width), vias as (net, pos, size, drill).
+    UUIDs are per-run random, so byte comparison is meaningless by design;
+    set equality is the strongest meaningful identity bar."""
+    from kicad_parser import parse_kicad_pcb
+
+    def canon(path):
+        pcb = parse_kicad_pcb(path)
+        names = {nid: net.name for nid, net in pcb.nets.items()}
+        segs = set()
+        for s in pcb.segments:
+            a = (round(s.start_x, 3), round(s.start_y, 3))
+            b = (round(s.end_x, 3), round(s.end_y, 3))
+            segs.add((names.get(s.net_id, s.net_id), s.layer,
+                      min(a, b), max(a, b), round(s.width, 3)))
+        vias = set()
+        for v in pcb.vias:
+            vias.add((names.get(v.net_id, v.net_id), round(v.x, 3),
+                      round(v.y, 3), round(v.size, 3), round(v.drill, 3)))
+        return segs, vias
+
+    s1, v1 = canon(cli_pcb)
+    s2, v2 = canon(gui_pcb)
+    print(f"\n=== COPPER-SET COMPARISON (UUID-independent) ===")
+    print(f"  segments: CLI={len(s1)} GUI={len(s2)} common={len(s1 & s2)} "
+          f"cli-only={len(s1 - s2)} gui-only={len(s2 - s1)}")
+    print(f"  vias:     CLI={len(v1)} GUI={len(v2)} common={len(v1 & v2)} "
+          f"cli-only={len(v1 - v2)} gui-only={len(v2 - v1)}")
+    for tag, diff in (('cli-only seg', sorted(s1 - s2)[:3]),
+                      ('gui-only seg', sorted(s2 - s1)[:3])):
+        for d in diff:
+            print(f"    {tag}: {d}")
+    identical = (s1 == s2 and v1 == v2)
+    print(f"  copper sets identical: {identical}")
+    return identical
+
+
 def main():
     board = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith('--') \
         else DEFAULT_BOARD
@@ -397,9 +438,11 @@ def main():
     b = grade(gui_final, 'GUI')
     same = (a['conn_full'] == b['conn_full'] and a['kicad'] == b['kicad']
             and a['drc'] == b['drc'])
+    identical = compare_copper(cli_final, gui_final)
     print(f"\nVERDICT: {'PARITY' if same else 'DIVERGENT'} "
           f"(kicad unconnected CLI={a['kicad']} GUI={b['kicad']}, "
-          f"drc CLI={a['drc']} GUI={b['drc']})")
+          f"drc CLI={a['drc']} GUI={b['drc']}); "
+          f"copper sets {'IDENTICAL' if identical else 'DIFFER'}")
     return 0
 
 
