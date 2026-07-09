@@ -902,4 +902,8 @@ class ClaudeTab(wx.Panel):
 
     def _log(self, message):
         if self.log_callback:
+            # Plan progress lines arrived without terminators and ran
+            # together in the Log tab ('step 4 finishedClaude plan: ...').
+            if not message.endswith(chr(10)):
+                message += chr(10)
             self.log_callback(message)

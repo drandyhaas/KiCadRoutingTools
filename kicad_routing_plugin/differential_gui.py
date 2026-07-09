@@ -1156,6 +1156,17 @@ class DifferentialTab(wx.Panel):
 
         return tracks_added, vias_added, tracks_removed
 
+        from .gui_utils import update_live_drc_floors
+        _cfg = getattr(self, '_diff_drc_config', {}) or {}
+        import pcbnew as _p
+        update_live_drc_floors(
+            _p.GetBoard(),
+            clearance=_cfg.get('clearance'),
+            track_width=_cfg.get('diff_pair_width') or _cfg.get('track_width'),
+            via_size=_cfg.get('via_size'),
+            via_drill=_cfg.get('via_drill'),
+            hole_to_hole=_cfg.get('hole_to_hole_clearance'))
+
     def _add_via_to_board(self, board, via, get_layer_id):
         """Add a via to the pcbnew board."""
         import pcbnew

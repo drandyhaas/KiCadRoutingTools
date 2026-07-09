@@ -1521,6 +1521,16 @@ class PlanesTab(wx.Panel):
         if self.sync_pcb_data_callback:
             self.sync_pcb_data_callback()
 
+        from .gui_utils import update_live_drc_floors
+        _cfg = getattr(self, '_plane_drc_config', {}) or {}
+        update_live_drc_floors(
+            board,
+            clearance=_cfg.get('clearance'),
+            track_width=_cfg.get('track_width'),
+            via_size=_cfg.get('via_size'),
+            via_drill=_cfg.get('via_drill'),
+            hole_to_hole=_cfg.get('hole_to_hole_clearance'))
+
         # LAST: with every zone/via/track now on the live board, run the
         # kicad-oracle recheck exactly like the CLI repair front does on its
         # written output (temp-save the board, route the reported links,

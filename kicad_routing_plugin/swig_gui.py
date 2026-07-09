@@ -3273,6 +3273,19 @@ class RoutingDialog(wx.Dialog):
         self.net_panel.refresh(sync_from_visible=False)
         self._update_status_bar()
 
+        # Per-step live DRC floors (GUI twin of the CLI's per-step
+        # fix_project_for_output): a DRC pressed right after this step must
+        # grade at the routed floors, not stock constraints.
+        from .gui_utils import update_live_drc_floors
+        update_live_drc_floors(
+            board,
+            clearance=config.get('clearance'),
+            track_width=config.get('track_width'),
+            via_size=config.get('via_size'),
+            via_drill=config.get('via_drill'),
+            hole_to_hole=config.get('hole_to_hole_clearance'),
+            edge_clearance=config.get('board_edge_clearance'))
+
     def _add_via_to_board(self, board, via, get_layer_id):
         """Add a via to the pcbnew board."""
         import pcbnew
