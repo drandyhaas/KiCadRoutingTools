@@ -1976,6 +1976,41 @@ class RoutingDialog(wx.Dialog):
         before each step (when 'reset other options' is on) so a plan run
         starts from CLI-default-equivalent state instead of inheriting
         stale session tweaks (the add_gnd_vias leak, generalized)."""
+        # Tab option panels too -- these are OUTSIDE the dialog's own
+        # controls and were the actual leak vector (planes add_gnd_vias).
+        # Best-effort with hasattr guards: a missing control just keeps its
+        # state (and the plan-side absent-means-off rules still apply).
+        try:
+            _po = self.planes_tab.create_options
+            if hasattr(_po, 'add_gnd_vias_check'):
+                _po.add_gnd_vias_check.SetValue(False)
+            if hasattr(_po, 'gnd_via_distance'):
+                _po.gnd_via_distance.SetValue(defaults.GND_VIA_DISTANCE)
+            if hasattr(_po, 'gnd_via_net'):
+                _po.gnd_via_net.SetValue(defaults.GND_VIA_NET)
+            if hasattr(_po, 'rip_blocker_check'):
+                _po.rip_blocker_check.SetValue(False)
+            if hasattr(_po, 'via_in_pad_check'):
+                _po.via_in_pad_check.SetValue(False)
+            _ro = self.planes_tab.repair_options
+            if hasattr(_ro, 'rip_blocker_check'):
+                _ro.rip_blocker_check.SetValue(False)
+            if hasattr(_ro, 'repair_pads'):
+                _ro.repair_pads.SetValue(True)
+            if hasattr(_ro, 'max_track_width'):
+                _ro.max_track_width.SetValue(defaults.REPAIR_MAX_TRACK_WIDTH)
+            if hasattr(_ro, 'analysis_grid'):
+                _ro.analysis_grid.SetValue(defaults.REPAIR_ANALYSIS_GRID_STEP)
+        except Exception:
+            pass
+        try:
+            _dt = self.differential_tab
+            if hasattr(_dt, 'diff_pair_width'):
+                _dt.diff_pair_width.SetValue(defaults.DIFF_PAIR_WIDTH)
+            if hasattr(_dt, 'diff_pair_gap'):
+                _dt.diff_pair_gap.SetValue(defaults.DIFF_PAIR_GAP)
+        except Exception:
+            pass
         # Reset basic parameters to defaults
         self.track_width.SetValue(defaults.TRACK_WIDTH)
         self.clearance.SetValue(defaults.CLEARANCE)
