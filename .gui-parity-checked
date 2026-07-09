@@ -1,29 +1,28 @@
-f79743afb01788eced8bbb590ad0159860d31b52 2026-07-09 audited 280009b..HEAD (8 commits); 0 gaps needing fixes.
-- The range is dominated by shared-engine Rust work that rides both fronts for free:
-  the single-ended A* NodeMap fold (2b3f881, 0.17.2), the mimalloc global allocator
-  (cfc982e, 0.17.3, lib.rs one-liner), and the PoseRouter PoseNodeMap fold (f79743a,
-  0.17.4). All three are internal memory/cache refactors verified byte-identical --
-  NO PyO3 signature / pub-fn / #[new] change (grep of the router.rs+pose_router.rs
-  diff for those is empty), so the GUI's grid_router call sites need nothing new.
-- diff_pair_routing.py (953db5b, revert of the #341 full_pose_budget cap): removes an
-  internal throttle inside the private _route_direct_coupled_middle only -- no change to
-  batch_route_diff_pairs or any public engine signature/param, so both fronts (CLI
-  route_diff.py + GUI differential_gui) inherit it automatically via the shared call.
-- CLI-only by design: memory_debug.py memory tooling (f537ce6) is a debug/profiling path,
-  not a routing engine surface.
-- GUI-only by design, no CLI counterpart needed:
-  * 31e66d9 (claude_plan.py _write_drc_floors): plan-end floor writes now go through the
-    existing GUI helper gui_utils.update_live_drc_floors (same board-scan min-merge as the
-    per-step path) instead of raw pcbnew DesignSettings assignments that raised floors back
-    above fine copper. Operates on a LIVE pcbnew board; the CLI has no live board -- it
-    writes .kicad_pro floors via its own already-min-merged clearance_ledger path.
-  * 4df8b86 (differential_gui / planes_gui / swig_gui): async busy-signal race fix (busy
-    stays true until results are APPLIED). Purely a GUI threading concern; the CLI is
-    synchronous and has no equivalent apply race.
-- No new engine parameter, flag, or results-data key was added anywhere in the range, so
-  there is nothing new to thread through the argparse layer, the GUI call sites, the config
-  dict, the options panels, or settings_persistence.py.
-- Static audit only (per CLAUDE.md method): git-log + engine-vs-GUI diff review. The live
-  gui_parity harness was NOT run this pass -- it routes a full board inside KiCad's python
-  and would have competed for RAM on the 8GB box with a concurrent stress wave whose timing
-  measurement had to stay clean; unnecessary here since the range adds no engine params.
+5873a9726e0bd34bb8239f560c0ddd219e693b56 2026-07-09 audited f79743a..HEAD (3 commits); 0 gaps remain (2 GUI/CLI default divergences CLOSED).
+- This short range is the GUI/CLI default-parity sweep prompted by Andy. Two GUI-only
+  fixes to swig_gui.py bring the route tab's defaults into line with route.py + the
+  batch_route engine signature:
+  * a0bb020 -- "No BGA Zones" box default was "ALL" (-> config['no_bga_zones']=[] ->
+    setup_bga_exclusion_zones DISABLES every BGA keep-out); CLI --no-bga-zones defaults
+    to None (auto-detect + ENABLE). Changed the control's initial value AND its
+    reset-to-defaults value to "" (== None). planes_gui reads the same shared
+    no_bga_zones_text and inherits the enabled default. This was a real STARTUP divergence
+    (the TextCtrl had an explicit value="ALL").
+  * 5873a97 -- reset_params_to_defaults() set add_teardrops / mps_reverse_rounds /
+    mps_layer_swap / mps_segment_intersection / can_swap_to_top to True, contradicting the
+    checkbox creation state (all created unchecked / add_teardrops SetValue(False)), the CLI
+    (--add-teardrops / --mps-* / --can-swap-to-top-layer are store_true => default off), and
+    batch_route (all default False). Set the five reset values to False. NOTE this was a
+    "Reset to defaults" bug only -- fresh startup already matched the CLI (those controls are
+    never set True except by the reset button), so it never silently changed a normal route.
+- Wider sweep result (recorded for the next auditor): every numeric "Advanced" control on
+  both fronts sources defaults.X from routing_defaults, so they match by construction. Four
+  CLI argparse defaults are hardcoded literals rather than defaults.X (--bga-proximity-radius
+  7.0, --bga-proximity-cost 0.2, --proximity-heuristic-factor 0.02, --vertical-attraction-
+  radius 1.0) -- all currently EQUAL their constants (BGA_PROXIMITY_RADIUS etc.), so no
+  divergence today, but a latent drift risk worth pointing at defaults.X eventually.
+  ordering_strategy matches ("mps" both sides); direction "Auto" == CLI --direction None;
+  move_copper_text is GUI-only (no CLI flag). Diff-pair / planes tabs vs route_diff.py /
+  route_planes.py were NOT swept this pass (route tab only).
+- b9d345c is the prior parity-file update commit (doc only). No engine parameter/flag/
+  results-key was added anywhere in the range.
