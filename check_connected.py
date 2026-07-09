@@ -111,14 +111,20 @@ class SegmentIndex:
         gx, gy = int(x // self.cell_size), int(y // self.cell_size)
         return self.grid.get((gx, gy, layer), [])
 
-    def query_near(self, x: float, y: float, layer: str):
-        """Like query_at but over the 3x3 cell neighbourhood, deduped - for
-        proximity tests whose tolerance (a track width) can cross a cell edge."""
+    def query_near(self, x: float, y: float, layer: str, radius: float = None):
+        """Like query_at but over the cell neighbourhood, deduped - for
+        proximity tests whose tolerance (a track width) can cross a cell
+        edge. `radius` widens the ring: a big via's barrel credit reaches
+        (via_size + track_width)/2, which exceeds one 1.0mm cell (the
+        silent-miss review finding)."""
         gx, gy = int(x // self.cell_size), int(y // self.cell_size)
+        r = 1
+        if radius is not None and radius > self.cell_size:
+            r = int(radius // self.cell_size) + 1
         seen = set()
         out = []
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
                 for item in self.grid.get((gx + dx, gy + dy, layer), ()):
                     if id(item[0]) not in seen:
                         seen.add(id(item[0]))
@@ -559,8 +565,12 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     # Use spatial index for O(n) average instead of O(n × m)
     for px, py, player, pid, psize in all_points:
         ptype = point_info[pid][0]
-        # Query segments that might contain this point
-        for seg, seg_start_id in seg_index.query_near(px, py, player):
+        # Query segments that might contain this point. Endpoint/via points
+        # credit out to (psize + seg_width)/2; the query ring must cover
+        # that for LARGE vias (size + width can exceed the 1mm cell).
+        _reach = psize / 2 + 1.0
+        for seg, seg_start_id in seg_index.query_near(px, py, player,
+                                                      radius=_reach):
             seg_end_id = seg_start_id + 1
             # Skip if this point IS one of the segment's endpoints
             if pid == seg_start_id or pid == seg_end_id:

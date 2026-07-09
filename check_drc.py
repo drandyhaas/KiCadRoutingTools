@@ -550,6 +550,17 @@ def _build_graphic_unification(pcb_data):
             best = min(best, _pt_seg_d(px, py, b))
         for (px, py) in ((b.start_x, b.start_y), (b.end_x, b.end_y)):
             best = min(best, _pt_seg_d(px, py, a))
+        if best > 0:
+            # Endpoint sampling misses CROSSING strokes (distance 0 with all
+            # four endpoints far away) -- two graphic lines drawn as an X
+            # never clustered and their intersection graded as a short.
+            from check_drc import segments_cross as _sc
+            try:
+                crossed, _ = _sc(a, b)
+                if crossed:
+                    return 0.0
+            except Exception:
+                pass
         return best
 
     def _pt_seg_d(px, py, sgm):

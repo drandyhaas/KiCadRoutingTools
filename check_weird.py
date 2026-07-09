@@ -82,8 +82,19 @@ def _net_name(pcb_data: PCBData, net_id: int) -> str:
 
 
 def _via_span(via, copper_layers) -> set:
-    """Copper layers a via connects (through vias span everything)."""
+    """Copper layers a via connects (through vias span everything).
+
+    Blind/buried vias record only their START/END layers in the file; the
+    barrel also connects every copper layer BETWEEN them in stackup order
+    (a buried F.Cu-In2.Cu via touches In1.Cu) -- treating the span as the
+    two endpoints alone manufactured phantom unsupported-via findings for
+    mid-span connections."""
     if via.layers and not ('F.Cu' in via.layers and 'B.Cu' in via.layers):
+        order = list(copper_layers)
+        idx = [order.index(l) for l in via.layers if l in order]
+        if len(idx) >= 2:
+            lo, hi = min(idx), max(idx)
+            return set(order[lo:hi + 1])
         return set(via.layers)
     return set(copper_layers)
 
@@ -131,11 +142,15 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads, findings):
                 gap = math.hypot(xi - xj, yi - yj)
                 cap = (wi + wj) / 2.0
                 if _SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
+                    # size=None: soft joints bypass the --tolerance filter.
+                    # Filtering by GAP inverted the severity metric (small
+                    # gap = still fragile) and on <=0.1mm-width routing every
+                    # representable soft joint has gap < 0.1 -- the whole
+                    # category silently vanished at the default tolerance.
                     findings.append(_finding(
                         'soft-joint', name, layer, xi, yi,
                         f"endpoint gap {gap:.3f}mm to ({xj:.3f}, {yj:.3f}), "
-                        f"caps overlap {cap - gap:.3f}mm (fragile near-open)",
-                        size=gap))
+                        f"caps overlap {cap - gap:.3f}mm (fragile near-open)"))
                     k1 = (layer,) + rk(xi, yi)
                     k2 = (layer,) + rk(xj, yj)
                     soft_pts.add(k1)
@@ -199,8 +214,16 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
             # max half-dimension) and misses rectangular pad corners: a stub
             # ending exactly on a 1.4x1.2 crystal pad's corner copper read
             # as a dangle. Exact outline test (glasgow XTALOUT/C11).
-            if any(point_to_pad_distance(fx, fy, p) <= s.width / 2
-                   for p in net_pads):
+            def _pad_carries(p):
+                # NPTH pads have no copper even when layers lists *.Cu; an
+                # other-layer SMD pad can't anchor this layer's free end.
+                if getattr(p, 'pad_type', '') == 'np_thru_hole':
+                    return False
+                if p.drill <= 0 and s.layer not in p.layers \
+                        and '*.Cu' not in p.layers:
+                    return False
+                return point_to_pad_distance(fx, fy, p) <= s.width / 2
+            if any(_pad_carries(p) for p in net_pads):
                 continue
             if any(point_in_polygon(fx, fy, z.polygon)
                    for z in zones_by_layer.get(s.layer, ())):
@@ -217,8 +240,13 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
                         for o in seg_index.get((s.layer, ncx, ncy), ()):
                             if o is s:
                                 continue
-                            if (math.hypot(o.start_x - fx, o.start_y - fy) <= join_tol
-                                    or math.hypot(o.end_x - fx, o.end_y - fy) <= join_tol):
+                            _cap = (s.width + o.width) / 2 - 1e-6
+                            _jt = min(join_tol, _cap)
+                            if (math.hypot(o.start_x - fx, o.start_y - fy) <= _jt
+                                    or math.hypot(o.end_x - fx, o.end_y - fy) <= _jt):
+                                # Width-aware: two fine tracks 0.09mm apart
+                                # do NOT overlap caps (real open) and stay
+                                # flagged; a flat 0.1 gate hid them.
                                 joined = True
                                 break
                         if joined:
@@ -341,9 +369,17 @@ def _check_removable(net_id, name, net_segs, net_vias, net_pads, net_zones,
         return
     base = analyze_conn_excluding(graph, ())
     base_key = (base['num_components'], len(base['disconnected_pads']))
+    if base['num_components'] != 1 or base['disconnected_pads']:
+        # A strictly-split net (mid-path soft joint or a real open) makes
+        # 'key unchanged' meaningless: load-bearing copper on the broken
+        # side would grade as removable. Mirror the mutating twin
+        # (collapse_strict_redundant) and skip the net.
+        return
+    base_copper = base.get('num_copper_components', 1)
     for i in track_idx:
         t = analyze_conn_excluding(graph, (i,))
-        if (t['num_components'], len(t['disconnected_pads'])) == base_key:
+        if (t['num_components'], len(t['disconnected_pads'])) == base_key \
+                and t.get('num_copper_components', 1) <= base_copper:
             s = net_segs[i]
             mx, my = (s.start_x + s.end_x) / 2.0, (s.start_y + s.end_y) / 2.0
             findings.append(_finding(

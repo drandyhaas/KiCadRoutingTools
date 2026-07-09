@@ -178,7 +178,21 @@ def grade(pcb, clearance):
     # shipped without a .kicad_pro (the daisho gap, #217).
     pro = Path(pcb).with_suffix(".kicad_pro")
     drc_args = [sys.executable, "-X", "utf8", str(REPO / "check_drc.py"), pcb, "--quiet"]
-    if not pro.exists():
+    # Auto-grade only when the .kicad_pro actually RECORDS a clearance: a
+    # stock/minimal project copied through the chain has none, and check_drc
+    # would silently fall back to 0.2 -- manufacturing phantom sub-clearance
+    # violations on a 0.1-routed board (the tigard class, again).
+    _recorded = None
+    if pro.exists():
+        try:
+            import json as _json
+            sys.path.insert(0, str(REPO))
+            from fix_kicad_drc_settings import project_copper_clearance
+            with open(pro) as _f:
+                _recorded = project_copper_clearance(_json.load(_f))
+        except Exception:
+            _recorded = None
+    if _recorded is None:
         drc_args[-1:-1] = ["-c", clearance]
     drc = subprocess.run(drc_args, capture_output=True, text=True)
     # NOT --quiet: the "Checking N routed nets" total (needed for completion %)
