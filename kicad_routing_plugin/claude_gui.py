@@ -817,7 +817,8 @@ class ClaudeTab(wx.Panel):
             self.routing_dialog, self._plan_steps, indices,
             on_status=self._on_plan_step_status,
             on_finished=self._on_plan_finished,
-            log=self._log)
+            log=self._log,
+            on_progress=self._on_plan_step_progress)
         self._plan_executor.start()
 
     def _on_stop_plan(self, event):
@@ -825,6 +826,26 @@ class ClaudeTab(wx.Panel):
             self._plan_executor.stop()
             self.stop_plan_btn.Disable()
             self._log("Claude plan: stop requested (after current step)")
+
+    def _on_plan_step_progress(self, index, step, label, value, rng,
+                               elapsed, is_busy):
+        """Mirror the working tab's status bar here: same text, same gauge,
+        plus which step and its elapsed time -- a route_diff step reads
+        exactly like the differential tab while it runs."""
+        if not self:
+            return
+        mins, secs = divmod(int(elapsed), 60)
+        action = step.get('action', '?')
+        text = f"Step {index + 1} ({action}) {mins}:{secs:02d}"
+        if label and label != 'Ready':
+            text += f" - {label}"
+        self.elapsed_label.SetLabel(text)
+        try:
+            if self.gauge.GetRange() != rng and rng > 0:
+                self.gauge.SetRange(rng)
+            self.gauge.SetValue(min(max(0, int(value)), self.gauge.GetRange()))
+        except Exception:
+            pass
 
     def _on_plan_step_status(self, index, status):
         if not self:
@@ -837,6 +858,12 @@ class ClaudeTab(wx.Panel):
 
     def _on_plan_finished(self, completed, aborted_reason):
         self._plan_executor = None
+        if self:
+            try:
+                self.elapsed_label.SetLabel("")
+                self.gauge.SetValue(0)
+            except Exception:
+                pass
         if not self:  # dialog destroyed while a step was running
             return
         self.stop_plan_btn.Disable()

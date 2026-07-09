@@ -496,16 +496,19 @@ class PlanExecutor:
     # handler declined to run (e.g. a validation popup) or finished instantly.
     START_GRACE_POLLS = 5
 
-    def __init__(self, dialog, steps, indices, on_status, on_finished, log=None):
+    def __init__(self, dialog, steps, indices, on_status, on_finished,
+                 log=None, on_progress=None):
         self.dialog = dialog
         self.steps = steps
         self.indices = list(indices)
         self.on_status = on_status
         self.on_finished = on_finished
+        self.on_progress = on_progress
         self.log = log or (lambda message: None)
         self._queue = []
         self._completed = 0
         self._stop_requested = False
+        self._step_started = None
 
     def start(self):
         # The plan sequences its own route_planes steps, so the route step's
@@ -520,6 +523,24 @@ class PlanExecutor:
         self._stop_requested = True
 
     # -- per-action wiring ---------------------------------------------------
+
+    def _status_source(self, action):
+        """The (status_text, progress_bar) pair of the tab actually doing
+        the work, so the Claude tab's status bar can MIRROR it live -- a
+        route_diff step shows exactly what the differential tab shows."""
+        d = self.dialog
+        owner = {
+            "route": d,
+            "route_diff": getattr(d, "differential_tab", None),
+            "fanout": getattr(d, "fanout_tab", None),
+            "optimize_caps": getattr(d, "fanout_tab", None),
+            "route_planes": getattr(d, "planes_tab", None),
+            "repair_planes": getattr(d, "planes_tab", None),
+        }.get(action)
+        if owner is None:
+            return None, None
+        return (getattr(owner, "status_text", None),
+                getattr(owner, "progress_bar", None))
 
     def _action_parts(self, action):
         """(invoke callable, busy predicate) for an action. The handlers run
@@ -679,6 +700,8 @@ class PlanExecutor:
             for note in notes:
                 self.log(f"Claude plan: {note}")
             invoke, busy = self._action_parts(step["action"])
+            import time as _time
+            self._step_started = _time.time()
             invoke()
         except Exception as e:
             self.on_status(index, "failed")
@@ -694,6 +717,20 @@ class PlanExecutor:
             # A control died (dialog closing) - abort quietly
             self._finish("dialog closed")
             return
+        if self.on_progress is not None:
+            # Mirror the working tab's own status bar (label + gauge) into
+            # the Claude tab, with per-step elapsed time.
+            try:
+                import time as _time
+                st, pb = self._status_source(self.steps[index]["action"])
+                label = st.GetLabel() if st is not None else ""
+                val = pb.GetValue() if pb is not None else 0
+                rng = pb.GetRange() if pb is not None else 100
+                elapsed = _time.time() - (self._step_started or _time.time())
+                self.on_progress(index, self.steps[index], label, val, rng,
+                                 elapsed, is_busy)
+            except Exception:
+                pass
         if is_busy:
             wx.CallLater(self.POLL_MS, self._poll_until_idle, index, busy, polls + 1, True)
             return
