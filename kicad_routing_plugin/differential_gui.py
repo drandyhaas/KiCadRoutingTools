@@ -962,8 +962,18 @@ class DifferentialTab(wx.Panel):
 
     def _on_routing_complete(self):
         """Handle routing completion."""
-        self.route_btn.Enable()
-        self.cancel_btn.SetLabel("Close")
+        # NOTE: the button is re-enabled in _finish_complete's finally, AFTER
+        # the results are applied -- it is the plan executor's busy signal,
+        # and the completion MessageBox pumps events, so enabling it up
+        # front let the executor start the NEXT step mid-apply (Andy's
+        # 'tracks don't all appear, rerun fixes it').
+        try:
+            self._on_routing_complete_body()
+        finally:
+            self.route_btn.Enable()
+            self.cancel_btn.SetLabel("Close")
+
+    def _on_routing_complete_body(self):
         self.progress_bar.SetValue(0)
 
         # Check if cancelled

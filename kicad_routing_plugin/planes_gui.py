@@ -1124,8 +1124,16 @@ class PlanesTab(wx.Panel):
 
     def _on_operation_complete(self):
         """Handle operation completion."""
-        self.action_btn.Enable()
-        self.cancel_btn.SetLabel("Close")
+        # Button re-enabled AFTER apply (finally): it is the plan executor's
+        # busy signal, and error/completion MessageBoxes pump events -- an
+        # early enable let the executor start the next step mid-apply.
+        try:
+            self._on_operation_complete_body()
+        finally:
+            self.action_btn.Enable()
+            self.cancel_btn.SetLabel("Close")
+
+    def _on_operation_complete_body(self):
         self.progress_bar.SetValue(0)
 
         if self._cancel_requested:

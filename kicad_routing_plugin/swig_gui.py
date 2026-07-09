@@ -2674,7 +2674,14 @@ class RoutingDialog(wx.Dialog):
         # Build configuration
         config = self._build_routing_config(selected_nets, selected_layers)
 
-        # Run routing in a thread
+        # Run routing in a thread. _apply_pending stays True until the
+        # results have actually been APPLIED to the board on the main
+        # thread: the worker queues the apply via wx.CallAfter, so the
+        # thread can be dead while the copper is still in the event queue
+        # -- re-enabling the button on thread death alone let the plan
+        # executor start the NEXT step before this one's tracks landed
+        # (Andy's 'tracks don't all appear, rerun fixes it').
+        self._apply_pending = True
         self._routing_thread = threading.Thread(
             target=self._run_routing,
             args=(config,),
@@ -3047,22 +3054,34 @@ class RoutingDialog(wx.Dialog):
                 )
 
             if self._cancel_requested:
-                wx.CallAfter(self._routing_cancelled)
+                wx.CallAfter(self._routing_finished, self._routing_cancelled)
             else:
                 # Calculate wall time from button press
                 wall_time = time.time() - self._routing_start_time
                 # Apply results to pcbnew on main thread
-                wx.CallAfter(self._apply_results_to_board, results_data, successful, failed, wall_time, config)
+                wx.CallAfter(self._routing_finished,
+                             self._apply_results_to_board, results_data,
+                             successful, failed, wall_time, config)
 
         except Exception as e:
-            wx.CallAfter(self._routing_error, str(e))
+            wx.CallAfter(self._routing_finished, self._routing_error, str(e))
         finally:
             # Restore original stdout
             sys.stdout = original_stdout
 
+    def _routing_finished(self, handler, *args):
+        """Main-thread completion wrapper: run the apply/cancel/error
+        handler, then clear _apply_pending so _poll_routing may re-enable
+        the button (the plan executor's busy signal)."""
+        try:
+            handler(*args)
+        finally:
+            self._apply_pending = False
+
     def _poll_routing(self):
-        """Poll for routing thread completion."""
-        if self._routing_thread and self._routing_thread.is_alive():
+        """Poll for routing thread completion AND results application."""
+        if (self._routing_thread and self._routing_thread.is_alive()) \
+                or getattr(self, '_apply_pending', False):
             wx.CallLater(100, self._poll_routing)
         else:
             self.route_btn.Enable()
