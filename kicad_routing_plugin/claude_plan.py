@@ -286,6 +286,7 @@ def apply_step_params(step, dialog):
             if name in params:
                 try:
                     getattr(dialog, name).SetValue(float(params[name]))
+                    notes.append(f"set {name}={params[name]}")
                 except (TypeError, ValueError):
                     notes.append(f"ignored non-numeric {name}={params[name]!r}")
         power = params.get("power_nets")
@@ -294,6 +295,7 @@ def apply_step_params(step, dialog):
             if widths and len(widths) == len(power):
                 dialog.power_nets_ctrl.SetValue(" ".join(str(p) for p in power))
                 dialog.power_widths_ctrl.SetValue(" ".join(f"{float(w):g}" for w in widths))
+                notes.append(f"set power_nets={list(power)} widths={list(widths)}")
             else:
                 notes.append("power_nets/widths count mismatch, fields not filled")
         costs = params.get("layer_costs")
