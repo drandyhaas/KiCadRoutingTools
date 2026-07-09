@@ -481,6 +481,12 @@ class ClaudeTab(wx.Panel):
         sel_grid.Add(self.effort_choice, 0, wx.EXPAND)
         ctrl_sizer.Add(sel_grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        # Visual break between the model/effort selectors and the actions
+        ctrl_sizer.AddSpacer(6)
+        ctrl_sizer.Add(wx.StaticLine(self), 0,
+                       wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
+        ctrl_sizer.AddSpacer(6)
+
         # Planning: the headline action (bold) with its Cancel right under it
         self.plan_btn = wx.Button(self, label="Plan Routing")
         self.plan_btn.SetFont(self.plan_btn.GetFont().Bold())
