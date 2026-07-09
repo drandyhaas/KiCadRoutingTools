@@ -1,25 +1,29 @@
-280009bdfb4c25bae980451ab8fcebbbed3c00ac 2026-07-09 audited d5a9d90..HEAD (30 commits); 0 gaps needing fixes.
-- Most of the range IS GUI-side work (claude tab: status mirror/relocation, model aliases,
-  Save/Load plan + .json wildcard, plan-install defaults reset incl. tab panels + fanout,
-  any-parameter mapping with aliases/special fields, per-step live DRC floors, oracle
-  Log-tab visibility, added_seg fix, plan log symmetry) or dual-front features built for
-  parity (in-engine reconciliation for return_results, in-memory repair cleanup +
-  self-reconnect + 6-tuple strip channel with the planes-applier unpack updated in the
-  same commit, repair-only oracle both fronts).
-- Shared-engine changes ride both fronts automatically: outline-over-credit closure
-  (zone_credit_validator + make_real_fill_validator in check_connected, wired through
-  every removal gate in pcb_modification), base-disconnected-component protection
-  (b696305), tap protected_pads (inside the route_disconnected_planes engine fn),
-  oracle rework (zone-kind expansion, fill-flow margins, two-short-links, drill guard),
-  GND-stitching fixes in add_gnd_vias (ring shortfall, grid snap).
-- VERIFIED parity details:
-  * GUI stitching already used ALL board copper layers (_get_all_copper_layers), so the
-    5c4a9f8 route_planes all-layers fix brought the CLI UP TO the GUI's behavior;
-  * route_planes' create-front cleanup_plane_taps_grazing call passes no protected_pads
-    -- covered by the generic gate-level base-disconnected protection (defense layer the
-    repair front has in addition);
-  * changed signatures (_safe_prune_net zone_credit_validator, cleanup_plane_taps_grazing
-    protected_pads) default-compat: external callers (tests, route_planes) unchanged pass.
-- CLI-only by design: KICAD_DUMP_BATCH_KWARGS probe (env-gated), manifest_to_plan.py
-  (produces GUI-loadable plans -- the tool exists to CROSS the fronts),
-  route_planes --no-kicad-recheck flag removed (its consumer was removed in-range).
+f79743afb01788eced8bbb590ad0159860d31b52 2026-07-09 audited 280009b..HEAD (8 commits); 0 gaps needing fixes.
+- The range is dominated by shared-engine Rust work that rides both fronts for free:
+  the single-ended A* NodeMap fold (2b3f881, 0.17.2), the mimalloc global allocator
+  (cfc982e, 0.17.3, lib.rs one-liner), and the PoseRouter PoseNodeMap fold (f79743a,
+  0.17.4). All three are internal memory/cache refactors verified byte-identical --
+  NO PyO3 signature / pub-fn / #[new] change (grep of the router.rs+pose_router.rs
+  diff for those is empty), so the GUI's grid_router call sites need nothing new.
+- diff_pair_routing.py (953db5b, revert of the #341 full_pose_budget cap): removes an
+  internal throttle inside the private _route_direct_coupled_middle only -- no change to
+  batch_route_diff_pairs or any public engine signature/param, so both fronts (CLI
+  route_diff.py + GUI differential_gui) inherit it automatically via the shared call.
+- CLI-only by design: memory_debug.py memory tooling (f537ce6) is a debug/profiling path,
+  not a routing engine surface.
+- GUI-only by design, no CLI counterpart needed:
+  * 31e66d9 (claude_plan.py _write_drc_floors): plan-end floor writes now go through the
+    existing GUI helper gui_utils.update_live_drc_floors (same board-scan min-merge as the
+    per-step path) instead of raw pcbnew DesignSettings assignments that raised floors back
+    above fine copper. Operates on a LIVE pcbnew board; the CLI has no live board -- it
+    writes .kicad_pro floors via its own already-min-merged clearance_ledger path.
+  * 4df8b86 (differential_gui / planes_gui / swig_gui): async busy-signal race fix (busy
+    stays true until results are APPLIED). Purely a GUI threading concern; the CLI is
+    synchronous and has no equivalent apply race.
+- No new engine parameter, flag, or results-data key was added anywhere in the range, so
+  there is nothing new to thread through the argparse layer, the GUI call sites, the config
+  dict, the options panels, or settings_persistence.py.
+- Static audit only (per CLAUDE.md method): git-log + engine-vs-GUI diff review. The live
+  gui_parity harness was NOT run this pass -- it routes a full board inside KiCad's python
+  and would have competed for RAM on the 8GB box with a concurrent stress wave whose timing
+  measurement had to stay clean; unnecessary here since the range adds no engine params.
