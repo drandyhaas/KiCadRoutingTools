@@ -3385,7 +3385,10 @@ class RoutingDialog(wx.Dialog):
                 print(f"Warning: failed to build routing suggestions: {e}")
         msg += "\nUse Edit -> Undo to revert changes."
 
-        wx.MessageBox(msg, "Routing Complete", wx.OK | wx.ICON_INFORMATION)
+        if getattr(self.GetTopLevelParent(), '_suppress_completion_popups', False):
+            print(msg)  # unattended plan run: no per-step OK dialog
+        else:
+            wx.MessageBox(msg, "Routing Complete", wx.OK | wx.ICON_INFORMATION)
 
         # Clear the selected nets since they've been routed
         self.net_panel._checked_nets.clear()

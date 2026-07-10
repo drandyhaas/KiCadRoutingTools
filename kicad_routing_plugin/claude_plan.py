@@ -583,7 +583,7 @@ class PlanExecutor:
     START_GRACE_POLLS = 5
 
     def __init__(self, dialog, steps, indices, on_status, on_finished,
-                 log=None, on_progress=None):
+                 log=None, on_progress=None, quiet=False):
         self.dialog = dialog
         self.steps = steps
         self.indices = list(indices)
@@ -591,6 +591,10 @@ class PlanExecutor:
         self.on_finished = on_finished
         self.on_progress = on_progress
         self.log = log or (lambda message: None)
+        # quiet: suppress each step's "Routing/Operation/Fanout Complete" OK
+        # popup so the whole plan runs unattended ("Run All Selected Steps").
+        # The per-step summary still prints; step status/log are unchanged.
+        self.quiet = quiet
         self._queue = []
         self._completed = 0
         self._stop_requested = False
@@ -601,6 +605,7 @@ class PlanExecutor:
         # "create planes first?" offer (which jumps to the Planes tab and
         # aborts routing) must not fire during an automated run.
         self.dialog._suppress_plane_offer = True
+        self.dialog._suppress_completion_popups = self.quiet
         self._queue = list(self.indices)
         self._next_step()
 
@@ -656,6 +661,7 @@ class PlanExecutor:
 
     def _finish(self, aborted_reason):
         self.dialog._suppress_plane_offer = False
+        self.dialog._suppress_completion_popups = False
         self._write_drc_floors()
         self.on_finished(self._completed, aborted_reason)
 

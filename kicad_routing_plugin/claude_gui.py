@@ -514,6 +514,16 @@ class ClaudeTab(wx.Panel):
         self.run_plan_btn.Disable()
         ctrl_sizer.Add(self.run_plan_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        # Same as above but unattended: no per-step "Routing Complete" OK popup.
+        self.run_all_plan_btn = wx.Button(self, label="Run All Selected Steps")
+        self.run_all_plan_btn.SetToolTip(
+            "Run the checked steps end-to-end WITHOUT the per-step completion "
+            "popup you normally have to OK. Each step's summary is printed to "
+            "the output/log instead.")
+        self.run_all_plan_btn.Bind(wx.EVT_BUTTON, self._on_run_all_selected)
+        self.run_all_plan_btn.Disable()
+        ctrl_sizer.Add(self.run_all_plan_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         self.stop_plan_btn = wx.Button(self, label="Stop")
         self.stop_plan_btn.SetToolTip("Stop after the currently running step finishes")
         self.stop_plan_btn.Bind(wx.EVT_BUTTON, self._on_stop_plan)
@@ -657,6 +667,7 @@ class ClaudeTab(wx.Panel):
                 [i for i in state.get('checked', []) if 0 <= i < len(steps)])
             self.run_plan_btn.Enable(self.routing_dialog is not None
                                      and self._claude_path is not None)
+            self.run_all_plan_btn.Enable(self.run_plan_btn.IsEnabled())
 
     # ------------------------------------------------------------------ run
 
@@ -670,6 +681,7 @@ class ClaudeTab(wx.Panel):
         self.review_btn.Disable()
         self.diagnose_btn.Disable()
         self.run_plan_btn.Disable()
+        self.run_all_plan_btn.Disable()
         self.cancel_btn.Enable()
         self.parsed_ctrl.SetValue("")
         # The transcript and step list persist across runs and dialog reopens;
@@ -769,6 +781,7 @@ class ClaudeTab(wx.Panel):
         self.review_btn.Enable()
         self.diagnose_btn.Enable()
         self.run_plan_btn.Enable(bool(self._plan_steps))
+        self.run_all_plan_btn.Enable(self.run_plan_btn.IsEnabled())
         self.cancel_btn.Disable()
         kind, self._pending_kind = self._pending_kind, None
 
@@ -839,6 +852,7 @@ class ClaudeTab(wx.Panel):
         self.plan_list.Set([step_label(i + 1, s) for i, s in enumerate(steps)])
         self.plan_list.SetCheckedItems(range(len(steps)))
         self.run_plan_btn.Enable(bool(steps) and self.routing_dialog is not None)
+        self.run_all_plan_btn.Enable(self.run_plan_btn.IsEnabled())
 
         # Fill the tabs so each step can be reviewed in its native controls.
         # (Selections of same-action steps overwrite each other here; they are
@@ -856,8 +870,10 @@ class ClaudeTab(wx.Panel):
         self.output_ctrl.AppendText(
             f"\nPlan loaded: {len(steps)} step(s). Parameters were applied to the "
             "tabs - review/tweak them there, uncheck steps you don't want, then "
-            "press 'Run Selected Steps'.\n")
+            "press 'Run Selected Steps' (or 'Run All Selected Steps' to run "
+            "unattended, without the per-step completion popup).\n")
         self.run_plan_btn.Enable()
+        self.run_all_plan_btn.Enable(self.run_plan_btn.IsEnabled())
         self._log(f"Claude plan: {len(steps)} steps loaded")
 
     def _on_save_plan(self, event):
@@ -906,7 +922,11 @@ class ClaudeTab(wx.Panel):
         self._log(f"Claude plan: loaded {len(steps)} step(s) from {path}")
         self._install_plan_steps(steps)
 
-    def _on_run_selected(self, event):
+    def _on_run_all_selected(self, event):
+        """Run the checked steps unattended (no per-step completion popups)."""
+        self._on_run_selected(event, quiet=True)
+
+    def _on_run_selected(self, event, quiet=False):
         from .claude_plan import PlanExecutor
 
         if self._plan_executor is not None or not self._plan_steps:
@@ -918,6 +938,7 @@ class ClaudeTab(wx.Panel):
             wx.MessageBox("No steps are checked.", "Claude", wx.OK | wx.ICON_WARNING)
             return
         self.run_plan_btn.Disable()
+        self.run_all_plan_btn.Disable()
         self.plan_btn.Disable()
         self.stop_plan_btn.Enable()
         self._plan_executor = PlanExecutor(
@@ -925,7 +946,8 @@ class ClaudeTab(wx.Panel):
             on_status=self._on_plan_step_status,
             on_finished=self._on_plan_finished,
             log=self._log,
-            on_progress=self._on_plan_step_progress)
+            on_progress=self._on_plan_step_progress,
+            quiet=quiet)
         self._plan_executor.start()
 
     def _on_stop_plan(self, event):
@@ -976,6 +998,7 @@ class ClaudeTab(wx.Panel):
             return
         self.stop_plan_btn.Disable()
         self.run_plan_btn.Enable(bool(self._plan_steps))
+        self.run_all_plan_btn.Enable(self.run_plan_btn.IsEnabled())
         self.plan_btn.Enable()
         if aborted_reason:
             message = f"Claude plan: stopped after {completed} step(s): {aborted_reason}"

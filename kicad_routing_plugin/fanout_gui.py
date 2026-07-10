@@ -1499,7 +1499,10 @@ class FanoutTab(wx.Panel):
                 print(f"Warning: failed to build fanout suggestions: {e}")
         msg += "\nUse Edit -> Undo to revert changes."
 
-        wx.MessageBox(msg, "Fanout Complete", wx.OK | wx.ICON_INFORMATION)
+        if getattr(self.GetTopLevelParent(), '_suppress_completion_popups', False):
+            print(msg)  # unattended plan run: no per-step OK dialog
+        else:
+            wx.MessageBox(msg, "Fanout Complete", wx.OK | wx.ICON_INFORMATION)
 
         # Callback
         if self.on_fanout_complete:

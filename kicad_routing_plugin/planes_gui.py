@@ -1192,7 +1192,10 @@ class PlanesTab(wx.Panel):
                 print(f"Warning: failed to build plane suggestions: {e}")
 
         msg += "\nUse Edit -> Undo to revert changes."
-        wx.MessageBox(msg, "Operation Complete", wx.OK | wx.ICON_INFORMATION)
+        if getattr(self.GetTopLevelParent(), '_suppress_completion_popups', False):
+            print(msg)  # unattended plan run: no per-step OK dialog
+        else:
+            wx.MessageBox(msg, "Operation Complete", wx.OK | wx.ICON_INFORMATION)
 
         # Callback - hand the parent the nets that were just touched so it
         # can invalidate their connectivity cache entries.
