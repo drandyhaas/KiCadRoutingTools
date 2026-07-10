@@ -1038,7 +1038,7 @@ class DifferentialTab(wx.Panel):
                 print(f"Warning: failed to build diff pair suggestions: {e}")
         msg += "\nUse Edit -> Undo to revert changes."
 
-        if getattr(self.GetTopLevelParent(), '_suppress_completion_popups', False):
+        if getattr(getattr(self, 'GetTopLevelParent', lambda: self)(), '_suppress_completion_popups', False):
             print(msg)  # unattended plan run: no per-step OK dialog
         else:
             wx.MessageBox(msg, "Routing Complete", wx.OK | wx.ICON_INFORMATION)
