@@ -1551,8 +1551,33 @@ def _chain_segments_into_contours(segments: List[Tuple[Tuple[float, float], Tupl
                 by = int(pt[1] / bucket_size)
                 seg_buckets[(bx, by)].append(i)
 
-        polygon = [group_segs[0][0], group_segs[0][1]]
-        used = {0}
+        # Loose ends = endpoints with no partner within tol. A group with
+        # exactly two is an OPEN chain: KiCad's outline assembler
+        # (ConvertOutlineToPolygon) closes it straight back to its start
+        # rather than discarding it -- bus_pirate5's two panel slots close
+        # across a 60mm synthesized edge. Walk such a chain from a loose
+        # end (starting mid-chain consumes only one side and drops the
+        # group); the self-intersection guard below then mirrors pcbnew's
+        # normalization dropping sliver rings whose closure crosses their
+        # own chain (the same board's panel-frame strips).
+        endpoints = []
+        for seg in group_segs:
+            endpoints.append(seg[0])
+            endpoints.append(seg[1])
+        loose = [p for p in endpoints
+                 if sum(1 for q in endpoints if approx_equal(p, q)) == 1]
+        start_idx, start_flip = 0, False
+        if len(loose) == 2:
+            for i, seg in enumerate(group_segs):
+                if approx_equal(seg[0], loose[0]):
+                    start_idx, start_flip = i, False
+                    break
+                if approx_equal(seg[1], loose[0]):
+                    start_idx, start_flip = i, True
+                    break
+        s0 = group_segs[start_idx]
+        polygon = [s0[1], s0[0]] if start_flip else [s0[0], s0[1]]
+        used = {start_idx}
 
         max_iterations = len(group_segs) * 2
         for _ in range(max_iterations):
@@ -1589,11 +1614,62 @@ def _chain_segments_into_contours(segments: List[Tuple[Tuple[float, float], Tupl
                 break
 
         # Remove duplicate closing point
+        gap_filled = False
         if len(polygon) > 1 and approx_equal(polygon[0], polygon[-1]):
             polygon = polygon[:-1]
+        elif len(loose) == 2 and len(used) == len(group_segs):
+            gap_filled = True  # open chain: ring closes polygon[-1]->polygon[0]
 
-        if len(used) == len(group_segs) and len(polygon) >= 3:
-            contours.append(polygon)
+        if len(used) != len(group_segs) or len(polygon) < 3:
+            continue
+        if gap_filled:
+            # pcbnew parity: a gap-filled ring whose synthesized closing edge
+            # properly CROSSES its own chain is a degenerate sliver (an open
+            # panel-frame strip, not a real cutout) -- polygon normalization
+            # drops it on the pcbnew side, so drop it here too. "Properly"
+            # means penetrating deeper than the chaining tolerance: a real
+            # slot's chain can graze its closure line by a sub-micron
+            # excursion at the loose ends (bus_pirate5: 0.8um), while a
+            # sliver strip oscillates across it by its full ~0.1mm width.
+            c1, c2 = polygon[-1], polygon[0]
+            clen = ((c2[0] - c1[0]) ** 2 + (c2[1] - c1[1]) ** 2) ** 0.5
+            crosses = False
+            if clen > tol:
+                ux, uy = (c2[0] - c1[0]) / clen, (c2[1] - c1[1]) / clen
+                for k in range(1, len(polygon) - 2):
+                    p1, p2 = polygon[k], polygon[k + 1]
+                    # signed perpendicular distance to the closure line
+                    s1 = (p1[0] - c1[0]) * uy - (p1[1] - c1[1]) * ux
+                    s2 = (p2[0] - c1[0]) * uy - (p2[1] - c1[1]) * ux
+                    if (s1 > 0) == (s2 > 0) or min(abs(s1), abs(s2)) <= tol:
+                        continue  # same side, or grazing shallower than tol
+                    # crossing point must lie within the closure segment
+                    t = s1 / (s1 - s2)
+                    cx = p1[0] + (p2[0] - p1[0]) * t
+                    cy = p1[1] + (p2[1] - p1[1]) * t
+                    along = (cx - c1[0]) * ux + (cy - c1[1]) * uy
+                    if tol < along < clen - tol:
+                        crosses = True
+                        break
+            if crosses:
+                continue
+            area = 0.0
+            perim = 0.0
+            for k in range(len(polygon)):
+                x1, y1 = polygon[k]
+                x2, y2 = polygon[(k + 1) % len(polygon)]
+                area += x1 * y2 - x2 * y1
+                perim += ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+            area = abs(area) / 2.0
+            # Mean-thickness sliver rule: a gap-filled ring thinner than any
+            # manufacturable cutout (fab min slot ~0.8mm) is a V-cut / tab
+            # guide LINE, not a hole -- pcbnew's normalization drops these
+            # (bus_pirate5's three panel-frame strips, 0.013-0.24mm thick,
+            # vs its real slots at ~3.8mm; the rule only applies to rings we
+            # closed OURSELVES, never to deliberately drawn thin rings).
+            if perim < tol or (2.0 * area) / perim < 0.5:
+                continue
+        contours.append(polygon)
 
     return contours
 
