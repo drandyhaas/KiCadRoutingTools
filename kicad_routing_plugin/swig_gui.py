@@ -1414,11 +1414,7 @@ class RoutingDialog(wx.Dialog):
             # the BGA fanout honors them like route/diff do (issue #288):
             # negative = no escape copper on that layer (soon-to-be-plane),
             # weights fill cheaper layers first. Empty/invalid -> [].
-            lc_text = self.layer_costs_ctrl.GetValue().strip()
-            try:
-                layer_costs = [float(c) for c in lc_text.split()] if lc_text else []
-            except ValueError:
-                layer_costs = []
+            layer_costs = self._selected_layer_costs()
             return {
                 'track_width': self.track_width.GetValue(),
                 'clearance': self.clearance.GetValue(),
@@ -1534,11 +1530,7 @@ class RoutingDialog(wx.Dialog):
             """Get full routing configuration from the main dialog."""
             # Per-layer cost multipliers from the shared Basic-tab control, so the
             # Differential tab honors them too (issue #193). Empty/invalid -> [].
-            lc_text = self.layer_costs_ctrl.GetValue().strip()
-            try:
-                layer_costs = [float(c) for c in lc_text.split()] if lc_text else []
-            except ValueError:
-                layer_costs = []
+            layer_costs = self._selected_layer_costs()
             return {
                 'layers': self._get_selected_layers(),
                 'layer_costs': layer_costs,
@@ -2262,6 +2254,36 @@ class RoutingDialog(wx.Dialog):
         """Get list of selected layers."""
         return [layer for layer, cb in self.layer_checks.items() if cb.GetValue()]
 
+    def _selected_layer_costs(self):
+        """Layer costs from the shared Basic-tab control, aligned to the
+        SELECTED layers (what batch_route/generate_bga_fanout expect).
+
+        The control's documented order is the board's full copper stack (its
+        defaults are generated per copper layer, and Claude plans emit costs
+        "in board layer order") -- but the engines want one value per selected
+        layer. With a subset of layers checked on a >N-layer board, the raw
+        list crashed the fanout ("--layer-costs needs one value per layer").
+        Translate by name: board-ordered input is subset to the checked
+        layers; input already matching the selected count passes through.
+        Anything else is returned raw so the engine's clear error stands.
+        Empty/invalid -> [].
+        """
+        lc_text = self.layer_costs_ctrl.GetValue().strip()
+        try:
+            costs = [float(c) for c in lc_text.split()] if lc_text else []
+        except ValueError:
+            return []
+        if not costs:
+            return []
+        selected = self._get_selected_layers()
+        if len(costs) == len(selected):
+            return costs
+        copper = self.pcb_data.board_info.copper_layers
+        if len(costs) == len(copper):
+            by_layer = dict(zip(copper, costs))
+            return [by_layer[l] for l in selected if l in by_layer]
+        return costs
+
     def _validate_routing_inputs(self):
         """Validate routing inputs before starting.
 
@@ -2434,14 +2456,7 @@ class RoutingDialog(wx.Dialog):
             config['rip_existing_nets'] = rip_existing_text.split()
 
         # Parse layer costs
-        layer_costs_text = self.layer_costs_ctrl.GetValue().strip()
-        if layer_costs_text:
-            try:
-                config['layer_costs'] = [float(c) for c in layer_costs_text.split()]
-            except ValueError:
-                config['layer_costs'] = []
-        else:
-            config['layer_costs'] = []
+        config['layer_costs'] = self._selected_layer_costs()
 
         # If using net class definitions, build per-class parameter mapping
         if self.use_netclass_check.GetValue():
