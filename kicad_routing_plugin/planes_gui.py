@@ -935,7 +935,7 @@ class PlanesTab(wx.Panel):
                 all_layers=all_layers,
                 dry_run=True,  # Don't write to file, apply via pcbnew
                 rip_blocker_nets=config.get('rip_blocker_nets', False),
-                max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),                # Re-route a ripped wide power net at its proper width.
+                max_rip_nets=config.get('max_rip_nets', defaults.PLANE_MAX_RIP_NETS),                # Re-route a ripped wide power net at its proper width.
                 power_nets=config.get('power_nets'),
                 power_nets_widths=config.get('power_nets_widths'),
                 # Match signal routing's No-BGA-Zones intent when rerouting
@@ -1081,7 +1081,7 @@ class PlanesTab(wx.Panel):
                 routing_layers=all_layers,
                 repair_pads=config.get('repair_pads', True),
                 rip_blocker_nets=config.get('rip_blocker_nets', False),
-                max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),                power_nets=config.get('power_nets'),
+                max_rip_nets=config.get('max_rip_nets', defaults.PLANE_MAX_RIP_NETS),                power_nets=config.get('power_nets'),
                 power_nets_widths=config.get('power_nets_widths'),
                 # The route tab's "ALL" no-BGA-zones intent, mirrored when
                 # re-routing ripped nets on a BGA board (issue #88).
