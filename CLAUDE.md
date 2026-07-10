@@ -99,11 +99,30 @@ picked up by both for free. The gaps appear at the edges:
   builds `PCBData` from pcbnew instead, so `build_pcb_data_from_board`
   must be kept at parity with the text parser separately.
 
+- **A post-pass added to a CLI `main()`** (running *after* the shared engine
+  call — cleanup, oracle recheck, DRC-floor writeback) is invisible to the
+  GUI unless separately replicated (the set11 plane-shorts bug:
+  `route_disconnected_planes.main()` ran `clean_plane_copper`, the planes tab
+  didn't). Prefer putting the pass INSIDE the shared engine function; when it
+  must operate on the written file, refactor a **board-level core** and call
+  it from both fronts (as `compute_plane_copper_cleanup` now backs both
+  `clean_plane_copper` and `planes_gui._run_plane_copper_cleanup`).
+
 **Rule of thumb:** whenever you change routing behavior via the CLI, check
 whether the corresponding GUI call site (and its options panel) needs the
 same change — and vice versa. When adding a flag, grep the
 `kicad_routing_plugin/` call sites for the function you changed and wire it
 through there too.
+
+**Parity gates (run these when touching CLI/GUI routing):**
+- `tests/gui_parity/test_manifest_plan_parity.py` — no wx; asserts every CLI
+  `--flag` survives `manifest_to_plan` into the GUI plan step (plan→params).
+- `tests/gui_parity/test_cli_postpass_coverage.py` — no wx; asserts every CLI
+  `main()` post-engine pass has a GUI counterpart, and blocks a new CLI-only
+  post-pass (Class-2 drift). Register new passes there.
+- `tests/gui_parity/test_gui_engine_parity.py` — needs KiCad python; runs the
+  plan through the GUI engine path and grades against the CLI chain
+  (`KICAD_DUMP_BATCH_KWARGS` diffs the 76-key param set).
 
 **Tracking the last-audited commit:** `.gui-parity-checked` (repo root,
 git-committed) holds the SHA of the last commit a full CLI/GUI parity audit
