@@ -154,7 +154,7 @@ def run_obstacle_audit(base_obstacles, working_obstacles,
             print("  (soft cost maps, residual expected: "
                   + ", ".join(f"{n} {d:+d}" for n, d in soft) + ")")
         print("=" * 60)
-        if os.environ.get("KICAD_OBSTACLE_LEDGER") == "1":
+        if _LEDGER_ENV:
             obstacle_ledger_report(net_obstacles_cache)
     except Exception as e:
         print(f"[OBSTACLE AUDIT] skipped ({e})")

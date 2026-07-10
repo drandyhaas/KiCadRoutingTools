@@ -10,6 +10,7 @@ Phase 3 connects remaining pads to the main route.
 """
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import List, Dict, Set, Optional, Tuple, Any
@@ -33,6 +34,10 @@ from obstacle_cache import (
 from obstacle_costs import compute_track_proximity_for_net
 from plane_pad_tap import push_inflight_copper, pop_inflight_copper
 from terminal_colors import RED, RESET
+
+# Opt-in canary for the #186 segment-crossing scan (see try_phase3_ripup);
+# read once at import -- the abandon path is inside the routing hot loop.
+_TAP_CROSS_SCAN = bool(os.environ.get('KICAD_TAP_CROSS_SCAN'))
 
 
 @dataclass
@@ -754,11 +759,14 @@ def try_phase3_ripup(
                             for s in child_sinks:
                                 s.update(c_ripped)
                     # Issue #186: also re-route any OTHER routed net whose copper
-                    # crosses the original tap we are keeping. With the #354 rip-tree
-                    # re-rip above this should find nothing new (only cascade-ripped
-                    # nets can postdate the original tap's obstacle snapshot); kept
-                    # as a cheap defensive fallback.
-                    for cid in _nets_crossing_segments(orig_tap_segs, pcb_data, net_id, existing_ids):
+                    # crosses the original tap we are keeping. The #354 rip-tree
+                    # re-rip above subsumes this (only cascade-ripped nets can
+                    # postdate the original tap's obstacle snapshot), so the scan
+                    # is OFF by default -- kept as an opt-in canary
+                    # (KICAD_TAP_CROSS_SCAN=1): if it ever fires, some code path
+                    # moved copper during the cascade without a recorded rip.
+                    for cid in (_nets_crossing_segments(orig_tap_segs, pcb_data, net_id, existing_ids)
+                                if _TAP_CROSS_SCAN else ()):
                         if cid not in routed_results:
                             continue
                         c_saved, c_ripped, c_was_in = rip_up_net(

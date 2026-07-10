@@ -13,6 +13,10 @@ from typing import Dict, List, Optional, Tuple
 from kicad_parser import PCBData, Segment, Via
 from routing_utils import pos_key, POSITION_DECIMALS, into_pad_frame_point
 
+# Read once at import: both are checked inside per-segment cleanup loops (hot).
+_COLLAPSE_DEBUG = os.environ.get('KICAD_COLLAPSE_DEBUG')
+_PRUNE_CONN_VERIFY = os.environ.get('PRUNE_CONN_VERIFY')
+
 
 def get_copper_layers_from_segments(segments: List[Segment], existing_segments: List[Segment] = None) -> List[str]:
     """
@@ -321,7 +325,7 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
         zone_credit_validator=zone_credit_validator)
     seg_pos = {id(s): i for i, s in enumerate(universe)}
     prunable_ids = [id(s) for s in prunable]
-    _verify = os.environ.get('PRUNE_CONN_VERIFY')
+    _verify = _PRUNE_CONN_VERIFY
 
     def disconnected(segs):
         if graph is not None:
@@ -1245,9 +1249,9 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None
                 t_phys = analyze_conn_excluding(graph_phys, excl)
                 if t_phys['disconnected_pads']:
                     continue
-                if os.environ.get('KICAD_COLLAPSE_DEBUG'):
+                if _COLLAPSE_DEBUG:
                     _nm = pcb_data.nets.get(net_id)
-                    if _nm and _nm.name == os.environ['KICAD_COLLAPSE_DEBUG']:
+                    if _nm and _nm.name == _COLLAPSE_DEBUG:
                         print(f"[COLLAPSE_DEBUG] net {_nm.name}: ACCEPT seg "
                               f"({s.start_x},{s.start_y})->({s.end_x},{s.end_y}) {s.layer} "
                               f"strict=({t['num_components']},{len(t['disconnected_pads'])}) "
@@ -2117,7 +2121,7 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
             net_id, net_segs, net_vias, net_pads, net_zones,
             zone_credit_validator=_zcv)
         seg_pos = {id(s): i for i, s in enumerate(net_segs)}
-        _verify = os.environ.get('PRUNE_CONN_VERIFY')
+        _verify = _PRUNE_CONN_VERIFY
         dropped = []
         dropped_idx = set()
         # Shortest grazing segments first: an appendix tip / tap stub is the most
