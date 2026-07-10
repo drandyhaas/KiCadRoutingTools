@@ -430,7 +430,8 @@ def try_phase3_ripup(
     global_tap_offset=0, global_tap_total=0, global_tap_failed=0,
     obstacle_cache=None,
     reroute_depth: int = 0,
-    ancestor_net_ids: frozenset = frozenset()
+    ancestor_net_ids: frozenset = frozenset(),
+    rip_sinks: tuple = ()
 ):
     """
     Try progressive rip-up and retry for failed Phase 3 tap routes.
@@ -438,6 +439,10 @@ def try_phase3_ripup(
     Tries N=1, then N=2, etc up to max_rip_up_count blockers.
     Returns updated completed_result if retry succeeded, None otherwise.
     Appends ripped nets to phase3_ripped_nets for later re-routing.
+
+    rip_sinks (#354): tuple of set()s owned by ANCESTOR rip-up frames. Every
+    net id ripped in this frame or below is added to all of them, so each
+    frame knows its full nested rip TREE (not just its direct victims).
     """
     net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"net_{net_id}"
 
@@ -455,6 +460,15 @@ def try_phase3_ripup(
     # -- a circular net -> ... -> net rip that orphans copper and ships the root
     # split. exclude_net_ids removes them from blocker selection at every depth.
     exclude_ids = {net_id} | ancestor_net_ids
+
+    # Rip TREE tracking (#354): every net ripped anywhere in this frame's
+    # nested cascade, including by nested rip-up frames. If this frame's
+    # retry is later ABANDONED, the ORIGINAL tap it keeps was never in the
+    # obstacle map while any of these nets re-routed (only the RETRY tap
+    # was), so any of them can hold copper exactly on the original tap's
+    # cells -- the abandon path must re-rip the whole subtree.
+    subtree_ripped = set()
+    child_sinks = rip_sinks + (subtree_ripped,)
 
     # Analyze blocking
     blockers = analyze_frontier_blocking(
@@ -537,6 +551,8 @@ def try_phase3_ripup(
 
         ripped_items.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
         ripped_canonical_ids.add(get_canonical_net_id(blocker.net_id, diff_pair_by_net_id))
+        for s in child_sinks:
+            s.update(ripped_ids)
         # Invalidate obstacle cache for ripped nets and record rip events
         for rid in ripped_ids:
             if obstacle_cache is not None:
@@ -629,7 +645,8 @@ def try_phase3_ripup(
                         all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
                         results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
                         reroute_depth=reroute_depth + 1,
-                        ancestor_net_ids=exclude_ids
+                        ancestor_net_ids=exclude_ids,
+                        rip_sinks=child_sinks
                     )
 
                 # IMPORTANT: Remove the temporarily added tap segments before returning.
@@ -695,7 +712,7 @@ def try_phase3_ripup(
                     for item in reroute_items:
                         vic_id = item[0]
                         if vic_id in routed_results:
-                            rip_up_net(
+                            _saved, re_ripped, _wir = rip_up_net(
                                 vic_id, pcb_data, routed_net_ids, routed_net_paths,
                                 routed_results, diff_pair_by_net_id, remaining_net_ids,
                                 results, config, track_proximity_cache,
@@ -703,12 +720,44 @@ def try_phase3_ripup(
                                 state.ripped_route_layer_costs, state.ripped_route_via_positions,
                                 layer_map
                             )
-                    # Issue #186: also re-route any OTHER routed net whose copper
-                    # crosses the original tap we are keeping. A net re-routed by a
-                    # nested rip-up cascade can have been laid across this tap (it was
-                    # in-flight, invisible copper then) and is not in ripped_items, so
-                    # the loop above misses it and a different-net SHORT would ship.
+                            if _saved is not None:
+                                for s in child_sinks:
+                                    s.update(re_ripped)
                     existing_ids = {it[0] for it in reroute_items}
+                    # Issue #354: re-rip EVERY net ripped anywhere in the nested
+                    # cascade beneath this frame (the full rip TREE), not just the
+                    # direct victims above. Nested victims re-routed while only the
+                    # RETRY tap was in the obstacle map -- the ORIGINAL tap we are
+                    # keeping was invisible to them -- so their fresh copper can sit
+                    # exactly on it (quickfeather: /SWD.SYS_RST's via drill-on-drill
+                    # under /SPI_{DEV}.MOSI's kept tap via). The #186 segment-crossing
+                    # scan below cannot see via-on-via or via-under-track overlaps;
+                    # the tree covers every net whose copper can postdate the
+                    # original tap's obstacle snapshot.
+                    for cid in sorted(subtree_ripped):
+                        if (cid in existing_ids or cid in exclude_ids
+                                or cid not in routed_results):
+                            continue
+                        c_saved, c_ripped, c_was_in = rip_up_net(
+                            cid, pcb_data, routed_net_ids, routed_net_paths,
+                            routed_results, diff_pair_by_net_id, remaining_net_ids,
+                            results, config, track_proximity_cache,
+                            state.working_obstacles, state.net_obstacles_cache,
+                            state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                            layer_map
+                        )
+                        if c_saved is not None:
+                            print(f"    {net_name}: re-routing {pcb_data.nets[cid].name if cid in pcb_data.nets else f'net_{cid}'} "
+                                  f"clear of the kept tap (cascade rip tree; issue #354)")
+                            reroute_items.append((cid, c_saved, c_ripped, c_was_in))
+                            existing_ids.add(cid)
+                            for s in child_sinks:
+                                s.update(c_ripped)
+                    # Issue #186: also re-route any OTHER routed net whose copper
+                    # crosses the original tap we are keeping. With the #354 rip-tree
+                    # re-rip above this should find nothing new (only cascade-ripped
+                    # nets can postdate the original tap's obstacle snapshot); kept
+                    # as a cheap defensive fallback.
                     for cid in _nets_crossing_segments(orig_tap_segs, pcb_data, net_id, existing_ids):
                         if cid not in routed_results:
                             continue
@@ -724,13 +773,17 @@ def try_phase3_ripup(
                             print(f"    {net_name}: re-routing {pcb_data.nets[cid].name if cid in pcb_data.nets else f'net_{cid}'} "
                                   f"clear of the kept tap (crossed it; issue #186)")
                             reroute_items.append((cid, c_saved, c_ripped, c_was_in))
+                            existing_ids.add(cid)
+                            for s in child_sinks:
+                                s.update(c_ripped)
                     _reroute_phase3_ripped_nets(
                         reroute_items,
                         pcb_data, config, state, routed_net_ids, remaining_net_ids,
                         all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
                         results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
                         reroute_depth=reroute_depth + 1,
-                        ancestor_net_ids=exclude_ids
+                        ancestor_net_ids=exclude_ids,
+                        rip_sinks=child_sinks
                     )
                     if guard:
                         remove_segments_list_from_obstacles(state.working_obstacles, orig_tap_segs, config)
@@ -777,7 +830,8 @@ def _retry_victim_main_with_ripup(
     all_unrouted_net_ids, routed_net_paths, routed_results,
     diff_pair_by_net_id, results, track_proximity_cache, layer_map,
     base_obstacles, gnd_net_id,
-    ancestor_net_ids: frozenset = frozenset()
+    ancestor_net_ids: frozenset = frozenset(),
+    rip_sinks: tuple = ()
 ):
     """Progressive rip-up retry for a rip-VICTIM's failed MAIN re-route
     (issue #347, core1106 RST1).
@@ -859,6 +913,8 @@ def _retry_victim_main_with_ripup(
             break
         nested_ripped.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
         ripped_canonical_ids.add(get_canonical_net_id(blocker.net_id, diff_pair_by_net_id))
+        for s in rip_sinks:
+            s.update(ripped_ids)
         for rid in ripped_ids:
             record_net_event(state, rid, "ripped_by", {
                 "ripping_net_id": victim_id,
@@ -922,7 +978,8 @@ def _reroute_phase3_ripped_nets(
     all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
     results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
     reroute_depth: int = 0,
-    ancestor_net_ids: frozenset = frozenset()
+    ancestor_net_ids: frozenset = frozenset(),
+    rip_sinks: tuple = ()
 ):
     """
     Re-route nets that were ripped during Phase 3 tap routing.
@@ -997,7 +1054,8 @@ def _reroute_phase3_ripped_nets(
                 all_unrouted_net_ids, routed_net_paths, routed_results,
                 diff_pair_by_net_id, results, track_proximity_cache, layer_map,
                 base_obstacles, gnd_net_id,
-                ancestor_net_ids=ancestor_net_ids | {ripped_net_id})
+                ancestor_net_ids=ancestor_net_ids | {ripped_net_id},
+                rip_sinks=rip_sinks)
             if retry is not None:
                 result = retry
 
@@ -1058,7 +1116,8 @@ def _reroute_phase3_ripped_nets(
                     routed_results, diff_pair_by_net_id, results,
                     track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
                     reroute_depth=reroute_depth + 1,
-                    ancestor_net_ids=ancestor_net_ids | {ripped_net_id})
+                    ancestor_net_ids=ancestor_net_ids | {ripped_net_id},
+                    rip_sinks=rip_sinks)
                 stranded.extend(nested_stranded)
 
             # Check if this was a multi-point net that needs tap routing (check saved_result)
@@ -1102,7 +1161,8 @@ def _reroute_phase3_ripped_nets(
                                 diff_pair_by_net_id, results, track_proximity_cache, layer_map,
                                 base_obstacles, gnd_net_id, [],  # unused parameter
                                 reroute_depth=reroute_depth + 1,
-                                ancestor_net_ids=ancestor_net_ids
+                                ancestor_net_ids=ancestor_net_ids,
+                                rip_sinks=rip_sinks
                             )
 
                             if retry_result is not None:
