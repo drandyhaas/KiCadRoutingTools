@@ -261,6 +261,15 @@ class RoutingDialog(wx.Dialog):
                     board, pcbnew.ToMM, get_layer_name)
             except Exception as e:
                 print(f"Warning: Error syncing zones from board: {e}")
+
+            # Sync FOOTPRINT and PAD positions too (#362) so a later route step
+            # sees caps where optimize_caps actually moved them, not their
+            # load-time positions. See gui_utils.sync_footprint_positions_from_board.
+            try:
+                from .gui_utils import sync_footprint_positions_from_board
+                sync_footprint_positions_from_board(board, self.pcb_data)
+            except Exception as e:
+                print(f"Warning: Error syncing footprint positions from board: {e}")
         except Exception as e:
             print(f"Warning: Error syncing tracks from board: {e}")
 
@@ -2693,6 +2702,11 @@ class RoutingDialog(wx.Dialog):
 
     def _on_route(self, event):
         """Handle route button click."""
+        # Pick up any board changes since the last sync BEFORE routing -- most
+        # importantly footprint/pad moves from a preceding optimize_caps step,
+        # so the router sees the caps where they ACTUALLY are, not where they
+        # were at load (#362). Segments/vias/zones/footprints all refresh here.
+        self._sync_pcb_data_from_board()
         selected_nets, selected_layers = self._validate_routing_inputs()
         if selected_nets is None:
             return

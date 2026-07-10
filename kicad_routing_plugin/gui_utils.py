@@ -56,6 +56,53 @@ def refill_all_zones(board):
         return 0
 
 
+def sync_footprint_positions_from_board(board, pcb_data):
+    """Refresh footprint and pad POSITIONS in pcb_data from the live pcbnew board
+    (#362).
+
+    pcb_data is parsed once when the dialog opens and then reused across plan
+    steps. optimize_caps (and manual edits) relocate footprints on the board via
+    SetPosition, but the cached pcb_data keeps their load-time positions -- so a
+    LATER signal/diff route step routes around where a cap USED to be, and the
+    moved cap's pad then shorts the fresh copper (rp2350: +1V1 vias grazing moved
+    decoupling caps C18/C22/C23/C24).
+
+    Re-reads each footprint's x/y/rotation and its pads' absolute positions.
+    Pad objects are shared with pcb_data.pads_by_net and net.pads, so updating
+    them here updates every view the router consults. Best-effort; never raises.
+    Returns the number of footprints synced (0 on error)."""
+    try:
+        import pcbnew
+        n = 0
+        for bfp in board.GetFootprints():
+            ref = bfp.GetReference()
+            pd_fp = pcb_data.footprints.get(ref)
+            if pd_fp is None:
+                continue
+            fpos = bfp.GetPosition()
+            pd_fp.x = pcbnew.ToMM(fpos.x)
+            pd_fp.y = pcbnew.ToMM(fpos.y)
+            try:
+                pd_fp.rotation = bfp.GetOrientationDegrees()
+            except Exception:
+                pass
+            bpads = {}
+            for bp in bfp.Pads():
+                bpads.setdefault(bp.GetNumber(), bp)
+            for pd_pad in pd_fp.pads:
+                bp = bpads.get(pd_pad.pad_number)
+                if bp is None:
+                    continue
+                ppos = bp.GetPosition()
+                pd_pad.global_x = pcbnew.ToMM(ppos.x)
+                pd_pad.global_y = pcbnew.ToMM(ppos.y)
+            n += 1
+        return n
+    except Exception as e:
+        print(f"Warning: Error syncing footprint positions from board: {e}")
+        return 0
+
+
 def move_copper_graphics_to_silkscreen_board(board):
     """Move copper graphic shapes (logos / artwork drawn as polys, lines, arcs,
     circles, rects, curves) from F.Cu/B.Cu to the matching silkscreen layer on the

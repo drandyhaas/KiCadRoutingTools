@@ -783,6 +783,14 @@ class DifferentialTab(wx.Panel):
 
     def _on_route(self, event):
         """Handle route button click."""
+        # Refresh shared pcb_data from the live board BEFORE routing so the diff
+        # router sees moved footprints/caps from a preceding optimize_caps step,
+        # not their load-time positions (#362; same fix as the signal route path).
+        if self.sync_pcb_data_callback:
+            try:
+                self.sync_pcb_data_callback()
+            except Exception as e:
+                print(f"(pre-route pcb_data sync skipped: {e})")
         selected_pair_info = self.get_selected_pair_net_ids()
         if not selected_pair_info:
             wx.MessageBox(
