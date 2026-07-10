@@ -95,3 +95,25 @@ all three converter-side gaps from the set11 regression (--no-bga-zones drop,
 diff pairs emitted as net names, layerless repair_planes). The apply-side
 gaps (escape_method value->index, no_gnd_vias inversion) are claude_plan.py's
 job and belong to the wx harness / a future stub-dialog apply test.
+
+## Class-2 post-pass coverage (test_cli_postpass_coverage.py)
+
+The converter gate above covers the plan->params translation; this one covers
+the OTHER drift axis: a CLI `main()` running a finalization pass AFTER its
+shared engine call that the GUI must separately replicate (Class 2). That is
+how the set11 GUI board shipped 35 plane shorts the CLI board didn't have --
+route_disconnected_planes.main() ran clean_plane_copper and the planes tab
+never did.
+
+Static, no wx/pcbnew. It AST-scans each CLI main() for post-engine passes,
+and for each registered pass asserts a GUI counterpart symbol exists under
+kicad_routing_plugin/; a finalization-module symbol used in a CLI main but not
+registered fails, so a NEW CLI-only post-pass can't be added without wiring the
+GUI. Fault-injection verified: renaming the GUI counterpart -> FAIL.
+
+    python3 tests/gui_parity/test_cli_postpass_coverage.py
+
+When you add a post-engine pass to a CLI main(), either put its core in the
+shared engine (best -- both fronts inherit it), or refactor a board-level core
+and call it from both fronts (as clean_plane_copper now does), then register
+the pass + its GUI counterpart here.
