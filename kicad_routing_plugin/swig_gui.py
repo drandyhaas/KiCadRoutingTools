@@ -3258,7 +3258,8 @@ class RoutingDialog(wx.Dialog):
                     pcbnew.FromMM(round(seg.end_x, POSITION_DECIMALS)),
                     pcbnew.FromMM(round(seg.end_y, POSITION_DECIMALS))
                 ))
-                track.SetWidth(pcbnew.FromMM(round(seg.width, POSITION_DECIMALS)))
+                track.SetWidth(pcbnew.FromMM(seg.width))  # not position-rounded (#362):
+                # round(w,3) drops a 0.0762 fab-floor width to 0.076
                 track.SetLayer(get_layer_id(seg.layer))
                 track.SetNetCode(seg.net_id)
                 board.Add(track)
@@ -3288,7 +3289,7 @@ class RoutingDialog(wx.Dialog):
                 pcbnew.FromMM(round(seg.end_x, POSITION_DECIMALS)),
                 pcbnew.FromMM(round(seg.end_y, POSITION_DECIMALS))
             ))
-            track.SetWidth(pcbnew.FromMM(round(seg.width, POSITION_DECIMALS)))
+            track.SetWidth(pcbnew.FromMM(seg.width))  # not position-rounded (#362)
             track.SetLayer(get_layer_id(seg.layer))
             track.SetNetCode(seg.net_id)
             board.Add(track)
