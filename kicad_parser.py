@@ -984,6 +984,71 @@ def _mask_pad_primitives(content: str) -> str:
     return ''.join(out)
 
 
+def _footprint_edge_points(content: str) -> List[Tuple[float, float]]:
+    """GLOBAL points of footprint-embedded Edge.Cuts shapes (fp_line/fp_rect/
+    fp_arc/fp_circle/fp_poly), transformed by each footprint's (at x y rot).
+
+    Some boards keep their entire outline inside a footprint (Adiuvo's
+    rp2350_fpga_eensy: fp_lines on Edge.Cuts in an outline footprint); a
+    board-level gr_* scan alone reports no bounds, which silently disables
+    the routing edge keep-out. KiCad's own edges bounding box includes
+    footprint shapes, so these points belong in board_bounds."""
+    pts: List[Tuple[float, float]] = []
+    if '"Edge.Cuts"' not in content:
+        return pts
+    for m in re.finditer(r'\(footprint\s+"', content):
+        start = m.start()
+        end = find_matching_paren(content, start)
+        fp_text = content[start:end]
+        if '"Edge.Cuts"' not in fp_text:
+            continue
+        at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)', fp_text)
+        if not at_match:
+            continue
+        fx, fy = float(at_match.group(1)), float(at_match.group(2))
+        frot = float(at_match.group(3)) if at_match.group(3) else 0.0
+        local: List[Tuple[float, float]] = []
+        for sm in re.finditer(
+                r'\(fp_(line|rect)\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+                r'\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP +
+                r'\(layer\s+"Edge\.Cuts"\)', fp_text, re.DOTALL):
+            x1, y1, x2, y2 = (float(sm.group(i)) for i in range(2, 6))
+            if sm.group(1) == 'rect':
+                # all four corners: under rotation the rect tilts, and the
+                # two derived corners bound it where start/end alone don't
+                local += [(x1, y1), (x2, y2), (x1, y2), (x2, y1)]
+            else:
+                local += [(x1, y1), (x2, y2)]
+        for sm in re.finditer(
+                r'\(fp_arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+                r'\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+                r'\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP +
+                r'\(layer\s+"Edge\.Cuts"\)', fp_text, re.DOTALL):
+            sx, sy, mx, my, ex, ey = (float(sm.group(i)) for i in range(1, 7))
+            for seg in _arc_to_segments((sx, sy), (mx, my), (ex, ey)):
+                local += list(seg)
+        for lx, ly in local:
+            pts.append(local_to_global(fx, fy, frot, lx, ly))
+        for sm in re.finditer(
+                r'\(fp_circle\s+\(center\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+                r'\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP +
+                r'\(layer\s+"Edge\.Cuts"\)', fp_text, re.DOTALL):
+            cx, cy, ex, ey = (float(sm.group(i)) for i in range(1, 5))
+            r = math.hypot(ex - cx, ey - cy)
+            gcx, gcy = local_to_global(fx, fy, frot, cx, cy)
+            # circle bounds are rotation-invariant about the moved center
+            pts += [(gcx - r, gcy - r), (gcx + r, gcy + r)]
+        for pm in re.finditer(r'\(fp_poly\s*\(pts', fp_text):
+            p_end = find_matching_paren(fp_text, pm.start())
+            poly_text = fp_text[pm.start():p_end]
+            if not re.search(r'\(layer\s+"Edge\.Cuts"\)', poly_text):
+                continue
+            for xm in re.finditer(r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)', poly_text):
+                pts.append(local_to_global(fx, fy, frot,
+                                           float(xm.group(1)), float(xm.group(2))))
+    return pts
+
+
 def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, float]]:
     """Extract board outline bounds from Edge.Cuts layer."""
     content = _mask_pad_primitives(content)  # pad primitives are not board graphics
@@ -1035,6 +1100,16 @@ def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, fl
             max_y = max(max_y, py)
         if poly:
             found = True
+
+    # Footprint-embedded Edge.Cuts (fp_* shapes, transformed to global):
+    # boards whose outline lives in a footprint otherwise report no bounds
+    # and route with no edge keep-out. Mirrored in build_pcb_data_from_board.
+    for px, py in _footprint_edge_points(content):
+        min_x = min(min_x, px)
+        max_x = max(max_x, px)
+        min_y = min(min_y, py)
+        max_y = max(max_y, py)
+        found = True
 
     if found:
         return (min_x, min_y, max_x, max_y)
@@ -2604,11 +2679,17 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             bmin_x = bmin_y = float('inf')
             bmax_x = bmax_y = float('-inf')
             found_edge = False
-            for drawing in board.GetDrawings():
+            # Footprint-embedded Edge.Cuts shapes count too (a board whose
+            # whole outline lives in a footprint, e.g. rp2350_fpga_eensy) --
+            # same shapes _footprint_edge_points reads on the text side.
+            # FP_SHAPE is the KiCad 6/7 footprint-shape class.
+            fp_items = [item for fp in board.GetFootprints()
+                        for item in fp.GraphicalItems()]
+            for drawing in list(board.GetDrawings()) + fp_items:
                 if drawing.GetLayer() != edge_cuts_id:
                     continue
                 class_name = drawing.GetClass()
-                if class_name not in ("PCB_SHAPE", "DRAWSEGMENT"):
+                if class_name not in ("PCB_SHAPE", "DRAWSEGMENT", "FP_SHAPE"):
                     continue
                 try:
                     bbox = drawing.GetBoundingBox()

@@ -182,7 +182,7 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 |-------|------|---------|
 | `layers` | Dict[int, str] | Layer ID → name for all layers |
 | `copper_layers` | List[str] | Copper layer names, top to bottom. Includes every `.Cu` layer regardless of declared use-type (`signal`, `power`, `mixed`, `jumper`) — KiCad often types plane layers `power`. |
-| `board_bounds` | Optional[Tuple] | `(min_x, min_y, max_x, max_y)` from Edge.Cuts, or `None` |
+| `board_bounds` | Optional[Tuple] | `(min_x, min_y, max_x, max_y)` from Edge.Cuts (board-level graphics AND footprint-embedded outline shapes), or `None` |
 | `board_outline` | List[Tuple[float, float]] | Outline polygon for non-rectangular boards (empty if rectangular) |
 | `board_cutouts` | List[List[Tuple]] | Interior cutout polygons |
 | `stackup` | List[StackupLayer] | Physical stackup, top to bottom (empty if the board has none) |
