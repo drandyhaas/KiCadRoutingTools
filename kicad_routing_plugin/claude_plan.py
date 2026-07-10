@@ -48,7 +48,7 @@ PLAN_RESULT_SCHEMA = (
     ']} '
     'In any step, params MAY additionally include ANY option shown on that '
     'tab or the shared options panel, keyed by its snake_case field name '
-    '(e.g. max_iterations, max_ripup, grid_step, board_edge_clearance, '
+    '(e.g. max_iterations, max_ripup, ripup_abandon_metric, grid_step, board_edge_clearance, '
     'hole_to_hole_clearance, via_cost, heuristic_weight, turn_cost, '
     'ordering_strategy) - unknown names are ignored with a note. '
     'List steps in execution order: fanout first, then route_diff, then route, '

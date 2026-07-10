@@ -82,6 +82,16 @@ picked up by both for free. The gaps appear at the edges:
   argparse layer *and* every GUI call site (plus its config dict, the
   options panel, and `settings_persistence.py`). A new `batch_route`
   kwarg that only `route.py` passes silently does nothing in the GUI.
+  It must also stay **Claude-settable end to end**: (1) the GUI plan
+  executor (`claude_plan.py`) applies any snake_case param whose name
+  matches a dialog control — so name the control after the param and add
+  it to `reset_params_to_defaults` (the plan executor resets through
+  that, or the param leaks between steps); (2) add the `--flag` →
+  param-name mapping to `tests/stress/manifest_to_plan.py` `FLAG_PARAMS`
+  so recorded manifests convert to `*_plan.json` with the param intact;
+  (3) mirror it in `tests/gui_parity/test_gui_engine_parity.py`'s config
+  map. Verify with: convert a manifest carrying the flag and check the
+  plan JSON step params include it.
 - **A changed default** must match in both places — the GUI sets its own
   values from UI controls and does not inherit argparse defaults.
 - **Parser/obstacle/writer fixes** in shared low-level modules are used by
