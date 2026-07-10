@@ -1497,14 +1497,16 @@ class PlanesTab(wx.Panel):
 
         # Fill any newly-added zones so they appear as solid copper without
         # the user needing to run "Fill All Zones" (B) manually.
-        if new_zone_objs:
-            try:
-                filler = pcbnew.ZONE_FILLER(board)
-                filler.Fill(new_zone_objs)
-                print(f"Filled {len(new_zone_objs)} new zone(s)")
-            except Exception as e:
-                print(f"Warning: could not auto-fill new zones ({e}). "
-                      "Press B in pcbnew to fill manually.")
+        # Re-fill EVERY zone (not just newly-created ones): a repair step adds
+        # tap/reconnect copper into EXISTING plane zones, which must pull back
+        # around it, and later signal steps add copper these planes must clear
+        # too (#362). Filling only new_zone_objs left the existing planes stale.
+        from .gui_utils import refill_all_zones
+        _rf = refill_all_zones(board)
+        if _rf:
+            print(f"Filled/refilled {_rf} zone(s)")
+        elif new_zone_objs:
+            print(f"Warning: could not auto-fill zones. Press B in pcbnew to fill manually.")
 
         # Plane-copper cleanup -- CLI/GUI PARITY (OPT-IN, default OFF).
         # The CLI plane mains run clean_plane_copper on their OUTPUT FILE after
@@ -1573,6 +1575,12 @@ class PlanesTab(wx.Panel):
         _result = getattr(self, '_operation_result', {}) or {}
         if _result.get('mode') == 'repair':
             self._run_kicad_oracle_after_apply(board)
+
+        # LAST -- refill after the oracle recheck too: the oracle routes missing
+        # links and adds copper, so a refill done before it (above) would be
+        # stale again around that copper (#362).
+        from .gui_utils import refill_all_zones
+        refill_all_zones(board)
 
     def _run_plane_copper_cleanup(self, board, get_layer_id):
         """CLI/GUI parity: apply the shared plane-copper cleanup delta

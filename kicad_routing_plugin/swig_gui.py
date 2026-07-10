@@ -3315,6 +3315,15 @@ class RoutingDialog(wx.Dialog):
         # Build connectivity to register new items properly
         board.BuildConnectivity()
 
+        # Re-fill plane zones so any pour pulls back around the copper we just
+        # routed (#362): a signal routed AFTER planes exist would otherwise
+        # leave the plane fill stale (no antipad), which KiCad DRC flags as
+        # clearance / shorting violations on the saved board.
+        from .gui_utils import refill_all_zones
+        _rf = refill_all_zones(board)
+        if _rf:
+            print(f"Refilled {_rf} zone(s) around the new copper")
+
         # Make the live board's DRC constraints consistent with what we just
         # routed to (issue #160), the GUI counterpart of the CLI's
         # fix_kicad_drc_settings: loosen the Board Setup floors + Default net

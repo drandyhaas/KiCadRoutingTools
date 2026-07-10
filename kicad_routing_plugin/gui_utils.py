@@ -32,6 +32,30 @@ class StdoutRedirector:
             self.original.flush()
 
 
+def refill_all_zones(board):
+    """Re-fill EVERY copper zone on the board so plane pours pull back around
+    copper added after they were first filled (#362).
+
+    The plane tab fills only the zones it just created; a signal routed in a
+    LATER plan step (e.g. +1V1 after the GND/+3V3 planes exist) then leaves the
+    plane fill STALE -- no antipad around the new track/via -- which KiCad DRC
+    flags as clearance / shorting violations on the saved board (the CLI board
+    is graded with kicad-cli --refill-zones, so it never shows these). Call this
+    after any apply that adds copper while filled zones exist. Best-effort.
+    Returns the number of zones refilled (0 if none / on error)."""
+    try:
+        import pcbnew
+        zones = list(board.Zones())
+        if not zones:
+            return 0
+        pcbnew.ZONE_FILLER(board).Fill(zones)
+        board.BuildConnectivity()
+        return len(zones)
+    except Exception as e:
+        print(f"(zone refill skipped: {e})")
+        return 0
+
+
 def move_copper_graphics_to_silkscreen_board(board):
     """Move copper graphic shapes (logos / artwork drawn as polys, lines, arcs,
     circles, rects, curves) from F.Cu/B.Cu to the matching silkscreen layer on the
