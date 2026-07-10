@@ -72,3 +72,26 @@ temp file vs the original bytes), per-step .kicad_pro floor carryover, and
 in-memory vs file-based post-pass sequencing. The production GUI path
 (builder representation) sits at ~77% copper identity with full grade
 parity; closing it to ~98% is the order-canonicalization follow-up.
+
+## Converter parity (test_manifest_plan_parity.py)
+
+The harness above proves the ENGINE half (same batch_route kwargs -> same
+board) but hand-mirrors the plan->params mapping, so it can't catch a bug in
+`manifest_to_plan` (converter) or `claude_plan.apply_step_params` (apply).
+Those two translation layers are where the set11 rp2350_fpga_eensy GUI replay
+silently diverged from its CLI board (242 DRC violations vs 0; issue #361).
+
+`test_manifest_plan_parity.py` is the CONVERTER-half gate: no wx, no pcbnew.
+It reuses manifest_to_plan's own pruning to pair each kept CLI command 1:1
+with its emitted plan step, then asserts each routing-affecting flag survived
+into the step's params/assignments using an INDEPENDENT expectation table (so
+a converter that drops a flag fails even though it agrees with itself).
+
+    python3 tests/gui_parity/test_manifest_plan_parity.py            # whole corpus
+    python3 tests/gui_parity/test_manifest_plan_parity.py <manifest> # one board
+
+Current: 0 mismatches over ~6200 flag-checks / 157 corpus manifests. Catches
+all three converter-side gaps from the set11 regression (--no-bga-zones drop,
+diff pairs emitted as net names, layerless repair_planes). The apply-side
+gaps (escape_method value->index, no_gnd_vias inversion) are claude_plan.py's
+job and belong to the wx harness / a future stub-dialog apply test.
