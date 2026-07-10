@@ -27,10 +27,10 @@ MAP=(
   "fusb302_pd_dev|bentwire__usb-c-fusb302-pi"
   "minisolarmesh|aresta__minisolarmesh"
   "mokya_lora_phone|tengigabytes__mokyalora"
-  "hackrf_one|greatscottgadgets__hackrf-one"
   "robotics_psu|thoric16__psu"
   "openairscope|emertcakir__openairscope"
   "linht_radio|m17project__linht-hw"
+  "meshtastic_solar|h0lad__meshtastic_solar"
 )
 
 for entry in "${MAP[@]}"; do

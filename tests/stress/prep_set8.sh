@@ -15,7 +15,6 @@ mkdir -p "$STRESS/boards_unrouted_set8" "$STRESS/boards_set8"
 
 # short-name | source-filename-fragment (unique within github_set8/)
 MAP=(
-  "piantor|beekeeb__piantor_left"
   "pinci|camrbuss__pinci"
   "uhk_trackball|uhk__trackball"
   "co2_monitor|miekush__co2_monitor"
@@ -30,6 +29,7 @@ MAP=(
   "bfo9000|keebio__bfo9000"
   "orbiter_kb|kjeller__orbiter"
   "weatherstation|ppusapati__weatherstation_mfg"
+  "osprey_kb|ebastler__osprey"
 )
 
 for entry in "${MAP[@]}"; do

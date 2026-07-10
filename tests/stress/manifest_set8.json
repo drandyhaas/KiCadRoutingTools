@@ -1,22 +1,6 @@
 [
   {
     "set": "set8",
-    "repo": "beekeeb/piantor",
-    "path": "pcb/left/keyboard_pcb.kicad_pcb",
-    "file": "/Users/andy/Documents/kicad_stress_test/sources/github_set8/beekeeb__piantor_left.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/beekeeb/piantor/main/pcb/left/keyboard_pcb.kicad_pcb",
-    "github_url": "https://github.com/beekeeb/piantor/blob/main/pcb/left/keyboard_pcb.kicad_pcb",
-    "size_kb": 1924,
-    "layers_est": 2,
-    "footprints": 36,
-    "routable_nets": 33,
-    "tier": "easy",
-    "packages": "2-layer,diodeless,RP2040",
-    "short_name": "piantor",
-    "note": "Piantor 36/42-key diodeless split keyboard, left half (RP2040-based)"
-  },
-  {
-    "set": "set8",
     "repo": "camrbuss/pinci",
     "path": "pcb/pinci.kicad_pcb",
     "file": "/Users/andy/Documents/kicad_stress_test/sources/github_set8/camrbuss__pinci.kicad_pcb",
@@ -238,5 +222,21 @@
     "packages": "4-layer,MCU,environmental-sensors,manufacturing-variant",
     "short_name": "weatherstation",
     "note": "4-layer environmental weather station board (multi-sensor DAQ, mfg variant)"
+  },
+  {
+    "set": "set8",
+    "repo": "ebastler/osprey",
+    "path": "osprey_rev_a/osprey_rev_a.kicad_pcb",
+    "file": "/Users/andy/Documents/kicad_stress_test/sources/github_set8/ebastler__osprey.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/ebastler/osprey/main/osprey_rev_a/osprey_rev_a.kicad_pcb",
+    "github_url": "https://github.com/ebastler/osprey/blob/main/osprey_rev_a/osprey_rev_a.kicad_pcb",
+    "size_kb": 4341,
+    "layers_est": 2,
+    "footprints": 160,
+    "routable_nets": 103,
+    "tier": "hard",
+    "packages": "2-layer,wireless,ergo,split-kb",
+    "short_name": "osprey_kb",
+    "note": "Osprey wireless ergonomic split keyboard PCB (dense per-key diode matrix)"
   }
 ]

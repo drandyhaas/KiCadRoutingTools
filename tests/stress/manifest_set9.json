@@ -177,22 +177,6 @@
   },
   {
     "set": "set9",
-    "repo": "greatscottgadgets/hackrf",
-    "path": "hardware/hackrf-one/hackrf-one.kicad_pcb",
-    "file": "/Users/andy/Documents/kicad_stress_test/sources/github_set9/greatscottgadgets__hackrf-one.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/greatscottgadgets/hackrf/main/hardware/hackrf-one/hackrf-one.kicad_pcb",
-    "github_url": "https://github.com/greatscottgadgets/hackrf/blob/main/hardware/hackrf-one/hackrf-one.kicad_pcb",
-    "size_kb": 4504,
-    "layers_est": 4,
-    "footprints": 437,
-    "routable_nets": 319,
-    "tier": "hard",
-    "packages": "SDR,RF,MAX2837,4-layer",
-    "short_name": "hackrf_one",
-    "note": "HackRF One open-source software defined radio (SDR) transceiver"
-  },
-  {
-    "set": "set9",
     "repo": "Thoric16/Power-Supply-Unit",
     "path": "hardware/PSU.kicad_pcb",
     "file": "/Users/andy/Documents/kicad_stress_test/sources/github_set9/thoric16__psu.kicad_pcb",
@@ -238,5 +222,21 @@
     "packages": "ham-radio,SDR,SX1255,i.MX,6-layer",
     "short_name": "linht_radio",
     "note": "LinHT Linux-based handheld ham radio transceiver mainboard"
+  },
+  {
+    "set": "set9",
+    "repo": "h0lad/SolarMeshtasticNode",
+    "path": "pcb/MeshtasticNode_BQ25185.kicad_pcb",
+    "file": "/Users/andy/Documents/kicad_stress_test/sources/github_set9/h0lad__meshtastic_solar.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/h0lad/SolarMeshtasticNode/main/pcb/MeshtasticNode_BQ25185.kicad_pcb",
+    "github_url": "https://github.com/h0lad/SolarMeshtasticNode/blob/main/pcb/MeshtasticNode_BQ25185.kicad_pcb",
+    "size_kb": 775,
+    "layers_est": 4,
+    "footprints": 41,
+    "routable_nets": 23,
+    "tier": "medium",
+    "packages": "LoRa,Meshtastic,HT-CT62,ESP32-C3,SX1262,solar,4-layer",
+    "short_name": "meshtastic_solar",
+    "note": "Meshtastic solar LoRa node: Heltec HT-CT62 (ESP32-C3 + SX1262) with BQ25185 solar charge controller"
   }
 ]
