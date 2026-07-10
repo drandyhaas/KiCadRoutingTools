@@ -227,7 +227,8 @@ def apply_step_params(step, dialog):
             return False
 
     # Params whose GUI home is not a same-named control.
-    _SPECIAL = {'layers', 'no_bga_zone', 'power_nets', 'power_nets_widths'}
+    _SPECIAL = {'layers', 'no_bga_zone', 'power_nets', 'power_nets_widths',
+                'escape_method', 'no_gnd_vias'}
     _ALIASES = {'rip_blocker_nets': 'rip_blocker_check',
                 'repair_pads': 'repair_pads',
                 'analysis_grid_step': 'analysis_grid'}
@@ -259,6 +260,33 @@ def apply_step_params(step, dialog):
                 return False
             ctl.SetValue(' '.join(str(v) for v in value))
             return True
+        if name == 'no_gnd_vias':
+            # route_diff's GND-return-via toggle: the CLI flag is the NEGATIVE
+            # --no-gnd-vias, while the differential tab's checkbox is the
+            # POSITIVE "Add GND vias" (gnd_via_check, default on) -- invert so a
+            # recorded --no-gnd-vias actually unchecks it. (route_planes'
+            # add_gnd_vias is a separate control, handled in its own block.)
+            chk = getattr(getattr(dialog, 'differential_tab', None),
+                          'gnd_via_check', None)
+            if chk is None:
+                return False
+            chk.SetValue(not bool(value))
+            return True
+        if name == 'escape_method':
+            # Fanout escape dropdown lives on the BGA options panel and shows
+            # DISPLAY strings ("Auto (channel, under-pad retry)"), while the
+            # plan/CLI value is the engine token ('auto'/'channel'/'underpad').
+            # Map value -> index via the panel's ESCAPE_METHODS tuple.
+            opts = getattr(getattr(dialog, 'fanout_tab', None), 'bga_options', None)
+            choice = getattr(opts, 'escape_method_choice', None)
+            if choice is None:
+                return False
+            methods = getattr(type(opts), 'ESCAPE_METHODS', ('auto', 'channel', 'underpad'))
+            v = str(value).lower()
+            if v in methods:
+                choice.SetSelection(methods.index(v))
+                return True
+            return False
         return False
 
     _skip = _GENERIC_SKIP.get(action, set())
@@ -408,9 +436,18 @@ def apply_step_selection(step, dialog):
     elif action == "route_diff":
         tab = dialog.differential_tab
         wanted = step.get("pairs") or ["*"]
+        # A plan's "pairs" may be base names ("/USB/D") OR the individual P/N
+        # net names the recorded route_diff --nets carried ("/USB/D+",
+        # "/USB/D-"). manifest_to_plan forwards --nets verbatim, so match a pair
+        # when the base name OR either half's full net name matches -- otherwise
+        # a name-per-half plan selected NO pairs and the signal step later
+        # routed the pair single-ended/uncoupled (set11 USB D+/D-).
+        nets_by_id = {i: n.name for i, n in dialog.pcb_data.nets.items()}
         matched_display = set()
-        for display_name, base_name, _p, _n in tab.pair_panel.all_pairs:
-            if any(fnmatch.fnmatch(base_name, w) or base_name == w for w in wanted):
+        for display_name, base_name, p_id, n_id in tab.pair_panel.all_pairs:
+            cands = [base_name, nets_by_id.get(p_id, ""), nets_by_id.get(n_id, "")]
+            if any(fnmatch.fnmatch(c, w) or c == w
+                   for w in wanted for c in cands if c):
                 matched_display.add(display_name)
         if not matched_display:
             notes.append(f"route_diff: no pairs match {wanted}")

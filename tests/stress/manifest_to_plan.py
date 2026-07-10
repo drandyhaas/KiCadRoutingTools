@@ -64,7 +64,11 @@ LIST_FLAGS = {
 BOOL_FLAGS = {
     '--rip-blocker-nets': 'rip_blocker_nets',
     '--add-gnd-vias': 'add_gnd_vias',
+    '--no-gnd-vias': 'no_gnd_vias',
+    # route.py spells it --no-bga-zones (plural, nargs='*'); bga_fanout uses the
+    # singular. Both map to the GUI's no_bga_zone special (bare = exclude ALL).
     '--no-bga-zone': 'no_bga_zone',
+    '--no-bga-zones': 'no_bga_zone',
 }
 
 # Flags whose values are file paths / bookkeeping -- consumed, never params.
@@ -163,8 +167,16 @@ def parse_command(argv):
             step['assignments'] = [
                 {'nets': [n], 'layer': layers[min(k, len(layers) - 1)]}
                 for k, n in enumerate(net_names)]
-        elif net_names:
+        elif net_names and action == 'route_planes':
+            # No --plane-layers (route_planes auto-detects zones): emit a
+            # layer-less assignment; the GUI plane tab resolves the layer.
             step['assignments'] = [{'nets': net_names, 'layer': ''}]
+        # repair_planes with no --plane-layers: emit NO assignments, so the
+        # post-pass below inherits the preceding route_planes step's REAL
+        # layers. route_disconnected_planes auto-detects zones on the CLI, but
+        # the GUI repair needs explicit copper layers -- an empty-layer
+        # assignment blocks the inherit fallback ("no valid copper layers in
+        # ['']") and the whole repair step is silently dropped.
     elif action == 'fanout':
         step['kind'] = 'bga' if tool == 'bga_fanout.py' else 'qfn'
         step['nets'] = [str(n) for n in nets] or ['*']
