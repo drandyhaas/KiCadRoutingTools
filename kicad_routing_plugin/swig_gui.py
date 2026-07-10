@@ -552,6 +552,19 @@ class RoutingDialog(wx.Dialog):
         self.max_ripup.SetToolTip("Maximum number of nets to rip up and reroute when blocked")
         grid.Add(self.max_ripup, 0, wx.EXPAND)
 
+        # Rip-up abandon metric (#85 arbitration; docs/rip-up-reroute.md)
+        grid.Add(wx.StaticText(parent, label="Rip-up Abandon Metric:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.ripup_abandon_metric = wx.Choice(
+            parent, choices=list(defaults.RIPUP_ABANDON_METRIC_CHOICES))
+        self.ripup_abandon_metric.SetStringSelection(defaults.RIPUP_ABANDON_METRIC)
+        self.ripup_abandon_metric.SetToolTip(
+            "How a multipoint tap rip-up decides between keeping the retry and "
+            "abandoning it: stranded (default; count only fully-lost victims), "
+            "total-pads / complete-nets (whole rip-tree totals), congestion / "
+            "history / weighted (boxed-in and hard-to-route pads count more), "
+            "probe / weighted-probe (discount pads unroutable either way)")
+        grid.Add(self.ripup_abandon_metric, 0, wx.EXPAND)
+
     def _on_obey_drc_changed(self, event):
         """Handle checkbox toggle - apply board minimums if enabled."""
         if self.obey_drc_check.GetValue():
@@ -1544,6 +1557,8 @@ class RoutingDialog(wx.Dialog):
                 'turn_cost': self.turn_cost.GetValue(),
                 'direction_preference_cost': self.direction_preference_cost.GetValue(),
                 'max_ripup': self.max_ripup.GetValue(),
+                'ripup_abandon_metric': self.ripup_abandon_metric.GetString(
+                    self.ripup_abandon_metric.GetSelection()),
                 'ordering_strategy': self.ordering_strategy.GetString(self.ordering_strategy.GetSelection()),
                 'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
@@ -2052,6 +2067,7 @@ class RoutingDialog(wx.Dialog):
         self.grid_step.SetValue(defaults.GRID_STEP)
         self.via_cost.SetValue(defaults.VIA_COST)
         self.max_ripup.SetValue(defaults.MAX_RIPUP)
+        self.ripup_abandon_metric.SetStringSelection(defaults.RIPUP_ABANDON_METRIC)
 
         # Reset layer selections (select all copper layers by default)
         for layer, cb in self.layer_checks.items():
@@ -2312,6 +2328,8 @@ class RoutingDialog(wx.Dialog):
             'turn_cost': self.turn_cost.GetValue(),
             'direction_preference_cost': self.direction_preference_cost.GetValue(),
             'max_ripup': self.max_ripup.GetValue(),
+            'ripup_abandon_metric': self.ripup_abandon_metric.GetString(
+                self.ripup_abandon_metric.GetSelection()),
             'ordering_strategy': self.ordering_strategy.GetString(self.ordering_strategy.GetSelection()),
             'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
             'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
@@ -2854,6 +2872,7 @@ class RoutingDialog(wx.Dialog):
                     turn_cost=config['turn_cost'],
                     direction_preference_cost=config.get('direction_preference_cost', 50),
                     max_rip_up_count=config['max_ripup'],
+                    ripup_abandon_metric=config.get('ripup_abandon_metric', defaults.RIPUP_ABANDON_METRIC),
                     ordering_strategy=config['ordering_strategy'],
                     direction_order=config.get('direction'),
                     stub_proximity_radius=config['stub_proximity_radius'],
@@ -2968,6 +2987,7 @@ class RoutingDialog(wx.Dialog):
                         turn_cost=config['turn_cost'],
                         direction_preference_cost=config.get('direction_preference_cost', 50),
                         max_rip_up_count=config['max_ripup'],
+                        ripup_abandon_metric=config.get('ripup_abandon_metric', defaults.RIPUP_ABANDON_METRIC),
                         ordering_strategy=config['ordering_strategy'],
                         direction_order=config.get('direction'),
                         stub_proximity_radius=config['stub_proximity_radius'],

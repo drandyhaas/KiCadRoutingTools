@@ -9,6 +9,7 @@ Implementation: `rip_up_reroute.py` (rip/restore), `blocking_analysis.py` (who i
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--max-ripup` | 3 | Maximum number of blockers ripped up at once for one failing net |
+| `--ripup-abandon-metric` | `stranded` | How a multipoint tap rip-up decides keep-retry vs abandon (see [Abandon metrics](#abandon-metrics)) |
 | `--ripped-route-avoidance-radius` | 1.0 | Soft-penalty radius around a ripped net's former corridor (mm) |
 | `--ripped-route-avoidance-cost` | 0.1 | Soft-penalty cost in the former corridor (0 disables) |
 
@@ -57,6 +58,38 @@ After the main routing pass, `run_reroute_loop()` processes the queue of ripped 
 - Each ripped net (or diff pair, as a unit) is re-routed with the current obstacle state.
 - If a reroute fails, the same blocking analysis and N+1 escalation applies — a reroute can itself rip further nets, which join the back of the queue (cascading).
 - Termination is guaranteed by the same combination-history and `--max-ripup` cap; the queue is processed linearly and only grows by successful rip-ups.
+
+## Abandon Metrics
+
+When a multipoint net's tap route fails, Phase 3 rips blockers and retries
+(`try_phase3_ripup` in `phase3_routing.py`). The retry can succeed *locally*
+while the ripped victims — and nets they ripped in turn (the **rip tree**) —
+end up worse off. The *abandon decision* arbitrates: keep the retry, or
+abandon it, restore the net's original tap, and re-route the whole rip tree
+around it (issues #85, #354).
+
+`--ripup-abandon-metric` (GUI: Advanced tab → "Rip-up Abandon Metric"; env
+override `KICAD_RIPUP_ABANDON_METRIC` for replay A/Bs) selects how the two
+worlds are compared. All metrics except `stranded` compare the **retry
+world** (retry kept, rip-tree victims re-routed around it) against the
+**before world** (original tap, every rip-tree net as it was when first
+ripped):
+
+| Metric | Compares | Rationale / trade-off |
+|--------|----------|-----------------------|
+| `stranded` *(default)* | Root pads gained vs. pads on victims left with **no route at all** | The original #85 rule. Partial victim regressions count zero — they are usually greedy churn that later passes recover. Blind to partial losses; a victim stranded by the *retry* world vetoes the retry even if it would also strand in the abandon world. |
+| `total-pads` | Total connected pads across root + rip tree | Symmetric; catches partial regressions. May veto retries whose partial losses would have recovered. |
+| `complete-nets` | Count of fully-connected nets across root + rip tree (ties broken on total pads) | Aligns with how boards are graded (disconnected nets). Coarse: a net dropping one pad counts the same as one dropping all. |
+| `congestion` | `total-pads` with each pad weighted `1 + min(foreign pads/vias within 1 mm, 24)/8` (range 1–4) | Boxed-in pads (few escape corridors) are unlikely to be reconnectable later, so losing one costs more. Reuses the #347 boxed-in-risk spatial hash. |
+| `history` | `total-pads` with each pad weighted `1 + min(times its net was ripped or failed a re-route this run, 3)` (range 1–4) | Empirically-hard nets cost more to lose. Catches difficulty a static congestion proxy can't see (corridor shape, layer starvation). |
+| `weighted` | Both weights multiplied | Congestion and history are complementary signals. |
+| `probe` | `total-pads`, but a stranded rip-tree net is first probed (capped-iteration main-route attempt) in the **abandon world** (original tap guarded into the map); if it cannot route there either, it is lost either way and does not vote | Fixes the pessimism of counting a pad against the retry when abandoning would not save it. Probes the 2-terminal main route only; nothing is committed. |
+| `weighted-probe` | `probe` filtering + `weighted` weights | The full combination. |
+
+The rip tree itself (which nets participated, and each net's pre-rip
+connectivity snapshot) is tracked by the #354 `rip_sinks` accumulator, which
+also drives the abandon path's re-rip of every cascade victim so the kept
+original tap can never be committed on top of cascade-era copper.
 
 ## Diagnostics
 

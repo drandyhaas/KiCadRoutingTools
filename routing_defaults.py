@@ -87,6 +87,12 @@ MAX_ITERATIONS = 200000
 HEURISTIC_WEIGHT = 1.9
 PROXIMITY_HEURISTIC_FACTOR = 0.02
 MAX_RIPUP = 3
+# Phase 3 tap rip-up abandon metric (#85 arbitration); documented in
+# docs/rip-up-reroute.md "Abandon metrics". Must match phase3_routing.ABANDON_METRICS.
+RIPUP_ABANDON_METRIC = 'stranded'
+RIPUP_ABANDON_METRIC_CHOICES = ('stranded', 'total-pads', 'complete-nets',
+                                'congestion', 'history', 'weighted',
+                                'probe', 'weighted-probe')
 
 # Layer direction preference (0=horizontal, 1=vertical, 255=none)
 # Alternates H/V starting with horizontal on top layer

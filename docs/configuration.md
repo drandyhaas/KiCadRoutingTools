@@ -190,6 +190,7 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 | `--heuristic-weight` | 1.9 | A* greediness (>1 = faster, <1 = more optimal) |
 | `--turn-cost` | 1000 | Penalty for direction changes (encourages straighter paths) |
 | `--max-ripup` | 3 | Max blockers to rip up at once during rip-up and retry |
+| `--ripup-abandon-metric` | `stranded` | Keep-retry vs abandon rule for multipoint tap rip-ups (see [rip-up-reroute.md](rip-up-reroute.md#abandon-metrics)) |
 | `--routing-clearance-margin` | 1.0 | Multiplier on track-via clearance (1.0 = minimum DRC) |
 | `--hole-to-hole-clearance` | 0.20 | Minimum drill hole edge-to-edge clearance (mm) |
 | `--board-edge-clearance` | 0.0 | Clearance from board edge in mm (0 = use track clearance) |
@@ -476,6 +477,7 @@ class GridRouteConfig:
     heuristic_weight: float = 1.9
     turn_cost: int = 1000         # penalty for direction changes (straighter paths)
     max_rip_up_count: int = 3     # max blockers to rip up at once (progressive N+1)
+    ripup_abandon_metric: str = 'stranded'  # tap rip-up abandon rule (docs/rip-up-reroute.md)
     max_setback_angle: float = 45.0  # degrees
     routing_clearance_margin: float = 1.0  # multiplier on track-via clearance (1.0 = min DRC)
     hole_to_hole_clearance: float = 0.20  # mm - drill-to-drill fab floor

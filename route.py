@@ -250,6 +250,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 debug_lines: bool = False,
                 verbose: bool = False,
                 max_rip_up_count: int = 3,
+                ripup_abandon_metric: str = 'stranded',
                 enable_layer_switch: bool = True,
                 crossing_layer_check: bool = True,
                 can_swap_to_top_layer: bool = False,
@@ -449,7 +450,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         via_proximity_cost=via_proximity_cost, bga_proximity_radius=bga_proximity_radius,
         bga_proximity_cost=bga_proximity_cost, track_proximity_distance=track_proximity_distance,
         track_proximity_cost=track_proximity_cost, debug_lines=debug_lines, verbose=verbose,
-        max_rip_up_count=max_rip_up_count, crossing_penalty=crossing_penalty,
+        max_rip_up_count=max_rip_up_count, ripup_abandon_metric=ripup_abandon_metric,
+        crossing_penalty=crossing_penalty,
         crossing_layer_check=crossing_layer_check, routing_clearance_margin=routing_clearance_margin,
         hole_to_hole_clearance=hole_to_hole_clearance, board_edge_clearance=board_edge_clearance,
         vertical_attraction_radius=vertical_attraction_radius,
@@ -1803,6 +1805,13 @@ For differential pair routing, use route_diff.py:
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=defaults.MAX_RIPUP,
                         help=f"Maximum blockers to rip up at once during rip-up and retry (default: {defaults.MAX_RIPUP})")
+    parser.add_argument("--ripup-abandon-metric",
+                        choices=list(defaults.RIPUP_ABANDON_METRIC_CHOICES),
+                        default=os.environ.get('KICAD_RIPUP_ABANDON_METRIC',
+                                               defaults.RIPUP_ABANDON_METRIC),
+                        help="How a Phase 3 tap rip-up decides keep-retry vs abandon "
+                             "(see docs/rip-up-reroute.md). Env override: "
+                             f"KICAD_RIPUP_ABANDON_METRIC (default: {defaults.RIPUP_ABANDON_METRIC})")
     parser.add_argument("--routing-clearance-margin", type=float, default=defaults.ROUTING_CLEARANCE_MARGIN,
                         help=f"Multiplier on track-via clearance ({defaults.ROUTING_CLEARANCE_MARGIN} = minimum DRC)")
     parser.add_argument("--hole-to-hole-clearance", type=float, default=defaults.HOLE_TO_HOLE_CLEARANCE,
@@ -2008,6 +2017,7 @@ For differential pair routing, use route_diff.py:
                 debug_lines=args.debug_lines,
                 verbose=args.verbose,
                 max_rip_up_count=args.max_ripup,
+                ripup_abandon_metric=args.ripup_abandon_metric,
                 enable_layer_switch=not args.no_stub_layer_swap,
                 crossing_layer_check=not args.no_crossing_layer_check,
                 can_swap_to_top_layer=args.can_swap_to_top_layer,

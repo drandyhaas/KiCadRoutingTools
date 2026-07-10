@@ -32,6 +32,8 @@ def get_dialog_settings(dialog):
         'grid_step': dialog.grid_step.GetValue(),
         'via_cost': dialog.via_cost.GetValue(),
         'max_ripup': dialog.max_ripup.GetValue(),
+        'ripup_abandon_metric': dialog.ripup_abandon_metric.GetString(
+            dialog.ripup_abandon_metric.GetSelection()),
         'obey_design_rules': dialog.obey_drc_check.GetValue(),
 
         # Layer selections
@@ -259,6 +261,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.via_cost.SetValue(settings['via_cost'])
     if 'max_ripup' in settings:
         dialog.max_ripup.SetValue(settings['max_ripup'])
+    if 'ripup_abandon_metric' in settings:
+        dialog.ripup_abandon_metric.SetStringSelection(settings['ripup_abandon_metric'])
     if 'obey_design_rules' in settings:
         dialog.obey_drc_check.SetValue(settings['obey_design_rules'])
 

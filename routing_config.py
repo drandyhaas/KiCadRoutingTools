@@ -76,6 +76,11 @@ class GridRouteConfig:
     debug_lines: bool = False  # Output debug geometry on User.2/3/8/9 layers
     verbose: bool = False  # Print detailed diagnostic output
     max_rip_up_count: int = 3  # Maximum blockers to rip up at once during rip-up and retry (1 to N)
+    # How the #85 arbitration decides keep-retry vs abandon after a Phase 3
+    # tap rip-up cascade (docs/rip-up-reroute.md "Abandon metrics"). One of
+    # phase3_routing.ABANDON_METRICS: stranded | total-pads | complete-nets |
+    # congestion | history | weighted | probe | weighted-probe
+    ripup_abandon_metric: str = 'stranded'
     max_setback_angle: float = 45.0  # Maximum angle (degrees) for setback position search
     track_proximity_distance: float = 2.0  # mm - radius around routed tracks to penalize (same layer)
     stub_layer_swap: bool = True  # Enable stub layer switching optimization
