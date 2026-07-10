@@ -227,8 +227,8 @@ def apply_step_params(step, dialog):
             return False
 
     # Params whose GUI home is not a same-named control.
-    _SPECIAL = {'layers', 'no_bga_zone', 'power_nets', 'power_nets_widths',
-                'escape_method', 'no_gnd_vias'}
+    _SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
+                'power_nets_widths', 'escape_method', 'no_gnd_vias'}
     _ALIASES = {'rip_blocker_nets': 'rip_blocker_check',
                 'repair_pads': 'repair_pads',
                 'analysis_grid_step': 'analysis_grid'}
@@ -242,7 +242,11 @@ def apply_step_params(step, dialog):
             for layer, cb in checks.items():
                 cb.SetValue(layer in wanted)
             return True
-        if name == 'no_bga_zone':
+        if name in ('no_bga_zone', 'no_bga_zones'):
+            # route.py spells it --no-bga-zones (plural); accept both the
+            # singular and the plural param name so plans emitted by an older
+            # converter (unknown-flag -> 'no_bga_zones') or by the live LLM
+            # still reach the control instead of being "ignored".
             ctl = getattr(dialog, 'no_bga_zones_ctrl', None)
             if ctl is None:
                 return False
@@ -483,9 +487,20 @@ def apply_step_selection(step, dialog):
         tab.mode_selector.SetSelection(1)  # Repair Disconnected
         tab._on_mode_changed(None)
         if step.get("assignments"):
-            assignments = _plane_assignments_from_step(step, dialog, notes, "repair_planes")
+            # Quiet the layerless case (an older converter / LLM emitting
+            # {'layer': ''}): only warn about genuinely UNKNOWN nets, not the
+            # missing layer, since the panel still holds the preceding
+            # route_planes step's real net->layer assignments and the repair
+            # inherits those.
+            layerless = all(not (a.get("layer") or a.get("layers"))
+                            for a in step["assignments"] if isinstance(a, dict))
+            sink = [] if layerless else notes
+            assignments = _plane_assignments_from_step(step, dialog, sink, "repair_planes")
             if assignments:
                 tab.assignment_panel.set_assignments(assignments)
+            elif layerless and tab.assignment_panel.get_assignments():
+                notes.append("repair_planes: inheriting the route_planes step's "
+                             "net->layer assignments (none specified on the repair step)")
         if not tab.assignment_panel.get_assignments():
             notes.append("repair_planes: no assignments (add a route_planes step first, "
                          "or include assignments on the repair step)")
