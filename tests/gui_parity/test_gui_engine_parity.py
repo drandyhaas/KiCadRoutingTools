@@ -43,8 +43,7 @@ KICAD_PYTHONS = [
     os.path.expandvars(r"C:\\Program Files\\KiCad\\bin\\python.exe"),
 ]
 
-DEFAULT_BOARD = os.path.expanduser(
-    "~/Documents/kicad_stress_test/boards_unrouted_set1/splitflap_driver.kicad_pcb")
+DEFAULT_BOARD = os.path.join(REPO, "kicad_files", "splitflap_driver.kicad_pcb")
 
 # The splitflap chain, expressed twice:
 #  - CLI: the recorded stress commands (what a stress replay runs);

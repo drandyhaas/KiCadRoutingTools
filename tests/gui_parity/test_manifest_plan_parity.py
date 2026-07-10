@@ -131,9 +131,14 @@ def check_pair(argv, step):
     return n, bad
 
 
+FIXTURE = str(Path(__file__).resolve().parent / "fixtures" / "sample_redo_commands.sh")
+
+
 def main():
+    # Corpus manifests give broad coverage; the checked-in fixture makes the gate
+    # self-contained (runs on a fresh checkout with no corpus). Explicit args win.
     manifests = sys.argv[1:] or sorted(
-        glob.glob(str(STRESS / "runs_set*/*/redo_commands.sh")))
+        glob.glob(str(STRESS / "runs_set*/*/redo_commands.sh"))) or [FIXTURE]
     if not manifests:
         print("no manifests found (set $STRESS_DIR or pass paths)")
         return 1

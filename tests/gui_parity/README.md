@@ -117,3 +117,22 @@ When you add a post-engine pass to a CLI main(), either put its core in the
 shared engine (best -- both fronts inherit it), or refactor a board-level core
 and call it from both fronts (as clean_plane_copper now does), then register
 the pass + its GUI counterpart here.
+
+## Grade parity on a set11-class board (test_gui_livechain_rp2350.py)
+
+The copper-identity harness measures overlap %, which diverges even when both
+fronts grade clean (rip-up routing is chaotic; #362). The invariant that
+matters is GRADE parity. This gate chains the rp2350 PLANE sub-chain (create →
+repair → reconnect route → repair2) on ONE live board -- as the Claude-tab plan
+executor does, in-memory across steps -- and asserts every stage grades 0 DRC
+like the CLI. It caught the swig_gui route-apply width-rounding bug (0.0762 →
+0.076 fab-floor violations, #362) that per-step isolation on file inputs missed.
+
+    python3 tests/gui_parity/test_gui_livechain_rp2350.py
+
+## Checked-in test inputs
+
+All boards these gates need are committed under `kicad_files/`
+(`splitflap_driver.*`, `rp2350_fpga_eensy_prePlane.*`), and
+`test_manifest_plan_parity.py` falls back to `fixtures/sample_redo_commands.sh`
+-- so every gate runs on a fresh checkout without the external stress corpus.
