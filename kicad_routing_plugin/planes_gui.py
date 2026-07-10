@@ -1506,16 +1506,19 @@ class PlanesTab(wx.Panel):
                 print(f"Warning: could not auto-fill new zones ({e}). "
                       "Press B in pcbnew to fill manually.")
 
-        # Plane-copper cleanup -- CLI/GUI PARITY. The CLI plane mains
-        # (route_planes.py / route_disconnected_planes.py) run clean_plane_copper
-        # on their OUTPUT FILE after every plane step; the GUI historically did
-        # not, so plane dead-end stubs / quantization grazes shipped and shorted
-        # in dense fine-pitch fields (set11 rp2350_fpga_eensy: 35 +3V3/GND plane
-        # shorts the CLI board didn't have). Apply the SAME shared cleanup delta
-        # (compute_plane_copper_cleanup) to the LIVE board instead of a file.
-        # Runs on the filled zones (its connectivity gates use the pour), so it
-        # is placed after the fill above.
-        self._run_plane_copper_cleanup(board, get_layer_id)
+        # Plane-copper cleanup -- CLI/GUI PARITY (OPT-IN, default OFF).
+        # The CLI plane mains run clean_plane_copper on their OUTPUT FILE after
+        # every plane step; the GUI historically did not, so plane dead-end
+        # stubs / quantization grazes could ship in dense fine-pitch fields.
+        # The shared core (compute_plane_copper_cleanup) and the CLI file front
+        # are verified; the LIVE-board delta application here is NOT yet
+        # validated end-to-end on a plane-heavy GUI run (its removal-matching
+        # path can add a connector without removing the original if a coord
+        # match misses), so it is gated behind KICAD_GUI_PLANE_CLEANUP=1 until a
+        # live-board grade proves it net-improves. Off by default = no field
+        # regression; the CLI parity it targets is unaffected.
+        if os.environ.get('KICAD_GUI_PLANE_CLEANUP') == '1':
+            self._run_plane_copper_cleanup(board, get_layer_id)
 
         # Make the live board's DRC constraints consistent with the plane routing
         # floors (issue #160), mirroring route_planes.py's auto-fix. Best-effort.
