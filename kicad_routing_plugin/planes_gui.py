@@ -909,6 +909,10 @@ class PlanesTab(wx.Panel):
             print("No net/layer assignments to process")
             return
 
+        # Remember which nets this plane op touched, so the post-apply plane
+        # copper cleanup (CLI parity) scopes to them (see _apply_results_to_board).
+        self._plane_net_names = list(dict.fromkeys(expanded_nets))
+
         failed_pads = 0
         try:
             (vias, traces, pads_needing, new_vias, new_segments, new_zones,
@@ -1046,6 +1050,9 @@ class PlanesTab(wx.Panel):
                     plane_layers.append(layer)
 
         all_layers = self._get_all_copper_layers()
+
+        # Nets this repair touched, for the post-apply plane copper cleanup.
+        self._plane_net_names = list(dict.fromkeys(net_names))
 
         print(f"Repairing zones: {list(zip(net_names, plane_layers))}")
 
@@ -1499,6 +1506,17 @@ class PlanesTab(wx.Panel):
                 print(f"Warning: could not auto-fill new zones ({e}). "
                       "Press B in pcbnew to fill manually.")
 
+        # Plane-copper cleanup -- CLI/GUI PARITY. The CLI plane mains
+        # (route_planes.py / route_disconnected_planes.py) run clean_plane_copper
+        # on their OUTPUT FILE after every plane step; the GUI historically did
+        # not, so plane dead-end stubs / quantization grazes shipped and shorted
+        # in dense fine-pitch fields (set11 rp2350_fpga_eensy: 35 +3V3/GND plane
+        # shorts the CLI board didn't have). Apply the SAME shared cleanup delta
+        # (compute_plane_copper_cleanup) to the LIVE board instead of a file.
+        # Runs on the filled zones (its connectivity gates use the pour), so it
+        # is placed after the fill above.
+        self._run_plane_copper_cleanup(board, get_layer_id)
+
         # Make the live board's DRC constraints consistent with the plane routing
         # floors (issue #160), mirroring route_planes.py's auto-fix. Best-effort.
         cfg = getattr(self, "_plane_drc_config", None)
@@ -1552,6 +1570,79 @@ class PlanesTab(wx.Panel):
         _result = getattr(self, '_operation_result', {}) or {}
         if _result.get('mode') == 'repair':
             self._run_kicad_oracle_after_apply(board)
+
+    def _run_plane_copper_cleanup(self, board, get_layer_id):
+        """CLI/GUI parity: apply the shared plane-copper cleanup delta
+        (pcb_modification.compute_plane_copper_cleanup -- the SAME core the CLI
+        clean_plane_copper file front runs) to the LIVE board. Best-effort; a
+        failure here never blocks the plane result already applied."""
+        names = getattr(self, '_plane_net_names', None)
+        if not names:
+            return
+        try:
+            import pcbnew
+            import routing_defaults as defaults
+            from kicad_parser import build_pcb_data_from_board
+            from pcb_modification import compute_plane_copper_cleanup
+            cfg = getattr(self, '_plane_drc_config', {}) or {}
+            clearance = cfg.get('clearance') or defaults.CLEARANCE
+            grid_step = cfg.get('grid_step', defaults.GRID_STEP)
+            pcb = build_pcb_data_from_board(board)
+            delta = compute_plane_copper_cleanup(pcb, names, clearance, grid_step)
+            if delta.is_empty:
+                return
+
+            # Remove stripped segments/vias: match live board items by rounded
+            # endpoint(s)+net, same key style as the ripped-copper strip loop.
+            rm_keys = set()
+            for s in delta.segments_to_remove:
+                rm_keys.add((round(s.start_x, 3), round(s.start_y, 3),
+                             round(s.end_x, 3), round(s.end_y, 3), s.net_id))
+            via_keys = set()
+            for v in delta.vias_to_remove:
+                via_keys.add((round(v.x, 3), round(v.y, 3), v.net_id))
+            removed = 0
+            for item in list(board.GetTracks()):
+                if item.Type() == pcbnew.PCB_VIA_T:
+                    k = (round(pcbnew.ToMM(item.GetPosition().x), 3),
+                         round(pcbnew.ToMM(item.GetPosition().y), 3),
+                         item.GetNetCode())
+                    if k in via_keys:
+                        board.RemoveNative(item)
+                        removed += 1
+                    continue
+                a = (round(pcbnew.ToMM(item.GetStart().x), 3),
+                     round(pcbnew.ToMM(item.GetStart().y), 3),
+                     round(pcbnew.ToMM(item.GetEnd().x), 3),
+                     round(pcbnew.ToMM(item.GetEnd().y), 3),
+                     item.GetNetCode())
+                b = (a[2], a[3], a[0], a[1], a[4])  # endpoints reversed
+                if a in rm_keys or b in rm_keys:
+                    board.RemoveNative(item)
+                    removed += 1
+
+            # Add connector/replacement segments (snap connectors, micro-shift
+            # replacements, soft-joint bridges).
+            added = 0
+            for s in delta.connectors:
+                track = pcbnew.PCB_TRACK(board)
+                track.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(s.start_x),
+                                               pcbnew.FromMM(s.start_y)))
+                track.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(s.end_x),
+                                             pcbnew.FromMM(s.end_y)))
+                track.SetWidth(pcbnew.FromMM(s.width))
+                track.SetLayer(get_layer_id(s.layer))
+                track.SetNetCode(s.net_id)
+                board.Add(track)
+                added += 1
+
+            if removed or added or delta.snapped:
+                board.BuildConnectivity()
+                print(f"Plane cleanup: closed {delta.snapped} stub gap(s), "
+                      f"trimmed {len(delta.segments_to_remove)} dead-end "
+                      f"segment(s), added {added} connector(s)")
+        except Exception as e:
+            print(f"Warning: plane copper cleanup skipped ({e})")
 
     def get_assignments(self):
         """Get list of net→layer assignments."""

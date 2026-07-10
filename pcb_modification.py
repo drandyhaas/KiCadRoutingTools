@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from kicad_parser import PCBData, Segment, Via
 from routing_utils import pos_key, POSITION_DECIMALS, into_pad_frame_point
@@ -748,89 +748,109 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
     return True
 
 
-def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1,
-                       grid_step: float = 0.05) -> Tuple[int, int]:
-    """Run the shared post-route cleanup pipeline on a plane tool's OUTPUT FILE
-    (issues #84, #308, #319 restructure).
+class PlaneCleanupDelta(NamedTuple):
+    """Result of the plane-copper cleanup, as a board-independent DELTA so the
+    CLI (file rewrite) and GUI (live pcbnew board) can apply the SAME cleanup.
 
-    route_planes / route_disconnected_planes write copper outside route.py's
-    write-list, so they miss the in-route cleanup. This re-parses the written
-    board and runs the same run_post_route_cleanup the signal fronts use --
+    connectors        : List[Segment]  -- new copper to ADD (snap connectors,
+                        micro-shift replacements, soft-joint bridges)
+    segments_to_remove: List[Segment]  -- input copper to STRIP (dead-ends, grazes)
+    vias_to_remove    : List[Via]
+    snapped           : int            -- stub gaps closed (for the log line)
+    """
+    connectors: list
+    segments_to_remove: list
+    vias_to_remove: list
+    snapped: int
+
+    @property
+    def is_empty(self):
+        return not (self.connectors or self.segments_to_remove or self.vias_to_remove)
+
+
+def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float = 0.1,
+                                 grid_step: float = 0.05) -> "PlaneCleanupDelta":
+    """Board-level core of the plane-copper cleanup (issues #84, #308, #319).
+
+    Runs the ONE shared run_post_route_cleanup pipeline the signal fronts use --
     gap snap, graze prune, octolinear re-bend, micro-shift (full-grid cap,
-    #308: urti's GND repair track grazed J3's mounting hole by 17um), cycle
-    prune (a no-op on zoned nets by design), dead-end sweep, and the final
-    soft-joint bridge -- then rewrites the file (stripping removed segments,
-    appending added ones). Because the board here IS a fresh parse of the
-    file, the board==file contract holds by construction; the only excluded
-    passes are the ones a segment-level file rewrite cannot express (via
-    moves) or that need a routing write-list (phantom drop, width neck).
-    The connectivity gates use the plane zones, so a tap the fill makes
-    redundant can be dropped and nothing that would enter another net's pour
-    is added. Returns ``(snapped, removed)``.
+    #308), cycle prune, dead-end sweep, soft-joint bridge -- on an already-parsed
+    ``pcb`` (PCBData), and returns the cleanup as a PlaneCleanupDelta instead of
+    touching any file. clean_plane_copper() (file front) and the GUI planes tab
+    (live-board front) both call this, so the two CANNOT drift: a plane-cleanup
+    fix lands in one place and both inherit it.
+
+    The excluded passes are the ones a segment-level DELTA cannot express (via
+    moves: #280/#281) or that need a routing write-list (phantom drop, width
+    neck) -- neither applies to plane copper. microshift_max_shift = grid_step
+    (not grid_step/2) because a plane-repair quantization graze can be a full
+    grid cell (#308: on-grid track vs off-grid hole); each shift is still
+    verified to clear all foreign copper and keep the net connected.
     """
     from types import SimpleNamespace
-    from kicad_parser import parse_kicad_pcb, is_kicad_10
-    from kicad_writer import remove_segments_from_content, generate_segment_sexpr
-    # Local import: cleanup_pipeline imports the passes from this module.
     from cleanup_pipeline import run_post_route_cleanup
 
-    pcb = parse_kicad_pcb(output_file)
-    with open(output_file, 'r', encoding='utf-8') as f:
-        content = f.read()
     names = set(plane_net_names)
     scope = {nid for nid, net in pcb.nets.items() if net.name in names}
     if not scope:
-        return 0, 0
+        return PlaneCleanupDelta([], [], [], 0)
 
-    # Run the ONE shared cleanup pipeline on the re-parsed board. In this
-    # file-round-trip mode every segment is an "original" (nothing routed in
-    # this process), so pass an empty write-list: additions (snap connectors,
-    # micro-shift replacements, soft-joint bridges) come back as tagged
-    # results entries; removals come back in input_strip_segments.
-    # Front-parity switches:
-    #   phantom OFF -- no write-list to reconcile;
-    #   via_nudge OFF -- an input-via's in-place move cannot be expressed by
-    #     this segment-level write-back (#280/#281), it would strand the
-    #     dragged segment endpoints;
-    #   neck OFF -- width-only fix for ROUTED wide trunks; nothing routed here;
-    #   microshift_max_shift = grid_step (not grid_step/2): plane-repair
-    #     quantization grazes can be a full grid cell (#308 -- the track is
-    #     on-grid, the hole off-grid), and each shift is still verified to
-    #     clear all foreign copper and keep the net connected.
     plane_results: list = []
     _cfg = SimpleNamespace(clearance=clearance, grid_step=grid_step)
     _outcome = run_post_route_cleanup(
         plane_results, pcb, scope, _cfg,
         label='Plane ', phantom=False, via_nudge=False, neck=False,
         microshift_max_shift=grid_step)
-    snapped = _outcome.counts.get('stub_gaps_snapped', 0)
-    to_remove = _outcome.input_strip_segments
-    vias_to_remove = getattr(_outcome, 'input_strip_vias', None) or []
-    connectors = [s for r in plane_results for s in (r.get('new_segments') or [])]
+    return PlaneCleanupDelta(
+        connectors=[s for r in plane_results for s in (r.get('new_segments') or [])],
+        segments_to_remove=list(_outcome.input_strip_segments),
+        vias_to_remove=list(getattr(_outcome, 'input_strip_vias', None) or []),
+        snapped=_outcome.counts.get('stub_gaps_snapped', 0))
 
-    if not (connectors or to_remove or vias_to_remove):
+
+def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1,
+                       grid_step: float = 0.05) -> Tuple[int, int]:
+    """FILE front for the plane-copper cleanup: parse the plane tool's OUTPUT
+    FILE, compute the cleanup delta via compute_plane_copper_cleanup (the shared
+    board-level core), and rewrite the file (stripping removed segments/vias,
+    appending connectors). Because the board here IS a fresh parse of the file,
+    the board==file contract holds by construction. Returns ``(snapped, removed)``.
+
+    The GUI planes tab applies the SAME delta to the live pcbnew board instead of
+    a file -- see kicad_routing_plugin/planes_gui.py -- so CLI and GUI plane
+    copper come out identical.
+    """
+    from kicad_parser import parse_kicad_pcb, is_kicad_10
+    from kicad_writer import remove_segments_from_content, generate_segment_sexpr
+
+    pcb = parse_kicad_pcb(output_file)
+    with open(output_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+    delta = compute_plane_copper_cleanup(pcb, plane_net_names, clearance, grid_step)
+    if delta.is_empty:
         return 0, 0
 
     n2n = getattr(pcb, 'net_id_to_name', {}) or {}
     v10 = is_kicad_10(content)
-    if to_remove:
-        content, _ = remove_segments_from_content(content, to_remove, n2n if v10 else None)
-    if vias_to_remove:
+    if delta.segments_to_remove:
+        content, _ = remove_segments_from_content(content, delta.segments_to_remove,
+                                                  n2n if v10 else None)
+    if delta.vias_to_remove:
         from plane_io import _remove_vias_at_positions
         content, _ = _remove_vias_at_positions(
-            content, [(v.x, v.y) for v in vias_to_remove],
-            net_ids=[v.net_id for v in vias_to_remove],
-            net_names=[n2n.get(v.net_id) for v in vias_to_remove])
-    if connectors:
+            content, [(v.x, v.y) for v in delta.vias_to_remove],
+            net_ids=[v.net_id for v in delta.vias_to_remove],
+            net_names=[n2n.get(v.net_id) for v in delta.vias_to_remove])
+    if delta.connectors:
         sexprs = [generate_segment_sexpr((s.start_x, s.start_y), (s.end_x, s.end_y),
                                          s.width, s.layer, s.net_id,
                                          n2n.get(s.net_id) if v10 else None)
-                  for s in connectors]
+                  for s in delta.connectors]
         lp = content.rfind(')')
         content = content[:lp] + '\n'.join(sexprs) + '\n' + content[lp:]
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(content)
-    return snapped, len(to_remove)
+    return delta.snapped, len(delta.segments_to_remove)
 
 
 def _rk3(x, y):
