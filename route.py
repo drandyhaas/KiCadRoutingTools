@@ -206,6 +206,31 @@ def _write_passthrough_output(input_file: str, output_file: str) -> None:
         print(f"Wrote unchanged copy to {output_file} (nothing to route)")
 
 
+def _dump_engine_config(engine, cfg):
+    """Config-parity probe for the plane engines (#362), mirroring batch_route's
+    dump. Only active in APPEND/CONTINUE mode (KICAD_DUMP_BATCH_KWARGS +
+    KICAD_DUMP_BATCH_KWARGS_CONTINUE=1): writes one JSONL line per engine call
+    and never alters routing, so a whole GUI plan run is captured in one pass."""
+    if not (os.environ.get('KICAD_DUMP_BATCH_KWARGS')
+            and os.environ.get('KICAD_DUMP_BATCH_KWARGS_CONTINUE') == '1'):
+        return
+    import json as _json
+    d = {'_engine': engine}
+    for k, v in cfg.items():
+        if k in ('input_file', 'output_file', 'pcb_data', 'all_layers') or callable(v):
+            continue
+        try:
+            _json.dumps(v)
+            d[k] = v
+        except (TypeError, ValueError):
+            d[k] = repr(v)
+    try:
+        with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'a') as _f:
+            _f.write(_json.dumps(d, sort_keys=True) + '\n')
+    except Exception:
+        pass
+
+
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
@@ -339,10 +364,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     for _k in ('input_file', 'output_file', 'net_names', 'pcb_data'):
         _reconcile_kwargs.pop(_k, None)
     if os.environ.get('KICAD_DUMP_BATCH_KWARGS'):
-        # Parameter-parity probe: dump THIS call's full parameter set and
-        # return without routing, so the CLI front (argparse->main) and the
-        # GUI front (plan setters->tab config->call site) can be diffed key
-        # by key on identical inputs.
+        # Parameter-parity probe: dump THIS call's full parameter set so the
+        # CLI front (argparse->main) and the GUI front (plan setters->tab
+        # config->call site) can be diffed key by key on identical inputs.
+        # Default: overwrite the file and RETURN without routing (single-call
+        # A/B). CONTINUE mode (KICAD_DUMP_BATCH_KWARGS_CONTINUE=1): APPEND one
+        # JSONL line per call and keep routing, so a whole multi-step GUI plan
+        # run can be captured in one pass without breaking the chain (#362).
         import json as _json
         _dump = {}
         for _k, _v in sorted(_reconcile_kwargs.items()):
@@ -355,11 +383,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             except (TypeError, ValueError):
                 _dump[_k] = repr(_v)
         _dump['net_names'] = net_names
-        with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'w') as _f:
-            _json.dump(_dump, _f, indent=1, sort_keys=True)
-        if return_results:
-            return 0, 0, 0.0, {'results': [], 'segments_to_remove': []}
-        return 0, 0, 0.0
+        if os.environ.get('KICAD_DUMP_BATCH_KWARGS_CONTINUE') == '1':
+            with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'a') as _f:
+                _f.write(_json.dumps(_dump, sort_keys=True) + '\n')
+            # fall through -- route normally
+        else:
+            with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'w') as _f:
+                _json.dump(_dump, _f, indent=1, sort_keys=True)
+            if return_results:
+                return 0, 0, 0.0, {'results': [], 'segments_to_remove': []}
+            return 0, 0, 0.0
     visualize = vis_callback is not None
 
     # Track memory if debug_memory enabled

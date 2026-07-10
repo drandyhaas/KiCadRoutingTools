@@ -26,7 +26,7 @@ from kicad_parser import parse_kicad_pcb, PCBData, Pad, Via, Segment, KICAD_10_M
 from kicad_writer import generate_zone_sexpr, generate_gr_line_sexpr
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import point_in_pad_rect, pad_rect_halfspan
-from route import batch_route
+from route import batch_route, _dump_engine_config
 from obstacle_cache import ViaPlacementObstacleData
 from connectivity import compute_mst_segments
 
@@ -1972,6 +1972,7 @@ def create_plane(
     Returns:
         (total_vias_placed, total_traces_added, total_pads_needing_vias)
     """
+    _dump_engine_config('create_plane', dict(locals()))
     if all_layers is None:
         all_layers = ['F.Cu', 'B.Cu']
 

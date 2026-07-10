@@ -391,6 +391,8 @@ def route_planes(
     Returns:
         Tuple of (total_routes_added, total_regions_connected)
     """
+    from route import _dump_engine_config
+    _dump_engine_config('repair_planes', dict(locals()))
     if pcb_data is None:
         print(f"Loading PCB from {input_file}...")
         pcb_data = parse_kicad_pcb(input_file)

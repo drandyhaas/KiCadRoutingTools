@@ -195,11 +195,15 @@ REPAIR_ANALYSIS_GRID_STEP = 0.5  # mm - grid step for connectivity analysis
 # GUI-specific ranges (min, max, increment, digits)
 # These define the SpinCtrl ranges for the GUI
 PARAM_RANGES = {
-    'track_width': {'min': 0.05, 'max': 25.0, 'inc': 0.05, 'digits': 3},
-    'clearance': {'min': 0.05, 'max': 5.0, 'inc': 0.05, 'digits': 3},
-    'via_size': {'min': 0.2, 'max': 2.0, 'inc': 0.05, 'digits': 3},
-    'via_drill': {'min': 0.1, 'max': 1.5, 'inc': 0.05, 'digits': 3},
-    'grid_step': {'min': 0.01, 'max': 1.0, 'inc': 0.01, 'digits': 3},
+    # 4 digits: fab-floor widths/drills carry a 4th decimal (e.g. a 6-layer
+    # min track 0.0762mm). At digits=3 the SpinCtrlDouble rounded 0.0762 -> 0.076,
+    # so the GUI routed BELOW the floor and every such track tripped a
+    # track-width DRC the CLI (full precision) does not (#362).
+    'track_width': {'min': 0.05, 'max': 25.0, 'inc': 0.05, 'digits': 4},
+    'clearance': {'min': 0.05, 'max': 5.0, 'inc': 0.05, 'digits': 4},
+    'via_size': {'min': 0.2, 'max': 2.0, 'inc': 0.05, 'digits': 4},
+    'via_drill': {'min': 0.1, 'max': 1.5, 'inc': 0.05, 'digits': 4},
+    'grid_step': {'min': 0.01, 'max': 1.0, 'inc': 0.01, 'digits': 4},
     'via_cost': {'min': 1, 'max': 1000},
     'max_iterations': {'min': 1000, 'max': 100000000},
     'heuristic_weight': {'min': 1.0, 'max': 10.0, 'inc': 0.1, 'digits': 1},
