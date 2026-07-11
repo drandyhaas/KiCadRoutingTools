@@ -599,7 +599,9 @@ class PlanExecutor:
     until the operation finishes. Stops on the first failed step.
 
     Callbacks (all on the main thread):
-      on_status(step_index, status)  status in 'running' | 'done' | 'failed'
+      on_status(step_index, status)
+          status in 'running' | 'done' | 'failed' | 'stopped'
+          ('stopped' = Stop cancelled the step mid-run; it did not complete)
       on_finished(completed_count, aborted_reason_or_None)
     """
 
@@ -912,6 +914,19 @@ class PlanExecutor:
             # Give it a short grace period before declaring completion.
             wx.CallLater(self.POLL_MS, self._poll_until_idle, index, busy, polls + 1, False)
             return
+        if self._stop_requested:
+            _owner = self._action_owner(self.steps[index]["action"])
+            if _owner is not None and hasattr(_owner, '_cancel_requested'):
+                # Stop was pressed while this step ran and its tab is
+                # cancellable: the engine aborted at its next safe boundary
+                # and the tab discarded the partial results, so the step did
+                # NOT complete -- mark it stopped (and leave it checked for a
+                # re-run), never "[ok]". A non-cancellable tab (fanout) ran
+                # its step to completion, so it falls through to "done".
+                self.on_status(index, "stopped")
+                self.log(f"Claude plan: step {index + 1} stopped (cancelled)")
+                self._next_step()
+                return
         self._completed += 1
         self.on_status(index, "done")
         self.log(f"Claude plan: step {index + 1} finished")

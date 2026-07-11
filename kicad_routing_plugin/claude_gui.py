@@ -525,7 +525,10 @@ class ClaudeTab(wx.Panel):
         ctrl_sizer.Add(self.run_all_plan_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         self.stop_plan_btn = wx.Button(self, label="Stop")
-        self.stop_plan_btn.SetToolTip("Stop after the currently running step finishes")
+        self.stop_plan_btn.SetToolTip(
+            "Cancel the currently running step (it aborts at its next safe "
+            "point and its partial results are discarded) and stop the plan; "
+            "remaining steps are not run")
         self.stop_plan_btn.Bind(wx.EVT_BUTTON, self._on_stop_plan)
         self.stop_plan_btn.Disable()
         ctrl_sizer.Add(self.stop_plan_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
@@ -981,9 +984,11 @@ class ClaudeTab(wx.Panel):
         if not self:
             return
         from .claude_plan import step_label
-        mark = {"running": "> ", "done": "[ok] ", "failed": "[FAIL] "}[status]
+        mark = {"running": "> ", "done": "[ok] ", "failed": "[FAIL] ",
+                "stopped": "[stopped] "}[status]
         self.plan_list.SetString(index, mark + step_label(index + 1, self._plan_steps[index]))
         if status == "done":
+            # Stopped/failed steps stay checked so a re-run picks them up.
             self.plan_list.Check(index, False)
 
     def _on_plan_finished(self, completed, aborted_reason):
