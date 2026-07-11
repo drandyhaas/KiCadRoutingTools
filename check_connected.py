@@ -533,14 +533,19 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             for pid in points_in_zone[1:]:
                 _union(points_in_zone[0], pid)
 
-    # Build spatial index for points (use 1mm grid cells)
-    point_index = SpatialIndex(cell_size=1.0)
+    # Connect all points that are within tolerance on the same layer
+    # Use spatial index for O(n) average instead of O(n²).
+    # The pair tolerance below is max(size1, size2)/4 (floored at `tolerance`),
+    # so the widest ring any pair can need is max_point_size/4 — using that
+    # exact bound instead of a fixed 1.0, and sizing the index cells to it so
+    # the 3x3-cell scan spans ~3x the radius rather than 3 mm, keeps this loop
+    # proportional to real neighbours on dense plane fill (issue #363: the
+    # fixed radius/cell made it dominate plane-step runtime).
+    max_point_size = max((p[4] for p in all_points), default=0.0)
+    max_tolerance = max(max_point_size / 4, tolerance)
+    point_index = SpatialIndex(cell_size=max(max_tolerance * 1.01, 0.05))
     for x, y, layer, pid, size in all_points:
         point_index.add(x, y, layer, pid, size)
-
-    # Connect all points that are within tolerance on the same layer
-    # Use spatial index for O(n) average instead of O(n²)
-    max_tolerance = 1.0  # Maximum possible tolerance (size/4 capped at reasonable value)
     for x1, y1, l1, id1, size1 in all_points:
         # Query nearby points on same layer
         for x2, y2, id2, size2 in point_index.query_nearby(x1, y1, l1, max_tolerance):
@@ -638,8 +643,13 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                     if _point_in_pad(ex, ey, pad, margin=_m):
                         _union(pad_repr_id[pad_idx], eid)
 
-    # Build spatial index for segments
-    seg_index = SegmentIndex(cell_size=1.0)
+    # Build spatial index for segments. Cell size = the widest credit reach
+    # any point below can need, so every query below is a single 3x3-cell
+    # ring — on 0.05mm-pitch plane fill the old fixed 1mm cells held hundreds
+    # of segments each and this loop dominated plane-step runtime (#363).
+    max_seg_width = max((seg.width for seg in segments), default=0.0)
+    _max_reach = max((max_point_size + max_seg_width) / 2, tolerance)
+    seg_index = SegmentIndex(cell_size=max(_max_reach * 1.01, 0.05))
     for seg_idx, seg in enumerate(segments):
         seg_start_id = seg_idx * 2
         seg_index.add(seg, seg_start_id)
@@ -650,8 +660,11 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         ptype = point_info[pid][0]
         # Query segments that might contain this point. Endpoint/via points
         # credit out to (psize + seg_width)/2; the query ring must cover
-        # that for LARGE vias (size + width can exceed the 1mm cell).
-        _reach = psize / 2 + 1.0
+        # that for LARGE vias (size + width can exceed the 1mm cell). Use the
+        # net's real max segment width for the bound, not a fixed 1.0 — the
+        # constant put the ring at 5x5 cells for every point on dense plane
+        # fill and dominated plane-step runtime (issue #363).
+        _reach = max((psize + max_seg_width) / 2, tolerance)
         for seg, seg_start_id in seg_index.query_near(px, py, player,
                                                       radius=_reach):
             seg_end_id = seg_start_id + 1
