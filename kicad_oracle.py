@@ -305,6 +305,49 @@ def _island_seed_points(cells, step, pcb_data, net_id, layer,
     return pts
 
 
+def _snap_zone_anchor(pcb_data, net_id, x, y, layer, clearance):
+    """Canonicalize a kicad-reported Zone anchor to a stable point on its
+    fill island. kicad-cli's fill/ratsnest anchor coordinates wobble from
+    run to run (its zone fill is threaded), and every downstream decision
+    keyed on the raw coordinates -- the same-position test, the Zone|Zone
+    split, the attempted-retry cap keys, the routed seed sets -- wobbles
+    with them, so identical invocations ship different copper. Trace the
+    island the anchor lands on and return the lexicographically smallest
+    fill cell's center: the same island always yields the same point.
+
+    The trace's margin ladder can succeed at different rungs for different
+    anchor positions on the same island (a pocketed anchor needs a finer
+    rung than a clear one), which would change the traced cell set -- so
+    one refinement pass re-traces from the canonical candidate (open fill,
+    coarse rung) to make the result rung-independent. Returns (x, y)
+    unchanged when no island is traceable or the trace over-floods."""
+    if not layer:
+        return x, y
+    zp = [z.polygon for z in (getattr(pcb_data, 'zones', []) or [])
+          if z.net_id == net_id and z.layer == layer
+          and getattr(z, 'polygon', None)]
+    if not zp:
+        return x, y
+    _cap = 40000
+
+    def _trace(sx, sy):
+        for _m in (max(clearance, 0.2) + 0.1, 0.2, 0.15):
+            cells = _trace_real_island((sx, sy), net_id, layer, pcb_data,
+                                       zp, _m, max_cells=_cap)
+            if cells:
+                return cells
+        return None
+
+    cells = _trace(x, y)
+    if not cells or len(cells) >= _cap:
+        return x, y
+    gx, gy = min(cells)
+    cells2 = _trace(gx * 0.25, gy * 0.25)
+    if cells2 and len(cells2) < _cap:
+        gx, gy = min(cells2)
+    return gx * 0.25, gy * 0.25
+
+
 def _merge_collinear(route_points, keep=frozenset()):
     """Collapse same-layer collinear runs of raw grid steps into single
     long segments, matching how other tracks are written. Points in `keep`
@@ -372,9 +415,15 @@ def oracle_reconnect(board_file: str, net_names, config,
                      hole_to_hole_clearance: float,
                      max_rounds: int = 3,
                      max_iterations: int = 1_000_000,
-                     verbose: bool = False) -> dict:
+                     verbose: bool = False,
+                     progress_callback=None,
+                     cancel_check=None) -> dict:
     """Route the exact missing links kicad-cli reports for `net_names` on
     `board_file`, in place, until KiCad is satisfied or no progress.
+
+    progress_callback(current, total, label) fires per round (0, 0, label:
+    the kicad-cli DRC run is indeterminate) and per link (k, N, label) --
+    issue #364. cancel_check() returning True aborts between links/rounds.
 
     Returns {'available': bool, 'rounds': n, 'links_routed': n,
              'links_failed': n, 'remaining': n}.
@@ -398,6 +447,12 @@ def oracle_reconnect(board_file: str, net_names, config,
     emitted_vias = []      # to a live board instead of reading the file
     attempted = {}  # (net, endpoints) -> attempt count (graduated retries)
     for rnd in range(max_rounds):
+        if cancel_check and cancel_check():
+            print("  KiCad-oracle recheck: cancelled")
+            break
+        if progress_callback:
+            progress_callback(0, 0, f"KiCad-oracle: running kicad-cli DRC "
+                                    f"(round {rnd + 1})...")
         links = kicad_unconnected(board_file, kicad_cli)
         if links is None:
             print("  KiCad-oracle recheck: kicad-cli DRC failed, skipping")
@@ -423,6 +478,31 @@ def oracle_reconnect(board_file: str, net_names, config,
         new_sexprs = []
         progress = False
 
+        # Determinism (#365): kicad-cli's reported anchors jitter between
+        # identical invocations (threaded fill/ratsnest). Snap every Zone
+        # anchor to its island's canonical point so reports differing only
+        # by jitter drive identical decisions (same-pos test, split, retry
+        # cap, seeds), then order the links canonically so processing order
+        # doesn't depend on the report's ordering either.
+        _snapped = []
+        for net_name, A, B in ours:
+            nid = name_to_id.get(net_name)
+            if nid is not None:
+                ax_, ay_, al_, ak_ = A
+                bx_, by_, bl_, bk_ = B
+                if ak_ == 'zone':
+                    ax_, ay_ = _snap_zone_anchor(pcb_data, nid, ax_, ay_,
+                                                 al_, config.clearance)
+                    A = (ax_, ay_, al_, ak_)
+                if bk_ == 'zone':
+                    bx_, by_ = _snap_zone_anchor(pcb_data, nid, bx_, by_,
+                                                 bl_, config.clearance)
+                    B = (bx_, by_, bl_, bk_)
+            _snapped.append((net_name, A, B))
+        ours = sorted(_snapped,
+                      key=lambda l: (l[0], l[1][:2], l[2][:2],
+                                     l[1][3], l[2][3]))
+
         # A Zone|Zone link with two DISTINCT ratsnest anchors can span the
         # whole board (castor +3.3V: opposite corners, 63mm -- the A*
         # exhausts 1M iterations twice). Both islands bonding to the net's
@@ -438,7 +518,15 @@ def oracle_reconnect(board_file: str, net_names, config,
                 work.append((net_name, B, (bx_, by_, bl_, 'main')))
             else:
                 work.append((net_name, A, B))
-        for net_name, (ax, ay, al, akind), (bx, by, bl, bkind) in work:
+        for _w_idx, (net_name, (ax, ay, al, akind), (bx, by, bl, bkind)) \
+                in enumerate(work):
+            if cancel_check and cancel_check():
+                print("  KiCad-oracle recheck: cancelled")
+                break
+            if progress_callback:
+                progress_callback(_w_idx + 1, len(work),
+                                  f"KiCad-oracle round {rnd + 1}: "
+                                  f"routing {net_name} link")
             net_id = name_to_id.get(net_name)
             if net_id is None:
                 failed += 1
