@@ -217,7 +217,10 @@ def _dump_engine_config(engine, cfg):
     import json as _json
     d = {'_engine': engine}
     for k, v in cfg.items():
-        if k in ('input_file', 'output_file', 'pcb_data', 'all_layers') or callable(v):
+        # Skip the board payload and non-config callables. all_layers/plane_layers
+        # ARE kept: layer ORDER is a live GUI/CLI divergence class (the pcbnew
+        # layer-ID vs stackup-order bug), so it must be visible in the dump.
+        if k in ('input_file', 'output_file', 'pcb_data') or callable(v):
             continue
         try:
             _json.dumps(v)
