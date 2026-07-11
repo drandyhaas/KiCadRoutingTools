@@ -1522,19 +1522,18 @@ class PlanesTab(wx.Panel):
         elif new_zone_objs:
             print(f"Warning: could not auto-fill zones. Press B in pcbnew to fill manually.")
 
-        # Plane-copper cleanup -- CLI/GUI PARITY (OPT-IN, default OFF).
-        # The CLI plane mains run clean_plane_copper on their OUTPUT FILE after
-        # every plane step; the GUI historically did not, so plane dead-end
-        # stubs / quantization grazes could ship in dense fine-pitch fields.
-        # The shared core (compute_plane_copper_cleanup) and the CLI file front
-        # are verified; the LIVE-board delta application here is NOT yet
-        # validated end-to-end on a plane-heavy GUI run (its removal-matching
-        # path can add a connector without removing the original if a coord
-        # match misses), so it is gated behind KICAD_GUI_PLANE_CLEANUP=1 until a
-        # live-board grade proves it net-improves. Off by default = no field
-        # regression; the CLI parity it targets is unaffected.
-        if os.environ.get('KICAD_GUI_PLANE_CLEANUP') == '1':
-            self._run_plane_copper_cleanup(board, get_layer_id)
+        # Plane-copper cleanup -- CLI/GUI PARITY. The CLI plane mains run
+        # clean_plane_copper on their OUTPUT FILE after every plane step
+        # (dead-end trim, stub-gap snap, graze prune); the GUI must do the same
+        # or it ships plane copper the CLI strips (rp2350: ~18 redundant GND
+        # segments at create alone). Runs unconditionally now: the delta is
+        # computed from build_pcb_data_from_board(board) -- the SAME source as
+        # the live board and validated at parser parity -- so the removal-match
+        # is reliable (the earlier KICAD_GUI_PLANE_CLEANUP gate guarded against a
+        # coord mismatch that no longer applies). _run_plane_copper_cleanup is
+        # best-effort (try/except) and BuildConnectivity-gated, so a bad match
+        # can never break an already-applied plane result.
+        self._run_plane_copper_cleanup(board, get_layer_id)
 
         # Make the live board's DRC constraints consistent with the plane routing
         # floors (issue #160), mirroring route_planes.py's auto-fix. Best-effort.
