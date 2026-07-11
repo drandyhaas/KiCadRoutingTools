@@ -204,6 +204,7 @@ def get_dialog_settings(dialog):
         'planes_gnd_via_net': dialog.planes_tab.create_options.gnd_via_net.GetValue(),
         # Repair mode options
         'planes_repair_max_track_width': dialog.planes_tab.repair_options.max_track_width.GetValue(),
+        'planes_repair_min_track_width': dialog.planes_tab.repair_options.min_track_width.GetValue(),
         'planes_repair_analysis_grid': dialog.planes_tab.repair_options.analysis_grid.GetValue(),
         'planes_repair_pads': dialog.planes_tab.repair_options.repair_pads.GetValue(),
         'planes_repair_rip_blocker_check': dialog.planes_tab.repair_options.rip_blocker_check.GetValue(),
@@ -617,6 +618,8 @@ def restore_dialog_settings(dialog, settings):
     # Repair mode options
     if 'planes_repair_max_track_width' in settings:
         dialog.planes_tab.repair_options.max_track_width.SetValue(settings['planes_repair_max_track_width'])
+    if 'planes_repair_min_track_width' in settings:
+        dialog.planes_tab.repair_options.min_track_width.SetValue(settings['planes_repair_min_track_width'])
     if 'planes_repair_analysis_grid' in settings:
         dialog.planes_tab.repair_options.analysis_grid.SetValue(settings['planes_repair_analysis_grid'])
     if 'planes_repair_pads' in settings:

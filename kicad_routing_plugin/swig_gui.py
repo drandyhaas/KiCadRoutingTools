@@ -2010,7 +2010,11 @@ class RoutingDialog(wx.Dialog):
             if hasattr(_po, 'rip_blocker_check'):
                 _po.rip_blocker_check.SetValue(False)
             if hasattr(_po, 'via_in_pad_check'):
-                _po.via_in_pad_check.SetValue(False)
+                # Default ON = same_net_pad_clearance -1.0 (CLI parity, big plane
+                # connectivity win; see CreatePlanesOptionsPanel #362).
+                _po.via_in_pad_check.SetValue(True)
+                if hasattr(_po, 'same_net_pad_clearance'):
+                    _po.same_net_pad_clearance.Enable(False)
             _ro = self.planes_tab.repair_options
             if hasattr(_ro, 'rip_blocker_check'):
                 _ro.rip_blocker_check.SetValue(False)
@@ -2018,6 +2022,8 @@ class RoutingDialog(wx.Dialog):
                 _ro.repair_pads.SetValue(True)
             if hasattr(_ro, 'max_track_width'):
                 _ro.max_track_width.SetValue(defaults.REPAIR_MAX_TRACK_WIDTH)
+            if hasattr(_ro, 'min_track_width'):
+                _ro.min_track_width.SetValue(defaults.REPAIR_MIN_TRACK_WIDTH)
             if hasattr(_ro, 'analysis_grid'):
                 _ro.analysis_grid.SetValue(defaults.REPAIR_ANALYSIS_GRID_STEP)
         except Exception:

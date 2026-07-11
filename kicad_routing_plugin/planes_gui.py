@@ -282,8 +282,15 @@ class CreatePlanesOptionsPanel(wx.Panel):
         self.via_in_pad_check.SetToolTip(
             "When checked, stitching vias may be placed on top of same-net pads, "
             "ignoring 'Same-net Pad Clearance'.")
-        self.via_in_pad_check.SetValue(False)
+        # Default ON = same_net_pad_clearance -1.0, matching route_planes.py's
+        # SAME_NET_PAD_CLEARANCE default. A same-net stitching via on its own
+        # net's pad can't short; enforcing a positive clearance instead (the old
+        # GUI default 0.25) blocks stitches and left 24 MORE pads unconnected at
+        # plane create on rp2350 (67 vs 43) -- a CLI/GUI parity gap that drove
+        # the plane-repair overshoot (#362). Uncheck to enforce a clearance.
+        self.via_in_pad_check.SetValue(True)
         self.via_in_pad_check.Bind(wx.EVT_CHECKBOX, self._on_via_in_pad_toggle)
+        self.same_net_pad_clearance.Enable(False)  # sync with default-checked box
         zone_sizer.Add(self.via_in_pad_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         sizer.Add(zone_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
@@ -398,6 +405,20 @@ class RepairPlanesOptionsPanel(wx.Panel):
         self.max_track_width.Bind(wx.EVT_SPINCTRLDOUBLE, self._on_max_track_width_changed)
         grid.Add(self.max_track_width, 0, wx.EXPAND)
 
+        # Min track width -- the FLOOR on region-connection trace width (CLI
+        # --min-track-width). Kept separate from the Basic-tab routing Track
+        # Width: the region-connection router picks a width in
+        # [min_track_width, max_track_width]. Defaults to REPAIR_MIN_TRACK_WIDTH
+        # (0.2) like the CLI, so plane connections aren't forced down to the fine
+        # routing width unless the user asks (#362 plane-parity).
+        grid.Add(wx.StaticText(self, label="Min Track Width (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        r = defaults.PARAM_RANGES['repair_min_track_width']
+        self.min_track_width = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
+                                                 initial=defaults.REPAIR_MIN_TRACK_WIDTH, inc=r['inc'])
+        self.min_track_width.SetDigits(r['digits'])
+        self.min_track_width.SetToolTip("Minimum track width for region connections (CLI --min-track-width)")
+        grid.Add(self.min_track_width, 0, wx.EXPAND)
+
         # Analysis grid step
         grid.Add(wx.StaticText(self, label="Analysis Grid (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         r = defaults.PARAM_RANGES['repair_analysis_grid_step']
@@ -440,6 +461,7 @@ class RepairPlanesOptionsPanel(wx.Panel):
         """Get the configuration values."""
         return {
             'max_track_width': self.max_track_width.GetValue(),
+            'min_track_width': self.min_track_width.GetValue(),
             'analysis_grid_step': self.analysis_grid.GetValue(),
             'repair_pads': self.repair_pads.GetValue(),
             'rip_blocker_nets': self.rip_blocker_check.GetValue(),        }
@@ -945,7 +967,12 @@ class PlanesTab(wx.Panel):
                 max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
                 max_via_reuse_radius=defaults.PLANE_MAX_VIA_REUSE_RADIUS,
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
-                board_edge_clearance=config.get('board_edge_clearance', defaults.BOARD_EDGE_CLEARANCE),
+                # PLANE_EDGE_CLEARANCE (0.5), NOT the generic BOARD_EDGE_CLEARANCE
+                # (0.0): route_planes.py defaults board_edge_clearance to
+                # defaults.PLANE_EDGE_CLEARANCE, keeping plane copper 0.5mm off
+                # the board edge. Using 0.0 let GUI plane pours run to the edge
+                # -- a CLI/GUI parity gap and a fab concern (#362).
+                board_edge_clearance=config.get('board_edge_clearance', defaults.PLANE_EDGE_CLEARANCE),
                 all_layers=all_layers,
                 dry_run=True,  # Don't write to file, apply via pcbnew
                 rip_blocker_nets=config.get('rip_blocker_nets', False),
@@ -1079,14 +1106,23 @@ class PlanesTab(wx.Panel):
                 plane_layers=plane_layers,
                 track_width=config.get('track_width', defaults.TRACK_WIDTH),
                 max_track_width=config.get('max_track_width', defaults.REPAIR_MAX_TRACK_WIDTH),
-                min_track_width=config.get('track_width', defaults.TRACK_WIDTH),
+                # Own control/default (REPAIR_MIN_TRACK_WIDTH), NOT the routing
+                # track_width -- CLI parity: route_disconnected_planes has a
+                # separate --min-track-width defaulting to REPAIR_MIN_TRACK_WIDTH
+                # (0.2). Conflating it with track_width let GUI region
+                # connections go down to the fine routing width (#362).
+                min_track_width=config.get('min_track_width', defaults.REPAIR_MIN_TRACK_WIDTH),
                 clearance=config.get('clearance', defaults.CLEARANCE),
                 via_size=config.get('via_size', defaults.VIA_SIZE),
                 via_drill=config.get('via_drill', defaults.VIA_DRILL),
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
                 analysis_grid_step=config.get('analysis_grid_step', defaults.REPAIR_ANALYSIS_GRID_STEP),
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
-                board_edge_clearance=config.get('board_edge_clearance', defaults.BOARD_EDGE_CLEARANCE),
+                # PLANE_EDGE_CLEARANCE (0.5) not BOARD_EDGE_CLEARANCE (0.0) --
+                # route_disconnected_planes.py defaults board_edge_clearance to
+                # defaults.PLANE_EDGE_CLEARANCE; match it (#362, keeps plane
+                # copper off the board edge).
+                board_edge_clearance=config.get('board_edge_clearance', defaults.PLANE_EDGE_CLEARANCE),
                 # Honor the panel's max-search-radius slider on Repair too, not
                 # just Create -- a boxed plane pad reaches a farther via/trace
                 # when the user widens it (issue #180).

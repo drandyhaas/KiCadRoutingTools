@@ -50,6 +50,7 @@ FLAG_PARAMS = {
     '--exit-margin': 'exit_margin',
     '--extension': 'extension',
     '--max-track-width': 'max_track_width',
+    '--min-track-width': 'min_track_width',
     '--analysis-grid-step': 'analysis_grid_step',
 }
 LIST_FLAGS = {
