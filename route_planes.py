@@ -1941,6 +1941,7 @@ def create_plane(
     same_net_pad_clearance: float = defaults.SAME_NET_PAD_CLEARANCE,
     skip_existing_zones: bool = False,
     no_bga_zone: bool = False,
+    progress_callback=None,
 ) -> Tuple[int, int, int]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
@@ -1968,6 +1969,11 @@ def create_plane(
             not create another one - just place stitching vias to the existing zone.
             When False (CLI default), an existing zone on the target layer for the
             same net is replaced.
+        progress_callback: Optional callable(current, total, label) invoked at
+            phase milestones and per-pad during via placement, mirroring
+            batch_route's callback (issue #364). (0, 0, label) marks an
+            indeterminate phase. Called from whatever thread runs the engine;
+            GUI callers must marshal to the UI thread themselves.
 
     Returns:
         (total_vias_placed, total_traces_added, total_pads_needing_vias)
@@ -2150,6 +2156,8 @@ def create_plane(
         print(f"{'='*60}")
 
         # Step 5: Identify target pads for this net
+        if progress_callback:
+            progress_callback(0, 0, f"{net_name}: analyzing pads on {plane_layer}...")
         target_pads = identify_target_pads(pcb_data, net_id, plane_layer)
 
         pads_through_hole = sum(1 for p in target_pads if p['type'] == 'through_hole')
@@ -2181,6 +2189,8 @@ def create_plane(
         # Step 7: Build obstacle map for via placement (exclude current net)
         if pads_need_via > 0:
             print("\nBuilding obstacle map for via placement...")
+            if progress_callback:
+                progress_callback(0, 0, f"{net_name}: building via obstacle map...")
             obstacles = build_via_obstacle_map(pcb_data, config, net_id,
                                                same_net_pad_clearance=same_net_pad_clearance)
             # Also block positions of vias we've already placed in previous nets
@@ -2271,6 +2281,9 @@ def create_plane(
             pad = pad_info['pad']
             pad_layer = pad_info.get('pad_layer')
             current_pad_key = (pad.global_x, pad.global_y)
+            if progress_callback:
+                progress_callback(pad_idx + 1, len(pads_needing_vias),
+                                  f"{net_name}: via for {pad.component_ref}.{pad.pad_number}")
 
             # Skip pads already processed in previous layer passes
             # (a via connects ALL layers, so once placed, pad is done)
@@ -2653,6 +2666,9 @@ def create_plane(
             print(f"\nRetrying {len(fine_candidates)} failed fine-pitch pad(s) with scoped "
                   f"fine parameters (grid {FINE_TAP_GRID_STEP}mm, clearance stepped down "
                   f"to the fab floor {_fab_clear}mm, track >= {_fab_track}mm):")
+            if progress_callback:
+                progress_callback(0, 0, f"{net_name}: fine-pitch retry "
+                                        f"({len(fine_candidates)} pad(s))...")
             recovered_entries = []
             for entry in fine_candidates:
                 pad_info = entry[3]
@@ -2823,6 +2839,8 @@ def create_plane(
                 print(f"Computing zone boundaries for multi-net layer {layer}")
                 print(f"Nets: {', '.join(nets_on_layer)}")
                 print(f"{'='*60}")
+                if progress_callback:
+                    progress_callback(0, 0, f"Computing Voronoi zones for {layer}...")
 
                 zone_sexprs, debug_line_sexprs, zone_data = _generate_multinet_layer_zones(
                     layer=layer,
@@ -2871,6 +2889,8 @@ def create_plane(
     # identical copper for identical inputs: neck grazes -> graze prune /
     # dead-end sweep -> close soft joints (#334 + follow-up). Previously this
     # lived inside _write_output_and_reroute and the GUI path never ran it.
+    if progress_callback:
+        progress_callback(0, 0, "Cleaning up plane tap copper...")
     all_new_segments = _finalize_plane_copper(
         all_new_segments, all_new_vias, pcb_data, clearance, all_layers,
         track_width, grid_step, via_size, via_drill, hole_to_hole_clearance)
@@ -2926,6 +2946,8 @@ def create_plane(
                       f"found {geo_failed} pad(s) not connected to their plane "
                       f"(see per-net breakdown above).")
 
+    if progress_callback:
+        progress_callback(1, 1, "Plane creation complete")
     if return_results:
         # all_ripped_net_ids LAST for backward compatibility: the GUI must
         # delete these nets' existing board copper before applying new_vias/

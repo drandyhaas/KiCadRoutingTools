@@ -873,6 +873,31 @@ class PlanesTab(wx.Panel):
         finally:
             sys.stdout = original_stdout
 
+    def _make_progress_callback(self):
+        """Engine progress hook (issue #364): marshals engine-thread milestone
+        updates onto the UI thread so the status bar / gauge track the plane
+        create/repair phases instead of freezing on "Creating planes...".
+        The plan executor mirrors status_text/progress_bar into the Claude
+        tab via _status_source, so it lights up there too."""
+        import time as _time
+
+        def on_progress(current, total, label=""):
+            wx.CallAfter(self._update_progress, current, total, label)
+            # Brief sleep releases the GIL so the main thread can paint the
+            # CallAfter update (same pattern as the route tab's callback).
+            _time.sleep(0.01)
+        return on_progress
+
+    def _update_progress(self, current, total, label):
+        """Update progress bar and status text (must run on the UI thread)."""
+        if total > 0:
+            self.progress_bar.SetRange(100)
+            self.progress_bar.SetValue(min(100, int(100 * current / total)))
+            self.status_text.SetLabel(f"{label} ({current}/{total})")
+        else:
+            self.progress_bar.Pulse()  # Indeterminate phase
+            self.status_text.SetLabel(label)
+
     def _run_create_planes(self, config):
         """Run plane creation."""
         # Cleared here; repopulated from create_plane's returned ripped set
@@ -994,6 +1019,7 @@ class PlanesTab(wx.Panel):
                 layer_nets=layer_nets,
                 same_net_pad_clearance=config.get('same_net_pad_clearance', defaults.SAME_NET_PAD_CLEARANCE),
                 skip_existing_zones=True,
+                progress_callback=self._make_progress_callback(),
             )
 
             total_vias = vias
@@ -1151,6 +1177,7 @@ class PlanesTab(wx.Panel):
                 dry_run=True,  # Don't write to file, apply via pcbnew
                 pcb_data=self.pcb_data,
                 return_results=True,
+                progress_callback=self._make_progress_callback(),
             )
 
             self._new_vias = new_vias

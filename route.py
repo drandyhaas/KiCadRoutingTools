@@ -220,7 +220,11 @@ def _dump_engine_config(engine, cfg):
         # Skip the board payload and non-config callables. all_layers/plane_layers
         # ARE kept: layer ORDER is a live GUI/CLI divergence class (the pcbnew
         # layer-ID vs stackup-order bug), so it must be visible in the dump.
-        if k in ('input_file', 'output_file', 'pcb_data') or callable(v):
+        # progress_callback is skipped by NAME, not just callable(): the CLI
+        # passes None (not callable, would dump as null) while the GUI passes
+        # a function (skipped) -- a phantom key diff in the parity harness.
+        if k in ('input_file', 'output_file', 'pcb_data',
+                 'progress_callback', 'cancel_check', 'vis_callback') or callable(v):
             continue
         try:
             _json.dumps(v)

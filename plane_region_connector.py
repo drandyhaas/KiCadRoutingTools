@@ -1168,7 +1168,8 @@ def route_disconnected_regions(
     verbose: bool = False,
     zone_layers: Optional[Set[str]] = None,
     debug_connectivity: bool = False,
-    zone_clearances: Optional[Dict[str, float]] = None
+    zone_clearances: Optional[Dict[str, float]] = None,
+    progress_callback=None
 ) -> Tuple[List[Dict], List[Dict], int, List[List[Tuple[float, float]]], List[Tuple[List[Tuple[float, float]], str]]]:
     """
     Detect and route between disconnected zone regions.
@@ -1191,6 +1192,8 @@ def route_disconnected_regions(
         zone_layers: Layers that have zones for this net (for cross-layer connectivity)
         debug_connectivity: If True, return connectivity paths from flood fill analysis
         zone_clearances: Per-layer zone clearances (layer -> clearance)
+        progress_callback: Optional callable(current, total, label) invoked at
+            region discovery and per connection attempt (issue #364)
 
     Returns:
         Tuple of (list of segment dicts, list of via dicts, number of routes added,
@@ -1199,6 +1202,8 @@ def route_disconnected_regions(
     coord = GridCoord(config.grid_step)
 
     # Find disconnected regions (checking connectivity across all layers)
+    if progress_callback:
+        progress_callback(0, 0, f"{net_name}: finding disconnected regions...")
     routing_layers = list(layer_map.keys())
     region_anchors, region_cells, connectivity_paths = find_disconnected_zone_regions(
         net_id, plane_layer, zone_bounds, pcb_data, config, zone_clearance,
@@ -1222,6 +1227,10 @@ def route_disconnected_regions(
     # Find MST edges to connect regions
     mst_edges = find_region_connection_points(region_anchors, region_cells, coord)
     print(f"  Routing {len(mst_edges)} connection(s) to join regions...")
+    if progress_callback:
+        progress_callback(0, len(mst_edges),
+                          f"{net_name}: {n_regions} regions, "
+                          f"{len(mst_edges)} connection(s) to route")
 
     # Get plane layer index and routing layers from layer_map
     plane_layer_idx = layer_map.get(plane_layer)
@@ -1307,6 +1316,9 @@ def route_disconnected_regions(
         # Progress indicator
         seed_note = f" (seed {len(seed_i)}x{len(seed_j)})" if reduced else ""
         print(f"    [{edge_idx+1}/{len(mst_edges)}] Region {region_i} ({len(anchors_i)} anchors) <-> Region {region_j} ({len(anchors_j)} anchors){seed_note}...", end=" ", flush=True)
+        if progress_callback:
+            progress_callback(edge_idx + 1, len(mst_edges),
+                              f"{net_name}: connecting plane regions")
 
         def _connect(a_i, a_j):
             return _try_route_between_regions(

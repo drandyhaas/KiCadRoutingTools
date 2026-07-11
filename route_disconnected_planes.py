@@ -356,6 +356,7 @@ def route_planes(
     power_nets: Optional[List[str]] = None,
     power_nets_widths: Optional[List[float]] = None,
     no_bga_zone: bool = False,
+    progress_callback=None,
 ) -> Tuple[int, int]:
     """
     Route between disconnected regions in power plane zones.
@@ -387,6 +388,12 @@ def route_planes(
             then scoped fine params for fine-pitch pads).
         max_search_radius: Max radius to search for a via position during pad
             repair (mm).
+        progress_callback: Optional callable(current, total, label) invoked at
+            phase milestones (pad repair k/N, region discovery, per-region
+            connects, cleanup, ripped-net reconnect), mirroring batch_route's
+            callback (issue #364). (0, 0, label) marks an indeterminate phase.
+            Called from whatever thread runs the engine; GUI callers must
+            marshal to the UI thread themselves.
 
     Returns:
         Tuple of (total_routes_added, total_regions_connected)
@@ -554,6 +561,8 @@ def route_planes(
         # not via down to the plane. Runs before island repair so the new
         # vias participate in the region connectivity analysis.
         if repair_pads:
+            if progress_callback:
+                progress_callback(0, 0, f"{net_name}: checking pad-plane connections...")
             unconnected = find_unconnected_plane_pads(pcb_data, net_id, net_zone_layers)
             total_pads_unconnected += len(unconnected)
             if not unconnected:
@@ -567,8 +576,12 @@ def route_planes(
                 )
                 # Cross-pad via-obstacle-map reuse for this net's repair pass (#263).
                 shared_maps = SharedViaMaps(pcb_data, net_id)
-                for pad, pad_layer in unconnected:
+                for _pr_idx, (pad, pad_layer) in enumerate(unconnected):
                     _tapped_pads.append(pad)
+                    if progress_callback:
+                        progress_callback(_pr_idx + 1, len(unconnected),
+                                          f"{net_name}: pad repair "
+                                          f"{pad.component_ref}.{pad.pad_number}")
                     print(f"    Pad {pad.component_ref}.{pad.pad_number} ({pad_layer})...", end=" ", flush=True)
                     result = tap_pad_with_escalation(
                         pad, pad_layer, net_id, pcb_data, tap_config,
@@ -626,6 +639,8 @@ def route_planes(
                         print(f"{RED}FAILED{RESET}")
 
         # Build obstacle map for this net
+        if progress_callback:
+            progress_callback(0, 0, f"{net_name}: building obstacle map...")
         print(f"  Building obstacle map...", end=" ", flush=True)
         base_obstacles, layer_map = build_base_obstacles(
             exclude_net_ids={net_id},
@@ -660,7 +675,8 @@ def route_planes(
             max_iterations=max_iterations,
             verbose=verbose,
             zone_layers=net_zone_layers,
-            zone_clearances=zone_clearances
+            zone_clearances=zone_clearances,
+            progress_callback=progress_callback
         )
 
         if routes_added > 0:
@@ -863,6 +879,8 @@ def route_planes(
     # (WITH the pour), so a load-bearing tap is kept and re-bent instead. route.py's
     # reconnect excludes the plane nets, so they are only ever cleaned up here.
     if all_new_segments:
+        if progress_callback:
+            progress_callback(0, 0, "Cleaning up repair copper (graze prune/nudge)...")
         from pcb_modification import cleanup_plane_taps_grazing
         _scope = {s['net_id'] for s in all_new_segments}
         all_new_segments, _gz_rm, _gz_nudge, _gz_swept = cleanup_plane_taps_grazing(
@@ -1005,6 +1023,8 @@ def route_planes(
             if _cnames:
                 print(f"\nReconnecting {len(_cnames)} net(s) this run ripped "
                       f"for pad repairs (in-memory): {', '.join(_cnames)}")
+                if progress_callback:
+                    progress_callback(0, 0, f"Reconnecting {len(_cnames)} ripped net(s)...")
                 try:
                     from route import batch_route
                     _ok, _fail, _t, _rdata = batch_route(
@@ -1110,6 +1130,8 @@ def route_planes(
         # The GUI deletes every returned net's old board copper before adding
         # all_new_*; partial nets' kept pieces ride the emissions, so include
         # them in the deletion set (strip-and-replace parity).
+        if progress_callback:
+            progress_callback(1, 1, "Plane repair complete")
         return (total_routes, total_regions, all_new_vias, all_new_segments,
                 ripped_net_ids + partial_ids, _strip_segments)
 
@@ -1157,6 +1179,8 @@ def route_planes(
         if _cnames:
             print(f"\nReconnecting {len(_cnames)} net(s) this run ripped for pad "
                   f"repairs: {', '.join(_cnames)}")
+            if progress_callback:
+                progress_callback(0, 0, f"Reconnecting {len(_cnames)} ripped net(s)...")
             try:
                 from route import batch_route
                 _ok, _fail, _t = batch_route(
@@ -1175,6 +1199,8 @@ def route_planes(
             except Exception as _e:
                 print(f"{RED}  ripped-net reconnect pass failed: {_e}{RESET}")
 
+    if progress_callback:
+        progress_callback(1, 1, "Plane repair complete")
     return (total_routes, total_regions)
 
 
