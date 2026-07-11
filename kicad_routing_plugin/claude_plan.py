@@ -170,8 +170,17 @@ def apply_step_params(step, dialog):
                   "power_nets", "power_nets_widths", "layer_costs"},
         "route_diff": {"diff_pair_width", "diff_pair_gap", "impedance",
                        "layer_costs"},
-        "route_planes": {"add_gnd_vias", "gnd_via_distance", "gnd_via_net"},
-        "repair_planes": set(),
+        # rip_blocker_nets is handled by the explicit per-action blocks below,
+        # which target the CORRECT options panel. The generic loop resolves it
+        # to the control name 'rip_blocker_check', which exists on BOTH
+        # create_options and repair_options, and picks the FIRST owner
+        # (create_options) -- so for a repair_planes step it would wrongly flip
+        # the create panel's checkbox (and, absent the explicit block, leave the
+        # repair panel's at its reset default of False, silently dropping
+        # --rip-blocker-nets). Skip it in the generic loop for both plane actions.
+        "route_planes": {"add_gnd_vias", "gnd_via_distance", "gnd_via_net",
+                         "rip_blocker_nets"},
+        "repair_planes": {"rip_blocker_nets"},
         "fanout": set(),
     }
 
