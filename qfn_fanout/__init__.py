@@ -503,6 +503,13 @@ def generate_qfn_fanout(footprint: Footprint,
     # map is too coarse to catch a sub-grid graze (issue #214). Each pad is
     # included if its OWN footprint can reach the stub span within `margin`, so the
     # window is correct for large pads too.
+    #
+    # The part's OWN pads are included too (issue #356): the obstacle map excludes
+    # every fanned net, and this scan used to exclude the whole footprint, so an
+    # escape threading a dense pad field (AQFN inner grid, hex_gateway U1) shipped
+    # 0.006mm from a NEIGHBOUR pad of the same part with no check at all. The
+    # per-stub `pad.net_id == net_id` skip below already exempts the stub's own
+    # pad(s); every other-net pad -- own part or not -- is real foreign copper.
     _sxs = [pt[0] for s in stubs for pt in (s.pad_pos, s.corner_pos, s.stub_end)]
     _sys = [pt[1] for s in stubs for pt in (s.pad_pos, s.corner_pos, s.stub_end)]
     if _sxs:
@@ -515,7 +522,7 @@ def generate_qfn_fanout(footprint: Footprint,
                     and _lo_y - r <= p.global_y <= _hi_y + r)
 
         foreign_pads = [p for plist in pcb_data.pads_by_net.values() for p in plist
-                        if p.component_ref != footprint.reference and _pad_near(p)]
+                        if _pad_near(p)]
     else:
         foreign_pads = []
 

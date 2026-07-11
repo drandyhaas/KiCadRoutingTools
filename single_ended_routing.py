@@ -51,8 +51,8 @@ _FOREIGN_PAD_WINDOW = 5.0  # mm
 
 
 def _pad_corner_radius(pad):
-    """Corner radius that turns a pad's board-axis bounding rect (half_x, half_y)
-    into an accurate rounded-rect model for the foreign-pad distance kernels:
+    """Corner radius that turns a pad's local rect (half_x, half_y) into an
+    accurate rounded-rect model for the foreign-pad distance kernels:
 
       * circle / oval -> min(half) : the rect becomes a capsule/circle, so the
         distance to a round BGA ball is exact (not the rect corner, which sticks
@@ -62,13 +62,12 @@ def _pad_corner_radius(pad):
       * rect / custom  -> 0 : plain bounding rect (custom pads keep the
         conservative over-approximation; their real outline is a polygon).
 
-    A pad rotated off the orthogonal axes (rect_rotation != 0) keeps the axis-
-    aligned bounding rect (radius 0): the rounded-rect SDF below is evaluated in
-    board axes, so a non-zero corner radius on a tilted rect would be wrong;
-    bbox is conservative there (rare -- most pads are axis-aligned)."""
+    Valid for rotated pads too: the kernels evaluate the SDF in the pad's LOCAL
+    frame (rotating each query point by -rect_rotation), so the radius applies
+    to the true tilted outline. The old board-axis fallback kept the UNROTATED
+    rect for tilted pads -- which under-covers a tilted oval by up to half its
+    long axis (issue #356, bfo9000 SW_A2.2 at -48 deg) -- it was never a bbox."""
     sx = pad.size_x; sy = pad.size_y
-    if getattr(pad, 'rect_rotation', 0.0):
-        return 0.0
     shape = getattr(pad, 'shape', 'rect')
     if shape in ('circle', 'oval'):
         return min(sx, sy) / 2.0
@@ -79,12 +78,18 @@ def _pad_corner_radius(pad):
 
 
 def _foreign_pad_arrays(pcb_data, layer):
-    """Cached per-layer numpy arrays (net_id, cx, cy, half_x, half_y, corner_r) for
-    every pad on `layer`. Pads never change during a route, so this is built once
-    per board and reused across the millions of foreign-pad distance queries (the
-    terminal graze/merge checks). `corner_r` makes the distance kernels model the
-    pad as a rounded rect (accurate for circle/oval/roundrect, exact rect at r=0).
-    Returns six parallel arrays."""
+    """Cached per-layer numpy arrays (net_id, cx, cy, half_x, half_y, corner_r,
+    rot_cos, rot_sin, ext_x, ext_y) for every pad on `layer`. Pads never change
+    during a route, so this is built once per board and reused across the
+    millions of foreign-pad distance queries (the terminal graze/merge checks).
+    `corner_r` makes the distance kernels model the pad as a rounded rect
+    (accurate for circle/oval/roundrect, exact rect at r=0). `rot_cos`/`rot_sin`
+    are the pad's rect_rotation (issue #356: kernels rotate query points into the
+    pad's local frame, so tilted pads use their TRUE outline -- the old
+    board-axis rect under-covered a tilted oval by up to half its long axis and
+    the nudge passes re-bent tracks INTO the pad). `ext_x`/`ext_y` are the
+    global-axis half-extents of the (possibly tilted) rect for windowing; equal
+    to half_x/half_y for axis-aligned pads. Returns ten parallel arrays."""
     cache = getattr(pcb_data, '_foreign_pad_arr_cache', None)
     if cache is None:
         cache = {}
@@ -92,15 +97,27 @@ def _foreign_pad_arrays(pcb_data, layer):
     arr = cache.get(layer)
     if arr is None:
         nids, cx, cy, hx, hy, cr = [], [], [], [], [], []
+        rc, rs, ex, ey = [], [], [], []
         for nid, pads in pcb_data.pads_by_net.items():
             for pad in pads:
                 if layer in pad.layers or '*.Cu' in pad.layers:
                     nids.append(nid)
                     cx.append(pad.global_x); cy.append(pad.global_y)
-                    hx.append(pad.size_x / 2.0); hy.append(pad.size_y / 2.0)
+                    half_x = pad.size_x / 2.0; half_y = pad.size_y / 2.0
+                    hx.append(half_x); hy.append(half_y)
                     cr.append(_pad_corner_radius(pad))
+                    rot = getattr(pad, 'rect_rotation', 0.0) or 0.0
+                    if rot:
+                        c = math.cos(math.radians(rot)); s = math.sin(math.radians(rot))
+                        rc.append(c); rs.append(s)
+                        ex.append(abs(half_x * c) + abs(half_y * s))
+                        ey.append(abs(half_x * s) + abs(half_y * c))
+                    else:
+                        rc.append(1.0); rs.append(0.0)
+                        ex.append(half_x); ey.append(half_y)
         arr = (np.asarray(nids, dtype=np.int64), np.asarray(cx), np.asarray(cy),
-               np.asarray(hx), np.asarray(hy), np.asarray(cr))
+               np.asarray(hx), np.asarray(hy), np.asarray(cr),
+               np.asarray(rc), np.asarray(rs), np.asarray(ex), np.asarray(ey))
         cache[layer] = arr
     return arr
 
@@ -111,19 +128,26 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer):
     exact rect at corner_r=0), so a round BGA ball is not over-approximated by its
     bounding-box corner. Vectorized + windowed (see _FOREIGN_PAD_WINDOW); exact
     for any distance within the window, which is all the callers ever look at."""
-    nids, cx, cy, hx, hy, cr = _foreign_pad_arrays(pcb_data, layer)
+    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey = _foreign_pad_arrays(pcb_data, layer)
     if cx.size == 0:
         return 1e9
     R = _FOREIGN_PAD_WINDOW
-    # Expand the window by each pad's own half-size: a large pad's EDGE can be
-    # within R even when its centre is past R. Then min edge distance is exact for
-    # anything <= R (any excluded pad is > R away, beyond every caller's margin).
-    near = (np.abs(cx - x) <= R + hx) & (np.abs(cy - y) <= R + hy) & (nids != net_id)
+    # Expand the window by each pad's own half-extent (global axes, so tilted
+    # pads window by their true bbox): a large pad's EDGE can be within R even
+    # when its centre is past R. Then min edge distance is exact for anything
+    # <= R (any excluded pad is > R away, beyond every caller's margin).
+    near = (np.abs(cx - x) <= R + ex) & (np.abs(cy - y) <= R + ey) & (nids != net_id)
     if not near.any():
         return 1e9
     fcr = cr[near]
-    dx = np.maximum(np.abs(x - cx[near]) - (hx[near] - fcr), 0.0)
-    dy = np.maximum(np.abs(y - cy[near]) - (hy[near] - fcr), 0.0)
+    # Rotate the query offset into each pad's local frame (R(-rot)); identity
+    # for axis-aligned pads (cos=1, sin=0), exact tilted outline otherwise.
+    ddx = x - cx[near]; ddy = y - cy[near]
+    frc, frs = rc[near], rs[near]
+    lx = np.abs(ddx * frc + ddy * frs)
+    ly = np.abs(-ddx * frs + ddy * frc)
+    dx = np.maximum(lx - (hx[near] - fcr), 0.0)
+    dy = np.maximum(ly - (hy[near] - fcr), 0.0)
     return float(np.min(np.hypot(dx, dy) - fcr))
 
 
@@ -133,25 +157,33 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
     e.g. BGA balls -- use their true outline, not the bounding-box corner that
     manufactures phantom grazes (#315). Vectorized: windows pads to the segment's
     bbox + margin, then evaluates ALL sample points against them in one matrix op."""
-    nids, cx, cy, hx, hy, cr = _foreign_pad_arrays(pcb_data, layer)
+    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey = _foreign_pad_arrays(pcb_data, layer)
     if cx.size == 0:
         return 1e9
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
     R = _FOREIGN_PAD_WINDOW
-    # Pad bbox (centre +/- half) must reach within R of the segment bbox; a pad
-    # excluded here is > R from every sample point on the segment.
-    near = ((cx + hx >= min(x1, x2) - R) & (cx - hx <= max(x1, x2) + R) &
-            (cy + hy >= min(y1, y2) - R) & (cy - hy <= max(y1, y2) + R) & (nids != net_id))
+    # Pad bbox (centre +/- global half-extent, true bbox for tilted pads) must
+    # reach within R of the segment bbox; a pad excluded here is > R from every
+    # sample point on the segment.
+    near = ((cx + ex >= min(x1, x2) - R) & (cx - ex <= max(x1, x2) + R) &
+            (cy + ey >= min(y1, y2) - R) & (cy - ey <= max(y1, y2) + R) & (nids != net_id))
     if not near.any():
         return 1e9
     fcx, fcy, fhx, fhy, fcr = cx[near], cy[near], hx[near], hy[near], cr[near]
+    frc, frs = rc[near], rs[near]
     t = np.linspace(0.0, 1.0, n + 1)
     sx = x1 + (x2 - x1) * t
     sy = y1 + (y2 - y1) * t
-    # Rounded-rect signed distance: shrink the half-extents by the corner radius,
-    # take the outside distance to that inner rect, then subtract the radius.
-    dx = np.maximum(np.abs(sx[:, None] - fcx[None, :]) - (fhx[None, :] - fcr[None, :]), 0.0)
-    dy = np.maximum(np.abs(sy[:, None] - fcy[None, :]) - (fhy[None, :] - fcr[None, :]), 0.0)
+    # Rounded-rect signed distance in each pad's LOCAL frame (query offsets
+    # rotated by R(-rot); identity for axis-aligned pads): shrink the
+    # half-extents by the corner radius, take the outside distance to that
+    # inner rect, then subtract the radius.
+    ddx = sx[:, None] - fcx[None, :]
+    ddy = sy[:, None] - fcy[None, :]
+    lx = np.abs(ddx * frc[None, :] + ddy * frs[None, :])
+    ly = np.abs(-ddx * frs[None, :] + ddy * frc[None, :])
+    dx = np.maximum(lx - (fhx[None, :] - fcr[None, :]), 0.0)
+    dy = np.maximum(ly - (fhy[None, :] - fcr[None, :]), 0.0)
     return float(np.min(np.hypot(dx, dy) - fcr[None, :]))
 
 

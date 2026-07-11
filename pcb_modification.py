@@ -2507,26 +2507,35 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
         if best is None or sf > best[0]:
             best = (sf, float(ts[i]), float(qx), float(qy))
 
-    nids, cx, cy, hx, hy, cr = _foreign_pad_arrays(pcb_data, s.layer)
+    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey = _foreign_pad_arrays(pcb_data, s.layer)
     if cx.size:
-        near = ((cx + hx >= sx.min() - R) & (cx - hx <= sx.max() + R) &
-                (cy + hy >= sy.min() - R) & (cy - hy <= sy.max() + R) &
+        near = ((cx + ex >= sx.min() - R) & (cx - ex <= sx.max() + R) &
+                (cy + ey >= sy.min() - R) & (cy - ey <= sy.max() + R) &
                 (nids != net_id))
         if near.any():
             fcx, fcy, fhx, fhy, fcr = cx[near], cy[near], hx[near], hy[near], cr[near]
-            # Closest point on the pad's rounded-rect boundary: clamp to the inner
-            # (corner-radius-shrunk) rect, then step out by the radius toward the
-            # sample point. Exact circle/oval for round pads (#315), plain rect at
-            # fcr=0. qx/qy is the boundary point -> correct "away" direction.
-            qxi = fcx[None, :] + np.clip(sx[:, None] - fcx[None, :],
-                                         -(fhx[None, :] - fcr[None, :]), fhx[None, :] - fcr[None, :])
-            qyi = fcy[None, :] + np.clip(sy[:, None] - fcy[None, :],
-                                         -(fhy[None, :] - fcr[None, :]), fhy[None, :] - fcr[None, :])
-            vx = sx[:, None] - qxi; vy = sy[:, None] - qyi
+            frc, frs = rc[near], rs[near]
+            # Work in each pad's LOCAL frame (query offsets rotated by R(-rot),
+            # identity for axis-aligned pads) so tilted pads use their true
+            # outline (#356). Closest point on the pad's rounded-rect boundary:
+            # clamp to the inner (corner-radius-shrunk) rect, then step out by
+            # the radius toward the sample point. Exact circle/oval for round
+            # pads (#315), plain rect at fcr=0. qx/qy is the boundary point
+            # (rotated back to board axes) -> correct "away" direction.
+            ddx = sx[:, None] - fcx[None, :]
+            ddy = sy[:, None] - fcy[None, :]
+            plx = ddx * frc[None, :] + ddy * frs[None, :]
+            ply = -ddx * frs[None, :] + ddy * frc[None, :]
+            qlxi = np.clip(plx, -(fhx[None, :] - fcr[None, :]), fhx[None, :] - fcr[None, :])
+            qlyi = np.clip(ply, -(fhy[None, :] - fcr[None, :]), fhy[None, :] - fcr[None, :])
+            vx = plx - qlxi; vy = ply - qlyi
             vlen = np.hypot(vx, vy)
             safe = np.where(vlen > 1e-12, vlen, 1.0)
-            qx = qxi + fcr[None, :] * vx / safe
-            qy = qyi + fcr[None, :] * vy / safe
+            qlx = qlxi + fcr[None, :] * vx / safe
+            qly = qlyi + fcr[None, :] * vy / safe
+            # Boundary point back to board axes: c + R(rot) . (qlx, qly)
+            qx = fcx[None, :] + qlx * frc[None, :] - qly * frs[None, :]
+            qy = fcy[None, :] + qlx * frs[None, :] + qly * frc[None, :]
             d = vlen - fcr[None, :]
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, qx[i, j], qy[i, j])
