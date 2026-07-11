@@ -847,8 +847,15 @@ def stub_clear_of_foreign_tracks(segments: List[Segment], dest_layer: str, net_i
     map). Own net and any swap-partner nets are excluded. Returns (clear, reason).
     """
     exclude = set(exclude_net_ids) | {net_id}
-    clear_dist = config.track_width / 2 + config.clearance
     for seg in segments:
+        # Use the REAL widths of both tracks, not config.track_width: a netclass-
+        # wide stub (ulx5m DDMI0 at 0.125 vs --track-width 0.1) moved next to an
+        # equally wide foreign stub needs w/2 + w/2 + clearance = 0.225, but the
+        # old config-width centerline test demanded only 0.15 and shipped a
+        # kicad-confirmed 0.2mm-spacing graze (issue #357, TX2_P onto TX1_P's
+        # In3.Cu corridor).
+        seg_half = (seg.width if getattr(seg, 'width', 0) and seg.width > 0
+                    else config.track_width) / 2
         sminx, smaxx = min(seg.start_x, seg.end_x), max(seg.start_x, seg.end_x)
         sminy, smaxy = min(seg.start_y, seg.end_y), max(seg.start_y, seg.end_y)
         bminx, bmaxx = sminx - 1.5, smaxx + 1.5
@@ -862,12 +869,13 @@ def stub_clear_of_foreign_tracks(segments: List[Segment], dest_layer: str, net_i
                     max(other.start_y, other.end_y) < bminy or
                     min(other.start_y, other.end_y) > bmaxy):
                 continue
+            other_half = (other.width if other.width > 0 else config.track_width) / 2
             d = segment_to_segment_distance_seg(seg, other)
-            if d < clear_dist:
+            if d < seg_half + other_half + config.clearance:
                 net = pcb_data.nets.get(other.net_id)
                 nm = net.name if net else f"net {other.net_id}"
                 return False, (f"stub on {dest_layer} would graze {nm} track "
-                               f"(gap {d:.3f}mm)")
+                               f"(gap {d - seg_half - other_half:.3f}mm)")
         # Foreign vias -- through-hole, so they block every layer (matches the
         # obstacle map's all-layer via treatment).
         for via in pcb_data.vias:
@@ -876,11 +884,11 @@ def stub_clear_of_foreign_tracks(segments: List[Segment], dest_layer: str, net_i
             if not (bminx <= via.x <= bmaxx and bminy <= via.y <= bmaxy):
                 continue
             d = point_to_segment_distance_seg(via.x, via.y, seg) - (via.size or 0) / 2
-            if d < clear_dist:
+            if d < seg_half + config.clearance:
                 net = pcb_data.nets.get(via.net_id)
                 nm = net.name if net else f"net {via.net_id}"
                 return False, (f"stub on {dest_layer} would graze {nm} via "
-                               f"(gap {d:.3f}mm)")
+                               f"(gap {d - seg_half:.3f}mm)")
     return True, ""
 
 

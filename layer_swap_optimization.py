@@ -817,54 +817,115 @@ def apply_diff_pair_layer_swaps(
                           f"{p_reason if not p_clear else n_reason}")
                     continue
 
-                via_p, stub_p = apply_bare_pad_target_via(
-                    pcb_data, pair.p_net_id, p_tgt_x, p_tgt_y, fan_layer,
-                    src_cx, src_cy, config)
-                via_n, stub_n = apply_bare_pad_target_via(
-                    pcb_data, pair.n_net_id, n_tgt_x, n_tgt_y, fan_layer,
-                    src_cx, src_cy, config)
-                # via_p/via_n are None when an existing same-net via-in-pad was
-                # reused (#282): no new hole, nothing to validate or undo for it.
-                new_pad_vias = [v for v in (via_p, via_n) if v is not None]
-                if len(new_pad_vias) < 2:
-                    print(f"    Bare-pad target swap: reused "
-                          f"{2 - len(new_pad_vias)} existing via(s) at the pad "
-                          f"(no new hole, #282)")
-                # Issue #241: the two pad vias can't fit at a tight connector pad
-                # pitch (0.5mm) - they collide with each other / graze neighbouring
-                # pads below clearance. Validate at check_drc's clearance and, if
-                # they don't fit, undo the swap so the pair routes to the bare pads
-                # instead (the right treatment for a dense connector fan-out).
-                fit, why = _bare_pad_pair_vias_fit(
-                    pcb_data, new_pad_vias, config)
-                # The synthesized stubs are geometric copper: validate them
-                # against foreign pads AND routed tracks/vias on the fan layer
-                # (#282: a stub anchored at a reused ball via runs straight at
-                # the neighbouring BGA ball's pad). Same validators the solo
-                # switch path uses.
-                if fit:
-                    from stub_layer_switching import (stub_clear_of_foreign_pads,
-                                                      stub_clear_of_foreign_tracks)
-                    _partners = {pair.p_net_id, pair.n_net_id}
-                    for _stub, _snid in ((stub_p, pair.p_net_id),
-                                         (stub_n, pair.n_net_id)):
-                        ok_p, why_p = stub_clear_of_foreign_pads(
-                            [_stub], fan_layer, _snid, pcb_data, config, _partners)
-                        ok_t, why_t = (True, "") if not ok_p else                             stub_clear_of_foreign_tracks(
+                # Candidate stub directions (issue #357): aiming BOTH stubs at
+                # the pair's source center converges them -- from fine-pitch
+                # pads the two connectors end up sub-gap to each other and one
+                # sweeps the PARTNER's pad via (ulx5m ETH1_N 0.001mm from
+                # ETH1_P's via). Try the aimed geometry first, then a parallel
+                # escape perpendicular to the pad-pair axis (toward the source
+                # half-plane), which keeps the stubs a full pad pitch apart.
+                import math as _math
+                _axx, _axy = n_tgt_x - p_tgt_x, n_tgt_y - p_tgt_y
+                _axn = _math.hypot(_axx, _axy) or 1.0
+                _px, _py = -_axy / _axn, _axx / _axn
+                _midx, _midy = (p_tgt_x + n_tgt_x) / 2, (p_tgt_y + n_tgt_y) / 2
+                if _px * (src_cx - _midx) + _py * (src_cy - _midy) < 0:
+                    _px, _py = -_px, -_py
+                candidates = [
+                    ((src_cx, src_cy), (src_cx, src_cy)),
+                    ((p_tgt_x + _px, p_tgt_y + _py), (n_tgt_x + _px, n_tgt_y + _py)),
+                ]
+                fit, why = False, ""
+                via_p = via_n = stub_p = stub_n = None
+                new_pad_vias = []
+                for toward_p, toward_n in candidates:
+                    via_p, stub_p = apply_bare_pad_target_via(
+                        pcb_data, pair.p_net_id, p_tgt_x, p_tgt_y, fan_layer,
+                        toward_p[0], toward_p[1], config)
+                    via_n, stub_n = apply_bare_pad_target_via(
+                        pcb_data, pair.n_net_id, n_tgt_x, n_tgt_y, fan_layer,
+                        toward_n[0], toward_n[1], config)
+                    # via_p/via_n are None when an existing same-net via-in-pad
+                    # was reused (#282): no new hole, nothing to validate or
+                    # undo for it.
+                    new_pad_vias = [v for v in (via_p, via_n) if v is not None]
+                    # Issue #241: the two pad vias can't fit at a tight connector
+                    # pad pitch (0.5mm) - they collide with each other / graze
+                    # neighbouring pads below clearance. Validate at check_drc's
+                    # clearance and, if they don't fit, undo the swap so the pair
+                    # routes to the bare pads instead (the right treatment for a
+                    # dense connector fan-out).
+                    fit, why = _bare_pad_pair_vias_fit(
+                        pcb_data, new_pad_vias, config)
+                    # The synthesized stubs are geometric copper: validate them
+                    # against foreign pads AND routed tracks/vias on the fan layer
+                    # (#282: a stub anchored at a reused ball via runs straight at
+                    # the neighbouring BGA ball's pad). Same validators the solo
+                    # switch path uses.
+                    if fit:
+                        from stub_layer_switching import (stub_clear_of_foreign_pads,
+                                                          stub_clear_of_foreign_tracks)
+                        _partners = {pair.p_net_id, pair.n_net_id}
+                        for _stub, _snid in ((stub_p, pair.p_net_id),
+                                             (stub_n, pair.n_net_id)):
+                            ok_p, why_p = stub_clear_of_foreign_pads(
                                 [_stub], fan_layer, _snid, pcb_data, config, _partners)
-                        if not (ok_p and ok_t):
-                            fit, why = False, (why_p if not ok_p else why_t)
-                            break
-                if not fit:
+                            ok_t, why_t = (True, "") if not ok_p else                                 stub_clear_of_foreign_tracks(
+                                    [_stub], fan_layer, _snid, pcb_data, config, _partners)
+                            if not (ok_p and ok_t):
+                                fit, why = False, (why_p if not ok_p else why_t)
+                                break
+                    if fit:
+                        # INTRA-PAIR clearance (issue #357): the foreign checks
+                        # above exclude both pair nets, so the two synthesized
+                        # stubs -- and each stub vs the PARTNER's anchor via --
+                        # were never validated against each other. Grade at the
+                        # intra-pair floor min(clearance, diff_pair_gap), the
+                        # same floor the clearance ledger grades the pair at.
+                        from geometry_utils import segment_to_segment_distance
+                        intra = min(config.clearance, config.diff_pair_gap)
+                        wp = stub_p.width / 2
+                        wn = stub_n.width / 2
+                        d_ss = segment_to_segment_distance(
+                            stub_p.start_x, stub_p.start_y, stub_p.end_x, stub_p.end_y,
+                            stub_n.start_x, stub_n.start_y, stub_n.end_x, stub_n.end_y)
+                        if d_ss - wp - wn < intra - 1e-6:
+                            fit, why = False, (f"synthesized P/N stubs pinch "
+                                               f"(gap {d_ss - wp - wn:.3f}mm)")
+                        if fit:
+                            # each stub vs the partner's anchor via (stub start
+                            # IS the anchor; a reused via sits there too)
+                            vp_r = (via_p.size if via_p else config.via_size) / 2
+                            vn_r = (via_n.size if via_n else config.via_size) / 2
+                            d_pv = point_to_segment_distance(
+                                stub_p.start_x, stub_p.start_y,
+                                stub_n.start_x, stub_n.start_y, stub_n.end_x, stub_n.end_y)
+                            d_nv = point_to_segment_distance(
+                                stub_n.start_x, stub_n.start_y,
+                                stub_p.start_x, stub_p.start_y, stub_p.end_x, stub_p.end_y)
+                            if d_pv - vp_r - wn < intra - 1e-6:
+                                fit, why = False, (f"N stub grazes P pad via "
+                                                   f"(gap {d_pv - vp_r - wn:.3f}mm)")
+                            elif d_nv - vn_r - wp < intra - 1e-6:
+                                fit, why = False, (f"P stub grazes N pad via "
+                                                   f"(gap {d_nv - vn_r - wp:.3f}mm)")
+                    if fit:
+                        break
+                    # undo this candidate before trying the next
                     for _v in new_pad_vias:
                         if _v in pcb_data.vias:
                             pcb_data.vias.remove(_v)
                     for _s in (stub_p, stub_n):
                         if _s in pcb_data.segments:
                             pcb_data.segments.remove(_s)
+                if not fit:
                     print(f"    Bare-pad target swap skipped for {pair_name}: {why} "
                           f"(pair routes to the bare pads instead)")
                     continue
+                if len(new_pad_vias) < 2:
+                    print(f"    Bare-pad target swap: reused "
+                          f"{2 - len(new_pad_vias)} existing via(s) at the pad "
+                          f"(no new hole, #282)")
                 all_swap_vias.extend(new_pad_vias)
                 all_swap_segments.extend([stub_p, stub_n])
 

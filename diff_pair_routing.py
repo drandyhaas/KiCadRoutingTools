@@ -3176,16 +3176,25 @@ def _collapse_leg_attach_join(leg_segs, attach_xy, config, pcb_data, net_id, par
         return leg_segs  # join doesn't continue the penultimate segment
 
     w = config.get_net_track_width(net_id, pen.layer)
+    # partner_segs is the OTHER half of the SAME pair, so the requirement is the
+    # INTRA-PAIR floor min(clearance, diff_pair_gap) -- the coupled trace runs at
+    # the design gap by construction, and the clearance ledger grades the board
+    # at that floor. Gating on the full clearance made the collapse a no-op
+    # whenever gap < clearance (#357 open_weather_station RD+/RD-: the join sat
+    # 0.10 from the partner, the collapsed corner 0.15 -- a real fix at the
+    # 0.15 floor, but the 0.2 full-clearance gate rejected it).
+    intra = min(config.clearance, config.diff_pair_gap)
     # Only act on a REAL local violation: the grid corner (penultimate's far end)
-    # must currently sit below clearance to the partner copper.
+    # must currently sit below the intra-pair floor to the partner copper.
     before = _seg_to_seglist_min_edge(pen.start_x, pen.start_y, pen.end_x, pen.end_y,
                                       w, pen.layer, partner_segs)
-    if before >= config.clearance - 1e-6:
+    if before >= intra - 1e-6:
         return leg_segs  # corner already clears the partner -> nothing to fix
-    # The relocated segment must clear the partner by the FULL clearance, or we'd
-    # just trade one graze for another (the butterstick D4 tilt-into-partner case).
+    # The relocated segment must clear the partner by the full intra-pair floor,
+    # or we'd just trade one graze for another (the butterstick D4
+    # tilt-into-partner case).
     after = _seg_to_seglist_min_edge(pen.start_x, pen.start_y, ax, ay, w, pen.layer, partner_segs)
-    if after < config.clearance - 1e-6 or after <= before + 1e-9:
+    if after < intra - 1e-6 or after <= before + 1e-9:
         return leg_segs  # collapse doesn't help (or makes it worse)
     if pcb_data is not None:
         from single_ended_routing import _seg_foreign_pad_dist
