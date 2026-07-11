@@ -357,6 +357,7 @@ def route_planes(
     power_nets_widths: Optional[List[float]] = None,
     no_bga_zone: bool = False,
     progress_callback=None,
+    cancel_check=None,
 ) -> Tuple[int, int]:
     """
     Route between disconnected regions in power plane zones.
@@ -539,6 +540,9 @@ def route_planes(
     distant_radius = max_search_radius if rip_blocker_nets else 0.0
 
     for net_id, (net_name, net_zone_layers) in unique_nets.items():
+        if cancel_check and cancel_check():
+            print("\nPlane repair cancelled")
+            break
         # Build per-layer zone clearances for all layers with zones for this net
         # These are used in flood fill to determine what the zone fill connects
         zone_clearances: Dict[str, float] = {}
@@ -577,6 +581,9 @@ def route_planes(
                 # Cross-pad via-obstacle-map reuse for this net's repair pass (#263).
                 shared_maps = SharedViaMaps(pcb_data, net_id)
                 for _pr_idx, (pad, pad_layer) in enumerate(unconnected):
+                    if cancel_check and cancel_check():
+                        print("    (cancelled)")
+                        break
                     _tapped_pads.append(pad)
                     if progress_callback:
                         progress_callback(_pr_idx + 1, len(unconnected),
@@ -676,7 +683,8 @@ def route_planes(
             verbose=verbose,
             zone_layers=net_zone_layers,
             zone_clearances=zone_clearances,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            cancel_check=cancel_check
         )
 
         if routes_added > 0:

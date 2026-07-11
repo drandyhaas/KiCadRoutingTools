@@ -1020,6 +1020,7 @@ class PlanesTab(wx.Panel):
                 same_net_pad_clearance=config.get('same_net_pad_clearance', defaults.SAME_NET_PAD_CLEARANCE),
                 skip_existing_zones=True,
                 progress_callback=self._make_progress_callback(),
+                cancel_check=lambda: self._cancel_requested,
             )
 
             total_vias = vias
@@ -1178,6 +1179,7 @@ class PlanesTab(wx.Panel):
                 pcb_data=self.pcb_data,
                 return_results=True,
                 progress_callback=self._make_progress_callback(),
+                cancel_check=lambda: self._cancel_requested,
             )
 
             self._new_vias = new_vias
@@ -1347,6 +1349,26 @@ class PlanesTab(wx.Panel):
                                              delete=False) as f:
                 tmp = f.name
             pcbnew.SaveBoard(tmp, board)
+
+            def _oracle_progress(current, total, label=""):
+                # Apply runs on the MAIN thread: update and force-repaint the
+                # status controls directly -- a CallAfter would not execute
+                # until this whole pass returned, i.e. too late to be seen
+                # (#364 follow-up: oracle rounds were the last silent phase).
+                try:
+                    if total > 0:
+                        self.progress_bar.SetRange(100)
+                        self.progress_bar.SetValue(
+                            min(100, int(100 * current / total)))
+                        self.status_text.SetLabel(f"{label} ({current}/{total})")
+                    else:
+                        self.progress_bar.Pulse()
+                        self.status_text.SetLabel(label)
+                    self.status_text.Update()
+                    self.progress_bar.Update()
+                except Exception:
+                    pass
+
             orc = oracle_reconnect(
                 tmp, nets, ocfg,
                 track_via_clearance=cfg_src.get(
@@ -1354,7 +1376,8 @@ class PlanesTab(wx.Panel):
                     defaults.PLANE_TRACK_VIA_CLEARANCE),
                 hole_to_hole_clearance=cfg_src.get(
                     'hole_to_hole_clearance',
-                    defaults.HOLE_TO_HOLE_CLEARANCE))
+                    defaults.HOLE_TO_HOLE_CLEARANCE),
+                progress_callback=_oracle_progress)
             import os as _os
             try:
                 _os.unlink(tmp)

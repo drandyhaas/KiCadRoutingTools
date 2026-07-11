@@ -1942,6 +1942,7 @@ def create_plane(
     skip_existing_zones: bool = False,
     no_bga_zone: bool = False,
     progress_callback=None,
+    cancel_check=None,
 ) -> Tuple[int, int, int]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
@@ -1974,6 +1975,10 @@ def create_plane(
             batch_route's callback (issue #364). (0, 0, label) marks an
             indeterminate phase. Called from whatever thread runs the engine;
             GUI callers must marshal to the UI thread themselves.
+        cancel_check: Optional callable returning True to abort. Checked at
+            net and pad boundaries; on cancel the function returns early with
+            the work done so far -- a cancelling caller should DISCARD the
+            partial results (the GUI does).
 
     Returns:
         (total_vias_placed, total_traces_added, total_pads_needing_vias)
@@ -2150,6 +2155,9 @@ def create_plane(
     # Process each net/layer pair
     for net_idx, (net_name, plane_layer, net_id, should_create_zone) in enumerate(
             zip(net_names, plane_layers, net_ids, should_create_zones)):
+        if cancel_check and cancel_check():
+            print("\nPlane creation cancelled")
+            break
 
         print(f"\n{'='*60}")
         print(f"Processing net '{net_name}' on layer {plane_layer}")
@@ -2278,6 +2286,9 @@ def create_plane(
         net_failed_start = len(failed_pad_infos)
 
         for pad_idx, pad_info in enumerate(pads_needing_vias):
+            if cancel_check and cancel_check():
+                print("  (cancelled)")
+                break
             pad = pad_info['pad']
             pad_layer = pad_info.get('pad_layer')
             current_pad_key = (pad.global_x, pad.global_y)

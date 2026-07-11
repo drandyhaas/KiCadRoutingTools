@@ -1169,7 +1169,8 @@ def route_disconnected_regions(
     zone_layers: Optional[Set[str]] = None,
     debug_connectivity: bool = False,
     zone_clearances: Optional[Dict[str, float]] = None,
-    progress_callback=None
+    progress_callback=None,
+    cancel_check=None
 ) -> Tuple[List[Dict], List[Dict], int, List[List[Tuple[float, float]]], List[Tuple[List[Tuple[float, float]], str]]]:
     """
     Detect and route between disconnected zone regions.
@@ -1194,6 +1195,8 @@ def route_disconnected_regions(
         zone_clearances: Per-layer zone clearances (layer -> clearance)
         progress_callback: Optional callable(current, total, label) invoked at
             region discovery and per connection attempt (issue #364)
+        cancel_check: Optional callable returning True to abort; checked
+            before each region connection (issue #364)
 
     Returns:
         Tuple of (list of segment dicts, list of via dicts, number of routes added,
@@ -1266,6 +1269,9 @@ def route_disconnected_regions(
     )
 
     for edge_idx, (region_i, region_j, point_i, point_j, dist) in enumerate(mst_edges):
+        if cancel_check and cancel_check():
+            print("    (cancelled)")
+            break
         # Get all anchors from each region for multi-point routing
         anchors_i = region_anchors[region_i]
         anchors_j = region_anchors[region_j]
