@@ -2740,7 +2740,30 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     for lid, lname in id_to_name.items():
         if enabled.Contains(lid):
             layers_dict[lid] = lname
-            if lid in copper_id_to_name:
+
+    # Copper layers must be in PHYSICAL STACKUP order (F.Cu, In1..InN, B.Cu) to
+    # match the text parser (parse_kicad_pcb reads them in file/stackup order).
+    # Iterating pcbnew layer-IDs instead puts B.Cu SECOND (its id is below the
+    # inner-layer ids), and the fanout/router consume the layer list in order as
+    # the layer-preference: with B.Cu 2nd, the BGA fanout piles ~all escapes onto
+    # B.Cu instead of distributing across the inner layers, congesting the board
+    # so the later signal route drops many nets. This was the GUI-only leg of the
+    # rp2350 GUI-vs-CLI connectivity gap: build_pcb_data_from_board must stay at
+    # parity with the text parser here. LSET.CuStack() yields front->back order.
+    try:
+        for lid in enabled.CuStack():
+            lname = id_to_name.get(lid)
+            if lname is None:
+                try:
+                    lname = board.GetLayerName(lid)
+                except Exception:
+                    lname = None
+            if lname is not None:
+                copper_layers.append(lname)
+    except Exception:
+        # Fallback to layer-id order if CuStack is unavailable on this build.
+        for lid, lname in id_to_name.items():
+            if enabled.Contains(lid) and lid in copper_id_to_name:
                 copper_layers.append(lname)
 
     # Board bounds from Edge.Cuts drawings. We use each drawing's bounding
