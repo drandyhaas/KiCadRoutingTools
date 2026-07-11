@@ -1,28 +1,83 @@
-5873a9726e0bd34bb8239f560c0ddd219e693b56 2026-07-09 audited f79743a..HEAD (3 commits); 0 gaps remain (2 GUI/CLI default divergences CLOSED).
-- This short range is the GUI/CLI default-parity sweep prompted by Andy. Two GUI-only
-  fixes to swig_gui.py bring the route tab's defaults into line with route.py + the
-  batch_route engine signature:
-  * a0bb020 -- "No BGA Zones" box default was "ALL" (-> config['no_bga_zones']=[] ->
-    setup_bga_exclusion_zones DISABLES every BGA keep-out); CLI --no-bga-zones defaults
-    to None (auto-detect + ENABLE). Changed the control's initial value AND its
-    reset-to-defaults value to "" (== None). planes_gui reads the same shared
-    no_bga_zones_text and inherits the enabled default. This was a real STARTUP divergence
-    (the TextCtrl had an explicit value="ALL").
-  * 5873a97 -- reset_params_to_defaults() set add_teardrops / mps_reverse_rounds /
-    mps_layer_swap / mps_segment_intersection / can_swap_to_top to True, contradicting the
-    checkbox creation state (all created unchecked / add_teardrops SetValue(False)), the CLI
-    (--add-teardrops / --mps-* / --can-swap-to-top-layer are store_true => default off), and
-    batch_route (all default False). Set the five reset values to False. NOTE this was a
-    "Reset to defaults" bug only -- fresh startup already matched the CLI (those controls are
-    never set True except by the reset button), so it never silently changed a normal route.
-- Wider sweep result (recorded for the next auditor): every numeric "Advanced" control on
-  both fronts sources defaults.X from routing_defaults, so they match by construction. Four
-  CLI argparse defaults are hardcoded literals rather than defaults.X (--bga-proximity-radius
-  7.0, --bga-proximity-cost 0.2, --proximity-heuristic-factor 0.02, --vertical-attraction-
-  radius 1.0) -- all currently EQUAL their constants (BGA_PROXIMITY_RADIUS etc.), so no
-  divergence today, but a latent drift risk worth pointing at defaults.X eventually.
-  ordering_strategy matches ("mps" both sides); direction "Auto" == CLI --direction None;
-  move_copper_text is GUI-only (no CLI flag). Diff-pair / planes tabs vs route_diff.py /
-  route_planes.py were NOT swept this pass (route tab only).
-- b9d345c is the prior parity-file update commit (doc only). No engine parameter/flag/
-  results-key was added anywhere in the range.
+8b41e5a 2026-07-11 audited 5873a97..HEAD (40 commits); 0 gaps remain (large PLANE-tab GUI/CLI parity sweep, #362 -- 8 divergences CLOSED).
+
+This range is dominated by the #362 investigation: a GUI Claude-tab plan replay of
+rp2350_fpga_eensy (set11) diverged from the identical CLI chain (DRC shorts, then
+extra plane copper, then ~11 more unconnected nets). Method that nailed each cause:
+KICAD_DUMP_BATCH_KWARGS on a real GUI plan run diffed against a FRESH HEAD CLI
+reference chain via tests/gui_parity/diff_engine_kwargs.py (the recorded stress
+boards were from an OLDER commit -- diffing against them manufactured phantom
+divergences; ALWAYS regenerate a HEAD reference). The dump now also covers the
+PLANE engines (create_plane, repair route_planes) incl. all_layers/plane_layers.
+
+PLANE-ENGINE param divergences found + fixed, all confirmed closed by a final GUI
+kwargs dump (diff_engine_kwargs: create_plane + both repair_planes MATCH; only
+benign dry_run/return_results/layer_costs[]-vs-None/routing_layers-None-vs-all6):
+  * same_net_pad_clearance (4471cbc) -- create-panel control defaulted to CLEARANCE
+    (0.25) vs engine SAME_NET_PAD_CLEARANCE (-1.0). THE BIG ONE: 0.25 blocked plane
+    stitches, create left 67 vs 43 unconnected, driving a ~+430-segment plane-repair
+    copper overshoot. Fixed by defaulting the "Allow via-in-pad" checkbox ON
+    (-> -1.0), in the panel AND reset_params_to_defaults. Post-fix plane-copper delta
+    +13 (was +430); GUI board 0 DRC / 4 unconnected (CLI 6).
+  * board_edge_clearance (4471cbc + 8b41e5a) -- GUI passed generic BOARD_EDGE_
+    CLEARANCE (0.0); planes default PLANE_EDGE_CLEARANCE (0.5). The engine-default
+    fix was OVERRIDDEN by the shared Basic-tab routing value merged into the plane
+    config, so the FINAL fix is `config.get('board_edge_clearance') or
+    PLANE_EDGE_CLEARANCE` (fall back to 0.5 when the shared value is 0/unset, honor
+    an explicit positive). Inert on rp2350 (min plane-copper-to-edge 1.285mm, same
+    as CLI) but real on edge-hugging boards.
+  * min_track_width (4471cbc) -- GUI conflated it with the routing track_width; CLI
+    has a separate --min-track-width (REPAIR_MIN_TRACK_WIDTH 0.2). Added a real "Min
+    Track Width" control on the repair panel, wired end-to-end: get_config, engine
+    call, reset_params_to_defaults, settings_persistence, PARAM_RANGES (already
+    present), manifest_to_plan FLAG_PARAMS, claude_plan plan->control mapping.
+  * all_layers (8a7f8fa) -- create passed all 6 copper layers; route_planes defaults
+    to ['F.Cu']+plane_layers+['B.Cu'] (outer+pour, keeps plane copper off signal
+    layers). GUI now mirrors that.
+  * no_bga_zone + max_iterations (ef21a30) -- LEAKED from the route tab's shared
+    controls into the plane step. Root cause: the plan executor reset params to
+    defaults ONCE at load, not before each step, so a route step's
+    max_iterations=1000000 / no_bga_zones=ALL persisted into the later plane step.
+    Fix: reset_params_to_defaults() before EACH step in _next_step (its docstring
+    already claimed this). Interactive single-step runs (clicking a tab button, not
+    via the executor) still read live controls, so user edits flow through. Also: on
+    normal completion the executor preps the NEXT step's params (loop to step 1 after
+    the final) so a pre-plane subset run leaves the plane params visible/editable.
+
+Other GUI/CLI fixes in range (all closed):
+  * copper_layers order (13931ad) -- build_pcb_data_from_board built copper_layers in
+    pcbnew layer-ID order ([F,B,In1..]) vs the text parser's stackup order
+    ([F,In1..,B]); the GUI fanout then piled ~58 escapes onto B.Cu. Now uses
+    LSET.CuStack(). PARSER-PARITY class -- covered by validate_pcb_data /
+    test_parser_pcbnew_parity.
+  * stale cap positions (d22c4b3, f0973ac) -- _sync_pcb_data_from_board didn't
+    refresh footprint/pad positions after optimize_caps moved caps -> router used
+    pre-move positions -> DRC shorts. Now syncs (matched by ITERATION ORDER not pad
+    number -- U6 has 11 pads numbered "61"; pad objects shared with pads_by_net).
+  * rip_blocker_nets panel targeting (f5eeb5d) -- the generic plan-executor loop hit
+    the FIRST panel with a 'rip_blocker_check' control (Create); repair_planes could
+    flip the wrong panel. Skipped in the generic loop for both plane actions.
+  * plane-copper cleanup gate removed (75afcf5) -- clean_plane_copper equivalent
+    (_run_plane_copper_cleanup) was gated behind KICAD_GUI_PLANE_CLEANUP=1; now runs
+    unconditionally like the CLI (delta computed from build_pcb_data_from_board, same
+    source as the live board, so the removal-match is reliable). In the Class-2 gate.
+  * track-width position-rounding (7a46487) + PARAM_RANGES 4-digit (b588837) -- GUI
+    route-apply quantized 0.0762 -> 0.076 (fab-floor phantom violations). Fixed.
+  * plane max_rip_nets leak (c318e1d), refill-all-zones (6eaa53c).
+
+NEW ENGINE PARAMS added in range, both threaded through BOTH fronts + Claude-
+settable (verified per the CLAUDE.md checklist): ripup_abandon_metric
+(23c16aa/cd15df9 -- argparse, GUI Advanced dropdown, claude_plan, manifest_to_plan
+FLAG_PARAMS, gui_parity map); min_track_width (repair control, above).
+
+REGRESSION GATES (tests/gui_parity/, all checked in + documented in the README):
+test_footprint_position_sync.py, test_plane_rip_blocker_panel.py,
+test_plane_all_layers_parity.py, test_gui_livechain_rp2350.py (grade-parity on the
+plane sub-chain), diag_fullchain_carry_rp2350.py (full GUI-carry reproduction),
+diff_engine_kwargs.py (kwargs-diff diagnostic). No-wx gates still green:
+test_manifest_plan_parity.py (6201 flag-checks, 0 mismatch), test_cli_postpass_
+coverage.py (4 registered, 0 gaps).
+
+NOT swept this pass: the diff-pair tab beyond what the #362 chain exercised, and the
+fanout tab's non-plane advanced knobs (audited only where the rp2350 chain touched
+them). Route tab was swept in the prior audit (5873a97). Diff/planes engine
+signatures were checked against their GUI call sites here via the kwargs dump.

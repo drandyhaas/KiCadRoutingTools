@@ -73,6 +73,40 @@ in-memory vs file-based post-pass sequencing. The production GUI path
 (builder representation) sits at ~77% copper identity with full grade
 parity; closing it to ~98% is the order-canonicalization follow-up.
 
+### Plane engines + diff_engine_kwargs.py (the #362 sweep)
+
+The dump now also covers the PLANE engines: `create_plane` (route_planes.py)
+and the repair `route_planes` (route_disconnected_planes.py) each write a line
+via `route._dump_engine_config` in CONTINUE mode, INCLUDING `all_layers` /
+`plane_layers` (layer content/order is a live divergence class). So one
+`KICAD_DUMP_BATCH_KWARGS_CONTINUE=1` run of a whole plan captures every engine
+call -- route, diff, create_plane, repair -- in one file.
+
+`diff_engine_kwargs.py <cli.jsonl> <gui.jsonl>` reports the non-benign per-engine
+divergences (see its docstring for how to produce the two captures and which
+keys are benign-by-design). Plane engines pair 1:1 and are authoritative; route
+calls pair by index and are unreliable when the two fronts made a different
+number of rip-up/reconnect calls -- read the plane rows.
+
+TWO HARD LESSONS from the #362 rp2350 plane sweep (both baked into the tool's docs):
+1. Generate the CLI reference chain FRESH AT HEAD. The recorded stress boards were
+   routed at an older commit; diffing GUI-at-HEAD against them manufactured phantom
+   divergences (+127 segs, +8 unconnected that vanished against a HEAD reference).
+2. The dump reflects the REAL GUI; an ad-hoc shim that omits a control's value
+   silently uses the ENGINE default and hides the divergence. The plane_subchain
+   shim omitted same_net_pad_clearance -> fell back to the engine -1.0 -> hid the
+   67-vs-43 create divergence the real GUI control (0.25) caused.
+
+The sweep this tool drove found + closed EIGHT GUI/CLI divergences (see
+.gui-parity-checked at the repo root for the full list): same_net_pad_clearance
+0.25 vs -1.0 (the big one -- blocked plane stitches, drove a +430-segment repair
+overshoot), board_edge_clearance 0.0 vs PLANE_EDGE_CLEARANCE, min_track_width
+conflated with track_width, all_layers all-6 vs outer+pour, and no_bga_zone +
+max_iterations leaking from the route tab's shared controls into the plane step
+(root cause: the plan executor reset params only once at load, not before each
+step). Post-fix: every plane call MATCHes, GUI board 0 DRC / plane-copper delta
++13 (was +430).
+
 ## Converter parity (test_manifest_plan_parity.py)
 
 The harness above proves the ENGINE half (same batch_route kwargs -> same
@@ -129,6 +163,26 @@ like the CLI. It caught the swig_gui route-apply width-rounding bug (0.0762 →
 0.076 fab-floor violations, #362) that per-step isolation on file inputs missed.
 
     python3 tests/gui_parity/test_gui_livechain_rp2350.py
+
+## #362 plane-parity regression gates
+
+Focused gates that each lock in one fixed GUI/CLI plane divergence (wx-gated;
+skip cleanly without KiCad python). Run any directly:
+
+- `test_footprint_position_sync.py` -- `_sync_pcb_data_from_board` refreshes
+  footprint/pad positions after optimize_caps (matched by iteration ORDER, not
+  pad number -- U6 has 11 pads numbered "61"); a no-op sync moves ZERO pads.
+- `test_plane_rip_blocker_panel.py` -- the plan executor sets `rip_blocker_nets`
+  on the CORRECT plane options panel per action (repair vs create), not the
+  first panel sharing the control name.
+- `test_plane_all_layers_parity.py` -- GUI create passes `all_layers` =
+  outer+pour (the route_planes default), not all 6 copper layers (mocks
+  create_plane to capture the kwarg).
+- `diag_fullchain_carry_rp2350.py` -- full GUI-carry reproduction: ONE board +
+  ONE shared pcb_data across all 10 plan steps, graded per stage vs the CLI. The
+  investigation harness that localized where the carry diverges (needs the set11
+  corpus + kicad-cli; skips otherwise). `SYNC_PLANES=1` toggles the plane-step
+  pcb_data resync.
 
 ## Checked-in test inputs
 
