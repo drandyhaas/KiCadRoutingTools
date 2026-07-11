@@ -196,8 +196,27 @@ def _staged_copy(board: str, clearance: float):
     return d, b2
 
 
+def _pro_clearance(board: str):
+    """Read the board's routed copper clearance from its sibling .kicad_pro
+    Default net class -- the same Stage-C auto-grade check_drc.py's CLI does
+    (#226/#227). Grading at a default (0.1) instead of the board's own floor
+    manufactures phantom sub-clearance grazes on legitimately tight copper
+    (#359). Returns None if no project / no clearance is recorded."""
+    try:
+        from fix_kicad_drc_settings import find_project, project_copper_clearance
+        pro = find_project(board)
+        if os.path.isfile(pro):
+            with open(pro) as f:
+                return project_copper_clearance(json.load(f))
+    except Exception:  # noqa: BLE001 -- best-effort, fall back to check_drc default
+        pass
+    return None
+
+
 def compare_board(board: str, label: str = None, clearance: float = None):
     label = label or os.path.basename(board)
+    if clearance is None:
+        clearance = _pro_clearance(board)
     if clearance:
         _tmpd, board_k = _staged_copy(board, clearance)
     else:
