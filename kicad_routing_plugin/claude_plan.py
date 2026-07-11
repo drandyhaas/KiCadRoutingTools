@@ -831,7 +831,17 @@ class PlanExecutor:
             # reset touches PARAMETERS only, not selections/log; apply_step_params
             # + apply_step_selection below then restore exactly THIS step's state.
             # (reset_params_to_defaults' own docstring says it is called here.)
-            if hasattr(self.dialog, 'reset_params_to_defaults'):
+            # EXCEPTION: optimize_caps is the tail of the BGA fanout, not a
+            # standalone op -- it clears decoupling caps from THE FANOUT'S vias,
+            # at the fanout's clearance/via-size (the CLI runs it as
+            # place_fanout_clearance right after bga_fanout with the same
+            # --clearance). It carries no params of its own, so it must INHERIT
+            # the preceding fanout step's options; resetting to defaults first
+            # runs it at the wrong clearance and it stops moving the caps. So
+            # skip the per-step reset for optimize_caps and let it keep the
+            # fanout step's live control state.
+            if (step["action"] != "optimize_caps"
+                    and hasattr(self.dialog, 'reset_params_to_defaults')):
                 try:
                     self.dialog.reset_params_to_defaults()
                 except Exception as _e:
