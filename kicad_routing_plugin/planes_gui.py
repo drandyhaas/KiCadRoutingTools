@@ -972,7 +972,13 @@ class PlanesTab(wx.Panel):
                 # defaults.PLANE_EDGE_CLEARANCE, keeping plane copper 0.5mm off
                 # the board edge. Using 0.0 let GUI plane pours run to the edge
                 # -- a CLI/GUI parity gap and a fab concern (#362).
-                board_edge_clearance=config.get('board_edge_clearance', defaults.PLANE_EDGE_CLEARANCE),
+                # `or` (not a plain default): the shared Basic-tab
+                # board_edge_clearance is a ROUTING value that defaults to 0.0
+                # and gets merged into the plane config, overriding a plain
+                # default. Planes need PLANE_EDGE_CLEARANCE (0.5); fall back to it
+                # whenever the shared value is 0/unset, but honor an explicitly
+                # set positive edge clearance. (#362)
+                board_edge_clearance=(config.get('board_edge_clearance') or defaults.PLANE_EDGE_CLEARANCE),
                 all_layers=all_layers,
                 dry_run=True,  # Don't write to file, apply via pcbnew
                 rip_blocker_nets=config.get('rip_blocker_nets', False),
@@ -1122,7 +1128,13 @@ class PlanesTab(wx.Panel):
                 # route_disconnected_planes.py defaults board_edge_clearance to
                 # defaults.PLANE_EDGE_CLEARANCE; match it (#362, keeps plane
                 # copper off the board edge).
-                board_edge_clearance=config.get('board_edge_clearance', defaults.PLANE_EDGE_CLEARANCE),
+                # `or` (not a plain default): the shared Basic-tab
+                # board_edge_clearance is a ROUTING value that defaults to 0.0
+                # and gets merged into the plane config, overriding a plain
+                # default. Planes need PLANE_EDGE_CLEARANCE (0.5); fall back to it
+                # whenever the shared value is 0/unset, but honor an explicitly
+                # set positive edge clearance. (#362)
+                board_edge_clearance=(config.get('board_edge_clearance') or defaults.PLANE_EDGE_CLEARANCE),
                 # Honor the panel's max-search-radius slider on Repair too, not
                 # just Create -- a boxed plane pad reaches a farther via/trace
                 # when the user widens it (issue #180).
