@@ -70,8 +70,18 @@ def sync_footprint_positions_from_board(board, pcb_data):
     Re-reads each footprint's x/y/rotation and its pads' absolute positions.
     Pad objects are shared with pcb_data.pads_by_net and net.pads, so updating
     them here updates every view the router consults. Best-effort; never raises.
-    Returns the number of footprints synced (0 on error)."""
+    Returns the number of footprints synced (0 on error).
+
+    Pads are matched to pcb_data by ITERATION ORDER, not pad number: a single
+    footprint routinely carries many pads sharing one number (U6 has 11 pads
+    numbered "61" for its GND array, plus 4 blank-numbered pads). Matching by
+    number collapses them all onto the first pad's position, deleting the copper
+    obstacle everywhere else and letting the router short straight through it.
+    build_pcb_data_from_board iterates fp.Pads() once with no skips, so order is
+    a faithful 1:1 map. The position math below mirrors that function's
+    copper-offset fold (#324/#325) so a no-op sync is a true no-op."""
     try:
+        import math
         import pcbnew
         n = 0
         for bfp in board.GetFootprints():
@@ -86,16 +96,33 @@ def sync_footprint_positions_from_board(board, pcb_data):
                 pd_fp.rotation = bfp.GetOrientationDegrees()
             except Exception:
                 pass
-            bpads = {}
-            for bp in bfp.Pads():
-                bpads.setdefault(bp.GetNumber(), bp)
-            for pd_pad in pd_fp.pads:
-                bp = bpads.get(pd_pad.pad_number)
-                if bp is None:
-                    continue
+            bpads = list(bfp.Pads())
+            if len(bpads) != len(pd_fp.pads):
+                # Order alignment can't be trusted if the counts disagree
+                # (should never happen from a live board); skip pads for safety.
+                n += 1
+                continue
+            for pd_pad, bp in zip(pd_fp.pads, bpads):
                 ppos = bp.GetPosition()
-                pd_pad.global_x = pcbnew.ToMM(ppos.x)
-                pd_pad.global_y = pcbnew.ToMM(ppos.y)
+                gx = pcbnew.ToMM(ppos.x)
+                gy = pcbnew.ToMM(ppos.y)
+                # Fold the rotated copper offset into the position, exactly as
+                # build_pcb_data_from_board does, so global_x/global_y stays the
+                # copper center for offset pads.
+                try:
+                    off = bp.GetOffset()
+                    if off.x or off.y:
+                        oa = math.radians(-bp.GetOrientationDegrees())
+                        ox, oy = pcbnew.ToMM(off.x), pcbnew.ToMM(off.y)
+                        gx += ox * math.cos(oa) - oy * math.sin(oa)
+                        gy += ox * math.sin(oa) + oy * math.cos(oa)
+                        if bp.GetDrillSize().x:
+                            pd_pad.hole_x = pcbnew.ToMM(ppos.x)
+                            pd_pad.hole_y = pcbnew.ToMM(ppos.y)
+                except Exception:
+                    pass
+                pd_pad.global_x = gx
+                pd_pad.global_y = gy
             n += 1
         return n
     except Exception as e:

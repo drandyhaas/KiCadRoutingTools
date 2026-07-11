@@ -56,6 +56,21 @@ def main():
     board = pcbnew.LoadBoard(board_path)
     pcb = build_pcb_data_from_board(board)
 
+    # Invariant: a sync with NO board change must move NO pad. This guards the
+    # duplicate-pad-number trap -- U6 carries 11 pads numbered "61" (a GND
+    # array); matching board pads to pcb_data pads by NUMBER collapsed them all
+    # onto the first pad's position, wiping the copper obstacle everywhere else
+    # and letting the router short through it (the 34-violation regression).
+    # Matching by iteration order fixes it; a no-op sync is a true no-op.
+    noop_before = {id(p): (p.global_x, p.global_y)
+                   for fp in pcb.footprints.values() for p in fp.pads}
+    sync_footprint_positions_from_board(board, pcb)
+    moved = [id(p) for fp in pcb.footprints.values() for p in fp.pads
+             if max(abs(p.global_x - noop_before[id(p)][0]),
+                    abs(p.global_y - noop_before[id(p)][1])) > 1e-6]
+    assert not moved, \
+        f"no-op sync moved {len(moved)} pad(s) -- pad matching is corrupting positions"
+
     # Pick any footprint that has a pad, to relocate.
     ref = None
     for r, fp in pcb.footprints.items():
