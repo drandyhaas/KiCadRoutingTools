@@ -21,7 +21,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - [Project Structure](#project-structure) & [Module Overview](#module-overview)
 - [Performance](#performance)
 - [Command Reference](#command-reference) — options per tool (full list: `--help` / [configuration.md](docs/configuration.md))
-- [Requirements](#requirements) · [Limitations](#limitations) · [License](#license)
+- [Requirements](#requirements) · [Limitations](#limitations) · [Contributing](#contributing) · [License](#license)
 
 ## Features
 
@@ -831,6 +831,15 @@ The shared option groups — geometry, power-net widths, algorithm/strategy, pro
 - No coarse grid assignment before detailed routing to plan overall topology
 - No via cost or other parameter learning/tuning
 - No design rules by region/area support
+
+## Contributing
+
+The most valuable contribution is routing a board we haven't seen: run
+`/plan-pcb-routing` on your own design (or any open-hardware board), grade
+the result with `check_drc.py` + `check_connected.py`, and file an issue for
+anything that breaks — ideally with a pointer to the board file. Fixes and
+pull requests for open issues are just as welcome. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
 
 ## License
 
