@@ -625,6 +625,7 @@ class PlanExecutor:
         self._completed = 0
         self._stop_requested = False
         self._step_started = None
+        self._current_action = None  # action of the step running right now
 
     def start(self):
         # The plan sequences its own route_planes steps, so the route step's
@@ -636,17 +637,24 @@ class PlanExecutor:
         self._next_step()
 
     def stop(self):
-        """Stop before the next step starts (the running one finishes)."""
+        """Stop before the next step starts AND cancel the step running right
+        now: the owning tab's _cancel_requested flag feeds the engines'
+        cancel_check (plane create/repair, batch_route, route_diff), so the
+        running operation aborts at its next safe boundary instead of being
+        waited out (#364 follow-up). Tabs without a cancel flag (fanout) just
+        run their step to completion as before."""
         self._stop_requested = True
+        owner = self._action_owner(self._current_action) \
+            if self._current_action else None
+        if owner is not None and hasattr(owner, '_cancel_requested'):
+            owner._cancel_requested = True
 
     # -- per-action wiring ---------------------------------------------------
 
-    def _status_source(self, action):
-        """The (status_text, progress_bar) pair of the tab actually doing
-        the work, so the Claude tab's status bar can MIRROR it live -- a
-        route_diff step shows exactly what the differential tab shows."""
+    def _action_owner(self, action):
+        """The tab (or dialog) that runs `action`'s operation."""
         d = self.dialog
-        owner = {
+        return {
             "route": d,
             "route_diff": getattr(d, "differential_tab", None),
             "fanout": getattr(d, "fanout_tab", None),
@@ -654,6 +662,12 @@ class PlanExecutor:
             "route_planes": getattr(d, "planes_tab", None),
             "repair_planes": getattr(d, "planes_tab", None),
         }.get(action)
+
+    def _status_source(self, action):
+        """The (status_text, progress_bar) pair of the tab actually doing
+        the work, so the Claude tab's status bar can MIRROR it live -- a
+        route_diff step shows exactly what the differential tab shows."""
+        owner = self._action_owner(action)
         if owner is None:
             return None, None
         return (getattr(owner, "status_text", None),
@@ -686,6 +700,7 @@ class PlanExecutor:
     # -- sequencing ----------------------------------------------------------
 
     def _finish(self, aborted_reason):
+        self._current_action = None
         self.dialog._suppress_plane_offer = False
         self.dialog._suppress_completion_popups = False
         self._write_drc_floors()
@@ -820,6 +835,7 @@ class PlanExecutor:
             return
         index = self._queue.pop(0)
         step = self.steps[index]
+        self._current_action = step['action']
         self.on_status(index, "running")
         self.log(f"Claude plan: step {index + 1} ({step['action']}) starting")
         try:

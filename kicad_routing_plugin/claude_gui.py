@@ -954,7 +954,7 @@ class ClaudeTab(wx.Panel):
         if self._plan_executor is not None:
             self._plan_executor.stop()
             self.stop_plan_btn.Disable()
-            self._log("Claude plan: stop requested (after current step)")
+            self._log("Claude plan: stop requested (cancelling current step)")
 
     def _on_plan_step_progress(self, index, step, label, value, rng,
                                elapsed, is_busy):
