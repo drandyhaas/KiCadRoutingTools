@@ -402,9 +402,11 @@ def apply_step_params(step, dialog):
                 except (TypeError, ValueError):
                     notes.append(f"ignored non-numeric {name}={params[name]!r}")
         opts = dialog.planes_tab.repair_options
-        for name in ("max_track_width", "analysis_grid_step"):
+        _repair_ctrls = {"max_track_width": opts.max_track_width,
+                         "min_track_width": opts.min_track_width,
+                         "analysis_grid_step": opts.analysis_grid}
+        for name, ctrl in _repair_ctrls.items():
             if name in params:
-                ctrl = opts.max_track_width if name == "max_track_width" else opts.analysis_grid
                 try:
                     ctrl.SetValue(float(params[name]))
                 except (TypeError, ValueError):
@@ -687,6 +689,27 @@ class PlanExecutor:
         self.dialog._suppress_plane_offer = False
         self.dialog._suppress_completion_popups = False
         self._write_drc_floors()
+        # Prep the GUI for the NEXT step to run, so its params are shown (and
+        # editable) after this batch finishes (Andy's requested behavior: run the
+        # steps before planes, and the plane step's params -- e.g.
+        # max_iterations=200000, not the leaked route 1000000 -- are then in the
+        # GUI). "Next" = the step after the last one just run, in plan order;
+        # after the FINAL plan step it loops back to step 1. Reset first so
+        # unspecified params show CLI-default-equivalent values. Best-effort;
+        # skipped on abort (leave the last state for inspection).
+        if aborted_reason is None and self.steps and self.indices:
+            try:
+                nxt = self.indices[-1] + 1
+                if nxt >= len(self.steps):
+                    nxt = 0  # ran the last plan step -> loop back to step 1
+                if hasattr(self.dialog, 'reset_params_to_defaults'):
+                    self.dialog.reset_params_to_defaults()
+                apply_step_params(self.steps[nxt], self.dialog)
+                apply_step_selection(self.steps[nxt], self.dialog)
+                self.log(f"Claude plan: GUI prepped for step {nxt + 1} "
+                         f"({self.steps[nxt]['action']})")
+            except Exception as e:
+                self.log(f"Claude plan: end-of-run prep skipped: {e}")
         self.on_finished(self._completed, aborted_reason)
 
     def _write_drc_floors(self):
@@ -800,6 +823,19 @@ class PlanExecutor:
         self.on_status(index, "running")
         self.log(f"Claude plan: step {index + 1} ({step['action']}) starting")
         try:
+            # Reset every routing PARAMETER to its default BEFORE applying this
+            # step's params, so a SHARED control an earlier step set doesn't leak
+            # into a later step that doesn't re-specify it -- e.g. a route step's
+            # max_iterations=1000000 or no_bga_zones=ALL persisting into the
+            # plane step (the CLI runs each command from its own defaults). The
+            # reset touches PARAMETERS only, not selections/log; apply_step_params
+            # + apply_step_selection below then restore exactly THIS step's state.
+            # (reset_params_to_defaults' own docstring says it is called here.)
+            if hasattr(self.dialog, 'reset_params_to_defaults'):
+                try:
+                    self.dialog.reset_params_to_defaults()
+                except Exception as _e:
+                    self.log(f"Claude plan: per-step reset skipped: {_e}")
             # Re-apply BOTH this step's parameters and its selection right before
             # running it: consecutive steps of the same action share one tab's
             # controls, so plan-time fill leaves only the last such step's
