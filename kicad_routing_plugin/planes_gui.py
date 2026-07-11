@@ -873,8 +873,22 @@ class PlanesTab(wx.Panel):
         # Get assignments: each is (nets_list, layers_list)
         assignments = config['assignments']
 
-        # Get all copper layers for routing
-        all_layers = self._get_all_copper_layers()
+        # Routing layers for the plane-connection traces. CLI/GUI PARITY:
+        # route_planes.py defaults all_layers to ['F.Cu'] + plane_layers +
+        # ['B.Cu'] (outer layers + the pour layers) when --layers is omitted, NOT
+        # every copper layer. Passing all 6 copper layers (the old GUI behavior)
+        # hands the router 2 extra inner layers to thread connection traces
+        # through -> different, worse-balanced plane routing than the CLI on the
+        # same board. Mirror the CLI default: outer layers + the assignment's
+        # plane layers, deduped in order. (#362 plane-parity)
+        _plane_layers_in_order = []
+        for _nets_list, _layers_list in config['assignments']:
+            for _L in _layers_list:
+                if _L not in _plane_layers_in_order:
+                    _plane_layers_in_order.append(_L)
+        _seen = set()
+        all_layers = [l for l in (['F.Cu'] + _plane_layers_in_order + ['B.Cu'])
+                      if not (l in _seen or _seen.add(l))]
 
         total_vias = 0
         total_traces = 0
