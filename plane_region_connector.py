@@ -823,24 +823,41 @@ def find_region_connection_points(
         pts.extend(_subsample_cell_points(region_cells[i] if i < len(region_cells) else (), coord))
         region_pts.append(pts)
 
+    # Per-region float coordinate arrays for the vectorized closest-approach
+    # query below. Built once (not per region PAIR) so the O(n_regions^2) pass
+    # reuses them.
+    region_np = [np.asarray(pts, dtype=np.float64).reshape(-1, 2)
+                 for pts in region_pts]
+
     edges: List[Tuple[float, int, int, Tuple[float, float], Tuple[float, float]]] = []
 
     for i in range(n_regions):
+        Pi = region_np[i]
+        if Pi.shape[0] == 0:
+            continue
         for j in range(i + 1, n_regions):
-            best_dist = float('inf')
-            best_pi = None
-            best_pj = None
-
-            for pi in region_pts[i]:
-                for pj in region_pts[j]:
-                    dist = math.sqrt((pi[0] - pj[0])**2 + (pi[1] - pj[1])**2)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_pi = pi
-                        best_pj = pj
-
-            if best_pi and best_pj:
-                edges.append((best_dist, i, j, best_pi, best_pj))
+            Pj = region_np[j]
+            if Pj.shape[0] == 0:
+                continue
+            # Closest approach between the two point sets. The old pure-Python
+            # double loop was O(N_i x N_j) per region pair (each region up to
+            # ~100 anchors + 400 subsampled fill cells), the dominant cost of the
+            # region-join MST on big multi-region plane nets (#351). np.argmin
+            # over the row-major dist^2 matrix returns the FIRST global minimum in
+            # (i-outer, j-inner) order -- bit-identical to the brute force's
+            # strict-`<` first-minimum tie-break -- so the selected points, and
+            # thus the routed edges, are unchanged; only the inner scan moves to C.
+            dx = Pi[:, 0][:, None] - Pj[:, 0][None, :]
+            dy = Pi[:, 1][:, None] - Pj[:, 1][None, :]
+            flat = int((dx * dx + dy * dy).argmin())
+            ii, jj = divmod(flat, Pj.shape[0])
+            # Return the ORIGINAL tuple objects (not numpy scalars) so downstream
+            # identity/`in` checks on the points behave exactly as before.
+            best_pi = region_pts[i][ii]
+            best_pj = region_pts[j][jj]
+            best_dist = math.sqrt((best_pi[0] - best_pj[0]) ** 2
+                                  + (best_pi[1] - best_pj[1]) ** 2)
+            edges.append((best_dist, i, j, best_pi, best_pj))
 
     # Sort by distance and build MST using Kruskal's algorithm
     edges.sort(key=lambda e: e[0])
