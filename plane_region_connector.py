@@ -713,14 +713,34 @@ def _interior_cells(cells):
     return full or ortho
 
 
-def _subsample_cell_points(cells, coord, max_pts: int = 400):
-    """INTERIOR region fill cells as float points, subsampled."""
-    interior = _interior_cells(cells)
-    pts = [coord.to_float(gx, gy) for gx, gy in interior]
+def _interior_points(cells, coord, cache=None):
+    """INTERIOR region fill cells as float points (before subsampling).
+
+    Pure function of `cells`. `_interior_cells` erosion + `to_float` is the
+    expensive part (~90 ms on a 40k-cell GND pour) and it is recomputed for the
+    SAME region on every region-join edge that touches it (#351). `cache` (a dict
+    the caller scopes to one route_disconnected_regions call, so its keys stay
+    live and it is GC'd afterwards) memoizes the result per cells-set identity.
+    The value keeps a reference to `cells`, so its id() cannot be recycled while
+    cached -- guarding the id()-key reuse footgun."""
+    if cache is not None:
+        hit = cache.get(id(cells))
+        if hit is not None and hit[0] is cells:
+            return hit[1]
+    pts = [coord.to_float(gx, gy) for gx, gy in _interior_cells(cells)]
+    if cache is not None:
+        cache[id(cells)] = (cells, pts)
+    return pts
+
+
+def _subsample_cell_points(cells, coord, max_pts: int = 400, interior_cache=None):
+    """INTERIOR region fill cells as float points, subsampled. Always returns a
+    FRESH list (never the cached interior) so callers may sort/extend it freely."""
+    pts = _interior_points(cells, coord, interior_cache)
     if len(pts) > max_pts:
         stride = len(pts) // max_pts + 1
-        pts = pts[::stride]
-    return pts
+        return pts[::stride]
+    return list(pts)
 
 
 def _real_fill_point(pt, net_id, pcb_data, zone_polys, plane_layer,
@@ -773,13 +793,14 @@ def _real_fill_point(pt, net_id, pcb_data, zone_polys, plane_layer,
 
 
 def _nearest_cell_points(cells, coord, near_pt, k: int = 8,
-                         validity=None):
+                         validity=None, interior_cache=None):
     """The k INTERIOR region fill cells closest to near_pt, as float points.
     A deep fill cell is electrically the region (new copper starting there
     lands in the zone fill), so these serve as pseudo-anchors. `validity`
     (optional callable) filters candidates to provably-real fill points."""
-    pts = _subsample_cell_points(cells, coord, max_pts=2000)
-    pts.sort(key=lambda p: (p[0] - near_pt[0]) ** 2 + (p[1] - near_pt[1]) ** 2)
+    pts = _subsample_cell_points(cells, coord, max_pts=2000,
+                                 interior_cache=interior_cache)
+    pts = sorted(pts, key=lambda p: (p[0] - near_pt[0]) ** 2 + (p[1] - near_pt[1]) ** 2)
     if validity is None:
         return pts[:k]
     out = []
@@ -794,7 +815,8 @@ def _nearest_cell_points(cells, coord, near_pt, k: int = 8,
 def find_region_connection_points(
     region_anchors: List[List[Tuple[float, float]]],
     region_cells: List[Set[Tuple[int, int]]],
-    coord: GridCoord
+    coord: GridCoord,
+    interior_cache=None
 ) -> List[Tuple[int, int, Tuple[float, float], Tuple[float, float], float]]:
     """
     Find MST edges connecting disconnected regions using closest anchor points.
@@ -820,7 +842,9 @@ def find_region_connection_points(
     region_pts: List[List[Tuple[float, float]]] = []
     for i in range(n_regions):
         pts = list(region_anchors[i])
-        pts.extend(_subsample_cell_points(region_cells[i] if i < len(region_cells) else (), coord))
+        pts.extend(_subsample_cell_points(
+            region_cells[i] if i < len(region_cells) else (), coord,
+            interior_cache=interior_cache))
         region_pts.append(pts)
 
     # Per-region float coordinate arrays for the vectorized closest-approach
@@ -1244,8 +1268,14 @@ def route_disconnected_regions(
         for i, anchors in enumerate(region_anchors):
             print(f"    Region {i}: {len(anchors)} anchor(s)")
 
+    # Per-region interior-fill-point memo, scoped to this join: the MST scan and
+    # every edge's pseudo-anchor lookup erode + float-convert the SAME region's
+    # cells repeatedly (~90 ms per 40k-cell pour), so memoize per region (#351).
+    interior_cache: Dict[int, tuple] = {}
+
     # Find MST edges to connect regions
-    mst_edges = find_region_connection_points(region_anchors, region_cells, coord)
+    mst_edges = find_region_connection_points(region_anchors, region_cells, coord,
+                                              interior_cache=interior_cache)
     print(f"  Routing {len(mst_edges)} connection(s) to join regions...")
     if progress_callback:
         progress_callback(0, len(mst_edges),
@@ -1318,14 +1348,16 @@ def route_disconnected_regions(
             cells = region_cells[region_idx] \
                 if region_idx < len(region_cells) else ()
             pts = _nearest_cell_points(cells, coord, near_pt,
-                                       validity=_valid_fill)
+                                       validity=_valid_fill,
+                                       interior_cache=interior_cache)
             if not pts:
                 # The track-width-padded margin starves thin pockets of
                 # seeds entirely ('seed 16x0' -> guaranteed FAILED edge);
                 # fall back to the bare zone clearance -- the A* still
                 # routes against the real obstacle map either way.
                 pts = _nearest_cell_points(cells, coord, near_pt,
-                                           validity=_valid_fill_relaxed)
+                                           validity=_valid_fill_relaxed,
+                                           interior_cache=interior_cache)
             return pts
 
         cells_i = _cells_for(region_i, point_i)

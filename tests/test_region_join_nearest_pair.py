@@ -91,6 +91,19 @@ def run(verbose=False):
     # < 2 regions -> no edges.
     assert find_region_connection_points([[(1.0, 1.0)]], [set()], coord) == []
 
+    # The per-region interior-point memo (#351) must be transparent: cached
+    # results identical to uncached, and _nearest_cell_points' sort must NOT
+    # corrupt the cached list (it returns a fresh sorted copy).
+    big = set((random.randint(0, 300), random.randint(0, 300)) for _ in range(8000))
+    cache = {}
+    base = prc._subsample_cell_points(big, coord, max_pts=400)
+    assert prc._subsample_cell_points(big, coord, max_pts=400, interior_cache=cache) == base
+    near = (5.0, 5.0)
+    assert prc._nearest_cell_points(big, coord, near) == \
+        prc._nearest_cell_points(big, coord, near, interior_cache=cache)
+    assert prc._subsample_cell_points(big, coord, max_pts=400, interior_cache=cache) == base, \
+        "cached interior list corrupted by _nearest_cell_points sort"
+
     # Perf/parity on a daisho-class input (many regions, dense anchors + cells).
     random.seed(7)
     n = 20
