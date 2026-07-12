@@ -3,6 +3,7 @@ Single-ended net routing functions.
 
 Routes individual nets using A* pathfinding on a grid obstacle map.
 """
+from __future__ import annotations
 
 import math
 import time
@@ -17,8 +18,8 @@ from routing_utils import build_layer_map, pad_rect_halfspan
 from connectivity import (
     get_net_endpoints,
     get_multipoint_net_pads,
-    compute_mst_edges,
-    get_zone_connected_pad_groups
+    get_copper_connected_terminal_groups,
+    compute_component_mst_edges,
 )
 from obstacle_map import build_obstacle_map, get_same_net_through_hole_positions
 from bresenham_utils import walk_line
@@ -36,6 +37,9 @@ except ImportError:
     GridRouter = None
     VisualRouter = None
 
+# Read once at import: checked inside per-via-record emit paths (hot).
+_UNBLOCK_DEBUG = bool(os.environ.get('KICAD_UNBLOCK_DEBUG'))
+
 
 # Pads farther than this from a query point can't change a neck/merge decision:
 # every caller thresholds the distance against a clearance/track-width margin that
@@ -46,73 +50,405 @@ except ImportError:
 _FOREIGN_PAD_WINDOW = 5.0  # mm
 
 
+def _pad_corner_radius(pad):
+    """Corner radius that turns a pad's local rect (half_x, half_y) into an
+    accurate rounded-rect model for the foreign-pad distance kernels:
+
+      * circle / oval -> min(half) : the rect becomes a capsule/circle, so the
+        distance to a round BGA ball is exact (not the rect corner, which sticks
+        out ~half the ball diameter past the copper and manufactures phantom
+        pad grazes -- butterstick DQ5 vs the round DQ6 ball).
+      * roundrect      -> roundrect_rratio * min(size) : KiCad's rounded corners.
+      * rect / custom  -> 0 : plain bounding rect (custom pads keep the
+        conservative over-approximation; their real outline is a polygon).
+
+    Valid for rotated pads too: the kernels evaluate the SDF in the pad's LOCAL
+    frame (rotating each query point by -rect_rotation), so the radius applies
+    to the true tilted outline. The old board-axis fallback kept the UNROTATED
+    rect for tilted pads -- which under-covers a tilted oval by up to half its
+    long axis (issue #356, bfo9000 SW_A2.2 at -48 deg) -- it was never a bbox."""
+    sx = pad.size_x; sy = pad.size_y
+    shape = getattr(pad, 'shape', 'rect')
+    if shape in ('circle', 'oval'):
+        return min(sx, sy) / 2.0
+    if shape == 'roundrect':
+        rr = getattr(pad, 'roundrect_rratio', 0.0) or 0.0
+        return rr * min(sx, sy)
+    return 0.0
+
+
 def _foreign_pad_arrays(pcb_data, layer):
-    """Cached per-layer numpy arrays (net_id, cx, cy, half_x, half_y) for every pad
-    on `layer`. Pads never change during a route, so this is built once per board
-    and reused across the millions of foreign-pad distance queries (the terminal
-    graze/merge checks). Returns five parallel arrays."""
+    """Cached per-layer numpy arrays (net_id, cx, cy, half_x, half_y, corner_r,
+    rot_cos, rot_sin, ext_x, ext_y) for every pad on `layer`. Pads never change
+    during a route, so this is built once per board and reused across the
+    millions of foreign-pad distance queries (the terminal graze/merge checks).
+    `corner_r` makes the distance kernels model the pad as a rounded rect
+    (accurate for circle/oval/roundrect, exact rect at r=0). `rot_cos`/`rot_sin`
+    are the pad's rect_rotation (issue #356: kernels rotate query points into the
+    pad's local frame, so tilted pads use their TRUE outline -- the old
+    board-axis rect under-covered a tilted oval by up to half its long axis and
+    the nudge passes re-bent tracks INTO the pad). `ext_x`/`ext_y` are the
+    global-axis half-extents of the (possibly tilted) rect for windowing; equal
+    to half_x/half_y for axis-aligned pads. Returns ten parallel arrays."""
     cache = getattr(pcb_data, '_foreign_pad_arr_cache', None)
     if cache is None:
         cache = {}
         pcb_data._foreign_pad_arr_cache = cache
     arr = cache.get(layer)
     if arr is None:
-        nids, cx, cy, hx, hy = [], [], [], [], []
+        nids, cx, cy, hx, hy, cr = [], [], [], [], [], []
+        rc, rs, ex, ey = [], [], [], []
         for nid, pads in pcb_data.pads_by_net.items():
             for pad in pads:
                 if layer in pad.layers or '*.Cu' in pad.layers:
                     nids.append(nid)
                     cx.append(pad.global_x); cy.append(pad.global_y)
-                    hx.append(pad.size_x / 2.0); hy.append(pad.size_y / 2.0)
+                    half_x = pad.size_x / 2.0; half_y = pad.size_y / 2.0
+                    hx.append(half_x); hy.append(half_y)
+                    cr.append(_pad_corner_radius(pad))
+                    rot = getattr(pad, 'rect_rotation', 0.0) or 0.0
+                    if rot:
+                        c = math.cos(math.radians(rot)); s = math.sin(math.radians(rot))
+                        rc.append(c); rs.append(s)
+                        ex.append(abs(half_x * c) + abs(half_y * s))
+                        ey.append(abs(half_x * s) + abs(half_y * c))
+                    else:
+                        rc.append(1.0); rs.append(0.0)
+                        ex.append(half_x); ey.append(half_y)
         arr = (np.asarray(nids, dtype=np.int64), np.asarray(cx), np.asarray(cy),
-               np.asarray(hx), np.asarray(hy))
+               np.asarray(hx), np.asarray(hy), np.asarray(cr),
+               np.asarray(rc), np.asarray(rs), np.asarray(ex), np.asarray(ey))
         cache[layer] = arr
     return arr
 
 
 def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer):
     """Min edge distance from point (x,y) on `layer` to any pad of a DIFFERENT net.
-    The pad is treated as its full board-axis rect (rounded corners ignored -> a
-    slight under-estimate, i.e. conservative). Vectorized + windowed (see
-    _FOREIGN_PAD_WINDOW); exact for any distance within the window, which is all
-    the callers ever look at."""
-    nids, cx, cy, hx, hy = _foreign_pad_arrays(pcb_data, layer)
+    The pad is modelled as a rounded rect (accurate for circle/oval/roundrect,
+    exact rect at corner_r=0), so a round BGA ball is not over-approximated by its
+    bounding-box corner. Vectorized + windowed (see _FOREIGN_PAD_WINDOW); exact
+    for any distance within the window, which is all the callers ever look at."""
+    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey = _foreign_pad_arrays(pcb_data, layer)
     if cx.size == 0:
         return 1e9
     R = _FOREIGN_PAD_WINDOW
-    # Expand the window by each pad's own half-size: a large pad's EDGE can be
-    # within R even when its centre is past R. Then min edge distance is exact for
-    # anything <= R (any excluded pad is > R away, beyond every caller's margin).
-    near = (np.abs(cx - x) <= R + hx) & (np.abs(cy - y) <= R + hy) & (nids != net_id)
+    # Expand the window by each pad's own half-extent (global axes, so tilted
+    # pads window by their true bbox): a large pad's EDGE can be within R even
+    # when its centre is past R. Then min edge distance is exact for anything
+    # <= R (any excluded pad is > R away, beyond every caller's margin).
+    near = (np.abs(cx - x) <= R + ex) & (np.abs(cy - y) <= R + ey) & (nids != net_id)
     if not near.any():
         return 1e9
-    dx = np.maximum(np.abs(x - cx[near]) - hx[near], 0.0)
-    dy = np.maximum(np.abs(y - cy[near]) - hy[near], 0.0)
-    return float(np.min(np.hypot(dx, dy)))
+    fcr = cr[near]
+    # Rotate the query offset into each pad's local frame (R(-rot)); identity
+    # for axis-aligned pads (cos=1, sin=0), exact tilted outline otherwise.
+    ddx = x - cx[near]; ddy = y - cy[near]
+    frc, frs = rc[near], rs[near]
+    lx = np.abs(ddx * frc + ddy * frs)
+    ly = np.abs(-ddx * frs + ddy * frc)
+    dx = np.maximum(lx - (hx[near] - fcr), 0.0)
+    dy = np.maximum(ly - (hy[near] - fcr), 0.0)
+    return float(np.min(np.hypot(dx, dy) - fcr))
 
 
 def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
     """Min foreign-pad edge distance sampled along a (short, terminal) segment.
-    Vectorized: windows pads to the segment's bbox + margin, then evaluates ALL
-    sample points against them in one numpy matrix op."""
-    nids, cx, cy, hx, hy = _foreign_pad_arrays(pcb_data, layer)
+    Pads are modelled as rounded rects (corner_r), so round/oval/roundrect pads --
+    e.g. BGA balls -- use their true outline, not the bounding-box corner that
+    manufactures phantom grazes (#315). Vectorized: windows pads to the segment's
+    bbox + margin, then evaluates ALL sample points against them in one matrix op."""
+    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey = _foreign_pad_arrays(pcb_data, layer)
     if cx.size == 0:
         return 1e9
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
     R = _FOREIGN_PAD_WINDOW
-    # Pad bbox (centre +/- half) must reach within R of the segment bbox; a pad
-    # excluded here is > R from every sample point on the segment.
-    near = ((cx + hx >= min(x1, x2) - R) & (cx - hx <= max(x1, x2) + R) &
-            (cy + hy >= min(y1, y2) - R) & (cy - hy <= max(y1, y2) + R) & (nids != net_id))
+    # Pad bbox (centre +/- global half-extent, true bbox for tilted pads) must
+    # reach within R of the segment bbox; a pad excluded here is > R from every
+    # sample point on the segment.
+    near = ((cx + ex >= min(x1, x2) - R) & (cx - ex <= max(x1, x2) + R) &
+            (cy + ey >= min(y1, y2) - R) & (cy - ey <= max(y1, y2) + R) & (nids != net_id))
     if not near.any():
         return 1e9
-    fcx, fcy, fhx, fhy = cx[near], cy[near], hx[near], hy[near]
+    fcx, fcy, fhx, fhy, fcr = cx[near], cy[near], hx[near], hy[near], cr[near]
+    frc, frs = rc[near], rs[near]
     t = np.linspace(0.0, 1.0, n + 1)
     sx = x1 + (x2 - x1) * t
     sy = y1 + (y2 - y1) * t
-    dx = np.maximum(np.abs(sx[:, None] - fcx[None, :]) - fhx[None, :], 0.0)
-    dy = np.maximum(np.abs(sy[:, None] - fcy[None, :]) - fhy[None, :], 0.0)
-    return float(np.min(np.hypot(dx, dy)))
+    # Rounded-rect signed distance in each pad's LOCAL frame (query offsets
+    # rotated by R(-rot); identity for axis-aligned pads): shrink the
+    # half-extents by the corner radius, take the outside distance to that
+    # inner rect, then subtract the radius.
+    ddx = sx[:, None] - fcx[None, :]
+    ddy = sy[:, None] - fcy[None, :]
+    lx = np.abs(ddx * frc[None, :] + ddy * frs[None, :])
+    ly = np.abs(-ddx * frs[None, :] + ddy * frc[None, :])
+    dx = np.maximum(lx - (fhx[None, :] - fcr[None, :]), 0.0)
+    dy = np.maximum(ly - (fhy[None, :] - fcr[None, :]), 0.0)
+    return float(np.min(np.hypot(dx, dy) - fcr[None, :]))
+
+
+def _foreign_seg_arrays(pcb_data, layer):
+    """Cached per-layer numpy arrays (net_id, x1, y1, x2, y2, half_width) for every
+    routed SEGMENT on `layer`, plus every VIA folded in as a degenerate (zero-length)
+    segment of half_width = via radius. Unlike pads, copper changes as nets route, so
+    the cache is keyed on the (segment, via) counts and rebuilt when they change.
+    Counts alone go stale across rip-reroute (#339: a ripped net re-adds the SAME
+    number of segments at new coordinates -- cynthion's refit judged a via against
+    MEZZANINE5's OLD track), so the tail elements' geometry joins the signature."""
+    segs, vias = pcb_data.segments, pcb_data.vias
+    tail = segs[-1] if segs else None
+    vtail = vias[-1] if vias else None
+    sig = (len(segs), len(vias),
+           (tail.start_x, tail.start_y, tail.end_x, tail.net_id) if tail is not None else None,
+           (vtail.x, vtail.y, vtail.net_id) if vtail is not None else None)
+    cache = getattr(pcb_data, '_foreign_seg_arr_cache', None)
+    if cache is None or cache[0] != sig:
+        cache = (sig, {})
+        pcb_data._foreign_seg_arr_cache = cache
+    per_layer = cache[1]
+    arr = per_layer.get(layer)
+    if arr is None:
+        nid, ax, ay, bx, by, hw = [], [], [], [], [], []
+        for s in pcb_data.segments:
+            if s.layer == layer:
+                nid.append(s.net_id); ax.append(s.start_x); ay.append(s.start_y)
+                bx.append(s.end_x); by.append(s.end_y)
+                hw.append((s.width if s.width > 0 else 0.0) / 2.0)
+        # A via spans its drilled layers; treat every via as present on this copper
+        # layer (a conservative over-approximation -- it only ever necks MORE).
+        for v in pcb_data.vias:
+            r = (v.size if getattr(v, 'size', 0) and v.size > 0 else 0.0) / 2.0
+            nid.append(v.net_id); ax.append(v.x); ay.append(v.y)
+            bx.append(v.x); by.append(v.y); hw.append(r)
+        arr = (np.asarray(nid, dtype=np.int64), np.asarray(ax, dtype=float),
+               np.asarray(ay, dtype=float), np.asarray(bx, dtype=float),
+               np.asarray(by, dtype=float), np.asarray(hw, dtype=float))
+        per_layer[layer] = arr
+    return arr
+
+
+def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
+    """Min edge distance from a (short, terminal) segment to any OTHER-net segment or
+    via on `layer` -- the segment analogue of _seg_foreign_pad_dist. Distance is from
+    the terminal centreline to the foreign copper EDGE (point-to-segment distance to
+    the foreign centreline minus the foreign half-width), sampled along the terminal
+    and vectorized over windowed foreign segments. A negative result (centreline
+    inside foreign copper) is returned as-is so the caller necks to the floor."""
+    nid, fax, fay, fbx, fby, fhw = _foreign_seg_arrays(pcb_data, layer)
+    if nid.size == 0:
+        return 1e9
+    n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
+    R = _FOREIGN_PAD_WINDOW
+    fminx = np.minimum(fax, fbx) - fhw; fmaxx = np.maximum(fax, fbx) + fhw
+    fminy = np.minimum(fay, fby) - fhw; fmaxy = np.maximum(fay, fby) + fhw
+    near = ((fmaxx >= min(x1, x2) - R) & (fminx <= max(x1, x2) + R) &
+            (fmaxy >= min(y1, y2) - R) & (fminy <= max(y1, y2) + R) & (nid != net_id))
+    if not near.any():
+        return 1e9
+    ax, ay, bx, by, hw = fax[near], fay[near], fbx[near], fby[near], fhw[near]
+    t = np.linspace(0.0, 1.0, n + 1)
+    sx = x1 + (x2 - x1) * t
+    sy = y1 + (y2 - y1) * t
+    abx = bx - ax; aby = by - ay                      # (M,)
+    L2 = abx * abx + aby * aby                         # (M,)
+    pax = sx[:, None] - ax[None, :]                    # (S, M)
+    pay = sy[:, None] - ay[None, :]
+    safe_L2 = np.where(L2 > 0, L2, 1.0)
+    tt = (pax * abx[None, :] + pay * aby[None, :]) / safe_L2[None, :]
+    tt = np.where(L2[None, :] > 0, np.clip(tt, 0.0, 1.0), 0.0)
+    projx = ax[None, :] + tt * abx[None, :]
+    projy = ay[None, :] + tt * aby[None, :]
+    dist = np.hypot(sx[:, None] - projx, sy[:, None] - projy) - hw[None, :]
+    return float(np.min(dist))
+
+
+def _foreign_via_arrays(pcb_data):
+    """Cached (net_id, x, y, radius) numpy arrays for every via on the board. Vias
+    are treated as present on ALL layers (a through-hole conservative over-
+    approximation, matching the obstacle map / _foreign_seg_arrays). Rebuilt when
+    the via count OR tail via changes (count alone goes stale across rip-reroute,
+    #339)."""
+    vt = pcb_data.vias[-1] if pcb_data.vias else None
+    sig = (len(pcb_data.vias), (vt.x, vt.y, vt.net_id) if vt is not None else None)
+    cache = getattr(pcb_data, '_foreign_via_arr_cache', None)
+    if cache is None or cache[0] != sig:
+        nids, cx, cy, rad = [], [], [], []
+        for v in pcb_data.vias:
+            nids.append(v.net_id)
+            cx.append(v.x); cy.append(v.y)
+            rad.append((v.size if getattr(v, 'size', 0) and v.size > 0 else 0.0) / 2.0)
+        cache = (sig, (np.asarray(nids, dtype=np.int64), np.asarray(cx, dtype=float),
+                       np.asarray(cy, dtype=float), np.asarray(rad, dtype=float)))
+        pcb_data._foreign_via_arr_cache = cache
+    return cache[1]
+
+
+def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
+    """Min edge distance from a segment to any OTHER-net VIA (body), exact point-to-
+    segment minus via radius. The via analogue of _seg_foreign_pad_dist; a negative
+    result (centreline inside the via) is returned as-is."""
+    nids, cx, cy, rad = _foreign_via_arrays(pcb_data)
+    if cx.size == 0:
+        return 1e9
+    R = _FOREIGN_PAD_WINDOW
+    mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    near = ((np.abs(cx - mx) <= R + abs(x2 - x1) / 2.0 + rad) &
+            (np.abs(cy - my) <= R + abs(y2 - y1) / 2.0 + rad) & (nids != net_id))
+    if not near.any():
+        return 1e9
+    fcx, fcy, fr = cx[near], cy[near], rad[near]
+    dx, dy = x2 - x1, y2 - y1
+    l2 = dx * dx + dy * dy
+    if l2 <= 0.0:
+        d = np.hypot(fcx - x1, fcy - y1) - fr
+    else:
+        tt = np.clip(((fcx - x1) * dx + (fcy - y1) * dy) / l2, 0.0, 1.0)
+        d = np.hypot(fcx - (x1 + tt * dx), fcy - (y1 + tt * dy)) - fr
+    return float(np.min(d))
+
+
+def _foreign_hole_capsules(pcb_data):
+    """Cached NPTH (no-copper) drill capsules: (net_id, ax, ay, bx, by, r) numpy
+    arrays, one row per pad whose drill carries no copper ring (mechanical /
+    mounting holes -- np_thru_hole, or a pad with no copper layer). The pad /
+    segment / via distance trio all measure to COPPER, so they never see these
+    holes; but a track crossing one is a real fab short (check_drc's track-hole
+    rule, issue #233), gated by the higher NPTH-to-track floor. Holes are
+    through, so the distance is layer-agnostic. Round drills degenerate to a
+    zero-length capsule (a=b). Rebuilt when the board's pad count changes (pads
+    are static during routing, so this almost never refires)."""
+    from check_drc import _pad_has_no_copper
+    from kicad_parser import pad_drill_capsule
+    sig = sum(len(p) for p in pcb_data.pads_by_net.values())
+    cache = getattr(pcb_data, '_foreign_hole_cap_cache', None)
+    if cache is None or cache[0] != sig:
+        nid, ax, ay, bx, by, r = [], [], [], [], [], []
+        for pad_net, pads in pcb_data.pads_by_net.items():
+            for pad in pads:
+                if pad.drill > 0 and _pad_has_no_copper(pad):
+                    (p1x, p1y), (p2x, p2y), hr = pad_drill_capsule(pad)
+                    nid.append(pad_net)
+                    ax.append(p1x); ay.append(p1y); bx.append(p2x); by.append(p2y)
+                    r.append(hr)
+        cache = (sig, (np.asarray(nid, dtype=np.int64), np.asarray(ax, dtype=float),
+                       np.asarray(ay, dtype=float), np.asarray(bx, dtype=float),
+                       np.asarray(by, dtype=float), np.asarray(r, dtype=float)))
+        pcb_data._foreign_hole_cap_cache = cache
+    return cache[1]
+
+
+def _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2):
+    """Min edge distance from a segment to any OTHER-net NPTH drill hole (the
+    hole analogue of _seg_foreign_via_dist). Exact segment-to-capsule distance
+    minus the hole radius; a negative result (segment over the hole) is returned
+    as-is. Own-net holes are excluded (a track legitimately reaches its own
+    mounting-hole pad). 1e9 when there are no foreign holes."""
+    nid, hax, hay, hbx, hby, hr = _foreign_hole_capsules(pcb_data)
+    if nid.size == 0:
+        return 1e9
+    R = _FOREIGN_PAD_WINDOW
+    hminx = np.minimum(hax, hbx) - hr; hmaxx = np.maximum(hax, hbx) + hr
+    hminy = np.minimum(hay, hby) - hr; hmaxy = np.maximum(hay, hby) + hr
+    near = ((hmaxx >= min(x1, x2) - R) & (hminx <= max(x1, x2) + R) &
+            (hmaxy >= min(y1, y2) - R) & (hminy <= max(y1, y2) + R) & (nid != net_id))
+    if not near.any():
+        return 1e9
+    ax, ay, bx, by, rr = hax[near], hay[near], hbx[near], hby[near], hr[near]
+    d = _seg_capsule_axis_dist(x1, y1, x2, y2, ax, ay, bx, by) - rr
+    return float(np.min(d))
+
+
+def _seg_capsule_axis_dist(x1, y1, x2, y2, ax, ay, bx, by):
+    """Exact distance from segment (x1,y1)-(x2,y2) to each capsule AXIS segment
+    (ax,ay)-(bx,by) (vectorized over the capsule arrays), returned per capsule.
+    Segment-to-segment distance = min of the four endpoint-to-other-segment
+    distances, or 0 where the two segments properly cross -- the same measure
+    check_drc uses for track-hole."""
+    def pt_to_seg(px, py, qx1, qy1, qx2, qy2):
+        dx = qx2 - qx1; dy = qy2 - qy1
+        L2 = dx * dx + dy * dy
+        safe = np.where(L2 > 0, L2, 1.0)
+        t = np.clip(((px - qx1) * dx + (py - qy1) * dy) / safe, 0.0, 1.0)
+        return np.hypot(px - (qx1 + t * dx), py - (qy1 + t * dy))
+    d = np.minimum(pt_to_seg(ax, ay, x1, y1, x2, y2),
+                   pt_to_seg(bx, by, x1, y1, x2, y2))
+    d = np.minimum(d, pt_to_seg(x1, y1, ax, ay, bx, by))
+    d = np.minimum(d, pt_to_seg(x2, y2, ax, ay, bx, by))
+    # Proper crossing -> distance 0 (orientation sign test, per capsule).
+    sdx, sdy = x2 - x1, y2 - y1
+    hdx, hdy = bx - ax, by - ay
+    o1 = sdx * (ay - y1) - sdy * (ax - x1)
+    o2 = sdx * (by - y1) - sdy * (bx - x1)
+    o3 = hdx * (y1 - ay) - hdy * (x1 - ax)
+    o4 = hdx * (y2 - ay) - hdy * (x2 - ax)
+    crossing = (o1 * o2 < 0) & (o3 * o4 < 0)
+    return np.where(crossing, 0.0, d)
+
+
+def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
+    """Re-validate a registered #189 unblock via against CURRENT copper (#339).
+
+    The registration was validated against the copper of ITS moment; a later
+    rip-reroute cascade can move foreign copper closer (cynthion: MEZZANINE5's
+    re-route landed 0.35mm from a cell registered when it was legal, and the
+    emitted 0.45 via grazed it by 39um). Try the registered size first, then
+    the fab-floor ladder's smaller vias (shrink-to-fit, same spirit as #189's
+    escalation); return the first that clears foreign copper mm-exactly, or
+    None when nothing fits (caller keeps the registered size -- honest DRC)."""
+    from fab_tiers import fab_floor_ladder
+    import routing_defaults as defaults
+    clearance = config.clearance
+    eps = defaults.UNBLOCK_REFIT_MARGIN
+    layers = [l for l in (pcb_data.board_info.copper_layers or []) if l.endswith('.Cu')]
+    ncu = len(layers) or 2
+    cands = [rec]
+    for f in fab_floor_ladder(ncu):
+        pair = (round(f['via_diameter'], 3), round(f['via_drill'], 3))
+        if pair[0] < rec[0] - 1e-9 and pair not in cands:
+            cands.append(pair)
+    for vs, dr in cands:
+        need = vs / 2.0 + clearance - eps
+        ok = True
+        for layer in layers:
+            if _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y, layer) < need:
+                ok = False
+                break
+            if _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer) < need:
+                ok = False
+                break
+        if ok and _seg_foreign_via_dist(pcb_data, net_id, x, y, x, y, layers[0] if layers else 'F.Cu') < need:
+            ok = False
+        if ok:
+            return (vs, dr)
+    return None
+
+
+def _emit_via_size(pcb_data, gx, gy, config, net_id=None, x=None, y=None):
+    """(size, drill) for a via the route conversion emits at cell (gx, gy). If a #189
+    via-in-pad unblock placed a DRC-legal shrunk via here, return THAT size so the
+    emitted via matches it -- a full config.via_size via at the same cell would graze
+    the neighbouring foreign pad the shrunk via was sized to clear (issue #212).
+    With net_id + mm coords, the registered size is RE-VALIDATED against current
+    copper and shrunk to fit (#339) -- registrations go stale across rip-reroute.
+    Otherwise return the configured via size."""
+    sizes = getattr(pcb_data, '_unblock_via_sizes', None)
+    rec = sizes.get((gx, gy)) if sizes is not None else None
+    if rec is None:
+        rec = (config.via_size, config.via_drill)
+    # Re-validate EVERY emitted via against current copper (#339): the #189
+    # unblock retry's allowed-cell window lets A* place a via on a cell whose
+    # via-blocking says no (that is the window's purpose -- reaching a boxed
+    # pad), and rip-reroute can move foreign copper toward any cell after its
+    # blocking was computed. A via that would ship grazing shrinks to the
+    # largest fab-ladder size that clears; clean vias return unchanged (the
+    # first candidate fits). If even the smallest grazes, ship rec -- honest.
+    if net_id is not None and x is not None and y is not None:
+        refit = _unblock_via_refit(pcb_data, net_id, x, y, rec, config)
+        if _UNBLOCK_DEBUG:
+            print(f"      EMIT-REFIT: cell=({gx},{gy}) {rec} -> {refit} net={net_id} at ({x},{y})")
+        if refit is not None:
+            return refit
+    return rec
 
 
 def _fab_track_floor(pcb_data) -> float:
@@ -131,17 +467,19 @@ def _fab_track_floor(pcb_data) -> float:
 
 
 def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=None):
-    """Neck a TERMINAL-connection segment that grazes a foreign pad, down to `floor`.
+    """Neck a TERMINAL-connection segment that grazes foreign copper, down to `floor`.
 
     A route's terminal connects to an off-grid pad / fanout escape: the
     exact-endpoint stub and the first/last on-grid leg are laid geometrically and
     the endpoint region is obstacle-exempt (so the net can reach its own pad), so a
-    full-width terminal can sit sub-clearance to a NEIGHBOURING foreign pad (#157,
-    e.g. tigard Net-(R7-Pad2) grazing the VREG pad by 8um). Narrowing the offending
-    terminal segment restores clearance without moving the centreline, so
-    connectivity is preserved; a graze the floor width still can't clear is left for
-    the DRC report. Only segments touching a terminal point are considered (the A*
-    body keep-outs already enforce clearance mid-route). Returns the count necked.
+    full-width terminal can sit sub-clearance to NEIGHBOURING foreign copper -- a pad
+    (#157, e.g. tigard Net-(R7-Pad2) grazing the VREG pad by 8um) OR another net's
+    track/via (#212: a +1V2 terminal into a cap pad grazing a wide +3V3 trace by
+    ~15um). Narrowing the offending terminal segment restores clearance without
+    moving the centreline, so connectivity is preserved; a graze the floor width
+    still can't clear is left for the DRC report. Only segments touching a terminal
+    point are considered (the A* body keep-outs already enforce clearance mid-route).
+    Returns the count necked.
 
     `floor` defaults to the board's fab track-width minimum (issue #176): necking
     to the grid step (0.05 mm) used to emit sub-fab-floor copper."""
@@ -157,7 +495,9 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
     for s in segments:
         if not touches(s):
             continue
-        d = _seg_foreign_pad_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer)
+        # Nearest foreign EDGE on this layer -- pad or track/via, whichever is closer.
+        d = min(_seg_foreign_pad_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer),
+                _seg_foreign_seg_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer))
         allowed_half = d - config.clearance - 1e-4  # 1e-4: stay just inside the rule
         if allowed_half < s.width / 2.0 - 1e-9:
             new_w = max(floor, 2.0 * allowed_half)
@@ -165,6 +505,24 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
                 s.width = round(new_w, 4)
                 necked += 1
     return necked
+
+
+def _neck_route_terminal_grazes(segments, path, coord, start_original, end_original,
+                                pcb_data, net_id, config):
+    """Run _neck_terminal_grazes for a converted multipoint edge/tap, recomputing the
+    terminal points from the path endpoints + original pad positions. Called AFTER
+    _apply_neckdown_widths / uniform_width so the graze-neck is authoritative: those
+    passes rebuild every width from the pad-distance taper and would otherwise restore
+    a grazing terminal to full/base width, undoing the neck (issue #212)."""
+    if pcb_data is None or not path:
+        return
+    term_pts = [coord.to_float(path[0][0], path[0][1]),
+                coord.to_float(path[-1][0], path[-1][1])]
+    if start_original:
+        term_pts.append((start_original[0], start_original[1]))
+    if end_original:
+        term_pts.append((end_original[0], end_original[1]))
+    _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config)
 
 
 def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
@@ -429,6 +787,42 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
                     print(f"{print_prefix}    Blocking obstacles: {', '.join(blocker_strs)}")
 
 
+def _via_drill_exclusion_radius(config: 'GridRouteConfig') -> int:
+    """Grid-cell radius for the Rust router's same-path via-spacing guard, sized
+    from the DRILL hole-to-hole minimum (same-net vias may touch copper but not
+    drills). The router's check blocks Chebyshev dist <= 2*radius (issue #230)."""
+    if config.hole_to_hole_clearance <= 0 or config.grid_step <= 0:
+        return 0
+    return max(1, int(math.ceil(
+        (config.via_drill + config.hole_to_hole_clearance) / config.grid_step / 2.0)))
+
+
+def _path_has_close_vias(path: Optional[List], config: 'GridRouteConfig') -> bool:
+    """True if the path drops two of its OWN vias closer than the drill hole-to-hole
+    minimum (a same-net VIA-DRILL-HOLE the obstacle map can't prevent within one
+    A* path). A via is a layer change at a fixed (gx, gy)."""
+    if not path or config.hole_to_hole_clearance <= 0:
+        return False
+    via_cells = []
+    for i in range(1, len(path)):
+        if path[i][0] == path[i - 1][0] and path[i][1] == path[i - 1][1] \
+                and path[i][2] != path[i - 1][2]:
+            via_cells.append((path[i][0], path[i][1]))
+    if len(via_cells) < 2:
+        return False
+    min_cc = (config.via_drill + config.hole_to_hole_clearance) / config.grid_step
+    min_cc_sq = min_cc * min_cc
+    seen = set()
+    for gx, gy in via_cells:
+        if (gx, gy) in seen:
+            continue
+        seen.add((gx, gy))
+        for ox, oy in seen:
+            if (ox, oy) != (gx, gy) and (gx - ox) ** 2 + (gy - oy) ** 2 < min_cc_sq:
+                return True
+    return False
+
+
 def _probe_route_with_frontier(
     router: 'GridRouter',
     obstacles: 'GridObstacleMap',
@@ -441,6 +835,43 @@ def _probe_route_with_frontier(
     pcb_data: PCBData = None,
     current_net_id: int = -1,
     single_direction: bool = False
+) -> Tuple[Optional[List], int, List, List, bool, int, int]:
+    """Two-pass wrapper: route with the same-path via-spacing guard OFF (fast),
+    and only re-route the same leg with the guard ON if the result actually drops
+    two same-net vias closer than the drill floor (#230). The vast majority of
+    legs never trip it, so they pay nothing; only the rare offender pays one extra
+    route. Falls back to the first (DRC-flawed but connected) path if the guarded
+    re-route fails to connect at all."""
+    result = _probe_route_with_frontier_once(
+        router, obstacles, forward_sources, forward_targets, config,
+        print_prefix, direction_labels, track_margin, pcb_data, current_net_id,
+        single_direction, via_exclusion_radius=0)
+    path = result[0]
+    if path is not None and _path_has_close_vias(path, config):
+        ver = _via_drill_exclusion_radius(config)
+        if ver > 0:
+            retry = _probe_route_with_frontier_once(
+                router, obstacles, forward_sources, forward_targets, config,
+                print_prefix, direction_labels, track_margin, pcb_data, current_net_id,
+                single_direction, via_exclusion_radius=ver)
+            if retry[0] is not None:
+                return retry  # re-routed with manufacturable via spacing
+    return result
+
+
+def _probe_route_with_frontier_once(
+    router: 'GridRouter',
+    obstacles: 'GridObstacleMap',
+    forward_sources: List,
+    forward_targets: List,
+    config: 'GridRouteConfig',
+    print_prefix: str = "",
+    direction_labels: Tuple[str, str] = ("forward", "backward"),
+    track_margin: int = 0,
+    pcb_data: PCBData = None,
+    current_net_id: int = -1,
+    single_direction: bool = False,
+    via_exclusion_radius: int = 0
 ) -> Tuple[Optional[List], int, List, List, bool, int, int]:
     """
     Probe routing with fail-fast on stuck directions.
@@ -473,6 +904,7 @@ def _probe_route_with_frontier(
     """
     first_label, second_label = direction_labels
     probe_iterations = config.max_probe_iterations
+    _ver = via_exclusion_radius
 
     # Track iterations per direction (first/second maps to forward/backward based on labels)
     first_total_iters = 0
@@ -480,7 +912,7 @@ def _probe_route_with_frontier(
 
     # Probe forward direction
     path, iterations, blocked_cells = router.route_with_frontier(
-        obstacles, forward_sources, forward_targets, probe_iterations, track_margin=track_margin)
+        obstacles, forward_sources, forward_targets, probe_iterations, track_margin=track_margin, via_exclusion_radius=_ver)
     first_probe_iters = iterations
     first_total_iters = first_probe_iters
     first_blocked = blocked_cells
@@ -518,7 +950,7 @@ def _probe_route_with_frontier(
         # Forward probe reached max - do full search
         print(f"{print_prefix}Probe: {first_label}={first_probe_iters} iters [single-direction bus mode], trying full iterations...")
         path, full_iters, full_blocked = router.route_with_frontier(
-            obstacles, forward_sources, forward_targets, config.max_iterations, track_margin=track_margin)
+            obstacles, forward_sources, forward_targets, config.max_iterations, track_margin=track_margin, via_exclusion_radius=_ver)
         first_total_iters += full_iters
         total_iterations += full_iters
 
@@ -531,7 +963,7 @@ def _probe_route_with_frontier(
 
     # Probe backward direction (bidirectional mode)
     path, iterations, blocked_cells = router.route_with_frontier(
-        obstacles, forward_targets, forward_sources, probe_iterations, track_margin=track_margin)
+        obstacles, forward_targets, forward_sources, probe_iterations, track_margin=track_margin, via_exclusion_radius=_ver)
     second_probe_iters = iterations
     second_total_iters = second_probe_iters
     second_blocked = blocked_cells
@@ -576,7 +1008,7 @@ def _probe_route_with_frontier(
     print(f"{print_prefix}Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {first_label} with full iterations...")
 
     path, full_iters, full_blocked = router.route_with_frontier(
-        obstacles, forward_sources, forward_targets, config.max_iterations, track_margin=track_margin)
+        obstacles, forward_sources, forward_targets, config.max_iterations, track_margin=track_margin, via_exclusion_radius=_ver)
     first_total_iters += full_iters
     total_iterations += full_iters
 
@@ -590,7 +1022,7 @@ def _probe_route_with_frontier(
     forward_blocked = full_blocked
 
     path, backward_full_iters, backward_full_blocked = router.route_with_frontier(
-        obstacles, forward_targets, forward_sources, config.max_iterations, track_margin=track_margin)
+        obstacles, forward_targets, forward_sources, config.max_iterations, track_margin=track_margin, via_exclusion_radius=_ver)
     second_total_iters += backward_full_iters
     total_iterations += backward_full_iters
 
@@ -821,10 +1253,12 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             # Check if layer change is at an existing through-hole pad
             # If so, skip creating a via - the pad provides the layer transition
             if (gx1, gy1) not in through_hole_positions:
+                _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config,
+                                            net_id=net_id, x=x1, y=y1)
                 via = Via(
                     x=x1, y=y1,
-                    size=config.via_size,
-                    drill=config.via_drill,
+                    size=_vsz,
+                    drill=_vdr,
                     layers=["F.Cu", "B.Cu"],  # Always through-hole
                     net_id=net_id
                 )
@@ -1106,18 +1540,29 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
     if key in cache:
         return None
 
-    from plane_pad_tap import tap_pad_with_escalation
-    from list_nets import fab_floors
+    from plane_pad_tap import tap_pad_with_escalation, inflight_copper_dicts
+    from list_nets import fab_floor_ladder, warn_fab_escalation
+    # Copper stamped in the working obstacle map but not yet committed to
+    # pcb_data (phase-3 tap rip-up windows) must block this via too, or it is
+    # drilled straight through a pending foreign track (#310, snapdragon
+    # ETH_ISOLATEB via on PCIE1_WAKE_N In2.Cu).
+    inflight_vias, inflight_segments = inflight_copper_dicts(pcb_data)
     ncu = len([l for l in layer_names if l.endswith('.Cu')]) or 2
-    ff = fab_floors(ncu)
-    via_pairs, seen_dia = [], set()
-    for vd, dr in ((config.via_size, config.via_drill),
-                   (ff['via_diameter'], ff['via_drill']),
-                   (ff['fine_via_diameter'], ff['fine_via_drill'])):
+    # Forced last-resort via sizes, largest first: the configured via, then the
+    # active fab-tier floor ladder (nominal floor, then any escalation rung). The
+    # advanced rung is the more-costly small via 'standard' escalates to (#237).
+    ladder = fab_floor_ladder(ncu)
+    candidates = [(config.via_size, config.via_drill, False)]
+    candidates += [(f['via_diameter'], f['via_drill'], i > 0)
+                   for i, f in enumerate(ladder)]
+    via_pairs, seen_dia, escalated_pair = [], set(), set()
+    for vd, dr, is_esc in candidates:
         vd, dr = round(vd, 3), round(dr, 3)
         if dr < vd <= config.via_size + 1e-9 and vd not in seen_dia:
             seen_dia.add(vd)
             via_pairs.append((vd, dr))
+            if is_esc:
+                escalated_pair.add((vd, dr))
     tap_res = None
     for vd, dr in via_pairs:
         # try_default=False: skip the default-parameter pass and go straight to
@@ -1130,36 +1575,78 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
             pad_obj, pad_layer, net_id, pcb_data,
             replace(config, via_size=vd, via_drill=dr, board_edge_clearance=0.0),
             max_search_radius=0.0, via_size=vd, via_drill=dr,
+            extra_vias=inflight_vias, extra_segments=inflight_segments,
             try_default=False, fine_for_all=True,
             distant_trace_radius=0.0, disable_reuse=True)
         if tap_res.success and tap_res.via is not None:
+            # mm-exact re-check at FULL clearance vs CURRENT copper (#339): the
+            # tap's fine pass places at capped clearance, which approved a 0.45
+            # via 39um short of a fellow-ripped net's fresh track (cynthion
+            # MEZZANINE6 vs MEZZANINE5). A graze at this size falls through to
+            # the next (smaller) ladder rung, whose tap may also relocate it.
+            _tv = tap_res.via
+            if _unblock_via_refit(pcb_data, net_id, _tv['x'], _tv['y'],
+                                  (_tv['size'], _tv['drill']), config) != (_tv['size'], _tv['drill']):
+                tap_res = None
+                continue
+            if (vd, dr) in escalated_pair:
+                warn_fab_escalation(f"last-resort via for net {net_id} ({vd}/{dr}mm)")
             break
     if tap_res is None or not tap_res.success or tap_res.via is None:
-        cache.add(key)
+        # Don't memoise a failure caused (possibly) by TRANSIENT in-flight
+        # copper: once that window closes the pad may be genuinely tappable.
+        if not (inflight_vias or inflight_segments):
+            cache.add(key)
         return None
     v = tap_res.via
     via = Via(x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
               layers=v.get('layers', [layer_names[0], layer_names[-1]]), net_id=net_id)
-    return via, coord.to_grid(v['x'], v['y']), layer_names.index(pad_layer)
+    vgx, vgy = coord.to_grid(v['x'], v['y'])
+    # Record this cell's DRC-legal shrunk via size so route conversion emits THAT
+    # size (not the full config.via_size) if the path later changes layer here
+    # through the registered free via. The free via is what lets the boxed pad
+    # connect; a full via at the cell grazes a neighbouring foreign pad (only the
+    # shrunk via fits) -- issue #212, glasgow_revC Z5 via vs RN4.6.
+    sizes = getattr(pcb_data, '_unblock_via_sizes', None)
+    if sizes is None:
+        sizes = {}
+        pcb_data._unblock_via_sizes = sizes
+    sizes[(vgx, vgy)] = (v['size'], v['drill'])
+    return via, (vgx, vgy), layer_names.index(pad_layer)
 
 
 def _net_pad_near(pcb_data, net_id, cells, coord):
-    """The net's SMD pad that grid `cells[0]` sits inside (a boxed endpoint), or
-    None. Tight in-pad test so a tap source on a mid-trace point (not a pad)
-    returns None and never gets a spurious via."""
-    if not cells:
-        return None
-    x, y = coord.to_float(cells[0][0], cells[0][1])
-    best = None
-    for p in pcb_data.pads_by_net.get(net_id, []):
-        if getattr(p, 'drill', 0):
-            continue
-        if (abs(p.global_x - x) <= p.size_x / 2 + 0.05 and
-                abs(p.global_y - y) <= p.size_y / 2 + 0.05):
-            d = abs(p.global_x - x) + abs(p.global_y - y)
-            if best is None or d < best[0]:
-                best = (d, p)
-    return best[1] if best else None
+    """The net's SMD pad that one of the grid `cells` sits inside (a boxed
+    endpoint), or None. Tight in-pad test so a tap source on a mid-trace point
+    (not a pad) returns None and never gets a spurious via.
+
+    Scans EVERY endpoint cell, not just cells[0]: a boxed side often lists a
+    stub tip first (ottercast Net-(C61-Pad1): tip at (114.3, 90.0), 0.1mm
+    OUTSIDE the U6.20 pad), and the cells[0]-only lookup returned None there --
+    so the #189 via-in-pad unblock silently never fired for a pad the
+    placement machinery could in fact tap (a hand-routed 0.45/0.2 via-in-pad
+    connects it trivially)."""
+    pads = _net_pads_near(pcb_data, net_id, cells, coord)
+    return pads[0] if pads else None
+
+
+def _net_pads_near(pcb_data, net_id, cells, coord):
+    """All of the net's SMD pads that some grid cell in `cells` sits inside,
+    nearest-first. The via-in-pad second rung iterates these: the closest pad
+    (e.g. a cap pad crowded by its neighbours) may refuse a via while another
+    endpoint pad of the same side (ottercast C69.1) accepts one."""
+    found = {}
+    for cell in cells:
+        x, y = coord.to_float(cell[0], cell[1])
+        for p in pcb_data.pads_by_net.get(net_id, []):
+            if getattr(p, 'drill', 0):
+                continue
+            if (abs(p.global_x - x) <= p.size_x / 2 + 0.05 and
+                    abs(p.global_y - y) <= p.size_y / 2 + 0.05):
+                d = abs(p.global_x - x) + abs(p.global_y - y)
+                if id(p) not in found or d < found[id(p)][0]:
+                    found[id(p)] = (d, p)
+    return [p for _d, p in sorted(found.values(), key=lambda t: t[0])]
 
 
 def _register_unblock_via(obstacles, vgx, vgy, layer_names):
@@ -1190,7 +1677,7 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
     res = _route_main_connection(router, obstacles, config, sources, targets, track_margin,
                                  pcb_data, net_id, print_prefix, direction_labels,
                                  single_direction, waypoints)
-    if res[0] is not None or os.environ.get('DISABLE_VIA_ESCAPE'):
+    if res[0] is not None:
         return res + ([],)
     layer_names = config.layers
     if len(layer_names) < 2:
@@ -1199,13 +1686,20 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
     lim = config.max_probe_iterations
     coord = GridCoord(config.grid_step)
 
+    _dbg = _UNBLOCK_DEBUG
     placed = []  # (via, vgx, vgy, pad_layer_idx)
     new_sources, new_targets = sources, targets
     # backward probe (from targets) exhausted -> the TARGET pad is boxed
     if bwd_i and bwd_i < lim:
         pad = _net_pad_near(pcb_data, net_id, targets, coord)
+        if _dbg:
+            print(f"      UNBLOCK: bwd stuck ({bwd_i}<{lim}), target pad="
+                  f"{pad.component_ref}.{pad.pad_number}" if pad else
+                  f"      UNBLOCK: bwd stuck ({bwd_i}<{lim}), NO pad at targets")
         r = (_place_shrunk_via_in_pad(pad, obstacles, config, pcb_data, net_id, coord, layer_names)
              if pad is not None else None)
+        if _dbg and pad is not None:
+            print(f"      UNBLOCK: placement {'OK ' + str(r[0]) if r else 'DECLINED'}")
         if r is not None:
             via, (vgx, vgy), pli = r
             _register_unblock_via(obstacles, vgx, vgy, layer_names)
@@ -1229,10 +1723,57 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
     # layer beside it is clear and the route is found within the probe budget;
     # if it isn't, grinding to the full max_iterations (1e6 at grid 0.05) just to
     # fail again is wasted -- fail fast and report the pad honestly.
+    if _dbg:
+        for (via, vgx, vgy, pli, pad) in placed:
+            for li in range(len(layer_names)):
+                nb = sum(1 for dx in (-1, 0, 1) for dy in (-1, 0, 1) if (dx or dy)
+                         and obstacles.is_blocked(vgx + dx, vgy + dy, li))
+                print(f"      UNBLOCK map: via@({vgx},{vgy}) {layer_names[li]}: "
+                      f"cell_blocked={obstacles.is_blocked(vgx, vgy, li)} neighbors_blocked={nb}/8")
     retry_config = replace(config, max_iterations=config.max_probe_iterations)
     res2 = _route_main_connection(router, obstacles, retry_config, new_sources, new_targets, track_margin,
                                   pcb_data, net_id, print_prefix, direction_labels,
                                   single_direction, waypoints)
+    if res2[0] is None:
+        # Second rung: the stuck side got its via but the retry still failed --
+        # the OTHER side often needs layer access too. Its probe burns the full
+        # budget wandering the walled outer layer ("forward=5000", not stuck),
+        # so it never qualifies above; if it terminates on an SMD pad, via it
+        # as well and retry once at a doubled budget. ottercast Net-(C61-Pad1):
+        # the hand-routed fix is exactly a via in C69.1 AND U6.20 joined on an
+        # inner layer -- one-ended unblock can never find that route.
+        second = []
+        if new_sources is sources:  # source side never got a via
+            side_cells, is_source = sources, True
+        elif new_targets is targets:  # target side never got a via
+            side_cells, is_source = targets, False
+        else:
+            side_cells = None
+        if side_cells is not None:
+            for pad2 in _net_pads_near(pcb_data, net_id, side_cells, coord):
+                r2 = _place_shrunk_via_in_pad(pad2, obstacles, config, pcb_data,
+                                              net_id, coord, layer_names)
+                if _dbg:
+                    print(f"      UNBLOCK rung2: {'source' if is_source else 'target'} "
+                          f"pad {pad2.component_ref}.{pad2.pad_number} -> "
+                          f"{'OK' if r2 else 'DECLINED'}")
+                if r2 is None:
+                    continue
+                via2, (vgx2, vgy2), pli2 = r2
+                _register_unblock_via(obstacles, vgx2, vgy2, layer_names)
+                ext = [(vgx2, vgy2, li) for li in range(len(layer_names))]
+                if is_source:
+                    new_sources = list(side_cells) + ext
+                else:
+                    new_targets = list(side_cells) + ext
+                placed.append((via2, vgx2, vgy2, pli2, pad2))
+                second.append(via2)
+                break
+        if second:
+            retry_config = replace(config, max_iterations=2 * config.max_probe_iterations)
+            res2 = _route_main_connection(router, obstacles, retry_config, new_sources, new_targets,
+                                          track_margin, pcb_data, net_id, print_prefix,
+                                          direction_labels, single_direction, waypoints)
     if res2[0] is None:
         # The via placed but didn't rescue the route. Memoise the pad as failed so
         # route_multipoint_taps' next rip-reroute pass doesn't redo the expensive
@@ -1680,10 +2221,12 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
             # Check if layer change is at an existing through-hole pad
             # If so, skip creating a via - the pad provides the layer transition
             if (gx1, gy1) not in through_hole_positions:
+                _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config,
+                                            net_id=net_id, x=x1, y=y1)
                 via = Via(
                     x=x1, y=y1,
-                    size=config.via_size,
-                    drill=config.via_drill,
+                    size=_vsz,
+                    drill=_vdr,
                     layers=["F.Cu", "B.Cu"],  # Always through-hole
                     net_id=net_id
                 )
@@ -1770,67 +2313,43 @@ def route_multipoint_main(
     # Extract pad positions for MST computation
     pad_positions = [(info[3], info[4]) for info in pad_info]  # (orig_x, orig_y)
 
-    # Compute MST with Manhattan distance (better for PCB routing)
-    mst_edges = compute_mst_edges(pad_positions, use_manhattan=True)
-
-    # Filter out MST edges between pads already connected through zones/planes
-    # Also track pad_components for Phase 3 to know which pads are zone-connected
-    pad_components = {i: i for i in range(len(pad_info))}  # Default: each pad is its own component
-    net_zones = [z for z in pcb_data.zones if z.net_id == net_id]
-    if net_zones:
-        net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
-        net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
-        pads_list = [info[5] for info in pad_info if len(info) > 5]
-        if pads_list:
-            pad_components = get_zone_connected_pad_groups(
-                net_segments, net_vias, pads_list, net_zones, config.layers
-            )
-            # Group pads by component for quick lookup
-            component_pads: dict = {}  # component_id -> list of pad indices
-            for pad_idx, comp_id in pad_components.items():
-                if comp_id not in component_pads:
-                    component_pads[comp_id] = []
-                component_pads[comp_id].append(pad_idx)
-
-            # Filter edges and optimize: for edges crossing components, find closest pad in zone-connected group
-            original_count = len(mst_edges)
-            optimized_edges = []
-            seen_component_pairs = set()  # Track which component pairs we've already connected
-
-            for a, b, dist in mst_edges:
-                comp_a = pad_components.get(a)
-                comp_b = pad_components.get(b)
-                if comp_a == comp_b:
-                    continue  # Skip intra-component edges
-
-                # Normalize component pair to avoid duplicates
-                pair_key = (min(comp_a, comp_b), max(comp_a, comp_b))
-                if pair_key in seen_component_pairs:
-                    continue  # Already have an edge between these components
-                seen_component_pairs.add(pair_key)
-
-                # Optimize: find shortest edge between pads in these two components
-                best_edge = None
-                best_dist = float('inf')
-                for pa in component_pads.get(comp_a, [a]):
-                    for pb in component_pads.get(comp_b, [b]):
-                        px_a, py_a = pad_positions[pa]
-                        px_b, py_b = pad_positions[pb]
-                        d = abs(px_a - px_b) + abs(py_a - py_b)  # Manhattan distance
-                        if d < best_dist:
-                            best_dist = d
-                            best_edge = (pa, pb, d)
-                if best_edge:
-                    optimized_edges.append(best_edge)
-
-            mst_edges = optimized_edges
-            if original_count > len(mst_edges):
-                skipped = original_count - len(mst_edges)
-                print(f"  Skipping {skipped} MST edge(s) already connected through plane")
+    # Component-based multipoint (issue #317): group the terminals by the
+    # net's EXISTING copper using the authoritative overlap-aware definition
+    # (check_net_connectivity -- cap overlap, T-junctions, zones, pad
+    # outlines), then span the COMPONENTS with an MST realized by the nearest
+    # terminal pair between each pair of components. N components take
+    # exactly N-1 routed connections; copper the checker already grades
+    # connected is never re-tapped (the old pad-position MST + 0.02mm
+    # coincidence filter routed redundant loops between overlap-joined
+    # escapes -- butterstick DQ5).
+    pad_components = get_copper_connected_terminal_groups(pcb_data, net_id, pad_info)
+    num_components = len(set(pad_components.values()))
+    if num_components < len(pad_info):
+        print(f"  Existing copper joins {len(pad_info)} terminals into "
+              f"{num_components} group(s)")
+    mst_edges = compute_component_mst_edges(pad_positions, pad_components)
 
     if not mst_edges:
-        print(f"  All pads already connected through plane - nothing to route")
-        return None
+        print(f"  All pads already connected by existing copper - nothing to route")
+        return {
+            'new_segments': [],
+            'new_vias': [],
+            'iterations': 0,
+            'path_length': 0,
+            'path': [],
+            'is_multipoint': True,
+            'multipoint_pad_info': pad_info,
+            'routed_pad_indices': set(range(len(pad_info))),
+            'pad_components': pad_components,
+            'original_segments': [],
+            'mst_edges': [],
+            'waypoint_buckets': {},
+            'already_connected': True,
+            'tap_edges_routed': 0,
+            'tap_edges_failed': 0,
+            'tap_pads_connected': len(pad_info),
+            'tap_pads_total': len(pad_info),
+        }
 
     # Sort MST edges by length (longest first)
     mst_edges = sorted(mst_edges, key=lambda e: -e[2])
@@ -1963,6 +2482,53 @@ def route_multipoint_main(
         }
 
     if path is None:
+        # #348 (ottercast RESETn): every main-edge attempt launches from PAD
+        # cells, so a terminal boxed in by static obstacles fails Phase 1
+        # outright even when its ISLAND has open copper (a free inner-layer
+        # stub end) a human routes from in seconds. When existing copper
+        # already joins terminals into fewer groups, don't fail the net:
+        # hand Phase 3 a synthetic empty main result rooted at the LARGEST
+        # copper-joined component -- its tap loop seeds sources from the
+        # island's copper (get_all_segment_tap_points over the existing base
+        # copper, see route_multipoint_taps) and has the orphan-pad fallback.
+        _has_copper = any(s.net_id == net_id for s in pcb_data.segments) or \
+            any(v.net_id == net_id for v in pcb_data.vias)
+        if _has_copper:
+            # Base = the component whose island carries the most existing
+            # copper (RESETn: three 1-terminal components, each its own
+            # island -- terminal count can't break the tie, copper can).
+            # Stub terminals resolve inside the helper.
+            from connectivity import get_terminal_component_info
+            _comps, _copper, _ = get_terminal_component_info(
+                pcb_data, net_id, pad_info)
+            _best = max(range(len(pad_info)),
+                        key=lambda i: _copper.get(_comps.get(i), 0))
+            _best_copper = _copper.get(_comps.get(_best), 0)
+            _base_comp = _comps.get(_best)
+            _base_idx = [i for i in range(len(pad_info))
+                         if _comps.get(i) == _base_comp]
+            if _base_idx and mst_edges and _best_copper > 0:
+                print(f"  Phase 1 exhausted from the pads; deferring "
+                      f"{len(mst_edges)} edge(s) to Phase 3's island-copper "
+                      f"sources (base component: {len(_base_idx)} terminal(s))")
+                _dummy = (_base_idx[0], _base_idx[0], 0.0)
+                return {
+                    'new_segments': [],
+                    'new_vias': [],
+                    'iterations': cumulative_iterations,
+                    'path_length': 0,
+                    'path': [],
+                    'is_multipoint': True,
+                    'multipoint_pad_info': pad_info,
+                    'routed_pad_indices': set(_base_idx),
+                    'pad_components': pad_components,
+                    'original_segments': [],
+                    'mst_edges': [_dummy] + mst_edges,
+                    'waypoint_buckets': waypoint_buckets,
+                    'phase1_exhausted': True,
+                    'tap_edges_routed': 0,
+                    'tap_edges_failed': 0,
+                }
         print(f"  Failed to route a main edge after {cumulative_iterations} iterations "
               f"({max_main_attempts} edge(s) tried)")
         failure = dict(last_failure or {'failed': True})
@@ -2001,6 +2567,12 @@ def route_multipoint_main(
         # that width, so obstacle blocking (reads seg.width) and output match.
         for _s in segments:
             _s.width = uniform_width
+    # Re-neck terminal grazes AFTER width assignment (#212): the neckdown/uniform
+    # passes above rebuild widths and would otherwise restore a grazing terminal leg
+    # to base/power width, undoing the graze-neck applied during conversion.
+    _neck_route_terminal_grazes(segments, path, coord,
+                                (pad_a[3], pad_a[4]), (pad_b[3], pad_b[4]),
+                                pcb_data, net_id, config)
     # Fab-floor via dropped inside a boxed main-edge pad to unblock it (#189).
     vias = list(vias) + main_unblock_vias
 
@@ -2101,6 +2673,36 @@ def route_multipoint_taps(
     global_total: int = 0,
     global_failed: int = 0
 ) -> Optional[dict]:
+    """route_multipoint_taps with guaranteed cleanup of the in-progress-via
+    rings (issue #309). _register_inprogress_via stamps raw ref-counted
+    blocked-via rings into `obstacles` while the taps route; when the caller
+    passed the PERSISTENT working map (reroute_loop's in-place mode) rather
+    than a per-net clone, those rings leaked forever - restore_obstacles_inplace
+    only removes its own same-net-via cells. The rings are per-route
+    scaffolding (the committed route's vias get their real keep-outs from the
+    net's recomputed obstacle cache), so remove exactly the cells added, on
+    every exit path. On a clone the removal is harmless."""
+    ring_cells: list = []
+    try:
+        return _route_multipoint_taps_impl(
+            pcb_data, net_id, config, obstacles, main_result,
+            global_offset, global_total, global_failed, ring_cells)
+    finally:
+        if ring_cells:
+            obstacles.remove_blocked_vias_batch(np.array(ring_cells, dtype=np.int32))
+
+
+def _route_multipoint_taps_impl(
+    pcb_data: PCBData,
+    net_id: int,
+    config: GridRouteConfig,
+    obstacles: 'GridObstacleMap',
+    main_result: dict,
+    global_offset: int = 0,
+    global_total: int = 0,
+    global_failed: int = 0,
+    _ring_cells: list = None
+) -> Optional[dict]:
     """
     Route the remaining MST edges for a multi-point net.
 
@@ -2158,20 +2760,67 @@ def route_multipoint_taps(
     # -- the VTT multipoint junction double-via (hole_to_hole DRC). The ring skips
     # the via's own cell so reuse stays open.
     _vv_radius = (config.via_size + config.clearance) * coord.inv_step
-    _vv_rng = int(math.ceil(_vv_radius))
-    _vv_sq = _vv_radius * _vv_radius
 
     def _register_inprogress_via(v):
         vgx, vgy = coord.to_grid(v.x, v.y)
         obstacles.add_free_via(vgx, vgy)
-        for ex in range(-_vv_rng, _vv_rng + 1):
-            for ey in range(-_vv_rng, _vv_rng + 1):
+        # Grow the ring by the via's sub-grid offset so a later same-net via keeps
+        # the full spacing from this via's TRUE centre, not its rounded cell --
+        # otherwise a fine-grid route drops a via a sub-cell too close (issue #70,
+        # mirroring add_same_net_via_clearance).
+        off_cells = math.hypot(v.x - vgx * coord.grid_step,
+                               v.y - vgy * coord.grid_step) / coord.grid_step
+        radius = _vv_radius + off_cells
+        rng = int(math.ceil(radius))
+        radius_sq = radius * radius
+        for ex in range(-rng, rng + 1):
+            for ey in range(-rng, rng + 1):
                 d = ex * ex + ey * ey
-                if 0 < d <= _vv_sq:
+                if 0 < d <= radius_sq:
                     obstacles.add_blocked_via(vgx + ex, vgy + ey)
+                    # Ref-counted raw add: the wrapper removes these on exit so
+                    # they can't leak into a persistent working map (#309).
+                    if _ring_cells is not None:
+                        _ring_cells.append((vgx + ex, vgy + ey))
 
     for _v in all_vias:
         _register_inprogress_via(_v)
+
+    # Phase-1-exhausted fallback (#348): the synthetic main result carries NO
+    # new copper, so seed the tap sources from the net's EXISTING copper that
+    # belongs to the routed base component(s) -- the island the terminals in
+    # routed_indices sit on. Sources restricted to the BASE component only:
+    # launching from an unconnected island would join the target to that
+    # island and mark it routed while the base stays split (#189).
+    source_extra_segments: List[Segment] = []
+    source_extra_vias: List = []
+    if main_result.get('phase1_exhausted'):
+        from connectivity import get_terminal_component_info
+        _comps, _copper, _segs_by_comp = get_terminal_component_info(
+            pcb_data, net_id, pad_info)
+        _base_comps = {_comps.get(_i) for _i in routed_indices}
+        _base_ends = []
+        for _c in _base_comps:
+            for _s in _segs_by_comp.get(_c, []):
+                # SOURCE-ONLY list: never into all_segments, whose final value
+                # becomes the result's new_segments (re-emitting existing
+                # copper would duplicate it in the output).
+                source_extra_segments.append(_s)
+                _base_ends.append((_s.start_x, _s.start_y))
+                _base_ends.append((_s.end_x, _s.end_y))
+        _net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+        # Existing vias touching the included base copper become tap points
+        # too (no in-progress ring: pcb_data vias already govern same-net via
+        # spacing in the obstacle build).
+        for _v in _net_vias:
+            _vr = (getattr(_v, 'size', 0.5) or 0.5) / 2 + 0.02
+            if any((abs(_v.x - _ex) <= _vr and abs(_v.y - _ey) <= _vr)
+                   for _ex, _ey in _base_ends):
+                source_extra_vias.append(_v)
+        if source_extra_segments or source_extra_vias:
+            print(f"  Seeding tap sources from the base island's existing "
+                  f"copper: {len(source_extra_segments)} segment(s), "
+                  f"{len(source_extra_vias)} via(s)")
 
     # Get remaining MST edges (skip the first one which was routed in Phase 1)
     # MST edges are already sorted longest-first
@@ -2290,7 +2939,9 @@ def route_multipoint_taps(
         # Get ALL points along existing segments and vias as potential tap sources
         # The router will find the shortest path from ANY of these points
         # Vias are included on ALL layers since they connect all copper layers
-        all_tap_points = get_all_segment_tap_points(all_segments, coord, layer_names, vias=all_vias)
+        all_tap_points = get_all_segment_tap_points(
+            all_segments + source_extra_segments, coord, layer_names,
+            vias=all_vias + source_extra_vias)
 
         # Always include the designated source pad position as a potential source
         # This is critical for zone-connected pads that have no segments to them yet
@@ -2421,6 +3072,12 @@ def route_multipoint_taps(
             # so obstacle blocking (reads seg.width) and output match.
             for _s in segments:
                 _s.width = uniform_width
+        # Re-neck terminal grazes AFTER width assignment (#212): the neckdown/uniform
+        # passes rebuild widths and would otherwise restore a grazing terminal leg to
+        # base/power width, undoing the graze-neck applied during conversion.
+        _neck_route_terminal_grazes(segments, path, coord,
+                                    (tap_x, tap_y), (tgt_x, tgt_y),
+                                    pcb_data, net_id, config)
         # Any fab-floor via dropped INSIDE the boxed target pad to unblock this
         # edge (issue #189) -- it connects the inner-layer path end to the pad by
         # copper overlap, no extra trace needed.
@@ -2573,10 +3230,12 @@ def _path_to_segments_vias(
                 pass
             else:
                 vx, vy = coord.to_float(gx1, gy1)  # via stays on the grid cell
+                _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config,
+                                            net_id=net_id, x=vx, y=vy)
                 via = Via(
                     x=vx, y=vy,
-                    size=config.via_size,
-                    drill=config.via_drill,
+                    size=_vsz,
+                    drill=_vdr,
                     layers=["F.Cu", "B.Cu"],  # Always through-hole
                     net_id=net_id
                 )

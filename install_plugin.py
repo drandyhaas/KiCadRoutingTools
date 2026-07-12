@@ -21,6 +21,7 @@ Content Manager is detected (it would sit next to the local install in the
 plugins directory and shadow it on sys.path) and moved aside, unless --keep-pcm
 is given.
 """
+from __future__ import annotations
 
 import os
 import sys
@@ -29,6 +30,7 @@ import shutil
 import platform
 import argparse
 from pathlib import Path
+from typing import Optional
 
 from startup_checks import get_cargo_version
 
@@ -232,7 +234,7 @@ def find_conflicting_pcm_installs(plugins_dir: Path) -> list:
     return conflicts
 
 
-def disable_pcm_install(pcm_dir: Path, version: str) -> Path | None:
+def disable_pcm_install(pcm_dir: Path, version: str) -> Optional[Path]:
     """Move a conflicting PCM plugin copy out of the plugin search path.
 
     Moved to <kicad_base>/disabled_pcm_plugins/<version>/ so it leaves sys.path

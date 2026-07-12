@@ -7,6 +7,7 @@ The bulk of routing functionality has been split into:
 - net_queries.py: Pad/net queries, MPS ordering, route length calculations
 - pcb_modification.py: Add/remove routes, segment cleanup
 """
+from __future__ import annotations
 
 import math
 from typing import Dict, List, Tuple

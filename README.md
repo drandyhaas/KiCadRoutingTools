@@ -11,56 +11,59 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
   <img src="docs/routed_kit.png" alt="Routed PCB example 2" width="600">
 </p>
 
+## Contents
+
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [KiCad Plugin](#kicad-plugin) — GUI, the AI **Claude tab**, installation
+- [Command-Line Interface](#command-line-interface) — routing, planes, verification
+- [Documentation](#documentation) — full guide for every feature
+- [Project Structure](#project-structure) & [Module Overview](#module-overview)
+- [Performance](#performance)
+- [Command Reference](#command-reference) — options per tool (full list: `--help` / [configuration.md](docs/configuration.md))
+- [Requirements](#requirements) · [Limitations](#limitations) · [Contributing](#contributing) · [License](#license)
+
 ## Features
 
-- **Grid-based A\* pathfinding** with Rust acceleration (~10x faster than Python)
-- **Octilinear routing** - Horizontal, vertical, and 45-degree diagonal moves
-- **Multi-layer routing** with automatic via insertion
-- **Differential pair routing** with pose-based A* and Dubins path heuristic for orientation-aware centerline routing
-- **Rip-up and reroute** - When routing fails, automatically rips up blocking routes and retries with progressive N+1 strategy (tries 1 blocker, then 2, up to configurable max). Re-analyzes blocking tracks after each failure for better recovery. Also triggers rip-up when quick probes detect blocking early, before attempting full routes. See [Rip-Up and Reroute](docs/rip-up-reroute.md) for details
-- **Ripped route corridor avoidance** - When a net is ripped up, soft penalties are applied to its former corridor. This encourages the current route to avoid that area, increasing the chance the ripped net can be successfully re-routed later.
-- **Blocking analysis** - Shows which previously-routed nets are blocking when routes fail
-- **Stub layer switching** - Optimization that moves stubs to different layers to avoid vias when source/target are on different layers. Works for both differential pairs and single-ended nets. Finds compatible swap pairs (two nets that can exchange layers to help each other) or moves stubs solo when safe. Tries multiple swap options (source/source, target/target, source/target, target/source) to find valid combinations. Validates that stub endpoints won't be too close to other stubs on the destination layer.
-- **Batch routing** with incremental obstacle caching (~7x speedup)
-- **Net ordering strategies** - MPS (crossing conflicts with diff pairs treated as units, shorter routes first using BGA-aware distance; uses segment intersection with MST for non-BGA boards), inside-out (BGA), or original order
-- **MPS layer swap** - When MPS detects crossing conflicts (nets in Round 2+), attempts layer swaps to eliminate same-layer crossings. Tries swapping both the conflicting Round 2 unit and Round 1 unit. Re-runs MPS after swaps to verify conflict resolution
-- **Board edge clearance** - Tracks and vias respect Edge.Cuts boundaries including curved edges (gr_arc), non-rectangular outlines, and interior cutouts. Arcs are automatically linearized into polylines for accurate clearance checking
-- **Keep-out rule areas** - Tracks and/or vias respect KiCad keep-out zones (rule areas with `(keepout (tracks not_allowed) (vias not_allowed) ...)`), blocking only the disallowed item on the keepout's listed layers (or all routing layers if none are listed). Track/via copper is kept clear of the boundary by the configured clearance, e.g. an antenna-flange RF exclusion
-- **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
-- **Stub proximity avoidance** - Penalizes routes near unrouted stubs, with direction-aware costs (moving away from stubs costs less)
-- **BGA proximity avoidance** - Penalizes routes near BGA edges, with direction-aware costs (moving away from BGA zones costs less)
-- **Track proximity avoidance** - Penalizes routes near previously routed tracks on the same layer, encouraging spread-out routing
-- **Vertical track alignment** - Attracts tracks on different layers to stack vertically (on top of each other), consolidating routing corridors and leaving more room for through-hole vias
-- **Adaptive setback angles** - Evaluates 9 setback angles (0°, ±max/4, ±max/2, ±3max/4, ±max) and selects the one that maximizes separation from neighboring stub endpoints, improving routing success when stubs are tightly spaced. Uses 0° when clearance to the nearest stub is sufficient (≥2× spacing), only angling away when stubs are too close
-- **U-turn prevention** - Prevents differential pair routes from making U-turns (>180° cumulative turn)
-- **GND via placement** - Automatically places GND vias adjacent to differential pair signal vias for return current paths. The Rust router checks clearance and determines optimal placement (ahead or behind signal vias)
-- **Automatic polarity resolution** - Detects when differential pair P/N polarity differs between source and target pads and resolves it by swapping target pad net assignments and/or routing the connectors out the opposite side at one end (bare-pad endpoints only); when both mechanisms can route, the shorter result wins. Swaps are applied consistently in the output file (CLI), the live board (plugin), and in-memory state. Use `--no-fix-polarity` to forbid pad swaps (default in the plugin GUI) - the pair is then skipped with a warning if no opposite-side route exists; crossing tracks are never written
-- **Bare-pad differential pairs** - Routes diff pairs directly between SMD pads with no fanout stubs (e.g., SOIC pins, termination resistors). The escape direction is derived from the pad geometry (perpendicular to the pad axis, away from the component body), and the pair's own pads are treated as obstacles outside the pad-entry corridors so the P/N tracks cannot cross the partner polarity's pad
-- **Multi-point differential pairs** - Pairs with 3+ pad-pair terminals (e.g., connector → termination → IC) are routed as a chain of legs passing "through" each terminal: a continuation leg leaves on the opposite side from the leg that arrived, since a pair cannot tap mid-track without P/N crossing. Alternative chain orderings are tried automatically if one fails
-- **Electrically-short legs route single-ended** - A coupled diff pair only earns its keep over an electrically long run. A leg shorter than ~5× the connector setback (measured by the shorter of its P/N runs) has no real coupled section — only fan-in/out — and forcing a coupled pair through clustered connector pads just tangles and shorts it. Such legs are deferred to single-ended: a 2-terminal pair is left whole for the single-ended pass, while a multi-point pair couples its long legs and defers only its short ones. The deferred nets are reported in the JSON summary (`single_ended_diff_pairs`, `single_ended_followup_nets`); the plan-pcb-routing workflow finishes them with a single-ended pass. **That follow-up must use the same track width / via size as the coupled pass** — mismatched widths between coupled and single-ended copper would themselves cause clearance errors (physics rule of thumb: even a 10 GHz / 10 Gb/s edge is electrically short over only ~1–3 mm, so a few-mm connector fan-in never needs coupling)
-- **Target swap optimization** - For swappable nets (e.g., memory lanes), uses Hungarian algorithm to find optimal source-to-target assignments that minimize crossings. Works for both differential pairs and single-ended nets
-- **Schematic synchronization** - When `--schematic-dir` is specified, updates KiCad schematic files with any pad swaps (target swaps or polarity swaps) to keep schematics in sync with PCB. Handles multi-unit symbols correctly by updating all schematic files containing the lib_symbol. Disabled by default
-- **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
-- **Turn cost penalty** - Penalizes direction changes during routing to encourage straighter paths with fewer wiggles
-- **Bus routing** - Automatically detects groups of nets with clustered endpoints (buses) and routes them together. Uses direction-based attraction so each net follows its neighbor's path in parallel, creating clean parallel traces. Routes from the middle of the bus outward, alternating sides. Enable with `--bus` flag. Configurable detection radius, attraction radius, and attraction bonus. See [Bus Routing](docs/bus-routing.md) for details
-- **Guide corridor (preferred route)** - Draw a polyline on a User layer (e.g. `User.1`) in KiCad and the selected nets are routed to follow it as waypoints — source → along your drawn path → target — getting as close to the line as obstacles allow. For multi-point nets each waypoint steers the nearest segment of the net's existing MST, so endpoints/topology are untouched. It's strictly best-effort: a waypoint it can't follow on the current layer is skipped (so a guide never makes a route fail or adds vias the direct route wouldn't need), and multiple nets following the same corridor pack alongside without overlapping. Enable with `--guide-corridor` (CLI) or the "Follow User-layer guide path" checkbox (plugin); configurable layer and waypoint spacing. See [Guide Corridor Options](docs/configuration.md#guide-corridor-options-preferred-route) for details
-- **Keepout zones** - Draw one or more closed polygons on a User layer (e.g. `User.2`) in KiCad and routed tracks (and vias) are kept **out** of those areas on every copper layer. It's a hard keepout that applies across single-ended, multipoint, and differential-pair routing, plus plane via-stitching and plane repair — useful for reserving analog regions, antenna clearances, or mechanical exclusions. Enable with `--keepout` (`route.py` / `route_diff.py`) or the "Keep out of User-layer polygon(s)" checkbox (plugin); configurable layer. (Don't draw a zone over a pad you need to route.)
-- **Length matching** - Adds trombone-style meanders to match route lengths within groups (e.g., DDR4 byte lanes). Auto-groups DQ/DQS nets by byte lane. Per-bump clearance checking with automatic amplitude reduction to avoid conflicts with other traces. Supports multi-layer routes with vias. Calculates via barrel length from board stackup for accurate length matching that matches KiCad's measurements. Includes stub via barrel lengths (BGA pad vias) using actual stub-layer-to-pad-layer distance. See [Length Matching](docs/length-matching.md) for details
-- **Time matching** - Alternative to length matching that matches propagation delay instead of physical length. Accounts for different signal speeds on outer layers (microstrip, faster) vs inner layers (stripline, slower) using effective dielectric constants from the board stackup. Use `--time-matching` to enable. Tolerance specified in picoseconds. See [Length Matching](docs/length-matching.md#time-matching) for details
-- **Multi-point routing** - Routes nets with 3+ pads using an MST-based 3-phase approach: (1) compute MST between all pads and route the longest edge, (2) apply length matching, (3) route remaining MST edges in length order (longest first). This ensures length-matched routes are clean 2-point paths while connecting all pads optimally
-- **Impedance-controlled routing** - Specify target impedance (e.g., 50Ω single-ended, 100Ω differential) and track widths are automatically calculated per layer from the board stackup. Uses IPC-2141 formulas for microstrip (outer layers) and stripline (inner layers). Widths adjust automatically when switching layers via vias to maintain target impedance
-- **Power net routing** - Route power nets (GND, VCC, etc.) with wider tracks than signal nets. Specify patterns and corresponding widths (e.g., `--power-nets "*GND*" "*VCC*" --power-nets-widths 0.4 0.5`). First matching pattern determines width for each net. Obstacle clearances automatically adjust for wider power traces. Power net widths are never smaller than the base track width
-- **Power route neck-down** - When a wide power route cannot fit (e.g. escaping a fine-pitch pad), it is automatically retried at the layer's default track width: narrow within `--neckdown-length` (default 2.5mm) of the pads, returning to the power width beyond that wherever clearance allows, with a stepped width taper at each transition (`--neckdown-taper-length`, default 0.5mm). Disable with `--no-power-tap-neckdown`
-- **Net class support** - The KiCad plugin reads net class parameters (track width, via size, clearance) from the board and uses them automatically. Nets can be organized by net class in separate tabs for easier selection. When routing nets from different classes, obstacle clearances properly account for the larger clearance requirements (e.g., routing "Wide" class nets with 0.4mm clearance near "Default" class pads)
-- **AI-powered power net analysis** - Use the `/analyze-power-nets` skill to identify power nets and recommend track widths. The skill uses WebSearch to look up component datasheets, classifies components by their role (power source, current sink, pass-through, shunt), traces current paths, and generates ready-to-use `--power-nets` configurations. See [Power Net Analysis](docs/power-nets.md) for details
-- **Power/ground plane via connections** - Automatically places vias to connect SMD pads to inner-layer copper planes. Supports multiple nets in one run (e.g., GND and VCC planes). Smart via placement tries pad center first (or, with `--same-net-pad-clearance >= 0`, forces vias outside same-net pads with the given edge-to-edge clearance), then spirals outward with A* routing to pads. Optional blocker rip-up removes interfering nets to maximize via placement, with automatic re-routing of ripped nets
-- **Multi-net plane layers** - Multiple power nets can share a single copper layer using Voronoi partitioning. Each net's vias get their own non-overlapping zone polygon. MST-based routing connects all vias of each net, with routes sampled as additional Voronoi seeds to ensure connected zones. Retries with net reordering when edges fail to route. Displays plane resistance and max current capacity (IPC-2152) for each polygon
-- **Disconnected plane region repair** - After power planes are created, regions may be effectively split due to vias and traces from other nets cutting through the plane. The `route_disconnected_planes.py` script detects disconnected regions and routes wide, short tracks between them to ensure electrical continuity. It also runs a **pad-level repair**: a plane-net pad with no connection to its plane gets a via dropped (or a trace to a nearby same-net via). A pad too small to drop a via in (e.g. a tiny USB-connector GND pin on the outer layer) is connected by a **trace to an adjacent same-net pad** — the human's connector-pin-to-shield strategy. With `--rip-blocker-nets` (`--max-rip-nets`), a signal net blocking that trace is ripped, the pad connected, and the ripped net **re-routed** (`--reroute-ripped-nets`) with the original signal parameters (`--power-nets`/`--power-nets-widths`/`--no-bga-zone`), restoring any net that can't re-route rather than leaving it disconnected. Exposed in the plugin's Planes "repair" tab ("Rip up blocking nets" / "Auto-reroute ripped nets")
-- **GND return via placement** - Automatically places GND vias near signal vias for return current paths. Searches from minimum viable distance outward (24 angles, fine step), placing GND vias as close as possible while respecting track clearances. Through-hole GND pads count as existing return paths. Use `--add-gnd-vias` with route_planes.py
-- **Post-route copper cleanup** - After routing settles, the output is reconciled to the actual board so it can never contain copper that was ripped off and not restored - including a different-net via that another net legitimately took while this net was ripped (an un-manufacturable drill-on-drill short). A whole-net dead-end sweep then trims dangling stubs left by rip-and-reroute and unused fanout/escape tails (tap tails, superseded spurs), and a per-commit prune keeps a route's own dead copper from blocking later routes. Every removal is gated against the connectivity model, so it never trims copper that carries a pad (plane landings, sole paths, T-junction taps are kept). Conversely, where a route stopped a fraction of a track width short of its same-net pad/via/trace, a short connector is added to physically close the gap (when it clears other nets, including not entering another net's copper pour), so the copper actually touches instead of relying on a connectivity tolerance to bridge it. The same sweep + gap-snap also runs on the plane tools' output (`route_planes.py`, `route_disconnected_planes.py`), so plane copper gets cleaned too. `check_orphan_stubs.py` reports what genuinely remains
-- **Real-time visualization** - Watch the A* search explore the grid live with the optional [PyGame visualizer](pygame_visualizer/README.md) (`route.py --visualize`), with pause/step, zoom/pan, per-layer filtering, and speed control
-- **AI-assisted routing from the plugin (Claude tab)** - The plugin GUI drives [Claude Code](https://claude.ai/claude-code) headless: a Claude tab generates a full routing plan (`/plan-pcb-routing`) that fills the dialog's parameters and executes as a checkable step list in-process on the live board, plus one-click reviews and per-field "Ask Claude" buttons on the Basic/Differential/Planes tabs (power nets, diff pairs, plane mappings, GND via distance, stackup). See [Claude Skills - Plugin GUI Integration](docs/claude-skills.md#plugin-gui-integration)
-- **AI-powered high-speed net analysis** - Use the `/find-high-speed-nets` skill to identify which nets carry high-speed signals. Looks up component datasheets via WebSearch to find max interface frequencies and rise times, traces signals through series passives, and recommends `--gnd-via-distance` values based on the fastest signals on the board. See [Claude Skills](docs/claude-skills.md) and the [GND return via distance guidance](#gnd-return-via-distance-guidance) in the planes documentation
+Fast, grid-based A\* routing with a native Rust core (~10× faster than pure Python): octilinear (H/V/45°) multi-layer routing with automatic vias, and batch routing with incremental obstacle caching. Highlights below link to the full deep-dive docs.
+
+**Core routing**
+- Rust-accelerated A\* pathfinding, multi-layer with automatic via insertion
+- [Rip-up and reroute](docs/rip-up-reroute.md) — progressive N+1 blocker analysis, ripped-corridor avoidance
+- [Net ordering strategies](docs/net-ordering.md) — MPS (crossing-aware), inside-out, or original, with MPS layer swaps
+- Stub layer switching, vertical track alignment, turn-cost straightening
+- Board-edge (Edge.Cuts arcs/cutouts), keep-out rule areas, and auto BGA exclusion zones — see [Configuration](docs/configuration.md)
+- Direction-aware stub / BGA / track [proximity penalties](docs/configuration.md)
+
+**Differential pairs** — see [Differential Pairs](docs/differential-pairs.md)
+- Pose-based A\* with a Dubins heuristic and adaptive setback angles for orientation-aware centerlines
+- Bare-pad, multi-point (3+ terminals), and hybrid (coupled middle + single-ended legs) routing
+- Automatic polarity resolution (opt-in pad swaps), U-turn prevention, GND return-via placement
+- Electrically-short legs auto-defer to single-ended; per-layer [impedance-controlled](docs/differential-pairs.md) widths
+
+**Power & planes** — see [Plane Routing](docs/route-plane.md) and [Power Nets](docs/power-nets.md)
+- [Wider power-net routing](docs/power-nets.md) with automatic neck-down at fine-pitch pads
+- Plane via connections and multi-net Voronoi plane layers with resistance / max-current reporting
+- Disconnected-plane-region repair (region joins + pad taps) and GND return-via placement
+
+**Signal integrity**
+- [Length matching](docs/length-matching.md) — trombone meanders, auto DQ/DQS grouping, via-barrel aware
+- [Time matching](docs/length-matching.md#time-matching) — propagation delay, microstrip vs stripline
+- [Bus routing](docs/bus-routing.md), plus [guide corridors and keep-out zones](docs/configuration.md) drawn on a User layer
+
+**Placement, fanout & optimization**
+- [Placement optimization](docs/placement-optimization.md) for routability, before routing
+- BGA / QFN fanout with decoupling-cap placement cleanup, Hungarian target-swap, and schematic sync
+
+**Cleanup & verification** — see [Utilities](docs/utilities.md)
+- Post-route copper cleanup reconciled against the connectivity model (no orphaned or ripped-and-not-restored copper), with gap-snap connectors
+- **KiCad-oracle reconnect** — routes the exact links KiCad's own DRC reports as unconnected
+- Checkers for DRC, connectivity, orphan stubs, copper hygiene (`check_weird.py`), and pad geometry
+
+**Interfaces**
+- Full [KiCad plugin GUI](#kicad-plugin) (KiCad 9 & 10) and a scriptable [CLI](#command-line-interface)
+- [AI assistance](docs/claude-skills.md) — a **Claude tab** that plans an entire routing workflow, per-field "Ask Claude" helpers, and datasheet-driven power / high-speed / diff-pair analysis
+- Optional [real-time PyGame visualizer](pygame_visualizer/README.md) (`route.py --visualize`)
 
 ## Quick Start
 
@@ -192,6 +195,7 @@ The plugin provides a full graphical interface for all routing features, running
 With [Claude Code](https://claude.ai/claude-code) installed, the routing dialog gains AI assistance throughout (the plugin spawns `claude` headless, streams a live transcript, and fills GUI controls from the results):
 
 - **Claude tab** - *Plan Routing* runs `/plan-pcb-routing`: the plan fills the parameter fields across the tabs and appears as a checkable step list, which *Run Selected Steps* executes sequentially in-process on the live board with per-step status marks. *Review Routed Board* and *Diagnose Routing Failures* give post-route QA and failure root-causing. Model and effort dropdowns control every AI run and persist with the dialog settings.
+- **Save / Load a plan** - *Save…* writes the generated step list to a JSON file; *Load…* reads one back and runs it with **no Claude call** — handy for replaying a workflow that worked on another board. A recorded stress-test chain converts to a loadable plan too (`tests/stress/manifest_to_plan.py <board>/redo_commands.sh plan.json`).
 - **Per-field "Ask Claude" buttons** - power nets/widths (Basic tab), stackup check (Layers), differential-pair verification by pin function (Differential tab), net-to-plane layer mappings and GND return via distance (Planes tab).
 
 The full button-to-skill map is in [Claude Skills - Plugin GUI Integration](docs/claude-skills.md#plugin-gui-integration). Datasheet-based skills use web lookups and take a few minutes; every run shows a live transcript with cancel.
@@ -429,7 +433,9 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/outp
 ### 4. Verify Results
 
 ```bash
-# Check for DRC violations (default clearance: 0.2mm)
+# Check for DRC violations. With no -c, grades at the clearance the routing
+# steps wrote into the sibling .kicad_pro (the smallest clearance any step
+# actually used); falls back to 0.2mm if there's no project. Pass -c to override.
 python check_drc.py kicad_files/output.kicad_pcb
 
 # Cross-check with KiCad's own DRC engine (requires KiCad; --refill-zones avoids
@@ -468,7 +474,13 @@ python check_pads.py kicad_files/board.kicad_pcb --cross-footprint  # also acros
 # (it can cut diagonally across foreign copper). qfn_fanout escape stubs are
 # excluded automatically; bga_fanout's short stub-end jogs clear the 0.25mm default.
 python check_orthonormal.py kicad_files/output.kicad_pcb
+
+# Copper hygiene (read-only): dangling stubs, same-net soft joints, redundant
+# cycles, and removable / stacked / floating copper the routing left behind.
+python check_weird.py kicad_files/output.kicad_pcb
 ```
+
+See [Utilities](docs/utilities.md) for every checker and its options.
 
 ### 5. Power Net Analysis
 
@@ -541,7 +553,7 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
 | [Visualizer](pygame_visualizer/README.md) | Real-time A* visualization with PyGame |
 | [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
-| [Claude Skills](docs/claude-skills.md) | All eight AI skills: routing plans, power/high-speed/diff-pair analysis, stackup, plane mappings, failure diagnosis, board review |
+| [Claude Skills](docs/claude-skills.md) | All nine AI skills: routing plans, power/high-speed/diff-pair analysis, stackup, plane mappings, failure diagnosis, board review |
 | [Placement](placement/README.md) | Placement optimization for routability |
 | [Integration Tests](tests/README.md) | Test scripts and performance benchmarks |
 | [Release Pipeline](docs/release-pipeline.md) | How to tag a release and submit it to the KiCad PCM (maintainers) |
@@ -650,11 +662,16 @@ KiCadRoutingTools/
 │   ├── differential_gui.py   # Differential pair routing tab
 │   ├── fanout_gui.py         # BGA/QFN fanout tab and net selection panel
 │   ├── planes_gui.py         # Power/ground planes tab
+│   ├── claude_gui.py         # Claude tab (spawns claude headless, streams transcript)
+│   ├── claude_plan.py        # Claude tab routing-plan orchestration
+│   ├── board_swaps.py        # Shared board pad/net swap helpers
+│   ├── deps_check.py         # Plugin dependency checks
 │   ├── about_tab.py          # About tab with version info
 │   ├── gui_utils.py          # Shared GUI utilities
 │   └── settings_persistence.py  # Save/restore dialog settings between sessions
 ├── placement/               # Component placement
-│   ├── engine.py            # Core placement algorithm
+│   ├── quench.py            # Placement optimizer
+│   ├── fanout_clearance.py  # Fanout clearance evaluation
 │   ├── parser.py            # Courtyard boundary extraction
 │   ├── writer.py            # Footprint position modification
 │   └── utility.py           # Shared placement utilities
@@ -666,6 +683,7 @@ KiCadRoutingTools/
     ├── plan-pcb-routing/     # AI-powered routing plan generation skill (orchestrates the others)
     ├── identify-diff-pairs/  # Datasheet-based diff pair detection skill
     ├── recommend-stackup/    # Stackup review/recommendation skill
+    ├── recommend-plane-mappings/  # Net-to-plane-layer assignment skill
     ├── diagnose-routing-failures/  # Failure root-cause and retry skill
     ├── review-routed-board/  # Post-route QA and sign-off skill
     └── stress-test-router/   # Batch stress-test on real-world boards + issue filing (dev/QA)
@@ -769,304 +787,36 @@ Integration test results (`tests/test_fanout_and_route.py`):
 
 Rust acceleration provides ~10x speedup vs pure Python.
 
-## Common Options
+## Command Reference
 
-### Single-Ended Routing (route.py)
+Every tool prints its full option list with `--help`, and **[docs/configuration.md](docs/configuration.md)** is the single source of truth for the flags — defaults, guidance, and which tool each applies to. The tool-specific guides go deeper on their area:
 
-```bash
-python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
-
-# Output options (default: input_routed.kicad_pcb)
---overwrite, -O         # Overwrite input file instead of creating _routed copy
-
-# Net selection (default: "*" = all nets)
---nets "pattern" ...    # Net names or wildcard patterns to route
-                        # Supports exclusion: --nets "*" "!GND" "!VCC" = all except GND/VCC
---component U1          # Route all nets on U1 (auto-excludes GND/VCC/VDD/unconnected unless --nets given)
-
-# Geometry
---track-width 0.3       # Track width (mm), ignored if --impedance specified
---impedance 50          # Target single-ended impedance (ohms), calculates width per layer from stackup
---clearance 0.25        # Track clearance (mm)
---via-size 0.5          # Via diameter (mm)
---via-drill 0.3         # Via drill (mm)
-
-# Power net routing (wider tracks for power/ground)
---power-nets "*GND*" "*VCC*"  # Glob patterns for power nets
---power-nets-widths 0.4 0.5   # Widths in mm for each pattern (must match --power-nets length)
---neckdown-length 2.5         # Narrow track length (mm) from the pads when a failed wide power
-                              # route is retried at the default width (neck-down)
---neckdown-taper-length 0.5   # Narrow-to-wide width taper length in mm (0 = abrupt)
---no-power-tap-neckdown       # Disable the neck-down retry of failed wide power routes
-
-# Algorithm
---grid-step 0.1         # Grid resolution (mm). For dense or fine-pitch boards use
-                        # --grid-step 0.05: it gives the router room to route legally
-                        # around correctly-blocked pads, recovering both completion and
-                        # DRC-cleanliness (e.g. castor_pollux: 0.1mm 101 nets vs 0.05mm
-                        # 123 nets, both DRC-clean). The coarser the grid, the fewer legal
-                        # routes near tight pads.
---via-cost 50           # Via penalty in 0.1mm grid steps (50 = 5mm of path; all cost knobs
-                        # are mm-calibrated, so behavior is independent of --grid-step)
---max-iterations 200000      # A* iteration limit
---max-probe-iterations 5000  # Quick probe per direction to detect stuck routes
---heuristic-weight 1.9       # A* greediness (>1 = faster)
---proximity-heuristic-factor 0.02  # Proximity cost estimate (only applied when endpoints in zones, diff pairs use 1/10th)
---turn-cost 1000             # Penalty for direction changes (straighter paths)
---direction-preference-cost 50   # Penalty for non-preferred layer direction (0=disabled)
-                                 # Alternates H/V: F.Cu=horizontal, In1.Cu=vertical, etc.
---max-ripup 3                # Max blockers to rip up at once (1-N progressive)
---routing-clearance-margin 1.0   # Multiplier on track-via clearance (1.0 = min DRC, default)
---hole-to-hole-clearance 0.2 # Minimum drill hole edge-to-edge clearance (mm)
---board-edge-clearance 0.0   # Clearance from board edge (0 = use track clearance)
-
-# Strategy
---ordering mps          # mps | inside_out | original
---layers F.Cu B.Cu      # Routing layers (default: 2-layer)
---layer-costs 1.0 3.0   # Per-layer cost multipliers (1.0-1000)
-                        # Default: 4+ layers = all 1.0; 2 layers = F.Cu=1.0, B.Cu=3.0
-                        # Order matches --layers. Use to prefer certain layers (e.g., keep signals on F.Cu)
---no-bga-zones          # Allow routing through all BGA areas
---no-bga-zones U1 U3    # Allow routing through specific BGAs only (or all if none given)
-
-# Proximity penalties
---stub-proximity-radius 2.0  # Radius around stubs to penalize (mm)
---stub-proximity-cost 0.2    # Cost penalty near stubs (mm equivalent)
---bga-proximity-radius 7.0  # Radius around BGA edges to penalize (mm)
---bga-proximity-cost 0.2     # Cost penalty near BGA edges (mm equivalent)
---track-proximity-distance 2.0  # Radius around routed tracks (mm, same layer)
---track-proximity-cost 0.0   # Cost penalty near tracks (0 = disabled)
---vertical-attraction-radius 1.0  # Radius for cross-layer track attraction (mm)
---vertical-attraction-cost 0.0    # Cost bonus for cross-layer alignment (0 = disabled)
---ripped-route-avoidance-radius 1.0  # Radius around ripped route corridors (mm)
---ripped-route-avoidance-cost 0.1    # Cost penalty for routing through ripped corridors (0 = disabled)
-
-# Bus routing (parallel groups of nets)
-# Detects groups of nets with clustered endpoints and routes them together.
-# Routes middle net first (guide track), then alternates outward with attraction
-# to keep traces parallel. Use --verbose to see routing order and attraction relationships.
---bus                           # Enable bus detection and parallel routing
---bus-detection-radius 5.0      # Max endpoint distance to form bus group (mm)
---bus-attraction-radius 5.0     # Attraction radius from neighbor track (mm)
---bus-attraction-bonus 5000     # Cost bonus for staying parallel to neighbor
---bus-min-nets 2                # Minimum nets to form a bus group
-
-# Guide corridor: route selected nets to follow a polyline drawn on a User layer (issue #7)
---guide-corridor                # Steer routed nets along the drawn guide polyline
---guide-corridor-layer User.1   # User layer the guide polyline is drawn on
---guide-corridor-spacing 0.0    # Max mm between waypoints (0 = drawn vertices only; >0 subdivides)
-
-# Keepout zones: keep routed tracks out of polygons drawn on a User layer (issue #27)
---keepout                       # Keep routed tracks out of the drawn keepout polygons
---keepout-layer User.2          # User layer the keepout polygons are drawn on
-
-# Layer optimization
---no-stub-layer-swap    # Disable stub layer switching
-
-# Target swap optimization
---swappable-nets "*rx*"  # Glob patterns for nets that can have targets swapped
---schematic-dir /path/to/kicad  # Optional: sync pad swaps to .kicad_sch files (disabled by default)
-                                # Updates lib_symbols in ALL files containing the symbol
---crossing-penalty 1000  # Penalty for crossing assignments (default: 1000)
---no-crossing-layer-check  # Count crossings regardless of layer (default: same-layer only)
---mps-reverse-rounds     # Route most-conflicting MPS groups first (instead of least)
---mps-layer-swap         # Try layer swaps to resolve MPS crossing conflicts
---mps-segment-intersection  # Force segment intersection method for MPS (auto when no BGAs)
-
-# Length matching (for DDR4 DQ/DQS signals)
---length-match-group auto       # Auto-group DDR4 nets by byte lane (DQ0-7+DQS0, DQ8-15+DQS1, etc)
---length-match-group "pattern1" "pattern2"  # Manual grouping by net patterns
---length-match-tolerance 0.1    # Acceptable length variance within group (mm)
---meander-amplitude 1.0         # Height of meanders perpendicular to trace (mm)
-
-# Time matching (alternative to length matching)
---time-matching                 # Match propagation time instead of length (accounts for layer dielectric)
---time-match-tolerance 1.0      # Acceptable time variance within group (ps)
-
-# Debug
---verbose               # Print detailed diagnostic output
---debug-lines           # Output debug geometry on User layers
---skip-routing          # Skip routing, only do swaps and write debug info
---debug-memory          # Print memory usage statistics during routing
---add-teardrops         # Add teardrop settings to all pads in output file
---stats                 # Print A* search statistics (cells expanded, heuristic efficiency, etc.)
-```
-
-### Differential Pair Routing (route_diff.py)
+| Tool | Purpose | Guide |
+|------|---------|-------|
+| `route.py` | Single-ended routing | [Configuration](docs/configuration.md) |
+| `route_diff.py` | Differential-pair routing | [Differential Pairs](docs/differential-pairs.md) |
+| `route_planes.py` | Power/ground plane via connections | [Plane Routing](docs/route-plane.md) |
+| `route_disconnected_planes.py` | Plane region repair + pad taps | [Plane Routing](docs/route-plane.md) |
+| `bga_fanout.py` / `qfn_fanout.py` | BGA / QFN escape fanout | [BGA](bga_fanout/README.md) · [QFN](qfn_fanout/README.md) · [Utilities](docs/utilities.md) |
+| `place_fanout_clearance.py` | Move decoupling caps off fanout vias | [Utilities](docs/utilities.md) |
+| `place_optimize.py` | Placement for routability | [Placement Optimization](docs/placement-optimization.md) |
+| `check_*.py` | DRC / connectivity / hygiene / pad checks | [Utilities](docs/utilities.md) |
 
 ```bash
-python route_diff.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
+# Full option list for any tool
+python route.py --help
 
-# Output options (default: input_routed.kicad_pcb)
---overwrite, -O         # Overwrite input file instead of creating _routed copy
-
-# Net selection (default: "*" = all nets)
-# All nets specified with --nets are treated as differential pairs (P/N naming convention)
-
-# Diff pair specific options
---impedance 100         # Target differential impedance (ohms), calculates width per layer from stackup
---diff-pair-gap 0.101   # P-N gap (mm), also used as spacing for impedance calculation
---diff-pair-centerline-setback  # Setback distance (default: 2x P-N spacing)
---min-turning-radius 0.2      # Min turn radius (mm)
---max-turn-angle 180          # Max cumulative turn (degrees, prevents U-turns)
---max-setback-angle 45        # Max angle for setback search (degrees)
---direction backward    # Route from target to source
---no-gnd-vias           # Disable GND via placement (enabled by default)
---diff-chamfer-extra 1.5      # Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings)
---diff-pair-intra-match       # Match P/N lengths within each diff pair (meander shorter track)
-
-# Layer optimization
---no-stub-layer-swap    # Disable stub layer switching
---can-swap-to-top-layer # Allow swapping stubs to F.Cu (off by default)
-
-# Target/polarity swap with schematic sync
---swappable-nets "*rx*"  # Glob patterns for nets that can have targets swapped
---schematic-dir /path/to/kicad  # Optional: sync pad swaps to .kicad_sch files (disabled by default)
-                                # Syncs target swaps (P1_P<->P2_P, P1_N<->P2_N) and polarity swaps (P<->N)
-                                # Updates ALL schematic files containing the lib_symbol
-
-# All other options from route.py also apply (geometry, strategy, proximity, length matching, etc.)
+# A typical chain: GND plane, then signals, then differential pairs
+python route_planes.py board.kicad_pcb board.kicad_pcb --nets GND --plane-layers B.Cu
+python route.py board.kicad_pcb -O --nets "*" "!GND"
+python route_diff.py board.kicad_pcb -O --nets "*_P" "*_N" --diff-pair-gap 0.15
 ```
 
-### Power/Ground Plane Via Connections (route_planes.py)
-
-```bash
-python route_planes.py kicad_files/input.kicad_pcb [output.kicad_pcb] --nets GND --plane-layers B.Cu [OPTIONS]
-
-# Output options (default: input_routed.kicad_pcb)
---overwrite, -O         # Overwrite input file instead of creating _routed copy
-
-# Required (can specify multiple nets/plane layers)
---nets, -n GND VCC          # Net name(s) for planes (e.g., GND VCC +3.3V)
-                            # Use | to share a layer: "VA19|VA11" creates Voronoi-partitioned zones
---plane-layers, -p In1.Cu In2.Cu  # Plane layer(s), one per net (or one per net group)
-
-# Via/trace geometry
---via-size 0.5          # Via outer diameter (mm)
---via-drill 0.3         # Via drill size (mm)
---track-width 0.3       # Track width for via-to-pad connections (mm)
---clearance 0.25        # Clearance (mm)
-
-# Zone options
---zone-clearance 0.2    # Zone clearance from other copper (mm)
---min-thickness 0.1     # Minimum zone copper thickness (mm)
-
-# Algorithm
---grid-step 0.1         # Grid resolution (mm)
---max-search-radius 10.0  # Max radius to search for valid via position (mm)
---max-via-reuse-radius 1.0  # Max radius to prefer reusing existing via (mm)
---close-via-radius 0.5      # Radius to check for nearby vias before placing new one (default: 2.5 * via-size)
---hole-to-hole-clearance 0.2  # Minimum drill hole clearance (mm)
---layers, -l F.Cu In1.Cu In2.Cu B.Cu  # All copper layers for routing and via span
---layer-costs 1.0 1.0 1.0 1.0  # Per-layer cost multipliers (1.0-1000)
-                               # Default: 4+ layers = all 1.0; 2 layers = F.Cu=1.0, B.Cu=3.0
---board-edge-clearance 0.5  # Zone clearance from board edge (mm)
-
-# Multi-net plane layers (Voronoi partitioning)
---plane-proximity-radius 2.0  # Proximity radius for routing around other nets' vias (mm)
---plane-proximity-cost 5.0    # Proximity cost for routing around other nets' vias
---plane-track-via-clearance 0.8  # Clearance from MST track center to other nets' via centers (mm)
---voronoi-seed-interval 2.0   # Sample interval for seed points along connection routes (mm)
---plane-max-iterations 200000 # Max A* iterations for plane connection routing
-
-# Blocker rip-up
---rip-blocker-nets      # Rip up nets blocking via placement
---max-rip-nets 3        # Max blocker nets to rip up per pad (default: 3)
---reroute-ripped-nets   # Automatically re-route ripped nets after via placement
---power-nets "*GND*" "*VCC*"  # Glob patterns for power nets (wider tracks when rerouting)
---power-nets-widths 0.4 0.5   # Track widths for each power-net pattern
-
-# Debug
---dry-run               # Analyze without writing output
---verbose, -v           # Print detailed debug messages
---debug-lines           # Draw MST routes on User.1, User.2, etc. per net
---add-teardrops         # Add teardrop settings to all pads in output file
-
-# GND return via placement (for signal integrity)
---add-gnd-vias          # Add GND vias near signal vias for return current paths
---gnd-via-net GND       # Net name for GND vias (default: GND)
---gnd-via-distance 2.0  # Max distance from signal via to place GND via (mm, default: 2.0)
-```
-
-Features:
-- **Multi-net support** - Process multiple nets in one run (e.g., GND and VCC planes)
-- **Voronoi partitioning** - Multiple nets can share a single plane layer using `|` separator (e.g., `"VA19|VA11"`). Each net's vias get non-overlapping zone polygons. MST edges are routed between all vias using A* pathfinding, with routes sampled as Voronoi seeds to ensure connected zones. Retries with failed nets first (up to 5 iterations)
-- **Automatic pad classification** - Identifies SMD pads needing vias vs through-hole/zone-layer pads
-- **Smart via placement** - Places vias at pad center when possible, spirals outward when blocked
-- **A\* trace routing** - Routes traces from offset vias to pads, avoiding all copper layers
-- **Via reuse with fallback** - Prefers nearby vias within reuse radius, falls back to farther vias if placement fails
-- **Blocker rip-up** - When via placement/routing fails, identifies blocking nets and temporarily removes them, then retries
-- **Automatic re-routing** - Optionally re-routes ripped nets after all plane vias are placed
-- **Zone creation** - Creates copper pour zone. If an existing zone for the same net/layer is present, it is replaced with new parameters (clearance, min_thickness)
-- **Resistance analysis** - Calculates and displays approximate plane resistance and maximum current capacity (IPC-2152) for each polygon. For multi-net layers, uses the longest MST route path length; for single-net layers, uses the bounding box diagonal. Samples polygon width perpendicular to the current path to estimate effective cross-section. Assumes 1 oz copper and 10°C temperature rise
-
-See [Power/Ground Planes](docs/route-plane.md) for detailed documentation.
-
-### Disconnected Plane Region Repair (route_disconnected_planes.py)
-
-After creating power planes, regions may become split by vias and traces from other nets cutting through. This script detects disconnected regions within each plane zone and routes wide, short tracks between them.
-
-```bash
-python route_disconnected_planes.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
-
-# Output options (default: input_routed.kicad_pcb)
---overwrite, -O         # Overwrite input file instead of creating _routed copy
-
-# Zone selection (auto-detects all zones if not specified)
---nets, -n GND +3.3V        # Net name(s) to process
---plane-layers, -p B.Cu In1.Cu  # Plane layer(s) to process
---layers, -l F.Cu In1.Cu In2.Cu B.Cu  # Layers available for routing (default: all copper)
-
-# Track width
---max-track-width 2.0       # Maximum track width for connections (mm)
---min-track-width 0.2       # Minimum track width for connections (mm)
---track-width 0.3           # Default track width for routing config (mm)
-
-# Clearance
---clearance 0.25            # Trace-to-trace clearance (mm)
---zone-clearance 0.2        # Zone fill clearance around obstacles (mm)
---track-via-clearance 0.8   # Clearance from tracks to other nets' vias (mm)
---board-edge-clearance 0.5  # Clearance from board edge (mm)
---hole-to-hole-clearance 0.3  # Minimum clearance between drill holes (mm)
-
-# Via options
---via-size 0.5              # Via outer diameter (mm)
---via-drill 0.3             # Via drill diameter (mm)
-
-# Grid
---grid-step 0.1             # Routing grid step (mm)
---analysis-grid-step 0.5    # Grid step for connectivity analysis (coarser = faster)
-
-# Routing
---max-iterations 200000     # Maximum A* iterations per route attempt
-
-# Debug
---dry-run                   # Analyze without writing output
---verbose, -v               # Print detailed debug messages
---debug-lines               # Add debug lines on User.4 layer showing route paths
-
-# DRC settings
---no-fix-drc-settings       # Skip making the output project's DRC rules match the
-                            # plane routing floors (done by default; issue #160)
---keep-thermal              # Leave starved_thermal at its severity instead of
-                            # demoting it to a warning when fixing DRC settings
-```
-
-Features:
-- **Auto-detection** - Automatically finds all zones in PCB if nets/layers not specified
-- **Per-net processing** - Zones with the same net on multiple layers are processed together, reducing redundant routes since vias connect all layers
-- **Flood-fill region detection** - Uses grid-based flood fill to identify disconnected regions across all zone layers
-- **Cross-layer connectivity** - Uses vias and through-hole pads to properly track connectivity across multiple zone layers
-- **MST-based connections** - Connects regions using minimum spanning tree for optimal routing
-- **Multi-point routing** - Uses ALL anchors (vias/pads) in each region as potential connection points, trying both directions (A->B and B->A) since A* can find different paths depending on direction
-- **Wide track routing** - Tries track widths from max (2.0mm) down to min (0.2mm), using the widest width that fits without rebuilding obstacle maps
-- **Smart via placement** - Only adds new vias at layer transitions if no via already exists at that position
-- **Hole-to-hole clearance** - Respects drill hole clearances when placing new vias
-- **Multi-layer routing** - Can route through any copper layer to connect regions
+The shared option groups — geometry, power-net widths, algorithm/strategy, proximity penalties, length/time matching, post-route DRC settings, and debug layers — apply across the routing CLIs and are documented in full in [Configuration](docs/configuration.md).
 
 ## Requirements
 
-- Python 3.7+
+- Python 3.9+ (prebuilt binaries are abi3-py39; 3.7+ only if building from source)
 - numpy (`pip3 install numpy`)
 - scipy (`pip3 install scipy`) - used for optimal target assignment and Voronoi partitioning
 - shapely (`pip3 install shapely`) - used for polygon union in multi-net plane layers
@@ -1081,9 +831,15 @@ Features:
 - No coarse grid assignment before detailed routing to plan overall topology
 - No via cost or other parameter learning/tuning
 - No design rules by region/area support
-- Greedy rip-up routing is sensitive to obstacle perturbation: a ~1% change in
-  blocked cells can swing completion noticeably on dense boards (a finer
-  `--grid-step` is the usual remedy)
+
+## Contributing
+
+The most valuable contribution is routing a board we haven't seen: run
+`/plan-pcb-routing` on your own design (or any open-hardware board), grade
+the result with `check_drc.py` + `check_connected.py`, and file an issue for
+anything that breaks — ideally with a pointer to the board file. Fixes and
+pull requests for open issues are just as welcome. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
 
 ## License
 

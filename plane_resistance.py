@@ -4,6 +4,7 @@ Plane resistance and current capacity calculations.
 Provides functions to calculate resistance of copper plane polygons and
 maximum current capacity based on IPC-2152 guidelines.
 """
+from __future__ import annotations
 
 import math
 from typing import List, Dict, Tuple, Optional

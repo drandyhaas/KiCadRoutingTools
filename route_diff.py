@@ -14,6 +14,7 @@ Requires the Rust router module. Build it with:
     cp target/release/grid_router.dll grid_router.pyd  # Windows
     cp target/release/libgrid_router.so grid_router.so  # Linux
 """
+from __future__ import annotations
 
 import sys
 import os
@@ -46,7 +47,7 @@ from connectivity import (
 from net_queries import (
     find_differential_pairs, get_all_unrouted_net_ids, get_chip_pad_positions,
     compute_mps_net_ordering, find_pad_nearest_to_position,
-    expand_net_patterns
+    expand_net_patterns, matches_diff_pair_patterns
 )
 from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
 from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
@@ -87,7 +88,8 @@ from length_matching import apply_intra_pair_length_matching
 from net_ordering import order_nets_mps, order_nets_inside_out, separate_nets_by_type
 from routing_common import (
     setup_bga_exclusion_zones, filter_already_routed,
-    run_length_matching, sync_pcb_data_segments, get_common_config_kwargs
+    run_length_matching, sync_pcb_data_segments, get_common_config_kwargs,
+    warn_targets_outside_board
 )
 import re
 from terminal_colors import RED, GREEN, YELLOW, RESET
@@ -104,11 +106,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 direction_order: str = None,
                 ordering_strategy: str = "inside_out",
                 disable_bga_zones: Optional[List[str]] = None,
-                track_width: float = 0.1,
+                track_width: float = defaults.TRACK_WIDTH,
                 impedance: Optional[float] = None,
-                clearance: float = 0.1,
-                via_size: float = 0.3,
-                via_drill: float = 0.2,
+                clearance: float = defaults.CLEARANCE,
+                via_size: float = defaults.VIA_SIZE,
+                via_drill: float = defaults.VIA_DRILL,
                 grid_step: float = defaults.GRID_STEP,
                 via_cost: int = defaults.VIA_COST,
                 max_iterations: int = defaults.MAX_ITERATIONS,
@@ -136,7 +138,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 min_turning_radius: float = defaults.DIFF_PAIR_MIN_TURNING_RADIUS,
                 debug_lines: bool = False,
                 verbose: bool = False,
-                fix_polarity: bool = True,
+                polarity_swap_nets: Optional[List[str]] = None,
                 max_rip_up_count: int = defaults.MAX_RIPUP,
                 max_setback_angle: float = defaults.DIFF_PAIR_MAX_SETBACK_ANGLE,
                 enable_layer_switch: bool = True,
@@ -162,6 +164,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 time_match_tolerance: float = defaults.TIME_MATCH_TOLERANCE,
                 diff_chamfer_extra: float = defaults.DIFF_PAIR_CHAMFER_EXTRA,
                 diff_pair_intra_match: bool = False,
+                ac_couple_match: bool = False,
                 debug_memory: bool = False,
                 mps_reverse_rounds: bool = False,
                 mps_layer_swap: bool = False,
@@ -186,10 +189,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         diff_pair_gap: Gap between P and N traces of differential pairs in mm (default: 0.101)
         diff_pair_centerline_setback: Distance in front of stubs to start centerline (default: 2x P-N spacing)
         min_turning_radius: Minimum turning radius for pose-based routing in mm (default: 0.2)
-        fix_polarity: Swap target pad net assignments if polarity swap is needed (default: True)
+        polarity_swap_nets: Glob patterns naming the pairs ALLOWED to resolve a
+            P/N mismatch by swapping pad net assignments (#279). None/empty =
+            no swaps ever (deny by default - a swap is only harmless when an
+            endpoint can compensate); ['*'] = allow all pairs.
         gnd_via_enabled: Add GND vias near diff pair signal vias (default: True)
         diff_chamfer_extra: Chamfer multiplier for diff pair meanders (default: 1.5)
         diff_pair_intra_match: Enable intra-pair P/N length matching (default: False)
+        ac_couple_match: End-to-end length-match AC-coupled diff pairs split by series
+            DC-blocking caps, matching the concatenated P vs N path (#196) (default: False)
         return_results: If True, return results data instead of writing to file
         pcb_data: Optional pre-parsed PCBData (if None, loads from input_file)
 
@@ -220,10 +228,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if not layer_costs:
         layer_costs = [1.0] * len(layers)
     for i, cost in enumerate(layer_costs):
-        if cost < 1.0 or cost > 1000:
+        if cost >= 0 and (cost < 1.0 or cost > 1000):
             from routing_exceptions import ConfigurationError
             layer_name = layers[i] if i < len(layers) else f"layer {i}"
-            raise ConfigurationError(f"Layer cost for {layer_name} must be between 1.0 and 1000, got {cost}")
+            raise ConfigurationError(f"Layer cost for {layer_name} must be negative (forbidden) or "
+                                     f"between 1.0 and 1000, got {cost}")
     if any(c != 1.0 for c in layer_costs):
         costs_str = ', '.join(f"{layers[i]}={layer_costs[i]}x" for i in range(min(len(layers), len(layer_costs))))
         print(f"  Layer costs: {costs_str}")
@@ -283,12 +292,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         diff_pair_gap=diff_pair_gap,
         diff_pair_centerline_setback=diff_pair_centerline_setback,
         min_turning_radius=min_turning_radius,
-        fix_polarity=fix_polarity,
         max_setback_angle=max_setback_angle,
         max_turn_angle=max_turn_angle,
         gnd_via_enabled=gnd_via_enabled,
         diff_chamfer_extra=diff_chamfer_extra,
         diff_pair_intra_match=diff_pair_intra_match,
+        ac_couple_match=ac_couple_match,
     )
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
@@ -301,6 +310,21 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Find differential pairs from all provided nets
     diff_pairs: Dict[str, DiffPairNet] = find_differential_pairs(pcb_data, net_names)
     diff_pair_net_ids = set()  # Net IDs that are part of differential pairs
+
+    # Detect AC-coupled XNets (#196): differential pairs split into two base-named
+    # pairs by series DC-blocking caps, to be length-matched END-TO-END after
+    # routing (see the AC-couple pass below). Pure read of pcb_data -- gathers a
+    # side-structure only, never touching diff_pairs / net order / pcb_data, so the
+    # routed result is byte-identical when --ac-couple-match is off.
+    ac_xnets = []
+    if config.ac_couple_match:
+        from diff_xnet import find_ac_coupled_xnets
+        ac_xnets, ac_warnings = find_ac_coupled_xnets(pcb_data, diff_pairs)
+        for _w in ac_warnings:
+            print(f"  WARNING: {_w}")
+        for _xn in ac_xnets:
+            print(f"  AC-coupled XNet: {'+'.join(_xn.base_names)} "
+                  f"(coupled via {', '.join(_xn.bridge_refs)})")
 
     if not diff_pairs:
         print(f"Error: No differential pairs found matching the patterns!")
@@ -316,6 +340,24 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         diff_pair_net_ids.add(pair.n_net_id)
 
     print(f"Found {len(diff_pairs)} differential pair(s)")
+
+    # Per-pair polarity-swap policy (#279): only pairs matching
+    # --polarity-swap-nets may have their P/N pad nets swapped. No patterns =
+    # no swaps (a swap is only harmless when an endpoint can compensate -
+    # FPGA generic I/O, polarity-tolerant protocol - so deny by default);
+    # '*' restores swap-everything.
+    if polarity_swap_nets:
+        for pair in diff_pairs.values():
+            pair.polarity_swap_allowed = any(
+                matches_diff_pair_patterns(nname, pair.base_name,
+                                           polarity_swap_nets)
+                for nname in (pair.p_net_name, pair.n_net_name) if nname)
+        n_allowed = sum(p.polarity_swap_allowed for p in diff_pairs.values())
+        print(f"  Polarity swaps allowed for {n_allowed}/{len(diff_pairs)} "
+              f"pair(s) (--polarity-swap-nets)")
+    else:
+        print("  Polarity swaps disabled (no --polarity-swap-nets; pass '*' "
+              "to allow all pairs)")
 
     # Build the net-id list from the diff pairs we found (both halves), so an
     # explicit base name ('/DVI_CK') or a one-sided glob ('*_P') still routes
@@ -335,11 +377,26 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
         return 0, 0, 0.0
 
+    # Flag target pads at/over the board edge before routing, so an unroutable
+    # off-board pad reads as a clear warning rather than a silent search failure
+    # (issue #195).
+    _edge_clear = board_edge_clearance if board_edge_clearance > 0 else clearance
+    warn_targets_outside_board(pcb_data, net_ids,
+                               edge_margin=_edge_clear + track_width / 2)
+
     net_ids, _ = filter_already_routed(pcb_data, net_ids, config)
     if not net_ids:
         print("All nets are already fully connected - nothing to route!")
         if return_results:
             return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
+        # Pass the board through unchanged so a chained pipeline never loses
+        # its output file (#86/#90/#167 -- route.py has had this fallback all
+        # along; this early-exit lacked it, so a retry step whose pairs turned
+        # out already-connected broke the NEXT step with FileNotFoundError).
+        if output_file:
+            from pcb_io_utils import passthrough_copy
+            if passthrough_copy(input_file, output_file):
+                print(f"Wrote unchanged copy to {output_file} (nothing to route)")
         return 0, 0, 0.0
 
     # Track all segment layer modifications for file output
@@ -373,6 +430,46 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         if return_results:
             return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
         return 0, 0, 0.0
+
+    # ----- Fanout DRC pre-check (#242) ------------------------------------
+    # A pair whose fanout escape stubs ALREADY pinch their own P/N below clearance
+    # (a bga_fanout escape-fan defect) cannot be coupled-routed cleanly: routing it
+    # only spreads or relocates the bad copper (a solo source switch silently moves
+    # the overlap to another layer). Detect it up front from the existing stub
+    # copper, skip the pair entirely (not routed here, and -- by dropping it from
+    # the routed-net set -- left as an obstacle and not handed to the single-ended
+    # follow-up), and report it. The fanout must be fixed, not routed over.
+    from diff_pair_routing import _seg_to_seglist_min_edge as _fanout_edge
+
+    def _fanout_self_overlaps(p_net_id, n_net_id):
+        # Match check_drc's seg-seg verdict: it ignores an overlap <= clearance*5%
+        # (a coupled escape laid right at the gap dips a hair below clearance at
+        # bends but is DRC-clean). Only a REAL violation (e.g. a touching escape
+        # fan, edge ~0) should skip the pair.
+        thr = config.clearance * 0.95
+        p_segs = [s for s in pcb_data.segments if s.net_id == p_net_id]
+        n_segs = [s for s in pcb_data.segments if s.net_id == n_net_id]
+        if not p_segs or not n_segs:
+            return False
+        return any(_fanout_edge(s.start_x, s.start_y, s.end_x, s.end_y, s.width, s.layer, n_segs)
+                   < thr for s in p_segs)
+
+    skipped_bad_fanout = [name for name, pair in diff_pair_ids_to_route_set
+                          if _fanout_self_overlaps(pair.p_net_id, pair.n_net_id)]
+    if skipped_bad_fanout:
+        skip_set = set(skipped_bad_fanout)
+        skip_net_ids = {nid for name, pair in diff_pair_ids_to_route_set if name in skip_set
+                        for nid in (pair.p_net_id, pair.n_net_id)}
+        diff_pair_ids_to_route_set = [(n, p) for n, p in diff_pair_ids_to_route_set
+                                      if n not in skip_set]
+        net_ids = [(nm, nid) for nm, nid in net_ids if nid not in skip_net_ids]
+        diff_pair_net_ids = {nid for nid in diff_pair_net_ids if nid not in skip_net_ids}
+        print("\n" + "=" * 60)
+        print(f"Skipping {len(skipped_bad_fanout)} pair(s): fanout escape stubs already pinch "
+              f"their own P/N below clearance ({config.clearance}mm) -- fix the fanout (#242):")
+        for n in skipped_bad_fanout:
+            print(f"  {n}")
+        print("=" * 60)
 
     # Apply target swaps for swappable-nets feature
     # This swaps net IDs at targets BEFORE routing, so routing sees the swapped configuration
@@ -507,8 +604,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         mem_after_base = get_process_memory_mb()
         print(format_memory_stats("After base obstacle map", mem_after_base, mem_after_base - mem_start))
 
-    # Save original (pre-routing) segment signatures to preserve stubs during sync
-    original_segment_ids = set(id(s) for s in pcb_data.segments)
+    # Save original (pre-routing) segment signatures to preserve stubs during sync.
+    # Keep the OBJECTS alive too: a bare id() set is only valid while the objects
+    # live -- when routing replaces originals and they are garbage-collected,
+    # CPython recycles their ids for NEW Segment objects, which sync then wrongly
+    # treats as "original" (keeping them AND re-adding them from the results, so
+    # the same object sits in pcb_data.segments twice -- the duplicate graph
+    # nodes then let the graze prune approve removals that gut the net, #195).
+    _original_segments_keepalive = list(pcb_data.segments)
+    original_segment_ids = set(id(s) for s in _original_segments_keepalive)
 
     # Build separate base obstacle map with extra clearance for diff pair centerline routing
     # Extra clearance = spacing from centerline to P/N track center
@@ -570,7 +674,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     cache_start = time.time()
     net_obstacles_cache = precompute_all_net_obstacles(
         pcb_data, list(all_unrouted_net_ids), config,
-        extra_clearance=0.0, diagonal_margin=0.25
+        extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN
     )
     cache_time = time.time() - cache_start
     print(f"Net obstacle cache built in {cache_time:.2f}s ({len(net_obstacles_cache)} nets)")
@@ -726,6 +830,14 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 
         # Process each diff pair once (using p_net_id as key to avoid duplicates)
         processed_pairs = set()
+        # AC-coupled (XNet) member pairs are matched end-to-end below, not per-side;
+        # skip them here so the two passes don't fight (double-meander). Gated on
+        # the flag so intra-pair behavior is unchanged when --ac-couple-match is off.
+        xnet_member_p_net_ids = set()
+        if config.ac_couple_match:
+            for _xn in ac_xnets:
+                for _m in _xn.members:
+                    xnet_member_p_net_ids.add(_m.p_net_id)
         for net_id, result in routed_results.items():
             if not result.get('is_diff_pair'):
                 continue
@@ -733,6 +845,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             if p_net_id is None or p_net_id in processed_pairs:
                 continue
             processed_pairs.add(p_net_id)
+            if p_net_id in xnet_member_p_net_ids:
+                continue  # matched end-to-end by the AC-couple pass (#196)
 
             # Get pair name for logging
             pair_info = diff_pair_by_net_id.get(net_id)
@@ -743,8 +857,50 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             apply_intra_pair_length_matching(result, config, pcb_data)
             seg_count_after = len(result.get('new_segments', []))
 
+    # Apply end-to-end AC-coupled (XNet) length matching if configured (#196).
+    # Runs AFTER group + intra-pair matching; for its member pairs it supersedes
+    # per-side intra-pair (skipped above) by matching the concatenated P vs N path
+    # and placing the compensating meanders on whichever segment has room.
+    ac_coupled_summary = []
+    if config.ac_couple_match and ac_xnets:
+        from length_matching import apply_ac_coupled_length_matching
+        print("\n" + "=" * 60)
+        print("End-to-end AC-coupled diff-pair length matching (#196)")
+        print("=" * 60)
+        for _xn in ac_xnets:
+            _skew = apply_ac_coupled_length_matching(_xn, routed_results, config, pcb_data)
+            if _skew is not None:
+                ac_coupled_summary.append({
+                    'nets': "+".join(_xn.base_names),
+                    'skew_mm': round(_skew, 4),
+                    'bridges': _xn.bridge_refs,
+                })
+
     # Sync pcb_data with length-matched segments
     sync_pcb_data_segments(pcb_data, routed_results, original_segment_ids, state, config)
+
+    # ----- Post-route cleanup (#215): the ONE shared pipeline ---------------
+    # Same passes, ordering and strip plumbing as route.py's single-ended
+    # cleanup (cleanup_pipeline.py), scoped to the diff-pair nets so other
+    # copper is untouched. snap/phantom/neck are off for parity with this
+    # front's historical pass set. octolinear IS enabled (deliberately, #318):
+    # its re-bend keeps the anchor endpoints coincident and its clears() gate
+    # includes the partner net, so a grazing terminal jog the prune must now
+    # KEEP (tightened coincidence gate) gets re-bent clear instead of shipping
+    # as a violation.
+    from cleanup_pipeline import run_post_route_cleanup
+    # ONLY fully-routed pairs: a failed / single-ended-deferred pair's fanout stubs
+    # have free ends by design (the single-ended follow-up connects them), so a
+    # dead-end sweep there would strip copper the next pass needs.
+    dp_scope = set()
+    for _pn, _pair in diff_pair_ids_to_route:
+        if _pair.p_net_id in routed_results and _pair.n_net_id in routed_results:
+            dp_scope.add(_pair.p_net_id)
+            dp_scope.add(_pair.n_net_id)
+    _dp_cleanup = run_post_route_cleanup(
+        results, pcb_data, dp_scope, config,
+        label='Diff-pair ', snap=False, phantom=False, neck=False)
+    cleanup_input_strip = _dp_cleanup.input_strip_segments
 
     # Build summary data
     import json
@@ -779,12 +935,19 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print(f"  Rerouted:      {len(rerouted_pairs)} (ripped nets re-routed)")
     if polarity_swapped_pairs:
         print(f"  Polarity swaps: {len(polarity_swapped_pairs)}")
+    if state.polarity_swap_denied_pairs:
+        print(f"  Polarity swaps denied: {len(state.polarity_swap_denied_pairs)} "
+              f"(mismatch found but pair not in --polarity-swap-nets): "
+              f"{', '.join(sorted(state.polarity_swap_denied_pairs))}")
     if target_swaps:
         swap_pairs = [(k, v) for k, v in target_swaps.items() if k < v]
         print(f"  Target swaps:  {len(swap_pairs)}")
     if single_ended_diff_pairs:
         print(f"  Single-ended:  {len(single_ended_diff_pairs)} (electrically short - "
               f"deferred to single-ended routing)")
+    if skipped_bad_fanout:
+        print(f"  {RED}Skipped:       {len(skipped_bad_fanout)} (fanout stubs self-overlap - "
+              f"fix the fanout, #242){RESET}")
     print(f"  Total vias:    {total_vias}")
     print(f"  Total time:    {total_time:.2f}s")
     print(f"  Iterations:    {total_iterations:,}")
@@ -795,15 +958,22 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         'ripup_success_pairs': sorted(ripup_success_pairs),
         'rerouted_pairs': sorted(rerouted_pairs),
         'polarity_swapped_pairs': sorted(polarity_swapped_pairs),
+        'polarity_swap_denied_pairs': sorted(state.polarity_swap_denied_pairs),
         'single_ended_followup_nets': sorted(state.diff_pair_single_ended_nets.values()),
+        'skipped_bad_fanout': sorted(skipped_bad_fanout),
         'target_swaps': [{'pair1': k, 'pair2': v} for k, v in target_swaps.items() if k < v],
         'layer_swaps': total_layer_swaps,
         'successful': successful,
         'failed': failed,
         'total_time': round(total_time, 2),
         'total_iterations': total_iterations,
-        'total_vias': total_vias
+        'total_vias': total_vias,
+        # Smallest copper clearance any step actually routed at (e.g. fine-pitch
+        # taps below the nominal). Grade/check_drc the board at this floor.
+        'min_clearance_used': __import__('clearance_ledger').effective(clearance),
     }
+    if ac_coupled_summary:
+        summary['ac_coupled_xnets'] = ac_coupled_summary
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
     # Write output file or return results for direct application
@@ -822,6 +992,18 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             'all_segment_modifications': all_segment_modifications,
             'exclusion_zone_lines': exclusion_zone_lines if debug_lines else [],
             'boundary_debug_labels': boundary_debug_labels if debug_lines else [],
+            # Input-file copper the cleanup pipeline removed -- the CLI writer
+            # strips these blocks (segments_to_remove in the write path);
+            # without this key the GUI kept them on the live board (parity gap
+            # found in the #319 restructure audit).
+            'segments_to_remove': cleanup_input_strip,
+            # successful/failed only count pairs that were coupled-routed or
+            # outright failed -- electrically-short pairs deferred to the
+            # single-ended pass, and pairs skipped for self-overlapping fanout,
+            # land in neither bucket. Without these the GUI's "0 routed, 0
+            # failed" result looks like nothing happened.
+            'single_ended_diff_pairs': single_ended_diff_pairs,
+            'skipped_bad_fanout': sorted(skipped_bad_fanout),
         }
     else:
         wrote = write_routed_output(
@@ -839,7 +1021,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             exclusion_zone_lines=exclusion_zone_lines,
             boundary_debug_labels=boundary_debug_labels,
             skip_routing=skip_routing,
-            add_teardrops=add_teardrops
+            add_teardrops=add_teardrops,
+            segments_to_remove=cleanup_input_strip or None
         )
         # When no coupled copper was written -- every pair was deferred to
         # single-ended (electrically short), OR a pair could not be routed at all
@@ -849,8 +1032,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # (the chains route '*' from the diff step's output); without this the
         # whole chain FileNotFoundErrors on the missing board (issues #90, #167).
         if not wrote and output_file:
-            import shutil
-            shutil.copy(input_file, output_file)
+            from pcb_io_utils import passthrough_copy
+            passthrough_copy(input_file, output_file)
             if state.diff_pair_single_ended_nets:
                 print(f"\nAll diff pairs deferred to single-ended (no coupled copper "
                       f"added); wrote board through to {output_file} for the "
@@ -915,6 +1098,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print(format_obstacle_map_stats(state.working_obstacles))
         print("=" * 60)
 
+    # Obstacle-map ref-count integrity audit (#309), same invariant as route.py:
+    # the diff loop maintains its own persistent working map + per-net caches.
+    if os.environ.get("KICAD_OBSTACLE_AUDIT"):
+        from obstacle_cache import run_obstacle_audit
+        run_obstacle_audit(base_obstacles, state.working_obstacles,
+                           state.net_obstacles_cache, label="route_diff")
+
     if return_results:
         return successful, failed, total_time, results_data
     return successful, failed, total_time
@@ -962,8 +1152,9 @@ Examples:
                         default=['F.Cu', 'B.Cu'],
                         help="Routing layers to use (default: F.Cu B.Cu)")
     parser.add_argument("--layer-costs", nargs="+", type=float, default=None,
-                        help="Per-layer cost multipliers (1.0-1000), one per --layers entry, "
-                             "to bias which layer(s) coupled diff pairs prefer (e.g. '1 1 1 3' "
+                        help="Per-layer cost multipliers (1.0-1000, or any negative value e.g. -1 = "
+                             "forbidden: the layer is an obstacle / via span but carries no routed copper), one per --layers "
+                             "entry, to bias which layer(s) coupled diff pairs prefer (e.g. '1 1 1 3' "
                              "to discourage the 4th layer). Default: 1.0 on every layer "
                              "(behavior unchanged). Matches route.py / route_planes.")
 
@@ -1038,8 +1229,12 @@ Examples:
                         help="Distance in front of stubs to start centerline route in mm (default: 2x P-N spacing)")
     parser.add_argument("--min-turning-radius", type=float, default=0.2,
                         help="Minimum turning radius for pose-based routing in mm (default: 0.2)")
-    parser.add_argument("--no-fix-polarity", action="store_true",
-                        help="Don't swap target pad net assignments if polarity swap is needed (default: fix polarity)")
+    parser.add_argument("--polarity-swap-nets", nargs="+", metavar="PATTERN",
+                        help="Glob patterns naming the diff pairs ALLOWED to resolve a P/N "
+                             "polarity mismatch by swapping pad net assignments (#279). "
+                             "Omit for no swaps ever (default - a swap is only harmless when "
+                             "an endpoint can compensate, e.g. FPGA generic I/O; never USB); "
+                             "pass '*' to allow all pairs. Same matcher as --nets.")
     parser.add_argument("--no-stub-layer-swap", action="store_true",
                         help="Disable stub layer switching optimization (enabled by default)")
     parser.add_argument("--no-crossing-layer-check", action="store_true",
@@ -1079,6 +1274,10 @@ Examples:
                         help="Chamfer multiplier for diff pair meanders (default: 1.5, >1 avoids P/N crossings)")
     parser.add_argument("--diff-pair-intra-match", action="store_true",
                         help="Enable intra-pair P/N length matching (add meanders to shorter track of each diff pair)")
+    parser.add_argument("--ac-couple-match", action="store_true",
+                        help="End-to-end length-match AC-coupled differential pairs split by series DC-blocking "
+                             "caps (#196): auto-detect the cap chain, match the concatenated P path vs the N path, "
+                             "and place the compensating meanders on whichever segment has room. Off by default.")
 
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=3,
@@ -1087,7 +1286,7 @@ Examples:
                         help="Maximum angle (degrees) for setback position search (default: 45.0)")
     parser.add_argument("--routing-clearance-margin", type=float, default=1.0,
                         help="Multiplier on track-via clearance (1.0 = minimum DRC)")
-    parser.add_argument("--hole-to-hole-clearance", type=float, default=0.2,
+    parser.add_argument("--hole-to-hole-clearance", type=float, default=defaults.HOLE_TO_HOLE_CLEARANCE,
                         help="Minimum clearance between drill holes in mm (default: 0.2)")
     parser.add_argument("--board-edge-clearance", type=float, default=0.0,
                         help="Clearance from board edge in mm (default: 0 = use track clearance)")
@@ -1117,15 +1316,24 @@ Examples:
                         help="Print memory usage statistics at key points during routing")
     parser.add_argument("--add-teardrops", action="store_true",
                         help="Add teardrop settings to all pads in output file")
-    parser.add_argument("--no-fix-drc-settings", action="store_true",
-                        help="Do not rewrite the output project's DRC design rules to match "
-                             "the routing floors (by default they are made consistent so "
-                             "KiCad's manual DRC shows only genuine violations; issue #160)")
-    parser.add_argument("--keep-thermal", action="store_true",
-                        help="When fixing DRC settings, leave thermal-relief severity "
-                             "(starved_thermal) untouched instead of demoting it to a warning")
+    from fix_kicad_drc_settings import add_drc_fix_args
+    add_drc_fix_args(parser)
 
+    from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
+                           enforce_fab_floors, count_copper_layers_in_file)
+    add_fab_tier_args(parser)
     args = parser.parse_args()
+    set_default_fab_tier(*fab_tier_from_args(args))
+    _pinned_floors = enforce_fab_floors(
+        count_copper_layers_in_file(args.input_file),
+        track_width=getattr(args, 'track_width', None),
+        clearance=getattr(args, 'clearance', None),
+        via_size=getattr(args, 'via_size', None),
+        via_drill=getattr(args, 'via_drill', None),
+        hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None))
+    # Below-floor params are pinned up to the fab floor (warned); apply the clamps.
+    for _pname, _pfloor in _pinned_floors.items():
+        setattr(args, _pname, _pfloor)
 
     # --output is a named alias for the positional output_file; reject giving both differently.
     if args.output is not None:
@@ -1219,7 +1427,7 @@ Examples:
                 min_turning_radius=args.min_turning_radius,
                 debug_lines=args.debug_lines,
                 verbose=args.verbose,
-                fix_polarity=not args.no_fix_polarity,
+                polarity_swap_nets=args.polarity_swap_nets,
                 max_rip_up_count=args.max_ripup,
                 max_setback_angle=args.max_setback_angle,
                 enable_layer_switch=not args.no_stub_layer_swap,
@@ -1244,6 +1452,7 @@ Examples:
                 time_match_tolerance=args.time_match_tolerance,
                 diff_chamfer_extra=args.diff_chamfer_extra,
                 diff_pair_intra_match=args.diff_pair_intra_match,
+                ac_couple_match=args.ac_couple_match,
                 debug_memory=args.debug_memory,
                 mps_reverse_rounds=args.mps_reverse_rounds,
                 mps_layer_swap=args.mps_layer_swap,
@@ -1257,13 +1466,18 @@ Examples:
     if not args.no_fix_drc_settings and not args.skip_routing \
             and args.output_file and os.path.isfile(args.output_file):
         try:
-            from fix_kicad_drc_settings import fix_project_for_output
+            import clearance_ledger
+            eff_clearance = clearance_ledger.effective(args.clearance)
+            if eff_clearance < args.clearance:
+                print(f"  Min clearance used: {eff_clearance:.4g} mm "
+                      f"(below nominal {args.clearance:.4g}) - grading at this floor")
+            from fix_kicad_drc_settings import fix_project_for_output, drc_fix_kwargs
             fix_project_for_output(
                 args.output_file, input_pcb=args.input_file,
-                clearance=args.clearance, hole_to_hole=args.hole_to_hole_clearance,
+                clearance=eff_clearance, hole_to_hole=args.hole_to_hole_clearance,
                 edge_clearance=args.board_edge_clearance, track_width=args.track_width,
                 via_diameter=args.via_size, via_drill=args.via_drill,
                 diff_pair_gap=args.diff_pair_gap, diff_pair_width=args.track_width,
-                keep_thermal=args.keep_thermal)
+                **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")

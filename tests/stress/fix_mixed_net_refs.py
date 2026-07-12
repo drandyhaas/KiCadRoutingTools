@@ -16,6 +16,8 @@ The numeric ids are resolved with the same synthetic id assignment the parser
 used when the fanout tool read the board (name discovery order is stable:
 names come from pads, which fanout does not change).
 """
+from __future__ import annotations
+
 import re
 import sys
 from pathlib import Path

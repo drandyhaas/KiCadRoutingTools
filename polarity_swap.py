@@ -4,6 +4,7 @@ Polarity swap functions for differential pair routing.
 This module handles swapping the P/N polarity of differential pairs when
 the routing algorithm determines that a swap is needed to achieve a valid route.
 """
+from __future__ import annotations
 
 from typing import Dict, List, Optional, Set, Tuple
 

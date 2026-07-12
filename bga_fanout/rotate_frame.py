@@ -15,6 +15,8 @@ in the rotated frame remain valid when mapped back.
 Only used for non-orthogonal placements; orthogonal BGAs skip this entirely and
 behave exactly as before.
 """
+from __future__ import annotations
+
 import copy
 import math
 from typing import Callable, Tuple

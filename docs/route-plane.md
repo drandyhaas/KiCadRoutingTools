@@ -74,7 +74,7 @@ When specifying multiple nets, each net is paired with its corresponding plane l
 | `--grid-step` | 0.1 | Grid resolution in mm |
 | `--max-search-radius` | 10.0 | Maximum radius to search for valid via position in mm |
 | `--max-via-reuse-radius` | 1.0 | Prefer reusing existing vias within this radius in mm |
-| `--hole-to-hole-clearance` | 0.2 | Minimum clearance between drill holes in mm |
+| `--hole-to-hole-clearance` | 0.2 | Minimum clearance between drill holes in mm (fab floor) |
 | `--same-net-pad-clearance` | -1.0 | Edge-to-edge clearance (mm) between stitching vias and same-net pads. `-1` allows via-in-pad placement (the default for the CLI). Any value `>= 0` forces vias to be placed outside same-net pads with that clearance |
 | `--layers`, `-l` | F.Cu + plane-layers + B.Cu | All copper layers for routing and via span (auto-computed) |
 | `--layer-costs` | 1.0 per layer (4+) or F.Cu=1.0/B.Cu=3.0 (2-layer) | Per-layer routing cost multipliers (1.0-1000) |
@@ -567,7 +567,7 @@ python route_disconnected_planes.py input.kicad_pcb --max-iterations 500000
 | `--clearance` | 0.25 | Trace-to-trace clearance (mm) |
 | `--zone-clearance` | 0.2 | Zone fill clearance around obstacles (mm) |
 | `--track-via-clearance` | 0.8 | Clearance from tracks to other nets' vias (mm) |
-| `--hole-to-hole-clearance` | 0.2 | Minimum clearance between drill holes (mm) |
+| `--hole-to-hole-clearance` | 0.2 | Minimum clearance between drill holes (mm, fab floor) |
 | `--board-edge-clearance` | 0.5 | Clearance from board edge (mm) |
 | `--via-size` | 0.5 | Via outer diameter (mm) |
 | `--via-drill` | 0.3 | Via drill diameter (mm) |
@@ -597,11 +597,16 @@ via or segment touching the pad's copper (including vias landed inside the
 pad), and the pad not sitting directly on a zone layer — and retries each
 with a stitching via + short trace. The retry uses the same parameter
 escalation as `route_planes.py`: the run parameters first, then scoped fine
-parameters (grid 0.05mm, clearance 0.15mm, track = min(pad min dimension,
-0.15mm)) when the pad is fine-pitch (a same-component neighbor pad within
-0.65mm, or pad min dimension below 0.35mm). Obstacle maps for each retry are
-built on a small window around the pad, so fine grids stay cheap on large
-boards. Per-pad outcomes are printed, and pads that still fail are listed in
+parameters when the pad is fine-pitch (a same-component neighbor pad within
+0.65mm, or pad min dimension below 0.35mm). The fine retry uses a finer grid
+(0.05mm) and steps the clearance DOWN from the run value toward the
+manufacturing floor for the board's layer count (the JLC fab floor, ~0.127mm
+2-layer / 0.10mm 4+), narrowing the tap track to the fab track floor, and stops
+at the loosest clearance that routes — there is no hard-coded "fine clearance"
+(issue #226). The clearance it actually used is recorded into the output
+`.kicad_pro` DRC floor and `JSON_SUMMARY` (`min_clearance_used`) so `check_drc`
+grades the board at it. Obstacle maps for each retry are built on a small window
+around the pad, so fine grids stay cheap on large boards. Per-pad outcomes are printed, and pads that still fail are listed in
 the summary. Use `--no-repair-pads` to only reconnect zone islands.
 
 `route_planes.py` itself applies the same fine-parameter retry to fine-pitch

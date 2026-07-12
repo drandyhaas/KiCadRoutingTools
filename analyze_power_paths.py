@@ -16,6 +16,7 @@ Usage:
         get_power_net_recommendations
     )
 """
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Set, Optional, Tuple

@@ -3,11 +3,113 @@ Geometry calculations for BGA fanout routing.
 
 Functions for calculating 45-degree stubs, exit points, and jog endpoints.
 """
+from __future__ import annotations
 
 import math
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 from bga_fanout.types import BGAGrid, Channel
+
+# Reference prefixes place_fanout_clearance treats as movable passives (keep in
+# sync with its --cap-prefix default): an unlocked <=2-copper-pad part with one
+# of these prefixes will be nudged off fanout vias by the next pipeline step,
+# so the fanout may ignore its copper when placing vias. Everything else --
+# locked parts, connectors, test points, ICs -- never moves (#253/#254).
+MOVABLE_PASSIVE_PREFIXES = ('C', 'R', 'FB')
+
+
+def immovable_foreign_pads(pcb_data, exclude_ref: str) -> List:
+    """Copper pads of foreign footprints that NO later pipeline step will move:
+    locked footprints, and any part place_fanout_clearance won't relocate
+    (i.e. not an unlocked 2-pad C*/R*/FB* passive). A through via placed by the
+    fanout must clear these on every copper layer; movable caps are deliberately
+    NOT included (cap-opt moves them off the vias afterwards)."""
+    out = []
+    for fp in pcb_data.footprints.values():
+        if fp.reference == exclude_ref:
+            continue
+        copper_pads = [p for p in fp.pads
+                       if any(str(l).endswith('.Cu') for l in p.layers)]
+        if not copper_pads:
+            continue
+        movable = (not getattr(fp, 'locked', False)
+                   and fp.reference.startswith(MOVABLE_PASSIVE_PREFIXES)
+                   and len(copper_pads) <= 2)
+        if movable:
+            continue
+        out.extend(copper_pads)
+    return out
+
+
+def via_clears_pad_rects(x: float, y: float, v_half: float, clearance: float,
+                         pads) -> bool:
+    """True if a through via at (x, y) clears every pad in `pads` (rect model,
+    rect_rotation-aware) by `clearance` edge-to-edge. Vias span all copper
+    layers, so the pads' own layers are irrelevant. The previous axis-aligned
+    bbox under-covered a ROTATED pad's protruding corners, passing via sites
+    whose ring grazed the real copper."""
+    from routing_utils import point_to_pad_rect_dist
+    for p in pads:
+        if point_to_pad_rect_dist(x, y, p) < v_half + clearance - 1e-9:
+            return False
+    return True
+
+
+def clamp_via_to_pad(via_size: float, via_drill: float, pad,
+                     floors) -> Tuple[float, float, str, int]:
+    """Issue #202: shrink a via-in-pad so it never bulges past the pad edge.
+
+    A via dropped at a pad centre whose diameter exceeds the pad's smallest
+    dimension bulges past the pad copper. A neighbouring different-net trace that
+    legitimately cleared the (smaller) pad then grazes the (larger) via -- a real
+    VIA-SEGMENT DRC error baked into the board before any signal routing runs
+    (the dominant via-seg source on keks: 163 grazes from Ø0.5 vias in 0.41 mm
+    pads).
+
+    Clamp the via to the pad's min dimension (a circular via inscribes a
+    rect/oval pad at min(size_x, size_y); for a circle pad that is the diameter),
+    but NEVER below the fab via floor -- a pad smaller than the smallest
+    manufacturable via keeps that floor via (it still bulges) rather than ship an
+    unmanufacturable one. The drill follows to hold the annular ring at the fab
+    floor.
+
+    The clamp belongs at via PLACEMENT (not a post-pass) so the escape's own
+    keep-out modelling uses the real, smaller via and neighbouring fanout tracks
+    can route past it.
+
+    ``floors`` is the fab-tier floor LADDER (nominal first, then escalation rungs;
+    see fab_tiers.fab_floor_ladder): each rung is a flat floor dict. The via is
+    clamped to the first rung whose via fits the pad; if the pad is smaller than
+    even the deepest rung's via, it's held at that deepest floor (still bulges).
+
+    Returns (size, drill, status, rung): status 'fits' (unchanged), 'clamped'
+    (shrunk to fit), or 'floor' (pad < deepest fab floor). ``rung`` is the floor
+    index used (0 = nominal/standard; >0 = escalated to a more-costly tier).
+    """
+    pad_min = min(pad.size_x, pad.size_y)
+    if via_size <= pad_min + 1e-9:
+        return via_size, via_drill, 'fits', 0
+
+    # First rung whose smallest manufacturable via fits this pad.
+    for rung, fab in enumerate(floors):
+        floor_dia = fab['via_diameter']
+        floor_drill = fab['via_drill']
+        if pad_min < floor_dia - 1e-9:
+            continue
+        # The fab's SMALLEST manufacturable annular ring for THIS rung -- the one its
+        # via pair uses ((0.45-0.20)/2 standard, (0.25-0.15)/2 advanced), NOT the
+        # larger fab['annular'] (which would force the drill below the floor and
+        # needlessly over-shrink a via that fits the pad fine).
+        min_annular = (floor_dia - floor_drill) / 2.0
+        new_size = round(pad_min, 4)
+        # Keep the configured drill, only thinning it as far as the ring needs, and
+        # never below this rung's drill floor.
+        new_drill = max(min(via_drill, new_size - 2 * min_annular), floor_drill)
+        return new_size, round(new_drill, 4), 'clamped', rung
+
+    # Even the deepest rung's via bulges past this pad: hold it at that floor.
+    deepest = len(floors) - 1
+    return floors[deepest]['via_diameter'], floors[deepest]['via_drill'], 'floor', deepest
 
 
 def create_45_stub(pad_x: float, pad_y: float,

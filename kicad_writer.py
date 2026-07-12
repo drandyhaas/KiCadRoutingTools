@@ -1,13 +1,33 @@
 """
 KiCad PCB Writer - Writes routing results to .kicad_pcb files.
 """
+from __future__ import annotations
 
 import re
 import uuid
 from typing import List, Dict, Tuple, Optional
 
-from kicad_parser import Pad, is_kicad_10
+from kicad_parser import Pad, is_kicad_10, _unescape_kicad_string
 from routing_utils import pos_key, POSITION_DECIMALS
+
+
+def _escape_net_name(name: Optional[str]) -> Optional[str]:
+    """Escape a net name for a quoted KiCad S-expr token — the exact inverse of
+    kicad_parser._unescape_kicad_string (backslash then quote).
+
+    The parser stores each net's DISPLAY name unescaped, but keys name-based net
+    dedup on the RAW file text (kicad_parser.extract_nets). So a net whose name
+    contains a literal backslash or quote -- e.g. `/GPIO24\\SPI1_RX(MISO)` -- must
+    be re-escaped on write, or route.py emits `(net "/GPIO24\\SPI1...")` with a
+    SINGLE backslash where the original board had it DOUBLE-escaped. The two raw
+    tokens then parse to two different synthetic net_ids for one net, so the
+    routed segment lands on a duplicate net and check_drc flags a phantom
+    pad-segment/via short against the pad (still on the original id). Compounds
+    every route.py step (issue #312, neo6502). Escape backslash FIRST, then quote.
+    """
+    if name is None:
+        return None
+    return name.replace('\\', '\\\\').replace('"', '\\"')
 
 
 def move_copper_text_to_silkscreen(content: str) -> str:
@@ -89,10 +109,13 @@ def move_copper_graphics_to_silkscreen(content: str) -> str:
     from copper layers to silkscreen, mirroring move_copper_text_to_silkscreen:
     F.Cu -> F.SilkS, B.Cu -> B.SilkS.
 
-    A net-less copper graphic (e.g. a copper OSHW logo) is not modelled as an
-    obstacle by the router, so plane pours and routed copper run straight over it
-    and short against it (orangecrab: one F.Cu logo shorted ~30 plane traces/vias).
-    Relocating it to silkscreen preserves it visually while taking it out of copper.
+    Only NET-LESS copper graphics (e.g. a copper OSHW logo, net 0 / no net) are
+    moved: unmodelled by the router, plane pours and routed copper run straight
+    over them and short (orangecrab: one F.Cu logo shorted ~30 plane traces/vias);
+    relocating to silkscreen preserves them visually while taking them out of
+    copper. A NET-TIED copper graphic is real functional copper (#337 models it
+    as an immutable obstacle and DRC treats it as copper) and is LEFT IN PLACE --
+    moving it would delete a real connection.
     """
     count = 0
     for tag in _COPPER_GRAPHIC_TAGS:
@@ -122,7 +145,15 @@ def move_copper_graphics_to_silkscreen(content: str) -> str:
                         break
             block = content[start:end]
             layer_match = re.search(r'\(layer\s+"(F\.Cu|B\.Cu)"\)', block)
-            if layer_match:
+            # #337: a NET-TIED copper graphic is FUNCTIONAL copper (the router
+            # models it as an immutable obstacle and check_drc treats it as
+            # copper) -- relocating it to silk would DELETE a real connection and
+            # re-expose the shorts #337 catches. Only net-less decoration (a
+            # copper logo, net 0 / no net) is safe to move off copper.
+            net_match = re.search(r'\(net\s+(\d+)(?:\s+"([^"]*)")?\)', block)
+            net_tied = net_match and (int(net_match.group(1)) != 0
+                                      or (net_match.group(2) or '') != '')
+            if layer_match and not net_tied:
                 layer = layer_match.group(1)
                 new_layer = 'F.SilkS' if layer == 'F.Cu' else 'B.SilkS'
                 block = block.replace(f'(layer "{layer}")', f'(layer "{new_layer}")')
@@ -148,7 +179,7 @@ def generate_segment_sexpr(start: Tuple[float, float], end: Tuple[float, float],
     Args:
         net_name: If provided, output KiCad 10 format (net "name") instead of (net id).
     """
-    net_str = f'(net "{net_name}")' if net_name is not None else f'(net {net_id})'
+    net_str = f'(net "{_escape_net_name(net_name)}")' if net_name is not None else f'(net {net_id})'
     return f'''	(segment
 		(start {start[0]:.6f} {start[1]:.6f})
 		(end {end[0]:.6f} {end[1]:.6f})
@@ -185,7 +216,7 @@ def generate_via_sexpr(x: float, y: float, size: float, drill: float,
     """
     layers_str = '" "'.join(layers)
     free_str = "\n\t\t(free yes)" if free else ""
-    net_str = f'(net "{net_name}")' if net_name is not None else f'(net {net_id})'
+    net_str = f'(net "{_escape_net_name(net_name)}")' if net_name is not None else f'(net {net_id})'
     # KiCad 10 adds structured tenting/covering/plugging fields after layers
     if net_name is not None:
         tenting_str = "\n\t\t(tenting (front yes) (back yes))"
@@ -264,9 +295,9 @@ def generate_zone_sexpr(
 
     # KiCad 10: (net "name"), no (net_name ...) line; KiCad 9: (net id) + (net_name "name")
     if use_net_name:
-        net_lines = f'(net "{net_name}")'
+        net_lines = f'(net "{_escape_net_name(net_name)}")'
     else:
-        net_lines = f'(net {net_id})\n\t\t(net_name "{net_name}")'
+        net_lines = f'(net {net_id})\n\t\t(net_name "{_escape_net_name(net_name)}")'
 
     # KiCad 10 removes (filled_areas_thickness no) and adds (island_removal_mode 0) in fill
     if use_net_name:
@@ -527,26 +558,28 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
     def coord_key(x, y):
         return (round(x, POSITION_DECIMALS), round(y, POSITION_DECIMALS))
 
-    mod_lookup = {}
-    # Secondary lookup by coordinates only (for fallback when net_id doesn't match due to swaps)
+    # Per-net lookups: KiCad 9 segments carry a numeric net id, KiCad 10 segments
+    # carry the net NAME, so index mods under both. Values are LISTS in append
+    # order so chained swaps resolve to the final layer (last mod wins per net).
+    mod_lookup_by_id = {}
+    mod_lookup_by_name = {}
+    # Coordinate-only fallback (net changed between mod recording and writing,
+    # e.g. target swaps reassigned the stub's net).
     mod_lookup_by_coords = {}
     for mod in segment_mods:
+        # #340 reuse-connector bookkeeping (an added NEW segment, emitted via
+        # the all_swap_segments channel) rides in segment_mods for revert only;
+        # it is not a file-text layer change, so skip it here.
+        if 'start' not in mod:
+            continue
         start_key = coord_key(mod['start'][0], mod['start'][1])
         end_key = coord_key(mod['end'][0], mod['end'][1])
-        key = (start_key, end_key, mod['net_id'])
         # Also store reverse order since segment endpoints can be swapped
-        key_rev = (end_key, start_key, mod['net_id'])
-        mod_lookup[key] = mod
-        mod_lookup[key_rev] = mod
-        # Coordinate-only lookup (list to handle multiple mods at same coords)
-        coord_only_key = (start_key, end_key)
-        coord_only_key_rev = (end_key, start_key)
-        if coord_only_key not in mod_lookup_by_coords:
-            mod_lookup_by_coords[coord_only_key] = []
-        mod_lookup_by_coords[coord_only_key].append(mod)
-        if coord_only_key_rev not in mod_lookup_by_coords:
-            mod_lookup_by_coords[coord_only_key_rev] = []
-        mod_lookup_by_coords[coord_only_key_rev].append(mod)
+        for ckey in ((start_key, end_key), (end_key, start_key)):
+            mod_lookup_by_id.setdefault(ckey + (mod['net_id'],), []).append(mod)
+            if mod.get('net_name'):
+                mod_lookup_by_name.setdefault(ckey + (mod['net_name'],), []).append(mod)
+            mod_lookup_by_coords.setdefault(ckey, []).append(mod)
 
     count = 0
 
@@ -557,7 +590,7 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
         r'\(end\s+([\d.-]+)\s+([\d.-]+)\)\s*\n?\s*'
         r'\(width\s+[\d.]+\)\s*\n?\s*'
         r'\(layer\s+")([^"]+)("\)\s*\n?\s*'
-        r'\(net\s+(?:(\d+)|"[^"]*")\))',
+        r'\(net\s+(?:(\d+)|"((?:[^"\\]|\\.)*)")\))',
         re.MULTILINE
     )
 
@@ -569,26 +602,36 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
         end_x = float(match.group(4))
         end_y = float(match.group(5))
         layer = match.group(6)
-        net_id = int(match.group(8)) if match.group(8) else 0
+        net_id = int(match.group(8)) if match.group(8) else None
+        # KiCad 10: (net "name") -- unescape the raw file text before the
+        # name lookup, or backslash-named nets fall to the coordinate-only
+        # fallback (ambiguous on stacked identical-geometry stubs, #264).
+        net_name = _unescape_kicad_string(match.group(9)) if match.group(9) else None
 
         start_key = coord_key(start_x, start_y)
         end_key = coord_key(end_x, end_y)
-        key = (start_key, end_key, net_id)
         coord_only_key = (start_key, end_key)
 
-        mod = None
-        # First try exact match by (coords, net_id)
-        if key in mod_lookup:
-            mod = mod_lookup[key]
-        # Fallback: try coordinate-only match
-        # This handles cases where net_id changed due to target swaps
-        # Only use fallback if the segment's current layer is one of the expected old_layers
-        elif coord_only_key in mod_lookup_by_coords:
-            mods_at_coords = mod_lookup_by_coords[coord_only_key]
-            # Check if current layer matches any old_layer in the chain
-            if any(m.get('old_layer') == layer for m in mods_at_coords):
-                # Use the last mod (final target layer for chained swaps)
-                mod = mods_at_coords[-1]
+        # First try an exact per-net match (numeric id for KiCad 9 files, net
+        # name for KiCad 10 files). Take the LAST mod so chained swaps land on
+        # the final layer. Matching by net matters: two nets can carry
+        # identical-geometry stub segments (stacked fanout escapes), and the
+        # coordinate-only fallback then applies one net's mod to the other's
+        # segment, leaving copper on the wrong layer mid-run (issue #264).
+        mods = None
+        if net_id is not None:
+            mods = mod_lookup_by_id.get(coord_only_key + (net_id,))
+        if mods is None and net_name is not None:
+            mods = mod_lookup_by_name.get(coord_only_key + (net_name,))
+        mod = mods[-1] if mods else None
+        # Fallback: coordinate match with the net left unmatched (the net was
+        # reassigned between recording and writing, e.g. by target swaps). Only
+        # accept mods whose old_layer equals THIS segment's current layer, so a
+        # twin segment of another net (different layer) never steals the mod.
+        if mod is None and coord_only_key in mod_lookup_by_coords:
+            cands = [m for m in mod_lookup_by_coords[coord_only_key]
+                     if m.get('old_layer') == layer]
+            mod = cands[-1] if cands else None
 
         if mod:
             new_layer = mod['new_layer']
@@ -627,7 +670,7 @@ def swap_segment_nets_at_positions(content: str, positions: set,
 
     if use_names:
         # KiCad 10: match (net "name")
-        segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+\(layer\s+"?([^")]+)"?\).*?\(net\s+"([^"]*)"\)'
+        segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+\(layer\s+"?([^")]+)"?\).*?\(net\s+"((?:[^"\\]|\\.)*)"\)'
     else:
         # KiCad 9: match (net <id>)
         segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width[^)]*\)\s+\(layer\s+"?([^")]+)"?\).*?\(net\s+(\d+)\)'
@@ -645,8 +688,11 @@ def swap_segment_nets_at_positions(content: str, positions: set,
 
         # Check if this segment has endpoints in our position set and correct net
         if use_names:
-            seg_net_name = match.group(6)
-            matches_net = seg_net_name == old_net_name
+            # group(6) is the RAW escaped file text; the caller's names are the
+            # parser's unescaped display names (#312/#264 escaping family --
+            # without this, backslash-named nets silently evade the swap).
+            raw_net = match.group(6)
+            matches_net = _unescape_kicad_string(raw_net) == old_net_name
         else:
             seg_net_id = int(match.group(6))
             matches_net = seg_net_id == old_net_id
@@ -655,7 +701,11 @@ def swap_segment_nets_at_positions(content: str, positions: set,
             if layer is None or seg_layer == layer:
                 count += 1
                 if use_names:
-                    return match.group(0).replace(f'(net "{old_net_name}")', f'(net "{new_net_name}")')
+                    # Replace the raw token as it appears in the file; write the
+                    # new name RE-ESCAPED or a backslash name ships under-escaped.
+                    return match.group(0).replace(
+                        f'(net "{raw_net}")',
+                        f'(net "{_escape_net_name(new_net_name)}")')
                 else:
                     return match.group(0).replace(f'(net {old_net_id})', f'(net {new_net_id})')
         return match.group(0)
@@ -665,7 +715,8 @@ def swap_segment_nets_at_positions(content: str, positions: set,
 
 
 def remove_segments_from_content(content: str, segments: List,
-                                 net_id_to_name: Dict = None) -> Tuple[str, int]:
+                                 net_id_to_name: Dict = None,
+                                 unmatched_out: List = None) -> Tuple[str, int]:
     """Delete whole ``(segment ...)`` blocks matching the given segments.
 
     Used by the dead-end sweep (issue #84) to strip original input-file copper
@@ -685,16 +736,24 @@ def remove_segments_from_content(content: str, segments: List,
     def seg_key(p1, p2, layer, net_token):
         return (frozenset((p1, p2)), layer, net_token)
 
-    targets = set()
+    # COUNTED multiset, not a set (#318 follow-up): a board can legitimately
+    # carry N identical-span segments with only K < N of them strip-listed
+    # (sechzig /PWR1V35: two byte-identical slivers, cleanup removed one). A
+    # set-based match deleted EVERY block with the key, including the keeper.
+    from collections import Counter
+    targets = Counter()
+    by_key = {}
     for s in segments:
         net_token = (net_id_to_name.get(s.net_id) if use_names else s.net_id)
-        targets.add(seg_key(pos_key(s.start_x, s.start_y),
-                            pos_key(s.end_x, s.end_y), s.layer, net_token))
+        k = seg_key(pos_key(s.start_x, s.start_y),
+                    pos_key(s.end_x, s.end_y), s.layer, net_token)
+        targets[k] += 1
+        by_key.setdefault(k, []).append(s)
 
     start_re = re.compile(r'\(start\s+([\d.-]+)\s+([\d.-]+)\)')
     end_re = re.compile(r'\(end\s+([\d.-]+)\s+([\d.-]+)\)')
     layer_re = re.compile(r'\(layer\s+"?([^")]+)"?\)')
-    net_name_re = re.compile(r'\(net\s+"([^"]*)"\)')
+    net_name_re = re.compile(r'\(net\s+"((?:[^"\\]|\\.)*)"\)')
     net_id_re = re.compile(r'\(net\s+(\d+)\)')
 
     # Scan top-level (segment ...) blocks with a quote-aware paren matcher. A
@@ -735,19 +794,126 @@ def remove_segments_from_content(content: str, segments: List,
         if ms and me and ml:
             if use_names:
                 mn = net_name_re.search(block)
-                net_token = mn.group(1) if mn else None
+                # The file stores the ESCAPED name (backslash doubled, quote
+                # backslashed); targets use the parser's unescaped name. Undo
+                # the escapes or every backslash-named net silently evades the
+                # strip and its stale copper ships (neo6502 /GPIO*\* nets,
+                # found by the FILE_LEDGER audit -- #312/#264 family).
+                net_token = _unescape_kicad_string(mn.group(1)) if mn else None
             else:
                 mn = net_id_re.search(block)
                 net_token = int(mn.group(1)) if mn else None
             key = seg_key(pos_key(float(ms.group(1)), float(ms.group(2))),
                           pos_key(float(me.group(1)), float(me.group(2))),
                           ml.group(1), net_token)
-            if key in targets:
+            if targets.get(key, 0) > 0:
+                targets[key] -= 1
                 keep = False
                 count += 1
         if keep:
             out.append(block)
         pos = k
+    if unmatched_out is not None:
+        # Strip targets whose block was NOT found (e.g. its layer/net token in
+        # the text only matches after the writer's later transforms). The
+        # residual post-transform pass retries EXACTLY these -- passing the
+        # full list again would let round 2 consume a same-key KEEPER block
+        # that round 1 legitimately left (the counted-multiset guarantee).
+        for k, n in targets.items():
+            if n > 0:
+                unmatched_out.extend(by_key[k][:n])
+    return ''.join(out), count
+
+
+def remove_vias_from_content(content: str, vias: List,
+                             net_id_to_name: Dict = None,
+                             unmatched_out: List = None) -> Tuple[str, int]:
+    """Delete whole ``(via ...)`` blocks matching the given vias.
+
+    Via twin of remove_segments_from_content: strips original input-file vias
+    of a ripped/re-routed net that are no longer on the final board (#103 rip-
+    existing; without this the old via AND its reroute's replacement both ship,
+    stacking same-net drill pairs). Matched by position + net token; duplicates
+    are interchangeable. Returns ``(modified_content, count_removed)``.
+    """
+    if not vias:
+        return content, 0
+
+    use_names = net_id_to_name is not None and is_kicad_10(content)
+
+    # Counted multiset like the segment strip (#318 follow-up): only remove as
+    # many blocks per key as were actually strip-listed.
+    from collections import Counter
+    targets = Counter()
+    _v_by_key = {}
+    for v in vias:
+        net_token = (net_id_to_name.get(v.net_id) if use_names else v.net_id)
+        _vk = (pos_key(v.x, v.y), net_token)
+        targets[_vk] += 1
+        _v_by_key.setdefault(_vk, []).append(v)
+
+    at_re = re.compile(r'\(at\s+([\d.-]+)\s+([\d.-]+)\)')
+    net_name_re = re.compile(r'\(net\s+"((?:[^"\\]|\\.)*)"\)')
+    net_id_re = re.compile(r'\(net\s+(\d+)\)')
+
+    out = []
+    pos = 0
+    n = len(content)
+    count = 0
+    while True:
+        j = content.find('(via', pos)
+        # skip non-via tokens sharing the prefix: (vias allowed) in rule areas
+        while j >= 0 and j + 4 < n and content[j + 4] not in ' \t\r\n(':
+            j = content.find('(via', j + 4)
+        if j < 0:
+            out.append(content[pos:])
+            break
+        out.append(content[pos:j])
+        depth = 0
+        in_str = False
+        k = j
+        while k < n:
+            ch = content[k]
+            if in_str:
+                if ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    k += 1
+                    break
+            k += 1
+        block = content[j:k]
+        ma = at_re.search(block)
+        keep = True
+        if ma:
+            if use_names:
+                mn = net_name_re.search(block)
+                # The file stores the ESCAPED name (backslash doubled, quote
+                # backslashed); targets use the parser's unescaped name. Undo
+                # the escapes or every backslash-named net silently evades the
+                # strip and its stale copper ships (neo6502 /GPIO*\* nets,
+                # found by the FILE_LEDGER audit -- #312/#264 family).
+                net_token = _unescape_kicad_string(mn.group(1)) if mn else None
+            else:
+                mn = net_id_re.search(block)
+                net_token = int(mn.group(1)) if mn else None
+            _vk = (pos_key(float(ma.group(1)), float(ma.group(2))), net_token)
+            if targets.get(_vk, 0) > 0:
+                targets[_vk] -= 1
+                keep = False
+                count += 1
+        if keep:
+            out.append(block)
+        pos = k
+    if unmatched_out is not None:
+        for _vk, n in targets.items():
+            if n > 0:
+                unmatched_out.extend(_v_by_key[_vk][:n])
     return ''.join(out), count
 
 
@@ -772,7 +938,7 @@ def swap_via_nets_at_positions(content: str, positions: set,
     use_names = old_net_name is not None and new_net_name is not None
 
     if use_names:
-        via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\).*?\(net\s+"([^"]*)"\)'
+        via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\).*?\(net\s+"((?:[^"\\]|\\.)*)"\)'
     else:
         via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\).*?\(net\s+(\d+)\)'
 
@@ -790,8 +956,10 @@ def swap_via_nets_at_positions(content: str, positions: set,
         via_x, via_y = float(match.group(1)), float(match.group(2))
 
         if use_names:
-            via_net_name = match.group(3)
-            matches_net = via_net_name == old_net_name
+            # Raw escaped file text vs unescaped display name (see the
+            # segment twin above).
+            raw_net = match.group(3)
+            matches_net = _unescape_kicad_string(raw_net) == old_net_name
         else:
             via_net_id = int(match.group(3))
             matches_net = via_net_id == old_net_id
@@ -799,7 +967,9 @@ def swap_via_nets_at_positions(content: str, positions: set,
         if matches_net and is_near_any_position(via_x, via_y, positions, tolerance):
             count += 1
             if use_names:
-                return match.group(0).replace(f'(net "{old_net_name}")', f'(net "{new_net_name}")')
+                return match.group(0).replace(
+                    f'(net "{raw_net}")',
+                    f'(net "{_escape_net_name(new_net_name)}")')
             else:
                 return match.group(0).replace(f'(net {old_net_id})', f'(net {new_net_id})')
         return match.group(0)

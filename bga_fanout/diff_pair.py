@@ -3,6 +3,7 @@ Differential pair detection and routing utilities.
 
 Functions for finding and processing differential pairs in BGA footprints.
 """
+from __future__ import annotations
 
 from typing import Dict, List
 

@@ -8,7 +8,9 @@ Phase 3 runs after:
 
 Phase 3 connects remaining pads to the main route.
 """
+from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import List, Dict, Set, Optional, Tuple, Any
@@ -18,7 +20,7 @@ from routing_config import GridRouteConfig
 from routing_state import RoutingState, record_net_event
 from routing_context import build_single_ended_obstacles, build_incremental_obstacles
 from single_ended_routing import route_multipoint_taps, route_net_with_obstacles, route_multipoint_main
-from connectivity import get_multipoint_net_pads, get_zone_connected_pad_groups
+from connectivity import get_multipoint_net_pads, get_copper_connected_terminal_groups
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import get_canonical_net_id
@@ -30,7 +32,12 @@ from obstacle_cache import (
     add_net_obstacles_from_cache, precompute_net_obstacles
 )
 from obstacle_costs import compute_track_proximity_for_net
+from plane_pad_tap import push_inflight_copper, pop_inflight_copper
 from terminal_colors import RED, RESET
+
+# Opt-in canary for the #186 segment-crossing scan (see try_phase3_ripup);
+# read once at import -- the abandon path is inside the routing hot loop.
+_TAP_CROSS_SCAN = bool(os.environ.get('KICAD_TAP_CROSS_SCAN'))
 
 
 @dataclass
@@ -87,14 +94,12 @@ def _reconcile_multipoint_connectivity(new_result, pcb_data, config, net_id):
     pad_info = new_result.get('multipoint_pad_info')
     if not pad_info:
         return
-    pads = [pi[5] if len(pi) > 5 else None for pi in pad_info]
-    if any(p is None for p in pads):
+    if any((pi[5] if len(pi) > 5 else None) is None for pi in pad_info):
         return  # can't map pads reliably; leave as-is
-    segs = [s for s in pcb_data.segments if s.net_id == net_id]
-    vias = [v for v in pcb_data.vias if v.net_id == net_id]
-    zones = [z for z in getattr(pcb_data, 'zones', []) if z.net_id == net_id]
-    layers = [l for l in config.layers if l.endswith('.Cu')]
-    groups = get_zone_connected_pad_groups(segs, vias, pads, zones, layers)
+    # Overlap-aware grouping (#317): must match the definition used to seed
+    # the component MST, or copper joined by cap overlap would be graded as
+    # failed pads here and pointlessly re-tapped.
+    groups = get_copper_connected_terminal_groups(pcb_data, net_id, pad_info)
     if not groups:
         return
     from collections import Counter
@@ -112,6 +117,252 @@ def _reconcile_multipoint_connectivity(new_result, pcb_data, config, net_id):
     new_result['failed_pads_info'] = failed
     new_result['tap_pads_connected'] = len(routed)
     new_result['tap_pads_total'] = len(pad_info)
+
+
+def _build_congestion_fn(pcb_data, radius=1.0):
+    """1mm-bucket spatial hash of all pads/vias -> congestion(net_id, x, y):
+    count of FOREIGN pads/vias within `radius` of (x, y). Static proxy for
+    "how boxed in is this point" (few escape corridors). Shared by the #347
+    phase-3 net ordering and the congestion-weighted #85 abandon metrics.
+    NC pads count too -- they physically wall a terminal regardless of net."""
+    buckets = {}
+
+    def _bucket_add(x, y, net_id):
+        buckets.setdefault((int(x // radius), int(y // radius)), []).append(
+            (x, y, net_id))
+
+    for fp in pcb_data.footprints.values():
+        for p in fp.pads:
+            _bucket_add(p.global_x, p.global_y, p.net_id)
+    for v in pcb_data.vias:
+        _bucket_add(v.x, v.y, v.net_id)
+
+    def _congestion(net_id, tx, ty):
+        n = 0
+        bx, by = int(tx // radius), int(ty // radius)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for (x, y, nid) in buckets.get((bx + dx, by + dy), ()):
+                    if nid != net_id and abs(x - tx) <= radius and abs(y - ty) <= radius:
+                        n += 1
+        return n
+
+    return _congestion
+
+
+# Choices for config.ripup_abandon_metric (issue #85 arbitration; see
+# docs/rip-up-reroute.md "Abandon metrics" for definitions and rationale).
+ABANDON_METRICS = ('stranded', 'total-pads', 'complete-nets', 'congestion',
+                   'history', 'weighted', 'probe', 'weighted-probe')
+
+
+def _sink_record(sinks, ripped_ids, saved_result):
+    """Record ripped nets in every ancestor rip-tree sink (#354), keeping the
+    net's PRE-rip failed-pad list from its first rip in each frame's window
+    (first write wins) -- the before-world input for the #85 abandon metrics.
+    The saved failed list belongs to the first (blocker) id; a diff-pair
+    partner ripped alongside it was fully routed."""
+    failed = list((saved_result or {}).get('failed_pads_info', []) or [])
+    for s in sinks:
+        for i, rid in enumerate(ripped_ids):
+            if rid not in s:
+                s[rid] = failed if i == 0 else []
+
+
+def _build_abandon_weight_fn(metric, pcb_data, state):
+    """Pad-weight function for the weighted #85 abandon metrics.
+
+    congestion: w = 1 + min(foreign pads/vias within 1mm, 24)/8  -> [1, 4]
+      (boxed-in pads are unlikely to be reconnectable by a later pass)
+    history:    w = 1 + min(times this net was ripped or failed a re-route
+      this run, 3)  -> [1, 4]  (empirically-hard nets cost more to lose)
+    weighted/weighted-probe: the product of both."""
+    use_c = metric in ('congestion', 'weighted', 'weighted-probe')
+    use_h = metric in ('history', 'weighted', 'weighted-probe')
+    cong = _build_congestion_fn(pcb_data) if use_c else None
+    hist_cache = {}
+
+    def _hist_w(nid):
+        if nid not in hist_cache:
+            events = state.net_history.get(nid, []) if state is not None else []
+            n = sum(1 for e in events
+                    if e.get('event') in ('ripped_by', 'reroute_failed'))
+            hist_cache[nid] = 1.0 + min(n, 3)
+        return hist_cache[nid]
+
+    def _weight(nid, x, y):
+        w = 1.0
+        if cong is not None:
+            w *= 1.0 + min(cong(nid, x, y), 24) / 8.0
+        if use_h:
+            w *= _hist_w(nid)
+        return w
+
+    return _weight
+
+
+def _probe_abandon_world(stranded_ids, orig_tap_segs, orig_tap_vias, ctx):
+    """probe / weighted-probe metrics: for each fully-stranded rip-tree net,
+    test whether it could re-route in the ABANDON world (original tap guarded
+    into the map) under a capped iteration budget. A net unroutable there too
+    is lost EITHER way and must not veto the retry. Returns {net_id: bool}.
+
+    Best-effort fidelity: probes the 2-terminal main route only (a multipoint
+    victim's taps are not probed), and nothing is committed -- the guard
+    add/remove mirrors the abandon path's (#309: matching diagonal_margin;
+    #310: inflight window)."""
+    from dataclasses import replace as _dc_replace
+    result = {}
+    if not stranded_ids:
+        return result
+    state, config, pcb_data = ctx['state'], ctx['config'], ctx['pcb_data']
+    guard = (state.working_obstacles is not None
+             and (orig_tap_segs or orig_tap_vias))
+    token = None
+    if guard:
+        add_segments_list_as_obstacles(state.working_obstacles, orig_tap_segs, config)
+        add_vias_list_as_obstacles(state.working_obstacles, orig_tap_vias, config, diagonal_margin=0.25)
+        token = push_inflight_copper(pcb_data, orig_tap_segs, orig_tap_vias)
+    probe_cfg = _dc_replace(config, max_iterations=min(config.max_iterations, 50000))
+    try:
+        for rid in stranded_ids:
+            if state.working_obstacles is not None and state.net_obstacles_cache:
+                obstacles, _ = build_incremental_obstacles(
+                    state.working_obstacles, pcb_data, config, rid,
+                    ctx['all_unrouted_net_ids'], ctx['routed_net_ids'],
+                    ctx['track_proximity_cache'], ctx['layer_map'],
+                    state.net_obstacles_cache)
+            else:
+                phase3_routed_ids = [x for x in ctx['routed_net_ids'] if x != rid]
+                obstacles, _ = build_single_ended_obstacles(
+                    ctx['base_obstacles'], pcb_data, config, phase3_routed_ids,
+                    ctx['remaining_net_ids'], ctx['all_unrouted_net_ids'], rid,
+                    ctx['gnd_net_id'], ctx['track_proximity_cache'], ctx['layer_map'],
+                    net_obstacles_cache=state.net_obstacles_cache,
+                    ripped_route_layer_costs=state.ripped_route_layer_costs,
+                    ripped_route_via_positions=state.ripped_route_via_positions)
+            r = route_net_with_obstacles(pcb_data, rid, probe_cfg, obstacles)
+            result[rid] = bool(r and not r.get('failed')
+                               and (r.get('path') or r.get('phase1_exhausted')))
+    finally:
+        if guard:
+            remove_segments_list_from_obstacles(state.working_obstacles, orig_tap_segs, config)
+            remove_vias_list_from_obstacles(state.working_obstacles, orig_tap_vias, config, diagonal_margin=0.25)
+            pop_inflight_copper(pcb_data, token)
+    return result
+
+
+def _phase3_abandon_retry(metric, pcb_data, config, state, net_id,
+                          completed_result, retry_result, stranded,
+                          subtree_before, routed_results,
+                          orig_tap_segs, orig_tap_vias, probe_ctx):
+    """Issue #85 arbitration: keep the successful tap RETRY, or abandon it in
+    favour of the original tap? Returns (abandon: bool, detail: str).
+
+    All metrics except 'stranded' compare the CURRENT world (retry kept: root
+    gained pads, rip-tree victims re-routed around the retry tap) against the
+    world BEFORE this rip-up frame started (original tap + every rip-tree net
+    as it was when first ripped, from _sink_record). See docs/rip-up-reroute.md
+    "Abandon metrics"."""
+    pads_lost = sum(lost for _item, lost in stranded)
+    pads_gained = (len(completed_result.get('failed_pads_info', []))
+                   - len(retry_result.get('failed_pads_info', [])))
+    base_detail = f"lost {pads_lost} pad(s) to gain {pads_gained}"
+    if metric == 'stranded':
+        # Original #85 rule: only fully-stranded victims count against the
+        # retry; partial victim regressions are greedy churn that recovers.
+        return pads_lost > pads_gained, base_detail
+
+    tree_ids = list(subtree_before.keys())
+    lost_either_way = set()
+    if metric in ('probe', 'weighted-probe'):
+        stranded_now = [rid for rid in tree_ids if rid not in routed_results]
+        routable = _probe_abandon_world(stranded_now, orig_tap_segs,
+                                        orig_tap_vias, probe_ctx)
+        lost_either_way = {rid for rid, ok in routable.items() if not ok}
+
+    weight = _build_abandon_weight_fn(metric, pcb_data, state)
+
+    def _value(nid, failed):
+        total = sum(weight(nid, p.global_x, p.global_y)
+                    for p in pcb_data.pads_by_net.get(nid, []))
+        lost = sum(weight(nid, f.get('x', 0.0), f.get('y', 0.0))
+                   for f in (failed or []))
+        return max(0.0, total - lost)
+
+    def _pad_count(nid, failed):
+        return max(0, len(pcb_data.pads_by_net.get(nid, [])) - len(failed or []))
+
+    before_val = _value(net_id, completed_result.get('failed_pads_info'))
+    now_val = _value(net_id, retry_result.get('failed_pads_info'))
+    before_pads = _pad_count(net_id, completed_result.get('failed_pads_info'))
+    now_pads = _pad_count(net_id, retry_result.get('failed_pads_info'))
+    before_nets = 1 if not completed_result.get('failed_pads_info') else 0
+    now_nets = 1 if not retry_result.get('failed_pads_info') else 0
+    for rid in tree_ids:
+        if rid in lost_either_way:
+            continue  # unroutable in the abandon world too: no vote
+        b_failed = subtree_before.get(rid)
+        before_val += _value(rid, b_failed)
+        before_pads += _pad_count(rid, b_failed)
+        before_nets += 1 if not b_failed else 0
+        if rid in routed_results:
+            n_failed = routed_results[rid].get('failed_pads_info')
+            now_val += _value(rid, n_failed)
+            now_pads += _pad_count(rid, n_failed)
+            now_nets += 1 if not n_failed else 0
+
+    if metric == 'complete-nets':
+        abandon = (now_nets, now_pads) < (before_nets, before_pads)
+        detail = (f"{base_detail}; complete nets {now_nets} vs {before_nets} "
+                  f"(pads {now_pads} vs {before_pads})")
+    else:
+        abandon = now_val < before_val
+        detail = f"{base_detail}; world value {now_val:.1f} vs {before_val:.1f}"
+        if lost_either_way:
+            detail += f"; {len(lost_either_way)} net(s) unroutable either way"
+    return abandon, f"{detail} [{metric}]"
+
+
+def _order_nets_by_boxed_in_risk(pending_multipoint_nets, pcb_data):
+    """Order Phase 3 nets so the most boxed-in pending terminals route FIRST
+    (issue #347, core1106 RST1).
+
+    Phase 3 nets contest shared narrow resources -- a fine-pitch connector
+    row's single escape corridor fits one tap. In insertion order, an
+    early net's tap can wall in a later net's terminal; the later net then
+    only connects by ripping the early tap, whose own re-route may strand
+    and veto the trade (#85). Routing the most-constrained terminal first
+    plays the contest while the board is emptiest.
+
+    Risk = max over the net's PENDING terminals of the local foreign-copper
+    density (pads/vias within 1mm), a static proxy for "how few escape
+    corridors does this terminal have". Deterministic: integer risk,
+    stable sort preserving insertion order on ties.
+    """
+    items = list(pending_multipoint_nets.items())
+    if len(items) < 2:
+        return items
+
+    _congestion = _build_congestion_fn(pcb_data)
+
+    def _risk(net_id, main_result):
+        pad_info = main_result.get('multipoint_pad_info') or []
+        routed = main_result.get('routed_pad_indices') or set()
+        best = 0
+        for i, info in enumerate(pad_info):
+            if i in routed:
+                continue
+            best = max(best, _congestion(net_id, info[3], info[4]))
+        return best
+
+    risks = {net_id: _risk(net_id, mr) for net_id, mr in items}
+    ordered = sorted(items, key=lambda kv: -risks[kv[0]])
+    if [k for k, _ in ordered] != [k for k, _ in items]:
+        names = [pcb_data.nets[k].name if k in pcb_data.nets else f"net_{k}"
+                 for k, _ in ordered]
+        print(f"Phase 3 order (boxed-in risk first): {', '.join(names)}")
+    return ordered
 
 
 def _commit_net_result(results, routed_results, net_id, new_result,
@@ -186,7 +437,9 @@ def run_phase3_tap_routing(
 
     # Count total tap edges across all nets for progress display
     total_tap_edges = sum(
-        len(result.get('mst_edges', [])) - 1  # -1 for the main edge routed in Phase 1
+        # -1 for the main edge routed in Phase 1; an already-connected net
+        # (#317 single-component result) has no edges at all, not -1
+        max(0, len(result.get('mst_edges', [])) - 1)
         for result in state.pending_multipoint_nets.values()
     )
     global_tap_offset = 0
@@ -204,7 +457,8 @@ def run_phase3_tap_routing(
 
     total_multipoint_nets = len(state.pending_multipoint_nets)
     net_index = 0
-    for net_id, main_result in list(state.pending_multipoint_nets.items()):
+    for net_id, main_result in _order_nets_by_boxed_in_risk(
+            state.pending_multipoint_nets, pcb_data):
         # Check for cancellation at start of each phase 3 iteration
         if cancel_check and cancel_check():
             print("\nPhase 3 cancelled by user")
@@ -283,12 +537,16 @@ def run_phase3_tap_routing(
                 if retry_result is not None:
                     completed_result = retry_result
 
-            # Print red final failure message if still have failures after all rip-up attempts
+            # Flag pads still unconnected after this net's rip-up attempts. This
+            # is a MID-RUN state, not a verdict: a later retry/fallback can still
+            # connect the pad, and the end-of-run summary re-checks every net
+            # authoritatively (issue #292: usb_pd printed FAILED here for a net
+            # the JSON_SUMMARY correctly reported connected).
             final_failed_pads = completed_result.get('failed_pads_info', [])
             if final_failed_pads:
                 net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"Net {net_id}"
                 for pad in final_failed_pads:
-                    print(f"  {RED}FAILED: {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) not connected{RESET}")
+                    print(f"  {RED}NOT CONNECTED (so far): {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) - may still be recovered; final verdict in the end-of-run summary{RESET}")
 
             # Extract only the NEW tap segments (after the length-matched main route)
             tap_segments = completed_result['new_segments'][len(lm_segments):]
@@ -358,7 +616,9 @@ def try_phase3_ripup(
     base_obstacles, gnd_net_id, phase3_ripped_nets,
     global_tap_offset=0, global_tap_total=0, global_tap_failed=0,
     obstacle_cache=None,
-    reroute_depth: int = 0
+    reroute_depth: int = 0,
+    ancestor_net_ids: frozenset = frozenset(),
+    rip_sinks: tuple = ()
 ):
     """
     Try progressive rip-up and retry for failed Phase 3 tap routes.
@@ -366,6 +626,10 @@ def try_phase3_ripup(
     Tries N=1, then N=2, etc up to max_rip_up_count blockers.
     Returns updated completed_result if retry succeeded, None otherwise.
     Appends ripped nets to phase3_ripped_nets for later re-routing.
+
+    rip_sinks (#354): tuple of set()s owned by ANCESTOR rip-up frames. Every
+    net id ripped in this frame or below is added to all of them, so each
+    frame knows its full nested rip TREE (not just its direct victims).
     """
     net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"net_{net_id}"
 
@@ -377,10 +641,28 @@ def try_phase3_ripup(
     if not all_blocked_cells:
         return None
 
+    # Cycle guard (glasgow Z1): never rip a net that is an ANCESTOR in the current
+    # rip-up chain (the root net being routed, or any net whose rip-up cascade led
+    # here). Ripping an ancestor re-routes it from under its own in-progress retry
+    # -- a circular net -> ... -> net rip that orphans copper and ships the root
+    # split. exclude_net_ids removes them from blocker selection at every depth.
+    exclude_ids = {net_id} | ancestor_net_ids
+
+    # Rip TREE tracking (#354): every net ripped anywhere in this frame's
+    # nested cascade, including by nested rip-up frames. If this frame's
+    # retry is later ABANDONED, the ORIGINAL tap it keeps was never in the
+    # obstacle map while any of these nets re-routed (only the RETRY tap
+    # was), so any of them can hold copper exactly on the original tap's
+    # cells -- the abandon path must re-rip the whole subtree.
+    # Maps net_id -> that net's failed-pad list at its FIRST rip in this
+    # frame's window (the #85 abandon metrics' before-world snapshot).
+    subtree_ripped = {}
+    child_sinks = rip_sinks + (subtree_ripped,)
+
     # Analyze blocking
     blockers = analyze_frontier_blocking(
         all_blocked_cells, pcb_data, config, routed_net_paths,
-        exclude_net_ids={net_id},
+        exclude_net_ids=exclude_ids,
         obstacle_cache=obstacle_cache
     )
 
@@ -407,7 +689,7 @@ def try_phase3_ripup(
             print(f"    Re-analyzing {len(last_retry_blocked_cells)} blocked cells from N={N-1} retry:")
             fresh_blockers = analyze_frontier_blocking(
                 last_retry_blocked_cells, pcb_data, config, routed_net_paths,
-                exclude_net_ids={net_id},
+                exclude_net_ids=exclude_ids,
                 obstacle_cache=obstacle_cache
             )
             print_blocking_analysis(fresh_blockers, prefix="      ")
@@ -458,6 +740,7 @@ def try_phase3_ripup(
 
         ripped_items.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
         ripped_canonical_ids.add(get_canonical_net_id(blocker.net_id, diff_pair_by_net_id))
+        _sink_record(child_sinks, ripped_ids, saved_result)
         # Invalidate obstacle cache for ripped nets and record rip events
         for rid in ripped_ids:
             if obstacle_cache is not None:
@@ -524,6 +807,7 @@ def try_phase3_ripup(
                 ripped_net_ids = {item[0] for item in ripped_items}
                 tap_segments_added = []
                 tap_vias_added = []
+                inflight_token = None
                 if state.working_obstacles is not None and net_id not in ripped_net_ids:
                     tap_segments_added = retry_result['new_segments'][len(lm_segments):]
                     tap_vias_added = retry_result['new_vias'][len(lm_vias):]
@@ -531,6 +815,11 @@ def try_phase3_ripup(
                         print(f"    Adding {len(tap_segments_added)} tap segments, {len(tap_vias_added)} tap vias to obstacles before re-routing...")
                         add_segments_list_as_obstacles(state.working_obstacles, tap_segments_added, config)
                         add_vias_list_as_obstacles(state.working_obstacles, tap_vias_added, config, diagonal_margin=0.25)
+                        # This copper is in the obstacle map but NOT in pcb_data
+                        # until the caller commits it; register it so pcb_data-
+                        # windowed via placement (#189 unblock) sees it too (#310).
+                        inflight_token = push_inflight_copper(
+                            pcb_data, tap_segments_added, tap_vias_added)
                 elif net_id in ripped_net_ids:
                     print(f"    Skipping tap obstacle addition - net will be re-routed")
 
@@ -543,7 +832,9 @@ def try_phase3_ripup(
                         ripped_items, pcb_data, config, state, routed_net_ids, remaining_net_ids,
                         all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
                         results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
-                        reroute_depth=reroute_depth + 1
+                        reroute_depth=reroute_depth + 1,
+                        ancestor_net_ids=exclude_ids,
+                        rip_sinks=child_sinks
                     )
 
                 # IMPORTANT: Remove the temporarily added tap segments before returning.
@@ -552,7 +843,12 @@ def try_phase3_ripup(
                 # and won't be properly removed when the net is later ripped.
                 if tap_segments_added or tap_vias_added:
                     remove_segments_list_from_obstacles(state.working_obstacles, tap_segments_added, config)
-                    remove_vias_list_from_obstacles(state.working_obstacles, tap_vias_added, config)
+                    # diagonal_margin MUST match the add above (0.25): the margin
+                    # inflates every via's per-layer track disc, so removing
+                    # without it leaves a quarter-cell ring ref-counted forever
+                    # (the working-map blocked_cells leak of issue #309).
+                    remove_vias_list_from_obstacles(state.working_obstacles, tap_vias_added, config, diagonal_margin=0.25)
+                    pop_inflight_copper(pcb_data, inflight_token)
 
                 # Issue #85: only commit the rip-up if it is a net improvement.
                 # Stranding (totally losing) a previously-routed victim is fine
@@ -569,24 +865,40 @@ def try_phase3_ripup(
                 # route avoids whatever is actually on the board now. We guard
                 # it with net_id's original tap so the victim steers clear of
                 # the copper the caller is about to commit.
-                pads_lost = sum(lost for _item, lost in stranded)
-                pads_gained = (len(completed_result.get('failed_pads_info', []))
-                               - len(retry_result.get('failed_pads_info', [])))
-                if pads_lost > pads_gained:
+                orig_tap_segs = completed_result['new_segments'][len(lm_segments):]
+                orig_tap_vias = completed_result['new_vias'][len(lm_vias):]
+                probe_ctx = {
+                    'state': state, 'config': config, 'pcb_data': pcb_data,
+                    'routed_net_ids': routed_net_ids,
+                    'remaining_net_ids': remaining_net_ids,
+                    'all_unrouted_net_ids': all_unrouted_net_ids,
+                    'track_proximity_cache': track_proximity_cache,
+                    'layer_map': layer_map, 'base_obstacles': base_obstacles,
+                    'gnd_net_id': gnd_net_id,
+                }
+                abandon, abandon_detail = _phase3_abandon_retry(
+                    getattr(config, 'ripup_abandon_metric', 'stranded'),
+                    pcb_data, config, state, net_id, completed_result,
+                    retry_result, stranded, subtree_ripped, routed_results,
+                    orig_tap_segs, orig_tap_vias, probe_ctx)
+                if abandon:
                     stranded_names = ", ".join(
                         pcb_data.nets[item[0]].name if item[0] in pcb_data.nets else f"net_{item[0]}"
                         for item, _lost in stranded
                     )
-                    print(f"    {RED}{net_name}: tap rip-up lost {pads_lost} pad(s) "
-                          f"({stranded_names}) to gain {pads_gained}; abandoning tap, "
+                    print(f"    {RED}{net_name}: tap rip-up {abandon_detail} "
+                          f"({stranded_names}); abandoning tap, "
                           f"re-routing victim(s){RESET}")
-                    orig_tap_segs = completed_result['new_segments'][len(lm_segments):]
-                    orig_tap_vias = completed_result['new_vias'][len(lm_vias):]
                     guard = (state.working_obstacles is not None
                              and (orig_tap_segs or orig_tap_vias))
+                    guard_token = None
                     if guard:
                         add_segments_list_as_obstacles(state.working_obstacles, orig_tap_segs, config)
                         add_vias_list_as_obstacles(state.working_obstacles, orig_tap_vias, config, diagonal_margin=0.25)
+                        # Same in-flight window as above: the kept original tap
+                        # is not in pcb_data while the victims re-route (#310).
+                        guard_token = push_inflight_copper(
+                            pcb_data, orig_tap_segs, orig_tap_vias)
                     # Issue #171: the victims that DID re-route above avoided the
                     # RETRY tap copper (added to obstacles before the re-route),
                     # but we are now DISCARDING that retry in favour of net_id's
@@ -599,7 +911,7 @@ def try_phase3_ripup(
                     for item in reroute_items:
                         vic_id = item[0]
                         if vic_id in routed_results:
-                            rip_up_net(
+                            _saved, re_ripped, _wir = rip_up_net(
                                 vic_id, pcb_data, routed_net_ids, routed_net_paths,
                                 routed_results, diff_pair_by_net_id, remaining_net_ids,
                                 results, config, track_proximity_cache,
@@ -607,13 +919,46 @@ def try_phase3_ripup(
                                 state.ripped_route_layer_costs, state.ripped_route_via_positions,
                                 layer_map
                             )
-                    # Issue #186: also re-route any OTHER routed net whose copper
-                    # crosses the original tap we are keeping. A net re-routed by a
-                    # nested rip-up cascade can have been laid across this tap (it was
-                    # in-flight, invisible copper then) and is not in ripped_items, so
-                    # the loop above misses it and a different-net SHORT would ship.
+                            if _saved is not None:
+                                _sink_record(child_sinks, re_ripped, _saved)
                     existing_ids = {it[0] for it in reroute_items}
-                    for cid in _nets_crossing_segments(orig_tap_segs, pcb_data, net_id, existing_ids):
+                    # Issue #354: re-rip EVERY net ripped anywhere in the nested
+                    # cascade beneath this frame (the full rip TREE), not just the
+                    # direct victims above. Nested victims re-routed while only the
+                    # RETRY tap was in the obstacle map -- the ORIGINAL tap we are
+                    # keeping was invisible to them -- so their fresh copper can sit
+                    # exactly on it (quickfeather: /SWD.SYS_RST's via drill-on-drill
+                    # under /SPI_{DEV}.MOSI's kept tap via). The #186 segment-crossing
+                    # scan below cannot see via-on-via or via-under-track overlaps;
+                    # the tree covers every net whose copper can postdate the
+                    # original tap's obstacle snapshot.
+                    for cid in sorted(subtree_ripped):
+                        if (cid in existing_ids or cid in exclude_ids
+                                or cid not in routed_results):
+                            continue
+                        c_saved, c_ripped, c_was_in = rip_up_net(
+                            cid, pcb_data, routed_net_ids, routed_net_paths,
+                            routed_results, diff_pair_by_net_id, remaining_net_ids,
+                            results, config, track_proximity_cache,
+                            state.working_obstacles, state.net_obstacles_cache,
+                            state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                            layer_map
+                        )
+                        if c_saved is not None:
+                            print(f"    {net_name}: re-routing {pcb_data.nets[cid].name if cid in pcb_data.nets else f'net_{cid}'} "
+                                  f"clear of the kept tap (cascade rip tree; issue #354)")
+                            reroute_items.append((cid, c_saved, c_ripped, c_was_in))
+                            existing_ids.add(cid)
+                            _sink_record(child_sinks, c_ripped, c_saved)
+                    # Issue #186: also re-route any OTHER routed net whose copper
+                    # crosses the original tap we are keeping. The #354 rip-tree
+                    # re-rip above subsumes this (only cascade-ripped nets can
+                    # postdate the original tap's obstacle snapshot), so the scan
+                    # is OFF by default -- kept as an opt-in canary
+                    # (KICAD_TAP_CROSS_SCAN=1): if it ever fires, some code path
+                    # moved copper during the cascade without a recorded rip.
+                    for cid in (_nets_crossing_segments(orig_tap_segs, pcb_data, net_id, existing_ids)
+                                if _TAP_CROSS_SCAN else ()):
                         if cid not in routed_results:
                             continue
                         c_saved, c_ripped, c_was_in = rip_up_net(
@@ -628,16 +973,22 @@ def try_phase3_ripup(
                             print(f"    {net_name}: re-routing {pcb_data.nets[cid].name if cid in pcb_data.nets else f'net_{cid}'} "
                                   f"clear of the kept tap (crossed it; issue #186)")
                             reroute_items.append((cid, c_saved, c_ripped, c_was_in))
+                            existing_ids.add(cid)
+                            _sink_record(child_sinks, c_ripped, c_saved)
                     _reroute_phase3_ripped_nets(
                         reroute_items,
                         pcb_data, config, state, routed_net_ids, remaining_net_ids,
                         all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
                         results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
-                        reroute_depth=reroute_depth + 1
+                        reroute_depth=reroute_depth + 1,
+                        ancestor_net_ids=exclude_ids,
+                        rip_sinks=child_sinks
                     )
                     if guard:
                         remove_segments_list_from_obstacles(state.working_obstacles, orig_tap_segs, config)
-                        remove_vias_list_from_obstacles(state.working_obstacles, orig_tap_vias, config)
+                        # diagonal_margin must match the add above (0.25) - see #309.
+                        remove_vias_list_from_obstacles(state.working_obstacles, orig_tap_vias, config, diagonal_margin=0.25)
+                        pop_inflight_copper(pcb_data, guard_token)
                     return None
 
                 return retry_result
@@ -672,11 +1023,161 @@ def try_phase3_ripup(
     return None
 
 
+def _retry_victim_main_with_ripup(
+    victim_id, was_multipoint, failed_result,
+    pcb_data, config, state, routed_net_ids, remaining_net_ids,
+    all_unrouted_net_ids, routed_net_paths, routed_results,
+    diff_pair_by_net_id, results, track_proximity_cache, layer_map,
+    base_obstacles, gnd_net_id,
+    ancestor_net_ids: frozenset = frozenset(),
+    rip_sinks: tuple = ()
+):
+    """Progressive rip-up retry for a rip-VICTIM's failed MAIN re-route
+    (issue #347, core1106 RST1).
+
+    try_phase3_ripup rips a blocker, routes the tap, then re-routes the
+    victim -- but the victim's main route was attempted BARE: one failure
+    and it stranded, the #85 arbitration counted its pads as lost, and the
+    ORIGINAL (successful!) tap rip-up was abandoned to restore the victim.
+    Giving the victim the same progressive rip-up the root tap got lets
+    both nets land and the rip-up pay off.
+
+    Ancestor-guarded like try_phase3_ripup: never rips the root net being
+    tapped or any net in the current rip chain. Uses only rip_up_net /
+    restore_net and the incremental obstacle builders, so the working-map
+    ref-counts stay balanced (#309 -- no raw add/remove pairs here).
+
+    Returns (result_or_None, nested_ripped_items). On success the caller
+    must re-route nested_ripped_items AFTER committing the victim's copper;
+    on failure everything ripped here has been restored and [] is returned.
+    """
+    victim_name = pcb_data.nets[victim_id].name if victim_id in pcb_data.nets else f"net_{victim_id}"
+    blocked = list(dict.fromkeys(
+        (failed_result or {}).get('blocked_cells_forward', [])
+        + (failed_result or {}).get('blocked_cells_backward', [])))
+    if not blocked:
+        return None, []
+
+    exclude_ids = {victim_id} | ancestor_net_ids
+    blockers = analyze_frontier_blocking(
+        blocked, pcb_data, config, routed_net_paths,
+        exclude_net_ids=exclude_ids)
+    if not blockers:
+        return None, []
+    rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
+        blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id)
+    if not rippable_blockers:
+        print(f"    {victim_name}: main re-route blocked, no rippable blockers")
+        return None, []
+
+    nested_ripped = []
+    ripped_canonical_ids = set()
+    last_blocked = blocked
+    for N in range(1, config.max_rip_up_count + 1):
+        if N > 1 and last_blocked:
+            fresh = analyze_frontier_blocking(
+                last_blocked, pcb_data, config, routed_net_paths,
+                exclude_net_ids=exclude_ids)
+            next_blocker = None
+            for b in fresh:
+                if b.net_id in routed_results:
+                    canonical = get_canonical_net_id(b.net_id, diff_pair_by_net_id)
+                    if canonical not in ripped_canonical_ids:
+                        next_blocker = b
+                        break
+            if next_blocker is None:
+                break
+            next_canonical = get_canonical_net_id(next_blocker.net_id, diff_pair_by_net_id)
+            if next_canonical not in seen_canonical_ids:
+                seen_canonical_ids.add(next_canonical)
+                rippable_blockers.append(next_blocker)
+        if N > len(rippable_blockers):
+            break
+
+        blocker = rippable_blockers[N - 1]
+        blocker_name = pcb_data.nets[blocker.net_id].name \
+            if blocker.net_id in pcb_data.nets else f"net_{blocker.net_id}"
+        print(f"    {victim_name}: main re-route blocked, ripping {blocker_name} "
+              f"(N={N}) to retry...")
+        saved_result, ripped_ids, was_in_results = rip_up_net(
+            blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
+            routed_results, diff_pair_by_net_id, remaining_net_ids,
+            results, config, track_proximity_cache,
+            state.working_obstacles, state.net_obstacles_cache,
+            state.ripped_route_layer_costs, state.ripped_route_via_positions,
+            layer_map
+        )
+        if saved_result is None:
+            print(f"    Failed to rip up {blocker_name}")
+            break
+        nested_ripped.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
+        ripped_canonical_ids.add(get_canonical_net_id(blocker.net_id, diff_pair_by_net_id))
+        _sink_record(rip_sinks, ripped_ids, saved_result)
+        for rid in ripped_ids:
+            record_net_event(state, rid, "ripped_by", {
+                "ripping_net_id": victim_id,
+                "ripping_net_name": victim_name,
+                "reason": f"Phase 3 victim main re-route rip-up N={N}",
+                "N": N
+            })
+
+        if state.working_obstacles is not None and state.net_obstacles_cache:
+            obstacles, _ = build_incremental_obstacles(
+                state.working_obstacles, pcb_data, config, victim_id,
+                all_unrouted_net_ids, routed_net_ids, track_proximity_cache,
+                layer_map, state.net_obstacles_cache)
+        else:
+            phase3_routed_ids = [rid for rid in routed_net_ids if rid != victim_id]
+            obstacles, _ = build_single_ended_obstacles(
+                base_obstacles, pcb_data, config, phase3_routed_ids, remaining_net_ids,
+                all_unrouted_net_ids, victim_id, gnd_net_id, track_proximity_cache,
+                layer_map, net_obstacles_cache=state.net_obstacles_cache,
+                ripped_route_layer_costs=state.ripped_route_layer_costs,
+                ripped_route_via_positions=state.ripped_route_via_positions)
+
+        if was_multipoint:
+            multipoint_pads = get_multipoint_net_pads(pcb_data, victim_id, config)
+            if multipoint_pads:
+                result = route_multipoint_main(pcb_data, victim_id, config, obstacles, multipoint_pads)
+            else:
+                result = route_net_with_obstacles(pcb_data, victim_id, config, obstacles)
+        else:
+            result = route_net_with_obstacles(pcb_data, victim_id, config, obstacles)
+
+        if result and not result.get('failed') \
+                and (result.get('path') or result.get('phase1_exhausted')):
+            # phase1_exhausted (#348) is a SUCCESS shape: no new main copper,
+            # but the net's island copper sources its Phase-3 taps. Reading
+            # it as failure burned further rip-up rounds for nothing.
+            print(f"    {victim_name}: main re-route rip-up SUCCESS (N={N})")
+            return result, nested_ripped
+        last_blocked = list(dict.fromkeys(
+            (result or {}).get('blocked_cells_forward', [])
+            + (result or {}).get('blocked_cells_backward', [])))
+
+    if nested_ripped:
+        print(f"    {victim_name}: main re-route rip-up failed, restoring "
+              f"{len(nested_ripped)} net(s)...")
+        for rid, saved_result, ripped_ids, was_in_results in reversed(nested_ripped):
+            restore_net(
+                rid, saved_result, ripped_ids, was_in_results,
+                pcb_data, routed_net_ids, routed_net_paths,
+                routed_results, diff_pair_by_net_id, remaining_net_ids,
+                results, config, track_proximity_cache, layer_map,
+                state.working_obstacles, state.net_obstacles_cache,
+                state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                refused_sink=state.collision_refused_net_ids
+            )
+    return None, []
+
+
 def _reroute_phase3_ripped_nets(
     phase3_ripped_nets, pcb_data, config, state, routed_net_ids, remaining_net_ids,
     all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
     results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
-    reroute_depth: int = 0
+    reroute_depth: int = 0,
+    ancestor_net_ids: frozenset = frozenset(),
+    rip_sinks: tuple = ()
 ):
     """
     Re-route nets that were ripped during Phase 3 tap routing.
@@ -737,7 +1238,38 @@ def _reroute_phase3_ripped_nets(
             # Route the main path for simple nets
             result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles)
 
-        if result and not result.get('failed') and result.get('path'):
+        # A victim whose main re-route fails BARE strands, and the #85
+        # arbitration then abandons the (successful) tap rip-up that ripped
+        # it -- give the victim the same progressive rip-up the tap got
+        # (#347, core1106 RST1). Ancestor-guarded; depth-capped.
+        nested_ripped_items = []
+        if ((result is None or result.get('failed') or not result.get('path'))
+                and config.max_rip_up_count > 0
+                and reroute_depth < config.max_rip_up_count):
+            retry, nested_ripped_items = _retry_victim_main_with_ripup(
+                ripped_net_id, was_multipoint, result,
+                pcb_data, config, state, routed_net_ids, remaining_net_ids,
+                all_unrouted_net_ids, routed_net_paths, routed_results,
+                diff_pair_by_net_id, results, track_proximity_cache, layer_map,
+                base_obstacles, gnd_net_id,
+                ancestor_net_ids=ancestor_net_ids | {ripped_net_id},
+                rip_sinks=rip_sinks)
+            if retry is not None:
+                result = retry
+
+        if result and not result.get('failed') \
+                and result.get('phase1_exhausted'):
+            # #348 island-source synthetic (path=[], no new copper): the
+            # victim's pad terminals are boxed in but its existing copper
+            # islands can source Phase-3 taps. Mirror the normal-flow
+            # handling (single_ended_loop) instead of reading the empty
+            # path as failure -- that stranded the exact net the fallback
+            # was built to save and killed its pending taps.
+            if ripped_net_id in state.pending_multipoint_nets:
+                state.pending_multipoint_nets[ripped_net_id] = result
+            record_net_event(state, ripped_net_id, "reroute_phase1_exhausted",
+                             {"taps_pending": True})
+        elif result and not result.get('failed') and result.get('path'):
             main_vias = result.get('new_vias', [])
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
             _commit_net_result(results, routed_results, ripped_net_id, result,
@@ -769,6 +1301,22 @@ def _reroute_phase3_ripped_nets(
                     remove_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[ripped_net_id])
                 update_net_obstacles_after_routing(pcb_data, ripped_net_id, result, config, state.net_obstacles_cache)
                 add_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[ripped_net_id])
+
+            # Re-route nets ripped for THIS victim's main route (#347), now
+            # that the victim's copper is committed to pcb_data and the
+            # working map (they must route around it, not through it). Their
+            # strandings count toward the caller's #85 arbitration.
+            if nested_ripped_items:
+                print(f"    Re-routing {len(nested_ripped_items)} net(s) ripped for {net_name}'s main route...")
+                nested_stranded = _reroute_phase3_ripped_nets(
+                    nested_ripped_items, pcb_data, config, state, routed_net_ids,
+                    remaining_net_ids, all_unrouted_net_ids, routed_net_paths,
+                    routed_results, diff_pair_by_net_id, results,
+                    track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
+                    reroute_depth=reroute_depth + 1,
+                    ancestor_net_ids=ancestor_net_ids | {ripped_net_id},
+                    rip_sinks=rip_sinks)
+                stranded.extend(nested_stranded)
 
             # Check if this was a multi-point net that needs tap routing (check saved_result)
             if was_multipoint and result.get('mst_edges') and len(result.get('mst_edges', [])) > 1:
@@ -810,7 +1358,9 @@ def _reroute_phase3_ripped_nets(
                                 all_unrouted_net_ids, routed_net_paths, routed_results,
                                 diff_pair_by_net_id, results, track_proximity_cache, layer_map,
                                 base_obstacles, gnd_net_id, [],  # unused parameter
-                                reroute_depth=reroute_depth + 1
+                                reroute_depth=reroute_depth + 1,
+                                ancestor_net_ids=ancestor_net_ids,
+                                rip_sinks=rip_sinks
                             )
 
                             if retry_result is not None:
@@ -855,7 +1405,7 @@ def _reroute_phase3_ripped_nets(
                     if final_failed_pads:
                         net_name = pcb_data.nets[ripped_net_id].name if ripped_net_id in pcb_data.nets else f"Net {ripped_net_id}"
                         for pad in final_failed_pads:
-                            print(f"    {RED}FAILED: {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) not connected{RESET}")
+                            print(f"    {RED}NOT CONNECTED (so far): {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) - may still be recovered; final verdict in the end-of-run summary{RESET}")
 
                     # Remove from pending_multipoint_nets since Phase 3 is now complete
                     if ripped_net_id in state.pending_multipoint_nets:

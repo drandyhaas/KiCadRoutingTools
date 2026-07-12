@@ -12,10 +12,18 @@ Checks a routed PCB for Design Rule Check violations.
 python check_drc.py output.kicad_pcb [OPTIONS]
 
 Options:
-  --clearance FLOAT    Track-to-track clearance in mm (default: 0.2)
+  --clearance FLOAT    Track-to-track clearance in mm. Default: auto-detected from
+                       the sibling .kicad_pro Default net-class clearance (the value
+                       the routing steps recorded as actually used, incl. auto-stepped
+                       fine-pitch taps); falls back to 0.2 if no project is found.
   --via-clearance FLOAT  Via-to-track clearance in mm (uses --clearance if not set)
-  --hole-to-hole-clearance FLOAT  Minimum drill hole edge-to-edge clearance in mm (default: 0.2)
+  --hole-to-hole-clearance FLOAT  Minimum drill hole edge-to-edge clearance in mm
+                                  (default: 0.20, the JLC fab floor — same as routing)
   --board-edge-clearance FLOAT    Minimum clearance from board edge in mm (0 = use --clearance)
+  --clearance-margin FLOAT  Fraction of --clearance used as tolerance (default: 0.05 = 5%).
+                            Violations smaller than clearance*margin are ignored — filters
+                            grid-quantization noise (~8 µm artifacts); raise to e.g. 0.1 to
+                            suppress more borderline grazes
   --nets PATTERN       Only check nets matching pattern
   --debug-lines        Output debug lines on User.7 showing violation locations
   --max-print INT      Max violations listed per type before "... and N more"
@@ -26,6 +34,14 @@ Options:
   --min-via-diameter FLOAT  Minimum via outer diameter in mm (default: fab floor)
   --min-via-drill FLOAT     Minimum via drill diameter in mm (default: fab floor)
   --size-margin FLOAT       Absolute tolerance in mm for the size checks (default: 0)
+  --check-pad-edge          Also check pad-to-board-edge clearance. Off by default:
+                            pad-edge violations are almost always pre-existing
+                            edge-connector pads, not router-introduced.
+  --fab-tier {standard,advanced}  JLC fab capability floor the size checks grade against
+                            (default: standard). Pass the tier the board was routed to so
+                            legitimately-escalated fine geometry is not flagged
+  --fab-overrides FILE      Fab-floor override file overlaying the selected --fab-tier
+                            (see [Fab Tier Options](configuration.md#fab-tier-options))
 ```
 
 The per-type listing is capped at `--max-print` (default 20); when a type has
@@ -36,13 +52,13 @@ the listing is never silently truncated relative to the header count. Use
 ### Examples
 
 ```bash
-# Check with default clearances
+# Auto-grade at the clearance the board was routed to (read from its .kicad_pro)
 python check_drc.py routed.kicad_pcb
 
-# Check with tighter clearances
+# Override the grading clearance explicitly
 python check_drc.py routed.kicad_pcb --clearance 0.15
 
-# Check with hole-to-hole clearance (for via drill spacing)
+# Override clearance and hole-to-hole explicitly (hole-to-hole defaults to the 0.20 fab floor)
 python check_drc.py routed.kicad_pcb --clearance 0.2 --hole-to-hole-clearance 0.2
 
 # Check specific nets only
@@ -58,13 +74,15 @@ The DRC checker validates:
 3. **Via-to-track clearance** - Vias maintain clearance from tracks on other nets
 4. **Via-to-via clearance** - Vias maintain clearance from each other
 5. **Pad-to-via clearance** - Vias maintain clearance from pads on other nets
-6. **Hole-to-hole clearance** - Drill holes (via drills and through-hole pad drills) maintain edge-to-edge clearance, even on the same net (manufacturing constraint)
-7. **Board edge clearance** - Tracks and vias maintain clearance from the board outline
-8. **Same-net crossings** - Detects tracks crossing on the same layer within a net
-9. **Track width** - Segments are at least the fab-floor minimum track width (JLC: 0.127mm on 2-layer, 0.0889mm on 4+ layer). Catches sub-fab copper a clearance-only check misses — a board's own `min_track_width` DRC rule can be lowered to match undersized tracks, so it never trips; the fab floor is the real limit.
-10. **Via / hole size** - Via outer diameter and drill are at least the fine-via fab floor (JLC: 0.45mm/0.20mm on 2-layer, 0.30mm/0.15mm on 4+ layer).
+6. **Pad-to-pad clearance** - Pads of different nets on a shared copper layer maintain clearance (catches overlaps/shorts, e.g. a placement step nudging a part onto a foreign pad). Pads of the *same* footprint are skipped — a component's own fine-pitch pin gaps are fixed library geometry, not a pipeline-introduced defect.
+7. **Copper-to-hole clearance** - Tracks maintain clearance from NPTH (no-copper) drill holes of other nets — a real fab short the via-drill hole check misses (e.g. a track across a mounting hole)
+8. **Hole-to-hole clearance** - Drill holes (via drills and through-hole pad drills) maintain edge-to-edge clearance, even on the same net (manufacturing constraint)
+9. **Board edge clearance** - Tracks and vias maintain clearance from the real `Edge.Cuts` outline (outer ring **plus interior cutouts/slots**), so copper routed into a cutout — which sits inside the bounding box — is caught. Falls back to the bounding box when the parser finds no usable outline. With `--check-pad-edge`, pads are checked too.
+10. **Same-net crossings** - Detects tracks crossing on the same layer within a net
+11. **Track width** - Segments are at least the fab-floor minimum track width (the active `--fab-tier`'s deepest floor; standard = JLC 0.127mm on 2-layer, 0.0889mm on 4+ layer). Catches sub-fab copper a clearance-only check misses — a board's own `min_track_width` DRC rule can be lowered to match undersized tracks, so it never trips; the fab floor is the real limit.
+12. **Via / hole size** - Via outer diameter and drill are at least the deepest fab via the tier can reach — the advanced (small/fine) via the router escalates to: JLC 0.25mm/0.15mm. Pass `--fab-tier` so grading matches how the board was routed (see [Fab Tier Options](configuration.md#fab-tier-options)).
 
-Checks 9–10 are on by default; pass `--no-size-checks` to skip them, or override the floors with `--min-track-width` / `--min-via-diameter` / `--min-via-drill`. The floor is derived from the board's copper-layer count unless overridden.
+Checks 11–12 are on by default; pass `--no-size-checks` to skip them, or override the floors with `--min-track-width` / `--min-via-diameter` / `--min-via-drill`. The floor is derived from the board's copper-layer count unless overridden.
 
 ### Clearance Margin
 
@@ -476,7 +494,7 @@ python bga_fanout.py input.kicad_pcb --component REFERENCE --output output.kicad
 
 Options:
   --component, -c     Component reference (auto-detect BGA if not specified)
-  --output, -o        Output PCB file (default: fanout_test.kicad_pcb)
+  --output, -o        Output PCB file (default: kicad_files/fanout_test.kicad_pcb)
   --layers, -l        Routing layers (default: F.Cu B.Cu)
   --track-width, -w   Track width in mm (default: 0.3)
   --clearance         Track clearance in mm (default: 0.25)
@@ -485,12 +503,33 @@ Options:
   --nets, -n          Net patterns to include
   --diff-pairs, -d    Differential pair patterns (e.g., "*lvds*")
   --diff-pair-gap     Gap between P/N traces in mm (default: 0.1)
-  --primary-escape    Primary escape direction: horizontal or vertical (default: horizontal)
-  --check-for-previous  Skip pads that already have fanouts
+  --exit-margin       Distance past the BGA boundary the escape stubs extend to, in mm
+                      (default: 0.5)
+  --primary-escape, -p  Primary escape direction: horizontal or vertical (default: horizontal).
+                      Pairs try this direction first, then switch if channels are full
+  --force-escape-direction  Only use the primary escape direction; do not fall back to the
+                      secondary direction
+  --rebalance-escape  Rebalance escape directions after initial assignment: pairs near the
+                      secondary edge but far from the primary edge are reassigned to the
+                      secondary direction for more even distribution
+  --check-for-previous  Skip pads that already have fanouts (also avoids occupied channels)
   --no-inner-top-layer  Prevent inner pads from using F.Cu
   --grid-step         Routing grid step in mm (default: 0.1). Escape stub ends
                       are snapped to this grid so the router gets on-grid
                       terminals; MATCH the --grid-step you pass to route.py
+  --escape-method     auto (default), channel, or underpad. "channel" is the
+                      45-stub + channel router; "underpad" vias each ball in
+                      its pad and routes under the pad field (dense arrays);
+                      "auto" runs channel and, if it drops any ball, retries
+                      with underpad and keeps whichever escapes more
+  --layer-costs       One value per --layers entry, matching route.py semantics:
+                      negative = forbidden (no escape copper there, e.g. a
+                      soon-to-be-plane inner layer), otherwise a weight in
+                      [1.0, 1000] - cheaper layers are filled first and costly
+                      layers keep only overflow escapes
+  --fab-tier {standard,advanced}  JLC fab capability floor (default: standard)
+  --fab-overrides FILE  Fab-floor override file overlaying the selected --fab-tier
+                      (see [Fab Tier Options](configuration.md#fab-tier-options))
 ```
 
 Escape stub ends are snapped to the `--grid-step` grid, and the decorative
@@ -530,15 +569,30 @@ Generates stub tracks for QFN/QFP package fanout.
 ### Usage
 
 ```bash
-python qfn_fanout.py input.kicad_pcb output.kicad_pcb REFERENCE [OPTIONS]
+python qfn_fanout.py input.kicad_pcb --output output.kicad_pcb --component REFERENCE [OPTIONS]
 
 Options:
-  --pattern GLOB      Net pattern to fanout
-  --stub-length FLOAT Stub length in mm (default: 0.3)
-  --layer LAYER       Target layer (default: F.Cu)
+  --component, -c     Component reference (auto-detected if not specified)
+  --output, -o        Output PCB file
+  --layer, -l         Routing layer (default: the layer the component is mounted on)
+  --width, -w         Track width in mm
+  --extension         Extension past pad edge before bend (mm)
+  --clearance         Min clearance to other-net pads in mm; stubs that would
+                      graze a foreign pad are shortened or dropped
+  --nets, -n          Net patterns to include
   --grid-step         Routing grid step in mm (default: 0.1). Fanned stub ends
                       are snapped to this grid so the router gets on-grid
                       terminals; MATCH the --grid-step you pass to route.py
+  --escape-method     stub (default) = surface 45-degree fan; underpad = drop a
+                      through-via just past each pad and escape on an inner layer
+                      (issue #164), for crowded fine-pitch edges
+  --via-size          Underpad escape via outer diameter in mm (default: 0.45)
+  --via-drill         Underpad escape via drill diameter in mm (default: 0.25)
+  --board-edge-clearance  Min clearance from stub/via copper to the Edge.Cuts
+                      outline in mm (default 0 = use --clearance)
+  --allow-via-in-pad  Underpad escape: let the escape via overlap its OWN pad
+  --fab-tier          JLC fab capability floor: standard (default) or advanced
+  --fab-overrides FILE  Fab-floor override file overlaying the selected --fab-tier
 ```
 
 Fanned stub ends are snapped to the `--grid-step` grid, and the end-jog is
@@ -562,15 +616,18 @@ Builds the Rust router module.
 python build_router.py [OPTIONS]
 
 Options:
-  --release    Build in release mode (default)
-  --debug      Build in debug mode
-  --clean      Clean before building
+  --clean        Remove all Rust build outputs and compiled library files
+  --from-source  Skip the prebuilt download and build locally with cargo
+  --tag TAG      Download from a specific release tag (e.g. v0.15.0) instead of
+                 the latest release
 ```
 
 ### What It Does
 
-1. Runs `cargo build --release` in `rust_router/`
-2. Copies the compiled library to the correct location:
+By default it downloads a prebuilt binary for the current platform from the
+GitHub Release and installs it, verifying the version. With `--from-source` it
+skips the download and builds locally with `cargo` instead. Either way it copies
+the resulting library to the correct location:
    - Windows: `grid_router.pyd`
    - Linux/Mac: `grid_router.so`
 
@@ -743,6 +800,103 @@ shared-endpoint loops; loops that remain here are typically **overlapping
 collinear copper** (a fanout stub and the route on top of it) or **via stacks**,
 which that pass does not yet handle.
 
+## Copper Hygiene Checker (`check_weird.py`)
+
+Read-only scan for **weird copper** a routed board should not have: dangling
+trace ends and tails, near-open **soft joints** (same-net segments that overlap
+by their end caps instead of meeting endpoint-to-endpoint), redundant copper
+**loops/cycles**, **removable** segments (copper that can be deleted without
+disconnecting the net), **stacked** duplicate copper, and **floating** vias
+(vias touching no copper on any layer). It never modifies the board — use it as
+a triage pass before or after the other checkers.
+
+### Usage
+
+```bash
+python3 check_weird.py board.kicad_pcb [OPTIONS]
+
+Options:
+  --nets, -n PATTERN [PATTERN ...]  Net name patterns to check (fnmatch wildcards,
+                                    e.g. "*lvds*"). Default: all nets
+  --thorough            Run the removable-segment scan on nets with >500 segments too
+                        (slow — off by default so big power/plane nets don't dominate)
+  --tolerance FLOAT     Minimum finding size in mm (dangle/tail length, gap,
+                        duplicated-copper length, via diameter); smaller findings are
+                        dropped. Default: 0.1; use 0 to report everything
+  --max-print INT       Max findings printed per category (<=0 prints all; default 20)
+```
+
+### Examples
+
+```bash
+# Whole board, default 0.1mm tolerance
+python3 check_weird.py routed.kicad_pcb
+
+# Only the LVDS nets, report every finding regardless of size
+python3 check_weird.py routed.kicad_pcb --nets "*lvds*" --tolerance 0
+
+# Include the slow removable-segment scan on large nets
+python3 check_weird.py routed.kicad_pcb --thorough
+```
+
+## Non-Orthonormal Segment Checker (`check_orthonormal.py`)
+
+Flags track segments that run at an angle other than a multiple of 45° **and**
+are longer than about one grid cell. An on-grid router emits only 0/45/90°
+segments; the one legitimate non-orthonormal segment is the **short** terminal
+connector that joins an on-grid path to an off-grid pad/ball/fanout-stub end
+(≤ ~1 grid cell). Any *longer* skewed segment is a routing defect — a terminal
+connector or merged terminal that spanned many cells and can cut straight
+across foreign copper (issues #157/#159). This finds them directly in the
+output, independent of DRC.
+
+### Usage
+
+```bash
+python3 check_orthonormal.py board.kicad_pcb [OPTIONS]
+
+Options:
+  --grid-step FLOAT     Router grid step in mm (default: 0.05)
+  --max-len FLOAT       Flag non-orthonormal segments longer than this (mm).
+                        Default: 5 × grid-step (0.25mm at 0.05 grid) — clears the
+                        legitimate ≤~0.15mm bga_fanout stub-end jogs
+  --angle-tol FLOAT     Degrees off a 45° multiple still considered orthonormal
+                        (default: 1.0, absorbs float noise)
+  --max-list INT        Max segments to list (default: 40)
+  --include-stub-pads   Also flag skewed segments that terminate at a pad (by default
+                        these bga/qfn fanout stubs are excluded)
+  --pad-tol FLOAT       Distance in mm for an endpoint to count as on a pad (default: 0.06)
+```
+
+### Examples
+
+```bash
+# Default (0.05mm grid)
+python3 check_orthonormal.py routed.kicad_pcb
+
+# Match a 0.1mm routing grid
+python3 check_orthonormal.py routed.kicad_pcb --grid-step 0.1
+```
+
+## Parser-Parity Validator (`validate_pcb_data.py`)
+
+Headless twin of the GUI About-tab "Validate PCB Data" button: loads the board
+with pcbnew, builds `PCBData` from the live board objects (the GUI plugin's
+path), text-parses the same file with `parse_kicad_pcb` (the CLI path), and
+diffs the two models with `compare_pcb_data`. Any difference means one of the
+two parsers mis-models the board (pad geometry, arc tracks, zones, bounds,
+...) and the CLI and GUI would route against different worlds.
+
+```bash
+python3 validate_pcb_data.py board.kicad_pcb [more.kicad_pcb ...]
+```
+
+Needs the pcbnew Python module; when run with a plain `python3` it re-execs
+itself into KiCad's bundled interpreter automatically. Exit 0 = all boards
+match, 1 = differences, 2 = error. The stress-test flows run it per board
+(RUNBOOK rule 1b; `redo_stress_test.py` validates the final board after each
+replay, `--skip-validate` to opt out).
+
 ## DRC Settings Fixer (`fix_kicad_drc_settings.py`)
 
 Rewrites a board's **project file** (`.kicad_pro`) so that a manual DRC in the
@@ -890,6 +1044,49 @@ Prints each change (`min_hole_clearance: 0.25 -> 0.0889 mm`,
 `severity[courtyards_overlap]: error -> ignore`, …) and a reminder to reopen the
 board. On a typical dense BGA board this turns a ~300-violation DRC into the few
 dozen genuine routing errors (clearance + shorts + real sub-floor hole clearance).
+
+## Fab Tier Floors (`fab_tiers.py`)
+
+A shared library — not a stand-alone command — that defines the JLCPCB
+manufacturing **floor ladder** every routing/DRC CLI shrinks tracks, vias and
+clearances *down toward*. It is stdlib-only so the lightweight DRC-settings
+script can import it without the PCB parser, and it exposes the two flags
+(`--fab-tier` / `--fab-overrides`) that `route.py`, `route_diff.py`,
+`route_planes.py`, `route_disconnected_planes.py`, `bga_fanout.py`,
+`qfn_fanout.py`, `check_drc.py`, `fix_kicad_drc_settings.py` and `list_nets.py`
+all add through its `add_fab_tier_args()` helper (so the flag is identical
+everywhere).
+
+- **`--fab-tier standard`** (default) — the cheap, no-extra-cost floor. Routing
+  prefers it but **auto-escalates to `advanced` (printing a one-line warning)**
+  when a fine-pitch fan-out genuinely cannot escape at the standard floor.
+- **`--fab-tier advanced`** — JLC's tighter, "more costly" floor (0.25 via /
+  0.15 drill, 0.09–0.10 mm track/clearance). A **hard** floor: no escalation.
+
+`--fab-overrides FILE` overlays the selected tier with a plain, human-editable
+`key = value` file — only the floor values listed change; the rest come from the
+base tier. Supplying one **disables escalation** (the floor becomes exactly
+*base tier + file*), since the file states your exact fab limits. Keys are
+`track_width`, `clearance`, `via_diameter`, `via_drill`, `hole_to_hole`,
+`pad_hole_to_hole`, `annular`; `#` starts a comment; values are in mm and must
+be > 0 (unknown/invalid lines are warned and skipped). A fully-commented
+template listing every key and the built-in tier values ships as
+[`fab_overrides.example.txt`](../fab_overrides.example.txt) in the repo root.
+
+```bash
+# Route to the cheap floor (default); dense fan-outs warn when they escalate
+python3 route.py in.kicad_pcb out.kicad_pcb --nets "Net*"
+
+# Opt the whole board into the tighter, more-costly floor
+python3 route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-tier advanced
+
+# Declare your own fab capability (pins the floor, no escalation)
+python3 route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-overrides my_fab.txt
+```
+
+See [Fab Tier Options](configuration.md#fab-tier-options) for the full floor
+tables and how the CLIs enforce these floors (they **error** if a size/clearance
+param is set below the active floor).
 
 ## Common Workflows
 

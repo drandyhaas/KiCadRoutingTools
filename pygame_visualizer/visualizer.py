@@ -9,6 +9,7 @@ Renders the A* search progression in real-time using the Rust router with:
 - Current path being explored
 - Final path when found
 """
+from __future__ import annotations
 
 import sys
 from typing import List, Tuple, Optional, Set

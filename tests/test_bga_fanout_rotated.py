@@ -93,6 +93,23 @@ def main():
                        and abs(tracks[0]["start"][1] - py) < 1e-6
                        and abs(vias[0]["x"] - px) < 1e-6))
 
+    # Issue #283: a ±90° (orthogonal, so no frame transform) BGA whose rotation
+    # transform left ~1e-6mm FP noise in the global coordinates must still
+    # resolve the true grid - the noise used to split each real row/column into
+    # near-duplicates and the dominant-pitch histogram reported 0.00mm, which
+    # then divided-by-zero in the underpad escape (zynq_ad9364 U1).
+    pcb90 = _make_bga("U1", 100.0, 100.0, -90.0, n=5)
+    for i, p in enumerate(pcb90.footprints["U1"].pads):
+        p.global_x += ((i * 37) % 3 - 1) * 8e-7
+        p.global_y += ((i * 53) % 3 - 1) * 8e-7
+    g_noise = analyze_bga_grid(pcb90.footprints["U1"])
+    good = (g_noise is not None
+            and len(g_noise.rows) == 5 and len(g_noise.cols) == 5
+            and abs(g_noise.pitch_x - 0.8) < 0.01
+            and abs(g_noise.pitch_y - 0.8) < 0.01)
+    results.append(_ok("FP-noise -90° BGA resolves true 5x5 / pitch 0.8 (issue #283)",
+                       good))
+
     passed = sum(results)
     print(f"\n{passed}/{len(results)} bga rotation tests passed")
     print("=" * 60)

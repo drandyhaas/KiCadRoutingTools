@@ -7,6 +7,7 @@ and routes short traces to connect vias to pads when direct placement is blocked
 Usage:
     python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu
 """
+from __future__ import annotations
 
 import sys
 import os
@@ -21,11 +22,11 @@ run_all_checks()
 # These imports are guaranteed to work after startup_checks passes
 import numpy as np
 
-from kicad_parser import parse_kicad_pcb, PCBData, Pad, Via, Segment, KICAD_10_MIN_VERSION
+from kicad_parser import parse_kicad_pcb, PCBData, Pad, Via, Segment, KICAD_10_MIN_VERSION, pad_is_plated_through
 from kicad_writer import generate_zone_sexpr, generate_gr_line_sexpr
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import point_in_pad_rect, pad_rect_halfspan
-from route import batch_route
+from route import batch_route, _dump_engine_config
 from obstacle_cache import ViaPlacementObstacleData
 from connectivity import compute_mst_segments
 
@@ -59,9 +60,8 @@ from plane_zone_geometry import (
 from plane_pad_tap import (
     pad_is_fine_pitch,
     tap_pad_with_escalation,
+    fab_floor_clearance_track,
     FINE_TAP_GRID_STEP,
-    FINE_TAP_CLEARANCE,
-    FINE_TAP_TRACK_WIDTH
 )
 from terminal_colors import GREEN, RED, RESET
 
@@ -133,7 +133,8 @@ def find_via_position(
     verbose: bool = False,
     failed_route_positions: Optional[Set[Tuple[int, int]]] = None,
     pending_pads: Optional[List[Dict]] = None,
-    router: Optional[GridRouter] = None
+    router: Optional[GridRouter] = None,
+    position_filter=None
 ) -> Optional[Tuple[float, float]]:
     """
     Find the closest valid position for a via near a pad.
@@ -157,6 +158,10 @@ def find_via_position(
         pending_pads: Optional list of pad_info dicts for pads that still need vias.
             Via positions too close to these pads' boundaries will be skipped to ensure
             routes can still reach them.
+        position_filter: Optional (x, y) -> bool predicate; positions failing it are
+            skipped. Used to keep a plane-tap via INSIDE its net's zone polygon on a
+            Voronoi-shared layer (issue #287) -- a via in the inter-cell gap reaches
+            no fill and leaves the pad floating while reporting success.
 
     Returns:
         (x, y) position for via, or None if no valid position found
@@ -165,7 +170,8 @@ def find_via_position(
 
     # Try pad center first - if not blocked, use it (no routing needed)
     if not obstacles.is_via_blocked(pad_gx, pad_gy):
-        return (pad.global_x, pad.global_y)
+        if position_filter is None or position_filter(pad.global_x, pad.global_y):
+            return (pad.global_x, pad.global_y)
 
     # Then try other positions WITHIN the pad's own copper (still via-in-pad, no
     # trace needed): the exact centre can be blocked by nearby other-net copper
@@ -188,6 +194,8 @@ def find_via_position(
                 bx, by = coord.to_float(gx, gy)
                 if _rotated and not point_in_pad_rect(bx, by, pad):
                     continue  # outside the (rotated) pad copper
+                if position_filter is not None and not position_filter(bx, by):
+                    continue  # e.g. outside the net's Voronoi cell (issue #287)
                 if not obstacles.is_via_blocked(gx, gy):
                     return (bx, by)
 
@@ -237,8 +245,31 @@ def find_via_position(
                     if not obstacles.is_via_blocked(gx, gy):
                         open_cells.append((gx, gy))
 
+    # Thin candidate via sites to ~1 per via-radius bin (#263). A wide forced-via
+    # search (max_search_radius 10mm at 0.05 grid = ~125k cells) otherwise
+    # enumerates and seeds EVERY open cell as an A* source, and repeats it per
+    # via-size rung x per fine-clearance config -- the dominant cost on a boxed-in
+    # pad amid open space (e.g. daisho U1.W18). Candidate vias closer than a via
+    # radius are redundant (a via at either connects the same), so bin by
+    # via-radius and keep the NEAREST open cell per bin (open_cells is nearest-
+    # first). Cuts the doomed search ~an order of magnitude while preserving spatial
+    # coverage across the radius. Only kicks in on large searches so small/normal
+    # taps keep exact behavior. (config -- which carries via_size -- is passed by
+    # both call sites; the None-guard is just null-safety for the optional param.)
+    via_bin = 0
+    if config is not None and len(open_cells) > 4000:
+        via_bin = max(1, int(round(config.via_size / coord.grid_step / 2)))
+    seen_bins = set()
+
     for gx, gy in open_cells:
         dx, dy = gx - pad_gx, gy - pad_gy
+
+        # Outside the caller's allowed region (e.g. the net's own Voronoi
+        # cell/zone polygon, issue #287) - not a usable plane tap.
+        if position_filter is not None:
+            fx, fy = coord.to_float(gx, gy)
+            if not position_filter(fx, fy):
+                continue
 
         # Skip if too close to a previously failed route position
         if failed_route_positions and skip_radius_sq > 0:
@@ -262,6 +293,15 @@ def find_via_position(
             if in_zone:
                 continue
 
+        # Thin redundant near-duplicate via sites: keep the nearest PASSING cell
+        # per via-radius bin (see via_bin note above). Done here, after the skip
+        # checks, so a bin is never consumed by a cell that was itself skipped.
+        if via_bin:
+            bin_key = (gx // via_bin, gy // via_bin)
+            if bin_key in seen_bins:
+                continue
+            seen_bins.add(bin_key)
+
         dist_sq = dx * dx + dy * dy
         valid_positions.append((dist_sq, coord.to_float(gx, gy), gx, gy))
 
@@ -278,53 +318,78 @@ def find_via_position(
             print(f"    DEBUG: Searched {max_radius_grid} grid steps ({max_search_radius}mm) from pad center")
         return None
 
-    # Check routability for each position until we find one that works
-    route_failures = 0
+    # Routability check (#259): instead of running one A* per candidate via cell
+    # (K searches, K up to thousands, ~99% of them failing on dense boards), seed a
+    # SINGLE multi-source A* with ALL candidate cells as sources and route to the
+    # pad. The router explores from every candidate at once and returns the shortest
+    # via->pad connection; the winning path's source end IS the via position. A
+    # genuinely boxed-in pad is proven unreachable in one frontier exhaustion rather
+    # than K separate searches. Candidate cells are via-unblocked (via keep-out
+    # >= trace keep-out), so seeding them as source_target_cells is trace-safe --
+    # the same multi-source pattern route_plane_connection_wide already uses.
+    layer_idx = 0
+    pad_gx, pad_gy = coord.to_grid(pad.global_x, pad.global_y)
+
+    source_cells = []
+    src_set = set()
     skipped_count = 0
     for dist_sq, via_pos, gx, gy in valid_positions:
-        # Skip if too close to a position where routing already failed (within this call)
+        # Skip cells near a position where routing already failed (rip-up retries)
         if failed_route_positions and skip_radius_sq > 0:
-            too_close = False
-            for failed_gx, failed_gy in failed_route_positions:
-                fdx = gx - failed_gx
-                fdy = gy - failed_gy
-                if fdx * fdx + fdy * fdy <= skip_radius_sq:
-                    too_close = True
-                    break
-            if too_close:
+            if any((gx - fgx) ** 2 + (gy - fgy) ** 2 <= skip_radius_sq
+                   for fgx, fgy in failed_route_positions):
                 skipped_count += 1
                 continue
+        source_cells.append((gx, gy, layer_idx))
+        src_set.add((gx, gy))
 
-        # Try to route from this via position to the pad
-        # Use verbose for first few failures to help debug
-        route_verbose = verbose and route_failures < 3
-        route_result = route_via_to_pad(
-            via_pos, pad, pad_layer, net_id,
-            routing_obstacles, config, verbose=route_verbose,
-            router=router
+    if not source_cells:
+        if verbose:
+            print(f"[skipped {skipped_count}, no candidates left]", end=" ")
+        return None
+
+    for gx, gy, _ in source_cells:
+        routing_obstacles.add_source_target_cell(gx, gy, layer_idx)
+    routing_obstacles.add_source_target_cell(pad_gx, pad_gy, layer_idx)
+
+    if router is None:
+        router = GridRouter(
+            via_cost=config.via_cost_units(),
+            h_weight=config.heuristic_weight,
+            turn_cost=config.turn_cost,
+            via_proximity_cost=0,
+            layer_costs=config.get_layer_costs(),
+            proximity_heuristic_cost=config.get_proximity_heuristic_cost()
         )
-        if route_result is not None:
-            # Routing succeeded - use this position
-            if verbose and (route_failures > 0 or skipped_count > 0):
-                print(f"[tried {route_failures+1}, skipped {skipped_count}]", end=" ")
-            return via_pos
 
-        # Routing failed - add to failed set so nearby positions are skipped
-        if failed_route_positions is not None:
+    # One search, seeded from all candidates; generous budget since it replaces K.
+    ms_iters = max(10000, min(60000, len(source_cells) * 4))
+    path, iterations, _ = router.route_with_frontier(
+        routing_obstacles, source_cells, [(pad_gx, pad_gy, layer_idx)], ms_iters,
+        False,  # collinear_vias
+        0,      # via_exclusion_radius
+        None,   # start_direction
+        None,   # end_direction
+        0       # direction_steps
+    )
+    routing_obstacles.clear_source_target_cells()
+
+    if path:
+        # The via is the path endpoint that is one of our candidate sources
+        # (the other endpoint is the pad target).
+        e0 = (path[0][0], path[0][1])
+        via_cell = e0 if e0 in src_set else (path[-1][0], path[-1][1])
+        if verbose and (skipped_count or len(source_cells) > 1):
+            print(f"[multi-source {len(source_cells)} cand, {iterations}it]", end=" ")
+        return coord.to_float(via_cell[0], via_cell[1])
+
+    # No candidate could reach the pad. Record them so a rip-up retry skips them.
+    if failed_route_positions is not None:
+        for gx, gy, _ in source_cells:
             failed_route_positions.add((gx, gy))
-        route_failures += 1
-
-    # Debug output on failure
     if verbose:
-        print(f"[tried {route_failures}, skipped {skipped_count}]", end=" ")
-        if not valid_positions:
-            print(f"\n    DEBUG: No valid via positions found (all blocked in obstacle map)")
-            print(f"    DEBUG: Searched {max_radius_grid} grid steps ({max_search_radius}mm) from pad center")
-        else:
-            print(f"\n    DEBUG: Found {len(valid_positions)} unblocked via positions, but routing failed for all")
-            print(f"    DEBUG: Closest unblocked position: ({valid_positions[0][1][0]:.2f}, {valid_positions[0][1][1]:.2f})")
-            print(f"    DEBUG: Tried to route on layer {pad_layer}")
-
+        print(f"\n    DEBUG: {len(source_cells)} unblocked via positions, none routed to the "
+              f"pad on {pad_layer} (multi-source, {iterations}it)", end=" ")
     return None  # No valid position with routable path
 
 
@@ -334,6 +399,108 @@ class RouteResult:
     segments: Optional[List[Dict]]  # Segments if successful, None if failed
     blocked_cells: List[Tuple[int, int, int]]  # Blocked cells from frontier (for blocker analysis)
     success: bool
+
+
+def _audit_plane_via_map(obstacles, pcb_data, config, net_id,
+                         same_net_pad_clearance, session_vias, coord,
+                         hole_to_hole_clearance, via_drill, via_size, net_name):
+    """KICAD_OBSTACLE_AUDIT (issue #309): whole-board integrity check of the
+    per-net via-placement map after a net's pad pass.
+
+    The map is mutated incrementally through rip-ups (ViaPlacementObstacleData
+    removal, the #208 desync class) and per-placement block_via_position calls;
+    it must end equal to a fresh rebuild from the current pcb_data plus the
+    same session-via blocking. Wrongly-OPEN cells are under-blocking (a later
+    via can land on ripped-net copper); wrongly-BLOCKED cells are a leak.
+    """
+    try:
+        fresh = build_via_obstacle_map(pcb_data, config, net_id, verbose=False,
+                                       same_net_pad_clearance=same_net_pad_clearance)
+        for pv in session_vias:
+            block_via_position(fresh, pv['x'], pv['y'], coord,
+                               hole_to_hole_clearance, via_drill,
+                               via_size, config.clearance)
+        bb = pcb_data.board_info.board_bounds
+        if not bb:
+            return
+        cgx, cgy = coord.to_grid((bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2)
+        r = int(max(bb[2] - bb[0], bb[3] - bb[1]) / config.grid_step / 2) + 50
+        maintained = obstacles.open_via_cells_within(cgx, cgy, r)
+        rebuilt = fresh.open_via_cells_within(cgx, cgy, r)
+        if maintained == rebuilt:
+            print(f"  [OBSTACLE AUDIT route_planes:{net_name}] via map BALANCED "
+                  f"vs fresh rebuild ({len(maintained)} open cells)")
+            return
+        sm, sr = set(maintained), set(rebuilt)
+        under = sm - sr   # open in maintained, blocked in fresh: under-blocked
+        over = sr - sm    # blocked in maintained, open in fresh: leaked block
+        print(f"  [OBSTACLE AUDIT route_planes:{net_name}] via map DIVERGED: "
+              f"{len(under)} wrongly-open (under-blocked), "
+              f"{len(over)} wrongly-blocked (leak) "
+              f"(maintained {len(sm)} vs rebuilt {len(sr)} open cells)")
+        for cell in sorted(under)[:3]:
+            print(f"      under-blocked at grid {cell}")
+        for cell in sorted(over)[:3]:
+            print(f"      leaked block at grid {cell}")
+    except Exception as e:
+        print(f"  [OBSTACLE AUDIT route_planes] skipped ({e})")
+
+
+def _path_to_segments(path, via_pos, pad, pad_layer, net_id, config, coord):
+    """Convert an A* grid path (oriented via->pad) into trace segment dicts.
+
+    Shared by route_via_to_pad (single source) and route_multi_source_to_pad
+    (#259): both build the trace directly from the A* path, adding connecting
+    stubs from the exact via float position to the first grid point and from the
+    last grid point to the pad centre. `path` must run from the via/source end to
+    the pad end.
+    """
+    segments = []
+
+    # Add connecting segment from via to first path point
+    if path:
+        first_gx, first_gy, _ = path[0]
+        first_x, first_y = coord.to_float(first_gx, first_gy)
+        if abs(via_pos[0] - first_x) > 0.001 or abs(via_pos[1] - first_y) > 0.001:
+            segments.append({
+                'start': via_pos,
+                'end': (first_x, first_y),
+                'width': config.track_width,
+                'layer': pad_layer,
+                'net_id': net_id
+            })
+
+    # Convert path points to segments
+    for i in range(len(path) - 1):
+        gx1, gy1, _ = path[i]
+        gx2, gy2, _ = path[i + 1]
+
+        x1, y1 = coord.to_float(gx1, gy1)
+        x2, y2 = coord.to_float(gx2, gy2)
+
+        if (x1, y1) != (x2, y2):
+            segments.append({
+                'start': (x1, y1),
+                'end': (x2, y2),
+                'width': config.track_width,
+                'layer': pad_layer,
+                'net_id': net_id
+            })
+
+    # Add connecting segment from last path point to pad center
+    if path:
+        last_gx, last_gy, _ = path[-1]
+        last_x, last_y = coord.to_float(last_gx, last_gy)
+        if abs(pad.global_x - last_x) > 0.001 or abs(pad.global_y - last_y) > 0.001:
+            segments.append({
+                'start': (last_x, last_y),
+                'end': (pad.global_x, pad.global_y),
+                'width': config.track_width,
+                'layer': pad_layer,
+                'net_id': net_id
+            })
+
+    return segments
 
 
 def route_via_to_pad(
@@ -453,54 +620,117 @@ def route_via_to_pad(
     routing_obstacles.clear_source_target_cells()
 
     # Convert path to segments
-    segments = []
-
-    # Add connecting segment from via to first path point
-    if path:
-        first_gx, first_gy, _ = path[0]
-        first_x, first_y = coord.to_float(first_gx, first_gy)
-        if abs(via_pos[0] - first_x) > 0.001 or abs(via_pos[1] - first_y) > 0.001:
-            segments.append({
-                'start': via_pos,
-                'end': (first_x, first_y),
-                'width': config.track_width,
-                'layer': pad_layer,
-                'net_id': net_id
-            })
-
-    # Convert path points to segments
-    for i in range(len(path) - 1):
-        gx1, gy1, _ = path[i]
-        gx2, gy2, _ = path[i + 1]
-
-        x1, y1 = coord.to_float(gx1, gy1)
-        x2, y2 = coord.to_float(gx2, gy2)
-
-        if (x1, y1) != (x2, y2):
-            segments.append({
-                'start': (x1, y1),
-                'end': (x2, y2),
-                'width': config.track_width,
-                'layer': pad_layer,
-                'net_id': net_id
-            })
-
-    # Add connecting segment from last path point to pad center
-    if path:
-        last_gx, last_gy, _ = path[-1]
-        last_x, last_y = coord.to_float(last_gx, last_gy)
-        if abs(pad.global_x - last_x) > 0.001 or abs(pad.global_y - last_y) > 0.001:
-            segments.append({
-                'start': (last_x, last_y),
-                'end': (pad.global_x, pad.global_y),
-                'width': config.track_width,
-                'layer': pad_layer,
-                'net_id': net_id
-            })
+    segments = _path_to_segments(path, via_pos, pad, pad_layer, net_id, config, coord)
 
     if return_blocked_cells:
         return RouteResult(segments=segments, blocked_cells=[], success=True)
     return segments
+
+
+def route_multi_source_to_pad(
+    candidate_positions: List[Tuple[float, float]],
+    pad: Pad,
+    pad_layer: str,
+    net_id: int,
+    routing_obstacles: GridObstacleMap,
+    config: GridRouteConfig,
+    max_iterations: int = 10000,
+    verbose: bool = False,
+    return_blocked_cells: bool = False,
+    router: Optional[GridRouter] = None,
+):
+    """Route a trace from `pad` to ANY of `candidate_positions` in ONE A* (#259).
+
+    Replaces a per-candidate `route_via_to_pad` loop (one full A* per candidate,
+    ~99% of them failing on dense boards) with a single multi-source search: all
+    candidate cells are seeded as sources and the pad as the target, so the router
+    explores from every candidate at once and returns the shortest routable
+    candidate->pad connection. The trace is built **directly from the winning A*
+    path** -- NOT by re-routing from the winner single-source (a re-route without
+    the other candidates as sources could fail to reproduce a path that threaded
+    another candidate's overridden cell; see issue #259).
+
+    Candidate positions are existing same-net copper (vias / escaped pads) that may
+    be blocked in the routing map; like route_via_to_pad they are added as
+    source_target_cells to override blocking.
+
+    Returns a (result, winning_position) tuple:
+      - return_blocked_cells=False: (segments|None, pos|None)
+      - return_blocked_cells=True:  (RouteResult, pos|None)
+    `pos` is the winning candidate's original float position (for reused_via_pos).
+    """
+    coord = GridCoord(config.grid_step)
+    layer_idx = 0
+    pad_gx, pad_gy = coord.to_grid(pad.global_x, pad.global_y)
+
+    # Map candidate grid cells -> original float position, skipping the pad centre
+    # (no trace needed there) and duplicate cells.
+    cell_to_pos: Dict[Tuple[int, int], Tuple[float, float]] = {}
+    source_cells: List[Tuple[int, int, int]] = []
+    src_set: Set[Tuple[int, int]] = set()
+    for pos in candidate_positions:
+        if abs(pos[0] - pad.global_x) < 0.001 and abs(pos[1] - pad.global_y) < 0.001:
+            continue
+        gx, gy = coord.to_grid(pos[0], pos[1])
+        if (gx, gy) == (pad_gx, pad_gy) or (gx, gy) in src_set:
+            continue
+        src_set.add((gx, gy))
+        source_cells.append((gx, gy, layer_idx))
+        cell_to_pos[(gx, gy)] = pos
+
+    if not source_cells:
+        if return_blocked_cells:
+            return RouteResult(segments=None, blocked_cells=[], success=False), None
+        return None, None
+
+    for gx, gy, _ in source_cells:
+        routing_obstacles.add_source_target_cell(gx, gy, layer_idx)
+    routing_obstacles.add_source_target_cell(pad_gx, pad_gy, layer_idx)
+
+    if router is None:
+        router = GridRouter(
+            via_cost=config.via_cost_units(),
+            h_weight=config.heuristic_weight,
+            turn_cost=config.turn_cost,
+            via_proximity_cost=0,
+            layer_costs=config.get_layer_costs(),
+            proximity_heuristic_cost=config.get_proximity_heuristic_cost()
+        )
+
+    # One search seeded from all candidates; generous budget since it replaces K.
+    ms_iters = max(max_iterations, min(60000, len(source_cells) * 4))
+    path, iterations, blocked_cells = router.route_with_frontier(
+        routing_obstacles, source_cells, [(pad_gx, pad_gy, layer_idx)], ms_iters,
+        False,  # collinear_vias
+        0,      # via_exclusion_radius
+        None,   # start_direction
+        None,   # end_direction
+        0       # direction_steps
+    )
+    routing_obstacles.clear_source_target_cells()
+
+    if path is None:
+        if verbose:
+            print(f"    DEBUG: multi-source A* ({len(source_cells)} cand) failed "
+                  f"after {iterations} iterations", end=" ")
+        if return_blocked_cells:
+            return RouteResult(segments=None, blocked_cells=blocked_cells, success=False), None
+        return None, None
+
+    # Orient the path so path[0] is the winning source (candidate) end and path[-1]
+    # is the pad; the other endpoint is the pad target.
+    e0 = (path[0][0], path[0][1])
+    if e0 not in src_set:
+        path = list(reversed(path))
+    win_cell = (path[0][0], path[0][1])
+    via_pos = cell_to_pos.get(win_cell, coord.to_float(win_cell[0], win_cell[1]))
+    if verbose and len(source_cells) > 1:
+        print(f"[multi-source {len(source_cells)} cand, {iterations}it]", end=" ")
+
+    segments = _path_to_segments(path, via_pos, pad, pad_layer, net_id, config, coord)
+    if return_blocked_cells:
+        return RouteResult(segments=segments, blocked_cells=[], success=True), via_pos
+    return segments, via_pos
 
 
 def _block_route_as_obstacle(obstacles: GridObstacleMap, route_path: List[Tuple[float, float]],
@@ -841,7 +1071,7 @@ def _generate_multinet_layer_zones(
             continue
         pts = []
         for pad in pcb_data.pads_by_net.get(net_id, []):
-            on_layer = (pad.drill and pad.drill > 0) or (layer in pad.layers)
+            on_layer = pad_is_plated_through(pad) or (layer in pad.layers)  # NPTH has no barrel (#328)
             if on_layer:
                 pts.append((pad.global_x, pad.global_y))
         pads_on_layer_by_net[net_id] = pts
@@ -1080,7 +1310,7 @@ def _generate_multinet_layer_zones(
             seen = {(round(x, 3), round(y, 3)) for x, y in seeds}
             anchors = net_anchor_pts.get(nid, [])
             for pad in pcb_data.pads_by_net.get(nid, []):
-                if not (pad.drill and pad.drill > 0):
+                if not pad_is_plated_through(pad):
                     continue
                 px, py = pad.global_x, pad.global_y
                 # Already inside its own net's cell? Then the plane already covers it.
@@ -1399,6 +1629,79 @@ def _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers, min_
     return necked
 
 
+def _finalize_plane_copper(all_new_segments, all_new_vias, pcb_data, clearance,
+                           all_layers, track_width, grid_step, via_size,
+                           via_drill, hole_to_hole_clearance):
+    """Run the full pre-write cleanup pipeline on plane tap copper and return the
+    resulting all_new_segments.
+
+    This is the copper-finalizing half of the plane write path, factored out so
+    the file-writer (_write_output_and_reroute) and the dry-run/GUI path
+    (create_plane, which never enters the writer) run the SAME steps and thus
+    emit the SAME copper -- the CLI and GUI front-ends must produce identical
+    output for identical inputs. The steps, in order:
+
+      1. Neck tap segments grazing foreign vias/pads near their target pads
+         (the tap router exempts source/target cells, #157).
+      2. Graze prune / re-bend / dead-end sweep: drop a redundant grazing tap or
+         re-bend a load-bearing one around the pad, then trim orphans (#224).
+      3. Close soft joints: bridge 10-100um same-net endpoint gaps left by tap
+         snaps / piece-level restore drops (#334) -- MUST be last, since it needs
+         the finalized endpoint picture (steps 1-2 trim copper an early call
+         would misread as extra endpoints).
+
+    Returns the (possibly replaced) all_new_segments list; the caller must
+    rebind its own reference to it.
+    """
+    # 0. reuse same-net vias that violate hole-to-hole (two independently-placed
+    #    plane taps landing a grid cell apart -> overlapping drills). MUST run before
+    #    the graze/soft-joint passes so they see the merged via set + reconnected
+    #    segment endpoints.
+    from pcb_modification import merge_close_same_net_vias
+    merge_close_same_net_vias(all_new_vias, all_new_segments, pcb_data,
+                              hole_to_hole_clearance)
+
+    # 1. neck grazing taps (mutates all_new_segments in place)
+    _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers)
+
+    # 2. graze prune / nudge / dead-end sweep (returns a NEW list)
+    if all_new_segments:
+        from pcb_modification import cleanup_plane_taps_grazing
+        scope = {s['net_id'] for s in all_new_segments}
+        all_new_segments, gz_rm, gz_nudge, gz_swept = cleanup_plane_taps_grazing(
+            pcb_data, all_new_segments, scope, clearance=clearance,
+            max_shift=grid_step / 2, all_new_vias=all_new_vias,
+            hole_to_hole=hole_to_hole_clearance)
+        if gz_rm:
+            print(f"  Graze prune: removed {gz_rm} grazing tap segment(s)")
+        if gz_nudge:
+            print(f"  Graze nudge: re-bent grazing tap jog(s) on {gz_nudge} net(s)")
+        if gz_swept:
+            print(f"  Dead-end sweep: trimmed {gz_swept} orphaned tap segment(s)")
+
+    # 3. close soft joints (#334) -- last, appends bridges (from_restore=True)
+    try:
+        from pcb_modification import close_soft_joints
+        bridge_results = []
+        cfg_sj = GridRouteConfig(track_width=track_width, clearance=clearance,
+                                 grid_step=grid_step, via_size=via_size,
+                                 via_drill=via_drill, layers=all_layers)
+        nb = close_soft_joints(bridge_results, pcb_data, None, cfg_sj)
+        if nb:
+            for br in bridge_results:
+                for bs in br.get('new_segments', []):
+                    all_new_segments.append({
+                        'start': (bs.start_x, bs.start_y),
+                        'end': (bs.end_x, bs.end_y),
+                        'width': bs.width, 'layer': bs.layer,
+                        'net_id': bs.net_id, 'from_restore': True})
+            print(f"  Closed {nb} soft joint(s) in plane/restored copper")
+    except Exception as e:
+        print(f"  (soft-joint close skipped: {e})")
+
+    return all_new_segments
+
+
 def _write_output_and_reroute(
     input_file: str,
     output_file: str,
@@ -1435,11 +1738,6 @@ def _write_output_and_reroute(
     combined_zone_sexpr = '\n'.join(all_sexprs) if all_sexprs else None
     if all_debug_lines:
         print(f"  Adding {len(all_debug_lines)} debug lines on User.4")
-
-    # Neck tap segments that graze foreign vias/pads near their target pads (the
-    # tap router exempts source/target cells, so the obstacle keep-out can't
-    # enforce clearance at the pad). Narrowing only removes conflicts (#157).
-    _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers)
 
     kicad_v10_names = pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None
     if not write_plane_output(input_file, output_file, combined_zone_sexpr, all_new_vias, all_new_segments,
@@ -1527,11 +1825,20 @@ def _write_output_and_reroute(
                             input_file=input_file,
                             output_file=output_file,
                             broken_net_ids=still_broken,
-                            plane_vias=all_new_vias,
+                            # plane copper only: restored signal emissions are
+                            # not plane copper and must not be removed-on-collision
+                            plane_vias=[x for x in all_new_vias
+                                        if not x.get('from_restore')],
                             net_id_to_name=kicad_v10_names,
                             via_size=via_size,
                             clearance=clearance,
-                            plane_segments=all_new_segments,
+                            plane_segments=[x for x in all_new_segments
+                                            if not x.get('from_restore')],
+                            # partial-restore emissions already in the output
+                            # must be stripped before the full-original restore
+                            partial_copper=(
+                                [x for x in all_new_segments if x.get('from_restore')],
+                                [x for x in all_new_vias if x.get('from_restore')]),
                         )
                         if restored_ids:
                             names = [pcb_data.nets[r].name if r in pcb_data.nets
@@ -1634,6 +1941,8 @@ def create_plane(
     same_net_pad_clearance: float = defaults.SAME_NET_PAD_CLEARANCE,
     skip_existing_zones: bool = False,
     no_bga_zone: bool = False,
+    progress_callback=None,
+    cancel_check=None,
 ) -> Tuple[int, int, int]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
@@ -1661,10 +1970,20 @@ def create_plane(
             not create another one - just place stitching vias to the existing zone.
             When False (CLI default), an existing zone on the target layer for the
             same net is replaced.
+        progress_callback: Optional callable(current, total, label) invoked at
+            phase milestones and per-pad during via placement, mirroring
+            batch_route's callback (issue #364). (0, 0, label) marks an
+            indeterminate phase. Called from whatever thread runs the engine;
+            GUI callers must marshal to the UI thread themselves.
+        cancel_check: Optional callable returning True to abort. Checked at
+            net and pad boundaries; on cancel the function returns early with
+            the work done so far -- a cancelling caller should DISCARD the
+            partial results (the GUI does).
 
     Returns:
         (total_vias_placed, total_traces_added, total_pads_needing_vias)
     """
+    _dump_engine_config('create_plane', dict(locals()))
     if all_layers is None:
         all_layers = ['F.Cu', 'B.Cu']
 
@@ -1748,7 +2067,7 @@ def create_plane(
               "(no Edge.Cuts drawings found, or they have zero extent). "
               "Add an Edge.Cuts outline to the board before creating planes.")
         if return_results:
-            return (0, 0, 0, [], [], [], 0)
+            return (0, 0, 0, [], [], [])
         return (0, 0, 0)
 
     min_x, min_y, max_x, max_y = board_bounds
@@ -1772,11 +2091,13 @@ def create_plane(
         else:
             layer_costs = [1.0 if layer == 'F.Cu' else 3.0 for layer in all_layers]
 
-    # Validate layer costs are in range [1.0, 1000]
+    # Validate layer costs: any negative = forbidden (no copper placed; still an
+    # obstacle), otherwise a multiplier in [1.0, 1000].
     for i, cost in enumerate(layer_costs):
-        if cost < 1.0 or cost > 1000:
+        if cost >= 0 and (cost < 1.0 or cost > 1000):
             layer_name = all_layers[i] if i < len(all_layers) else f"layer {i}"
-            print(f"ERROR: Layer cost for {layer_name} must be between 1.0 and 1000, got {cost}")
+            print(f"ERROR: Layer cost for {layer_name} must be negative (forbidden) or "
+                  f"between 1.0 and 1000, got {cost}")
             return (0, 0, 0)
 
     costs_str = ', '.join(f"{all_layers[i]}={layer_costs[i]}x" for i in range(min(len(all_layers), len(layer_costs))))
@@ -1834,18 +2155,24 @@ def create_plane(
     # Process each net/layer pair
     for net_idx, (net_name, plane_layer, net_id, should_create_zone) in enumerate(
             zip(net_names, plane_layers, net_ids, should_create_zones)):
+        if cancel_check and cancel_check():
+            print("\nPlane creation cancelled")
+            break
 
         print(f"\n{'='*60}")
         print(f"Processing net '{net_name}' on layer {plane_layer}")
         print(f"{'='*60}")
 
         # Step 5: Identify target pads for this net
+        if progress_callback:
+            progress_callback(0, 0, f"{net_name}: analyzing pads on {plane_layer}...")
         target_pads = identify_target_pads(pcb_data, net_id, plane_layer)
 
         pads_through_hole = sum(1 for p in target_pads if p['type'] == 'through_hole')
         pads_direct = sum(1 for p in target_pads if p['type'] == 'direct')
         pads_already_connected = sum(1 for p in target_pads if p['type'] == 'already_connected')
         pads_need_via = sum(1 for p in target_pads if p['type'] == 'via_needed')
+        pads_off_board = sum(1 for p in target_pads if p['type'] == 'off_board')
         total_pads_needing_vias += pads_need_via
 
         print(f"\nPad analysis for net '{net_name}':")
@@ -1854,6 +2181,9 @@ def create_plane(
         if pads_already_connected:
             print(f"  SMD pads already routed to plane (no via needed): {pads_already_connected}")
         print(f"  SMD pads on other layers (via needed): {pads_need_via}")
+        if pads_off_board:
+            print(f"  {RED}Pads OUTSIDE the board outline (unreachable, skipped, #291): "
+                  f"{pads_off_board}{RESET}")
 
         # Step 6: Collect existing vias on target net (for reuse)
         existing_net_vias: List[Tuple[float, float]] = []
@@ -1867,6 +2197,8 @@ def create_plane(
         # Step 7: Build obstacle map for via placement (exclude current net)
         if pads_need_via > 0:
             print("\nBuilding obstacle map for via placement...")
+            if progress_callback:
+                progress_callback(0, 0, f"{net_name}: building via obstacle map...")
             obstacles = build_via_obstacle_map(pcb_data, config, net_id,
                                                same_net_pad_clearance=same_net_pad_clearance)
             # Also block positions of vias we've already placed in previous nets
@@ -1897,6 +2229,7 @@ def create_plane(
         new_segments = []
         vias_placed = 0
         vias_reused = 0
+        pads_strapped = 0
         traces_added = 0
         failed_pads = 0
         ripped_net_ids: List[int] = []  # Nets ripped for this net
@@ -1954,9 +2287,15 @@ def create_plane(
         net_failed_start = len(failed_pad_infos)
 
         for pad_idx, pad_info in enumerate(pads_needing_vias):
+            if cancel_check and cancel_check():
+                print("  (cancelled)")
+                break
             pad = pad_info['pad']
             pad_layer = pad_info.get('pad_layer')
             current_pad_key = (pad.global_x, pad.global_y)
+            if progress_callback:
+                progress_callback(pad_idx + 1, len(pads_needing_vias),
+                                  f"{net_name}: via for {pad.component_ref}.{pad.pad_number}")
 
             # Skip pads already processed in previous layer passes
             # (a via connects ALL layers, so once placed, pad is done)
@@ -2015,6 +2354,64 @@ def create_plane(
                     vias_reused += 1
                     print(f"reused nearby via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {dist:.2f}mm away")
                     processed_pad_ids.add(current_pad_key)
+                    continue
+
+            # Issue #349: before drilling, strap to an ADJACENT same-net pad that
+            # is already plane-connected (processed earlier this run, or a plated
+            # through-hole). Adjacent same-net pad clusters (fine-pitch power
+            # pins, GND rows) then share ONE via plus short pad-layer straps
+            # instead of a via per pad -- fewer drills and less via congestion
+            # near connectors (the #347/#348 corridor-contention class). The
+            # strap uses the same obstacle-aware trace as via reuse, so a strap
+            # that doesn't fit falls through to normal via placement below.
+            if pad_layer:
+                strap_cands = []
+                for npad in pcb_data.pads_by_net.get(net_id, []):
+                    nkey = (npad.global_x, npad.global_y)
+                    if nkey == current_pad_key:
+                        continue
+                    if not (nkey in processed_pad_ids or pad_is_plated_through(npad)):
+                        continue
+                    if not (pad_layer in npad.layers
+                            or any(l.startswith('*') for l in npad.layers)
+                            or pad_is_plated_through(npad)):
+                        continue
+                    d = ((npad.global_x - pad.global_x) ** 2 +
+                         (npad.global_y - pad.global_y) ** 2) ** 0.5
+                    if d > defaults.PLANE_PAD_STRAP_RADIUS:
+                        continue
+                    # Anchor the strap on the neighbour's VIA when one sits in
+                    # its pad copper (via-in-pad taps land off-center): the
+                    # connectivity graph follows exact endpoint/via keys, so a
+                    # strap ending at the pad CENTER next to an off-center
+                    # in-pad via reads as unconnected and gets re-tapped by the
+                    # repair pass. A plated through-hole neighbour conducts at
+                    # its center (barrel), so the center is the right anchor.
+                    npos = nkey
+                    if not pad_is_plated_through(npad):
+                        nv = via_index.find_nearest(
+                            npad.global_x, npad.global_y,
+                            max(npad.size_x, npad.size_y) / 2)
+                        if nv is not None:
+                            npos = nv
+                    strap_cands.append((d, npos))
+                strapped = False
+                for d, npos in sorted(strap_cands):
+                    routing_obs = get_routing_obstacles(pad_layer)
+                    route_result = route_via_to_pad(npos, pad, pad_layer, net_id,
+                                                    routing_obs, config, verbose=verbose,
+                                                    return_blocked_cells=True,
+                                                    router=via_pad_router)
+                    if route_result.success and route_result.segments:
+                        new_segments.extend(route_result.segments)
+                        traces_added += len(route_result.segments)
+                        pads_strapped += 1
+                        print(f"strapped to same-net pad at ({npos[0]:.2f}, {npos[1]:.2f}), "
+                              f"{d:.2f}mm away, {len(route_result.segments)} segment(s), no via (#349)")
+                        processed_pad_ids.add(current_pad_key)
+                        strapped = True
+                        break
+                if strapped:
                     continue
 
             # Next, try to place via within pad boundary (preferred - no trace needed)
@@ -2181,6 +2578,47 @@ def create_plane(
                     clearance=clearance,
                 )
 
+                # Collision-checked restore (#329 route_planes side): every
+                # ripped net's kept copper must ALSO be re-emitted as new
+                # copper with the net's input copper stripped -- the writer
+                # works from the input file, so a pcb_data-only restore would
+                # resurrect the dropped (colliding) pieces (#319 board==file).
+                # A net left STILL-RIPPED after settle (its restore collided)
+                # may have a stale emission from an earlier rip's restore --
+                # purge it or the writer ships copper that pcb_data and the
+                # obstacle maps no longer track (H9 drilled a via on +1V1's
+                # stale-emitted trunk).
+                for rid in (result.ripped_net_ids or []):
+                    new_segments[:] = [x for x in new_segments if x.get('net_id') != rid]
+                    new_vias[:] = [x for x in new_vias if x.get('net_id') != rid]
+                    all_new_segments[:] = [x for x in all_new_segments if x.get('net_id') != rid]
+                    all_new_vias[:] = [x for x in all_new_vias if x.get('net_id') != rid]
+                for rid, ksegs, kvias, _dropped in (result.restored_nets or []):
+                    if rid not in ripped_net_ids:
+                        ripped_net_ids.append(rid)
+                    # A net can be ripped AGAIN by a later pad (its restored
+                    # copper is back in pcb_data); purge any earlier emission
+                    # of this net or the stale set resurrects pieces the newer
+                    # settle dropped (+1V1 ripped at C98.2 then U1.J9: 6 GND
+                    # vias landed on a stale-emitted trunk segment).
+                    new_segments[:] = [x for x in new_segments if x.get('net_id') != rid]
+                    new_vias[:] = [x for x in new_vias if x.get('net_id') != rid]
+                    all_new_segments[:] = [x for x in all_new_segments if x.get('net_id') != rid]
+                    all_new_vias[:] = [x for x in all_new_vias if x.get('net_id') != rid]
+                    # from_restore: settle already put these OBJECTS back in
+                    # pcb_data; the net-end sync must not add them again or
+                    # every re-rip doubles the net's copper (dup drill pairs).
+                    for ks in ksegs:
+                        new_segments.append({
+                            'start': (ks.start_x, ks.start_y),
+                            'end': (ks.end_x, ks.end_y),
+                            'width': ks.width, 'layer': ks.layer, 'net_id': rid,
+                            'from_restore': True})
+                    for kv in kvias:
+                        new_vias.append({
+                            'x': kv.x, 'y': kv.y, 'size': kv.size,
+                            'drill': kv.drill, 'layers': kv.layers, 'net_id': rid,
+                            'from_restore': True})
                 if result.success:
                     # Track ripped nets and remove their vias/segments from all_new_* lists
                     for rid in result.ripped_net_ids:
@@ -2294,9 +2732,13 @@ def create_plane(
         fine_candidates = [e for e in net_failed
                            if pad_is_fine_pitch(e[3]['pad'], pcb_data)]
         if fine_candidates:
+            _fab_clear, _fab_track = fab_floor_clearance_track(pcb_data)
             print(f"\nRetrying {len(fine_candidates)} failed fine-pitch pad(s) with scoped "
-                  f"fine parameters (grid {FINE_TAP_GRID_STEP}mm, clearance "
-                  f"{FINE_TAP_CLEARANCE}mm, track <= {FINE_TAP_TRACK_WIDTH}mm):")
+                  f"fine parameters (grid {FINE_TAP_GRID_STEP}mm, clearance stepped down "
+                  f"to the fab floor {_fab_clear}mm, track >= {_fab_track}mm):")
+            if progress_callback:
+                progress_callback(0, 0, f"{net_name}: fine-pitch retry "
+                                        f"({len(fine_candidates)} pad(s))...")
             recovered_entries = []
             for entry in fine_candidates:
                 pad_info = entry[3]
@@ -2351,6 +2793,17 @@ def create_plane(
             if recovered_entries:
                 print(f"  Fine-pitch retry recovered {len(recovered_entries)}/{len(fine_candidates)} pad(s)")
 
+        # Ref-count integrity audit of this net's via-placement map (#309, same
+        # class as #208): after all rips/placements the maintained map must
+        # equal a fresh rebuild from the CURRENT pcb_data plus the session vias
+        # (mirroring its Step-7 construction + per-placement blocking).
+        if os.environ.get("KICAD_OBSTACLE_AUDIT") and obstacles is not None:
+            _audit_plane_via_map(obstacles, pcb_data, config, net_id,
+                                 same_net_pad_clearance,
+                                 all_new_vias + new_vias, coord,
+                                 hole_to_hole_clearance, via_drill, via_size,
+                                 net_name)
+
         # Step 10: Generate zone for this net (if needed)
         # For multi-net layers, defer zone generation until all nets are processed
         zone_sexpr = None
@@ -2392,9 +2845,29 @@ def create_plane(
             print(f"  Zone created on {plane_layer}{suffix}")
         print(f"  New vias placed: {vias_placed}")
         print(f"  Existing vias reused: {vias_reused}")
+        if pads_strapped > 0:
+            print(f"  Pads strapped to adjacent same-net pads (no via, #349): {pads_strapped}")
         print(f"  Traces added: {traces_added}")
         if failed_pads > 0:
             print(f"  Failed pads: {failed_pads}")
+
+        # KICAD_PLANE_MAP_PARITY=1: verify the incremental via map still
+        # BLOCKS every restored net's live copper (under-blocking here is the
+        # via-drilled-on-restored-track class; over-blocking is by-design
+        # conservative for dropped pieces). Fresh-recompute each restored
+        # net's footprint from CURRENT pcb_data and probe the map.
+        if os.environ.get('KICAD_PLANE_MAP_PARITY') and ripped_net_ids:
+            from obstacle_cache import precompute_via_placement_obstacles as _pv
+            for _rid in ripped_net_ids:
+                if not any(v.net_id == _rid for v in pcb_data.vias) and \
+                   not any(sg.net_id == _rid for sg in pcb_data.segments):
+                    continue  # fully ripped, nothing live to verify
+                _fresh = _pv(pcb_data, _rid, config, all_layers)
+                _miss = sum(1 for (gx, gy) in map(tuple, _fresh.blocked_vias)
+                            if not obstacles.is_via_blocked(int(gx), int(gy)))
+                _nm = pcb_data.nets[_rid].name if _rid in pcb_data.nets else _rid
+                status = 'OK' if _miss == 0 else f'UNDER-BLOCKED {_miss} cells'
+                print(f"  MAP-PARITY {_nm}: {len(_fresh.blocked_vias)} live cells, {status}")
 
         # Accumulate results
         all_new_vias.extend(new_vias)
@@ -2407,13 +2880,19 @@ def create_plane(
             if rid not in all_ripped_net_ids:
                 all_ripped_net_ids.append(rid)
 
-        # Add new vias/segments to pcb_data so subsequent nets will avoid them
+        # Add new vias/segments to pcb_data so subsequent nets will avoid them.
+        # Restored-net emissions are skipped: their copper OBJECTS are already
+        # in pcb_data (settle's restore) -- re-adding doubles the net's copper.
         for v in new_vias:
+            if v.get('from_restore'):
+                continue
             pcb_data.vias.append(Via(
                 x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
                 layers=v['layers'], net_id=v['net_id']
             ))
         for s in new_segments:
+            if s.get('from_restore'):
+                continue
             start = s['start']
             end = s['end']
             pcb_data.segments.append(Segment(
@@ -2432,6 +2911,8 @@ def create_plane(
                 print(f"Computing zone boundaries for multi-net layer {layer}")
                 print(f"Nets: {', '.join(nets_on_layer)}")
                 print(f"{'='*60}")
+                if progress_callback:
+                    progress_callback(0, 0, f"Computing Voronoi zones for {layer}...")
 
                 zone_sexprs, debug_line_sexprs, zone_data = _generate_multinet_layer_zones(
                     layer=layer,
@@ -2475,10 +2956,26 @@ def create_plane(
                 ripped_names.append(net.name if net else f"net_{rid}")
             print(f"  Nets excluded from output: {', '.join(ripped_names)}")
 
+    # Finalize plane tap copper ONCE, before the write/dry-run split, so the
+    # GUI (dry_run=True, return_results) and the CLI (writes the file) emit
+    # identical copper for identical inputs: neck grazes -> graze prune /
+    # dead-end sweep -> close soft joints (#334 + follow-up). Previously this
+    # lived inside _write_output_and_reroute and the GUI path never ran it.
+    if progress_callback:
+        progress_callback(0, 0, "Cleaning up plane tap copper...")
+    all_new_segments = _finalize_plane_copper(
+        all_new_segments, all_new_vias, pcb_data, clearance, all_layers,
+        track_width, grid_step, via_size, via_drill, hole_to_hole_clearance)
+
     geo_results: Dict[int, Dict] = {}
     if dry_run:
         print("\nDry run - no output file written")
     else:
+        if os.environ.get('KICAD_SETTLE_DEBUG'):
+            from collections import Counter as _C
+            _dups = {k: n for k, n in _C((v.get('net_id'), round(v['x'], 3), round(v['y'], 3))
+                                          for v in all_new_vias).items() if n > 1}
+            print(f"\n  WRITE-DEBUG: duplicate new_vias: {_dups}")
         _write_output_and_reroute(
             input_file=input_file,
             output_file=output_file,
@@ -2521,9 +3018,18 @@ def create_plane(
                       f"found {geo_failed} pad(s) not connected to their plane "
                       f"(see per-net breakdown above).")
 
+    if progress_callback:
+        progress_callback(1, 1, "Plane creation complete")
     if return_results:
+        # all_ripped_net_ids LAST for backward compatibility: the GUI must
+        # delete these nets' existing board copper before applying new_vias/
+        # new_segments (which include the from_restore replacement pieces) --
+        # the CLI writer's exclude_net_ids strip has no pcbnew equivalent, so
+        # without this the live board keeps the originals AND gains the
+        # emitted copies (duplicated restored copper).
         return (total_vias_placed, total_traces_added, total_pads_needing_vias,
-                all_new_vias, all_new_segments, all_zone_data, total_failed_pads)
+                all_new_vias, all_new_segments, all_zone_data, total_failed_pads,
+                all_ripped_net_ids)
     return (total_vias_placed, total_traces_added, total_pads_needing_vias)
 
 
@@ -2557,31 +3063,32 @@ Examples:
                         help="Plane layer(s) for the zone(s), one per net (e.g., In1.Cu In2.Cu)")
 
     # Via and track geometry
-    parser.add_argument("--via-size", type=float, default=0.5, help="Via outer diameter in mm (default: 0.5)")
-    parser.add_argument("--via-drill", type=float, default=0.3, help="Via drill size in mm (default: 0.3)")
-    parser.add_argument("--track-width", type=float, default=0.3, help="Track width for via-to-pad connections in mm (default: 0.3)")
-    parser.add_argument("--clearance", type=float, default=0.25, help="Clearance in mm (default: 0.25)")
+    parser.add_argument("--via-size", type=float, default=defaults.VIA_SIZE, help="Via outer diameter in mm (default: 0.5)")
+    parser.add_argument("--via-drill", type=float, default=defaults.VIA_DRILL, help="Via drill size in mm (default: 0.3)")
+    parser.add_argument("--track-width", type=float, default=defaults.TRACK_WIDTH, help="Track width for via-to-pad connections in mm (default: 0.3)")
+    parser.add_argument("--clearance", type=float, default=defaults.CLEARANCE, help="Clearance in mm (default: 0.25)")
 
     # Zone options
-    parser.add_argument("--zone-clearance", type=float, default=0.2, help="Zone clearance from other copper in mm (default: 0.2)")
-    parser.add_argument("--min-thickness", type=float, default=0.1, help="Minimum zone copper thickness in mm (default: 0.1)")
+    parser.add_argument("--zone-clearance", type=float, default=defaults.PLANE_ZONE_CLEARANCE, help="Zone clearance from other copper in mm (default: 0.2)")
+    parser.add_argument("--min-thickness", type=float, default=defaults.PLANE_MIN_THICKNESS, help="Minimum zone copper thickness in mm (default: 0.1)")
 
     # Algorithm options
-    parser.add_argument("--grid-step", type=float, default=0.1, help="Grid resolution in mm (default: 0.1)")
-    parser.add_argument("--max-search-radius", type=float, default=10.0, help="Max radius to search for valid via position in mm (default: 10.0)")
-    parser.add_argument("--max-via-reuse-radius", type=float, default=1.0, help="Max radius to reuse existing via instead of placing new one in mm (default: 1.0)")
+    parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP, help="Grid resolution in mm (default: 0.1)")
+    parser.add_argument("--max-search-radius", type=float, default=defaults.PLANE_MAX_SEARCH_RADIUS, help="Max radius to search for valid via position in mm (default: 10.0)")
+    parser.add_argument("--max-via-reuse-radius", type=float, default=defaults.PLANE_MAX_VIA_REUSE_RADIUS, help="Max radius to reuse existing via instead of placing new one in mm (default: 1.0)")
     parser.add_argument("--close-via-radius", type=float, default=None, help="Radius to check for nearby vias before placing new one (default: 2.5 * via-size)")
-    parser.add_argument("--hole-to-hole-clearance", type=float, default=0.2, help="Minimum clearance between drill holes in mm (default: 0.2)")
+    parser.add_argument("--hole-to-hole-clearance", type=float, default=defaults.HOLE_TO_HOLE_CLEARANCE, help=f"Minimum clearance between drill holes in mm (default: {defaults.HOLE_TO_HOLE_CLEARANCE}, the fab floor)")
     parser.add_argument("--layers", "-l", nargs="+", default=None,
                         help="All copper layers for routing and via span (default: F.Cu + plane-layers + B.Cu)")
     parser.add_argument("--layer-costs", nargs="+", type=float, default=[],
-                        help="Per-layer routing cost multipliers (1.0-1000). "
-                             "Order matches --layers. Example: --layer-costs 1.0 3.0 3.0 3.0")
+                        help="Per-layer routing cost multipliers (1.0-1000, or any negative value e.g. -1 = "
+                             "forbidden: the layer stays an obstacle / via span but gets no routed copper). "
+                             "Order matches --layers. Example: --layer-costs 1.0 -1 -1 3.0")
 
     # Blocker rip-up options
     parser.add_argument("--rip-blocker-nets", action="store_true",
                         help="Identify and rip up nets blocking via placement, then retry. Ripped nets are excluded from output.")
-    parser.add_argument("--max-rip-nets", type=int, default=3,
+    parser.add_argument("--max-rip-nets", type=int, default=defaults.PLANE_MAX_RIP_NETS,
                         help="Maximum number of blocker nets to rip up (default: 3)")
     parser.add_argument("--reroute-ripped-nets", action="store_true",
                         help="Automatically re-route ripped nets after via placement")
@@ -2599,22 +3106,18 @@ Examples:
                         help="Radius around other nets' vias to add proximity cost when routing plane connections (mm, default: 3.0)")
     parser.add_argument("--plane-proximity-cost", type=float, default=2.0,
                         help="Maximum proximity cost around other nets' vias when routing plane connections (mm equivalent, default: 2.0)")
-    parser.add_argument("--plane-track-via-clearance", type=float, default=0.8,
+    parser.add_argument("--plane-track-via-clearance", type=float, default=defaults.PLANE_TRACK_VIA_CLEARANCE,
                         help="Clearance from track center to other nets' via centers when routing MST connections (mm, default: 0.8)")
     parser.add_argument("--voronoi-seed-interval", type=float, default=2.0,
                         help="Sample interval for Voronoi seed points along plane connection routes (mm, default: 2.0)")
-    parser.add_argument("--plane-max-iterations", type=int, default=200000,
+    parser.add_argument("--plane-max-iterations", type=int, default=defaults.MAX_ITERATIONS,
                         help="Max A* iterations for routing plane connections (default: 200000)")
 
     # Board edge clearance
-    parser.add_argument("--board-edge-clearance", type=float, default=0.5,
+    parser.add_argument("--board-edge-clearance", type=float, default=defaults.PLANE_EDGE_CLEARANCE,
                         help="Clearance from board edge for zones in mm (default: 0.5)")
-    parser.add_argument("--no-fix-drc-settings", action="store_true",
-                        help="Do not adjust the output's .kicad_pro DRC constraints to match the "
-                             "routed clearances/sizes afterwards (issue #160).")
-    parser.add_argument("--keep-thermal", action="store_true",
-                        help="When fixing DRC settings, leave thermal-relief severity "
-                             "(starved_thermal) untouched instead of demoting it to a warning")
+    from fix_kicad_drc_settings import add_drc_fix_args
+    add_drc_fix_args(parser)
 
     # Same-net pad clearance (avoid via-in-pad)
     parser.add_argument("--same-net-pad-clearance", type=float,
@@ -2640,7 +3143,21 @@ Examples:
     parser.add_argument("--gnd-via-distance", type=float, default=2.0,
         help="Maximum distance from signal via to place GND via in mm (default: 2.0)")
 
+    from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
+                           enforce_fab_floors, count_copper_layers_in_file)
+    add_fab_tier_args(parser)
     args = parser.parse_args()
+    set_default_fab_tier(*fab_tier_from_args(args))
+    _pinned_floors = enforce_fab_floors(
+        count_copper_layers_in_file(args.input_file),
+        track_width=getattr(args, 'track_width', None),
+        clearance=getattr(args, 'clearance', None),
+        via_size=getattr(args, 'via_size', None),
+        via_drill=getattr(args, 'via_drill', None),
+        hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None))
+    # Below-floor params are pinned up to the fab floor (warned); apply the clamps.
+    for _pname, _pfloor in _pinned_floors.items():
+        setattr(args, _pname, _pfloor)
 
     # Handle output file: use --overwrite, explicit output, or auto-generate with _routed suffix
     if args.output_file is None:
@@ -2750,7 +3267,11 @@ Examples:
             track_width=args.track_width,
             clearance=args.clearance,
             grid_step=args.grid_step,
-            layers=args.layers,
+            # A THROUGH via must clear copper on EVERY board layer, not just
+            # the configured routing layers: with --layers omitting an inner
+            # layer, stitching vias were placed straight through its tracks
+            # (0.3-0.46mm overlaps on In2 in the bitaxe repro).
+            layers=list(pcb_data.board_info.copper_layers),
             # Thread the fab hole-to-hole minimum through so GND-via placement
             # enforces the real drill spacing (issue #125), not the 0.2mm default.
             hole_to_hole_clearance=args.hole_to_hole_clearance
@@ -2796,24 +3317,48 @@ Examples:
     # otherwise. Gated against connectivity + pours, so it never breaks a net.
     if not args.dry_run:
         from pcb_modification import clean_plane_copper
-        _snapped, _removed = clean_plane_copper(args.output_file, net_names, args.clearance)
+        _snapped, _removed = clean_plane_copper(args.output_file, net_names,
+                                                args.clearance, args.grid_step)
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
+
+    # NO KiCad-oracle recheck here (#217): the plane this step just poured has NOT
+    # yet been stitched -- tying pads/islands into the pour is route_disconnected_
+    # planes' job, the very next step. At the route_planes stage KiCad reports every
+    # not-yet-stitched pad as a missing link (hackrf: 26 plane links / 42 total),
+    # so an oracle pass here thrashes routing links that don't exist as failures
+    # (18 routed, 77 failed, 3 kicad-cli rounds) -- a 2-8x route_planes regression
+    # for work route_disconnected_planes does properly. The oracle runs ONCE, as an
+    # end-of-pipeline fallback at the end of route_disconnected_planes, on the
+    # already-repaired board -- do not re-add it here.
 
     # Make the output project's KiCad DRC constraints consistent with the routed
     # clearances/sizes (issue #160); only edits the .kicad_pro, never the board.
     if not args.no_fix_drc_settings and not args.dry_run \
             and args.output_file and os.path.isfile(args.output_file):
         try:
-            from fix_kicad_drc_settings import fix_project_for_output
+            import clearance_ledger
+            eff_clearance = clearance_ledger.effective(args.clearance)
+            if eff_clearance < args.clearance:
+                print(f"  Min clearance used: {eff_clearance:.4g} mm "
+                      f"(below nominal {args.clearance:.4g}; fine-pitch taps) - "
+                      f"grading at this floor")
+            from fix_kicad_drc_settings import fix_project_for_output, drc_fix_kwargs
             fix_project_for_output(
                 args.output_file, input_pcb=args.input_file,
-                clearance=args.clearance, hole_to_hole=args.hole_to_hole_clearance,
+                clearance=eff_clearance, hole_to_hole=args.hole_to_hole_clearance,
                 edge_clearance=args.board_edge_clearance, track_width=args.track_width,
                 via_diameter=args.via_size, via_drill=args.via_drill,
-                keep_thermal=args.keep_thermal)
+                **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+
+    # Machine-readable summary so an orchestrator and the next pipeline step can
+    # read the clearance this step actually used (mirrors route.py/route_diff.py).
+    import json as _json, clearance_ledger as _cl
+    print("JSON_SUMMARY: " + _json.dumps({
+        "min_clearance_used": _cl.effective(args.clearance),
+    }))
 
 
 if __name__ == "__main__":

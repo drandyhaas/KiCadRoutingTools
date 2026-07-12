@@ -4,6 +4,7 @@ Net ordering strategies for PCB routing.
 This module provides different strategies for ordering nets before routing,
 including MPS (Maximum Planar Subset), inside-out BGA ordering, and original order.
 """
+from __future__ import annotations
 
 from typing import List, Tuple, Dict, Optional, Set
 

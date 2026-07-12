@@ -1,6 +1,7 @@
 """
 Data types for QFN/QFP fanout routing.
 """
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Tuple

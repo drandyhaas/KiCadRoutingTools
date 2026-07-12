@@ -4,6 +4,7 @@ Length matching for PCB routes using trombone-style meanders.
 Adds length to shorter routes by inserting perpendicular zigzag patterns
 at the longest straight segment.
 """
+from __future__ import annotations
 
 import fnmatch
 import math
@@ -266,7 +267,8 @@ def get_safe_amplitude_at_point(
     extra_vias: List = None,
     is_first_bump: bool = True,
     paired_net_id: int = None,
-    clearance_index: 'ClearanceIndex' = None
+    clearance_index: 'ClearanceIndex' = None,
+    own_width: float = 0.0
 ) -> float:
     """
     Find the maximum safe amplitude for a meander bump at a specific point.
@@ -286,6 +288,11 @@ def get_safe_amplitude_at_point(
         extra_vias: Additional vias to check against (e.g., from other nets in same length-match pass)
         paired_net_id: Optional paired net ID to also exclude (for intra-pair diff pair matching)
         clearance_index: Pre-built spatial index for efficient collision detection (optional)
+        own_width: Actual width of the segment being meandered (mm). The meander arms
+            inherit this width, so it drives the own-width term of the keep-out. Pass
+            the segment's real width so a segment widened beyond its netclass (e.g. a
+            hand-placed wide trunk) is honored, matching obstacle_cache's max(net_w,
+            seg.width). 0 = fall back to the net's configured width only.
 
     Returns:
         Safe amplitude, or 0 if no safe amplitude found
@@ -294,12 +301,32 @@ def get_safe_amplitude_at_point(
     # The routing uses grid-snapped segments, but output merges them into longer
     # segments that may have slightly different coordinates (up to half a grid step)
     meander_clearance_margin = config.grid_step / 2
+    # This net may be routed wider than the base track_width (impedance-controlled
+    # --impedance layer widths, or a power net width). The meander arms carry the
+    # net's ACTUAL width, so size the keep-out from it (#175). max() keeps the
+    # common case (net_w == track_width) byte-identical; only wider nets grow their
+    # keep-out. own_width is the actual width of the meandered segment, so a segment
+    # widened beyond its netclass is honored too (mirrors obstacle_cache's
+    # max(net_w, seg.width)). We only bump the meandered net's OWN half-width; the
+    # neighbor half-width stays the generic track_width/2.
+    net_w = max(config.track_width, config.get_net_track_width(net_id, layer), own_width)
+    net_half = net_w / 2
     # Add corner margin for track width bloat at 45-degree chamfered corners
-    corner_margin = config.track_width / 2 * CORNER_BLOAT_FACTOR
-    required_clearance = config.track_width + config.clearance + meander_clearance_margin + corner_margin
-    via_clearance = config.via_size / 2 + config.track_width / 2 + config.clearance + meander_clearance_margin + corner_margin
-    paired_clearance = config.track_width + config.clearance
+    corner_margin = net_half * CORNER_BLOAT_FACTOR
+    required_clearance = net_half + config.track_width / 2 + config.clearance + meander_clearance_margin + corner_margin
+    via_clearance = config.via_size / 2 + net_half + config.clearance + meander_clearance_margin + corner_margin
+    paired_clearance = net_half + config.track_width / 2 + config.clearance
     chamfer = CHAMFER_SIZE
+
+    # Board-edge keep-out (meanders overran the board outline). The A* router avoids
+    # the edge via add_board_edge_obstacles, but this geometric meander pass never
+    # did, so bumps near the edge printed past it. A bump arm carries the net's
+    # width, so its centerline must stay edge_clearance + net_half inside the bounds
+    # (mirrors obstacle_map: edge_clearance + track_width/2). board_edge_clearance
+    # overrides config.clearance when set, matching add_board_edge_obstacles.
+    board_bounds = getattr(pcb_data.board_info, 'board_bounds', None) if pcb_data and pcb_data.board_info else None
+    edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
+    edge_margin = edge_clearance + net_half
 
     # Binary search for safe amplitude
     # Start with max_amplitude and reduce if there are conflicts
@@ -323,6 +350,16 @@ def get_safe_amplitude_at_point(
         bump_max_x = max(max(bx1, bx2) for bx1, by1, bx2, by2 in bump_segs)
         bump_min_y = min(min(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
         bump_max_y = max(max(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
+
+        # Reject amplitudes whose bump would print past the board edge (copper edge
+        # = centerline bbox expanded by net_half must stay edge_clearance inside).
+        if board_bounds is not None and (
+            bump_min_x < board_bounds[0] + edge_margin or
+            bump_max_x > board_bounds[2] - edge_margin or
+            bump_min_y < board_bounds[1] + edge_margin or
+            bump_max_y > board_bounds[3] - edge_margin
+        ):
+            continue  # try a smaller amplitude that stays inside the outline
 
         # Use spatial index if available, otherwise fall back to full iteration
         if clearance_index is not None:
@@ -382,7 +419,7 @@ def get_safe_amplitude_at_point(
 
             # Check bump segments against nearby pads (on same layer)
             if not conflict_found:
-                pad_clearance = config.track_width / 2 + config.clearance + corner_margin
+                pad_clearance = net_half + config.clearance + corner_margin
                 nearby_pads = clearance_index.query_pads(
                     bump_min_x, bump_min_y, bump_max_x, bump_max_y, pad_clearance + 2.0
                 )
@@ -493,7 +530,7 @@ def get_safe_amplitude_at_point(
 
             # Check bump segments against pads (on same layer)
             if not conflict_found:
-                pad_clearance = config.track_width / 2 + config.clearance + corner_margin
+                pad_clearance = net_half + config.clearance + corner_margin
                 for bx1, by1, bx2, by2 in bump_segs:
                     if conflict_found:
                         break
@@ -713,7 +750,8 @@ def generate_trombone_meander(
             safe_amp = get_safe_amplitude_at_point(
                 check_cx, check_cy, ux, uy, px, py, direction, amplitude, min_amplitude,
                 segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first,
-                paired_net_id=paired_net_id, clearance_index=clearance_index
+                paired_net_id=paired_net_id, clearance_index=clearance_index,
+                own_width=segment.width
             )
             if safe_amp < min_amplitude:
                 # Try the other direction
@@ -729,7 +767,8 @@ def generate_trombone_meander(
                 safe_amp_other = get_safe_amplitude_at_point(
                     other_check_cx, other_check_cy, ux, uy, px, py, other_dir, amplitude, min_amplitude,
                     segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first,
-                    paired_net_id=paired_net_id, clearance_index=clearance_index
+                    paired_net_id=paired_net_id, clearance_index=clearance_index,
+                    own_width=segment.width
                 )
                 if safe_amp_other >= min_amplitude:
                     # Mark the original direction as blocked if safe_amp was 0
@@ -1153,7 +1192,7 @@ def _apply_meanders_to_net_with_iteration(
     group_clearance_index,
     metric_func,
     extra_length_func,
-) -> Tuple[dict, List[Segment], int]:
+) -> Tuple[dict, List[Segment], int, float]:
     """
     Apply meanders to a single net with bump iteration and amplitude scaling.
 
@@ -1175,7 +1214,7 @@ def _apply_meanders_to_net_with_iteration(
         extra_length_func: Function(metric_deficit) -> extra_length in mm
 
     Returns:
-        Tuple of (modified_result_or_segments, final_segments, bump_count)
+        Tuple of (modified_result_or_segments, final_segments, bump_count, final_metric)
     """
     from net_queries import calculate_route_length
 
@@ -1435,7 +1474,7 @@ def apply_length_matching_to_group(
         modified, new_segments, bump_count, new_length = _apply_meanders_to_net_with_iteration(
             result, target_length, current_length, config.length_match_tolerance,
             config, pcb_data, already_processed_segments, already_processed_vias,
-            group_clearance_index, length_metric, length_to_length, "mm"
+            group_clearance_index, length_metric, length_to_length
         )
 
         print(f"      {net_name}: new length = {new_length:.2f}mm ({bump_count} bumps)")
@@ -1588,7 +1627,7 @@ def apply_time_matching_to_group(
         modified, new_segments, bump_count, new_time = _apply_meanders_to_net_with_iteration(
             result, target_time, current_time, config.time_match_tolerance,
             config, pcb_data, already_processed_segments, already_processed_vias,
-            group_clearance_index, time_metric, time_to_length, "ps"
+            group_clearance_index, time_metric, time_to_length
         )
 
         print(f"      {net_name}: new time = {new_time:.2f}ps ({bump_count} bumps)")
@@ -1886,8 +1925,16 @@ def generate_centerline_meander(
     bump_width = 6 * chamfer  # wide entry (2) + wide top chamfers (4)
 
     # Account for full diff pair width in clearance
-    # The meander bump needs clearance for both P and N tracks
-    diff_pair_half_width = spacing_mm + config.track_width / 2
+    # The meander bump needs clearance for both P and N tracks. Use the pair's
+    # actual routed width (impedance/power), not the base track_width (#175).
+    # (Informational only; the real per-bump keep-out is computed in
+    # get_safe_amplitude_for_diff_pair.)
+    layer_names = config.layers if isinstance(getattr(config, 'layers', None), list) else []
+    layer_name = layer_names[layer] if isinstance(layer, int) and layer < len(layer_names) else str(layer)
+    pair_net_w = max(config.track_width,
+                     config.get_net_track_width(p_net_id, layer_name) if p_net_id is not None else 0.0,
+                     config.get_net_track_width(n_net_id, layer_name) if n_net_id is not None else 0.0)
+    diff_pair_half_width = spacing_mm + pair_net_w / 2
 
     # Build new path with meanders
     new_path = list(float_path[:start_idx])
@@ -2078,16 +2125,34 @@ def get_safe_amplitude_for_diff_pair(
 
     # Add margin for segment merging
     meander_clearance_margin = config.grid_step / 2
-    # Add corner margin for track width bloat at 45-degree chamfered corners
-    corner_margin = config.track_width / 2 * CORNER_BLOAT_FACTOR
-    required_clearance = config.track_width + config.clearance + meander_clearance_margin + diff_pair_extra + corner_margin
-    via_clearance = config.via_size / 2 + config.track_width / 2 + config.clearance + meander_clearance_margin + diff_pair_extra + corner_margin
-    chamfer = CHAMFER_SIZE
 
     # Get layer name for comparison
     # config.layers is a list of layer names
     layer_names = config.layers if hasattr(config, 'layers') and isinstance(config.layers, list) else []
     layer_name = layer_names[layer] if layer < len(layer_names) else str(layer)
+
+    # The pair may be routed wider than the base track_width (impedance control /
+    # power width). The meandered arms carry the pair's ACTUAL width, so drive the
+    # own-width term of the keep-out from it (#175). max() keeps the common case
+    # (net_w == track_width) byte-identical; only wider pairs grow their keep-out.
+    # spacing_mm already reflects the routed P/N offset. Neighbor half-width stays
+    # the generic track_width/2.
+    net_w = max(config.track_width,
+                config.get_net_track_width(p_net_id, layer_name),
+                config.get_net_track_width(n_net_id, layer_name))
+    net_half = net_w / 2
+    # Add corner margin for track width bloat at 45-degree chamfered corners
+    corner_margin = net_half * CORNER_BLOAT_FACTOR
+    required_clearance = net_half + config.track_width / 2 + config.clearance + meander_clearance_margin + diff_pair_extra + corner_margin
+    via_clearance = config.via_size / 2 + net_half + config.clearance + meander_clearance_margin + diff_pair_extra + corner_margin
+    chamfer = CHAMFER_SIZE
+
+    # Board-edge keep-out: bumps are generated at the pair CENTERLINE, but the P/N
+    # copper extends spacing_mm + net_half beyond it, so that outer edge must stay
+    # edge_clearance inside the board outline (mirrors the single-ended path).
+    board_bounds = getattr(pcb_data.board_info, 'board_bounds', None) if pcb_data and pcb_data.board_info else None
+    edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
+    edge_margin = edge_clearance + diff_pair_extra + net_half
 
     # Combine all segments and vias
     all_segments = list(pcb_data.segments)
@@ -2112,6 +2177,18 @@ def get_safe_amplitude_for_diff_pair(
         bump_segs = get_bump_segments(cx, cy, ux, uy, px, py, direction, test_amp, chamfer, is_first_bump)
 
         conflict_found = False
+
+        # Reject amplitudes whose P/N copper would print past the board edge.
+        if board_bounds is not None:
+            b_min_x = min(min(bx1, bx2) for bx1, by1, bx2, by2 in bump_segs)
+            b_max_x = max(max(bx1, bx2) for bx1, by1, bx2, by2 in bump_segs)
+            b_min_y = min(min(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
+            b_max_y = max(max(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
+            if (b_min_x < board_bounds[0] + edge_margin or
+                b_max_x > board_bounds[2] - edge_margin or
+                b_min_y < board_bounds[1] + edge_margin or
+                b_max_y > board_bounds[3] - edge_margin):
+                continue  # try a smaller amplitude that stays inside the outline
 
         # Check each bump segment
         for bx1, by1, bx2, by2 in bump_segs:
@@ -2164,7 +2241,7 @@ def get_safe_amplitude_for_diff_pair(
 
         # Check bump segments against pads (on same layer)
         if not conflict_found:
-            pad_clearance = config.track_width / 2 + config.clearance + corner_margin + diff_pair_extra
+            pad_clearance = net_half + config.clearance + corner_margin + diff_pair_extra
             for bx1, by1, bx2, by2 in bump_segs:
                 if conflict_found:
                     break
@@ -2384,6 +2461,110 @@ def apply_meanders_to_diff_pair(
     return result, 0
 
 
+def _lengthen_net_with_meanders(
+    segments: List[Segment],
+    net_id: int,
+    paired_net_id: int,
+    vias: List,
+    stub_length: float,
+    current_length: float,
+    target_length: float,
+    delta: float,
+    config: GridRouteConfig,
+    pcb_data: PCBData,
+) -> Tuple[List[Segment], float, int]:
+    """Add meanders to ONE net's ``segments`` to lengthen it toward
+    ``target_length`` (total = routed + ``stub_length``), starting from
+    ``current_length`` (the same total before meandering) with a positive
+    ``delta`` gap to close.
+
+    Shared by intra-pair P/N matching and end-to-end AC-coupled (XNet) matching
+    so the bump-count + amplitude-scaling search lives in exactly one place.
+    ``paired_net_id`` is the net's coupled partner on this run (reduced
+    clearance). Returns ``(meandered_segments, new_total_length, bump_count)``;
+    ``bump_count == 0`` means no meanders could be fit (segments/length returned
+    unchanged) and the caller decides how to report it.
+    """
+    # Meander geometry: entry chamfer + 2 risers + 2 top chamfers + exit chamfer.
+    # For n bumps: extra ~= n * (2*amplitude - 2.34*chamfer).
+    chamfer = CHAMFER_SIZE
+    min_amplitude = 0.1  # Minimum useful amplitude (smaller for small deltas)
+    max_amplitude = config.meander_amplitude  # Default 1.0mm
+
+    # Pick a bump count + initial amplitude that should hit the delta in one
+    # shot, then refine by scaling below.
+    max_extra_per_bump = 2 * max_amplitude - 2.34 * chamfer  # ~1.766mm at amplitude=1.0
+    num_bumps_needed = max(1, int(math.ceil(delta / max_extra_per_bump)))
+    initial_amplitude = (delta / num_bumps_needed + 2.34 * chamfer) / 2
+    initial_amplitude = max(min_amplitude, min(initial_amplitude, max_amplitude))
+
+    # Pass paired_net_id to use reduced clearance for the coupled partner track,
+    # and min_bumps to get exactly the calculated number of bumps.
+    meandered_segments, bump_count = apply_meanders_to_route(
+        segments,
+        delta,
+        config,
+        pcb_data=pcb_data,
+        net_id=net_id,
+        paired_net_id=paired_net_id,
+        amplitude_override=initial_amplitude,
+        min_bumps=num_bumps_needed
+    )
+
+    if bump_count == 0:
+        return segments, current_length, 0
+
+    new_routed = calculate_route_length(meandered_segments, vias, pcb_data)
+    new_length = new_routed + stub_length
+
+    # Keep track of best result (closest to target)
+    best_segments = meandered_segments
+    best_length = new_length
+    best_bump_count = bump_count
+
+    # Scale amplitude to converge on target (keep the closest result).
+    for scale_iter in range(5):
+        if abs(new_length - target_length) <= config.length_match_tolerance:
+            break
+
+        actual_extra = new_length - current_length
+        if actual_extra < MIN_SEGMENT_LENGTH or bump_count == 0:
+            break  # No meaningful extra was added
+
+        needed_extra = target_length - current_length
+        # amplitude that would give needed_extra with the current bump_count
+        target_amplitude = (needed_extra / bump_count + 2.34 * chamfer) / 2
+        if target_amplitude < 0.2:
+            break  # Amplitude too small, accept current result
+
+        new_meandered_segments, new_bump_count = apply_meanders_to_route(
+            segments,
+            delta,
+            config,
+            pcb_data=pcb_data,
+            net_id=net_id,
+            min_bumps=bump_count,  # Keep same bump count
+            amplitude_override=target_amplitude,
+            paired_net_id=paired_net_id
+        )
+
+        if new_bump_count == 0:
+            break  # Scaling failed, use best result so far
+
+        new_routed = calculate_route_length(new_meandered_segments, vias, pcb_data)
+        new_length = new_routed + stub_length
+
+        if abs(new_length - target_length) < abs(best_length - target_length):
+            best_segments = new_meandered_segments
+            best_length = new_length
+            best_bump_count = new_bump_count
+            bump_count = new_bump_count
+        else:
+            break  # Not improving, stop
+
+    return best_segments, best_length, best_bump_count
+
+
 def apply_intra_pair_length_matching(
     result: dict,
     config: GridRouteConfig,
@@ -2515,109 +2696,16 @@ def apply_intra_pair_length_matching(
 
     print(f"    P/N intra-pair: P={p_length:.3f}mm, N={n_length:.3f}mm, delta={delta:.3f}mm, adding meanders to {shorter_label}")
 
-    # Step 1: Generate initial meanders
-    # Meander geometry: entry chamfer + 2 risers + 2 top chamfers + exit chamfer
-    # For 1 bump: extra = 2*amplitude - 2.34*chamfer
-    # For n bumps: extra ≈ n * (2*amplitude - 2.34*chamfer) (approximately, first bump has entry/exit)
-    chamfer = CHAMFER_SIZE
-    min_amplitude = 0.1  # Minimum useful amplitude (smaller for intra-pair small deltas)
-    max_amplitude = config.meander_amplitude  # Default 1.0mm
-
-    # Calculate max extra per bump at max amplitude
-    max_extra_per_bump = 2 * max_amplitude - 2.34 * chamfer  # ~1.766mm at amplitude=1.0
-
-    # Determine number of bumps needed
-    num_bumps_needed = max(1, int(math.ceil(delta / max_extra_per_bump)))
-
-    # Calculate amplitude for this number of bumps to hit target delta
-    # extra = n * (2*amp - 2.34*chamfer)
-    # amp = (extra/n + 2.34*chamfer) / 2
-    initial_amplitude = (delta / num_bumps_needed + 2.34 * chamfer) / 2
-    initial_amplitude = max(min_amplitude, min(initial_amplitude, max_amplitude))
-
-    # Pass paired_net_id to use reduced clearance for the paired track
-    # Use min_bumps to ensure we get exactly the calculated number of bumps
-    meandered_segments, bump_count = apply_meanders_to_route(
-        shorter_segments,
-        delta,
-        config,
-        pcb_data=pcb_data,
-        net_id=shorter_net_id,
-        paired_net_id=longer_net_id,
-        amplitude_override=initial_amplitude,
-        min_bumps=num_bumps_needed
+    # Lengthen the shorter track to match the longer one (shared meander
+    # search — see _lengthen_net_with_meanders, also used by XNet matching).
+    meandered_segments, new_shorter_length, bump_count = _lengthen_net_with_meanders(
+        shorter_segments, shorter_net_id, longer_net_id, shorter_vias,
+        shorter_stub_length, shorter_length, target_length, delta, config, pcb_data,
     )
 
     if bump_count == 0:
         print(f"    P/N intra-pair: could not fit meanders")
         return result
-
-    # Calculate new length including stub (to compare with target which includes stub)
-    new_shorter_routed = calculate_route_length(meandered_segments, shorter_vias, pcb_data)
-    new_shorter_length = new_shorter_routed + shorter_stub_length
-
-    # Keep track of best result (closest to target)
-    best_segments = meandered_segments
-    best_length = new_shorter_length
-    best_bump_count = bump_count
-
-    # Step 2: Scale amplitude to hit target length (iterate to refine)
-    # For a meander bump: extra_length ≈ 2*amplitude - 2.34*chamfer per bump
-    # Rearranging: amplitude ≈ (extra_length/bump_count + 2.34*chamfer) / 2
-    for scale_iter in range(5):
-        new_delta = abs(new_shorter_length - target_length)
-        if new_delta <= config.length_match_tolerance:
-            break
-
-        # Calculate target amplitude based on needed extra length
-        actual_extra = new_shorter_length - shorter_length
-        if actual_extra < MIN_SEGMENT_LENGTH or bump_count == 0:
-            break  # No meaningful extra was added
-
-        needed_extra = target_length - shorter_length
-        # Calculate amplitude that would give needed_extra with current bump_count
-        # extra = bump_count * (2*amplitude - 2.34*chamfer)
-        # amplitude = (extra/bump_count + 2.34*chamfer) / 2
-        target_amplitude = (needed_extra / bump_count + 2.34 * chamfer) / 2
-
-        if target_amplitude < 0.2:
-            # Amplitude too small, accept current result
-            break
-
-        # Regenerate with target amplitude
-        new_meandered_segments, new_bump_count = apply_meanders_to_route(
-            shorter_segments,
-            delta,
-            config,
-            pcb_data=pcb_data,
-            net_id=shorter_net_id,
-            min_bumps=bump_count,  # Keep same bump count
-            amplitude_override=target_amplitude,
-            paired_net_id=longer_net_id
-        )
-
-        if new_bump_count == 0:
-            # Scaling failed, use best result so far
-            break
-
-        new_shorter_routed = calculate_route_length(new_meandered_segments, shorter_vias, pcb_data)
-        new_shorter_length = new_shorter_routed + shorter_stub_length
-
-        # Update best if this is closer to target
-        if abs(new_shorter_length - target_length) < abs(best_length - target_length):
-            best_segments = new_meandered_segments
-            best_length = new_shorter_length
-            best_bump_count = new_bump_count
-            meandered_segments = new_meandered_segments
-            bump_count = new_bump_count
-        else:
-            # Not improving, stop
-            break
-
-    # Use best result
-    meandered_segments = best_segments
-    new_shorter_length = best_length
-    bump_count = best_bump_count
 
     # Check if meanders actually improved delta (don't make things worse)
     new_delta = abs(new_shorter_length - target_length)
@@ -2645,3 +2733,148 @@ def apply_intra_pair_length_matching(
     print(f"    P/N intra-pair: {bump_count} bumps added, new {shorter_label}={new_shorter_length:.3f}mm, new delta={new_delta:.3f}mm")
 
     return result
+
+
+def _ac_coupled_member_lengths(result, p_net_id, n_net_id, pcb_data):
+    """Per-member P and N conductor contributions for end-to-end matching.
+
+    Mirrors apply_intra_pair_length_matching's measurement (routed length plus
+    polarity-aware stub lengths) but returns BOTH sides plus the raw segment / via
+    lists so the caller can lengthen one member net in place.
+    """
+    from net_queries import calculate_route_length
+    segs = result.get('new_segments', [])
+    vias = result.get('new_vias', [])
+    p_segs = [s for s in segs if s.net_id == p_net_id]
+    n_segs = [s for s in segs if s.net_id == n_net_id]
+    p_vias = [v for v in vias if v.net_id == p_net_id]
+    n_vias = [v for v in vias if v.net_id == n_net_id]
+    p_routed = calculate_route_length(p_segs, p_vias, pcb_data)
+    n_routed = calculate_route_length(n_segs, n_vias, pcb_data)
+
+    # Polarity-aware stub totals (each member can be independently polarity-fixed,
+    # matching apply_intra_pair_length_matching's post-swap accounting).
+    p_src = result.get('p_src_stub_length', 0.0)
+    p_tgt = result.get('p_tgt_stub_length', 0.0)
+    n_src = result.get('n_src_stub_length', 0.0)
+    n_tgt = result.get('n_tgt_stub_length', 0.0)
+    if result.get('polarity_fixed', False):
+        p_stub, n_stub = p_src + n_tgt, n_src + p_tgt
+    else:
+        p_stub, n_stub = p_src + p_tgt, n_src + n_tgt
+
+    return {
+        'result': result,
+        'p_net_id': p_net_id, 'n_net_id': n_net_id,
+        'p_segs': p_segs, 'n_segs': n_segs,
+        'p_vias': p_vias, 'n_vias': n_vias,
+        'p_stub': p_stub, 'n_stub': n_stub,
+        'p_routed': p_routed, 'n_routed': n_routed,
+        'p_len': p_routed + p_stub, 'n_len': n_routed + n_stub,
+    }
+
+
+def apply_ac_coupled_length_matching(xnet, routed_results, config, pcb_data):
+    """End-to-end length-match one AC-coupled XNet (issue #196).
+
+    Matches the concatenated P conductor (the sum of every member pair's P net)
+    against the concatenated N conductor, then distributes the compensating
+    meanders across the member segments: first onto members where the shorter
+    conductor is *also* the locally-shorter net (so it reduces local intra-pair
+    skew too), then spilling any remainder onto the member with the most routed
+    copper (the most meander room). The meanders are added one MEMBER NET at a
+    time (never a concatenated list -- each half's own copper would otherwise read
+    as a foreign net at zero clearance). Length-only, mirroring intra-pair.
+
+    Edits each member result's 'new_segments' in place. Returns the final
+    end-to-end skew in mm (or None if a member was not fully routed); degrades
+    gracefully on congestion and never falsely claims a match it could not make.
+    """
+    tol = config.length_match_tolerance
+    name = "+".join(xnet.base_names)
+
+    members = []
+    for m in xnet.members:
+        res = routed_results.get(m.p_net_id)
+        if res is None or routed_results.get(m.n_net_id) is None:
+            print(f"    AC-couple {name}: member '{m.base_name}' not fully routed; "
+                  f"skipping end-to-end match")
+            return None
+        md = _ac_coupled_member_lengths(res, m.p_net_id, m.n_net_id, pcb_data)
+        md['base'] = m.base_name
+        members.append(md)
+
+    total_p = sum(md['p_len'] for md in members)
+    total_n = sum(md['n_len'] for md in members)
+    delta = abs(total_p - total_n)
+    bridges = ", ".join(xnet.bridge_refs)
+    print(f"    AC-couple {name}: end-to-end P={total_p:.3f}mm, N={total_n:.3f}mm, "
+          f"delta={delta:.3f}mm (coupled via {bridges})")
+    if delta <= tol:
+        print(f"    AC-couple {name}: already matched (delta={delta:.3f}mm <= {tol}mm)")
+        return delta
+
+    # Shorter conductor S receives the meanders; L is the longer (the target).
+    S, L = ('p', 'n') if total_p < total_n else ('n', 'p')
+    need = delta
+
+    # Plan per-member additions:
+    #  phase 1 - bring members where S is locally shorter up to LOCAL match (this
+    #            also reduces their local intra-pair skew), capped at the total need;
+    #  phase 2 - spill any remaining end-to-end deficit onto the member with the
+    #            most routed S copper (proxy for the most meander room).
+    plan = [0.0] * len(members)
+    remaining = need
+    by_headroom = sorted(
+        range(len(members)),
+        key=lambda i: members[i][f'{L}_len'] - members[i][f'{S}_len'],
+        reverse=True,
+    )
+    for i in by_headroom:
+        if remaining <= tol:
+            break
+        headroom = members[i][f'{L}_len'] - members[i][f'{S}_len']
+        if headroom <= tol:
+            continue
+        a = min(remaining, headroom)
+        plan[i] += a
+        remaining -= a
+    if remaining > tol:
+        spill = max(range(len(members)), key=lambda i: members[i][f'{S}_routed'])
+        plan[spill] += remaining
+        remaining = 0.0
+
+    # Apply: lengthen each planned member's S net once (never re-meander a net).
+    added_total = 0.0
+    for i, want in enumerate(plan):
+        if want <= tol:
+            continue
+        md = members[i]
+        s_id, l_id = md[f'{S}_net_id'], md[f'{L}_net_id']
+        cur = md[f'{S}_len']
+        new_segs, new_len, bumps = _lengthen_net_with_meanders(
+            md[f'{S}_segs'], s_id, l_id, md[f'{S}_vias'], md[f'{S}_stub'],
+            cur, cur + want, want, config, pcb_data,
+        )
+        if bumps <= 0:
+            print(f"      {md['base']}: could not fit meanders on {S.upper()} "
+                  f"(wanted +{want:.3f}mm)")
+            continue
+        added = new_len - cur
+        res = md['result']
+        res['new_segments'] = [s for s in res['new_segments']
+                               if s.net_id != s_id] + new_segs
+        md[f'{S}_len'] = new_len
+        added_total += added
+        print(f"      {md['base']}: +{added:.3f}mm on {S.upper()} ({bumps} bumps)")
+
+    new_total_s = (total_p if S == 'p' else total_n) + added_total
+    new_total_l = total_n if S == 'p' else total_p
+    new_delta = abs(new_total_l - new_total_s)
+    if added_total <= tol:
+        print(f"    AC-couple {name}: could not fit end-to-end meanders "
+              f"(residual delta={delta:.3f}mm)")
+    else:
+        print(f"    AC-couple {name}: added {added_total:.3f}mm to {S.upper()}, "
+              f"end-to-end delta {delta:.3f} -> {new_delta:.3f}mm")
+    return new_delta

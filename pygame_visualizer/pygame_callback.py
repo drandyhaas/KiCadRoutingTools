@@ -3,6 +3,7 @@ PyGame implementation of the visualization callback.
 
 This wraps the existing RoutingVisualizer to implement the callback interface.
 """
+from __future__ import annotations
 
 import time
 from typing import List, Tuple, Set, Optional

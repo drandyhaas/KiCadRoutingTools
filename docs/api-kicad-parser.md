@@ -110,6 +110,7 @@ section. Used for accurate length/time matching.
 | `drill` | float | Drill diameter (0 for SMD, > 0 for through-hole). Oval/slot drills (`(drill oval w h)`) report `max(w, h)` so they keep `> 0` / through-hole semantics. |
 | `pinfunction` | str | Pin function from the schematic (`'TX'`, `'~RESET'`) |
 | `pintype` | str | Pin electrical type (`'passive'`, `'input'`, `'power_in'`) |
+| `pad_type` | str | Pad kind: `'smd'`, `'thru_hole'`, `'np_thru_hole'`, `'connect'`. NPTH pads carry **no copper** (their size is just the mask opening, even when `layers` lists `*.Cu`), so copper-clearance checks skip them; only their drill hole matters. |
 | `roundrect_rratio` | float | Corner radius ratio for roundrect pads (0–0.5) |
 | `rect_rotation` | float | Residual rectangle tilt in the global frame, in (-90, 90]. `0` for axis-aligned pads (the common case); non-zero only for pads on non-orthogonal angles. |
 
@@ -181,7 +182,7 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 |-------|------|---------|
 | `layers` | Dict[int, str] | Layer ID → name for all layers |
 | `copper_layers` | List[str] | Copper layer names, top to bottom. Includes every `.Cu` layer regardless of declared use-type (`signal`, `power`, `mixed`, `jumper`) — KiCad often types plane layers `power`. |
-| `board_bounds` | Optional[Tuple] | `(min_x, min_y, max_x, max_y)` from Edge.Cuts, or `None` |
+| `board_bounds` | Optional[Tuple] | `(min_x, min_y, max_x, max_y)` from Edge.Cuts (board-level graphics AND footprint-embedded outline shapes), or `None` |
 | `board_outline` | List[Tuple[float, float]] | Outline polygon for non-rectangular boards (empty if rectangular) |
 | `board_cutouts` | List[List[Tuple]] | Interior cutout polygons |
 | `stackup` | List[StackupLayer] | Physical stackup, top to bottom (empty if the board has none) |
@@ -270,7 +271,7 @@ get_footprint_bounds(footprint: Footprint, margin: float = 0.0)
 
 detect_bga_pitch(footprint: Footprint) -> float   # mm; 1.0 if undetectable
 
-auto_detect_bga_exclusion_zones(pcb_data: PCBData, margin: float = 0.5)
+auto_detect_bga_exclusion_zones(pcb_data: PCBData, margin: float = 0.0)
     -> List[Tuple[float, float, float, float, float]]
     # (min_x, min_y, max_x, max_y, edge_tolerance) per BGA
 ```

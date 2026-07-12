@@ -4,6 +4,7 @@ Routing context helpers for PCB routing.
 This module provides helper functions for common routing operations
 like building obstacle maps and recording route results.
 """
+from __future__ import annotations
 
 from typing import List, Set, Dict, Optional, Tuple, TYPE_CHECKING
 import math
@@ -200,6 +201,35 @@ def build_diff_pair_obstacles(
         add_own_stubs_func(obstacles, pcb_data, p_net_id, n_net_id, config, extra_clearance)
 
     return obstacles, all_stubs
+
+
+def build_diff_pair_leg_obstacles(base_obstacles, pcb_data, config, routed_net_ids,
+                                  remaining_net_ids, all_unrouted_net_ids,
+                                  p_net_id, n_net_id, gnd_net_id,
+                                  track_proximity_cache, layer_map):
+    """Obstacle map for a hybrid pair's SINGLE-ENDED legs (issue #246 review).
+
+    The legs are one-track point-to-point routes, so they must use single-ended
+    clearance -- NOT the coupled diff-pair clearance:
+
+    - base = ``base_obstacles`` (no extra clearance baked in), NOT
+      ``diff_pair_base_obstacles`` (which bakes in the half-pair-width the coupled
+      CENTERLINE needs for its offsets); that inflation over-blocks a one-track leg.
+    - ``extra_clearance=0`` for the same reason (over-blocks a leg's escape via --
+      watchy USB_D).
+    - no ``add_own_stubs_func`` / ``ripped_route_*``: the leg's own near-pad stub must
+      not block it, and the partner net's copper is re-added per-leg inside
+      ``_route_hybrid_leg``.
+
+    Every hybrid call site (``_maybe_swap_to_hybrid``, the main-loop and reroute-loop
+    last-resort hybrids, and the multipoint leg hybrid) builds the leg map through this
+    one helper so it means the SAME thing regardless of entry path.
+    """
+    obstacles, _ = build_diff_pair_obstacles(
+        base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+        all_unrouted_net_ids, p_net_id, n_net_id, gnd_net_id,
+        track_proximity_cache, layer_map, 0.0)
+    return obstacles
 
 
 def build_single_ended_obstacles(
@@ -669,6 +699,29 @@ def restore_ripped_net(
         layer_map: Optional layer name to index mapping
     """
     if not ripped_saved:
+        return
+
+    # #329 audit: this restore was blind, unlike restore_net (#134). Every
+    # caller restores IMMEDIATELY after its own failed attempt (which commits
+    # no copper), so a collision "cannot happen" -- but a graze/partial result
+    # that ever starts committing copper first would turn the verbatim re-add
+    # into a different-net short. Cheap belt-and-braces: skip the copper
+    # re-add if it would collide, and leave the net for the reroute queue
+    # (unrouted beats shorted); the bookkeeping below still runs so the net
+    # is tracked either way.
+    from rip_up_reroute import _saved_route_collides
+    if _saved_route_collides(ripped_saved, pcb_data, list(ripped_ids), config.clearance):
+        names = [pcb_data.nets[r].name if r in pcb_data.nets else str(r) for r in ripped_ids]
+        print(f"    restore of {'/'.join(names)} would collide with copper routed "
+              f"meanwhile -- leaving unrouted for reroute (#134 guard)")
+        for rid in ripped_ids:
+            if rid in routed_net_ids:
+                routed_net_ids.remove(rid)
+            if rid not in remaining_net_ids:
+                remaining_net_ids.append(rid)
+            routed_results.pop(rid, None)
+        if ripped_saved in results:
+            results.remove(ripped_saved)
         return
 
     add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)

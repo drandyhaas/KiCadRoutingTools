@@ -1,4 +1,5 @@
 """Memory debugging utilities for tracking routing memory usage."""
+from __future__ import annotations
 
 import sys
 from typing import Dict, Any, Optional
@@ -110,13 +111,19 @@ def format_obstacle_map_stats(obstacles) -> str:
         return "[MEMORY] Obstacle map: N/A (no get_stats method)"
 
     stats = obstacles.get_stats()
-    blocked_cells, blocked_vias, stub_prox, layer_prox, cross_layer, source_target = stats
+    # get_stats() returns 7 counts (free_vias was added later); tolerate 6 or 7.
+    blocked_cells, blocked_vias, stub_prox, layer_prox, cross_layer, source_target = stats[:6]
+    free_vias = stats[6] if len(stats) > 6 else 0
 
-    # Estimate memory: ~40 bytes per HashMap entry (key + value + overhead)
-    bytes_per_entry = 40
-    estimated_mb = (blocked_cells + blocked_vias + stub_prox + layer_prox + cross_layer + source_target) * bytes_per_entry / (1024 * 1024)
+    # hashbrown/FxHashMap effective bytes/entry (key+value+control, ~0.875 load):
+    # (u64,u16)/(u64,i32) maps ~24B; FxHashSet<u64> ~16B. Round to ~24B for maps,
+    # ~16B for the sets (allowed/source_target/free_vias are sets).
+    MAP_B, SET_B = 24, 16
+    map_entries = blocked_cells + blocked_vias + stub_prox + layer_prox + cross_layer
+    set_entries = source_target + free_vias
+    estimated_mb = (map_entries * MAP_B + set_entries * SET_B) / (1024 * 1024)
 
     return (f"[MEMORY] Rust obstacle map: ~{estimated_mb:.1f} MB estimated\n"
             f"         blocked_cells: {blocked_cells:,}, blocked_vias: {blocked_vias:,}\n"
             f"         stub_proximity: {stub_prox:,}, layer_proximity: {layer_prox:,}\n"
-            f"         cross_layer: {cross_layer:,}, source_target: {source_target:,}")
+            f"         cross_layer: {cross_layer:,}, source_target: {source_target:,}, free_vias: {free_vias:,}")

@@ -82,6 +82,8 @@ class DiffPairSelectionPanel(wx.Panel):
         self._check_fn = None
         self._suspend_check = False  # Temporarily disable check_fn during restore
         self._component_filter_value = ""
+        self._hide_short = False      # hide electrically-short (deferred) pairs
+        self._short_check_fn = None   # fn(p_net_id, n_net_id) -> bool
 
         self._create_ui(instructions, show_hide_checkbox, show_component_dropdown)
         self._load_diff_pairs()
@@ -258,6 +260,11 @@ class DiffPairSelectionPanel(wx.Panel):
             if hide_connected and self._check_fn and not self._suspend_check:
                 if self._check_fn(p_net_id) and self._check_fn(n_net_id):
                     continue
+            # Check if should be hidden (electrically short -> deferred to
+            # single-ended, so coupling it does nothing)
+            if self._hide_short and self._short_check_fn:
+                if self._short_check_fn(p_net_id, n_net_id):
+                    continue
             idx = self.pair_list.Append(display_name)
             if display_name in self._checked_pairs:
                 self.pair_list.Check(idx, True)
@@ -289,6 +296,15 @@ class DiffPairSelectionPanel(wx.Panel):
     def set_check_function(self, fn):
         """Set connectivity check function."""
         self._check_fn = fn
+
+    def set_short_check_function(self, fn):
+        """Set the short-pair test: fn(p_net_id, n_net_id) -> bool."""
+        self._short_check_fn = fn
+
+    def set_hide_short(self, enabled):
+        """Enable/disable hiding electrically-short (deferred) pairs, then refresh."""
+        self._hide_short = bool(enabled)
+        self._update_pair_list()
 
     def suspend_check(self):
         """Temporarily disable connectivity checking during settings restore."""
@@ -397,12 +413,24 @@ class DifferentialTab(wx.Panel):
         self.get_claude_params = get_claude_params
         self._routing_thread = None
         self._cancel_requested = False
+        # Called when "Hide short routes" or a param affecting it changes, so the
+        # main dialog can refresh the Basic tab's single-ended net list too.
+        self.on_hide_short_changed = None
+        self._short_cache = {}  # (params_key, p_net_id, n_net_id) -> bool
 
         self._create_ui()
 
         # Set up connectivity check
         if self.get_connectivity_check:
             self.pair_panel.set_check_function(self.get_connectivity_check())
+        # Wire short-pair hiding (default on)
+        self.pair_panel.set_short_check_function(self._is_short_pair)
+        self.pair_panel.set_hide_short(self.hide_short_check.GetValue())
+        # Pair Width / Gap / Centerline Setback change the short threshold, so a
+        # change must re-evaluate which pairs are short.
+        for ctrl in (self.diff_pair_width, self.diff_pair_gap, self.centerline_setback):
+            ctrl.Bind(wx.EVT_SPINCTRLDOUBLE, self._on_short_param_changed)
+            ctrl.Bind(wx.EVT_TEXT, self._on_short_param_changed)
 
     def _create_ui(self):
         """Create the tab UI."""
@@ -527,15 +555,23 @@ class DifferentialTab(wx.Panel):
         options_box = wx.StaticBox(self, label="Options")
         options_sizer = wx.StaticBoxSizer(options_box, wx.VERTICAL)
 
-        self.fix_polarity_check = wx.CheckBox(self, label="Fix polarity swaps")
-        self.fix_polarity_check.SetValue(False)
-        self.fix_polarity_check.SetToolTip(
-            "Allow swapping target pad net assignments to fix polarity (board only - "
-            "schematic must be updated to match); the swap competes with routing the "
-            "connectors out the opposite side and the shorter route wins. When "
-            "unchecked, pad swaps never happen - the opposite-side route is used, or "
-            "the pair is skipped if that's not possible")
-        options_sizer.Add(self.fix_polarity_check, 0, wx.ALL, 5)
+        # Per-pair polarity-swap allowlist (#279): glob patterns naming the
+        # pairs allowed to resolve a P/N mismatch by swapping pad nets.
+        # '*' = all pairs (the historical behavior), empty = no swaps ever.
+        polarity_row = wx.BoxSizer(wx.HORIZONTAL)
+        polarity_row.Add(wx.StaticText(self, label="Polarity-swap allowed nets:"),
+                         0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.polarity_swap_nets_text = wx.TextCtrl(self, value="*", size=(180, -1))
+        self.polarity_swap_nets_text.SetToolTip(
+            "Glob patterns (comma/space-separated) naming the diff pairs ALLOWED to "
+            "resolve a P/N polarity mismatch by swapping pad net assignments (board "
+            "only - schematic must be updated to match). A swap is only harmless when "
+            "an endpoint can compensate (FPGA generic I/O, polarity-tolerant SerDes) - "
+            "never allow USB/MIPI/TMDS pairs. '*' allows every pair; EMPTY disables "
+            "swaps entirely (a mismatched pair is routed with the connectors out the "
+            "opposite side, or skipped if that's not possible).")
+        polarity_row.Add(self.polarity_swap_nets_text, 1, wx.ALIGN_CENTER_VERTICAL)
+        options_sizer.Add(polarity_row, 0, wx.EXPAND | wx.ALL, 5)
 
         self.gnd_via_check = wx.CheckBox(self, label="Add GND vias")
         self.gnd_via_check.SetValue(True)
@@ -546,6 +582,23 @@ class DifferentialTab(wx.Panel):
         self.intra_match_check.SetValue(False)
         self.intra_match_check.SetToolTip("Add meanders to shorter track of each pair for P/N matching")
         options_sizer.Add(self.intra_match_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
+        self.ac_couple_check = wx.CheckBox(self, label="AC-coupled end-to-end matching")
+        self.ac_couple_check.SetValue(False)
+        self.ac_couple_check.SetToolTip("Length-match diff pairs split by series DC-blocking caps "
+                                        "end-to-end: detect the cap chain and match the whole P path "
+                                        "vs N path across the caps, not each side alone (#196)")
+        options_sizer.Add(self.ac_couple_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
+        self.hide_short_check = wx.CheckBox(self, label="Hide short routes")
+        self.hide_short_check.SetValue(True)
+        self.hide_short_check.SetToolTip(
+            "Hide electrically-short pairs that the router defers to single-ended "
+            "routing (coupling a sub-few-mm run gains nothing). They drop out of "
+            "the differential pair list here, and stay visible on the Basic tab "
+            "(so they get routed single-ended) even when 'Hide differential' is on.")
+        self.hide_short_check.Bind(wx.EVT_CHECKBOX, self._on_hide_short_changed)
+        options_sizer.Add(self.hide_short_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         right_sizer.Add(options_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
@@ -581,6 +634,59 @@ class DifferentialTab(wx.Panel):
         main_sizer.Add(right_sizer, 0, wx.EXPAND | wx.ALL, 5)
 
         self.SetSizer(main_sizer)
+
+    def _short_params(self):
+        """Current (track_width, gap, centerline_setback) driving the short test."""
+        return (self.diff_pair_width.GetValue(),
+                self.diff_pair_gap.GetValue(),
+                self.centerline_setback.GetValue())
+
+    def _is_short_pair(self, p_net_id, n_net_id):
+        """Whether this pair would be deferred to single-ended as electrically
+        short, given the current Pair Width / Gap / Centerline Setback. Cached
+        per (params, pair)."""
+        from diff_pair_multipoint import diff_pair_is_short
+        width, gap, setback = self._short_params()
+        key = ((round(width, 6), round(gap, 6), round(setback, 6)), p_net_id, n_net_id)
+        if key not in self._short_cache:
+            try:
+                self._short_cache[key] = diff_pair_is_short(
+                    self.pcb_data, p_net_id, n_net_id, width, gap, setback)
+            except Exception:
+                self._short_cache[key] = False
+        return self._short_cache[key]
+
+    def is_hide_short_enabled(self):
+        """True when short (deferred) pairs should be hidden from diff lists and
+        kept on the single-ended list."""
+        return self.hide_short_check.GetValue()
+
+    def get_short_pair_net_ids(self):
+        """Net ids (P and N) of every pair that is currently electrically short.
+        Used by the Basic tab to keep these single-ended nets visible even when
+        'Hide differential' is on."""
+        ids = set()
+        for _display, _base, p_net_id, n_net_id in self.pair_panel.all_pairs:
+            if self._is_short_pair(p_net_id, n_net_id):
+                ids.add(p_net_id)
+                ids.add(n_net_id)
+        return ids
+
+    def _on_hide_short_changed(self, event):
+        """Toggle hiding short pairs; refresh this list and the Basic tab list."""
+        self.pair_panel.set_hide_short(self.hide_short_check.GetValue())
+        if self.on_hide_short_changed:
+            self.on_hide_short_changed()
+
+    def _on_short_param_changed(self, event):
+        """A param affecting the short threshold changed - drop the cache and
+        refresh both lists if short hiding is active."""
+        event.Skip()
+        self._short_cache.clear()
+        if self.hide_short_check.GetValue():
+            self.pair_panel.refresh()
+            if self.on_hide_short_changed:
+                self.on_hide_short_changed()
 
     def _on_ask_claude_diff_pairs(self):
         """Run /identify-diff-pairs headless and update the pair selection
@@ -680,6 +786,14 @@ class DifferentialTab(wx.Panel):
 
     def _on_route(self, event):
         """Handle route button click."""
+        # Refresh shared pcb_data from the live board BEFORE routing so the diff
+        # router sees moved footprints/caps from a preceding optimize_caps step,
+        # not their load-time positions (#362; same fix as the signal route path).
+        if self.sync_pcb_data_callback:
+            try:
+                self.sync_pcb_data_callback()
+            except Exception as e:
+                print(f"(pre-route pcb_data sync skipped: {e})")
         selected_pair_info = self.get_selected_pair_net_ids()
         if not selected_pair_info:
             wx.MessageBox(
@@ -764,6 +878,13 @@ class DifferentialTab(wx.Panel):
         import sys
         import time
 
+        # Fresh clearance ledger so a prior op's fine-pitch clearance doesn't
+        # leak into this board's DRC floor.
+        import clearance_ledger
+        clearance_ledger.reset()
+        from fab_tiers import set_fab_tier_from_config
+        set_fab_tier_from_config(config)
+
         original_stdout = sys.stdout
         if self.append_log:
             sys.stdout = StdoutRedirector(self.append_log, original_stdout)
@@ -807,9 +928,10 @@ class DifferentialTab(wx.Panel):
                 max_turn_angle=config.get('max_turn_angle', 180.0),
                 diff_chamfer_extra=config.get('diff_chamfer_extra', 1.5),
                 diff_pair_centerline_setback=config.get('diff_pair_centerline_setback'),
-                fix_polarity=config.get('fix_polarity', True),
+                polarity_swap_nets=config.get('polarity_swap_nets'),
                 gnd_via_enabled=config.get('gnd_via_enabled', True),
                 diff_pair_intra_match=config.get('diff_pair_intra_match', False),
+                ac_couple_match=config.get('ac_couple_match', False),
                 enable_layer_switch=config.get('enable_layer_switch', True),
                 debug_lines=config.get('debug_lines', False),
                 verbose=config.get('verbose', False),
@@ -851,8 +973,18 @@ class DifferentialTab(wx.Panel):
 
     def _on_routing_complete(self):
         """Handle routing completion."""
-        self.route_btn.Enable()
-        self.cancel_btn.SetLabel("Close")
+        # NOTE: the button is re-enabled in _finish_complete's finally, AFTER
+        # the results are applied -- it is the plan executor's busy signal,
+        # and the completion MessageBox pumps events, so enabling it up
+        # front let the executor start the NEXT step mid-apply (Andy's
+        # 'tracks don't all appear, rerun fixes it').
+        try:
+            self._on_routing_complete_body()
+        finally:
+            self.route_btn.Enable()
+            self.cancel_btn.SetLabel("Close")
+
+    def _on_routing_complete_body(self):
         self.progress_bar.SetValue(0)
 
         # Check if cancelled
@@ -881,17 +1013,28 @@ class DifferentialTab(wx.Panel):
         results_data = result.get('results_data', {})
 
         # Apply results to the board
-        tracks_added, vias_added = self._apply_results_to_board(results_data)
+        tracks_added, vias_added, tracks_removed = self._apply_results_to_board(results_data)
 
         self.status_text.SetLabel(f"Complete: {successful} routed, {failed} failed in {total_time:.1f}s")
+
+        single_ended_pairs = results_data.get('single_ended_diff_pairs', [])
+        skipped_bad_fanout = results_data.get('skipped_bad_fanout', [])
 
         msg = f"Differential pair routing complete!\n\n"
         msg += f"Routed: {successful}\n"
         msg += f"Failed: {failed}\n"
+        if single_ended_pairs:
+            msg += (f"Deferred to single-ended: {len(single_ended_pairs)} "
+                    f"(electrically short - route these single-ended next)\n")
+        if skipped_bad_fanout:
+            msg += (f"Skipped: {len(skipped_bad_fanout)} "
+                    f"(fanout stubs self-overlap - fix the fanout first)\n")
         msg += f"Time: {total_time:.1f}s\n\n"
         msg += f"Added to board:\n"
         msg += f"  {tracks_added} segments\n"
         msg += f"  {vias_added} vias\n"
+        if tracks_removed > 0:
+            msg += f"  {tracks_removed} stale segment(s) removed\n"
         if failed > 0:
             try:
                 from routing_diagnostics import (
@@ -906,7 +1049,10 @@ class DifferentialTab(wx.Panel):
                 print(f"Warning: failed to build diff pair suggestions: {e}")
         msg += "\nUse Edit -> Undo to revert changes."
 
-        wx.MessageBox(msg, "Routing Complete", wx.OK | wx.ICON_INFORMATION)
+        if getattr(getattr(self, 'GetTopLevelParent', lambda: self)(), '_suppress_completion_popups', False):
+            print(msg)  # unattended plan run: no per-step OK dialog
+        else:
+            wx.MessageBox(msg, "Routing Complete", wx.OK | wx.ICON_INFORMATION)
 
         # Refresh the pair list to show updated connectivity
         self.pair_panel.refresh()
@@ -956,6 +1102,16 @@ class DifferentialTab(wx.Panel):
             self.sync_pcb_data_callback()
         return counts["tracks"], counts["vias"]
 
+    def get_polarity_swap_nets(self):
+        """Parse the polarity-swap allowlist field into a pattern list (#279).
+
+        Comma/space-separated globs; empty field -> None (no swaps ever),
+        matching route_diff.py's --polarity-swap-nets semantics.
+        """
+        text = self.polarity_swap_nets_text.GetValue()
+        patterns = [t for t in text.replace(',', ' ').split() if t]
+        return patterns or None
+
     def get_config(self):
         """Get the differential pair configuration."""
         setback = self.centerline_setback.GetValue()
@@ -968,9 +1124,10 @@ class DifferentialTab(wx.Panel):
             'max_turn_angle': self.max_turn_angle.GetValue(),
             'diff_chamfer_extra': self.chamfer_extra.GetValue(),
             'diff_pair_centerline_setback': setback if setback > 0 else None,  # 0 = auto
-            'fix_polarity': self.fix_polarity_check.GetValue(),
+            'polarity_swap_nets': self.get_polarity_swap_nets(),
             'gnd_via_enabled': self.gnd_via_check.GetValue(),
             'diff_pair_intra_match': self.intra_match_check.GetValue(),
+            'ac_couple_match': self.ac_couple_check.GetValue(),
         }
 
     def _on_use_netclass_changed(self, event):

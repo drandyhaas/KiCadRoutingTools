@@ -1,6 +1,7 @@
 """
 Shared utilities for test scripts.
 """
+from __future__ import annotations
 
 import os
 import shlex

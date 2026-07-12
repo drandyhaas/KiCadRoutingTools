@@ -14,6 +14,29 @@ VIA_DRILL = 0.3  # mm
 # Grid parameters
 GRID_STEP = 0.1  # mm
 
+# Via-obstacle diagonal expansion margin: how far a via's keep-out reaches
+# diagonally on the routing grid. MUST be identical between the per-net obstacle
+# cache (_collect_via_obstacles) and the full obstacle map, or incremental
+# rip/rebuild desyncs (see obstacle_map.py). Coincidentally equals CLEARANCE but
+# is a distinct concept; centralized so the call sites can't drift.
+DIAGONAL_MARGIN = 0.25  # mm
+
+# Allowance subtracted from mm-exact PLACEMENT validation thresholds so that
+# grid-quantized copper (endpoints rounded to the routing grid) is not
+# rejected for sub-resolution noise. This is a placement tolerance, NOT the
+# DRC grading margin (check_drc --clearance-margin): placement must demand
+# (nearly) full clearance or it ships real grazes (#339).
+PLACEMENT_QUANTIZATION_MARGIN = 0.005  # mm
+
+# Clearance slack the #189/#339 via-in-pad UNBLOCK refit tolerates before it
+# shrinks/rejects a rescue via. The tight PLACEMENT_QUANTIZATION_MARGIN stranded
+# pads (ulx3s -11, butterstick -7) because a via grazing by a few tens of um was
+# shrunk/rejected until the unblock failed. Tolerate up to this much sub-clearance
+# at PLACEMENT and let the post-route via-nudge (nudge_grazing_vias) move the
+# residual graze to full clearance instead -- a nudged via stays connected; a
+# stranded pad does not. Matches check_drc's default grading margin.
+UNBLOCK_REFIT_MARGIN = 0.05  # mm
+
 # Cost parameters
 VIA_COST = 50
 VIA_PROXIMITY_COST = 10
@@ -64,6 +87,12 @@ MAX_ITERATIONS = 200000
 HEURISTIC_WEIGHT = 1.9
 PROXIMITY_HEURISTIC_FACTOR = 0.02
 MAX_RIPUP = 3
+# Phase 3 tap rip-up abandon metric (#85 arbitration); documented in
+# docs/rip-up-reroute.md "Abandon metrics". Must match phase3_routing.ABANDON_METRICS.
+RIPUP_ABANDON_METRIC = 'stranded'
+RIPUP_ABANDON_METRIC_CHOICES = ('stranded', 'total-pads', 'complete-nets',
+                                'congestion', 'history', 'weighted',
+                                'probe', 'weighted-probe')
 
 # Layer direction preference (0=horizontal, 1=vertical, 255=none)
 # Alternates H/V starting with horizontal on top layer
@@ -86,7 +115,19 @@ KEEPOUT_LAYER = "User.2"  # User layer the keepout polygon is drawn on
 
 # Clearance parameters
 ROUTING_CLEARANCE_MARGIN = 1.0
-HOLE_TO_HOLE_CLEARANCE = 0.2  # mm
+HOLE_TO_HOLE_CLEARANCE = 0.20  # mm - JLC "Via Hole-to-Hole Spacing" (edge-to-edge),
+                               # the floor that governs router-placed via drills.
+                               # (JLCPCB's pad-hole-to-hole is a separate, larger
+                               # 0.45 mm; not modelled here -- this value targets
+                               # via spacing. list_nets._FAB_FLOORS 'hole_to_hole'.)
+                               # Routing AND check_drc default to this so a bare run
+                               # never places/passes vias closer than is manufacturable.
+NPTH_TO_TRACK_CLEARANCE = 0.20  # mm - JLC "NPTH to Track" fab floor: minimum copper
+                                # (track) to NPTH mounting-hole edge. The drill removes
+                                # any copper closer, so a track can't be routed/graded
+                                # nearer than this regardless of the (smaller) routing
+                                # clearance. Used by the NPTH track keep-out + check_drc
+                                # track-hole check (issue #233).
 BOARD_EDGE_CLEARANCE = 0.0  # mm
 
 # Default layers
@@ -101,6 +142,8 @@ BGA_CLEARANCE = 0.25  # mm
 BGA_VIA_SIZE = 0.5  # mm
 BGA_VIA_DRILL = 0.3  # mm
 BGA_EXIT_MARGIN = 0.5  # mm
+BGA_SAME_NET_ESCAPES = 1  # balls per multi-ball net that get their own escape
+                          # (issue #129); 0 = legacy fan-every-ball
 BGA_DIFF_PAIR_GAP = 0.1  # mm
 
 # QFN Fanout defaults
@@ -123,12 +166,30 @@ PLANE_MIN_THICKNESS = 0.1  # mm - minimum zone copper thickness
 PLANE_EDGE_CLEARANCE = 0.5  # mm - zone clearance from board edge
 PLANE_MAX_SEARCH_RADIUS = 10.0  # mm - max radius to search for via position
 PLANE_MAX_VIA_REUSE_RADIUS = 1.0  # mm - max radius to reuse existing via
+PLANE_PAD_STRAP_RADIUS = 1.5  # mm - max distance to strap a plane pad to an
+                              # adjacent already-connected same-net pad instead
+                              # of drilling another via (issue #349)
 PLANE_MAX_RIP_NETS = 3  # max blocker nets to rip up
 PLANE_TRACK_VIA_CLEARANCE = 0.8  # mm - clearance from track center to other nets' via centers
 SAME_NET_PAD_CLEARANCE = -1.0  # mm - edge-to-edge clearance between via and same-net pads
                                # when placing plane stitching vias. -1 disables (allow via-in-pad).
                                # Any value >= 0 forces vias to be placed outside same-net pads
                                # with that much edge-to-edge clearance.
+
+# Fine-pitch tap escalation (plane_pad_tap.py, issues #99/#104)
+# When a tap can't be placed at the nominal clearance/grid on dense fine-pitch
+# QFN/LQFP/BGA pads, the router escalates to a finer grid and steps the clearance
+# DOWN toward the manufacturing floor (list_nets.fab_floors for the board's layer
+# count), narrowing the tap track to the fab track floor. There is deliberately
+# NO hard-coded "fine clearance"/"fine track" magic number -- the floor is the
+# fab limit, and the ladder stops at the first clearance that routes (issue #226).
+FINE_PITCH_NEIGHBOR_DIST = 0.65  # mm - same-component neighbor spacing => fine-pitch
+FINE_PITCH_MIN_PAD_DIM = 0.35    # mm - pad min dimension below this => fine-pitch
+FINE_TAP_GRID_STEP = 0.05        # mm - fine routing grid for tight tap retries
+FINE_TAP_CLEARANCE_STEPS = 4     # clearance steps from nominal down to the fab floor
+FINE_TAP_SEARCH_RADIUS = 3.0     # mm - cap on NEW-via search during the fine retry
+                                 # (a far new via at fine width butterflies neighbours;
+                                 # far EXISTING vias are reached via the distant-trace path)
 
 # Repair disconnected planes defaults (route_disconnected_planes.py)
 REPAIR_MAX_TRACK_WIDTH = 2.0  # mm - maximum track width for connections
@@ -139,11 +200,15 @@ REPAIR_ANALYSIS_GRID_STEP = 0.5  # mm - grid step for connectivity analysis
 # GUI-specific ranges (min, max, increment, digits)
 # These define the SpinCtrl ranges for the GUI
 PARAM_RANGES = {
-    'track_width': {'min': 0.05, 'max': 25.0, 'inc': 0.05, 'digits': 3},
-    'clearance': {'min': 0.05, 'max': 5.0, 'inc': 0.05, 'digits': 3},
-    'via_size': {'min': 0.2, 'max': 2.0, 'inc': 0.05, 'digits': 3},
-    'via_drill': {'min': 0.1, 'max': 1.5, 'inc': 0.05, 'digits': 3},
-    'grid_step': {'min': 0.01, 'max': 1.0, 'inc': 0.01, 'digits': 3},
+    # 4 digits: fab-floor widths/drills carry a 4th decimal (e.g. a 6-layer
+    # min track 0.0762mm). At digits=3 the SpinCtrlDouble rounded 0.0762 -> 0.076,
+    # so the GUI routed BELOW the floor and every such track tripped a
+    # track-width DRC the CLI (full precision) does not (#362).
+    'track_width': {'min': 0.05, 'max': 25.0, 'inc': 0.05, 'digits': 4},
+    'clearance': {'min': 0.05, 'max': 5.0, 'inc': 0.05, 'digits': 4},
+    'via_size': {'min': 0.2, 'max': 2.0, 'inc': 0.05, 'digits': 4},
+    'via_drill': {'min': 0.1, 'max': 1.5, 'inc': 0.05, 'digits': 4},
+    'grid_step': {'min': 0.01, 'max': 1.0, 'inc': 0.01, 'digits': 4},
     'via_cost': {'min': 1, 'max': 1000},
     'max_iterations': {'min': 1000, 'max': 100000000},
     'heuristic_weight': {'min': 1.0, 'max': 10.0, 'inc': 0.1, 'digits': 1},

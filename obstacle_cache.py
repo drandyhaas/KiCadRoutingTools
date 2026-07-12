@@ -4,6 +4,7 @@ Net obstacle caching for PCB routing.
 Provides pre-computation and incremental updates for per-net obstacles,
 dramatically speeding up routing by avoiding redundant obstacle calculations.
 """
+from __future__ import annotations
 
 from typing import List, Tuple, Dict, Set
 from dataclasses import dataclass, field
@@ -12,10 +13,11 @@ import numpy as np
 
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, GridCoord
+import routing_defaults as defaults
 from routing_utils import build_layer_map, iter_pad_blocked_cells, \
-    pad_blocked_cells_array, segment_blocked_cells_array, square_offsets, circle_offsets
-from bresenham_utils import walk_line, is_diagonal_segment, get_diagonal_via_blocking_params
+    pad_blocked_cells_array, segment_blocked_cells_array, circle_offsets
 from net_queries import expand_pad_layers
+
 
 # Import Rust router
 import sys
@@ -29,6 +31,174 @@ except ImportError:
 
 
 _PACK_OFFSET = 1 << 20  # grid coords stay well within +/-2^20 at any allowed grid step
+
+# --- Obstacle-map ref-count ledger (issue #309) --------------------------------
+# KICAD_OBSTACLE_LEDGER=1 arms a cheap per-object ledger over the persistent
+# working map: every NetObstacleData gets a creation serial, and every
+# add/remove of a cache object against the WORKING map (identified by id(); set
+# by build_working_obstacle_map) is recorded with its call site. The invariant
+# `working == base + sum(current caches)` holds iff, at end of run, every
+# serial's adds - removes == 1 for objects still resident in the cache dict and
+# == 0 for replaced/dropped ones. obstacle_ledger_report() prints the serials
+# (and sites) that violate it - naming the exact leaking interleaving that the
+# whole-map KICAD_OBSTACLE_AUDIT diff can only total. Raw (non-cache) list ops
+# on the working map are accounted separately by get_stats() deltas per site.
+_LEDGER_ENV = os.environ.get("KICAD_OBSTACLE_LEDGER") == "1"
+_LEDGER = None
+if _LEDGER_ENV:
+    import itertools as _itertools
+    _LEDGER = {
+        "wid": None,             # id() of the persistent working map
+        "serial": _itertools.count(1),
+        "meta": {},              # serial -> (net_id, creation site)
+        "adds": {},              # serial -> {site: count}
+        "removes": {},           # serial -> {site: count}
+        "raw": {},               # site -> [d_cells, d_vias] cumulative (raw list ops)
+        "events": 0,
+    }
+
+
+def _ledger_site(depth: int = 2, frames: int = 3) -> str:
+    import sys as _sys
+    parts = []
+    try:
+        f = _sys._getframe(depth)
+    except ValueError:
+        return "?"
+    for _ in range(frames):
+        if f is None:
+            break
+        parts.append(f"{os.path.basename(f.f_code.co_filename)}:{f.f_code.co_name}:{f.f_lineno}")
+        f = f.f_back
+    return " <- ".join(parts)
+
+
+def ledger_set_working_map(obstacles) -> None:
+    """Mark `obstacles` as THE persistent working map the ledger audits.
+
+    Also resets the per-run books: a process can host MORE THAN ONE routing
+    run (route.py's end-of-run reconciliation re-invokes batch_route on the
+    written output, #348), and each run has its own working map and cache
+    objects. Without the reset, the second run's ledger report grades the
+    FIRST run's records against the second run's final cache and prints
+    phantom UNBALANCED serials."""
+    if _LEDGER is not None:
+        _LEDGER["wid"] = id(obstacles)
+        _LEDGER["meta"] = {}
+        _LEDGER["adds"] = {}
+        _LEDGER["removes"] = {}
+        _LEDGER["raw"] = {}
+        _LEDGER["events"] = 0
+
+
+def _ledger_cache_op(op: str, obstacles, cache_data) -> None:
+    if _LEDGER is None or _LEDGER["wid"] != id(obstacles):
+        return
+    serial = getattr(cache_data, "_audit_serial", 0)
+    site = _ledger_site(depth=3)
+    book = _LEDGER["adds" if op == "add" else "removes"]
+    per = book.setdefault(serial, {})
+    per[site] = per.get(site, 0) + 1
+    _LEDGER["events"] += 1
+
+
+def ledger_raw_delta(obstacles, site_tag: str, d_cells: int, d_vias: int) -> None:
+    """Record a raw (non-cache) mutation of the working map, as get_stats deltas."""
+    if _LEDGER is None or _LEDGER["wid"] != id(obstacles):
+        return
+    ent = _LEDGER["raw"].setdefault(site_tag, [0, 0])
+    ent[0] += d_cells
+    ent[1] += d_vias
+    _LEDGER["events"] += 1
+
+
+def run_obstacle_audit(base_obstacles, working_obstacles,
+                       net_obstacles_cache: Dict[int, "NetObstacleData"],
+                       label: str = "") -> None:
+    """End-of-run ref-count integrity audit (issue #309), shared by every
+    front-end that maintains a persistent working map + per-net cache dict.
+
+    Invariant: working == base + sum(current net caches). Clones the working
+    map, removes every net's CURRENT cache, and compares entry counts to the
+    base. Any residual in the ref-counted sets is a leak (an add not mirrored
+    by a remove) or an over-decrement. Fully defensive; env-gated by callers.
+    """
+    try:
+        if base_obstacles is None or working_obstacles is None:
+            return
+        probe = working_obstacles.clone_fresh()
+        cache = net_obstacles_cache or {}
+        for _nid, _cd in list(cache.items()):
+            remove_net_obstacles_from_cache(probe, _cd)
+        labels = ("blocked_cells", "blocked_vias", "stub_prox",
+                  "layer_prox", "cross_layer", "source_target", "free_vias")
+        # HARD = ref-counted obstacle sets that cause DRC/routing errors when
+        # leaked; SOFT = proximity/cost maps whose residual is expected.
+        hard = {"blocked_cells", "blocked_vias", "source_target", "free_vias"}
+        bs, ps = base_obstacles.get_stats(), probe.get_stats()
+        resid = [(labels[i], ps[i] - bs[i])
+                 for i in range(min(len(labels), len(bs), len(ps)))]
+        leak = [(n, d) for n, d in resid if d != 0 and n in hard]
+        soft = [(n, d) for n, d in resid if d != 0 and n not in hard]
+        print("\n" + "=" * 60)
+        print(f"[OBSTACLE AUDIT{' ' + label if label else ''}] "
+              f"working - sum(caches) vs base ({len(cache)} net caches removed)")
+        if leak:
+            print("  LEAK/DESYNC in ref-counted obstacle maps:")
+            for n, d in leak:
+                print(f"    {n}: {d:+d} cells unaccounted for by any net cache")
+        else:
+            print("  BALANCED: ref-counted maps (blocked_cells/blocked_vias/"
+                  "source_target/free_vias) return exactly to base.")
+        if soft:
+            print("  (soft cost maps, residual expected: "
+                  + ", ".join(f"{n} {d:+d}" for n, d in soft) + ")")
+        print("=" * 60)
+        if _LEDGER_ENV:
+            obstacle_ledger_report(net_obstacles_cache)
+    except Exception as e:
+        print(f"[OBSTACLE AUDIT] skipped ({e})")
+
+
+def obstacle_ledger_report(final_cache: Dict[int, "NetObstacleData"]) -> None:
+    """Print every cache object whose working-map adds/removes don't balance."""
+    if _LEDGER is None:
+        print("[OBSTACLE LEDGER] not armed (KICAD_OBSTACLE_LEDGER != 1)")
+        return
+    resident = {getattr(cd, "_audit_serial", 0) for cd in (final_cache or {}).values()}
+    serials = set(_LEDGER["adds"]) | set(_LEDGER["removes"])
+    bad = []
+    for s in sorted(serials):
+        adds = _LEDGER["adds"].get(s, {})
+        removes = _LEDGER["removes"].get(s, {})
+        balance = sum(adds.values()) - sum(removes.values())
+        expected = 1 if s in resident else 0
+        if balance != expected:
+            bad.append((s, balance, expected, adds, removes))
+    print("\n" + "=" * 60)
+    print(f"[OBSTACLE LEDGER] {_LEDGER['events']} events, "
+          f"{len(serials)} cache objects touched the working map, "
+          f"{len(resident)} resident at end")
+    if _LEDGER["events"] == 0:
+        print("  WARNING: zero events recorded - instrument did not engage "
+              "(working map id never matched?)")
+    for s, balance, expected, adds, removes in bad:
+        net_id, created = _LEDGER["meta"].get(s, ("?", "?"))
+        print(f"  UNBALANCED serial {s} (net {net_id}): adds-removes={balance}, "
+              f"expected {expected} (resident={s in resident})")
+        print(f"    created at: {created}")
+        for site, n in adds.items():
+            print(f"    +{n} add    {site}")
+        for site, n in removes.items():
+            print(f"    -{n} remove {site}")
+    if not bad:
+        print("  cache-object ledger BALANCED (leak, if any, is in raw ops below)")
+    raw = {k: v for k, v in _LEDGER["raw"].items() if v[0] or v[1]}
+    if raw:
+        print("  raw-op cumulative stats deltas (should cancel per add/remove pair):")
+        for site, (dc, dv) in sorted(raw.items()):
+            print(f"    cells {dc:+d} vias {dv:+d}  {site}")
+    print("=" * 60)
 
 # Bitmap dedupe allocates one bool per cell in the rows' bounding box; cap the
 # allocation (200M bools = 200MB) and fall back to sorting for outliers.
@@ -81,7 +251,7 @@ class NetObstacleData:
 
 def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                               extra_clearance: float = 0.0,
-                              diagonal_margin: float = 0.25) -> NetObstacleData:
+                              diagonal_margin: float = defaults.DIAGONAL_MARGIN) -> NetObstacleData:
     """Pre-compute obstacle cells for a single net.
 
     Returns cached data that can be quickly added to obstacle maps via batch operations.
@@ -108,7 +278,7 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # Precompute per-layer expansion values for impedance-controlled and power net routing
     # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
     expansion_mm_by_layer = {}
-    via_block_grid_by_layer = {}
+    via_block_mm_by_layer = {}
     layer_widths = []  # per-layer future-routing-track width (impedance / power)
     for layer_name in config.layers:
         # Use per-net width for power nets, otherwise layer width (impedance) or default
@@ -120,7 +290,7 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         expansion_mm_by_layer[layer_name] = max(coord.grid_step, expansion_mm)
         # Segment via-block: future ROUTE via (config.via_size) near this net's copper.
         via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
-        via_block_grid_by_layer[layer_name] = max(1, coord.to_grid_dist_safe(via_block_mm))
+        via_block_mm_by_layer[layer_name] = via_block_mm
 
     # Process segments. Keep-out from the segment's ACTUAL width, not just the
     # net's configured width: a pre-existing wide/diff-pair trace (e.g. a 0.2mm
@@ -140,14 +310,13 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         own_half = max(layer_w, seg_w) / 2
         if seg_w <= layer_w:
             expansion_mm = expansion_mm_by_layer.get(seg.layer, coord.grid_step)
-            via_block_grid = via_block_grid_by_layer.get(seg.layer, 1)
+            via_block_mm = via_block_mm_by_layer.get(seg.layer)
         else:
             expansion_mm = max(coord.grid_step,
                                own_half + config.clearance + config.track_width / 2 + extra_clearance)
-            via_block_grid = max(1, coord.to_grid_dist_safe(
-                config.via_size / 2 + own_half + config.clearance + extra_clearance))
-        _collect_segment_obstacles(seg, coord, layer_idx, expansion_mm, via_block_grid,
-                                    blocked_cells_set, blocked_vias_set)
+            via_block_mm = config.via_size / 2 + own_half + config.clearance + extra_clearance
+        _collect_segment_obstacles(seg, coord, layer_idx, expansion_mm,
+                                   blocked_cells_set, blocked_vias_set, via_block_mm)
 
     # Process vias. Keep-out from the via's ACTUAL size, not config.via_size: a
     # fanout via-in-pad is larger (e.g. 0.45 vs 0.3), and using config under-
@@ -186,29 +355,26 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     else:
         blocked_vias_arr = np.empty((0, 2), dtype=np.int32)
 
-    return NetObstacleData(
+    data = NetObstacleData(
         blocked_cells=blocked_cells_arr,
         blocked_vias=blocked_vias_arr
     )
+    if _LEDGER is not None:
+        data._audit_serial = next(_LEDGER["serial"])
+        _LEDGER["meta"][data._audit_serial] = (net_id, _ledger_site(depth=2))
+    return data
 
 
 def _collect_segment_obstacles(seg, coord: GridCoord, layer_idx: int,
-                                track_margin_mm: float, via_block_grid: int,
+                                track_margin_mm: float,
                                 blocked_cells: List["np.ndarray"],
-                                blocked_vias: List["np.ndarray"]):
-    """Collect segment obstacle cells into sets (no obstacle map modification).
+                                blocked_vias: List["np.ndarray"],
+                                via_block_mm: float):
+    """Collect segment obstacle cells into lists (no obstacle map modification).
 
-    The track keep-out is a capsule measured from the REAL float segment (handles
-    off-grid endpoints + diagonals); the via keep-out still uses the Bresenham line
-    (vias land on grid cells, and the diagonal margin already compensates there).
-    """
-    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-
-    is_diagonal = is_diagonal_segment(gx1, gy1, gx2, gy2)
-    effective_via_block_sq, via_block_range = get_diagonal_via_blocking_params(via_block_grid, is_diagonal)
-
-    # Track blocking: capsule around the true segment (issue #70/B).
+    Both keep-outs are an exact capsule measured from the REAL float segment
+    (handles off-grid endpoints + diagonals): the track at `track_margin_mm`, the
+    via at `via_block_mm`. Matches build_base's _add_segment_obstacle."""
     cells = segment_blocked_cells_array(seg.start_x, seg.start_y, seg.end_x, seg.end_y,
                                         track_margin_mm, coord.grid_step)
     rows = np.empty((len(cells), 3), dtype=np.int32)
@@ -216,10 +382,8 @@ def _collect_segment_obstacles(seg, coord: GridCoord, layer_idx: int,
     rows[:, 2] = layer_idx
     blocked_cells.append(rows)
 
-    # Via blocking still rasterized along the Bresenham line (issue #35).
-    line = np.array(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int32)
-    via_offs = circle_offsets(via_block_range, effective_via_block_sq)
-    blocked_vias.append((line[:, None, :] + via_offs[None, :, :]).reshape(-1, 2))
+    blocked_vias.append(segment_blocked_cells_array(
+        seg.start_x, seg.start_y, seg.end_x, seg.end_y, via_block_mm, coord.grid_step))
 
 
 def _collect_via_obstacles(via, coord: GridCoord, num_layers: int,
@@ -351,7 +515,7 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
 
 def precompute_all_net_obstacles(pcb_data: PCBData, net_ids: List[int], config: GridRouteConfig,
                                    extra_clearance: float = 0.0,
-                                   diagonal_margin: float = 0.25) -> Dict[int, NetObstacleData]:
+                                   diagonal_margin: float = defaults.DIAGONAL_MARGIN) -> Dict[int, NetObstacleData]:
     """Pre-compute obstacles for all nets to route.
 
     This is called once at the start of routing to build a cache that
@@ -384,6 +548,8 @@ def add_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetObst
         obstacles: The obstacle map to add to
         cache_data: Pre-computed NetObstacleData for the net
     """
+    if _LEDGER is not None:
+        _ledger_cache_op("add", obstacles, cache_data)
     if len(cache_data.blocked_cells) > 0:
         # Pass numpy array directly to Rust (no conversion needed)
         obstacles.add_blocked_cells_batch(cache_data.blocked_cells)
@@ -401,6 +567,8 @@ def remove_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetO
         obstacles: The obstacle map to remove from
         cache_data: Pre-computed NetObstacleData for the net
     """
+    if _LEDGER is not None:
+        _ledger_cache_op("remove", obstacles, cache_data)
     if len(cache_data.blocked_cells) > 0:
         obstacles.remove_blocked_cells_batch(cache_data.blocked_cells)
     if len(cache_data.blocked_vias) > 0:
@@ -422,6 +590,7 @@ def build_working_obstacle_map(base_obstacles: GridObstacleMap,
         Working obstacle map ready for incremental updates
     """
     working = base_obstacles.clone_fresh()
+    ledger_set_working_map(working)  # no-op unless KICAD_OBSTACLE_LEDGER=1 (#309)
     for net_id, cache_data in net_obstacles_cache.items():
         add_net_obstacles_from_cache(working, cache_data)
     return working
@@ -444,7 +613,7 @@ def update_net_obstacles_after_routing(pcb_data, net_id: int, result: Dict,
     # Recompute this net's obstacles (now includes the new route)
     net_obstacles_cache[net_id] = precompute_net_obstacles(
         pcb_data, net_id, config,
-        extra_clearance=0.0, diagonal_margin=0.25
+        extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN
     )
 
 
@@ -528,66 +697,78 @@ def precompute_via_placement_obstacles(
     """
     import math
     coord = GridCoord(config.grid_step)
+    # build_via_obstacle_map / build_routing_obstacle_map add a half-cell
+    # discretization cushion to the via-block margin; removal must match (#208).
+    grid_cushion = config.grid_step / 2
 
     # Collect blocked positions as numpy chunks (one per segment/via stamp), then
-    # concatenate. Duplicate counts are preserved - the obstacle map uses
-    # reference counting, so removal must match exactly what was added. Each stamp
-    # is the Bresenham line broadcast against a circular offset mask (circle_offsets
-    # reproduces the legacy ex/ey<=r^2 loops cell-for-cell, in the same order), so
-    # the cell multiset is identical to the old scalar double loops (issue #35 pattern).
+    # concatenate. Duplicate counts are preserved - the obstacle maps are REFERENCE
+    # COUNTED, so a net's removal must remove EXACTLY the cell multiset its add
+    # stamped, or ripping it drives shared cells' counts to zero and wrongly
+    # unblocks copper a present net still needs (issue #208). So these stamps mirror
+    # the add side cell-for-cell: build_via_obstacle_map and build_routing_obstacle_map
+    # both use the exact capsule (segment_blocked_cells_array) for segments -- NOT the
+    # bresenham-line + circle this used to use, which stamped a disc at every line
+    # cell and over-counted a near cell ~7x, so removal over-decremented by ~7x.
     via_chunks: List["np.ndarray"] = []
     cell_chunks: Dict[str, List["np.ndarray"]] = {layer: [] for layer in all_copper_layers}
+    track_w_by_layer = {layer: config.get_track_width(layer) for layer in all_copper_layers}
 
-    # Process this net's segments - they block via placement
+    # Process this net's segments - they block via placement (all layers) and
+    # routing (own layer).
     for seg in pcb_data.segments:
         if seg.net_id != net_id:
             continue
-        # Via-segment clearance (via can't overlap segment on any layer)
-        seg_expansion_mm = config.via_size / 2 + seg.width / 2 + config.clearance
-        seg_expansion_sq = (seg_expansion_mm / config.grid_step) ** 2
-        seg_expansion_int = int(math.ceil(math.sqrt(seg_expansion_sq)))
-
-        # Routing clearance for this segment's layer (circular test: use float
-        # squared radius + ceil scan bound so we don't under-reserve by ~1 cell)
-        route_expansion_mm = config.track_width / 2 + seg.width / 2 + config.clearance
-        route_expansion_sq = (route_expansion_mm / config.grid_step) ** 2
-        route_expansion_grid = max(1, int(math.ceil(math.sqrt(route_expansion_sq))))
-
-        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-        line = _bresenham_line_points(gx1, gy1, gx2, gy2)  # (L, 2) int32
-
-        # Via positions: stamp the via keep-out disc at every line cell.
-        via_offs = circle_offsets(seg_expansion_int, seg_expansion_sq)
-        via_chunks.append((line[:, None, :] + via_offs[None, :, :]).reshape(-1, 2))
-
-        # Routing cells on this segment's layer (circular, matching build_routing_obstacle_map)
+        # Via map: capsule at via_size/2 + seg/2 + clearance + cushion (== _add_segment_via_obstacle).
+        via_margin = config.via_size / 2 + seg.width / 2 + config.clearance + grid_cushion
+        via_chunks.append(segment_blocked_cells_array(
+            seg.start_x, seg.start_y, seg.end_x, seg.end_y, via_margin, config.grid_step))
+        # Routing map: capsule at the per-layer track width, NO cushion (== _add_segment_routing_obstacle).
         if seg.layer in cell_chunks:
-            route_offs = circle_offsets(route_expansion_grid, route_expansion_sq)
-            cell_chunks[seg.layer].append((line[:, None, :] + route_offs[None, :, :]).reshape(-1, 2))
+            route_margin = track_w_by_layer[seg.layer] / 2 + seg.width / 2 + config.clearance
+            cell_chunks[seg.layer].append(segment_blocked_cells_array(
+                seg.start_x, seg.start_y, seg.end_x, seg.end_y, route_margin, config.grid_step))
 
-    # Process this net's vias - they block via placement and routing on all layers
-    via_via_expansion_mm = config.via_size + config.clearance
-    via_via_radius_sq = (via_via_expansion_mm / config.grid_step) ** 2
-    via_via_radius_int = int(math.ceil(math.sqrt(via_via_radius_sq)))
-
-    via_route_expansion_sq = ((config.via_size / 2 + config.track_width / 2 + config.clearance) / config.grid_step) ** 2
-    via_route_expansion = max(1, int(math.ceil(math.sqrt(via_route_expansion_sq))))
-
-    via_via_offs = circle_offsets(via_via_radius_int, via_via_radius_sq)
-    via_route_offs = circle_offsets(via_route_expansion, via_route_expansion_sq)
-
+    # Process this net's vias - they block via placement and routing on all layers.
     for via in pcb_data.vias:
         if via.net_id != net_id:
             continue
         gx, gy = coord.to_grid(via.x, via.y)
         center = np.array([[gx, gy]], dtype=np.int32)  # (1, 2)
-        # Block via positions (via-via clearance)
-        via_chunks.append(center + via_via_offs)
-        # Block routing cells on all layers (via spans all layers)
-        route_block = center + via_route_offs
+        # Via map: per-size via-via disc + cushion at the grid-snapped centre
+        # (== build_via_obstacle_map's per-size circle, keyed on this via's size).
+        vv_mm = via.size / 2 + config.via_size / 2 + config.clearance + grid_cushion
+        vv_sq = (vv_mm / config.grid_step) ** 2
+        via_chunks.append(center + circle_offsets(max(1, int(math.ceil(math.sqrt(vv_sq)))), vv_sq))
+        # Via map: drill hole-to-hole keepout, stamped IN ADDITION to the via-via
+        # disc by _add_drill_hole_via_obstacles (== block_via_cells_near_drills, a
+        # float-centre disc, strict <). Removing it too keeps the via map exactly in
+        # sync -- without it the ripped via leaves a stale drill keepout (#208).
+        h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
+        if h2h > 0 and via.drill > 0:
+            req = via.drill / 2.0 + config.via_drill / 2.0 + h2h
+            req_sq = req * req
+            de = coord.to_grid_dist_safe(req) + 1  # ceil + 1-cell bbox margin (matches source)
+            doff = np.arange(-de, de + 1)
+            dxg, dyg = np.meshgrid(doff, doff, indexing="ij")
+            cx = (gx + dxg) * config.grid_step
+            cy = (gy + dyg) * config.grid_step
+            dmask = ((cx - via.x) ** 2 + (cy - via.y) ** 2) < req_sq
+            via_chunks.append(
+                np.column_stack([(gx + dxg)[dmask], (gy + dyg)[dmask]]).astype(np.int32))
+        # Routing map: float-centre real-distance disc + half-cell, per-layer track
+        # width (== build_routing_obstacle_map's via loop). The via spans all layers.
         for layer in all_copper_layers:
-            cell_chunks[layer].append(route_block)
+            r_mm = via.size / 2 + track_w_by_layer[layer] / 2 + config.clearance + config.grid_step / 2
+            rg = coord.to_grid_dist_safe(r_mm)
+            r_sq = r_mm * r_mm
+            off = np.arange(-rg, rg + 1)
+            exg, eyg = np.meshgrid(off, off, indexing="ij")
+            ddx = (gx + exg) * config.grid_step - via.x
+            ddy = (gy + eyg) * config.grid_step - via.y
+            mask = (ddx * ddx + ddy * ddy) <= r_sq
+            cell_chunks[layer].append(
+                np.column_stack([(gx + exg)[mask], (gy + eyg)[mask]]).astype(np.int32))
 
     # Concatenate chunks into the final arrays (keep duplicates for reference counting)
     if via_chunks:

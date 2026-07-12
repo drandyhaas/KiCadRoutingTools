@@ -36,13 +36,16 @@ _CLAUDE_CANDIDATES = [
 DEFAULT_ALLOWED_TOOLS = "Read,Glob,Grep,Bash,WebSearch"
 
 # Main models offered in the model dropdown: (label, --model value).
-# None = let the CLI use the user's configured default.
+# None = let the CLI use the user's configured default. ALIASES, not pinned
+# version IDs: the CLI resolves 'fable'/'opus'/'sonnet'/'haiku' to the
+# newest model of each tier, so this list never goes stale ('Sonnet 4.6'
+# style entries were outdated the day a new Sonnet shipped).
 MODEL_CHOICES = [
     ("Default", None),
-    ("Fable 5", "claude-fable-5"),
-    ("Opus 4.8", "claude-opus-4-8"),
-    ("Sonnet 4.6", "claude-sonnet-4-6"),
-    ("Haiku 4.5", "claude-haiku-4-5"),
+    ("Fable (latest)", "fable"),
+    ("Opus (latest)", "opus"),
+    ("Sonnet (latest)", "sonnet"),
+    ("Haiku (latest)", "haiku"),
 ]
 
 # --effort levels accepted by the CLI ("Default" = don't pass the flag).
@@ -482,9 +485,14 @@ class ClaudeTab(wx.Panel):
         sel_grid.Add(self.effort_choice, 0, wx.EXPAND)
         ctrl_sizer.Add(sel_grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
-        # Planning: the headline action (bold) with its Cancel right under it
+        # Visual break between the model/effort selectors and the actions
+        ctrl_sizer.AddSpacer(6)
+        ctrl_sizer.Add(wx.StaticLine(self), 0,
+                       wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
+        ctrl_sizer.AddSpacer(6)
+
+        # Planning: the headline action with its Cancel right under it
         self.plan_btn = wx.Button(self, label="Plan Routing")
-        self.plan_btn.SetFont(self.plan_btn.GetFont().Bold())
         self.plan_btn.SetToolTip(
             "Run the /plan-pcb-routing skill headless on the current board. The "
             "plan fills the tabs' parameter fields and appears in the step list "
@@ -510,8 +518,21 @@ class ClaudeTab(wx.Panel):
         self.run_plan_btn.Disable()
         ctrl_sizer.Add(self.run_plan_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        # Same as above but unattended: no per-step "Routing Complete" OK popup.
+        self.run_all_plan_btn = wx.Button(self, label="Run All Selected Steps")
+        self.run_all_plan_btn.SetToolTip(
+            "Run the checked steps end-to-end WITHOUT the per-step completion "
+            "popup you normally have to OK. Each step's summary is printed to "
+            "the output/log instead.")
+        self.run_all_plan_btn.Bind(wx.EVT_BUTTON, self._on_run_all_selected)
+        self.run_all_plan_btn.Disable()
+        ctrl_sizer.Add(self.run_all_plan_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         self.stop_plan_btn = wx.Button(self, label="Stop")
-        self.stop_plan_btn.SetToolTip("Stop after the currently running step finishes")
+        self.stop_plan_btn.SetToolTip(
+            "Cancel the currently running step (it aborts at its next safe "
+            "point and its partial results are discarded) and stop the plan; "
+            "remaining steps are not run")
         self.stop_plan_btn.Bind(wx.EVT_BUTTON, self._on_stop_plan)
         self.stop_plan_btn.Disable()
         ctrl_sizer.Add(self.stop_plan_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
@@ -537,16 +558,36 @@ class ClaudeTab(wx.Panel):
         self.diagnose_btn.Enable(self._claude_path is not None)
         ctrl_sizer.Add(self.diagnose_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
-        # Activity: elapsed time + pulsing gauge while Claude runs
-        self.elapsed_label = wx.StaticText(self, label="")
-        ctrl_sizer.Add(self.elapsed_label, 0, wx.LEFT | wx.RIGHT, 5)
-        self.gauge = wx.Gauge(self, range=100)
-        ctrl_sizer.Add(self.gauge, 0, wx.EXPAND | wx.ALL, 5)
-
         ctrl_sizer.AddStretchSpacer(1)
+
+        # Close pinned at the column bottom (same behavior as the other
+        # tabs' Close buttons).
+        ctrl_sizer.AddSpacer(6)
+        ctrl_sizer.Add(wx.StaticLine(self), 0,
+                       wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
+        ctrl_sizer.AddSpacer(6)
+        self.close_btn = wx.Button(self, label="Close")
+        self.close_btn.SetToolTip("Close dialog")
+        self.close_btn.Bind(wx.EVT_BUTTON, self._on_close)
+        ctrl_sizer.Add(self.close_btn, 0,
+                       wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         top_sizer.Add(ctrl_sizer, 0, wx.EXPAND)
 
         sizer.Add(top_sizer, 1, wx.EXPAND | wx.ALL, 8)
+
+        # Status bar: elapsed/step text + progress gauge, full width between
+        # the Planned Steps box and the parsed-result line -- it mirrors the
+        # working tab's status during plan steps, so give it room.
+        activity_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.elapsed_label = wx.StaticText(self, label="")
+        activity_sizer.Add(self.elapsed_label, 0,
+                           wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16)
+        self.gauge = wx.Gauge(self, range=100)
+        activity_sizer.Add(self.gauge, 1, wx.EXPAND)
+        self._activity_sizer = activity_sizer
+        sizer.Add(activity_sizer, 0,
+                  wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         # Parsed machine-readable result (RESULT= line of the last run)
         parsed_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -557,6 +598,18 @@ class ClaudeTab(wx.Panel):
             "The machine-readable last line of Claude's reply (RESULT=...), "
             "demonstrating how skill output will populate GUI fields.")
         parsed_sizer.Add(self.parsed_ctrl, 1, wx.EXPAND)
+        self.save_plan_btn = wx.Button(self, label="Save...")
+        self.save_plan_btn.SetToolTip(
+            "Save the current plan steps to a JSON file (replay later with "
+            "Load - no Claude run needed)")
+        self.save_plan_btn.Bind(wx.EVT_BUTTON, self._on_save_plan)
+        parsed_sizer.Add(self.save_plan_btn, 0, wx.LEFT, 5)
+        self.load_plan_btn = wx.Button(self, label="Load...")
+        self.load_plan_btn.SetToolTip(
+            "Load plan steps from a JSON file (a saved plan, or one exported "
+            "by tests/stress/manifest_to_plan.py from a stress-test manifest)")
+        self.load_plan_btn.Bind(wx.EVT_BUTTON, self._on_load_plan)
+        parsed_sizer.Add(self.load_plan_btn, 0, wx.LEFT, 5)
         sizer.Add(parsed_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         # Full output across the whole width at the bottom
@@ -621,6 +674,7 @@ class ClaudeTab(wx.Panel):
                 [i for i in state.get('checked', []) if 0 <= i < len(steps)])
             self.run_plan_btn.Enable(self.routing_dialog is not None
                                      and self._claude_path is not None)
+            self.run_all_plan_btn.Enable(self.run_plan_btn.IsEnabled())
 
     # ------------------------------------------------------------------ run
 
@@ -634,6 +688,7 @@ class ClaudeTab(wx.Panel):
         self.review_btn.Disable()
         self.diagnose_btn.Disable()
         self.run_plan_btn.Disable()
+        self.run_all_plan_btn.Disable()
         self.cancel_btn.Enable()
         self.parsed_ctrl.SetValue("")
         # The transcript and step list persist across runs and dialog reopens;
@@ -733,6 +788,7 @@ class ClaudeTab(wx.Panel):
         self.review_btn.Enable()
         self.diagnose_btn.Enable()
         self.run_plan_btn.Enable(bool(self._plan_steps))
+        self.run_all_plan_btn.Enable(self.run_plan_btn.IsEnabled())
         self.cancel_btn.Disable()
         kind, self._pending_kind = self._pending_kind, None
 
@@ -779,9 +835,31 @@ class ClaudeTab(wx.Panel):
             self.output_ctrl.AppendText("\nPlan was unusable - nothing applied.\n")
             return
 
+        self._install_plan_steps(steps)
+
+    def _install_plan_steps(self, steps):
+        """Adopt a validated step list (from a fresh plan OR a loaded plan
+        file): populate the checklist and pre-fill the tabs."""
+        from .claude_plan import step_label, apply_step_params, \
+            apply_step_selection
+        # A new plan supersedes the session's panel tweaks: reset every
+        # routing parameter to defaults BEFORE applying the plan's values,
+        # so options the plan does not specify run at CLI-default-
+        # equivalent state (the add_gnd_vias leak, generalized). Applies to
+        # both a fresh Claude plan and a Load...-ed file.
+        try:
+            if self.routing_dialog is not None and \
+                    hasattr(self.routing_dialog, 'reset_params_to_defaults'):
+                self.routing_dialog.reset_params_to_defaults()
+                self._log("Claude plan: options reset to defaults before "
+                          "applying the plan")
+        except Exception as e:
+            self._log(f"Claude plan: defaults reset skipped: {e}")
         self._plan_steps = steps
         self.plan_list.Set([step_label(i + 1, s) for i, s in enumerate(steps)])
         self.plan_list.SetCheckedItems(range(len(steps)))
+        self.run_plan_btn.Enable(bool(steps) and self.routing_dialog is not None)
+        self.run_all_plan_btn.Enable(self.run_plan_btn.IsEnabled())
 
         # Fill the tabs so each step can be reviewed in its native controls.
         # (Selections of same-action steps overwrite each other here; they are
@@ -799,11 +877,63 @@ class ClaudeTab(wx.Panel):
         self.output_ctrl.AppendText(
             f"\nPlan loaded: {len(steps)} step(s). Parameters were applied to the "
             "tabs - review/tweak them there, uncheck steps you don't want, then "
-            "press 'Run Selected Steps'.\n")
+            "press 'Run Selected Steps' (or 'Run All Selected Steps' to run "
+            "unattended, without the per-step completion popup).\n")
         self.run_plan_btn.Enable()
+        self.run_all_plan_btn.Enable(self.run_plan_btn.IsEnabled())
         self._log(f"Claude plan: {len(steps)} steps loaded")
 
-    def _on_run_selected(self, event):
+    def _on_save_plan(self, event):
+        if not self._plan_steps:
+            wx.MessageBox("No plan steps to save. Run Plan Routing first "
+                          "(or Load a plan file).", "Claude",
+                          wx.OK | wx.ICON_WARNING)
+            return
+        with wx.FileDialog(self, "Save plan (.json)", wildcard="*.json",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            path = dlg.GetPath()
+        try:
+            import json
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"steps": self._plan_steps}, f, indent=2)
+            self._log(f"Claude plan: saved {len(self._plan_steps)} step(s) to {path}")
+            self.output_ctrl.AppendText(f"\nPlan saved to {path}\n")
+        except Exception as e:
+            wx.MessageBox(f"Could not save plan:\n{e}", "Claude",
+                          wx.OK | wx.ICON_ERROR)
+
+    def _on_load_plan(self, event):
+        from .claude_plan import parse_plan_result
+        with wx.FileDialog(self, "Load plan (.json - other files are shown greyed by macOS)", wildcard="*.json",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            path = dlg.GetPath()
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except Exception as e:
+            wx.MessageBox(f"Could not read plan file:\n{e}", "Claude",
+                          wx.OK | wx.ICON_ERROR)
+            return
+        steps, errors = parse_plan_result(text)
+        for message in errors:
+            self.output_ctrl.AppendText(f"plan: {message}\n")
+        if steps is None:
+            wx.MessageBox("The file is not a usable plan (see the transcript "
+                          "for details).", "Claude", wx.OK | wx.ICON_ERROR)
+            return
+        self.parsed_ctrl.SetValue(f"Loaded from {path}")
+        self._log(f"Claude plan: loaded {len(steps)} step(s) from {path}")
+        self._install_plan_steps(steps)
+
+    def _on_run_all_selected(self, event):
+        """Run the checked steps unattended (no per-step completion popups)."""
+        self._on_run_selected(event, quiet=True)
+
+    def _on_run_selected(self, event, quiet=False):
         from .claude_plan import PlanExecutor
 
         if self._plan_executor is not None or not self._plan_steps:
@@ -815,36 +945,69 @@ class ClaudeTab(wx.Panel):
             wx.MessageBox("No steps are checked.", "Claude", wx.OK | wx.ICON_WARNING)
             return
         self.run_plan_btn.Disable()
+        self.run_all_plan_btn.Disable()
         self.plan_btn.Disable()
         self.stop_plan_btn.Enable()
         self._plan_executor = PlanExecutor(
             self.routing_dialog, self._plan_steps, indices,
             on_status=self._on_plan_step_status,
             on_finished=self._on_plan_finished,
-            log=self._log)
+            log=self._log,
+            on_progress=self._on_plan_step_progress,
+            quiet=quiet)
         self._plan_executor.start()
 
     def _on_stop_plan(self, event):
         if self._plan_executor is not None:
             self._plan_executor.stop()
             self.stop_plan_btn.Disable()
-            self._log("Claude plan: stop requested (after current step)")
+            self._log("Claude plan: stop requested (cancelling current step)")
+
+    def _on_plan_step_progress(self, index, step, label, value, rng,
+                               elapsed, is_busy):
+        """Mirror the working tab's status bar here: same text, same gauge,
+        plus which step and its elapsed time -- a route_diff step reads
+        exactly like the differential tab while it runs."""
+        if not self:
+            return
+        mins, secs = divmod(int(elapsed), 60)
+        action = step.get('action', '?')
+        text = f"Step {index + 1} ({action}) {mins}:{secs:02d}"
+        if label and label != 'Ready':
+            text += f" - {label}"
+        self.elapsed_label.SetLabel(text)
+        self.Layout()
+        try:
+            if self.gauge.GetRange() != rng and rng > 0:
+                self.gauge.SetRange(rng)
+            self.gauge.SetValue(min(max(0, int(value)), self.gauge.GetRange()))
+        except Exception:
+            pass
 
     def _on_plan_step_status(self, index, status):
         if not self:
             return
         from .claude_plan import step_label
-        mark = {"running": "> ", "done": "[ok] ", "failed": "[FAIL] "}[status]
+        mark = {"running": "> ", "done": "[ok] ", "failed": "[FAIL] ",
+                "stopped": "[stopped] "}[status]
         self.plan_list.SetString(index, mark + step_label(index + 1, self._plan_steps[index]))
         if status == "done":
+            # Stopped/failed steps stay checked so a re-run picks them up.
             self.plan_list.Check(index, False)
 
     def _on_plan_finished(self, completed, aborted_reason):
         self._plan_executor = None
+        if self:
+            try:
+                self.elapsed_label.SetLabel("")
+                self.gauge.SetValue(0)
+            except Exception:
+                pass
         if not self:  # dialog destroyed while a step was running
             return
         self.stop_plan_btn.Disable()
         self.run_plan_btn.Enable(bool(self._plan_steps))
+        self.run_all_plan_btn.Enable(self.run_plan_btn.IsEnabled())
         self.plan_btn.Enable()
         if aborted_reason:
             message = f"Claude plan: stopped after {completed} step(s): {aborted_reason}"
@@ -867,8 +1030,17 @@ class ClaudeTab(wx.Panel):
         self._elapsed_seconds += 1
         mins, secs = divmod(self._elapsed_seconds, 60)
         self.elapsed_label.SetLabel(f"{mins}m {secs:02d}s" if mins else f"{secs}s")
+        self.Layout()
         self.gauge.Pulse()
+
+    def _on_close(self, event):
+        """Close the parent dialog (matches the other tabs' Close button)."""
+        self.GetTopLevelParent().EndModal(wx.ID_CANCEL)
 
     def _log(self, message):
         if self.log_callback:
+            # Plan progress lines arrived without terminators and ran
+            # together in the Log tab ('step 4 finishedClaude plan: ...').
+            if not message.endswith(chr(10)):
+                message += chr(10)
             self.log_callback(message)

@@ -4,6 +4,7 @@ Visualization callback interface for the PCB router.
 This module provides a callback interface that the batch router uses
 to communicate with the visualizer without depending on pygame.
 """
+from __future__ import annotations
 
 from typing import List, Tuple, Set, Optional, Callable, Protocol
 from dataclasses import dataclass

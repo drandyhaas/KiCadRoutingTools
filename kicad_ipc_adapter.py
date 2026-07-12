@@ -937,6 +937,122 @@ def apply_planes_results(board, *, pcb_data,
     return counts
 
 
+def apply_oracle_reconnect(board, *, nets, config, pcb_data,
+                           track_via_clearance, hole_to_hole_clearance,
+                           progress_callback=None,
+                           message: str = "KiCadRoutingTools: oracle reconnect") -> dict:
+    """GUI/stress parity (#364): run the kicad-oracle recheck the CLI plane
+    repair front runs on its written output, against a temp snapshot of the
+    LIVE board, and apply the routed copper back in one commit.
+
+    Temp-saves the board via save_board_snapshot (SaveCopyOfDocument -- never
+    touches the user's open file), lets oracle_reconnect route the links
+    kicad-cli reports missing, then adds the returned segments/vias. Net names
+    come from pcb_data (kipy assigns nets by name). Best-effort: returns {} and
+    skips quietly when kicad-cli is unavailable or anything fails. The IPC
+    analogue of the SWIG planes tab's temp-save + PCB_TRACK/PCB_VIA apply."""
+    from kicad_oracle import oracle_reconnect, find_kicad_cli
+    import os
+    import tempfile
+    if find_kicad_cli() is None or not nets:
+        return {}
+
+    def name_for(net_id):
+        if pcb_data is None or net_id is None:
+            return None
+        n = pcb_data.nets.get(net_id)
+        return n.name if n is not None else None
+
+    with tempfile.NamedTemporaryFile(suffix='.kicad_pcb', delete=False) as f:
+        tmp = f.name
+    try:
+        save_board_snapshot(tmp)
+        orc = oracle_reconnect(
+            tmp, nets, config,
+            track_via_clearance=track_via_clearance,
+            hole_to_hole_clearance=hole_to_hole_clearance,
+            progress_callback=progress_callback)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+    new_segments = orc.get('new_segments') or []
+    new_vias = orc.get('new_vias') or []
+    if new_segments or new_vias:
+        with begin_commit(board, message) as commit:
+            for s in new_segments:
+                commit.add(make_track(
+                    commit.net_map, s.start_x, s.start_y, s.end_x, s.end_y,
+                    s.width, s.layer, net_name=name_for(s.net_id)))
+            for v in new_vias:
+                layers = getattr(v, 'layers', None) or ['F.Cu', 'B.Cu']
+                commit.add(make_via(
+                    commit.net_map, v.x, v.y, v.size, v.drill,
+                    top_layer=layers[0], bottom_layer=layers[-1],
+                    net_name=name_for(v.net_id)))
+    return orc
+
+
+def apply_plane_copper_cleanup(board, *, net_names, clearance, grid_step,
+                               message: str = "KiCadRoutingTools: plane cleanup") -> dict:
+    """CLI/GUI parity: apply pcb_modification.compute_plane_copper_cleanup's
+    delta (the SAME core the CLI clean_plane_copper front runs) to the LIVE
+    board in one commit -- dead-end trims, stub-gap snaps, micro-shift / soft-
+    joint connectors (set11 plane shorts). Best-effort: returns {} on any
+    failure so it can never break the already-applied plane result. The IPC
+    analogue of the SWIG planes tab's GetTracks/RemoveNative/PCB_TRACK loop;
+    live copper is matched by unordered endpoint pair + net name (pos_key), the
+    same key style apply_routing_results uses for its dead-end strip."""
+    from kicad_parser import build_pcb_data_from_board
+    from pcb_modification import compute_plane_copper_cleanup
+    from routing_utils import pos_key
+    if not net_names:
+        return {}
+    pcb = build_pcb_data_from_board(board)
+    delta = compute_plane_copper_cleanup(pcb, net_names, clearance, grid_step)
+    if delta.is_empty:
+        return {"removed": 0, "added": 0, "snapped": 0}
+
+    def name_for(net_id):
+        n = pcb.nets.get(net_id)
+        return (n.name if n is not None else "") or ""
+
+    seg_keys = set()
+    for s in delta.segments_to_remove:
+        seg_keys.add((frozenset((pos_key(s.start_x, s.start_y),
+                                 pos_key(s.end_x, s.end_y))), name_for(s.net_id)))
+    via_keys = set()
+    for v in delta.vias_to_remove:
+        via_keys.add((pos_key(v.x, v.y), name_for(v.net_id)))
+
+    removed = added = 0
+    with begin_commit(board, message) as commit:
+        if seg_keys:
+            for t in board.get_tracks():
+                tname = (getattr(t.net, "name", "") or "") if t.net is not None else ""
+                sx, sy = _vec_xy_mm(t.start)
+                ex, ey = _vec_xy_mm(t.end)
+                key = (frozenset((pos_key(sx, sy), pos_key(ex, ey))), tname)
+                if key in seg_keys:
+                    commit.remove(t)
+                    removed += 1
+        if via_keys:
+            for vi in board.get_vias():
+                vname = (getattr(vi.net, "name", "") or "") if vi.net is not None else ""
+                vx, vy = _vec_xy_mm(vi.position)
+                if (pos_key(vx, vy), vname) in via_keys:
+                    commit.remove(vi)
+                    removed += 1
+        for s in delta.connectors:
+            commit.add(make_track(
+                commit.net_map, s.start_x, s.start_y, s.end_x, s.end_y,
+                s.width, s.layer, net_name=name_for(s.net_id) or None))
+            added += 1
+    return {"removed": removed, "added": added, "snapped": delta.snapped}
+
+
 # --- DRC settings write-back (issue #160) -----------------------------------
 #
 # The CLI route/route_diff/route_planes auto-fix the OUTPUT project's DRC

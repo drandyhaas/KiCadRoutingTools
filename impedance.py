@@ -8,6 +8,7 @@ Provides formulas for calculating characteristic impedance of:
 
 Based on IPC-2141 and industry-standard approximations.
 """
+from __future__ import annotations
 
 import math
 from typing import Optional, Tuple, List, Dict

@@ -4,6 +4,7 @@ Proximity cost functions for PCB routing obstacle maps.
 Handles track proximity costs, stub proximity costs, BGA proximity costs,
 and cross-layer track alignment tracking.
 """
+from __future__ import annotations
 
 from typing import List, Tuple, Dict, Set
 import numpy as np

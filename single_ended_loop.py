@@ -4,6 +4,7 @@ Single-ended routing loop.
 This module contains the main loop for routing single-ended nets,
 extracted from route.py for better maintainability.
 """
+from __future__ import annotations
 
 import time
 from typing import List, Tuple, Optional, Any, Dict, Set
@@ -55,7 +56,7 @@ def _sample_path(path: List[Tuple[int, int, int]], step: int = 1) -> List[Tuple[
     sampled.append(path[-1])
     return sampled
 
-from routing_state import RoutingState, record_net_event
+from routing_state import RoutingState, record_net_event, record_rip_ancestry, rip_exclude_set
 from bus_detection import detect_bus_groups, get_bus_routing_order, get_attraction_neighbor, BusGroup
 from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_mb
 from obstacle_map import (
@@ -473,7 +474,7 @@ def route_single_ended_nets(
 
                     blockers = analyze_frontier_blocking(
                         blocked_cells, pcb_data, config, routed_net_paths,
-                        exclude_net_ids={net_id},
+                        exclude_net_ids=rip_exclude_set(state, net_id),
                         target_xy=single_target_xy,
                         source_xy=single_source_xy,
                         obstacle_cache=obstacle_cache
@@ -501,7 +502,7 @@ def route_single_ended_nets(
                             print(f"  Re-analyzing {len(last_retry_blocked_cells)} blocked cells from N={N-1} retry:")
                             fresh_blockers = analyze_frontier_blocking(
                                 last_retry_blocked_cells, pcb_data, config, routed_net_paths,
-                                exclude_net_ids={net_id},
+                                exclude_net_ids=rip_exclude_set(state, net_id),
                                 target_xy=single_target_xy,
                                 source_xy=single_source_xy,
                                 obstacle_cache=obstacle_cache
@@ -590,6 +591,7 @@ def route_single_ended_nets(
                             # Invalidate cache for ripped nets
                             for rid in ripped_ids:
                                 invalidate_obstacle_cache(obstacle_cache, rid)
+                                record_rip_ancestry(state, net_id, rid)
                                 # Record rip event for the ripped net
                                 record_net_event(state, rid, "ripped_by", {
                                     "ripping_net_id": net_id,
@@ -763,10 +765,28 @@ def route_single_ended_nets(
                     "reason": "no rippable blockers found"
                 })
                 print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
-                from routing_diagnostics import static_boxin_hint
+                from routing_diagnostics import static_boxin_hint, preexisting_blocker_hint
                 hint = static_boxin_hint(result, config, pcb_data)
                 if hint:
                     print(f"  {hint}")
+                # #301: the blockers may be PRE-EXISTING copper (earlier run/
+                # step) the rip-up attribution cannot see -- name them and the
+                # --rip-existing-nets retry. Cells were popped into
+                # blocked_cells when the rip-up branch ran; else read them off
+                # the result.
+                _cells301 = []
+                if result:
+                    _cells301 = ((result.get('blocked_cells_forward') or []) +
+                                 (result.get('blocked_cells_backward') or []))
+                if not _cells301:
+                    _cells301 = list(locals().get('blocked_cells') or [])
+                hint301 = preexisting_blocker_hint(
+                    _cells301, config, pcb_data, net_id,
+                    routed_net_ids=state.routed_net_ids)
+                if hint301:
+                    print(f"  {hint301}")
+                    record_net_event(state, net_id, "preexisting_blockers", {
+                        "hint": hint301})
                 failed += 1
 
     return successful, failed, total_time, total_iterations, route_index, user_quit

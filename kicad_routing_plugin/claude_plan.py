@@ -23,7 +23,7 @@ PLAN_RESULT_SCHEMA = (
     '{"steps": [ '
     '{"action": "fanout", "component": "<ref e.g. U1>", "kind": "bga"|"qfn", '
     '"nets": ["<glob>", ...], '
-    '"params": {"escape_method": "underpad"|"channel", "exit_margin": <mm>, '
+    '"params": {"escape_method": "auto"|"underpad"|"channel", "exit_margin": <mm>, '
     '"extension": <mm>}} | '
     '{"action": "route_diff", "pairs": ["<pair base name, the net name with its '
     'P/N suffix stripped, e.g. /lvds_rx0>", ...], '
@@ -46,6 +46,11 @@ PLAN_RESULT_SCHEMA = (
     '"grid_step": <mm>, "analysis_grid_step": <mm>, "repair_pads": true|false, '
     '"rip_blocker_nets": true|false}} '
     ']} '
+    'In any step, params MAY additionally include ANY option shown on that '
+    'tab or the shared options panel, keyed by its snake_case field name '
+    '(e.g. max_iterations, max_ripup, ripup_abandon_metric, grid_step, board_edge_clearance, '
+    'hole_to_hole_clearance, via_cost, heuristic_weight, turn_cost, '
+    'ordering_strategy) - unknown names are ignored with a note. '
     'List steps in execution order: fanout first, then route_diff, then route, '
     'then route_planes, then repair_planes - signals route before planes because '
     'plane stitching vias can adapt around tracks, but a via placed early can '
@@ -116,7 +121,7 @@ def _insert_cap_optimization(steps):
         if s["action"] == "fanout" and (s.get("kind") or "bga").lower() == "bga":
             last_bga = i
     if last_bga is not None:
-        steps.insert(last_bga + 1, {"action": "optimize_caps", "cap_prefix": "C,R"})
+        steps.insert(last_bga + 1, {"action": "optimize_caps", "cap_prefix": "C,R,FB"})
 
 
 def step_label(index, step):
@@ -155,11 +160,174 @@ def apply_step_params(step, dialog):
     notes = []
     action = step["action"]
     params = step.get("params") or {}
+    # ANY GUI parameter (Andy): a plan step's params may name any control
+    # on the step's tab or the shared options panels; resolve by attribute
+    # name and coerce by control type. Composite fields with special
+    # formatting (power_nets pairs, diff geometry, assignments) are handled
+    # by the action-specific blocks below, which run AFTER and win.
+    _GENERIC_SKIP = {
+        "route": {"track_width", "clearance", "via_size", "via_drill",
+                  "power_nets", "power_nets_widths", "layer_costs"},
+        "route_diff": {"diff_pair_width", "diff_pair_gap", "impedance",
+                       "layer_costs"},
+        # rip_blocker_nets is handled by the explicit per-action blocks below,
+        # which target the CORRECT options panel. The generic loop resolves it
+        # to the control name 'rip_blocker_check', which exists on BOTH
+        # create_options and repair_options, and picks the FIRST owner
+        # (create_options) -- so for a repair_planes step it would wrongly flip
+        # the create panel's checkbox (and, absent the explicit block, leave the
+        # repair panel's at its reset default of False, silently dropping
+        # --rip-blocker-nets). Skip it in the generic loop for both plane actions.
+        "route_planes": {"add_gnd_vias", "gnd_via_distance", "gnd_via_net",
+                         "rip_blocker_nets"},
+        "repair_planes": {"rip_blocker_nets"},
+        "fanout": set(),
+    }
+
+    def _owners():
+        d = dialog
+        if action == "route_diff":
+            t = getattr(d, "differential_tab", None)
+            return [t, d] if t is not None else [d]
+        if action == "fanout":
+            t = getattr(d, "fanout_tab", None)
+            return [t, d] if t is not None else [d]
+        if action in ("route_planes", "repair_planes"):
+            t = getattr(d, "planes_tab", None)
+            subs = []
+            if t is not None:
+                for sub in ("create_options", "repair_options"):
+                    s = getattr(t, sub, None)
+                    if s is not None:
+                        subs.append(s)
+                subs.append(t)
+            subs.append(d)
+            return subs
+        return [d]
+
+    def _set_control(owner, name, value):
+        ctrl = getattr(owner, name, None)
+        if ctrl is None:
+            return False
+        import wx
+        try:
+            if isinstance(ctrl, wx.CheckBox):
+                ctrl.SetValue(bool(value))
+            elif isinstance(ctrl, (wx.SpinCtrl,)):
+                ctrl.SetValue(int(float(value)))
+            elif isinstance(ctrl, wx.SpinCtrlDouble):
+                ctrl.SetValue(float(value))
+            elif isinstance(ctrl, wx.Choice):
+                idx = ctrl.FindString(str(value))
+                if idx == wx.NOT_FOUND:
+                    return False
+                ctrl.SetSelection(idx)
+            elif hasattr(ctrl, "SetValue"):
+                if isinstance(value, (list, tuple)):
+                    ctrl.SetValue(" ".join(str(v) for v in value))
+                elif isinstance(value, bool):
+                    ctrl.SetValue(value)
+                else:
+                    ctrl.SetValue(str(value))
+            else:
+                return False
+            return True
+        except Exception:
+            return False
+
+    # Params whose GUI home is not a same-named control.
+    _SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
+                'power_nets_widths', 'escape_method', 'no_gnd_vias'}
+    _ALIASES = {'rip_blocker_nets': 'rip_blocker_check',
+                'repair_pads': 'repair_pads',
+                'analysis_grid_step': 'analysis_grid'}
+
+    def _apply_special(name, value):
+        if name == 'layers' and isinstance(value, (list, tuple)):
+            checks = getattr(dialog, 'layer_checks', None)
+            if not checks:
+                return False
+            wanted = {str(v) for v in value}
+            for layer, cb in checks.items():
+                cb.SetValue(layer in wanted)
+            return True
+        if name in ('no_bga_zone', 'no_bga_zones'):
+            # route.py spells it --no-bga-zones (plural); accept both the
+            # singular and the plural param name so plans emitted by an older
+            # converter (unknown-flag -> 'no_bga_zones') or by the live LLM
+            # still reach the control instead of being "ignored".
+            ctl = getattr(dialog, 'no_bga_zones_ctrl', None)
+            if ctl is None:
+                return False
+            ctl.SetValue('ALL' if value else '')
+            return True
+        if name == 'power_nets' and isinstance(value, (list, tuple)):
+            ctl = getattr(dialog, 'power_nets_ctrl', None)
+            if ctl is None:
+                return False
+            ctl.SetValue(' '.join(str(v) for v in value))
+            return True
+        if name == 'power_nets_widths' and isinstance(value, (list, tuple)):
+            ctl = getattr(dialog, 'power_widths_ctrl', None)
+            if ctl is None:
+                return False
+            ctl.SetValue(' '.join(str(v) for v in value))
+            return True
+        if name == 'no_gnd_vias':
+            # route_diff's GND-return-via toggle: the CLI flag is the NEGATIVE
+            # --no-gnd-vias, while the differential tab's checkbox is the
+            # POSITIVE "Add GND vias" (gnd_via_check, default on) -- invert so a
+            # recorded --no-gnd-vias actually unchecks it. (route_planes'
+            # add_gnd_vias is a separate control, handled in its own block.)
+            chk = getattr(getattr(dialog, 'differential_tab', None),
+                          'gnd_via_check', None)
+            if chk is None:
+                return False
+            chk.SetValue(not bool(value))
+            return True
+        if name == 'escape_method':
+            # Fanout escape dropdown lives on the BGA options panel and shows
+            # DISPLAY strings ("Auto (channel, under-pad retry)"), while the
+            # plan/CLI value is the engine token ('auto'/'channel'/'underpad').
+            # Map value -> index via the panel's ESCAPE_METHODS tuple.
+            opts = getattr(getattr(dialog, 'fanout_tab', None), 'bga_options', None)
+            choice = getattr(opts, 'escape_method_choice', None)
+            if choice is None:
+                return False
+            methods = getattr(type(opts), 'ESCAPE_METHODS', ('auto', 'channel', 'underpad'))
+            v = str(value).lower()
+            if v in methods:
+                choice.SetSelection(methods.index(v))
+                return True
+            return False
+        return False
+
+    _skip = _GENERIC_SKIP.get(action, set())
+    for name, value in list(params.items()):
+        if name in _skip:
+            continue
+        if name in _SPECIAL:
+            if _apply_special(name, value):
+                notes.append(f"set {name}={value}")
+            else:
+                notes.append(f"no control for {name}, ignored")
+            continue
+        lookup = _ALIASES.get(name, name)
+        placed = False
+        for owner in _owners():
+            if owner is not None and _set_control(owner, lookup, value):
+                notes.append(f"set {name}={value}")
+                placed = True
+                break
+        if not placed:
+            notes.append(f"no control for {name}, ignored")
+
     if action == "route":
         for name in ("track_width", "clearance", "via_size", "via_drill"):
             if name in params:
                 try:
                     getattr(dialog, name).SetValue(float(params[name]))
+                    notes.append(f"set {name}={params[name]}")
                 except (TypeError, ValueError):
                     notes.append(f"ignored non-numeric {name}={params[name]!r}")
         power = params.get("power_nets")
@@ -168,6 +336,7 @@ def apply_step_params(step, dialog):
             if widths and len(widths) == len(power):
                 dialog.power_nets_ctrl.SetValue(" ".join(str(p) for p in power))
                 dialog.power_widths_ctrl.SetValue(" ".join(f"{float(w):g}" for w in widths))
+                notes.append(f"set power_nets={list(power)} widths={list(widths)}")
             else:
                 notes.append("power_nets/widths count mismatch, fields not filled")
         costs = params.get("layer_costs")
@@ -206,8 +375,13 @@ def apply_step_params(step, dialog):
                 notes.append(f"ignored non-numeric layer_costs={costs!r}")
     elif action == "route_planes":
         opts = dialog.planes_tab.create_options
-        if "add_gnd_vias" in params:
-            opts.add_gnd_vias_check.SetValue(bool(params["add_gnd_vias"]))
+        # A plan step is a COMPLETE spec of feature toggles: absent means
+        # OFF. Leaving the persisted/panel state in place let a previously
+        # enabled 'Add GND vias' leak into a loaded stress-manifest plan
+        # that never asked for stitching (Andy's bitaxe DRC2 grazes).
+        opts.add_gnd_vias_check.SetValue(bool(params.get("add_gnd_vias")))
+        if not params.get("add_gnd_vias"):
+            notes.append("add_gnd_vias off (not in plan step)")
         if "gnd_via_distance" in params:
             try:
                 opts.gnd_via_distance.SetValue(float(params["gnd_via_distance"]))
@@ -228,9 +402,11 @@ def apply_step_params(step, dialog):
                 except (TypeError, ValueError):
                     notes.append(f"ignored non-numeric {name}={params[name]!r}")
         opts = dialog.planes_tab.repair_options
-        for name in ("max_track_width", "analysis_grid_step"):
+        _repair_ctrls = {"max_track_width": opts.max_track_width,
+                         "min_track_width": opts.min_track_width,
+                         "analysis_grid_step": opts.analysis_grid}
+        for name, ctrl in _repair_ctrls.items():
             if name in params:
-                ctrl = opts.max_track_width if name == "max_track_width" else opts.analysis_grid
                 try:
                     ctrl.SetValue(float(params[name]))
                 except (TypeError, ValueError):
@@ -244,12 +420,18 @@ def apply_step_params(step, dialog):
         if kind == "bga":
             opts = dialog.fanout_tab.bga_options
             if "escape_method" in params:
-                opts.underpad_escape.SetValue(str(params["escape_method"]).lower() == "underpad")
+                opts.set_escape_method(params["escape_method"])
             if "exit_margin" in params:
                 try:
                     opts.exit_margin.SetValue(float(params["exit_margin"]))
                 except (TypeError, ValueError):
                     notes.append(f"ignored non-numeric exit_margin={params['exit_margin']!r}")
+            if "same_net_escapes" in params:
+                try:
+                    opts.same_net_escapes.SetValue(int(params["same_net_escapes"]))
+                except (TypeError, ValueError):
+                    notes.append(f"ignored non-numeric same_net_escapes="
+                                 f"{params['same_net_escapes']!r}")
         else:
             opts = dialog.fanout_tab.qfn_options
             if "extension" in params:
@@ -275,9 +457,18 @@ def apply_step_selection(step, dialog):
     elif action == "route_diff":
         tab = dialog.differential_tab
         wanted = step.get("pairs") or ["*"]
+        # A plan's "pairs" may be base names ("/USB/D") OR the individual P/N
+        # net names the recorded route_diff --nets carried ("/USB/D+",
+        # "/USB/D-"). manifest_to_plan forwards --nets verbatim, so match a pair
+        # when the base name OR either half's full net name matches -- otherwise
+        # a name-per-half plan selected NO pairs and the signal step later
+        # routed the pair single-ended/uncoupled (set11 USB D+/D-).
+        nets_by_id = {i: n.name for i, n in dialog.pcb_data.nets.items()}
         matched_display = set()
-        for display_name, base_name, _p, _n in tab.pair_panel.all_pairs:
-            if any(fnmatch.fnmatch(base_name, w) or base_name == w for w in wanted):
+        for display_name, base_name, p_id, n_id in tab.pair_panel.all_pairs:
+            cands = [base_name, nets_by_id.get(p_id, ""), nets_by_id.get(n_id, "")]
+            if any(fnmatch.fnmatch(c, w) or c == w
+                   for w in wanted for c in cands if c):
                 matched_display.add(display_name)
         if not matched_display:
             notes.append(f"route_diff: no pairs match {wanted}")
@@ -313,9 +504,20 @@ def apply_step_selection(step, dialog):
         tab.mode_selector.SetSelection(1)  # Repair Disconnected
         tab._on_mode_changed(None)
         if step.get("assignments"):
-            assignments = _plane_assignments_from_step(step, dialog, notes, "repair_planes")
+            # Quiet the layerless case (an older converter / LLM emitting
+            # {'layer': ''}): only warn about genuinely UNKNOWN nets, not the
+            # missing layer, since the panel still holds the preceding
+            # route_planes step's real net->layer assignments and the repair
+            # inherits those.
+            layerless = all(not (a.get("layer") or a.get("layers"))
+                            for a in step["assignments"] if isinstance(a, dict))
+            sink = [] if layerless else notes
+            assignments = _plane_assignments_from_step(step, dialog, sink, "repair_planes")
             if assignments:
                 tab.assignment_panel.set_assignments(assignments)
+            elif layerless and tab.assignment_panel.get_assignments():
+                notes.append("repair_planes: inheriting the route_planes step's "
+                             "net->layer assignments (none specified on the repair step)")
         if not tab.assignment_panel.get_assignments():
             notes.append("repair_planes: no assignments (add a route_planes step first, "
                          "or include assignments on the repair step)")
@@ -403,7 +605,9 @@ class PlanExecutor:
     until the operation finishes. Stops on the first failed step.
 
     Callbacks (all on the main thread):
-      on_status(step_index, status)  status in 'running' | 'done' | 'failed'
+      on_status(step_index, status)
+          status in 'running' | 'done' | 'failed' | 'stopped'
+          ('stopped' = Stop cancelled the step mid-run; it did not complete)
       on_finished(completed_count, aborted_reason_or_None)
     """
 
@@ -412,30 +616,70 @@ class PlanExecutor:
     # handler declined to run (e.g. a validation popup) or finished instantly.
     START_GRACE_POLLS = 5
 
-    def __init__(self, dialog, steps, indices, on_status, on_finished, log=None):
+    def __init__(self, dialog, steps, indices, on_status, on_finished,
+                 log=None, on_progress=None, quiet=False):
         self.dialog = dialog
         self.steps = steps
         self.indices = list(indices)
         self.on_status = on_status
         self.on_finished = on_finished
+        self.on_progress = on_progress
         self.log = log or (lambda message: None)
+        # quiet: suppress each step's "Routing/Operation/Fanout Complete" OK
+        # popup so the whole plan runs unattended ("Run All Selected Steps").
+        # The per-step summary still prints; step status/log are unchanged.
+        self.quiet = quiet
         self._queue = []
         self._completed = 0
         self._stop_requested = False
+        self._step_started = None
+        self._current_action = None  # action of the step running right now
 
     def start(self):
         # The plan sequences its own route_planes steps, so the route step's
         # "create planes first?" offer (which jumps to the Planes tab and
         # aborts routing) must not fire during an automated run.
         self.dialog._suppress_plane_offer = True
+        self.dialog._suppress_completion_popups = self.quiet
         self._queue = list(self.indices)
         self._next_step()
 
     def stop(self):
-        """Stop before the next step starts (the running one finishes)."""
+        """Stop before the next step starts AND cancel the step running right
+        now: the owning tab's _cancel_requested flag feeds the engines'
+        cancel_check (plane create/repair, batch_route, route_diff), so the
+        running operation aborts at its next safe boundary instead of being
+        waited out (#364 follow-up). Tabs without a cancel flag (fanout) just
+        run their step to completion as before."""
         self._stop_requested = True
+        owner = self._action_owner(self._current_action) \
+            if self._current_action else None
+        if owner is not None and hasattr(owner, '_cancel_requested'):
+            owner._cancel_requested = True
 
     # -- per-action wiring ---------------------------------------------------
+
+    def _action_owner(self, action):
+        """The tab (or dialog) that runs `action`'s operation."""
+        d = self.dialog
+        return {
+            "route": d,
+            "route_diff": getattr(d, "differential_tab", None),
+            "fanout": getattr(d, "fanout_tab", None),
+            "optimize_caps": getattr(d, "fanout_tab", None),
+            "route_planes": getattr(d, "planes_tab", None),
+            "repair_planes": getattr(d, "planes_tab", None),
+        }.get(action)
+
+    def _status_source(self, action):
+        """The (status_text, progress_bar) pair of the tab actually doing
+        the work, so the Claude tab's status bar can MIRROR it live -- a
+        route_diff step shows exactly what the differential tab shows."""
+        owner = self._action_owner(action)
+        if owner is None:
+            return None, None
+        return (getattr(owner, "status_text", None),
+                getattr(owner, "progress_bar", None))
 
     def _action_parts(self, action):
         """(invoke callable, busy predicate) for an action. The handlers run
@@ -464,8 +708,91 @@ class PlanExecutor:
     # -- sequencing ----------------------------------------------------------
 
     def _finish(self, aborted_reason):
+        self._current_action = None
         self.dialog._suppress_plane_offer = False
+        self.dialog._suppress_completion_popups = False
+        self._write_drc_floors()
+        # Prep the GUI for the NEXT step to run, so its params are shown (and
+        # editable) after this batch finishes (Andy's requested behavior: run the
+        # steps before planes, and the plane step's params -- e.g.
+        # max_iterations=200000, not the leaked route 1000000 -- are then in the
+        # GUI). "Next" = the step after the last one just run, in plan order;
+        # after the FINAL plan step it loops back to step 1. Reset first so
+        # unspecified params show CLI-default-equivalent values. Best-effort;
+        # skipped on abort (leave the last state for inspection).
+        if aborted_reason is None and self.steps and self.indices:
+            try:
+                nxt = self.indices[-1] + 1
+                if nxt >= len(self.steps):
+                    nxt = 0  # ran the last plan step -> loop back to step 1
+                if hasattr(self.dialog, 'reset_params_to_defaults'):
+                    self.dialog.reset_params_to_defaults()
+                apply_step_params(self.steps[nxt], self.dialog)
+                apply_step_selection(self.steps[nxt], self.dialog)
+                self.log(f"Claude plan: GUI prepped for step {nxt + 1} "
+                         f"({self.steps[nxt]['action']})")
+            except Exception as e:
+                self.log(f"Claude plan: end-of-run prep skipped: {e}")
         self.on_finished(self._completed, aborted_reason)
+
+    def _write_drc_floors(self):
+        """CLI parity (gap #2): every CLI step records its routed floors in
+        the sibling .kicad_pro (fix_project_for_output); a GUI plan run used
+        to leave the project file untouched, so a manual DRC graded at stock
+        defaults. Best-effort; never blocks plan completion."""
+        try:
+            import os
+            import clearance_ledger
+            board_file = getattr(self.dialog, 'board_filename', None)
+            # Gather every floor the CLI records (route.py passes clearance,
+            # hole_to_hole, edge_clearance, track_width, via size/drill;
+            # route_diff adds the pair geometry) from the plan's steps --
+            # smallest value wins where steps disagree, like the ledger.
+            floors = {}
+
+            def _take(key, val, smallest=True):
+                try:
+                    v = float(val)
+                except (TypeError, ValueError):
+                    return
+                if key not in floors or (smallest and v < floors[key]):
+                    floors[key] = v
+            for step in self.steps:
+                p = step.get('params') or {}
+                for k in ('clearance', 'track_width', 'via_size', 'via_drill',
+                          'hole_to_hole_clearance', 'board_edge_clearance',
+                          'diff_pair_width', 'diff_pair_gap'):
+                    if p.get(k) is not None:
+                        _take(k, p[k])
+            clearance = floors.get('clearance')
+            track_width = floors.get('track_width')
+            if clearance is None:
+                return
+            eff = clearance_ledger.effective(clearance)
+            # kipy exposes NO setter for live design settings (unlike the SWIG
+            # plugin's board.GetDesignSettings()), so the IPC plan records the
+            # routed floors in the sibling .kicad_pro on disk -- exactly what the
+            # CLI does (fix_project_for_output). KiCad holds the project in
+            # memory, so the user must RELOAD the project for a manual DRC to
+            # pick these up; the write only ever loosens floors and never
+            # touches the .kicad_pcb, so it is never harmful.
+            if board_file and os.path.isfile(board_file):
+                from fix_kicad_drc_settings import fix_project_for_output
+                fix_project_for_output(
+                    board_file, input_pcb=board_file,
+                    clearance=eff,
+                    track_width=track_width,
+                    via_diameter=floors.get('via_size'),
+                    via_drill=floors.get('via_drill'),
+                    hole_to_hole=floors.get('hole_to_hole_clearance'),
+                    edge_clearance=floors.get('board_edge_clearance'),
+                    diff_pair_width=floors.get('diff_pair_width'),
+                    diff_pair_gap=floors.get('diff_pair_gap'))
+                self.log(f"Claude plan: recorded DRC floors in the project "
+                         f"file (min clearance {eff:.4g}mm); reload the project "
+                         f"in KiCad for a manual DRC to use them")
+        except Exception as e:
+            self.log(f"Claude plan: DRC floor write skipped: {e}")
 
     def _next_step(self):
         if self._stop_requested:
@@ -476,9 +803,33 @@ class PlanExecutor:
             return
         index = self._queue.pop(0)
         step = self.steps[index]
+        self._current_action = step['action']
         self.on_status(index, "running")
         self.log(f"Claude plan: step {index + 1} ({step['action']}) starting")
         try:
+            # Reset every routing PARAMETER to its default BEFORE applying this
+            # step's params, so a SHARED control an earlier step set doesn't leak
+            # into a later step that doesn't re-specify it -- e.g. a route step's
+            # max_iterations=1000000 or no_bga_zones=ALL persisting into the
+            # plane step (the CLI runs each command from its own defaults). The
+            # reset touches PARAMETERS only, not selections/log; apply_step_params
+            # + apply_step_selection below then restore exactly THIS step's state.
+            # (reset_params_to_defaults' own docstring says it is called here.)
+            # EXCEPTION: optimize_caps is the tail of the BGA fanout, not a
+            # standalone op -- it clears decoupling caps from THE FANOUT'S vias,
+            # at the fanout's clearance/via-size (the CLI runs it as
+            # place_fanout_clearance right after bga_fanout with the same
+            # --clearance). It carries no params of its own, so it must INHERIT
+            # the preceding fanout step's options; resetting to defaults first
+            # runs it at the wrong clearance and it stops moving the caps. So
+            # skip the per-step reset for optimize_caps and let it keep the
+            # fanout step's live control state.
+            if (step["action"] != "optimize_caps"
+                    and hasattr(self.dialog, 'reset_params_to_defaults')):
+                try:
+                    self.dialog.reset_params_to_defaults()
+                except Exception as _e:
+                    self.log(f"Claude plan: per-step reset skipped: {_e}")
             # Re-apply BOTH this step's parameters and its selection right before
             # running it: consecutive steps of the same action share one tab's
             # controls, so plan-time fill leaves only the last such step's
@@ -490,6 +841,8 @@ class PlanExecutor:
             for note in notes:
                 self.log(f"Claude plan: {note}")
             invoke, busy = self._action_parts(step["action"])
+            import time as _time
+            self._step_started = _time.time()
             invoke()
         except Exception as e:
             self.on_status(index, "failed")
@@ -505,6 +858,20 @@ class PlanExecutor:
             # A control died (dialog closing) - abort quietly
             self._finish("dialog closed")
             return
+        if self.on_progress is not None:
+            # Mirror the working tab's own status bar (label + gauge) into
+            # the Claude tab, with per-step elapsed time.
+            try:
+                import time as _time
+                st, pb = self._status_source(self.steps[index]["action"])
+                label = st.GetLabel() if st is not None else ""
+                val = pb.GetValue() if pb is not None else 0
+                rng = pb.GetRange() if pb is not None else 100
+                elapsed = _time.time() - (self._step_started or _time.time())
+                self.on_progress(index, self.steps[index], label, val, rng,
+                                 elapsed, is_busy)
+            except Exception:
+                pass
         if is_busy:
             wx.CallLater(self.POLL_MS, self._poll_until_idle, index, busy, polls + 1, True)
             return
@@ -513,6 +880,19 @@ class PlanExecutor:
             # Give it a short grace period before declaring completion.
             wx.CallLater(self.POLL_MS, self._poll_until_idle, index, busy, polls + 1, False)
             return
+        if self._stop_requested:
+            _owner = self._action_owner(self.steps[index]["action"])
+            if _owner is not None and hasattr(_owner, '_cancel_requested'):
+                # Stop was pressed while this step ran and its tab is
+                # cancellable: the engine aborted at its next safe boundary
+                # and the tab discarded the partial results, so the step did
+                # NOT complete -- mark it stopped (and leave it checked for a
+                # re-run), never "[ok]". A non-cancellable tab (fanout) ran
+                # its step to completion, so it falls through to "done".
+                self.on_status(index, "stopped")
+                self.log(f"Claude plan: step {index + 1} stopped (cancelled)")
+                self._next_step()
+                return
         self._completed += 1
         self.on_status(index, "done")
         self.log(f"Claude plan: step {index + 1} finished")

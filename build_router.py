@@ -313,6 +313,37 @@ def _verify_import(rust_dir):
     return True
 
 
+def _cargo_version(rust_dir):
+    """Read the [package] version from rust_router/Cargo.toml (None if unreadable)."""
+    cargo_path = os.path.join(rust_dir, 'Cargo.toml')
+    try:
+        in_package = False
+        with open(cargo_path) as f:
+            for line in f:
+                s = line.strip()
+                if s.startswith('[') and s.endswith(']'):
+                    in_package = (s == '[package]')
+                    continue
+                if in_package and s.startswith('version') and '=' in s:
+                    return s.split('=', 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return None
+
+
+def _installed_version(rust_dir):
+    """__version__ of the currently-importable grid_router (None if absent)."""
+    if rust_dir not in sys.path:
+        sys.path.insert(0, rust_dir)
+    if 'grid_router' in sys.modules:
+        del sys.modules['grid_router']
+    try:
+        import grid_router
+    except ImportError:
+        return None
+    return getattr(grid_router, '__version__', None)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Install the Rust grid router module (downloads a prebuilt "
@@ -338,6 +369,21 @@ def main():
         return
 
     if try_download_prebuilt(script_dir, rust_dir, args.tag):
+        # The prebuilt bakes in CARGO_PKG_VERSION and the runtime guard
+        # (startup_checks.py) requires installed == Cargo.toml. The crate version
+        # may legitimately lag VERSION, but the downloaded asset must still match
+        # *this* checkout's Cargo.toml; a stale release asset (e.g. the v0.17.1
+        # binary that reported 0.17.0) would otherwise install cleanly and then be
+        # rejected at every run. Self-heal by building from source instead of
+        # leaving a mismatched binary in place.
+        want = _cargo_version(rust_dir)
+        have = _installed_version(rust_dir)
+        if want and have and have != want:
+            print()
+            print("Prebuilt reports v%s but rust_router/Cargo.toml is %s "
+                  "(stale release asset)." % (have, want))
+            print("Building from source to match...")
+            build_from_source(script_dir, rust_dir)
         return
 
     print()

@@ -4,6 +4,7 @@ Parse placement-relevant geometry from KiCad PCB files.
 Extracts courtyard boundaries and other footprint geometry that
 kicad_parser doesn't provide, for use by the placement tool.
 """
+from __future__ import annotations
 
 import re
 from typing import Dict, Set, Tuple

@@ -3,6 +3,7 @@ Track generation and collision detection for BGA fanout routing.
 
 Functions for generating track segments from routes and detecting collisions.
 """
+from __future__ import annotations
 
 from typing import Dict, List, Tuple
 

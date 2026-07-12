@@ -76,11 +76,11 @@ Examples:
                              "(default: 1.5)")
     parser.add_argument("--no-rotate", action="store_true",
                         help="Disable 90-degree rotation moves")
-    parser.add_argument("--cap-prefix", default="C,R",
+    parser.add_argument("--cap-prefix", default="C,R,FB",
                         help="Comma-separated reference prefix(es) treated as "
-                             "movable passives near a BGA (default: C,R = caps and "
-                             "resistors; multi-pad parts like RN arrays are excluded "
-                             "by the 2-copper-pad test)")
+                             "movable passives near a BGA (default: C,R,FB = caps, "
+                             "resistors and ferrite beads (#252); multi-pad parts "
+                             "like RN arrays are excluded by the 2-copper-pad test)")
     parser.add_argument("--lock", nargs="+", default=None, metavar="REF",
                         help="Additional reference patterns to lock in place")
     parser.add_argument("--max-passes", type=int, default=30,
@@ -118,9 +118,12 @@ Examples:
         verbose=args.verbose,
     )
 
-    if result['placements']:
+    if result['placements'] or result.get('via_moves') or result.get('new_segments'):
         write_placed_output(args.input_file, args.output_file,
-                            result['placements'])
+                            result['placements'],
+                            via_moves=result.get('via_moves'),
+                            new_segments=result.get('new_segments'),
+                            pcb_data=pcb_data)
         print(f"Wrote {args.output_file}")
     else:
         print("No caps moved; not writing output.")

@@ -9,6 +9,7 @@ This module consolidates geometry calculations used across multiple modules:
 - Union-Find data structure for connectivity
 - Path simplification (removing collinear points)
 """
+from __future__ import annotations
 
 import math
 from typing import Tuple, Optional, Dict, Any, TYPE_CHECKING

@@ -16,6 +16,7 @@ The halo term spreads apart parts that are not pulled together by shared
 nets — things that *can* be far apart may as well be, to leave routing room,
 especially around high-pin-count parts.
 """
+from __future__ import annotations
 
 import math
 from typing import Dict, List, Tuple, Set, Optional

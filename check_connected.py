@@ -1,6 +1,7 @@
 """
 Connectivity Checker - Verify that tracks form fully connected routes from source to target pads.
 """
+from __future__ import annotations
 
 import sys
 import argparse
@@ -110,6 +111,26 @@ class SegmentIndex:
         gx, gy = int(x // self.cell_size), int(y // self.cell_size)
         return self.grid.get((gx, gy, layer), [])
 
+    def query_near(self, x: float, y: float, layer: str, radius: float = None):
+        """Like query_at but over the cell neighbourhood, deduped - for
+        proximity tests whose tolerance (a track width) can cross a cell
+        edge. `radius` widens the ring: a big via's barrel credit reaches
+        (via_size + track_width)/2, which exceeds one 1.0mm cell (the
+        silent-miss review finding)."""
+        gx, gy = int(x // self.cell_size), int(y // self.cell_size)
+        r = 1
+        if radius is not None and radius > self.cell_size:
+            r = int(radius // self.cell_size) + 1
+        seen = set()
+        out = []
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                for item in self.grid.get((gx + dx, gy + dy, layer), ()):
+                    if id(item[0]) not in seen:
+                        seen.add(id(item[0]))
+                        out.append(item)
+        return out
+
 
 def point_on_segment(px: float, py: float, x1: float, y1: float, x2: float, y2: float, tolerance: float = 0.02) -> bool:
     """Check if point (px, py) lies on the segment from (x1, y1) to (x2, y2) within tolerance.
@@ -144,6 +165,51 @@ def point_on_segment(px: float, py: float, x1: float, y1: float, x2: float, y2: 
     return dist_sq <= tolerance * tolerance
 
 
+def _pad_bounding_radius(pad) -> float:
+    """Radius of a circle guaranteed to contain the pad's copper (half the
+    rect diagonal). Over-approximates on purpose: used only as a cheap
+    spatial prefilter before the exact shape test below."""
+    return math.hypot(pad.size_x, pad.size_y) / 2
+
+
+def _pads_copper_touch(pi: Pad, pj: Pad, tolerance: float = 0.05) -> bool:
+    """Shape-accurate test that two pads' copper physically touches/overlaps
+    (edge-to-edge gap <= tolerance).
+
+    The old sum-of-bounding-circle-radii test graded 1.5x0.7 rect pads at
+    1.0 mm pitch (real edge gap 0.3 mm) as "connected", so a castellated
+    module's spare power pads with NO copper on them at all passed the
+    connectivity check — and the multipoint router, which trusts this
+    checker's graph for its terminal grouping (#317), never routed them
+    (issue #346). Cross-sample each pad's real perimeter against the other
+    pad's exact distance function (rect/roundrect/circle/oval +
+    rect_rotation + custom polygons), same geometry check_drc grades with.
+    """
+    from check_drc import point_to_pad_distance, _pad_perimeter_points
+
+    def _degenerate(p):
+        # _EndpointStub terminals (and any pad-like without a shape/size)
+        # are points, not outlines.
+        return not getattr(p, 'shape', None) or (p.size_x <= 0 and p.size_y <= 0)
+
+    if _degenerate(pi) and _degenerate(pj):
+        return math.hypot(pi.global_x - pj.global_x,
+                          pi.global_y - pj.global_y) <= tolerance
+    if _degenerate(pi):
+        return point_to_pad_distance(pi.global_x, pi.global_y, pj) <= tolerance
+    if _degenerate(pj):
+        return point_to_pad_distance(pj.global_x, pj.global_y, pi) <= tolerance
+    # Both directions: one pad fully inside the other still hits (the inner
+    # pad's perimeter samples are inside the outer copper, distance 0).
+    for x, y in _pad_perimeter_points(pi):
+        if point_to_pad_distance(x, y, pj) <= tolerance:
+            return True
+    for x, y in _pad_perimeter_points(pj):
+        if point_to_pad_distance(x, y, pi) <= tolerance:
+            return True
+    return False
+
+
 def _net_pads_connected_by_overlap(pads: List[Pad], copper_layers, tolerance: float = 0.05) -> bool:
     """True if every pad of the net touches the others through overlapping
     copper alone (no track needed).
@@ -174,11 +240,13 @@ def _net_pads_connected_by_overlap(pads: List[Pad], copper_layers, tolerance: fl
             pi, pj = pads[i], pads[j]
             if not shares_copper(pi, pj):
                 continue
-            reach = (max(pi.size_x, pi.size_y) / 2
-                     + max(pj.size_x, pj.size_y) / 2 + tolerance)
+            # Cheap bounding-circle prefilter, then exact shape overlap —
+            # the circle alone falsely joined adjacent edge pads (#346).
+            reach = _pad_bounding_radius(pi) + _pad_bounding_radius(pj) + tolerance
             dx = pi.global_x - pj.global_x
             dy = pi.global_y - pj.global_y
-            if dx * dx + dy * dy <= reach * reach:
+            if dx * dx + dy * dy <= reach * reach and \
+                    _pads_copper_touch(pi, pj, tolerance):
                 parent[find(i)] = find(j)
     return len({find(i) for i in range(len(pads))}) == 1
 
@@ -186,29 +254,103 @@ def _net_pads_connected_by_overlap(pads: List[Pad], copper_layers, tolerance: fl
 def _point_in_pad(px: float, py: float, pad: Pad, margin: float = 0.0) -> bool:
     """True if (px, py) lies within `pad`'s copper outline (+margin).
 
-    Handles pad rotation; circle/oval by radius, everything else as a rectangle
-    (roundrect corners are treated as square, which is fine for a via-in-pad
-    membership test). Used to credit an offset via-in-pad as connected (#89)."""
+    EXACT shape test via check_drc.point_to_pad_distance (custom-pad
+    polygons, roundrect corners, rotation). The old rectangle fallback
+    treated a CUSTOM pad as its full bounding box: bitaxe Q2.5 (a 9.1x10mm
+    FET tab) then phantom-connected a track endpoint 4mm from its real
+    copper, and collapse_strict_redundant trusted the graph and removed the
+    genuinely load-bearing bridge segment (0708d regression). A cheap bbox
+    prefilter keeps the hot path fast."""
     dx = px - pad.global_x
     dy = py - pad.global_y
-    # size_x/size_y are board-resolved; the rectangle's residual tilt is
-    # rect_rotation (0 for orthogonal pads), not the total pad rotation.
-    rot = math.radians(getattr(pad, 'rect_rotation', 0.0) or 0.0)
-    c, s = math.cos(-rot), math.sin(-rot)
-    lx = dx * c - dy * s
-    ly = dx * s + dy * c
-    hx = pad.size_x / 2 + margin
-    hy = pad.size_y / 2 + margin
-    if pad.shape == 'circle':
-        r = pad.size_x / 2 + margin
-        return lx * lx + ly * ly <= r * r
-    return abs(lx) <= hx and abs(ly) <= hy
+    reach = max(pad.size_x, pad.size_y) / 2 + margin
+    if dx * dx + dy * dy > reach * reach * 2:  # bbox-diagonal prefilter
+        return False
+    from check_drc import point_to_pad_distance
+    return point_to_pad_distance(px, py, pad) <= margin
+
+
+def make_real_fill_validator(pcb_data, net_id, margin: float = 0.25):
+    """Factory for a zone-credit validator: validate(x, y, layer) -> True iff
+    a `margin`-radius disc at (x, y) is clear of every FOREIGN copper item on
+    `layer` -- i.e. real zone fill can provably exist there.
+
+    The zone credit in check_net_connectivity otherwise trusts the pour
+    OUTLINE, which over-credits: a pad inside the outline but in a
+    clearance-carved pocket grades 'plane-connected', and a REMOVAL pass
+    trusting that grade deletes the pad's genuinely load-bearing tap (the
+    bitaxe Q2 shredded-stub opens). Removal gates pass this validator so
+    outline credit only applies where fill can actually flow. Conservative
+    by construction: a False only DENIES credit, which blocks a removal.
+
+    Foreign geometry is bucketed per layer on first use (1mm cells), so each
+    validate() is O(local)."""
+    import math as _m
+    _buckets = {}
+
+    def _build(layer):
+        b = {}
+
+        def _add(x1, y1, x2, y2, reach, obj):
+            for bx in range(int(min(x1, x2) - reach) - 1,
+                            int(max(x1, x2) + reach) + 2):
+                for by in range(int(min(y1, y2) - reach) - 1,
+                                int(max(y1, y2) + reach) + 2):
+                    b.setdefault((bx, by), []).append(obj)
+        for v in pcb_data.vias:
+            if v.net_id != net_id:
+                _add(v.x, v.y, v.x, v.y, v.size / 2 + margin,
+                     ('c', v.x, v.y, v.size / 2))
+        for s in pcb_data.segments:
+            if s.net_id != net_id and s.layer == layer:
+                _add(s.start_x, s.start_y, s.end_x, s.end_y,
+                     s.width / 2 + margin, ('s', s))
+        for plist in pcb_data.pads_by_net.values():
+            for p in plist:
+                if p.net_id == net_id:
+                    continue
+                if p.drill <= 0 and layer not in p.layers \
+                        and '*.Cu' not in p.layers:
+                    continue
+                r = max(p.size_x, p.size_y) / 2
+                _add(p.global_x, p.global_y, p.global_x, p.global_y,
+                     r + margin, ('p', p))
+        return b
+
+    def validate(x, y, layer):
+        b = _buckets.get(layer)
+        if b is None:
+            b = _buckets[layer] = _build(layer)
+        from check_drc import point_to_pad_distance
+        for obj in b.get((int(x), int(y)), ()):
+            kind = obj[0]
+            if kind == 'c':
+                _, cx, cy, r = obj
+                if _m.hypot(x - cx, y - cy) < r + margin:
+                    return False
+            elif kind == 's':
+                s = obj[1]
+                dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+                L2 = dx * dx + dy * dy
+                t = max(0.0, min(1.0, ((x - s.start_x) * dx +
+                                       (y - s.start_y) * dy) / L2)) if L2 else 0.0
+                if _m.hypot(x - (s.start_x + t * dx),
+                            y - (s.start_y + t * dy)) < s.width / 2 + margin:
+                    return False
+            else:
+                if point_to_pad_distance(x, y, obj[1]) < margin:
+                    return False
+        return True
+
+    return validate
 
 
 def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via],
                            pads: List[Pad], zones: List[Zone] = None,
                            tolerance: float = 0.02,
-                           verbose: bool = False) -> Dict:
+                           verbose: bool = False,
+                           return_graph: bool = False,
+                           zone_credit_validator=None) -> Dict:
     """Check connectivity for a single net.
 
     Args:
@@ -230,6 +372,20 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     if zones is None:
         zones = []
     uf = UnionFind()
+    # Record every union as an edge in parallel with uf (which still drives this
+    # call's result unchanged). A caller can then re-evaluate connectivity with
+    # some segments EXCLUDED -- without rebuilding the expensive spatial graph --
+    # by dropping edges that touch the excluded segments' endpoint points. Segment
+    # i's two endpoints are the first points created, so they are point ids 2i and
+    # 2i+1 (see the segment loop below). Only PAD roots decide connectivity, so an
+    # excluded segment's now-isolated points are harmless. Used by the cleanup
+    # loops (prune_grazing_segments et al.) that otherwise call this per candidate
+    # removal -- O(net_size x candidates) -> O(net_size + candidates) (#263).
+    edges = []
+
+    def _union(a, b):
+        uf.union(a, b)
+        edges.append((a, b))
 
     # Detect all copper layers from segments, vias, and pads
     copper_layer_set = set()
@@ -286,7 +442,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         point_info[end_id] = ('segment_end', seg_idx, seg.layer, seg.end_x, seg.end_y)
         point_id += 1
         # Connect segment's own endpoints
-        uf.union(start_id, end_id)
+        _union(start_id, end_id)
 
     # Add vias - they connect all layers at one location
     via_repr_id = {}        # via_idx -> a representative point id (layers all unioned)
@@ -309,7 +465,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             point_id += 1
         # Connect all via layers together
         for vid in via_ids[1:]:
-            uf.union(via_ids[0], vid)
+            _union(via_ids[0], vid)
         if via_ids:
             via_repr_id[via_idx] = via_ids[0]
             via_copper_layers[via_idx] = {l for l in via_layers if l.endswith('.Cu')}
@@ -329,13 +485,14 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         for layer in expanded_layers:
             if layer not in copper_layers:
                 continue
-            # Connection tolerance is size/4 (below). Use the pad's real size so a
-            # track landing inside a large through-hole/connector pad (but not at
-            # its center) is credited as connected, matching KiCad -- the residual
-            # over-report on hand-routed boards. Floored at 0.4 so small pads keep
-            # the previous 0.1mm tolerance (no regression on router output, whose
-            # tracks land at pad centers).
-            pad_size = max(pad.size_x, pad.size_y, 0.4)
+            # Generic point-point tolerance is size/4 (below). The pad's REAL
+            # size here radially over-credited large/elongated pads (a 9mm
+            # custom tab pulled anything within 2.3mm of its CENTER into the
+            # net -- the 0708d collapse regression); every large-pad case the
+            # real size was for is now covered by the EXACT rules below
+            # (#195 endpoint-in-pad, #89 via-in-pad, #346 pad-pad overlap),
+            # so pad points keep only the small flat tolerance.
+            pad_size = 0.4
             all_points.append((pad.global_x, pad.global_y, layer, point_id, pad_size))
             point_info[point_id] = ('pad', pad_idx, layer, pad.global_x, pad.global_y, pad.component_ref)
             pad_ids.append(point_id)
@@ -345,7 +502,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             point_id += 1
         # Connect all layers of this pad together (through-hole pads act like vias)
         for pid in this_pad_ids[1:]:
-            uf.union(this_pad_ids[0], pid)
+            _union(this_pad_ids[0], pid)
         if this_pad_ids:
             pad_repr_id[pad_idx] = this_pad_ids[0]
             pad_copper_layers[pad_idx] = this_pad_layers
@@ -362,21 +519,33 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         points_in_zone = []
         for x, y, layer, pid, size in points_on_layer:
             if point_in_polygon(x, y, zone.polygon):
+                # Removal gates pass a fill validator (#outline-over-credit,
+                # bitaxe Q2): outline membership only counts where real fill
+                # can provably exist. GRADING callers pass None and keep the
+                # permissive outline credit.
+                if zone_credit_validator is not None and \
+                        not zone_credit_validator(x, y, zone.layer):
+                    continue
                 points_in_zone.append(pid)
 
         # Connect all points inside this zone together
         if len(points_in_zone) > 1:
             for pid in points_in_zone[1:]:
-                uf.union(points_in_zone[0], pid)
-
-    # Build spatial index for points (use 1mm grid cells)
-    point_index = SpatialIndex(cell_size=1.0)
-    for x, y, layer, pid, size in all_points:
-        point_index.add(x, y, layer, pid, size)
+                _union(points_in_zone[0], pid)
 
     # Connect all points that are within tolerance on the same layer
-    # Use spatial index for O(n) average instead of O(n²)
-    max_tolerance = 1.0  # Maximum possible tolerance (size/4 capped at reasonable value)
+    # Use spatial index for O(n) average instead of O(n²).
+    # The pair tolerance below is max(size1, size2)/4 (floored at `tolerance`),
+    # so the widest ring any pair can need is max_point_size/4 — using that
+    # exact bound instead of a fixed 1.0, and sizing the index cells to it so
+    # the 3x3-cell scan spans ~3x the radius rather than 3 mm, keeps this loop
+    # proportional to real neighbours on dense plane fill (issue #363: the
+    # fixed radius/cell made it dominate plane-step runtime).
+    max_point_size = max((p[4] for p in all_points), default=0.0)
+    max_tolerance = max(max_point_size / 4, tolerance)
+    point_index = SpatialIndex(cell_size=max(max_tolerance * 1.01, 0.05))
+    for x, y, layer, pid, size in all_points:
+        point_index.add(x, y, layer, pid, size)
     for x1, y1, l1, id1, size1 in all_points:
         # Query nearby points on same layer
         for x2, y2, id2, size2 in point_index.query_nearby(x1, y1, l1, max_tolerance):
@@ -385,15 +554,18 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             # Use max(size1, size2) / 4, but at least the minimum tolerance
             point_tolerance = max(max(size1, size2) / 4, tolerance)
             if points_match(x1, y1, x2, y2, point_tolerance):
-                uf.union(id1, id2)
+                _union(id1, id2)
 
     # Same-net pads whose copper physically overlaps are connected even when
     # their centres sit further apart than the tight point tolerance above —
     # e.g. a large exposed-pad EP and the thermal-via pads scattered near its
-    # corners (issue #108). Mirror the generous sum-of-half-extents overlap
-    # test from _net_pads_connected_by_overlap onto the connectivity graph.
+    # corners (issue #108). Bounding circles prune candidates; the union
+    # itself needs the exact shape-vs-shape overlap test — circle distance
+    # alone joined 1.5x0.7 rect pads a full 0.3 mm apart, hiding genuinely
+    # unrouted castellated-module pads from both the grader and the
+    # multipoint router that trusts this graph (issue #346).
     if len(pad_repr_id) > 1:
-        pad_reach = {idx: max(pads[idx].size_x, pads[idx].size_y) / 2
+        pad_reach = {idx: _pad_bounding_radius(pads[idx])
                      for idx in pad_repr_id}
         max_pad_reach = max(pad_reach.values())
         pad_center_index = SpatialIndex(cell_size=1.0)
@@ -416,8 +588,9 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                 reach = pad_reach[idx] + pad_reach[jdx] + tolerance
                 dx = pad.global_x - other.global_x
                 dy = pad.global_y - other.global_y
-                if dx * dx + dy * dy <= reach * reach:
-                    uf.union(pad_repr_id[idx], pad_repr_id[jdx])
+                if dx * dx + dy * dy <= reach * reach and \
+                        _pads_copper_touch(pad, other, tolerance):
+                    _union(pad_repr_id[idx], pad_repr_id[jdx])
 
     # A via dropped *inside* an SMD pad's copper connects that pad even when the
     # via centre is offset from the pad centre — e.g. a via-in-pad at the end of
@@ -439,10 +612,44 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                 if not (via_copper_layers[via_idx] & pad_copper_layers[pad_idx]):
                     continue
                 if _point_in_pad(vx, vy, pad, margin=tolerance):
-                    uf.union(pad_repr_id[pad_idx], via_repr_id[via_idx])
+                    _union(pad_repr_id[pad_idx], via_repr_id[via_idx])
 
-    # Build spatial index for segments
-    seg_index = SegmentIndex(cell_size=1.0)
+    # A track that *ends inside* a pad's copper outline connects that pad even
+    # when the endpoint is offset from the pad centre by more than the tight
+    # centre-to-centre tolerance above — e.g. a route landing in a large
+    # through-hole connector pad enters the annular ring but stops well over
+    # size/4 from the pad centre, so the proximity test misses it though the
+    # copper physically touches (issue #195). Mirror the via-in-pad rule onto
+    # segment endpoints: union a pad to any segment endpoint that lies within the
+    # pad outline on a copper layer the pad occupies.
+    if pad_repr_id and segments:
+        endpoint_index = SpatialIndex(cell_size=1.0)
+        for seg_idx, seg in enumerate(segments):
+            if seg.layer.endswith('.Cu'):
+                endpoint_index.add(seg.start_x, seg.start_y, seg.layer, seg_idx * 2, seg.width)
+                endpoint_index.add(seg.end_x, seg.end_y, seg.layer, seg_idx * 2 + 1, seg.width)
+        for pad_idx in pad_repr_id:
+            pad = pads[pad_idx]
+            reach = max(pad.size_x, pad.size_y) / 2 + tolerance
+            for layer in pad_copper_layers[pad_idx]:
+                for ex, ey, eid, ewidth in endpoint_index.query_nearby(
+                        pad.global_x, pad.global_y, layer, reach):
+                    # The endpoint's round cap (radius width/2) physically
+                    # overlaps the pad whenever it reaches the outline --
+                    # same overlap-credit semantics as the #285 endpoint-cap
+                    # rule (the strict twin clamps widths, so the strict
+                    # graph keeps its tight gate automatically).
+                    _m = max(ewidth / 2 - 1e-6, tolerance)
+                    if _point_in_pad(ex, ey, pad, margin=_m):
+                        _union(pad_repr_id[pad_idx], eid)
+
+    # Build spatial index for segments. Cell size = the widest credit reach
+    # any point below can need, so every query below is a single 3x3-cell
+    # ring — on 0.05mm-pitch plane fill the old fixed 1mm cells held hundreds
+    # of segments each and this loop dominated plane-step runtime (#363).
+    max_seg_width = max((seg.width for seg in segments), default=0.0)
+    _max_reach = max((max_point_size + max_seg_width) / 2, tolerance)
+    seg_index = SegmentIndex(cell_size=max(_max_reach * 1.01, 0.05))
     for seg_idx, seg in enumerate(segments):
         seg_start_id = seg_idx * 2
         seg_index.add(seg, seg_start_id)
@@ -450,17 +657,59 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     # Check for T-junctions: points that lie on the middle of a segment (same layer)
     # Use spatial index for O(n) average instead of O(n × m)
     for px, py, player, pid, psize in all_points:
-        # Query segments that might contain this point
-        for seg, seg_start_id in seg_index.query_at(px, py, player):
+        ptype = point_info[pid][0]
+        # Query segments that might contain this point. Endpoint/via points
+        # credit out to (psize + seg_width)/2; the query ring must cover
+        # that for LARGE vias (size + width can exceed the 1mm cell). Use the
+        # net's real max segment width for the bound, not a fixed 1.0 — the
+        # constant put the ring at 5x5 cells for every point on dense plane
+        # fill and dominated plane-step runtime (issue #363).
+        _reach = max((psize + max_seg_width) / 2, tolerance)
+        for seg, seg_start_id in seg_index.query_near(px, py, player,
+                                                      radius=_reach):
             seg_end_id = seg_start_id + 1
             # Skip if this point IS one of the segment's endpoints
             if pid == seg_start_id or pid == seg_end_id:
                 continue
-            # Check if point lies on this segment
-            seg_tolerance = max(seg.width / 2, tolerance)
+            # Check if point lies on this segment. For a SEGMENT endpoint the
+            # copper is a round end cap of radius psize/2 (its track's half
+            # width), so it physically overlaps this segment's copper whenever
+            # the centreline distance is under (psize + seg.width)/2 -- two
+            # 0.1mm tracks whose endpoints sit 0.05mm apart overlap in a
+            # 0.087mm-wide lens, which KiCad counts as connected (issue #285:
+            # eit_mux /S1 graded as a phantom "0.05mm gap"; the old width/2
+            # threshold also made exact-tangency flip on FP epsilon across the
+            # file write/parse round-trip). Exact tangency (zero-width copper)
+            # is still NOT credited, so a real end-to-end gap stays flagged.
+            if ptype in ('segment_start', 'segment_end'):
+                seg_tolerance = max((psize + seg.width) / 2 - 1e-6, tolerance)
+            elif ptype == 'via':
+                # A via barrel (psize = via diameter) physically overlaps this
+                # segment's copper whenever the centerline passes within
+                # (via_radius + track_half_width) -- KiCad counts that as
+                # connected. The old width/2 tolerance missed e.g. a stub
+                # ending 0.141mm from a 0.35 via's centre (inside the barrel,
+                # glasgow /SDA #217) and graded a connected net as split.
+                # Exact tangency is still NOT credited, matching the #285
+                # endpoint-cap rule.
+                seg_tolerance = max((psize + seg.width) / 2 - 1e-6, tolerance)
+            else:
+                seg_tolerance = max(seg.width / 2, tolerance)
             if point_on_segment(px, py, seg.start_x, seg.start_y, seg.end_x, seg.end_y, seg_tolerance):
                 # Connect this point to the segment (via one of its endpoints)
-                uf.union(pid, seg_start_id)
+                _union(pid, seg_start_id)
+
+    # Optional reusable graph for exclusion re-evaluation (see _union note).
+    # pad_index_repr maps each input pad's INDEX to a representative point id,
+    # so a caller replaying the edges through its own UnionFind can read off
+    # per-pad components in the same id space (segment i's endpoints are point
+    # ids 2i / 2i+1). Used by the multipoint component grouping (issue #317).
+    graph = ({'num_points': point_id, 'pad_ids': list(pad_ids),
+              'pad_locations': list(pad_locations), 'edges': edges,
+              'pad_index_repr': dict(pad_repr_id),
+              'via_index_repr': dict(via_repr_id),
+              'num_segments': len(segments)}
+             if return_graph else None)
 
     # Check if all pads are in the same component
     if not pad_ids:
@@ -470,7 +719,8 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             'pad_components': {},
             'disconnected_pads': [],
             'message': 'No pads found for this net',
-            'debug_info': None
+            'debug_info': None,
+            'graph': graph,
         }
 
     pad_roots = [uf.find(pid) for pid in pad_ids]
@@ -536,8 +786,87 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         'pad_components': {loc: uf.find(pid) for pid, loc in zip(pad_ids, pad_locations)},
         'disconnected_pads': disconnected,
         'message': None,
-        'debug_info': debug_info
+        'debug_info': debug_info,
+        'graph': graph,
     }
+
+
+def analyze_conn_excluding(graph: Dict, excluded_seg_indices=()) -> Dict:
+    """Re-evaluate net connectivity from a prebuilt graph (check_net_connectivity
+    with return_graph=True) with some segments EXCLUDED, WITHOUT rebuilding the
+    expensive spatial graph (#263).
+
+    excluded_seg_indices index into the ORIGINAL segments list. Segment i's two
+    endpoint points are ids 2i, 2i+1; excluding it drops every edge that touches
+    them (its own start<->end union and any adjacency/T-junction/pad union to its
+    endpoints), leaving those points isolated -- harmless, since only PAD roots
+    decide connectivity. Returns {connected, num_components, disconnected_pads},
+    matching check_net_connectivity on the reduced segment set.
+
+    Caveat: this reuses the point set / copper-layer set built from the FULL
+    segment list, so it diverges from a true recompute only if excluding a
+    segment empties a copper layer (which would shrink a via/pad's layer span) --
+    never the case on a plane net with zones + many segments per layer. Callers
+    that need a hard guarantee should equivalence-check against a real recompute.
+    """
+    excl = set()
+    for i in excluded_seg_indices:
+        excl.add(2 * i)
+        excl.add(2 * i + 1)
+    uf = UnionFind()
+    for a, b in graph['edges']:
+        if a in excl or b in excl:
+            continue
+        uf.union(a, b)
+    pad_ids = graph['pad_ids']
+    pad_locations = graph['pad_locations']
+    if not pad_ids:
+        return {'connected': True, 'num_components': 0, 'disconnected_pads': []}
+    pad_roots = [uf.find(pid) for pid in pad_ids]
+    unique_roots = set(pad_roots)
+    # Copper components over ALL points (pads + vias + non-excluded segment
+    # endpoints): 'num_components' below is PAD components only, which lets
+    # a removal strand a pad-less sliver unnoticed (castor POLLUX_SUB_IN's
+    # 28um dangle, 0708d). Consumers that must not create islands or stubs
+    # gate on this count instead.
+    excluded = set(excluded_seg_indices)
+    copper_roots = set(unique_roots)
+    for vid in graph.get('via_index_repr', {}).values():
+        copper_roots.add(uf.find(vid))
+    n_segs_total = graph.get('num_segments', 0)
+    for i_ in range(n_segs_total):
+        if i_ in excluded:
+            continue
+        copper_roots.add(uf.find(2 * i_))
+    # Copper components over ALL points (pads + vias + non-excluded segment
+    # endpoints): 'num_components' below is PAD components only, which lets
+    # a removal strand a pad-less sliver unnoticed (castor POLLUX_SUB_IN's
+    # 28um dangle, 0708d). Consumers that must not create islands or stubs
+    # gate on this count instead.
+    excluded = set(excluded_seg_indices)
+    copper_roots = set(unique_roots)
+    for vid in graph.get('via_index_repr', {}).values():
+        copper_roots.add(uf.find(vid))
+    n_segs_total = graph.get('num_segments', 0)
+    for i_ in range(n_segs_total):
+        if i_ in excluded:
+            continue
+        copper_roots.add(uf.find(2 * i_))
+    root_counts = defaultdict(int)
+    for r in pad_roots:
+        root_counts[r] += 1
+    main_root = max(root_counts.keys(), key=lambda r: root_counts[r])
+    disconnected = []
+    seen_pads = set()
+    for pid, loc in zip(pad_ids, pad_locations):
+        if uf.find(pid) != main_root:
+            pad_key = (round(loc[0], 4), round(loc[1], 4), loc[3])
+            if pad_key not in seen_pads:
+                seen_pads.add(pad_key)
+                disconnected.append(loc)
+    return {'connected': len(unique_roots) == 1,
+            'num_components': len(unique_roots),
+            'disconnected_pads': disconnected}
 
 
 def find_gap_between_components(debug_info: Dict, tolerance: float) -> Optional[Dict]:
@@ -697,8 +1026,9 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
             if net_id in segments_by_net or net_id in pads_by_net:
                 nets_to_check.append((net_id, net_info.name))
         else:
-            # Only check nets that have both segments and pads
-            if net_id in segments_by_net and net_id in pads_by_net:
+            # Only check nets that have copper (segments, or vias -- a via alone
+            # can bridge opposite-layer pads it overlaps, issue #285) and pads
+            if (net_id in segments_by_net or net_id in vias_by_net) and net_id in pads_by_net:
                 nets_to_check.append((net_id, net_info.name))
 
     # Find unrouted nets (pads but no segments) unless routed_only
@@ -719,11 +1049,16 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
             # Filter by pattern if specified
             if net_patterns and not matches_any_pattern(net_info.name, net_patterns):
                 continue
-            # Check if net has pads but no segments
+            # Check if net has pads but no copper at all. A net with VIAS but no
+            # segments is NOT automatically unrouted (issue #285, icepi_zero's
+            # USB-C CC2 nets): a single via can legitimately bridge two
+            # opposite-layer pads it physically overlaps (via-in-pad), and the
+            # per-net union-find below is via/pad-shape aware -- let it decide.
             has_pads = net_id in pads_by_net and len(pads_by_net[net_id]) >= 2
             has_segments = net_id in segments_by_net
+            has_vias = net_id in vias_by_net
             has_zones = net_id in zones_by_net
-            if has_pads and not has_segments and not has_zones:
+            if has_pads and not has_segments and not has_zones and not has_vias:
                 # A net whose pads all overlap (e.g. a castellated module's
                 # co-located TH+SMD pad pairs) is already connected (issue #92).
                 if _net_pads_connected_by_overlap(pads_by_net[net_id], copper_layers):

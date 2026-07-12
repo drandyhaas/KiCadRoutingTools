@@ -4,6 +4,7 @@ This module consolidates all Bresenham line algorithm implementations to avoid
 code duplication across obstacle_map.py, obstacle_cache.py, blocking_analysis.py,
 obstacle_costs.py, plane_blocker_detection.py, and plane_region_connector.py.
 """
+from __future__ import annotations
 
 from typing import Generator, Tuple
 

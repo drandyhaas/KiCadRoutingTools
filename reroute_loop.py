@@ -4,23 +4,28 @@ Reroute loop for ripped-up nets.
 This module contains the unified reroute loop that handles all nets ripped
 during diff pair or single-ended routing, extracted from route.py.
 """
+from __future__ import annotations
 
 import time
 from typing import List, Tuple
 
-from routing_state import RoutingState, record_net_event
+from routing_state import (RoutingState, record_net_event, record_rip_ancestry,
+                           record_pair_rip_ancestry, rip_exclude_set,
+                           diff_pair_rip_exclude)
 from obstacle_costs import compute_track_proximity_for_net
 from connectivity import get_net_endpoints, calculate_stub_length, get_multipoint_net_pads
 from net_queries import calculate_route_length
 from pcb_modification import add_route_to_pcb_data
 from single_ended_routing import route_net_with_obstacles, route_multipoint_main, route_multipoint_taps
-from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_endpoints
+from diff_pair_routing import (route_diff_pair_with_obstacles, get_diff_pair_endpoints,
+                               _route_direct_coupled_middle)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import apply_polarity_swap, get_canonical_net_id
 from layer_swap_fallback import try_fallback_layer_swap, add_own_stubs_as_obstacles_for_diff_pair
 from routing_context import (
     build_single_ended_obstacles, build_diff_pair_obstacles,
+    build_diff_pair_leg_obstacles,
     record_single_ended_success, record_diff_pair_success,
     prepare_obstacles_inplace, restore_obstacles_inplace
 )
@@ -162,7 +167,7 @@ def run_reroute_loop(
                         if final_failed_pads:
                             net_name = pcb_data.nets[ripped_net_id].name if ripped_net_id in pcb_data.nets else f"Net {ripped_net_id}"
                             for pad in final_failed_pads:
-                                print(f"    {RED}FAILED: {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) not connected{RESET}")
+                                print(f"    {RED}NOT CONNECTED (so far): {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) - may still be recovered; final verdict in the end-of-run summary{RESET}")
 
                         # Remove from pending_multipoint_nets since Phase 3 is now complete
                         if ripped_net_id in state.pending_multipoint_nets:
@@ -231,7 +236,7 @@ def run_reroute_loop(
 
                         blockers = analyze_frontier_blocking(
                             blocked_cells, pcb_data, config, routed_net_paths,
-                            exclude_net_ids={ripped_net_id},
+                            exclude_net_ids=rip_exclude_set(state, ripped_net_id),
                             target_xy=reroute_target_xy,
                             source_xy=reroute_source_xy,
                             obstacle_cache=obstacle_cache
@@ -250,7 +255,7 @@ def run_reroute_loop(
                                 print(f"  Re-analyzing {len(last_retry_blocked_cells)} blocked cells from N={N-1} retry:")
                                 fresh_blockers = analyze_frontier_blocking(
                                     last_retry_blocked_cells, pcb_data, config, routed_net_paths,
-                                    exclude_net_ids={ripped_net_id},
+                                    exclude_net_ids=rip_exclude_set(state, ripped_net_id),
                                     target_xy=reroute_target_xy,
                                     source_xy=reroute_source_xy,
                                     obstacle_cache=obstacle_cache
@@ -325,6 +330,7 @@ def run_reroute_loop(
                                 # Invalidate obstacle cache for ripped nets and record rip events
                                 for rid in ripped_ids:
                                     invalidate_obstacle_cache(obstacle_cache, rid)
+                                    record_rip_ancestry(state, ripped_net_id, rid)
                                     record_net_event(state, rid, "ripped_by", {
                                         "ripping_net_id": ripped_net_id,
                                         "ripping_net_name": ripped_net_name,
@@ -378,7 +384,7 @@ def run_reroute_loop(
                                         if final_failed_pads:
                                             net_name = pcb_data.nets[ripped_net_id].name if ripped_net_id in pcb_data.nets else f"Net {ripped_net_id}"
                                             for pad in final_failed_pads:
-                                                print(f"    {RED}FAILED: {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) not connected{RESET}")
+                                                print(f"    {RED}NOT CONNECTED (so far): {net_name} - {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) - may still be recovered; final verdict in the end-of-run summary{RESET}")
 
                                         # Remove from pending_multipoint_nets since Phase 3 is now complete
                                         if ripped_net_id in state.pending_multipoint_nets:
@@ -539,6 +545,8 @@ def run_reroute_loop(
                 successful += 1
                 total_iterations += result['iterations']
                 rerouted_pairs.add(ripped_pair_name)
+                if result.get('polarity_swap_denied'):
+                    state.polarity_swap_denied_pairs.add(ripped_pair_name)
                 apply_polarity_swap(pcb_data, result, pad_swaps, ripped_pair_name, polarity_swapped_pairs)
                 record_diff_pair_success(
                     pcb_data, result, ripped_pair, ripped_pair_name, config,
@@ -577,7 +585,8 @@ def run_reroute_loop(
                     if blocked_cells:
                         blockers = analyze_frontier_blocking(
                             blocked_cells, pcb_data, config, routed_net_paths,
-                            exclude_net_ids={ripped_pair.p_net_id, ripped_pair.n_net_id},
+                            exclude_net_ids=diff_pair_rip_exclude(
+                                state, ripped_pair.p_net_id, ripped_pair.n_net_id),
                             extra_clearance=diff_pair_extra_clearance,
                             target_xy=reroute_target_xy,
                             source_xy=reroute_source_xy,
@@ -607,7 +616,8 @@ def run_reroute_loop(
                                 print(f"  Re-analyzing {len(last_retry_blocked_cells)} blocked cells from N={N-1} retry:")
                                 fresh_blockers = analyze_frontier_blocking(
                                     last_retry_blocked_cells, pcb_data, config, routed_net_paths,
-                                    exclude_net_ids={ripped_pair.p_net_id, ripped_pair.n_net_id},
+                                    exclude_net_ids=diff_pair_rip_exclude(
+                                        state, ripped_pair.p_net_id, ripped_pair.n_net_id),
                                     extra_clearance=diff_pair_extra_clearance,
                                     target_xy=reroute_target_xy,
                                     source_xy=reroute_source_xy,
@@ -692,6 +702,10 @@ def run_reroute_loop(
                                 # Invalidate obstacle cache for ripped nets and record rip events
                                 for rid in ripped_ids:
                                     invalidate_obstacle_cache(obstacle_cache, rid)
+                                    # Cycle guard (issue #219): the rerouting pair
+                                    # ripped rid, so rid must not rip either half back.
+                                    record_pair_rip_ancestry(state, ripped_pair.p_net_id,
+                                                             ripped_pair.n_net_id, rid)
                                     record_net_event(state, rid, "ripped_by", {
                                         "ripping_net_id": ripped_pair.p_net_id,
                                         "ripping_net_name": ripped_pair_name,
@@ -858,6 +872,52 @@ def run_reroute_loop(
                             invalidate_obstacle_cache(obstacle_cache, ripped_pair.p_net_id)
                             invalidate_obstacle_cache(obstacle_cache, ripped_pair.n_net_id)
                             reroute_succeeded = True
+
+                # Last-resort hybrid (issue #244): a rip-reroute casualty whose lane
+                # is gone and whose standard probe + rip-up both dead-ended can still
+                # have a coupled-middle + single-ended-leg escape (often to an inner
+                # layer). The MAIN routing loop already tries this on a first-pass
+                # failure (diff_pair_loop.py); the reroute path did not, so a pair
+                # that only fails AFTER being ripped (butterstick /GIGABIT-0/ETH_B,
+                # the /SYZYGY1.D1 class) failed honestly instead of taking the same
+                # fallback. Rebuild the obstacle maps fresh -- rip-up/restore mutated
+                # pcb_data since the reroute's were built. Returns None when it can't
+                # lay a clean route, so this can't make things worse.
+                if not reroute_succeeded and config.diff_pair_hybrid_escape:
+                    hyb_obstacles, _ = build_diff_pair_obstacles(
+                        diff_pair_base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+                        all_unrouted_net_ids, ripped_pair.p_net_id, ripped_pair.n_net_id, gnd_net_id,
+                        track_proximity_cache, layer_map, diff_pair_extra_clearance,
+                        add_own_stubs_func=add_own_stubs_as_obstacles_for_diff_pair,
+                        ripped_route_layer_costs=state.ripped_route_layer_costs,
+                        ripped_route_via_positions=state.ripped_route_via_positions)
+                    # Single-ended leg clearance map. See build_diff_pair_leg_obstacles
+                    # for why this uses base_obstacles + 0 clearance (not the coupled
+                    # diff_pair_base_obstacles / extra clearance the middle map above
+                    # uses) -- previously this site built it inconsistently (#246 review).
+                    leg_obstacles = build_diff_pair_leg_obstacles(
+                        base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+                        all_unrouted_net_ids, ripped_pair.p_net_id, ripped_pair.n_net_id,
+                        gnd_net_id, track_proximity_cache, layer_map)
+                    hyb = _route_direct_coupled_middle(
+                        pcb_data, ripped_pair, config, hyb_obstacles, config.layers,
+                        leg_obstacles=leg_obstacles)
+                    if hyb and not hyb.get('failed'):
+                        print(f"  {GREEN}HYBRID ESCAPE (reroute): direct coupled middle "
+                              f"+ point-to-point terminal legs{RESET}")
+                        results.append(hyb)
+                        successful += 1
+                        total_iterations += hyb.get('iterations', 0)
+                        rerouted_pairs.add(ripped_pair_name)
+                        record_diff_pair_success(
+                            pcb_data, hyb, ripped_pair, ripped_pair_name, config,
+                            remaining_net_ids, routed_net_ids, routed_net_paths, routed_results,
+                            diff_pair_by_net_id, track_proximity_cache, layer_map)
+                        queued_net_ids.discard(ripped_pair.p_net_id)
+                        queued_net_ids.discard(ripped_pair.n_net_id)
+                        invalidate_obstacle_cache(obstacle_cache, ripped_pair.p_net_id)
+                        invalidate_obstacle_cache(obstacle_cache, ripped_pair.n_net_id)
+                        reroute_succeeded = True
 
                 if not reroute_succeeded:
                     if not ripped_items:

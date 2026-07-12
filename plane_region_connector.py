@@ -5,6 +5,7 @@ After power planes are created, regions may be effectively split due to vias and
 traces from other nets cutting through the plane. This module detects disconnected
 regions and routes wide, short tracks between them to ensure electrical continuity.
 """
+from __future__ import annotations
 
 from typing import List, Optional, Tuple, Dict, Set
 from collections import deque
@@ -12,15 +13,18 @@ import math
 
 import numpy as np
 
-from kicad_parser import PCBData, Via, Segment, Pad, POSITION_DECIMALS
+from kicad_parser import PCBData, Via, Segment, Pad, POSITION_DECIMALS, pad_drill_circles
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import point_in_pad_rect, pad_rect_halfspan, filter_cells_in_pad_rect
+from routing_utils import (point_in_pad_rect, pad_rect_halfspan, filter_cells_in_pad_rect,
+                           segment_blocked_cells_array)
 from geometry_utils import UnionFind
 from bresenham_utils import walk_line
 from obstacle_map import (add_board_edge_obstacles, add_user_keepout_obstacles,
-                          add_rule_area_keepout_obstacles)
+                          add_rule_area_keepout_obstacles,
+                          _batch_cells_one_layer, _batch_vias,
+                          block_track_cells_near_drills, _pad_has_copper)
 from plane_obstacle_builder import (
-    _precompute_circle_offsets, _bresenham_centers,
+    _precompute_circle_offsets,
     _batch_block_circles_via, _batch_block_circles_cell
 )
 
@@ -28,6 +32,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
 from grid_router import GridObstacleMap, GridRouter
+from single_ended_routing import _track_margin_for_width
 import routing_defaults as defaults
 
 
@@ -128,6 +133,53 @@ def _collect_cross_layer_points(
             cross_layer_points.append((pad.global_x, pad.global_y, set(routing_layers)))
 
     return cross_layer_points
+
+
+def _zone_interior_cells(
+    net_id: int,
+    layer: str,
+    pcb_data: PCBData,
+    coord: GridCoord,
+    bounds_grid: Tuple[int, int, int, int],
+) -> Optional[Set[Tuple[int, int]]]:
+    """Grid cells whose centers lie inside ANY of this net's zone OUTLINES on
+    `layer` (scanline rasterization, O(rows x edges) per polygon).
+
+    The connectivity flood used to traverse every unblocked cell in the zone
+    BOUNDS -- including empty space with no copper at all -- so a plane split
+    into multiple outline islands (castor_pollux +3.3V: 3 outlines sharing
+    In2.Cu with +3.3VA) graded as ONE region and the repair never bridged it
+    (#217/#189 false 'fully connected'). Zone-layer traversal must stay
+    inside the net's own outlines; same-net tracks crossing the gaps remain
+    traversable via net_segment_cells.
+
+    Returns None when the net has no zone polygons on the layer (caller keeps
+    the legacy unrestricted flood -- e.g. zones not present in pcb_data).
+    """
+    polys = [z.polygon for z in (getattr(pcb_data, 'zones', None) or [])
+             if z.net_id == net_id and z.layer == layer
+             and getattr(z, 'polygon', None) and len(z.polygon) >= 3]
+    if not polys:
+        return None
+    min_gx, max_gx, min_gy, max_gy = bounds_grid
+    inside: Set[Tuple[int, int]] = set()
+    for poly in polys:
+        for gy in range(min_gy, max_gy + 1):
+            _, y = coord.to_float(0, gy)
+            xs = []
+            n = len(poly)
+            for i in range(n):
+                x1, y1 = poly[i]
+                x2, y2 = poly[(i + 1) % n]
+                if (y1 <= y < y2) or (y2 <= y < y1):
+                    xs.append(x1 + (y - y1) * (x2 - x1) / (y2 - y1))
+            xs.sort()
+            for k in range(0, len(xs) - 1, 2):
+                gx_lo, _ = coord.to_grid(xs[k], y)
+                gx_hi, _ = coord.to_grid(xs[k + 1], y)
+                for gx in range(max(gx_lo, min_gx), min(gx_hi, max_gx) + 1):
+                    inside.add((gx, gy))
+    return inside
 
 
 def _build_layer_blocked_set(
@@ -312,7 +364,9 @@ def find_disconnected_zone_regions(
     # Cache the blocked set and segment cells for plane_layer to reuse later
     blocked_plane: Optional[Set[Tuple[int, int]]] = None
     net_plane_segment_cells: Optional[Set[Tuple[int, int]]] = None
+    inside_plane: Optional[Set[Tuple[int, int]]] = None
 
+    bounds_grid = (min_gx, max_gx, min_gy, max_gy)
     for layer in routing_layers:
         # Get layer-specific clearance (fall back to default zone_clearance)
         layer_clearance = zone_clearance
@@ -323,11 +377,16 @@ def find_disconnected_zone_regions(
         blocked, net_segment_cells = _build_layer_blocked_set(
             layer, net_id, pcb_data, coord, layer_clearance
         )
+        # Zone copper only exists inside this net's own outlines (#217).
+        inside_zone = (_zone_interior_cells(net_id, layer, pcb_data, coord,
+                                            bounds_grid)
+                       if layer in zone_layers else None)
 
         # Cache plane_layer data for reuse in anchor flood fill
         if layer == plane_layer:
             blocked_plane = blocked
             net_plane_segment_cells = net_segment_cells
+            inside_plane = inside_zone
 
         # Find cross-layer points on this layer
         layer_cls: List[int] = []
@@ -389,17 +448,34 @@ def find_disconnected_zone_regions(
                                 debug_paths.append((path_points, layer))
                         cl_uf.union(start_cl_idx, cl_idx)
 
-                # Expand to neighbors (4-connected for flood fill)
-                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                # Expand to neighbors: 4-connected through zone copper, plus
+                # diagonal steps ALONG the net's own segment cells -- segment
+                # rasterization is a Bresenham line, so a 45-degree repair
+                # route is a diagonal cell chain a 4-connected flood cannot
+                # walk. The previous repair invocation's region-connection
+                # routes were therefore invisible to the next invocation's
+                # model, which re-routed the SAME connections onto identical
+                # coordinates (castor_pollux: 293 stacked duplicate GND
+                # segments). A diagonal into own-copper cells is physically
+                # real copper continuity, never a corner-cut through a gap.
+                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0),
+                               (1, 1), (1, -1), (-1, 1), (-1, -1)]:
                     nx, ny = gx + dx, gy + dy
+                    if dx != 0 and dy != 0 and (nx, ny) not in net_segment_cells:
+                        continue
                     if (nx, ny) in layer_visited:
                         continue
                     if nx < min_gx or nx > max_gx or ny < min_gy or ny > max_gy:
                         continue
                     if layer in zone_layers:
-                        # Layer has a zone: flood through unblocked cells (zone copper)
-                        # or through blocked cells if they're same-net segments
-                        if (nx, ny) in blocked:
+                        # Layer has a zone: flood through unblocked cells INSIDE
+                        # this net's own zone outlines (zone copper), or through
+                        # same-net segments anywhere. Unrestricted bounds-wide
+                        # flooding unioned separate outline islands through
+                        # copper-free space (#217 castor_pollux +3.3V).
+                        if ((nx, ny) in blocked
+                                or (inside_zone is not None
+                                    and (nx, ny) not in inside_zone)):
                             if (nx, ny) not in net_segment_cells:
                                 continue
                     else:
@@ -441,6 +517,11 @@ def find_disconnected_zone_regions(
     assert blocked_plane is not None, "plane_layer should have been processed in the loop"
     assert net_plane_segment_cells is not None, "plane_layer should have been processed in the loop"
     plane_visited: Set[Tuple[int, int]] = set()
+    # Per-flood fill cells, keyed by the starting anchor index: these ARE the
+    # region's modeled fill on the plane layer, and the join uses them as
+    # pseudo-anchor material (castor +3.3VA: the region's only real anchor
+    # sat 20mm from where its island nearly touches the neighbour).
+    flood_cells_by_start: Dict[int, Set[Tuple[int, int]]] = {}
     for start_anchor_idx in range(len(anchor_points)):
         start_gx, start_gy = anchor_grid_points[start_anchor_idx]
 
@@ -452,25 +533,74 @@ def find_disconnected_zone_regions(
 
         queue = deque([(start_gx, start_gy)])
         plane_visited.add((start_gx, start_gy))
+        this_flood: Set[Tuple[int, int]] = {(start_gx, start_gy)}
+        flood_cells_by_start[start_anchor_idx] = this_flood
 
         while queue:
             gx, gy = queue.popleft()
+            this_flood.add((gx, gy))
 
             if (gx, gy) in grid_to_anchors:
                 for anchor_idx in grid_to_anchors[(gx, gy)]:
                     anchor_uf.union(start_anchor_idx, anchor_idx)
 
-            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0),
+                           (1, 1), (1, -1), (-1, 1), (-1, -1)]:
                 nx, ny = gx + dx, gy + dy
+                # Diagonals only along own segment copper (Bresenham chains),
+                # same as the cross-layer flood above.
+                if dx != 0 and dy != 0 and (nx, ny) not in net_plane_segment_cells:
+                    continue
                 if (nx, ny) in plane_visited:
                     continue
                 if nx < min_gx or nx > max_gx or ny < min_gy or ny > max_gy:
                     continue
-                if (nx, ny) in blocked_plane:
+                # Same inside-own-outline gate as the cross-layer flood (#217).
+                if ((nx, ny) in blocked_plane
+                        or (inside_plane is not None
+                            and (nx, ny) not in inside_plane)):
                     if (nx, ny) not in net_plane_segment_cells:
                         continue
                 plane_visited.add((nx, ny))
                 queue.append((nx, ny))
+
+    # Anchor-less fill islands (#217 castor +3.3VA): a bare patch of modeled
+    # fill with no via/pad/track anywhere on it never seeds a flood, so it
+    # stayed invisible to region detection -- yet KiCad fills it and its DRC
+    # connectivity flags it against the rest of the net. Sweep the leftover
+    # inside-outline unblocked cells into anchor-less regions (cells only,
+    # walked with the same gates as the anchor flood); the join's validated
+    # fill-cell pseudo-anchors give them connectable points. Tiny slivers
+    # (<1mm^2 at the analysis grid) are model noise, not real islands.
+    orphan_patches: List[Set[Tuple[int, int]]] = []
+    if inside_plane is not None:
+        # High bar: >=25mm^2. The model's fill is approximate (thermal
+        # spokes, coarse carves) and a low bar manufactured DOZENS of
+        # phantom 0-anchor regions on zone-heavy boards -- 75 join edges of
+        # copper spam on the kit board. Small REAL islands are the
+        # kicad-oracle recheck's job (it sees the authoritative fill).
+        min_patch_cells = max(100, int(25.0 / (analysis_grid_step * analysis_grid_step)))
+        for start in inside_plane:
+            if start in plane_visited or start in blocked_plane:
+                continue
+            patch: Set[Tuple[int, int]] = {start}
+            plane_visited.add(start)
+            queue = deque([start])
+            while queue:
+                gx, gy = queue.popleft()
+                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                    nx, ny = gx + dx, gy + dy
+                    if (nx, ny) in plane_visited:
+                        continue
+                    if nx < min_gx or nx > max_gx or ny < min_gy or ny > max_gy:
+                        continue
+                    if (nx, ny) in blocked_plane or (nx, ny) not in inside_plane:
+                        continue
+                    plane_visited.add((nx, ny))
+                    patch.add((nx, ny))
+                    queue.append((nx, ny))
+            if len(patch) >= min_patch_cells:
+                orphan_patches.append(patch)
 
     # Group anchors by their root
     groups: Dict[int, List[int]] = {}
@@ -486,9 +616,22 @@ def find_disconnected_zone_regions(
 
     for root, indices in groups.items():
         anchors = [anchor_points[i] for i in indices]
+        # The region's modeled FILL cells: union of its member anchors' plane
+        # floods (previously just the anchor grid points, which starved the
+        # join of pseudo-anchor material).
         cells = set(anchor_grid_points[i] for i in indices)
+        for i in indices:
+            cells |= flood_cells_by_start.get(i, set())
         region_anchors.append(anchors)
         region_cells.append(cells)
+
+    # Anchor-less islands become regions with cells only; the join seeds
+    # them purely from validated fill-cell pseudo-anchors.
+    # Largest few only: each extra region is an MST edge someone must route.
+    orphan_patches.sort(key=len, reverse=True)
+    for patch in orphan_patches[:4]:
+        region_anchors.append([])
+        region_cells.append(patch)
 
     return region_anchors, region_cells, debug_paths
 
@@ -548,10 +691,132 @@ def _block_pad_cells(
             blocked.add((gx, gy))
 
 
+def _interior_cells(cells):
+    """Cells eroded by one analysis cell: the flood model approximates the
+    fill at coarse resolution, so interior cells are far likelier to carry
+    real copper -- a pseudo-anchor on a boundary cell can land where the
+    actual fill was carved away, emitting a join that connects to nothing.
+    Erosion ladder: 8-neighbor interior, else 4-neighbor (thin strip
+    islands at a coarse grid have no 8-interior at all), else nothing (the
+    join falls back to plain anchors)."""
+    full = []
+    ortho = []
+    for (gx, gy) in cells:
+        ok4 = all((gx + dx, gy + dy) in cells
+                  for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)))
+        if not ok4:
+            continue
+        ortho.append((gx, gy))
+        if all((gx + dx, gy + dy) in cells
+               for dx in (-1, 0, 1) for dy in (-1, 0, 1)):
+            full.append((gx, gy))
+    return full or ortho
+
+
+def _interior_points(cells, coord, cache=None):
+    """INTERIOR region fill cells as float points (before subsampling).
+
+    Pure function of `cells`. `_interior_cells` erosion + `to_float` is the
+    expensive part (~90 ms on a 40k-cell GND pour) and it is recomputed for the
+    SAME region on every region-join edge that touches it (#351). `cache` (a dict
+    the caller scopes to one route_disconnected_regions call, so its keys stay
+    live and it is GC'd afterwards) memoizes the result per cells-set identity.
+    The value keeps a reference to `cells`, so its id() cannot be recycled while
+    cached -- guarding the id()-key reuse footgun."""
+    if cache is not None:
+        hit = cache.get(id(cells))
+        if hit is not None and hit[0] is cells:
+            return hit[1]
+    pts = [coord.to_float(gx, gy) for gx, gy in _interior_cells(cells)]
+    if cache is not None:
+        cache[id(cells)] = (cells, pts)
+    return pts
+
+
+def _subsample_cell_points(cells, coord, max_pts: int = 400, interior_cache=None):
+    """INTERIOR region fill cells as float points, subsampled. Always returns a
+    FRESH list (never the cached interior) so callers may sort/extend it freely."""
+    pts = _interior_points(cells, coord, interior_cache)
+    if len(pts) > max_pts:
+        stride = len(pts) // max_pts + 1
+        return pts[::stride]
+    return list(pts)
+
+
+def _real_fill_point(pt, net_id, pcb_data, zone_polys, plane_layer,
+                     margin: float) -> bool:
+    from check_connected import point_in_polygon
+    # A point inside a FOREIGN zone outline on this layer may be copper owned
+    # by a higher-priority foreign pour (Zone has no parsed priority yet, so
+    # reject conservatively -- the join falls back to real anchors).
+    for z in (getattr(pcb_data, 'zones', []) or []):
+        if z.net_id != net_id and z.layer == plane_layer \
+                and getattr(z, 'polygon', None) \
+                and point_in_polygon(pt[0], pt[1], z.polygon):
+            return False
+    """True when a disc of radius `margin` around pt provably sits in REAL
+    zone fill: fully inside one outline and at least `margin` clear of every
+    foreign copper item on the plane layer (the coarse flood model blurs the
+    fill's clearance carving; joins attached to modeled-but-absent fill ship
+    floating vias -- kicad-cli 'Via | Zone unconnected')."""
+    x, y = pt
+    probes = ((x, y), (x + margin, y), (x - margin, y),
+              (x, y + margin), (x, y - margin))
+    if not any(all(point_in_polygon(px, py, poly) for px, py in probes)
+               for poly in zone_polys):
+        return False
+    m2 = margin
+    for v in pcb_data.vias:
+        if v.net_id != net_id and \
+                math.hypot(x - v.x, y - v.y) < v.size / 2 + m2:
+            return False
+    for s in pcb_data.segments:
+        if s.net_id == net_id or s.layer != plane_layer:
+            continue
+        dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+        L2 = dx * dx + dy * dy
+        t = max(0.0, min(1.0, ((x - s.start_x) * dx + (y - s.start_y) * dy) / L2)) if L2 else 0.0
+        if math.hypot(x - (s.start_x + t * dx), y - (s.start_y + t * dy)) < s.width / 2 + m2:
+            return False
+    from check_drc import point_to_pad_distance
+    for pads in pcb_data.pads_by_net.values():
+        for p in pads:
+            if p.net_id == net_id:
+                continue
+            if p.drill <= 0 and plane_layer not in p.layers and '*.Cu' not in p.layers:
+                continue
+            # Exact outline distance: the radial max-dim/2 test over-rejects
+            # near rectangular pads and starved thin lobes of pseudo-anchors.
+            if point_to_pad_distance(x, y, p) < m2:
+                return False
+    return True
+
+
+def _nearest_cell_points(cells, coord, near_pt, k: int = 8,
+                         validity=None, interior_cache=None):
+    """The k INTERIOR region fill cells closest to near_pt, as float points.
+    A deep fill cell is electrically the region (new copper starting there
+    lands in the zone fill), so these serve as pseudo-anchors. `validity`
+    (optional callable) filters candidates to provably-real fill points."""
+    pts = _subsample_cell_points(cells, coord, max_pts=2000,
+                                 interior_cache=interior_cache)
+    pts = sorted(pts, key=lambda p: (p[0] - near_pt[0]) ** 2 + (p[1] - near_pt[1]) ** 2)
+    if validity is None:
+        return pts[:k]
+    out = []
+    for p in pts:
+        if validity(p):
+            out.append(p)
+            if len(out) >= k:
+                break
+    return out
+
+
 def find_region_connection_points(
     region_anchors: List[List[Tuple[float, float]]],
     region_cells: List[Set[Tuple[int, int]]],
-    coord: GridCoord
+    coord: GridCoord,
+    interior_cache=None
 ) -> List[Tuple[int, int, Tuple[float, float], Tuple[float, float], float]]:
     """
     Find MST edges connecting disconnected regions using closest anchor points.
@@ -568,25 +833,55 @@ def find_region_connection_points(
     if n_regions < 2:
         return []
 
-    # Find closest points between each pair of regions
+    # Closest approach between regions is measured over the regions' FILL
+    # CELLS (subsampled) plus their anchors -- not anchors alone. A region's
+    # only anchor can sit 20mm from where its island nearly touches the
+    # other region (castor +3.3VA: RV1's pad at (58.5,66.9) vs the 4mm hop
+    # at (55,87) Andy bridged by hand); anchor-only selection then asks the
+    # router for the long way through the dense middle and fails.
+    region_pts: List[List[Tuple[float, float]]] = []
+    for i in range(n_regions):
+        pts = list(region_anchors[i])
+        pts.extend(_subsample_cell_points(
+            region_cells[i] if i < len(region_cells) else (), coord,
+            interior_cache=interior_cache))
+        region_pts.append(pts)
+
+    # Per-region float coordinate arrays for the vectorized closest-approach
+    # query below. Built once (not per region PAIR) so the O(n_regions^2) pass
+    # reuses them.
+    region_np = [np.asarray(pts, dtype=np.float64).reshape(-1, 2)
+                 for pts in region_pts]
+
     edges: List[Tuple[float, int, int, Tuple[float, float], Tuple[float, float]]] = []
 
     for i in range(n_regions):
+        Pi = region_np[i]
+        if Pi.shape[0] == 0:
+            continue
         for j in range(i + 1, n_regions):
-            best_dist = float('inf')
-            best_pi = None
-            best_pj = None
-
-            for pi in region_anchors[i]:
-                for pj in region_anchors[j]:
-                    dist = math.sqrt((pi[0] - pj[0])**2 + (pi[1] - pj[1])**2)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_pi = pi
-                        best_pj = pj
-
-            if best_pi and best_pj:
-                edges.append((best_dist, i, j, best_pi, best_pj))
+            Pj = region_np[j]
+            if Pj.shape[0] == 0:
+                continue
+            # Closest approach between the two point sets. The old pure-Python
+            # double loop was O(N_i x N_j) per region pair (each region up to
+            # ~100 anchors + 400 subsampled fill cells), the dominant cost of the
+            # region-join MST on big multi-region plane nets (#351). np.argmin
+            # over the row-major dist^2 matrix returns the FIRST global minimum in
+            # (i-outer, j-inner) order -- bit-identical to the brute force's
+            # strict-`<` first-minimum tie-break -- so the selected points, and
+            # thus the routed edges, are unchanged; only the inner scan moves to C.
+            dx = Pi[:, 0][:, None] - Pj[:, 0][None, :]
+            dy = Pi[:, 1][:, None] - Pj[:, 1][None, :]
+            flat = int((dx * dx + dy * dy).argmin())
+            ii, jj = divmod(flat, Pj.shape[0])
+            # Return the ORIGINAL tuple objects (not numpy scalars) so downstream
+            # identity/`in` checks on the points behave exactly as before.
+            best_pi = region_pts[i][ii]
+            best_pj = region_pts[j][jj]
+            best_dist = math.sqrt((best_pi[0] - best_pj[0]) ** 2
+                                  + (best_pi[1] - best_pj[1]) ** 2)
+            edges.append((best_dist, i, j, best_pi, best_pj))
 
     # Sort by distance and build MST using Kruskal's algorithm
     edges.sort(key=lambda e: e[0])
@@ -735,6 +1030,7 @@ def _try_route_between_regions(
     _attempt_count = 0
     _total_route_time = 0.0
     _attempt_details = []
+    _any_exhausted = False
 
     def _try_route(src, tgt, margin, iters, label):
         """Helper to attempt one route and track stats."""
@@ -755,8 +1051,14 @@ def _try_route_between_regions(
         _dt = _time.time() - _t0
         _attempt_count += 1
         _total_route_time += _dt
+        nonlocal _any_exhausted
+        if not result and used_iters >= iters * 0.95:
+            _any_exhausted = True
         _attempt_details.append(f"{label} {'OK' if result else 'fail'} {_dt:.2f}s/{used_iters}it")
         return result, used_iters
+
+    if not anchors_i or not anchors_j:
+        return None, min_track_width, None, False
 
     # Generate width steps: min, min*2, min*4, ..., up to max
     track_widths_narrow_first = [min_track_width]
@@ -772,13 +1074,29 @@ def _try_route_between_regions(
     open_space_via = None
     base_iterations = 0  # iterations used by narrowest successful route
 
+    # Route from the region with FEWER anchors as SOURCES. A multi-source A* with
+    # many sources and few targets floods a broad, weakly-guided frontier and often
+    # exhausts the whole budget WITHOUT finding a path, whereas few-sources ->
+    # many-targets beelines: its heuristic (distance to the NEAREST of many targets)
+    # is far more informative and the frontier stays focused. On daisho, routing the
+    # 299-anchor GND region as ~128 source cells toward a 1-anchor region exhausted
+    # 200k iterations and FAILED, while the reverse (few sources -> that big region
+    # as target) found the same connection in ~2k -- and edges list the giant region
+    # first, so the old fixed A->B order paid the 200k failure on ~every big-region
+    # edge before the reverse succeeded. Ordering cheap-direction-first is purely a
+    # search-efficiency choice: same obstacle map, same connectivity (#263).
+    if len(anchors_i) <= len(anchors_j):
+        lo_src, hi_tgt = anchors_i, anchors_j
+    else:
+        lo_src, hi_tgt = anchors_j, anchors_i
+
     # Step 1: Try minimum width first (both directions) with full budget
     result, base_iterations = _try_route(
-        anchors_i, anchors_j, 0, max_iterations, f"w={min_track_width:.2f}mm A->B")
+        lo_src, hi_tgt, 0, max_iterations, f"w={min_track_width:.2f}mm few->many")
 
     if result is None:
         result, base_iterations = _try_route(
-            anchors_j, anchors_i, 0, max_iterations, f"w={min_track_width:.2f}mm B->A")
+            hi_tgt, lo_src, 0, max_iterations, f"w={min_track_width:.2f}mm many->few")
 
     if result is None:
         # Can't route even at min width - try open-space fallback
@@ -810,21 +1128,35 @@ def _try_route_between_regions(
     # Step 2: If we found a route at min width, try wider widths with bounded budget
     if result is not None and len(track_widths_narrow_first) > 1:
         narrow_result = result
-        iter_budget = max(base_iterations * 3, 1000)  # at least 1000
+        # Wider width is an OPTIONAL upgrade over the already-successful narrow
+        # route, so cap its budget at the standard max_iterations: a widening that
+        # can't fit the corridor then fails fast instead of exhausting up to 3x a
+        # large base. On daisho base_iterations reached ~200k, so the old 3x gave
+        # ~600k-iteration FAILING searches per edge (2-8s each, x every edge that
+        # routed narrow) -- a dominant slice of the multi-minute region-connect
+        # phase (#263). Never below base_iterations, so a legitimate widening
+        # through the same corridor (needs ~base) still succeeds; only the trace
+        # WIDTH is affected on a miss, never whether the regions connect.
+        iter_budget = min(max(base_iterations * 3, 1000), max_iterations)
 
         # Try wider widths (skip min_track_width which we already did)
         for try_width in track_widths_narrow_first[1:]:
-            extra_margin_mm = (try_width - min_track_width) / 2
-            track_margin = int(math.ceil(extra_margin_mm / config.grid_step))
+            # Same +1 quantization guard as route.py's _track_margin_for_width
+            # (issue #268): the obstacle stamp blocks cell CENTERS strictly inside
+            # the keep-out radius, so the outermost blocked cell sits up to ~one
+            # cell inside it; a bare ceil margin measured from that shell lets a
+            # widened trunk land tens of um inside the NPTH/copper floor.
+            track_margin = _track_margin_for_width(
+                try_width, min_track_width, config.grid_step)
 
             wider, _ = _try_route(
-                anchors_i, anchors_j, track_margin, iter_budget,
-                f"w={try_width:.2f}mm A->B")
+                lo_src, hi_tgt, track_margin, iter_budget,
+                f"w={try_width:.2f}mm few->many")
 
             if wider is None:
                 wider, _ = _try_route(
-                    anchors_j, anchors_i, track_margin, iter_budget,
-                    f"w={try_width:.2f}mm B->A")
+                    hi_tgt, lo_src, track_margin, iter_budget,
+                    f"w={try_width:.2f}mm many->few")
 
             if wider is not None:
                 result = wider
@@ -835,7 +1167,27 @@ def _try_route_between_regions(
     if verbose:
         print(f"({_attempt_count} attempts, {_total_route_time:.1f}s: {'; '.join(_attempt_details)}) ", end="", flush=True)
 
-    return result, track_width, open_space_via
+    return result, track_width, open_space_via, _any_exhausted
+
+
+# Cap on how many anchors of a region are fed into the connection A* as
+# source/target seeds. A giant plane region (e.g. daisho's GND Region 0 has
+# 320 anchors) otherwise pushes thousands of source/target cells into EVERY A*
+# attempt, across N track widths x N region pairs -- the dominant cost of
+# route_disconnected_planes on dense boards. Regions are internally connected,
+# so routing between the anchors nearest each region's connection point is
+# optimal; the full anchor set is retried as a fallback if the reduced route
+# fails, so no connection is lost.
+ANCHOR_SEED_CAP = 16
+
+
+def _nearest_anchors(anchors, point, k=ANCHOR_SEED_CAP):
+    """The <=k anchors nearest `point`. Returns `anchors` unchanged when there
+    are <= k of them (no behavior change for small regions) or `point` is None."""
+    if point is None or len(anchors) <= k:
+        return anchors
+    px, py = point
+    return sorted(anchors, key=lambda a: (a[0] - px) ** 2 + (a[1] - py) ** 2)[:k]
 
 
 def route_disconnected_regions(
@@ -857,7 +1209,9 @@ def route_disconnected_regions(
     verbose: bool = False,
     zone_layers: Optional[Set[str]] = None,
     debug_connectivity: bool = False,
-    zone_clearances: Optional[Dict[str, float]] = None
+    zone_clearances: Optional[Dict[str, float]] = None,
+    progress_callback=None,
+    cancel_check=None
 ) -> Tuple[List[Dict], List[Dict], int, List[List[Tuple[float, float]]], List[Tuple[List[Tuple[float, float]], str]]]:
     """
     Detect and route between disconnected zone regions.
@@ -880,6 +1234,10 @@ def route_disconnected_regions(
         zone_layers: Layers that have zones for this net (for cross-layer connectivity)
         debug_connectivity: If True, return connectivity paths from flood fill analysis
         zone_clearances: Per-layer zone clearances (layer -> clearance)
+        progress_callback: Optional callable(current, total, label) invoked at
+            region discovery and per connection attempt (issue #364)
+        cancel_check: Optional callable returning True to abort; checked
+            before each region connection (issue #364)
 
     Returns:
         Tuple of (list of segment dicts, list of via dicts, number of routes added,
@@ -888,6 +1246,8 @@ def route_disconnected_regions(
     coord = GridCoord(config.grid_step)
 
     # Find disconnected regions (checking connectivity across all layers)
+    if progress_callback:
+        progress_callback(0, 0, f"{net_name}: finding disconnected regions...")
     routing_layers = list(layer_map.keys())
     region_anchors, region_cells, connectivity_paths = find_disconnected_zone_regions(
         net_id, plane_layer, zone_bounds, pcb_data, config, zone_clearance,
@@ -908,9 +1268,19 @@ def route_disconnected_regions(
         for i, anchors in enumerate(region_anchors):
             print(f"    Region {i}: {len(anchors)} anchor(s)")
 
+    # Per-region interior-fill-point memo, scoped to this join: the MST scan and
+    # every edge's pseudo-anchor lookup erode + float-convert the SAME region's
+    # cells repeatedly (~90 ms per 40k-cell pour), so memoize per region (#351).
+    interior_cache: Dict[int, tuple] = {}
+
     # Find MST edges to connect regions
-    mst_edges = find_region_connection_points(region_anchors, region_cells, coord)
+    mst_edges = find_region_connection_points(region_anchors, region_cells, coord,
+                                              interior_cache=interior_cache)
     print(f"  Routing {len(mst_edges)} connection(s) to join regions...")
+    if progress_callback:
+        progress_callback(0, len(mst_edges),
+                          f"{net_name}: {n_regions} regions, "
+                          f"{len(mst_edges)} connection(s) to route")
 
     # Get plane layer index and routing layers from layer_map
     plane_layer_idx = layer_map.get(plane_layer)
@@ -934,6 +1304,8 @@ def route_disconnected_regions(
     previous_routes: List[List[Tuple[float, float]]] = []
 
     # Create a single reusable router for all MST edges
+    narrow_obstacles = None       # lazily-built map stamped at config.track_width
+    routes_added_replay = []      # connections added this loop, replayed onto it
     plane_router = GridRouter(
         via_cost=config.via_cost_units(),
         h_weight=config.heuristic_weight,
@@ -944,29 +1316,160 @@ def route_disconnected_regions(
     )
 
     for edge_idx, (region_i, region_j, point_i, point_j, dist) in enumerate(mst_edges):
+        if cancel_check and cancel_check():
+            print("    (cancelled)")
+            break
         # Get all anchors from each region for multi-point routing
         anchors_i = region_anchors[region_i]
         anchors_j = region_anchors[region_j]
 
+        # Seed the A* only from the anchors nearest each region's connection
+        # point (fix: giant regions otherwise feed thousands of seeds per attempt).
+        seed_i = _nearest_anchors(anchors_i, point_i)
+        seed_j = _nearest_anchors(anchors_j, point_j)
+        # Pseudo-anchors on the fill nearest the closest approach: a new via
+        # anywhere on a region's fill IS the region (castor +3.3VA -- the
+        # human's bridge started at a bare fill spot 20mm from the anchor).
+        _zone_polys = [z.polygon for z in (getattr(pcb_data, 'zones', []) or [])
+                       if z.net_id == net_id and getattr(z, 'polygon', None)]
+        _plane_layer_name = [l for l, i in layer_map.items()
+                             if i == plane_layer_idx][0]
+        _margin = zone_clearance + min_track_width / 2
+
+        def _valid_fill(pt):
+            return _real_fill_point(pt, net_id, pcb_data, _zone_polys,
+                                    _plane_layer_name, _margin)
+
+        def _valid_fill_relaxed(pt):
+            return _real_fill_point(pt, net_id, pcb_data, _zone_polys,
+                                    _plane_layer_name, zone_clearance)
+
+        def _cells_for(region_idx, near_pt):
+            cells = region_cells[region_idx] \
+                if region_idx < len(region_cells) else ()
+            pts = _nearest_cell_points(cells, coord, near_pt,
+                                       validity=_valid_fill,
+                                       interior_cache=interior_cache)
+            if not pts:
+                # The track-width-padded margin starves thin pockets of
+                # seeds entirely ('seed 16x0' -> guaranteed FAILED edge);
+                # fall back to the bare zone clearance -- the A* still
+                # routes against the real obstacle map either way.
+                pts = _nearest_cell_points(cells, coord, near_pt,
+                                           validity=_valid_fill_relaxed,
+                                           interior_cache=interior_cache)
+            return pts
+
+        cells_i = _cells_for(region_i, point_i)
+        cells_j = _cells_for(region_j, point_j)
+        seed_i = seed_i + [p for p in cells_i if p not in seed_i]
+        seed_j = seed_j + [p for p in cells_j if p not in seed_j]
+        full_i = anchors_i + [p for p in cells_i if p not in anchors_i]
+        full_j = anchors_j + [p for p in cells_j if p not in anchors_j]
+        reduced = (len(seed_i) < len(full_i)) or (len(seed_j) < len(full_j))
+
         # Progress indicator
-        print(f"    [{edge_idx+1}/{len(mst_edges)}] Region {region_i} ({len(anchors_i)} anchors) <-> Region {region_j} ({len(anchors_j)} anchors)...", end=" ", flush=True)
+        seed_note = f" (seed {len(seed_i)}x{len(seed_j)})" if reduced else ""
+        print(f"    [{edge_idx+1}/{len(mst_edges)}] Region {region_i} ({len(anchors_i)} anchors) <-> Region {region_j} ({len(anchors_j)} anchors){seed_note}...", end=" ", flush=True)
+        if progress_callback:
+            progress_callback(edge_idx + 1, len(mst_edges),
+                              f"{net_name}: connecting plane regions")
+
+        def _connect(a_i, a_j):
+            return _try_route_between_regions(
+                a_i, a_j,
+                base_obstacles=base_obstacles,
+                plane_layer_idx=plane_layer_idx,
+                routing_layers=routing_layers,
+                config=config,
+                bounds=zone_bounds,
+                net_vias=net_vias,
+                max_track_width=max_track_width,
+                min_track_width=min_track_width,
+                max_iterations=max_iterations,
+                coord=coord,
+                verbose=verbose,
+                router=plane_router
+            )
 
         # Try routing with multiple track widths using helper function
-        result, track_width, open_space_via = _try_route_between_regions(
-            anchors_i, anchors_j,
-            base_obstacles=base_obstacles,
-            plane_layer_idx=plane_layer_idx,
-            routing_layers=routing_layers,
-            config=config,
-            bounds=zone_bounds,
-            net_vias=net_vias,
-            max_track_width=max_track_width,
-            min_track_width=min_track_width,
-            max_iterations=max_iterations,
-            coord=coord,
-            verbose=verbose,
-            router=plane_router
-        )
+        result, track_width, open_space_via, _exhausted = _connect(seed_i, seed_j)
+
+        # Fallback: if the reduced-anchor route failed, retry with the full
+        # region anchor sets (the original, slower behavior) so we never miss a
+        # connection that the full set would have found.
+        if result is None and reduced:
+            print(f"{YELLOW}retry-full{RESET} ", end="", flush=True)
+            result, track_width, open_space_via, _ex2 = _connect(full_i, full_j)
+            _exhausted = _exhausted or _ex2
+
+        # Budget escalation (#217 castor +3.3VA): every failing attempt above
+        # exhausted the default 200k cap without exhausting the SPACE -- at
+        # 1M the same edges route. Boost once before giving up; a join is a
+        # rare last-resort event, so the extra budget costs nothing on
+        # healthy boards.
+        # Escalate ONLY when some attempt actually ran out of budget: a
+        # fast fail means walls, and 5x the budget just burns ~12M
+        # iterations per genuinely-impossible edge (review finding).
+        if result is None and max_iterations < 1_000_000 and _exhausted:
+            print(f"{YELLOW}budget-x5{RESET} ", end="", flush=True)
+            result, track_width, open_space_via, _ = _try_route_between_regions(
+                full_i, full_j,
+                base_obstacles=base_obstacles,
+                plane_layer_idx=plane_layer_idx,
+                routing_layers=routing_layers,
+                config=config,
+                bounds=zone_bounds,
+                net_vias=net_vias,
+                max_track_width=max_track_width,
+                min_track_width=min_track_width,
+                max_iterations=min(max_iterations * 5, 1_000_000),
+                coord=coord,
+                verbose=verbose,
+                router=plane_router
+            )
+
+        # Last resort (#217 castor +3.3VA): the corridor between two regions
+        # can be narrower than REPAIR_MIN_TRACK_WIDTH while still fitting the
+        # run's own signal --track-width (Andy hand-bridged the failing edge
+        # at exactly 0.127). The base map's keep-outs are stamped at
+        # min_track_width, so a narrower attempt needs a map stamped at the
+        # narrow width -- built lazily once per net and kept in sync with the
+        # connections already added this loop. A narrow bridge beats a split
+        # plane.
+        if result is None and config.track_width < min_track_width - 1e-9:
+            if narrow_obstacles is None:
+                print(f"{YELLOW}narrow-map{RESET} ", end="", flush=True)
+                narrow_obstacles, _ = build_base_obstacles(
+                    exclude_net_ids={net_id},
+                    routing_layers=routing_layers,
+                    pcb_data=pcb_data,
+                    config=config,
+                    track_width=config.track_width,
+                    track_via_clearance=track_via_clearance,
+                    hole_to_hole_clearance=hole_to_hole_clearance)
+                for (_rp, _vp, _tw) in routes_added_replay:
+                    add_route_to_obstacles(
+                        narrow_obstacles, _rp, _vp, layer_map, _tw,
+                        config.clearance, track_via_clearance, config,
+                        hole_to_hole_clearance)
+            print(f"{YELLOW}narrow-width {config.track_width:.3f}{RESET} ",
+                  end="", flush=True)
+            result, track_width, open_space_via, _ = _try_route_between_regions(
+                full_i, full_j,
+                base_obstacles=narrow_obstacles,
+                plane_layer_idx=plane_layer_idx,
+                routing_layers=routing_layers,
+                config=config,
+                bounds=zone_bounds,
+                net_vias=net_vias,
+                max_track_width=config.track_width,
+                min_track_width=config.track_width,
+                max_iterations=min(max_iterations * 5, 1_000_000),
+                coord=coord,
+                verbose=verbose,
+                router=plane_router
+            )
 
         if result is None:
             print(f"{RED}FAILED{RESET}")
@@ -976,6 +1479,13 @@ def route_disconnected_regions(
             continue
 
         route_points, via_positions = result
+        # Collapse same-layer collinear grid steps into long segments (the
+        # oracle's emission got this; joins shipped raw 0.05mm stubs). Via
+        # positions stay as vertices.
+        from kicad_oracle import _merge_collinear
+        route_points = _merge_collinear(
+            route_points,
+            keep={(round(vx, 3), round(vy, 3)) for vx, vy in via_positions})
 
         # Calculate actual route length
         route_length = 0.0
@@ -998,6 +1508,13 @@ def route_disconnected_regions(
             track_width, config.clearance, track_via_clearance, config,
             hole_to_hole_clearance
         )
+        routes_added_replay.append((route_points, via_positions, track_width))
+        if narrow_obstacles is not None:
+            add_route_to_obstacles(
+                narrow_obstacles, route_points, via_positions, layer_map,
+                track_width, config.clearance, track_via_clearance, config,
+                hole_to_hole_clearance
+            )
 
         # Keep track of route for debug output
         previous_routes.append([(p[0], p[1]) for p in route_points])
@@ -1101,25 +1618,40 @@ def build_base_obstacles(
         Tuple of (obstacle_map, layer_map)
     """
     coord = GridCoord(config.grid_step)
+    # Half-cell discretization cushion (matches build_via_obstacle_map /
+    # build_routing_obstacle_map): the keep-out cells are grid-snapped, but the
+    # router's own connection/merge geometry can land OFF grid between cells, so
+    # without this margin an off-grid connector segment grazes foreign copper
+    # sub-cell (issue #173). Far smaller than the old flat 0.8mm over-block.
+    cushion = config.grid_step / 2
 
     num_layers = len(routing_layers)
     layer_map = {layer: idx for idx, layer in enumerate(routing_layers)}
 
     obstacles = GridObstacleMap(num_layers)
 
-    # Block other nets' vias as hard obstacles on ALL layers (vias are through-hole)
-    via_radius = coord.to_grid_dist_safe(track_via_clearance)
-    other_via_centers = []
+    # Block other nets' vias (issue #173 parity with route.py): a foreign via
+    # blocks TRACK routing within foreign_via_radius + our_track_half + clearance
+    # on every layer, and new-VIA placement within foreign_via_radius +
+    # our_via_radius + clearance -- both scaling with the foreign via's ACTUAL
+    # size. The old code used a single flat track_via_clearance constant (0.8mm)
+    # for all vias, which over-blocked typical vias, ignored their real size, and
+    # added no copper via-via placement clearance. our_track_half uses track_width
+    # (== min connection width): the region router routes at the min width against
+    # this base map and adds its own extra margin when it widens.
+    foreign_centers_by_size: Dict[float, List[Tuple[int, int]]] = {}
     for via in pcb_data.vias:
         if via.net_id in exclude_net_ids:
             continue
-        gx, gy = coord.to_grid(via.x, via.y)
-        other_via_centers.append((gx, gy))
-
-    if other_via_centers:
-        via_circle_offsets = _precompute_circle_offsets(via_radius * via_radius)
+        foreign_centers_by_size.setdefault(via.size, []).append(coord.to_grid(via.x, via.y))
+    for vsize, centers in foreign_centers_by_size.items():
+        track_keepout_mm = vsize / 2 + track_width / 2 + config.clearance + cushion
+        track_offs = _precompute_circle_offsets((track_keepout_mm / coord.grid_step) ** 2)
         for layer_idx in range(num_layers):
-            _batch_block_circles_cell(obstacles, other_via_centers, via_circle_offsets, layer_idx)
+            _batch_block_circles_cell(obstacles, centers, track_offs, layer_idx)
+        via_keepout_mm = vsize / 2 + config.via_size / 2 + config.clearance + cushion
+        via_offs = _precompute_circle_offsets((via_keepout_mm / coord.grid_step) ** 2)
+        _batch_block_circles_via(obstacles, centers, via_offs)
 
     # Add proximity costs around other nets' vias (on all layers)
     proximity_radius_grid = coord.to_grid_dist(proximity_radius)
@@ -1139,15 +1671,21 @@ def build_base_obstacles(
             False
         )
 
-    # Block via placement near holes for hole-to-hole clearance
-    hole_clearance_grid = max(1, coord.to_grid_dist_safe(hole_to_hole_clearance + config.via_drill))
-
-    # Block via placement near ALL vias (including same-net) for hole-to-hole clearance
+    # Block via placement near ALL vias (including same-net) for hole-to-hole
+    # clearance, using each EXISTING via's actual drill: required centre distance
+    # is existing_drill/2 + new_drill/2 + h2h, not the equal-drill shortcut
+    # h2h + config.via_drill, which let a 0.15-drill repair via land 0.354mm from
+    # a 0.3-drill stitching via (needs 0.425 -- issue #274).
     # Via reuse is handled separately by snapping routes to existing vias
-    all_via_centers = [(coord.to_grid(via.x, via.y)) for via in pcb_data.vias]
-    if all_via_centers:
-        hole_circle_offsets = _precompute_circle_offsets(hole_clearance_grid * hole_clearance_grid)
-        _batch_block_circles_via(obstacles, all_via_centers, hole_circle_offsets)
+    via_centers_by_radius: Dict[int, List[Tuple[int, int]]] = {}
+    for via in pcb_data.vias:
+        vdrill = via.drill if via.drill and via.drill > 0 else config.via_drill
+        r = max(1, coord.to_grid_dist_safe(
+            hole_to_hole_clearance + vdrill / 2 + config.via_drill / 2))
+        via_centers_by_radius.setdefault(r, []).append(coord.to_grid(via.x, via.y))
+    for radius, centers in via_centers_by_radius.items():
+        hole_circle_offsets = _precompute_circle_offsets(radius * radius)
+        _batch_block_circles_via(obstacles, centers, hole_circle_offsets)
 
     # Block via placement near ALL through-hole pad holes (including same-net)
     # Via reuse at pads is handled separately by snapping routes to pad positions
@@ -1155,12 +1693,18 @@ def build_base_obstacles(
     pad_centers_by_radius: Dict[int, List[Tuple[int, int]]] = {}
     for pad_net_id, pads in pcb_data.pads_by_net.items():
         for pad in pads:
-            if '*.Cu' in pad.layers and pad.drill > 0:  # Through-hole pad with drill
-                gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-                pad_hole_clearance_grid = max(1, coord.to_grid_dist_safe(hole_to_hole_clearance + pad.drill / 2 + config.via_drill / 2))
-                if pad_hole_clearance_grid not in pad_centers_by_radius:
-                    pad_centers_by_radius[pad_hole_clearance_grid] = []
-                pad_centers_by_radius[pad_hole_clearance_grid].append((gx, gy))
+            # Any drilled pad: PTH barrels AND NPTH mounting holes (which often
+            # list only *.Mask) -- the drill goes through every layer (#268).
+            # A milled SLOT drill is a capsule, not a round hole: sample it as
+            # circles along its axis (pad_drill_circles) so the whole slot is
+            # kept clear, not just a circle at its centre. Round drills yield one
+            # circle == the old behaviour.
+            if pad.drill > 0:
+                for hx, hy, hdia in pad_drill_circles(pad):
+                    gx, gy = coord.to_grid(hx, hy)
+                    r_grid = max(1, coord.to_grid_dist_safe(
+                        hole_to_hole_clearance + hdia / 2 + config.via_drill / 2))
+                    pad_centers_by_radius.setdefault(r_grid, []).append((gx, gy))
 
     for radius, centers in pad_centers_by_radius.items():
         pad_circle_offsets = _precompute_circle_offsets(radius * radius)
@@ -1174,21 +1718,28 @@ def build_base_obstacles(
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
-        seg_expansion_mm = track_width / 2 + seg.width / 2 + config.clearance
-        seg_expansion_grid = max(1, coord.to_grid_dist_safe(seg_expansion_mm))
-        _block_segment_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_grid)
+        seg_expansion_mm = track_width / 2 + seg.width / 2 + config.clearance + cushion
+        _block_segment_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_mm)
         # Also block vias along this segment - must include segment width for proper clearance
-        via_seg_expansion_mm = config.via_size / 2 + seg.width / 2 + config.clearance
-        via_seg_expansion_grid = max(1, coord.to_grid_dist_safe(via_seg_expansion_mm))
-        _block_segment_via_obstacle(obstacles, seg, coord, via_seg_expansion_grid)
+        via_seg_expansion_mm = config.via_size / 2 + seg.width / 2 + config.clearance + cushion
+        _block_segment_via_obstacle(obstacles, seg, coord, via_seg_expansion_mm)
 
     # Block pads from non-plane nets on their respective layers
     # (plane net pads are excluded here - they're anchors; other plane nets' pads
     # will be blocked per-net in route_disconnected_regions)
+    npth_holes = []  # (x, y, drill) of no-copper holes -> NPTH track keep-out
     for pad_net_id, pads in pcb_data.pads_by_net.items():
         if pad_net_id in exclude_net_ids:
             continue
         for pad in pads:
+            # NPTH mounting holes have NO copper (even when the library lists
+            # *.Cu): the pad-rect block below would only enforce the routing
+            # clearance, but copper must stay the NPTH-to-track fab floor from
+            # the DRILL (issue #268) -- handled by the drill keep-out after
+            # this loop instead.
+            if pad.drill > 0 and not _pad_has_copper(pad):
+                npth_holes.append((pad.global_x, pad.global_y, pad.drill))
+                continue
             # Determine which layers this pad is on
             pad_layers_on = []
             if '*.Cu' in pad.layers:
@@ -1204,7 +1755,7 @@ def build_base_obstacles(
             # Block rectangular area around pad with clearance for track routing.
             # Honor a per-pad local clearance override (fiducial keep-clear etc.).
             pad_clr = max(config.clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
-            pad_expansion_mm = track_width / 2 + pad_clr
+            pad_expansion_mm = track_width / 2 + pad_clr + cushion
             half_w, half_h = pad_rect_halfspan(pad, pad_expansion_mm)
             min_gx, _ = coord.to_grid(pad.global_x - half_w, 0)
             max_gx, _ = coord.to_grid(pad.global_x + half_w, 0)
@@ -1219,8 +1770,9 @@ def build_base_obstacles(
                 for layer_idx in pad_layers_on:
                     layer_col = np.full((rect_cells.shape[0], 1), layer_idx, dtype=np.int32)
                     obstacles.add_blocked_cells_batch(np.hstack([rect_cells, layer_col]))
-            # Also block vias around pad - need more clearance for via size
-            via_expansion_mm = config.via_size / 2 + track_via_clearance
+            # Also block vias around pad - new via radius + clearance from pad edge
+            # (issue #173 parity: was config.via_size/2 + the flat 0.8 constant).
+            via_expansion_mm = config.via_size / 2 + config.clearance + cushion
             via_half_w, via_half_h = pad_rect_halfspan(pad, via_expansion_mm)
             via_min_gx, _ = coord.to_grid(pad.global_x - via_half_w, 0)
             via_max_gx, _ = coord.to_grid(pad.global_x + via_half_w, 0)
@@ -1233,6 +1785,16 @@ def build_base_obstacles(
                 via_rect_cells = np.column_stack([via_gx_grid.ravel(), via_gy_grid.ravel()])
                 via_rect_cells = filter_cells_in_pad_rect(via_rect_cells, coord.grid_step, pad, via_expansion_mm)
                 obstacles.add_blocked_vias_batch(via_rect_cells)
+
+    # Track keep-out around NPTH (no-copper) drills on every layer at exactly
+    # the NPTH-to-track fab floor (issues #268/#233). No cushion: the floor is
+    # the hard fab requirement and cell centers at >= the radius stay free, so
+    # this blocks the minimum area that avoids real copper-to-hole violations.
+    if npth_holes:
+        npth_clr = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
+        block_track_cells_near_drills(obstacles, npth_holes, track_width,
+                                      npth_clr, config.grid_step,
+                                      list(range(num_layers)))
 
     # Block areas outside the board outline (supports non-rectangular boards)
     add_board_edge_obstacles(obstacles, pcb_data, config, 0.0, layers=routing_layers)
@@ -1259,36 +1821,47 @@ def add_route_to_obstacles(
     """Add a completed route (segments and vias) to the obstacle map for subsequent routes to avoid."""
     coord = GridCoord(config.grid_step)
     num_layers = len(layer_map)
+    cushion = config.grid_step / 2  # half-cell discretization margin (issue #173)
 
-    # Block segments on their layers and also block vias along segments
-    route_expansion_mm = track_width + clearance
-    route_expansion_grid = max(1, coord.to_grid_dist_safe(route_expansion_mm))
-    via_seg_expansion_mm = config.via_size / 2 + track_width / 2 + clearance
-    via_seg_expansion_grid = max(1, coord.to_grid_dist_safe(via_seg_expansion_mm))
+    # Block segments on their layers and also block vias along segments.
+    # Exact capsule keep-out from the TRUE float route points (issue #173),
+    # shared with route.py's obstacle builder -- no grid snapping of the
+    # newly-routed connection geometry, which is exactly the off-grid copper
+    # that the old bresenham stamp under-covered sub-cell.
+    route_expansion_mm = track_width + clearance + cushion
+    via_seg_expansion_mm = config.via_size / 2 + track_width / 2 + clearance + cushion
 
     for i in range(len(route_points) - 1):
         p1, p2 = route_points[i], route_points[i + 1]
         # Only block if on same layer (segments)
         if p1[2] == p2[2]:
             layer_idx = layer_map.get(p1[2], 0)
-            gx1, gy1 = coord.to_grid(p1[0], p1[1])
-            gx2, gy2 = coord.to_grid(p2[0], p2[1])
-            _block_line_cells(obstacles, gx1, gy1, gx2, gy2, layer_idx, route_expansion_grid)
+            cells = segment_blocked_cells_array(p1[0], p1[1], p2[0], p2[1],
+                                                route_expansion_mm, coord.grid_step)
+            _batch_cells_one_layer(obstacles, cells, layer_idx)
             # Also block vias along this segment
-            _block_line_vias(obstacles, gx1, gy1, gx2, gy2, via_seg_expansion_grid)
+            vias = segment_blocked_cells_array(p1[0], p1[1], p2[0], p2[1],
+                                               via_seg_expansion_mm, coord.grid_step)
+            _batch_vias(obstacles, vias)
 
-    # Block vias on all layers (through-hole) for track routing clearance
-    via_radius = coord.to_grid_dist_safe(via_clearance)
-    # Block via placement with hole-to-hole clearance (prevents new vias too close to these)
+    # Newly-placed connection vias (all config.via_size) block TRACK routing at
+    # via_size/2 + our_track_half + clearance, new-VIA placement at copper
+    # clearance (via_size + clearance), and drill placement at hole-to-hole.
+    # (issue #173 parity: was a flat via_clearance constant for track + hole-to-
+    # hole only, with no copper via-via placement clearance.)
+    track_keepout_mm = config.via_size / 2 + track_width / 2 + clearance + cushion
+    via_copper_keepout_mm = config.via_size + clearance + cushion
     hole_clearance_radius = coord.to_grid_dist_safe(hole_to_hole_clearance + config.via_drill)
 
     if via_positions:
         via_grid_centers = [coord.to_grid(vx, vy) for vx, vy in via_positions]
         # Block track routing around vias on all layers
-        via_cell_offsets = _precompute_circle_offsets(via_radius * via_radius)
+        via_cell_offsets = _precompute_circle_offsets((track_keepout_mm / coord.grid_step) ** 2)
         for layer_idx in range(num_layers):
             _batch_block_circles_cell(obstacles, via_grid_centers, via_cell_offsets, layer_idx)
-        # Block via placement with proper hole-to-hole clearance
+        # Block new-via placement: copper clearance AND drill hole-to-hole.
+        via_copper_offsets = _precompute_circle_offsets((via_copper_keepout_mm / coord.grid_step) ** 2)
+        _batch_block_circles_via(obstacles, via_grid_centers, via_copper_offsets)
         hole_offsets = _precompute_circle_offsets(hole_clearance_radius * hole_clearance_radius)
         _batch_block_circles_via(obstacles, via_grid_centers, hole_offsets)
 
@@ -1343,34 +1916,39 @@ def route_plane_connection_wide(
         """Check if a point is at a via location (connects all layers)."""
         return (round(x, POSITION_DECIMALS), round(y, POSITION_DECIMALS)) in via_positions
 
-    # Set up sources - all anchor points from source region
-    # For vias (which connect all layers), set source on ALL layers
-    sources = []
-    for sx, sy in source_points:
-        gx, gy = coord.to_grid(sx, sy)
-        if is_at_via(sx, sy):
-            # Via connects all layers - set source on all layers
-            for layer_idx in range(n_layers):
-                obstacles.add_source_target_cell(gx, gy, layer_idx)
-                sources.append((gx, gy, layer_idx))
-        else:
-            # SMD pad - only on plane layer
-            obstacles.add_source_target_cell(gx, gy, plane_layer_idx)
-            sources.append((gx, gy, plane_layer_idx))
+    # Set up sources - all anchor points from source region.
+    # Points are (x, y) -- stamped on the plane layer, or all layers when at
+    # a via -- or (x, y, layer_name) for an explicit layer (the kicad-oracle
+    # reconnect feeds endpoints on arbitrary layers).
+    layer_name_to_idx = {name: i for i, name in enumerate(routing_layers)}
 
-    # Set up targets - all anchor points from target region
+    def _stamp(points, out):
+        for pt in points:
+            if len(pt) == 3:
+                sx, sy, lname = pt
+                li = layer_name_to_idx.get(lname)
+                gx, gy = coord.to_grid(sx, sy)
+                if li is None:
+                    continue
+                obstacles.add_source_target_cell(gx, gy, li)
+                out.append((gx, gy, li))
+                continue
+            sx, sy = pt
+            gx, gy = coord.to_grid(sx, sy)
+            if is_at_via(sx, sy):
+                # Via connects all layers - set on all layers
+                for layer_idx in range(n_layers):
+                    obstacles.add_source_target_cell(gx, gy, layer_idx)
+                    out.append((gx, gy, layer_idx))
+            else:
+                # SMD pad - only on plane layer
+                obstacles.add_source_target_cell(gx, gy, plane_layer_idx)
+                out.append((gx, gy, plane_layer_idx))
+
+    sources = []
+    _stamp(source_points, sources)
     targets = []
-    for tx, ty in target_points:
-        gx, gy = coord.to_grid(tx, ty)
-        if is_at_via(tx, ty):
-            # Via connects all layers - set target on all layers
-            for layer_idx in range(n_layers):
-                obstacles.add_source_target_cell(gx, gy, layer_idx)
-                targets.append((gx, gy, layer_idx))
-        else:
-            # SMD pad - only on plane layer
-            obstacles.add_source_target_cell(gx, gy, plane_layer_idx)
-            targets.append((gx, gy, plane_layer_idx))
+    _stamp(target_points, targets)
 
     # Create router if not provided
     if router is None:
@@ -1442,48 +2020,25 @@ def _block_segment_obstacle(
     seg: Segment,
     coord: GridCoord,
     layer_idx: int,
-    expansion_grid: int
+    expansion_mm: float
 ):
-    """Block cells along a segment in the obstacle map."""
-    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-    _block_line_cells(obstacles, gx1, gy1, gx2, gy2, layer_idx, expansion_grid)
+    """Block cells along a segment: exact point-to-segment (capsule) keep-out
+    from the TRUE float segment, shared with route.py's obstacle builder (issue
+    #173). The previous bresenham stamp snapped the endpoints to the grid and
+    under-covered off-grid/diagonal copper sub-cell."""
+    cells = segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                        seg.end_x, seg.end_y, expansion_mm, coord.grid_step)
+    _batch_cells_one_layer(obstacles, cells, layer_idx)
 
 
 def _block_segment_via_obstacle(
     obstacles: GridObstacleMap,
     seg: Segment,
     coord: GridCoord,
-    expansion_grid: int
+    expansion_mm: float
 ):
-    """Block via placement along a segment (vias span all layers)."""
-    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-    _block_line_vias(obstacles, gx1, gy1, gx2, gy2, expansion_grid)
-
-
-def _block_line_vias(
-    obstacles: GridObstacleMap,
-    gx1: int, gy1: int,
-    gx2: int, gy2: int,
-    expansion_grid: int
-):
-    """Block via placement along a line with given expansion radius."""
-    radius_sq = expansion_grid * expansion_grid
-    circle_offsets = _precompute_circle_offsets(radius_sq)
-    centers = _bresenham_centers(gx1, gy1, gx2, gy2)
-    _batch_block_circles_via(obstacles, centers, circle_offsets)
-
-
-def _block_line_cells(
-    obstacles: GridObstacleMap,
-    gx1: int, gy1: int,
-    gx2: int, gy2: int,
-    layer_idx: int,
-    expansion_grid: int
-):
-    """Block cells along a line with given expansion radius."""
-    radius_sq = expansion_grid * expansion_grid
-    circle_offsets = _precompute_circle_offsets(radius_sq)
-    centers = _bresenham_centers(gx1, gy1, gx2, gy2)
-    _batch_block_circles_cell(obstacles, centers, circle_offsets, layer_idx)
+    """Block via placement along a segment (vias span all layers): exact capsule
+    keep-out from the TRUE float segment (issue #173)."""
+    vias = segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                       seg.end_x, seg.end_y, expansion_mm, coord.grid_step)
+    _batch_vias(obstacles, vias)

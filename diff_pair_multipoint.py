@@ -15,6 +15,7 @@ resistor -> IC pins) are routed as a CHAIN of terminals:
   fresh terminal). Pad swaps are never used: a swap at a shared terminal
   would break the already-routed leg.
 """
+from __future__ import annotations
 
 import math
 from itertools import permutations
@@ -30,13 +31,14 @@ from kicad_parser import PCBData, Pad
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
 from diff_pair_routing import (
     route_diff_pair_with_obstacles, get_pair_end_direction, _pn_tracks_cross,
-    _DRC_CLEARANCE_MARGIN, _routing_copper_layers
+    _DRC_CLEARANCE_MARGIN, _routing_copper_layers, _seg_to_seglist_min_edge,
+    _route_direct_coupled_middle
 )
 from layer_swap_fallback import add_own_stubs_as_obstacles_for_diff_pair, rank_fallback_layers
 from stub_layer_switching import apply_bare_pad_target_via
 from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from polarity_swap import apply_polarity_swap, undo_polarity_swap
-from routing_context import build_diff_pair_obstacles
+from routing_context import build_diff_pair_obstacles, build_diff_pair_leg_obstacles
 
 
 def _segments_properly_cross(a, b, eps: float = 1e-6) -> bool:
@@ -77,6 +79,47 @@ def _crosses_committed_legs(new_segments, committed_segments) -> bool:
             if new_seg.layer == old_seg.layer and \
                     _segments_properly_cross(new_seg, old_seg):
                 return True
+    return False
+
+
+def _pn_self_overlaps(new_segments, p_net_id, n_net_id, config, pcb_data=None) -> bool:
+    """True if this leg's new P/N copper comes below clearance to the partner
+    polarity (an intra-pair SEGMENT-SEGMENT overlap, #215). A multipoint leg is a
+    standard coupled route, so it can pinch P against N at the terminal connectors
+    just like a top-level pair -- but unlike the top-level path there is no hybrid
+    swap to fall back on here, so a self-overlapping leg is rejected and the chain
+    falls through to single-ended (the right treatment for these short legs).
+
+    The partner copper includes the pair's pre-existing fanout stubs in pcb_data
+    (not just this leg's own segments): the leg's coupled middle can land on the
+    OTHER net's carried-through escape stub (butterstick USB-PHY/USBD), and the
+    diff-pair obstacle map excludes both pair nets so the router never saw it."""
+    new_p = [s for s in new_segments if s.net_id == p_net_id]
+    new_n = [s for s in new_segments if s.net_id == n_net_id]
+    if not new_p and not new_n:
+        return False
+    own = set(id(s) for s in new_segments)
+    all_p, all_n = list(new_p), list(new_n)
+    if pcb_data is not None:
+        for s in pcb_data.segments:
+            if id(s) in own:
+                continue
+            if s.net_id == p_net_id:
+                all_p.append(s)
+            elif s.net_id == n_net_id:
+                all_n.append(s)
+    if not all_p or not all_n:
+        return False
+    # Only the NEW segments need testing as the moving party -- pre-existing
+    # stub-vs-stub spacing was already DRC-valid before this leg.
+    for s in new_p:
+        if _seg_to_seglist_min_edge(s.start_x, s.start_y, s.end_x, s.end_y,
+                                    s.width, s.layer, all_n) < config.clearance - 1e-6:
+            return True
+    for s in new_n:
+        if _seg_to_seglist_min_edge(s.start_x, s.start_y, s.end_x, s.end_y,
+                                    s.width, s.layer, all_p) < config.clearance - 1e-6:
+            return True
     return False
 
 
@@ -192,21 +235,33 @@ def terminal_separation(terminal: Tuple[Pad, Pad]) -> float:
 # ~1 setback fanning in and ~1 fanning out - so coupling buys nothing and only
 # tangles the pair through clustered connector pads (castor_pollux /MCU/CONN_D, a
 # USB connector). Such a leg is routed single-ended instead. 5x the connector
-# setback is the floor. (Physics: even a 10 GHz / 10 Gb/s edge is electrically
-# short over ~1-3 mm, so a few-mm connector fan-in never needs coupling.)
+# setback is the geometric floor.
 DIFF_PAIR_MIN_COUPLED_SETBACKS = 5.0
+
+# Absolute electrical floor (mm): below ~lambda/10 at 5 GHz on FR4 a pair is
+# electrically short, so SE vs coupled is indistinguishable no matter how tight
+# the geometric fan-in is. v = c/sqrt(eps_eff) ~= 145-173 mm/ns on FR4
+# (stripline..microstrip), f = 5 GHz -> lambda ~= 29-35 mm -> lambda/10 ~= 3 mm.
+# This catches tight-pitch pairs (width+gap <= 0.3 mm) whose 5x-setback floor is
+# under 3 mm; wider pairs are still governed by the larger geometric floor.
+# (Assumes a <=5 GHz design; a much faster board would want a smaller floor.)
+DIFF_PAIR_MIN_COUPLED_FLOOR_MM = 3.0
 
 
 def diff_pair_min_coupled_length(config: GridRouteConfig) -> float:
     """Minimum leg length (mm) below which coupling gains nothing -> single-end.
 
-    = DIFF_PAIR_MIN_COUPLED_SETBACKS * connector setback (the centerline setback
-    if configured, else 4x the pair half-spacing - the same setback the corridor
-    capsules use)."""
+    = max(DIFF_PAIR_MIN_COUPLED_SETBACKS * connector setback,
+          DIFF_PAIR_MIN_COUPLED_FLOOR_MM)
+    where the setback is the centerline setback if configured, else 4x the pair
+    half-spacing (the same setback the corridor capsules use). The geometric term
+    keeps short fan-ins from tangling; the absolute lambda/10-at-5GHz floor keeps
+    electrically-short pairs single-ended even at very tight pitch."""
     spacing_mm = (config.track_width + config.diff_pair_gap) / 2
     setback = (config.diff_pair_centerline_setback
                if config.diff_pair_centerline_setback is not None else spacing_mm * 4)
-    return DIFF_PAIR_MIN_COUPLED_SETBACKS * setback
+    return max(DIFF_PAIR_MIN_COUPLED_SETBACKS * setback,
+               DIFF_PAIR_MIN_COUPLED_FLOOR_MM)
 
 
 def leg_electrically_short(term_a: Tuple[Pad, Pad], term_b: Tuple[Pad, Pad],
@@ -221,6 +276,30 @@ def leg_electrically_short(term_a: Tuple[Pad, Pad], term_b: Tuple[Pad, Pad],
     n_dist = math.hypot(term_a[1].global_x - term_b[1].global_x,
                         term_a[1].global_y - term_b[1].global_y)
     return min(p_dist, n_dist) < threshold
+
+
+def diff_pair_is_short(pcb_data: PCBData, p_net_id: int, n_net_id: int,
+                       track_width: float, diff_pair_gap: float,
+                       centerline_setback: float = None) -> bool:
+    """True if a pair would be wholly deferred to single-ended as electrically
+    short -- the same test route_diff applies before routing (diff_pair_loop:
+    a 2-terminal pair whose single leg is electrically short is left for the
+    single-ended pass). Used by the GUI to hide short pairs from the diff-pair
+    list and to keep them visible on the single-ended list. Conservative for
+    multi-point pairs (3+ terminals): those may still couple some legs, so they
+    are never reported short here. Reuses leg_electrically_short so the GUI and
+    the router agree on what counts as short.
+
+    centerline_setback mirrors the GUI control: None or <= 0 means auto."""
+    from types import SimpleNamespace
+    terminals = get_diff_pair_terminals(pcb_data, p_net_id, n_net_id)
+    if len(terminals) != 2:
+        return False
+    cfg = SimpleNamespace(
+        track_width=track_width, diff_pair_gap=diff_pair_gap,
+        diff_pair_centerline_setback=(centerline_setback
+                                      if centerline_setback else None))
+    return leg_electrically_short(terminals[0], terminals[1], cfg)
 
 
 def classify_terminals(terminals: List[Tuple[Pad, Pad]], config: GridRouteConfig
@@ -359,10 +438,16 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
     The via legitimately sits on its own relocated pad and connects to its own-net
     stub, so own-net pads/segments are excluded."""
     from check_drc import (check_via_via_overlap, check_pad_via_overlap,
-                           check_via_segment_overlap)
+                           check_via_segment_overlap, check_via_drill_overlap,
+                           check_pad_drill_via_overlap)
     clearance = config.clearance
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
     margin = _DRC_CLEARANCE_MARGIN
-    fan_vias = [v for v, _ in fans]
+    # A fan entry's via is None when apply_bare_pad_target_via REUSED an existing
+    # same-net via (#282) instead of drilling a new one - there is no new via to
+    # validate (the reused via is already committed and gets checked as an
+    # existing via when the partner fan via is tested). Skip the None entries.
+    fan_vias = [v for v, _ in fans if v is not None]
     fan_ids = {id(v) for v in fan_vias}
     reloc_ids = {id(p) for p in relocated_pads}
     routing_layers = _routing_copper_layers(pcb_data, config)
@@ -371,14 +456,25 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
         for w in fan_vias[i + 1:]:
             if check_via_via_overlap(v, w, clearance, margin)[0]:
                 return False
+            if h2h and check_via_drill_overlap(v, w, h2h, margin)[0]:
+                return False
+        # Drill hole-to-hole is net-INDEPENDENT at the fab (#282), so unlike the
+        # body checks the drill pass excludes nothing (mirrors
+        # _bare_pad_pair_vias_fit, which this gate previously omitted).
         for ev in pcb_data.vias:
-            if id(ev) not in fan_ids and check_via_via_overlap(v, ev, clearance, margin)[0]:
+            if id(ev) in fan_ids:
+                continue
+            if check_via_via_overlap(v, ev, clearance, margin)[0]:
+                return False
+            if h2h and check_via_drill_overlap(v, ev, h2h, margin)[0]:
                 return False
         for pads in pcb_data.pads_by_net.values():
             for pad in pads:
                 if id(pad) in reloc_ids:
-                    continue
+                    continue  # the via legitimately sits on its own relocated pad
                 if check_pad_via_overlap(pad, v, clearance, routing_layers, margin)[0]:
+                    return False
+                if h2h and check_pad_drill_via_overlap(pad, v, h2h, margin)[0]:
                     return False
         for seg in pcb_data.segments:
             if seg.net_id == v.net_id:
@@ -403,7 +499,10 @@ def _attach_fans(merged, fans, legs=None):
     real leg result so the writer emits its vias, and keep `merged` consistent
     for obstacle sync."""
     fan_segs = [s for _, s in fans]
-    fan_vias = [v for v, _ in fans]
+    # A reused existing via (#282) is recorded as None: it is already in
+    # pcb_data.vias / an earlier result's new_vias, so it must NOT be re-emitted
+    # here (a duplicate via in the writer). Only NEW fan vias reach new_vias.
+    fan_vias = [v for v, _ in fans if v is not None]
     sink = legs[0] if legs else merged
     sink['new_segments'] = list(sink.get('new_segments', [])) + fan_segs
     sink['new_vias'] = list(sink.get('new_vias', [])) + fan_vias
@@ -502,6 +601,60 @@ def _make_endpoint(terminal: Tuple[Pad, Pad], config: GridRouteConfig) -> Tuple:
     n_gx, n_gy = coord.to_grid(nn.global_x, nn.global_y)
     return (p_gx, p_gy, n_gx, n_gy, layer_idx,
             pp.global_x, pp.global_y, nn.global_x, nn.global_y)
+
+
+def _terminal_stub_endpoint(pcb_data: PCBData, terminal: Tuple[Pad, Pad],
+                            config: GridRouteConfig):
+    """Endpoint at the terminal's fanout STUB free ends (clear of the BGA) instead
+    of the pad midpoint (buried inside the BGA -> blocked on every layer, so a
+    coupled middle can't even start there). For each polarity, flood-fill the net's
+    copper from the pad and take the farthest free end of that component -- the
+    escape tip the fanout already threaded out between the bus vias. Returns a
+    get_diff_pair_endpoints-format tuple, or None if either stub tip is missing."""
+    from connectivity import find_stub_free_ends
+    coord = GridCoord(config.grid_step)
+    pp, nn = terminal
+    tol = 0.05
+
+    def _near(ax, ay, bx, by):
+        return abs(ax - bx) < tol and abs(ay - by) < tol
+
+    def tip(pad):
+        segs = [s for s in pcb_data.segments if s.net_id == pad.net_id]
+        comp, used = [], [False] * len(segs)
+        pts = [(pad.global_x, pad.global_y)]
+        changed = True
+        while changed:
+            changed = False
+            for k, s in enumerate(segs):
+                if used[k]:
+                    continue
+                if any(_near(s.start_x, s.start_y, px, py) or _near(s.end_x, s.end_y, px, py)
+                       for px, py in pts):
+                    used[k] = True
+                    comp.append(s)
+                    pts.append((s.start_x, s.start_y))
+                    pts.append((s.end_x, s.end_y))
+                    changed = True
+        if not comp:
+            return None
+        ends = find_stub_free_ends(comp, [pad])
+        if not ends:
+            return None
+        fx, fy, flayer = max(ends, key=lambda e: math.hypot(e[0] - pad.global_x,
+                                                            e[1] - pad.global_y))
+        if flayer not in config.layers:
+            return None
+        return fx, fy, config.layers.index(flayer)
+
+    pt, nt = tip(pp), tip(nn)
+    if pt is None or nt is None:
+        return None
+    px, py, pl = pt
+    nx, ny, nl = nt
+    p_gx, p_gy = coord.to_grid(px, py)
+    n_gx, n_gy = coord.to_grid(nx, ny)
+    return (p_gx, p_gy, n_gx, n_gy, pl, px, py, nx, ny)
 
 
 def _terminal_base_dir(pcb_data: PCBData, pair: DiffPairNet, terminal: Tuple[Pad, Pad],
@@ -735,7 +888,18 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
             forced_dir_next = None
             continue
 
-        endpoints = (_make_endpoint(term_a, config), _make_endpoint(term_b, config))
+        # #277: the standard coupled route must ALWAYS launch from a terminal's
+        # fanout STUB FREE END (on the stub's actual layer), not the pad -- exactly
+        # like the hybrid path already does (hyb_eps). The stub end is clear of the
+        # pad/part congestion, and after a layer swap it is on the swapped layer, so
+        # launching from the pad makes the leg double back to the pad on the wrong
+        # layer (redundant copper + a dangling swapped stub end; lumenpnp USB_D
+        # swapped to B.Cu but the middle returned to the F.Cu pad). Fall back to the
+        # pad only when a terminal has no stub (a bare pad).
+        def _leg_endpoint(term):
+            stub_ep = _terminal_stub_endpoint(pcb_data, term, config)
+            return stub_ep if stub_ep is not None else _make_endpoint(term, config)
+        endpoints = (_leg_endpoint(term_a), _leg_endpoint(term_b))
 
         # Pad swaps are only safe at chain-fresh terminals: the target terminal
         # is always fresh, the source only on the first leg (a swap at a shared
@@ -795,10 +959,46 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
             # A wrap-around leg can cross an earlier leg's tracks inside the
             # shared terminal's corridor exemption (issue #56)
             failed_reason = "crosses an earlier leg"
+        elif _pn_self_overlaps(result.get('new_segments', []), pair.p_net_id,
+                               pair.n_net_id, config, pcb_data):
+            # The leg's P/N pinch below clearance -- against its own connectors or
+            # the partner's carried-through fanout stub (#215); no hybrid fallback
+            # here, so reject and let it go single-ended
+            failed_reason = "P/N graze below clearance"
         elif result.get('target_base_dir') is None:
             failed_reason = "missing target direction"
 
         if failed_reason:
+            # Before giving up, route THIS leg as a 2-terminal HYBRID: a clean
+            # coupled middle between the terminals (launched from their fanout STUB
+            # TIPS, clear of the BGA) + single-ended escape legs. A congested BGA
+            # can't launch a *coupled* pair from the pads (CK1's DDR3-bank escape),
+            # but each net escapes individually and couples once clear; the coupled
+            # middle shortens until reachable and the legs single-end the rest.
+            leg_obstacles = build_diff_pair_leg_obstacles(
+                state.base_obstacles, pcb_data, config,
+                state.routed_net_ids, state.remaining_net_ids,
+                state.all_unrouted_net_ids, pair.p_net_id, pair.n_net_id,
+                state.gnd_net_id, state.track_proximity_cache, state.layer_map)
+            hyb_eps = (_terminal_stub_endpoint(pcb_data, term_a, config) or endpoints[0],
+                       _terminal_stub_endpoint(pcb_data, term_b, config) or endpoints[1])
+            # Only THIS leg's two terminals (term_a/term_b are (P pad, N pad)) must
+            # connect -- the net's OTHER terminals are separate legs routed later, so
+            # the hybrid's connectivity gate must not demand the whole net (#250).
+            _leg_pads = {pair.p_net_id: [term_a[0], term_b[0]],
+                         pair.n_net_id: [term_a[1], term_b[1]]}
+            hyb = _route_direct_coupled_middle(
+                pcb_data, pair, config, obstacles, config.layers,
+                leg_obstacles=leg_obstacles, endpoints=hyb_eps, terminal_pads=_leg_pads)
+            if (hyb is not None and not hyb.get('failed') and
+                    not _pn_tracks_cross(hyb.get('new_segments', []), pair.p_net_id, pair.n_net_id) and
+                    not _crosses_committed_legs(hyb.get('new_segments', []), committed_segments)):
+                print(f"  Leg {i + 1} via hybrid (coupled middle + single-ended escapes)")
+                add_route_to_pcb_data(pcb_data, hyb, debug_lines=config.debug_lines)
+                leg_results.append(hyb)
+                committed_segments.extend(hyb.get('new_segments', []))
+                forced_dir_next = None
+                continue
             print(f"  Leg {i + 1} FAILED ({failed_reason}) - "
                   f"ripping {len(leg_results)} committed leg(s)")
             rip_attempt()

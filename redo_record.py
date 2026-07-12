@@ -14,6 +14,7 @@ manifest file (run_board.sh sets it to <run-dir>/redo_commands.sh; set it to
 redo_stress_test.py expects: a '# cwd=<dir>' line followed by the fully-quoted
 command on the next line.
 """
+from __future__ import annotations
 
 import atexit
 import json

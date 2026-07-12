@@ -54,8 +54,10 @@ resistors/caps/jumpers.
 ## place_fanout_clearance.py — decoupling-cap clearance repair (issue #130)
 
 Run **after** `bga_fanout.py`. Nudges decoupling caps near a BGA so their
-pads clear every foreign-net fanout via (and any foreign track on the cap's
-own copper side), and pulls each pad toward the nearest **same-net** ball — so
+pads clear every foreign-net fanout via, every foreign track on the cap's
+own copper side, and every foreign component pad (#130/#278/#275 — a graze
+already present at the seed placement is a violation to fix, not a baseline
+to preserve), and pulls each pad toward the nearest **same-net** ball — so
 a power/GND via dropped at that ball later also lands on the cap pad (one
 shared via connects ball + cap + plane). Caps move as little as possible
 (90° rotations allowed), never overlap each other or a locked part, and a cap
@@ -87,6 +89,30 @@ The advanced knobs above (capture radius, near margin, search step, max
 displacement / cap / growth, max passes, cap-ref prefix, allow-rotation) are
 exposed in that tab's **"Cap Placement (advanced)"** box; `--clearance`,
 `--grid-step`, and the via size come from the Basic tab.
+
+### animate_fanout_clearance.py — visualize the repair as a GIF
+
+`animate_fanout_clearance.py` (repo root) runs the **same** repair engine and
+records every accepted cap move via the engine's optional `on_move` hook, then
+renders an animated GIF of the caps gliding from their seed placement to their
+final, via-clearing positions. The view is framed to the BGA ball field (not
+the whole board); fanout vias appear as net-coloured disks with their keep-out
+ring, cap pads are coloured by net, and a faint ghost rectangle marks each
+cap's seed position. It accepts all of `place_fanout_clearance.py`'s repair
+options plus `--size`, `--fps`, and `--sub-frames` (motion smoothness).
+
+![Decoupling caps gliding off foreign-net fanout vias on the glasgow revC BGA](../docs/fanout-cap-placement.gif)
+
+```bash
+# after: bga_fanout.py board.kicad_pcb -o fanned.kicad_pcb --escape-method underpad \
+#            --via-size 0.3 --via-drill 0.2 --track-width 0.1 --clearance 0.1
+python animate_fanout_clearance.py fanned.kicad_pcb capmove.gif --clearance 0.1
+```
+
+This is a read-only visualization tool: the `on_move` hook defaults to `None`,
+so `place_fanout_clearance.py`, the GUI, and the engine itself behave exactly
+as before when it is unused. Requires `pygame` (render) and `Pillow` (GIF
+encode) — both already used elsewhere in this repo; no matplotlib/ffmpeg.
 
 ## Module layout
 

@@ -4,6 +4,7 @@ Rip-up and reroute functions for the PCB router.
 This module handles removing routed nets from the PCB data and tracking structures,
 as well as restoring them when needed (e.g., when a rip-up retry fails).
 """
+from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
@@ -294,6 +295,16 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
               f"other-net copper; left ripped (#134)")
         if refused_sink is not None:
             refused_sink.update(ripped_net_ids)
+        # Keep the refused route for the #134 recovery's LAST resort: if the
+        # clean reroute pass also fails, a piece-level restore of the
+        # non-colliding copper beats shipping the net at zero (parity with the
+        # plane tools' settle, 72ca5f9).
+        stash = getattr(pcb_data, '_refused_saved_134', None)
+        if stash is None:
+            stash = {}
+            pcb_data._refused_saved_134 = stash
+        for rid in ripped_net_ids:
+            stash[rid] = saved_result
         return
 
     # Add back to pcb_data

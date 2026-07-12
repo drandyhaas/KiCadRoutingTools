@@ -3,12 +3,13 @@ I/O utilities for copper plane generation.
 
 Handles reading zone information from PCB files and writing plane output.
 """
+from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
-from kicad_parser import PCBData, parse_kicad_pcb
+from kicad_parser import PCBData, parse_kicad_pcb, _unescape_kicad_string
 from kicad_writer import (generate_via_sexpr, generate_segment_sexpr, move_copper_text_to_silkscreen,
                           move_copper_graphics_to_silkscreen, add_teardrops_to_pads)
 
@@ -50,7 +51,7 @@ def extract_zones(pcb_file: str) -> List[ZoneInfo]:
         for match in re.finditer(zone_pattern_v10, content):
             zones.append(ZoneInfo(
                 net_id=0,  # No numeric ID in KiCad 10
-                net_name=match.group(1),
+                net_name=_unescape_kicad_string(match.group(1)),
                 layer=match.group(2)
             ))
 
@@ -163,8 +164,14 @@ def filter_nets_from_content(content: str, net_ids_to_exclude: List[int],
                     continue
             elif net_name_set:
                 # KiCad 10: (net "name")
-                net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', element_text)
-                if net_match_v10 and net_match_v10.group(1) in net_name_set:
+                net_match_v10 = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"\)', element_text)
+                # The file stores the ESCAPED name; the exclude set holds the
+                # parser's unescaped names -- without unescaping, every
+                # backslash-named ripped net evaded this filter and its stale
+                # copper shipped OVERLAPPING the tap via route_planes placed in
+                # the vacated spot (neo6502 GND-via-on-/GPIO9\OE2#, found by
+                # the #319 DRC attribution; #312/#264 escaping family).
+                if net_match_v10 and _unescape_kicad_string(net_match_v10.group(1)) in net_name_set:
                     i += 1
                     continue
 
@@ -230,9 +237,10 @@ def filter_zones_from_content(content: str, zones_to_remove: List[Tuple[int, str
                     continue
             elif layer_match and remove_name_set:
                 # KiCad 10: (net "name")
-                net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', element_text)
+                net_match_v10 = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"\)', element_text)
                 if net_match_v10:
-                    zone_net_name = net_match_v10.group(1)
+                    # Unescape: remove_name_set holds parser display names.
+                    zone_net_name = _unescape_kicad_string(net_match_v10.group(1))
                     zone_layer = layer_match.group(1)
                     if (zone_net_name, zone_layer) in remove_name_set:
                         i += 1
@@ -367,12 +375,29 @@ def _pt_seg_dist_sq(px: float, py: float, x1: float, y1: float, x2: float, y2: f
 
 
 def _remove_vias_at_positions(content: str, positions: List[Tuple[float, float]],
-                              tol: float = 2e-3) -> Tuple[str, int]:
+                              tol: float = 2e-3,
+                              net_ids: Optional[List[int]] = None,
+                              net_names: Optional[List[Optional[str]]] = None
+                              ) -> Tuple[str, int]:
     """Remove `(via ...)` elements whose `(at x y)` matches any of `positions`.
 
     Used to drop plane stitching vias that would short against restored signal
     copper (issue #88). Matching is positional with a small tolerance because
     vias are written with fixed 6-decimal precision.
+
+    net_ids / net_names (parallel to positions, #313/#344): when given, a via
+    is dropped only if its net ALSO matches -- so a via-nudge rewrite that
+    re-emits ONE net's moved via can't collaterally delete a DIFFERENT net's
+    via that happens to sit within `tol` of the old position (net-agnostic
+    positional removal was a silent +open-net path). KiCad 9 vias carry a
+    numeric `(net N)`, KiCad 10 vias carry the net NAME `(net "/FOO")` -- the
+    id-only guard read every name-based via as net None, never matched, and
+    turned removal into a no-op: the moved via was re-emitted WITHOUT removing
+    the original, shipping a stacked duplicate and the very graze the nudge
+    was clearing (#344 C6.1/GPIO26, same file-format class as #264). The net
+    guard therefore only skips on a POSITIVE mismatch of whichever form the
+    file carries; a via whose net cannot be compared falls back to positional
+    matching (pre-#313 behavior).
     """
     if not positions:
         return content, 0
@@ -392,11 +417,26 @@ def _remove_vias_at_positions(content: str, positions: List[Tuple[float, float]]
                 open_parens += lines[i].count('(') - lines[i].count(')')
             element_text = '\n'.join(element_lines)
             m = re.search(r'\(at\s+(-?[\d.]+)\s+(-?[\d.]+)', element_text)
+            nm = re.search(r'\(net\s+(\d+)', element_text)
+            v_net = int(nm.group(1)) if nm else None
+            v_net_name = None
+            if v_net is None:
+                nn = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"', element_text)
+                if nn:
+                    from kicad_parser import _unescape_kicad_string
+                    v_net_name = _unescape_kicad_string(nn.group(1))
             drop = False
             if m:
                 vx, vy = float(m.group(1)), float(m.group(2))
-                for px, py in positions:
+                for k, (px, py) in enumerate(positions):
                     if abs(vx - px) < tol and abs(vy - py) < tol:
+                        if (net_ids is not None and v_net is not None
+                                and v_net != net_ids[k]):
+                            continue  # right spot, wrong net: leave it
+                        if (net_names is not None and v_net_name is not None
+                                and net_names[k] is not None
+                                and v_net_name != net_names[k]):
+                            continue  # name-based file, wrong net name
                         drop = True
                         break
             if drop:
@@ -472,6 +512,7 @@ def restore_failed_reroute_nets(
     via_size: float,
     clearance: float,
     plane_segments: Optional[List[Dict]] = None,
+    partial_copper: Optional[Tuple[List[Dict], List[Dict]]] = None,
 ) -> Tuple[List[int], int, int]:
     """Issue #88: restore the ORIGINAL trace of ripped nets that failed to
     re-route, so they are never left disconnected (strictly worse than the
@@ -504,7 +545,7 @@ def restore_failed_reroute_nets(
                                   'layers': v.layers, 'net_id': nid})
 
     if not restored_net_ids:
-        return [], 0
+        return [], 0, 0
 
     # A plane via that lands within (via_r + own_radius + clearance) of restored
     # copper is an electrical short between the signal net and the plane net.
@@ -560,6 +601,21 @@ def restore_failed_reroute_nets(
 
     with open(output_file, 'r', encoding='utf-8') as f:
         content = f.read()
+
+    # A PARTIALLY-restored net (b2557cd settle) already has its kept pieces in
+    # the output as emitted copper; restoring the full original on top would
+    # duplicate every piece at identical coordinates and resurrect the dropped
+    # colliding ones. Strip the net's emitted partial copper first -- the full
+    # original restore replaces it.
+    if partial_copper is not None:
+        p_segs, p_vias = partial_copper
+        p_segs = [x for x in p_segs if x.get('net_id') in restored_net_ids]
+        p_vias = [x for x in p_vias if x.get('net_id') in restored_net_ids]
+        if p_vias:
+            content, _n = _remove_vias_at_positions(
+                content, [(v['x'], v['y']) for v in p_vias])
+        if p_segs:
+            content, _n = _remove_segments_at(content, p_segs)
 
     content, vias_removed = _remove_vias_at_positions(content, remove_positions)
     content, segs_removed = _remove_segments_at(content, remove_segs)

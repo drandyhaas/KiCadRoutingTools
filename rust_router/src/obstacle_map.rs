@@ -398,6 +398,64 @@ impl GridObstacleMap {
         false
     }
 
+    /// Swept-capsule clearance check for wide tracks (issues #156 / #173): true if
+    /// any blocked cell centre is within Euclidean distance `r` (in grid cells) of
+    /// the SEGMENT (gx1,gy1)->(gx2,gy2) -- i.e. the extra-half-width `r` of a wide
+    /// track swept along this A* move.
+    ///
+    /// Replaces is_blocked_with_margin for wide tracks. That function tested a
+    /// Chebyshev SQUARE around ONLY the destination cell, so (a) it over-covered
+    /// corners and (b) it never checked the swept body of a 45deg move -- a
+    /// diagonal step could slip a blocked cell sub-cell between its endpoints
+    /// (the residual grazes in #173, and why #156's point-disc was a no-win:
+    /// a disc at the endpoint still misses the swept segment). This checks the
+    /// true point-to-segment distance with an exact Euclidean radius, covering
+    /// the diagonal sweep. A degenerate segment (p1==p2, used for layer-change
+    /// checks) reduces to a disc of radius `r` about the point. `r <= 0` falls
+    /// back to a plain destination-cell check (base-width tracks: identical to
+    /// the old is_blocked_with_margin(.., 0)).
+    #[inline]
+    pub fn segment_blocked(&self, gx1: i32, gy1: i32, gx2: i32, gy2: i32,
+                           layer: usize, r: f64) -> bool {
+        if r <= 0.0 {
+            return self.is_blocked(gx2, gy2, layer);
+        }
+        let r2 = r * r;
+        let rc = r.ceil() as i32;
+        let lo_x = gx1.min(gx2) - rc;
+        let hi_x = gx1.max(gx2) + rc;
+        let lo_y = gy1.min(gy2) - rc;
+        let hi_y = gy1.max(gy2) + rc;
+        let (ax, ay) = (gx1 as f64, gy1 as f64);
+        let dx = (gx2 - gx1) as f64;
+        let dy = (gy2 - gy1) as f64;
+        let len2 = dx * dx + dy * dy;
+        for cx in lo_x..=hi_x {
+            for cy in lo_y..=hi_y {
+                if !self.is_blocked(cx, cy, layer) {
+                    continue;
+                }
+                let px = cx as f64;
+                let py = cy as f64;
+                let d2 = if len2 <= 0.0 {
+                    let ex = px - ax;
+                    let ey = py - ay;
+                    ex * ex + ey * ey
+                } else {
+                    let mut t = ((px - ax) * dx + (py - ay) * dy) / len2;
+                    if t < 0.0 { t = 0.0; } else if t > 1.0 { t = 1.0; }
+                    let ex = px - (ax + t * dx);
+                    let ey = py - (ay + t * dy);
+                    ex * ex + ey * ey
+                };
+                if d2 <= r2 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Check if via is blocked
     #[inline]
     pub fn is_via_blocked(&self, gx: i32, gy: i32) -> bool {

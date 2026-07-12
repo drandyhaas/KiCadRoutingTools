@@ -3,6 +3,7 @@ Rerouting and collision resolution for BGA fanout routing.
 
 Functions for resolving collisions and rerouting signals through alternate channels.
 """
+from __future__ import annotations
 
 import math
 from typing import List, Dict, Tuple, Optional, Set

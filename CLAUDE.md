@@ -17,7 +17,45 @@ python build_router.py
 
 This builds the Rust module, copies the library to the correct location, and verifies the version. Do not run `cargo build` directly.
 
+**Prefer Python-only solutions; avoid changing the Rust router (`rust_router/`)
+unless clearly necessary and agreed.** A Rust change forces a crate version bump,
+a `build_router.py --from-source` rebuild, and re-distributing prebuilt per-platform
+binaries via GitHub Releases — heavy overhead. When a feature seems to need a Rust
+change, surface that cost early and check for a Python-only approach first.
+
 **Important:** When making changes to the Rust router, bump the version in `rust_router/Cargo.toml` and update the version history in `rust_router/README.md`.
+
+## Testing & Verification
+
+Validate routed boards against the *real* spec, with the right checker — most
+"mystery" bugs here turn out to be grading mistakes, not routing bugs:
+
+- **Connectivity is orthogonal to DRC.** A DRC-clean board can be fully
+  disconnected (isolated copper has no clearance conflicts). Always run
+  `check_connected.py` in addition to `check_drc.py` before calling a route clean.
+- **Grade DRC at the clearance the board was actually routed to** — the route
+  step's `--clearance` (recorded in `redo_commands.sh`), or the board's
+  `.kicad_pro`/netclass — never a guessed/round value. Grading stricter than the
+  route used manufactures phantom sub-clearance grazes. `check_drc.py
+  --clearance-margin 0.1` filters ~grid-quantization noise (~8 µm artifacts).
+- **Routing is deterministic, but outputs carry per-run random UUIDs.** Never hash
+  or whole-file-`diff` `.kicad_pcb` outputs to judge determinism — compare
+  `check_drc` / `check_connected` counts (stable run-to-run) instead.
+- **`route.py` reads/writes a sibling `<output>.kicad_pro` DRC floor.** Re-running
+  to the same output path reads it back and silently changes the routing (looks
+  like non-determinism; it isn't). For clean A/B comparisons, route to a FRESH
+  output path each run (or `rm` the `.kicad_pro` first).
+- **Routers can report false success.** A router's own "routed" tally may come from
+  a local/heuristic proxy while pads stay disconnected; re-verify with the
+  authoritative, zone/fill-aware `check_net_connectivity` before trusting it.
+
+## Stress testing & A/B replay
+
+Every recorded stress run leaves a `redo_commands.sh` manifest that replays the
+full chain with **no LLM**. To regression-test or A/B an engine change across the
+board corpus, use `tests/stress/ab_replay_grade.py` (whole-set replay + DRC/
+connectivity grading) or `tests/stress/redo_diff_stage.py` (diff-pair stages only).
+See `tests/stress/RUNBOOK.md` ("Replaying & A/B (no LLM)") for the recipes.
 
 ## Keep CLI and GUI routing in sync
 
@@ -44,6 +82,16 @@ picked up by both for free. The gaps appear at the edges:
   argparse layer *and* every GUI call site (plus its config dict, the
   options panel, and `settings_persistence.py`). A new `batch_route`
   kwarg that only `route.py` passes silently does nothing in the GUI.
+  It must also stay **Claude-settable end to end**: (1) the GUI plan
+  executor (`claude_plan.py`) applies any snake_case param whose name
+  matches a dialog control — so name the control after the param and add
+  it to `reset_params_to_defaults` (the plan executor resets through
+  that, or the param leaks between steps); (2) add the `--flag` →
+  param-name mapping to `tests/stress/manifest_to_plan.py` `FLAG_PARAMS`
+  so recorded manifests convert to `*_plan.json` with the param intact;
+  (3) mirror it in `tests/gui_parity/test_gui_engine_parity.py`'s config
+  map. Verify with: convert a manifest carrying the flag and check the
+  plan JSON step params include it.
 - **A changed default** must match in both places — the GUI sets its own
   values from UI controls and does not inherit argparse defaults.
 - **Parser/obstacle/writer fixes** in shared low-level modules are used by
@@ -51,11 +99,41 @@ picked up by both for free. The gaps appear at the edges:
   builds `PCBData` from pcbnew instead, so `build_pcb_data_from_board`
   must be kept at parity with the text parser separately.
 
+- **A post-pass added to a CLI `main()`** (running *after* the shared engine
+  call — cleanup, oracle recheck, DRC-floor writeback) is invisible to the
+  GUI unless separately replicated (the set11 plane-shorts bug:
+  `route_disconnected_planes.main()` ran `clean_plane_copper`, the planes tab
+  didn't). Prefer putting the pass INSIDE the shared engine function; when it
+  must operate on the written file, refactor a **board-level core** and call
+  it from both fronts (as `compute_plane_copper_cleanup` now backs both
+  `clean_plane_copper` and `planes_gui._run_plane_copper_cleanup`).
+
 **Rule of thumb:** whenever you change routing behavior via the CLI, check
 whether the corresponding GUI call site (and its options panel) needs the
 same change — and vice versa. When adding a flag, grep the
 `kicad_routing_plugin/` call sites for the function you changed and wire it
 through there too.
+
+**Parity gates (run these when touching CLI/GUI routing):**
+- `tests/gui_parity/test_manifest_plan_parity.py` — no wx; asserts every CLI
+  `--flag` survives `manifest_to_plan` into the GUI plan step (plan→params).
+- `tests/gui_parity/test_cli_postpass_coverage.py` — no wx; asserts every CLI
+  `main()` post-engine pass has a GUI counterpart, and blocks a new CLI-only
+  post-pass (Class-2 drift). Register new passes there.
+- `tests/gui_parity/test_gui_engine_parity.py` — needs KiCad python; runs the
+  plan through the GUI engine path and grades against the CLI chain
+  (`KICAD_DUMP_BATCH_KWARGS` diffs the 76-key param set).
+
+**Tracking the last-audited commit:** `.gui-parity-checked` (repo root,
+git-committed) holds the SHA of the last commit a full CLI/GUI parity audit
+covered, plus the date and outcome. To bring it up to date: `git log
+--oneline <that-sha>..HEAD` to see what's new, `git diff <that-sha>..HEAD --
+<CLI scripts> kicad_routing_plugin/` to see the engine-side vs GUI-side
+diffs, then check every new engine parameter/flag/results-data key against
+the GUI call sites (per the rule of thumb above). When the audit finds and
+fixes a gap, commit the fix first, note it in the file, then update the file
+to current `HEAD` and commit that too — so the recorded SHA always reflects
+"parity confirmed as of here," not "parity assumed."
 
 ## KiCad Parser Usage
 
@@ -115,6 +193,16 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `pad.shape` - 'circle', 'oval', 'rect', etc.
 - `pad.layers` - List of layer names
 - `pad.drill` - Drill diameter (0 for SMD, >0 for through-hole)
+- `pad.hole_x`, `pad.hole_y` - Drill/hole position when the pad copper is
+  OFFSET from it (`(drill (offset x y))`, castellated-module paddles);
+  `None` = hole at `global_x/global_y`. `global_x/global_y` is always the
+  COPPER center (clearance/DRC/obstacle consumers use it directly); drill
+  geometry must use `pad_drill_capsule`/`pad_drill_circles` or hole_x/y.
+- `pad.pad_type` - 'smd', 'thru_hole', 'np_thru_hole', 'connect'. NPTH pads have
+  NO copper even when `layers` lists `*.Cu` (size = mask opening only): skip them
+  in copper-clearance logic, only their drill hole matters. For "does this pad's
+  barrel tie copper layers together", use `pad_is_plated_through(pad)` — never
+  bare `pad.drill > 0` (a net-tied NPTH mounting hole is not a connection, #328)
 - `pad.component_ref` - Parent component reference
 - `pad.pinfunction`, `pad.pintype` - Pin metadata
 

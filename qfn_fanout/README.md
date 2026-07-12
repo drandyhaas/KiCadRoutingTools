@@ -134,24 +134,34 @@ qfn_fanout/
 3. **Escape Direction** - Calculate perpendicular escape direction for each pad
 4. **Stub Generation** - Create two-segment stubs:
    - Straight segment: perpendicular to chip edge (pad_width / 2 + extension, clears pad before bend)
-   - 45-degree segment: fans outward, length varies by position (0 at center, max at corners)
+   - Fan segment: angles outward; both its length AND its angle grow with
+     position along the edge (0 at the edge midpoint, full length and a 45°
+     angle at the outermost/corner pad)
 5. **Collision Check** - Validate endpoint spacing meets minimum spacing requirements
 
 ## Stub Pattern
 
 ```
-Corner pads: Long 45° fan-out
+Corner pad: long, full 45° fan-out
     ╲
      ╲
       ●  (pad)
 
-Center pads: Straight only (no 45°)
-      |
+Mid-edge pad: shorter, shallower angle
+     ╲
+      ●  (pad)
+
+Edge-midpoint pad: straight only (~0° fan)
       |
       ●  (pad)
 ```
 
-The 45-degree segment length varies linearly:
-- Corner pads: max_diagonal_length (= chip_width / 3)
-- Center pads: 0 (no diagonal)
-- Intermediate: linear interpolation based on position along edge
+The fan **length** varies linearly with edge position (0 at the midpoint,
+max_diagonal_length = chip_width / 3 at the corner). The fan **angle** ramps
+separately from ~0° at the midpoint to a full 45° at the *outermost pad* on each
+side (issue #200). A uniform 45° fan keeps every adjacent stub parallel, so
+neighbouring tips stay only pitch/√2 apart — too tight on a fine-pitch edge to
+fit an escape via between them. Ramping the angle makes adjacent stubs *diverge*
+instead, spreading the tips apart while the corner pad keeps its full 45° reach.
+Tips are then snapped to the routing grid in a direction-preserving way, so a
+near-midpoint stub's bend never reverses toward its neighbour.

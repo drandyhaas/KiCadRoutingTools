@@ -3,6 +3,7 @@ Zone geometry utilities for copper plane generation.
 
 Handles Voronoi zone boundary computation, polygon clipping, merging, and grouping.
 """
+from __future__ import annotations
 
 import math
 from typing import List, Dict, Tuple, Optional

@@ -21,6 +21,16 @@ if ROOT_DIR not in sys.path:
 
 import routing_defaults as defaults
 from kicad_parser import POSITION_DECIMALS
+
+def _via_width(via):
+    """KiCad 9/10 padstack vias can refuse layerless GetWidth() ('result
+    with an error set', seen on vias ADDED in-session then re-synced);
+    GetFrontWidth() is the stable outer-annulus accessor."""
+    try:
+        return via.GetWidth()
+    except Exception:
+        return via.GetFrontWidth()
+
 from .fanout_gui import NetSelectionPanel
 from .gui_utils import StdoutRedirector
 from .settings_persistence import get_dialog_settings, restore_dialog_settings
@@ -558,6 +568,45 @@ class RoutingDialog(wx.Dialog):
             setattr(self, name, ctrl)
             grid.Add(ctrl, 0, wx.EXPAND)
 
+        # Fab tier (issue #237): the JLC manufacturing floor every tab routes/grades
+        # DOWN toward. 'standard' (no extra cost) auto-escalates to 'advanced' (the
+        # more-costly 0.25/0.15 small via etc.) WITH A WARNING when a fine-pitch
+        # fan-out can't escape at the standard floor; 'advanced' is a hard floor. An
+        # optional override file overlays the selected tier (only the keys it lists)
+        # and disables escalation. One shared control read by every tab.
+        grid.Add(wx.StaticText(parent, label="Fab Tier:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.fab_tier = wx.Choice(parent, choices=["standard", "advanced"])
+        self.fab_tier.SetSelection(0)
+        self.fab_tier.SetToolTip(
+            "JLC fab capability floor. standard = no-extra-cost, escalates to advanced "
+            "(with a warning) when a fine-pitch fan-out needs it; advanced = tight "
+            "0.25/0.15 via etc. (more costly), a hard floor.")
+        self.fab_tier.Bind(wx.EVT_CHOICE, self._revalidate_fab_floors)
+        grid.Add(self.fab_tier, 0, wx.EXPAND)
+
+        # Override file: a recent-files dropdown (favourites) + Browse... file picker.
+        grid.Add(wx.StaticText(parent, label="Fab Overrides File:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        ovr_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.fab_overrides_path = wx.ComboBox(parent, choices=[], style=wx.CB_DROPDOWN)
+        # Small min width so this row doesn't force the parameter grid's value
+        # column wider than the spin controls (the ComboBox expands to fill whatever
+        # width the column gives; the Browse button stays compact).
+        self.fab_overrides_path.SetMinSize((60, -1))
+        self.fab_overrides_path.SetToolTip(
+            "Optional fab-floor override file (key=value lines, e.g. 'via_drill = 0.15') "
+            "overlaying the selected tier; pick a recently-used file from the dropdown "
+            "or Browse. Supplying one disables standard->advanced escalation. See the "
+            "ready-to-copy template fab_overrides.example.txt in the repo root for the "
+            "format and every key.")
+        self.fab_overrides_path.Bind(wx.EVT_COMBOBOX, self._revalidate_fab_floors)
+        ovr_sizer.Add(self.fab_overrides_path, 1, wx.EXPAND | wx.RIGHT, 4)
+        self.fab_overrides_browse = wx.Button(parent, label="…", style=wx.BU_EXACTFIT)
+        self.fab_overrides_browse.SetToolTip(
+            "Browse for a fab-floor override file (template: fab_overrides.example.txt)")
+        self.fab_overrides_browse.Bind(wx.EVT_BUTTON, self._on_browse_fab_overrides)
+        ovr_sizer.Add(self.fab_overrides_browse, 0)
+        grid.Add(ovr_sizer, 0, wx.EXPAND)
+
         # Edge clearance (checkbox + value)
         grid.Add(wx.StaticText(parent, label="Edge Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         edge_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -601,6 +650,19 @@ class RoutingDialog(wx.Dialog):
         self.max_ripup.SetToolTip("Maximum number of nets to rip up and reroute when blocked")
         grid.Add(self.max_ripup, 0, wx.EXPAND)
 
+        # Rip-up abandon metric (#85 arbitration; docs/rip-up-reroute.md)
+        grid.Add(wx.StaticText(parent, label="Rip-up Abandon Metric:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.ripup_abandon_metric = wx.Choice(
+            parent, choices=list(defaults.RIPUP_ABANDON_METRIC_CHOICES))
+        self.ripup_abandon_metric.SetStringSelection(defaults.RIPUP_ABANDON_METRIC)
+        self.ripup_abandon_metric.SetToolTip(
+            "How a multipoint tap rip-up decides between keeping the retry and "
+            "abandoning it: stranded (default; count only fully-lost victims), "
+            "total-pads / complete-nets (whole rip-tree totals), congestion / "
+            "history / weighted (boxed-in and hard-to-route pads count more), "
+            "probe / weighted-probe (discount pads unroutable either way)")
+        grid.Add(self.ripup_abandon_metric, 0, wx.EXPAND)
+
     def _on_obey_drc_changed(self, event):
         """Handle checkbox toggle - apply board minimums if enabled."""
         if self.obey_drc_check.GetValue():
@@ -624,6 +686,26 @@ class RoutingDialog(wx.Dialog):
         # focus from the spin control which fires yet another event. Without this
         # guard the warning dialog reappears endlessly and the UI deadlocks (#30).
         if getattr(self, '_drc_validating', False):
+            return
+
+        # Fab floor (issue #237): independent of the DRC-obey toggle, a track /
+        # clearance / via / drill / hole value can never go below what the fab can
+        # make for the active tier. Pin to the floor and warn, don't route sub-fab.
+        floor = self._fab_floor_for_ctrl(ctrl_name)
+        ctrl = getattr(self, ctrl_name, None)
+        if floor is not None and ctrl is not None and ctrl.GetValue() < floor - 1e-9:
+            self._drc_validating = True
+            try:
+                ctrl.SetValue(floor)
+            finally:
+                self._drc_validating = False
+            label = ctrl_name.replace('_', ' ').title()
+            wx.CallAfter(
+                wx.MessageBox,
+                f"{label} cannot go below the fab floor {floor:.4f} mm for the "
+                f"selected fab tier; pinned to it. Use a Fab Overrides file to "
+                f"declare a smaller fab capability.",
+                "Fab Floor", wx.OK | wx.ICON_WARNING)
             return
 
         if not (hasattr(self, 'obey_drc_check') and self.obey_drc_check.GetValue()):
@@ -857,6 +939,63 @@ class RoutingDialog(wx.Dialog):
                 pass
             self._append_log(f"Claude recommends {value} copper layers{note}\n")
 
+    def _on_browse_fab_overrides(self, event):
+        """Browse for a fab-floor override file; remember it as a recent favourite."""
+        cur = self.fab_overrides_path.GetValue().strip()
+        ddir = os.path.dirname(cur) if cur else ""
+        with wx.FileDialog(self, "Select fab-floor override file", defaultDir=ddir,
+                           wildcard="Override files (*.txt;*.cfg)|*.txt;*.cfg|All files (*.*)|*.*",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if dlg.ShowModal() == wx.ID_CANCEL:
+                return
+            self._add_recent_fab_override(dlg.GetPath())
+
+    def _add_recent_fab_override(self, path):
+        """Put `path` at the top of the override-file dropdown (deduped, capped)."""
+        if not path:
+            return
+        items = [path] + [s for s in self.fab_overrides_path.GetStrings() if s != path]
+        del items[8:]
+        self.fab_overrides_path.Set(items)
+        self.fab_overrides_path.SetValue(path)
+        self._revalidate_fab_floors()
+
+    def _fab_floor_for_ctrl(self, ctrl_name):
+        """Fab floor (mm) for a Basic-tab spin control under the active fab tier +
+        override file, or None if the control has no fab floor / no board loaded."""
+        try:
+            from fab_tiers import fab_floor_for_param, parse_fab_overrides
+            ncu = len(self.pcb_data.board_info.copper_layers) or 2
+            tier = self.fab_tier.GetString(self.fab_tier.GetSelection())
+            path = self.fab_overrides_path.GetValue().strip()
+            ovr = parse_fab_overrides(path) if path and os.path.isfile(path) else {}
+            return fab_floor_for_param(ctrl_name, ncu, tier, ovr)
+        except Exception:
+            return None
+
+    def _revalidate_fab_floors(self, event=None):
+        """Re-pin every fab-floored Basic-tab spin control after the fab tier or
+        override file changes (an override can RAISE a floor above the current value)."""
+        pinned = []
+        for name in ('track_width', 'clearance', 'via_size', 'via_drill',
+                     'hole_to_hole_clearance'):
+            ctrl = getattr(self, name, None)
+            floor = self._fab_floor_for_ctrl(name)
+            if ctrl is not None and floor is not None and ctrl.GetValue() < floor - 1e-9:
+                self._drc_validating = True
+                try:
+                    ctrl.SetValue(floor)
+                finally:
+                    self._drc_validating = False
+                pinned.append(f"{name.replace('_', ' ')} -> {floor:.4f} mm")
+        if pinned and event is not None:
+            wx.CallAfter(
+                wx.MessageBox,
+                "Pinned to the new fab floor:\n  " + "\n  ".join(pinned),
+                "Fab Floor", wx.OK | wx.ICON_INFORMATION)
+        if event is not None:
+            event.Skip()
+
     def _create_basic_options_panel(self, panel):
         """Create the basic options panel for the Basic tab."""
         options_box = wx.StaticBox(panel, label="Options")
@@ -975,8 +1114,11 @@ class RoutingDialog(wx.Dialog):
         # No BGA zones
         bga_sizer = wx.BoxSizer(wx.HORIZONTAL)
         bga_sizer.Add(wx.StaticText(options_scroll, label="No BGA Zones:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
-        self.no_bga_zones_ctrl = wx.TextCtrl(options_scroll, value="ALL")
-        self.no_bga_zones_ctrl.SetToolTip("Disable BGA exclusion zones: component refs (e.g., U1 U3), ALL, or leave empty to exclude none")
+        # Default empty == CLI route.py's --no-bga-zones default (None): auto-detect
+        # and ENABLE BGA exclusion zones. "ALL" here would disable them all, which
+        # diverged from the CLI (GUI/CLI default parity).
+        self.no_bga_zones_ctrl = wx.TextCtrl(options_scroll, value="")
+        self.no_bga_zones_ctrl.SetToolTip("Disable BGA exclusion zones: component refs (e.g., U1 U3), ALL, or leave empty (default) to keep all BGA zones")
         bga_sizer.Add(self.no_bga_zones_ctrl, 1, wx.EXPAND)
         options_inner.Add(bga_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
@@ -1000,7 +1142,9 @@ class RoutingDialog(wx.Dialog):
         for layer in self.pcb_data.board_info.copper_layers:
             default_costs.append("1.0" if layer == "F.Cu" else "3.0")
         self.layer_costs_ctrl.SetValue(" ".join(default_costs))
-        self.layer_costs_ctrl.SetToolTip("Per-layer cost multipliers (order: " + " ".join(self.pcb_data.board_info.copper_layers) + ")")
+        self.layer_costs_ctrl.SetToolTip("Per-layer cost multipliers 1.0-1000, or any negative value "
+                                         "(e.g. -1) = forbidden (obstacle/via-span only, no routed copper). "
+                                         "Order: " + " ".join(self.pcb_data.board_info.copper_layers))
         layer_sizer.Add(self.layer_costs_ctrl, 1, wx.EXPAND)
         options_inner.Add(layer_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
@@ -1098,6 +1242,36 @@ class RoutingDialog(wx.Dialog):
         options_scroll.SetScrollRate(0, 10)
         options_inner = wx.BoxSizer(wx.VERTICAL)
 
+        # DRC settings fix (sub-options of the Basic tab's "Fix DRC settings
+        # after routing" toggle) -- kept at the top of the Options box.
+        drc_label = wx.StaticText(options_scroll, label="DRC Settings Fix:")
+        drc_label.SetFont(drc_label.GetFont().Bold())
+        options_inner.Add(drc_label, 0, wx.LEFT | wx.TOP, 3)
+
+        self.keep_thermal_check = wx.CheckBox(options_scroll, label="Keep thermal-relief DRC severity")
+        self.keep_thermal_check.SetValue(False)
+        self.keep_thermal_check.SetToolTip(
+            "When 'Fix DRC settings after routing' runs (Basic tab), by default it "
+            "demotes the starved_thermal DRC category to a warning. Check this to "
+            "leave thermal-relief severity untouched (matches the CLI's "
+            "--keep-thermal). Off by default.")
+        options_inner.Add(self.keep_thermal_check, 0, wx.ALL, 3)
+
+        self.no_clamp_netclasses_check = wx.CheckBox(
+            options_scroll, label="Keep net-class clearances")
+        self.no_clamp_netclasses_check.SetValue(False)
+        self.no_clamp_netclasses_check.SetToolTip(
+            "When 'Fix DRC settings after routing' runs, by default it clamps every "
+            "NON-Default net class's clearance/track/via floors down to the routed "
+            "values, so KiCad's per-net-class DRC does not flag copper routed at the "
+            "smaller run clearance (affects any non-Default class -- impedance, "
+            "power, etc.). Check this to leave the net-class spec untouched for a "
+            "FINAL board whose class rules must survive (matches the CLI's "
+            "--no-clamp-netclasses). Off by default.")
+        options_inner.Add(self.no_clamp_netclasses_check, 0, wx.ALL, 3)
+
+        options_inner.AddSpacer(10)
+
         # MPS options
         mps_label = wx.StaticText(options_scroll, label="MPS Options:")
         mps_label.SetFont(mps_label.GetFont().Bold())
@@ -1114,15 +1288,6 @@ class RoutingDialog(wx.Dialog):
         self.mps_segment_intersection = wx.CheckBox(options_scroll, label="MPS segment intersection")
         self.mps_segment_intersection.SetToolTip("Force MPS to use segment intersection for crossing detection")
         options_inner.Add(self.mps_segment_intersection, 0, wx.ALL, 3)
-
-        self.keep_thermal_check = wx.CheckBox(options_scroll, label="Keep thermal-relief DRC severity")
-        self.keep_thermal_check.SetValue(False)
-        self.keep_thermal_check.SetToolTip(
-            "When 'Fix DRC settings after routing' runs (Basic tab), by default it "
-            "demotes the starved_thermal DRC category to a warning. Check this to "
-            "leave thermal-relief severity untouched (matches the CLI's "
-            "--keep-thermal). Off by default.")
-        options_inner.Add(self.keep_thermal_check, 0, wx.ALL, 3)
 
         options_inner.AddSpacer(10)
 
@@ -1343,16 +1508,27 @@ class RoutingDialog(wx.Dialog):
         from .fanout_gui import FanoutTab
 
         def get_shared_params():
+            # Per-layer cost multipliers from the shared Basic-tab control, so
+            # the BGA fanout honors them like route/diff do (issue #288):
+            # negative = no escape copper on that layer (soon-to-be-plane),
+            # weights fill cheaper layers first. Empty/invalid -> [].
+            layer_costs = self._selected_layer_costs()
             return {
                 'track_width': self.track_width.GetValue(),
                 'clearance': self.clearance.GetValue(),
                 'via_size': self.via_size.GetValue(),
                 'via_drill': self.via_drill.GetValue(),
                 'layers': self._get_selected_layers(),
+                'layer_costs': layer_costs,
                 'diff_pair_gap': self.differential_tab.diff_pair_gap.GetValue(),
                 # Escape stub ends are snapped to this grid so the router gets
                 # on-grid terminals (issue #149); use the Basic tab's grid step.
                 'grid_step': self.grid_step.GetValue(),
+                'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
+                'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
+                # Edge.Cuts keep-out for QFN escape stubs/vias (issue #288);
+                # 0 = fall back to the copper clearance inside generate_qfn_fanout.
+                'board_edge_clearance': self._effective_board_edge_clearance(),
             }
 
         return FanoutTab(
@@ -1397,6 +1573,9 @@ class RoutingDialog(wx.Dialog):
                 # routing" toggle lives on the Basic tab (issue #160).
                 'fix_drc_settings': self.fix_drc_check.GetValue(),
                 'keep_thermal': self.keep_thermal_check.GetValue(),
+                'no_clamp_netclasses': self.no_clamp_netclasses_check.GetValue(),
+                'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
+                'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
             }
 
         def get_claude_params():
@@ -1454,11 +1633,7 @@ class RoutingDialog(wx.Dialog):
             """Get full routing configuration from the main dialog."""
             # Per-layer cost multipliers from the shared Basic-tab control, so the
             # Differential tab honors them too (issue #193). Empty/invalid -> [].
-            lc_text = self.layer_costs_ctrl.GetValue().strip()
-            try:
-                layer_costs = [float(c) for c in lc_text.split()] if lc_text else []
-            except ValueError:
-                layer_costs = []
+            layer_costs = self._selected_layer_costs()
             return {
                 'layers': self._get_selected_layers(),
                 'layer_costs': layer_costs,
@@ -1477,13 +1652,18 @@ class RoutingDialog(wx.Dialog):
                 'turn_cost': self.turn_cost.GetValue(),
                 'direction_preference_cost': self.direction_preference_cost.GetValue(),
                 'max_ripup': self.max_ripup.GetValue(),
+                'ripup_abandon_metric': self.ripup_abandon_metric.GetString(
+                    self.ripup_abandon_metric.GetSelection()),
                 'ordering_strategy': self.ordering_strategy.GetString(self.ordering_strategy.GetSelection()),
+                'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
+                'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
                 'debug_lines': self.debug_lines_check.GetValue(),
                 'verbose': self.verbose_check.GetValue(),
                 'enable_layer_switch': self.enable_layer_switch.GetValue(),
                 # Shared Basic-tab toggle, inherited by the Differential tab (#160).
                 'fix_drc_settings': self.fix_drc_check.GetValue(),
                 'keep_thermal': self.keep_thermal_check.GetValue(),
+                'no_clamp_netclasses': self.no_clamp_netclasses_check.GetValue(),
             }
 
         def sync_pcb_data():
@@ -1507,6 +1687,13 @@ class RoutingDialog(wx.Dialog):
                 'effort': self.claude_tab.get_effort_value(),
             }
         )
+        # Wire the Differential tab's "Hide short routes" to the Basic net list:
+        # short (deferred) pairs stay visible there under "Hide differential" so
+        # they get routed single-ended, and toggling it refreshes that list.
+        self.net_panel.set_short_net_filter(
+            self.differential_tab.get_short_pair_net_ids,
+            self.differential_tab.is_hide_short_enabled)
+        self.differential_tab.on_hide_short_changed = lambda: self.net_panel.refresh()
         return self.differential_tab
 
     def _create_advanced_tab(self):
@@ -1595,6 +1782,11 @@ class RoutingDialog(wx.Dialog):
     def _on_main_tab_changed(self, event):
         """Handle main notebook tab change - validate settings when switching tabs."""
         event.Skip()  # Allow normal tab switching
+
+        # Switching to the Basic tab (index 0): refresh the net list so short
+        # (deferred) pairs reflect the current Differential-tab params/toggle.
+        if event.GetSelection() == 0 and getattr(self, 'differential_tab', None):
+            self.net_panel.refresh()
 
         # Check if switching to Planes tab (index 4)
         if event.GetSelection() == 4:
@@ -1890,6 +2082,91 @@ class RoutingDialog(wx.Dialog):
         self.planes_tab.net_panel._checked_nets = set()
         self.differential_tab.pair_panel._checked_pairs = set()
 
+        self.reset_params_to_defaults()
+
+    def reset_params_to_defaults(self):
+        """Reset every routing PARAMETER control to routing_defaults --
+        selections and the log untouched. The plan executor calls this
+        before each step (when 'reset other options' is on) so a plan run
+        starts from CLI-default-equivalent state instead of inheriting
+        stale session tweaks (the add_gnd_vias leak, generalized)."""
+        # Tab option panels too -- these are OUTSIDE the dialog's own
+        # controls and were the actual leak vector (planes add_gnd_vias).
+        # Best-effort with hasattr guards: a missing control just keeps its
+        # state (and the plan-side absent-means-off rules still apply).
+        try:
+            _po = self.planes_tab.create_options
+            if hasattr(_po, 'add_gnd_vias_check'):
+                _po.add_gnd_vias_check.SetValue(False)
+            if hasattr(_po, 'gnd_via_distance'):
+                _po.gnd_via_distance.SetValue(defaults.GND_VIA_DISTANCE)
+            if hasattr(_po, 'gnd_via_net'):
+                _po.gnd_via_net.SetValue(defaults.GND_VIA_NET)
+            if hasattr(_po, 'rip_blocker_check'):
+                _po.rip_blocker_check.SetValue(False)
+            if hasattr(_po, 'via_in_pad_check'):
+                # Default ON = same_net_pad_clearance -1.0 (CLI parity, big plane
+                # connectivity win; see CreatePlanesOptionsPanel #362).
+                _po.via_in_pad_check.SetValue(True)
+                if hasattr(_po, 'same_net_pad_clearance'):
+                    _po.same_net_pad_clearance.Enable(False)
+            _ro = self.planes_tab.repair_options
+            if hasattr(_ro, 'rip_blocker_check'):
+                _ro.rip_blocker_check.SetValue(False)
+            if hasattr(_ro, 'repair_pads'):
+                _ro.repair_pads.SetValue(True)
+            if hasattr(_ro, 'max_track_width'):
+                _ro.max_track_width.SetValue(defaults.REPAIR_MAX_TRACK_WIDTH)
+            if hasattr(_ro, 'min_track_width'):
+                _ro.min_track_width.SetValue(defaults.REPAIR_MIN_TRACK_WIDTH)
+            if hasattr(_ro, 'analysis_grid'):
+                _ro.analysis_grid.SetValue(defaults.REPAIR_ANALYSIS_GRID_STEP)
+        except Exception:
+            pass
+        try:
+            # BGA options live on the fanout tab's bga_options panel.
+            _bo = getattr(self.fanout_tab, 'bga_options', None)
+            if _bo is not None and hasattr(_bo, 'same_net_escapes'):
+                _bo.same_net_escapes.SetValue(defaults.BGA_SAME_NET_ESCAPES)
+            if _bo is not None and hasattr(_bo, 'exit_margin'):
+                _bo.exit_margin.SetValue(defaults.BGA_EXIT_MARGIN)
+            _ft = self.fanout_tab
+            for _name, _val in (
+                    ('exit_margin', defaults.BGA_EXIT_MARGIN),
+                    ('extension', defaults.QFN_EXTENSION),
+                    ('differential_check', False),
+                    ('force_escape', False),
+                    ('rebalance_escape', False),
+                    ('check_previous', False),
+                    ('no_inner_top', False),
+                    ('optimize_caps', False),
+                    ('cap_allow_rotation', True),
+                    ('cap_max_passes', 30),
+                    ('underpad_escape', False),
+                    ('allow_via_in_pad', False)):
+                _ctl = getattr(_ft, _name, None)
+                if _ctl is not None:
+                    try:
+                        _ctl.SetValue(_val)
+                    except Exception:
+                        pass
+            for _name in ('escape_method_choice',):
+                _ctl = getattr(_ft, _name, None)
+                if _ctl is not None:
+                    try:
+                        _ctl.SetSelection(0)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            _dt = self.differential_tab
+            if hasattr(_dt, 'diff_pair_width'):
+                _dt.diff_pair_width.SetValue(defaults.DIFF_PAIR_WIDTH)
+            if hasattr(_dt, 'diff_pair_gap'):
+                _dt.diff_pair_gap.SetValue(defaults.DIFF_PAIR_GAP)
+        except Exception:
+            pass
         # Reset basic parameters to defaults
         self.track_width.SetValue(defaults.TRACK_WIDTH)
         self.clearance.SetValue(defaults.CLEARANCE)
@@ -1898,6 +2175,7 @@ class RoutingDialog(wx.Dialog):
         self.grid_step.SetValue(defaults.GRID_STEP)
         self.via_cost.SetValue(defaults.VIA_COST)
         self.max_ripup.SetValue(defaults.MAX_RIPUP)
+        self.ripup_abandon_metric.SetStringSelection(defaults.RIPUP_ABANDON_METRIC)
 
         # Reset layer selections (select all copper layers by default)
         for layer, cb in self.layer_checks.items():
@@ -1906,10 +2184,10 @@ class RoutingDialog(wx.Dialog):
         # Reset basic options
         self.enable_layer_switch.SetValue(True)
         self.move_text_check.SetValue(True)
-        self.add_teardrops_check.SetValue(True)
+        self.add_teardrops_check.SetValue(False)  # match creation default + CLI (--add-teardrops off)
         self.power_nets_ctrl.SetValue("")
         self.power_widths_ctrl.SetValue("")
-        self.no_bga_zones_ctrl.SetValue("ALL")
+        self.no_bga_zones_ctrl.SetValue("")  # empty == CLI default (None: keep BGA zones)
         self.rip_existing_nets_ctrl.SetValue("")
         self.layer_costs_ctrl.SetValue("")
 
@@ -1923,6 +2201,8 @@ class RoutingDialog(wx.Dialog):
         self.turn_cost.SetValue(defaults.TURN_COST)
         self.direction_preference_cost.SetValue(defaults.DIRECTION_PREFERENCE_COST)
         self.ordering_strategy.SetSelection(0)
+        self.fab_tier.SetSelection(0)
+        self.fab_overrides_path.SetValue("")
         self.bga_proximity_radius.SetValue(defaults.BGA_PROXIMITY_RADIUS)
         self.bga_proximity_cost.SetValue(defaults.BGA_PROXIMITY_COST)
         self.stub_proximity_radius.SetValue(defaults.STUB_PROXIMITY_RADIUS)
@@ -1944,17 +2224,19 @@ class RoutingDialog(wx.Dialog):
         self.board_edge_clearance.Enable(False)
         self.direction_choice.SetSelection(0)
 
-        # Reset advanced options
-        self.mps_reverse_rounds.SetValue(True)
-        self.mps_layer_swap.SetValue(True)
-        self.mps_segment_intersection.SetValue(True)
+        # Reset advanced options. mps_*/can_swap default OFF to match the checkbox
+        # creation state, the CLI (--mps-*/--can-swap-to-top-layer are store_true),
+        # and the engine signature (batch_route defaults all False).
+        self.mps_reverse_rounds.SetValue(False)
+        self.mps_layer_swap.SetValue(False)
+        self.mps_segment_intersection.SetValue(False)
         self.bus_enabled.SetValue(False)
         self.bus_detection_radius.SetValue(defaults.BUS_DETECTION_RADIUS)
         self.bus_attraction_radius.SetValue(defaults.BUS_ATTRACTION_RADIUS)
         self.bus_attraction_bonus.SetValue(defaults.BUS_ATTRACTION_BONUS)
         self.bus_min_nets.SetValue(defaults.BUS_MIN_NETS)
         self.no_crossing_layer_check.SetValue(False)
-        self.can_swap_to_top.SetValue(True)
+        self.can_swap_to_top.SetValue(False)  # match creation default + CLI/engine (off)
         self.crossing_penalty.SetValue(defaults.CROSSING_PENALTY)
         self.length_match_groups_ctrl.SetValue("")
         self.length_match_tolerance.SetValue(defaults.LENGTH_MATCH_TOLERANCE)
@@ -2019,9 +2301,10 @@ class RoutingDialog(wx.Dialog):
         self.differential_tab.max_setback_angle.SetValue(defaults.DIFF_PAIR_MAX_SETBACK_ANGLE)
         self.differential_tab.max_turn_angle.SetValue(defaults.DIFF_PAIR_MAX_TURN_ANGLE)
         self.differential_tab.chamfer_extra.SetValue(defaults.DIFF_PAIR_CHAMFER_EXTRA)
-        self.differential_tab.fix_polarity_check.SetValue(False)
+        self.differential_tab.polarity_swap_nets_text.SetValue("*")
         self.differential_tab.gnd_via_check.SetValue(False)
         self.differential_tab.intra_match_check.SetValue(False)
+        self.differential_tab.ac_couple_check.SetValue(False)
 
         # Reset fanout tab
         self.fanout_tab.fanout_type.SetSelection(0)
@@ -2086,6 +2369,36 @@ class RoutingDialog(wx.Dialog):
     def _get_selected_layers(self):
         """Get list of selected layers."""
         return [layer for layer, cb in self.layer_checks.items() if cb.GetValue()]
+
+    def _selected_layer_costs(self):
+        """Layer costs from the shared Basic-tab control, aligned to the
+        SELECTED layers (what batch_route/generate_bga_fanout expect).
+
+        The control's documented order is the board's full copper stack (its
+        defaults are generated per copper layer, and Claude plans emit costs
+        "in board layer order") -- but the engines want one value per selected
+        layer. With a subset of layers checked on a >N-layer board, the raw
+        list crashed the fanout ("--layer-costs needs one value per layer").
+        Translate by name: board-ordered input is subset to the checked
+        layers; input already matching the selected count passes through.
+        Anything else is returned raw so the engine's clear error stands.
+        Empty/invalid -> [].
+        """
+        lc_text = self.layer_costs_ctrl.GetValue().strip()
+        try:
+            costs = [float(c) for c in lc_text.split()] if lc_text else []
+        except ValueError:
+            return []
+        if not costs:
+            return []
+        selected = self._get_selected_layers()
+        if len(costs) == len(selected):
+            return costs
+        copper = self.pcb_data.board_info.copper_layers
+        if len(costs) == len(copper):
+            by_layer = dict(zip(copper, costs))
+            return [by_layer[l] for l in selected if l in by_layer]
+        return costs
 
     def _validate_routing_inputs(self):
         """Validate routing inputs before starting.
@@ -2153,7 +2466,11 @@ class RoutingDialog(wx.Dialog):
             'turn_cost': self.turn_cost.GetValue(),
             'direction_preference_cost': self.direction_preference_cost.GetValue(),
             'max_ripup': self.max_ripup.GetValue(),
+            'ripup_abandon_metric': self.ripup_abandon_metric.GetString(
+                self.ripup_abandon_metric.GetSelection()),
             'ordering_strategy': self.ordering_strategy.GetString(self.ordering_strategy.GetSelection()),
+            'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
+            'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
             'stub_proximity_radius': self.stub_proximity_radius.GetValue(),
             'stub_proximity_cost': self.stub_proximity_cost.GetValue(),
             'power_tap_neckdown': self.power_tap_neckdown_check.GetValue(),
@@ -2179,6 +2496,7 @@ class RoutingDialog(wx.Dialog):
             'add_teardrops': self.add_teardrops_check.GetValue(),
             'fix_drc_settings': self.fix_drc_check.GetValue(),
             'keep_thermal': self.keep_thermal_check.GetValue(),
+            'no_clamp_netclasses': self.no_clamp_netclasses_check.GetValue(),
             # Guide corridor (issue #7)
             'guide_corridor_enabled': self.guide_corridor_check.GetValue(),
             'guide_corridor_layer': self.guide_corridor_layer_ctrl.GetValue().strip() or defaults.GUIDE_CORRIDOR_LAYER,
@@ -2254,14 +2572,7 @@ class RoutingDialog(wx.Dialog):
             config['rip_existing_nets'] = rip_existing_text.split()
 
         # Parse layer costs
-        layer_costs_text = self.layer_costs_ctrl.GetValue().strip()
-        if layer_costs_text:
-            try:
-                config['layer_costs'] = [float(c) for c in layer_costs_text.split()]
-            except ValueError:
-                config['layer_costs'] = []
-        else:
-            config['layer_costs'] = []
+        config['layer_costs'] = self._selected_layer_costs()
 
         # If using net class definitions, build per-class parameter mapping
         if self.use_netclass_check.GetValue():
@@ -2498,6 +2809,11 @@ class RoutingDialog(wx.Dialog):
 
     def _on_route(self, event):
         """Handle route button click."""
+        # Pick up any board changes since the last sync BEFORE routing -- most
+        # importantly footprint/pad moves from a preceding optimize_caps step,
+        # so the router sees the caps where they ACTUALLY are, not where they
+        # were at load (#362). Segments/vias/zones/footprints all refresh here.
+        self._sync_pcb_data_from_board()
         selected_nets, selected_layers = self._validate_routing_inputs()
         if selected_nets is None:
             return
@@ -2517,7 +2833,14 @@ class RoutingDialog(wx.Dialog):
         # Build configuration
         config = self._build_routing_config(selected_nets, selected_layers)
 
-        # Run routing in a thread
+        # Run routing in a thread. _apply_pending stays True until the
+        # results have actually been APPLIED to the board on the main
+        # thread: the worker queues the apply via wx.CallAfter, so the
+        # thread can be dead while the copper is still in the event queue
+        # -- re-enabling the button on thread death alone let the plan
+        # executor start the NEXT step before this one's tracks landed
+        # (Andy's 'tracks don't all appear, rerun fixes it').
+        self._apply_pending = True
         self._routing_thread = threading.Thread(
             target=self._run_routing,
             args=(config,),
@@ -2530,6 +2853,12 @@ class RoutingDialog(wx.Dialog):
 
     def _run_routing(self, config):
         """Run the routing in a background thread."""
+        # Start a fresh clearance ledger so a prior operation's fine-pitch
+        # clearance doesn't leak into this board's DRC floor.
+        import clearance_ledger
+        clearance_ledger.reset()
+        from fab_tiers import set_fab_tier_from_config
+        set_fab_tier_from_config(config)
         # Set up stdout redirection to capture routing output
         original_stdout = sys.stdout
         sys.stdout = StdoutRedirector(self._append_log, original_stdout)
@@ -2678,6 +3007,7 @@ class RoutingDialog(wx.Dialog):
                     turn_cost=config['turn_cost'],
                     direction_preference_cost=config.get('direction_preference_cost', 50),
                     max_rip_up_count=config['max_ripup'],
+                    ripup_abandon_metric=config.get('ripup_abandon_metric', defaults.RIPUP_ABANDON_METRIC),
                     ordering_strategy=config['ordering_strategy'],
                     direction_order=config.get('direction'),
                     stub_proximity_radius=config['stub_proximity_radius'],
@@ -2744,7 +3074,7 @@ class RoutingDialog(wx.Dialog):
                 # Route each net class group with its own parameters
                 total_successful = 0
                 total_failed = 0
-                all_results = {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': [], 'segments_to_remove': []}
+                all_results = {'results': [], 'all_swap_vias': [], 'all_swap_segments': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': [], 'segments_to_remove': []}
 
                 class_names = list(config['nets_by_class'].keys())
                 total_classes = len(class_names)
@@ -2792,6 +3122,7 @@ class RoutingDialog(wx.Dialog):
                         turn_cost=config['turn_cost'],
                         direction_preference_cost=config.get('direction_preference_cost', 50),
                         max_rip_up_count=config['max_ripup'],
+                        ripup_abandon_metric=config.get('ripup_abandon_metric', defaults.RIPUP_ABANDON_METRIC),
                         ordering_strategy=config['ordering_strategy'],
                         direction_order=config.get('direction'),
                         stub_proximity_radius=config['stub_proximity_radius'],
@@ -2858,6 +3189,10 @@ class RoutingDialog(wx.Dialog):
                     if results_data:
                         all_results['results'].extend(results_data.get('results', []))
                         all_results['all_swap_vias'].extend(results_data.get('all_swap_vias', []))
+                        # #340 swap reuse-connector copper (same channel the
+                        # standard path draws) -- omitting it leaves a swapped
+                        # net open in the per-class GUI route.
+                        all_results['all_swap_segments'].extend(results_data.get('all_swap_segments', []))
                         all_results['exclusion_zone_lines'].extend(results_data.get('exclusion_zone_lines', []))
                         all_results['boundary_debug_labels'].extend(results_data.get('boundary_debug_labels', []))
                         # Original-board loop/dead-end segments flagged for removal
@@ -2879,22 +3214,34 @@ class RoutingDialog(wx.Dialog):
                 )
 
             if self._cancel_requested:
-                wx.CallAfter(self._routing_cancelled)
+                wx.CallAfter(self._routing_finished, self._routing_cancelled)
             else:
                 # Calculate wall time from button press
                 wall_time = time.time() - self._routing_start_time
                 # Apply results to pcbnew on main thread
-                wx.CallAfter(self._apply_results_to_board, results_data, successful, failed, wall_time, config)
+                wx.CallAfter(self._routing_finished,
+                             self._apply_results_to_board, results_data,
+                             successful, failed, wall_time, config)
 
         except Exception as e:
-            wx.CallAfter(self._routing_error, str(e))
+            wx.CallAfter(self._routing_finished, self._routing_error, str(e))
         finally:
             # Restore original stdout
             sys.stdout = original_stdout
 
+    def _routing_finished(self, handler, *args):
+        """Main-thread completion wrapper: run the apply/cancel/error
+        handler, then clear _apply_pending so _poll_routing may re-enable
+        the button (the plan executor's busy signal)."""
+        try:
+            handler(*args)
+        finally:
+            self._apply_pending = False
+
     def _poll_routing(self):
-        """Poll for routing thread completion."""
-        if self._routing_thread and self._routing_thread.is_alive():
+        """Poll for routing thread completion AND results application."""
+        if (self._routing_thread and self._routing_thread.is_alive()) \
+                or getattr(self, '_apply_pending', False):
             wx.CallLater(100, self._poll_routing)
         else:
             self.route_btn.Enable()
@@ -3035,7 +3382,10 @@ class RoutingDialog(wx.Dialog):
                 print(f"Warning: failed to build routing suggestions: {e}")
         msg += "\nUse Edit -> Undo to revert changes."
 
-        wx.MessageBox(msg, "Routing Complete", wx.OK | wx.ICON_INFORMATION)
+        if getattr(getattr(self, 'GetTopLevelParent', lambda: self)(), '_suppress_completion_popups', False):
+            print(msg)  # unattended plan run: no per-step OK dialog
+        else:
+            wx.MessageBox(msg, "Routing Complete", wx.OK | wx.ICON_INFORMATION)
 
         # Clear the selected nets since they've been routed
         self.net_panel._checked_nets.clear()

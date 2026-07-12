@@ -8,6 +8,7 @@ The key concept is "unrolling" each chip's rectangular boundary into a linear or
 starting from the "far side" (the side facing away from the other chip). Two nets cross
 if their source ordering is inverted relative to their target ordering.
 """
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List, Optional, Tuple

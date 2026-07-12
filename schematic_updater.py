@@ -4,6 +4,7 @@ Schematic Updater - Updates KiCad schematic files with pad swaps from routing.
 When routing applies pad swaps (target swaps or polarity swaps), this module
 updates the corresponding .kicad_sch files to keep schematics in sync with PCB.
 """
+from __future__ import annotations
 
 import os
 import re

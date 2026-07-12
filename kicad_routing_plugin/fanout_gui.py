@@ -85,6 +85,12 @@ class NetSelectionPanel(wx.Panel):
         self._diff_pairs = {}  # base_name -> (p_net_id, n_net_id) when in diff mode
         self._on_selection_changed = None  # Callback when selection changes
         self._on_tabbed_view_changed = None  # Callback when tabbed view is created/destroyed
+        # Optional: keep electrically-short diff-pair nets visible even when
+        # "Hide differential" is on, so they can be routed single-ended. Set by
+        # the main dialog to wire the Differential tab's "Hide short routes".
+        self._short_nets_provider = None      # () -> set of net_ids
+        self._hide_short_enabled_fn = None    # () -> bool
+        self._short_nets = set()              # net_ids kept visible under hide_diff
 
         # Net class separation
         self._separate_by_netclass = False
@@ -366,11 +372,29 @@ class NetSelectionPanel(wx.Panel):
         if self._auto_hide_differential and not self._differential_mode:
             hide_diff = True
 
+        # Electrically-short pairs are deferred to single-ended routing, so when
+        # "Hide short routes" is on they stay visible here even under hide_diff.
+        self._short_nets = set()
+        if (hide_diff and not self._differential_mode
+                and self._hide_short_enabled_fn and self._short_nets_provider
+                and self._hide_short_enabled_fn()):
+            try:
+                self._short_nets = self._short_nets_provider() or set()
+            except Exception:
+                self._short_nets = set()
+
         # Populate either single list or tabbed lists
         if self._separate_by_netclass and self._tabbed_net_lists:
             self._populate_tabbed_lists(filtered_nets, hide_checked, hide_diff)
         else:
             self._populate_single_list(filtered_nets, hide_checked, hide_diff)
+
+    def set_short_net_filter(self, short_nets_provider, hide_short_enabled_fn):
+        """Wire the Differential tab's 'Hide short routes': short (deferred) pair
+        nets are kept visible under 'Hide differential' so they route single-ended.
+        short_nets_provider() -> set of net_ids; hide_short_enabled_fn() -> bool."""
+        self._short_nets_provider = short_nets_provider
+        self._hide_short_enabled_fn = hide_short_enabled_fn
 
     def _populate_single_list(self, filtered_nets, hide_checked, hide_diff):
         """Populate the single CheckListBox."""
@@ -380,9 +404,11 @@ class NetSelectionPanel(wx.Panel):
             if hide_checked and self._check_fn and not self._suspend_check:
                 if self._check_fn(net_id):
                     continue
-            # Check if should be hidden (differential)
+            # Check if should be hidden (differential) - but keep short pairs,
+            # which are routed single-ended
             if hide_diff and self._is_differential_net(name):
-                continue
+                if net_id not in self._short_nets:
+                    continue
             idx = self.net_list.Append(name)
             # Restore checked state
             if name in self._checked_nets:
@@ -402,9 +428,11 @@ class NetSelectionPanel(wx.Panel):
             if hide_checked and self._check_fn and not self._suspend_check:
                 if self._check_fn(net_id):
                     continue
-            # Check if should be hidden (differential)
+            # Check if should be hidden (differential) - but keep short pairs,
+            # which are routed single-ended
             if hide_diff and self._is_differential_net(name):
-                continue
+                if net_id not in self._short_nets:
+                    continue
             class_name = self._net_to_class.get(name, 'Default')
             if class_name in nets_by_class:
                 nets_by_class[class_name].append((name, net_id))
@@ -660,8 +688,16 @@ class NetSelectionPanel(wx.Panel):
         return text.split(' (')[0]
 
 
-class BGAOptionsPanel(wx.Panel):
-    """BGA fanout options panel (parameters not in Basic tab)."""
+class BGAOptionsPanel(wx.ScrolledWindow):
+    """BGA fanout options panel (parameters not in Basic tab).
+
+    A vertical ScrolledWindow: the panel has more sections (escape, options,
+    cap placement) than fit a short dialog, and without scrolling the lower
+    controls were simply unreachable.
+    """
+
+    # wx.Choice index -> engine escape_method value (order matches the dropdown)
+    ESCAPE_METHODS = ('auto', 'channel', 'underpad')
 
     def __init__(self, parent, on_differential_changed=None):
         """
@@ -671,7 +707,8 @@ class BGAOptionsPanel(wx.Panel):
             parent: Parent window
             on_differential_changed: Callback(bool) when differential checkbox changes
         """
-        super().__init__(parent)
+        super().__init__(parent, style=wx.VSCROLL)
+        self.SetScrollRate(0, 10)
         self._on_differential_changed_callback = on_differential_changed
         self._create_ui()
 
@@ -694,6 +731,18 @@ class BGAOptionsPanel(wx.Panel):
         self.exit_margin.SetDigits(r['digits'])
         self.exit_margin.SetToolTip("Distance from BGA edge to route escape vias")
         grid.Add(self.exit_margin, 0, wx.EXPAND)
+
+        # Same-net escapes (issue #129): balls per multi-ball net that get
+        # their own escape; the rest connect to the escaped ball intra-BGA.
+        grid.Add(wx.StaticText(self, label="Same-net escapes:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.same_net_escapes = wx.SpinCtrl(self, min=0, max=8,
+                                            initial=defaults.BGA_SAME_NET_ESCAPES)
+        self.same_net_escapes.SetToolTip(
+            "How many balls of a multi-ball net get their own escape (issue #129). "
+            "Remaining same-net balls are routed to the escaped ball inside the BGA "
+            "instead of burning escape channels; BGA-only nets (no outside pad) fan "
+            "nothing and just interconnect. 0 = legacy fan-every-ball.")
+        grid.Add(self.same_net_escapes, 0, wx.EXPAND)
 
         param_sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 5)
         main_sizer.Add(param_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
@@ -743,14 +792,24 @@ class BGAOptionsPanel(wx.Panel):
         self.no_inner_top.SetToolTip("Prevent inner pads from using F.Cu")
         options_sizer.Add(self.no_inner_top, 0, wx.LEFT | wx.BOTTOM, 5)
 
-        self.underpad_escape = wx.CheckBox(self, label="Under-pad escape (dense BGA)")
-        self.underpad_escape.SetToolTip(
-            "Use the under-pad grid escape instead of the channel router. Each "
-            "signal vias in its pad and routes under the pad field on inner "
-            "layers - escapes fully-populated arrays the channel router can't "
-            "(#122). Routes diff pairs as single-ended; power nets tap planes. "
-            "Use a small via/track for dense pitch (e.g. via 0.35, track 0.12).")
-        options_sizer.Add(self.underpad_escape, 0, wx.LEFT | wx.BOTTOM, 5)
+        esc_method_row = wx.BoxSizer(wx.HORIZONTAL)
+        esc_method_row.Add(wx.StaticText(self, label="Escape method:"), 0,
+                           wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        self.escape_method_choice = wx.Choice(
+            self, choices=["Auto (channel, under-pad retry)",
+                           "Channel",
+                           "Under-pad (dense BGA)"])
+        self.escape_method_choice.SetSelection(0)
+        self.escape_method_choice.SetToolTip(
+            "Auto (default): run the channel router and, if it drops any ball, "
+            "retry with the under-pad grid escape and keep whichever escapes "
+            "more (#288). Channel: 45-stub + channel router only. Under-pad: "
+            "each signal vias in its pad and routes under the pad field on "
+            "inner layers - escapes fully-populated arrays the channel router "
+            "can't (#122); use a small via/track for dense pitch (e.g. via "
+            "0.35, track 0.12).")
+        esc_method_row.Add(self.escape_method_choice, 1)
+        options_sizer.Add(esc_method_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         self.optimize_caps = wx.CheckBox(self, label="Optimize decoupling cap placement")
         self.optimize_caps.SetValue(False)
@@ -808,7 +867,7 @@ class BGAOptionsPanel(wx.Panel):
         cap_grid.Add(self.cap_max_passes, 0, wx.EXPAND)
 
         cap_grid.Add(wx.StaticText(self, label="Movable prefix(es):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.cap_prefix = wx.TextCtrl(self, value="C,R")
+        self.cap_prefix = wx.TextCtrl(self, value="C,R,FB")
         self.cap_prefix.SetToolTip("Comma-separated reference prefix(es) for movable "
                                    "passives near a BGA (--cap-prefix; default C,R = "
                                    "caps and resistors; RN-style arrays auto-excluded "
@@ -826,6 +885,20 @@ class BGAOptionsPanel(wx.Panel):
 
         self.SetSizer(main_sizer)
 
+    def get_escape_method(self) -> str:
+        """The engine escape_method value for the current dropdown selection."""
+        sel = self.escape_method_choice.GetSelection()
+        return self.ESCAPE_METHODS[sel] if 0 <= sel < len(self.ESCAPE_METHODS) else 'auto'
+
+    def set_escape_method(self, value):
+        """Set the dropdown from an engine value ('auto'/'channel'/'underpad').
+
+        Unknown values are ignored (dropdown keeps its current selection).
+        """
+        v = str(value).strip().lower()
+        if v in self.ESCAPE_METHODS:
+            self.escape_method_choice.SetSelection(self.ESCAPE_METHODS.index(v))
+
     def _on_differential_changed(self, event):
         """Handle differential checkbox change."""
         is_diff = self.differential_check.GetValue()
@@ -838,6 +911,7 @@ class BGAOptionsPanel(wx.Panel):
         is_differential = self.differential_check.GetValue()
         return {
             'exit_margin': self.exit_margin.GetValue(),
+            'same_net_escapes': self.same_net_escapes.GetValue(),
             'differential': is_differential,
             'diff_pair_patterns': ['*'] if is_differential else [],  # Auto-detect all diff pairs when enabled
             'primary_escape': 'horizontal' if self.escape_direction.GetSelection() == 0 else 'vertical',
@@ -845,7 +919,9 @@ class BGAOptionsPanel(wx.Panel):
             'rebalance_escape': self.rebalance_escape.GetValue(),
             'check_for_previous': self.check_previous.GetValue(),
             'no_inner_top_layer': self.no_inner_top.GetValue(),
-            'escape_method': 'underpad' if self.underpad_escape.GetValue() else 'channel',
+            # Dropdown: auto (default, channel + under-pad retry, #288) /
+            # channel / underpad - same choices and default as the CLI.
+            'escape_method': self.get_escape_method(),
             'optimize_caps': self.optimize_caps.GetValue(),
             # Decoupling-cap placement (advanced) knobs (#130)
             'cap_capture_radius': self.cap_capture_radius.GetValue(),
@@ -855,12 +931,12 @@ class BGAOptionsPanel(wx.Panel):
             'cap_max_displacement_cap': self.cap_max_displacement_cap.GetValue(),
             'cap_displacement_growth': self.cap_displacement_growth.GetValue(),
             'cap_max_passes': self.cap_max_passes.GetValue(),
-            'cap_prefix': self.cap_prefix.GetValue().strip() or 'C,R',
+            'cap_prefix': self.cap_prefix.GetValue().strip() or 'C,R,FB',
             'cap_allow_rotation': self.cap_allow_rotation.GetValue(),
         }
 
 
-class QFNOptionsPanel(wx.Panel):
+class QFNOptionsPanel(wx.ScrolledWindow):
     """QFN fanout options panel (parameters not in Basic tab)."""
 
     def __init__(self, parent):
@@ -870,7 +946,8 @@ class QFNOptionsPanel(wx.Panel):
         Args:
             parent: Parent window
         """
-        super().__init__(parent)
+        super().__init__(parent, style=wx.VSCROLL)
+        self.SetScrollRate(0, 10)
         self._create_ui()
 
     def _create_ui(self):
@@ -1133,6 +1210,8 @@ class FanoutTab(wx.Panel):
 
         # Get shared parameters from Basic tab (includes layers)
         shared = self.get_shared_params() if self.get_shared_params else {}
+        from fab_tiers import set_fab_tier_from_config
+        set_fab_tier_from_config(shared)
         track_width = shared.get('track_width', defaults.BGA_TRACK_WIDTH)
         clearance = shared.get('clearance', defaults.BGA_CLEARANCE)
         via_size = shared.get('via_size', defaults.BGA_VIA_SIZE)
@@ -1169,8 +1248,13 @@ class FanoutTab(wx.Panel):
                 via_drill=via_drill,
                 check_for_previous=config['check_for_previous'],
                 no_inner_top_layer=config['no_inner_top_layer'],
-                escape_method=config.get('escape_method', 'channel'),
+                escape_method=config.get('escape_method', 'auto'),
                 grid_step=shared.get('grid_step', defaults.GRID_STEP),
+                # Shared Basic-tab per-layer costs (issue #288), same values the
+                # route/diff tabs use; None when the control is empty/invalid.
+                layer_costs=shared.get('layer_costs') or None,
+                same_net_escapes=config.get('same_net_escapes',
+                                            defaults.BGA_SAME_NET_ESCAPES),
             )
 
             self._apply_fanout_results(
@@ -1207,6 +1291,8 @@ class FanoutTab(wx.Panel):
 
         # Get shared parameters from Basic tab
         shared = self.get_shared_params() if self.get_shared_params else {}
+        from fab_tiers import set_fab_tier_from_config
+        set_fab_tier_from_config(shared)
         track_width = shared.get('track_width', defaults.QFN_TRACK_WIDTH)
         clearance = shared.get('clearance', defaults.BGA_CLEARANCE)
 
@@ -1238,6 +1324,7 @@ class FanoutTab(wx.Panel):
                 via_size=via_size,
                 via_drill=via_drill,
                 allow_via_in_pad=allow_via_in_pad,
+                board_edge_clearance=shared.get('board_edge_clearance', 0.0),
             )
 
             self._apply_fanout_results(
@@ -1411,6 +1498,8 @@ class FanoutTab(wx.Panel):
             moved = apply_footprint_moves(board, result.get('placements', []))
             unresolved = result.get('unresolved', [])
             summary = f"Decoupling caps optimized: {moved} moved"
+            if nudged:
+                summary += f"; {nudged} via(s) nudged with reconnect (#313)"
             if unresolved:
                 summary += (f"; {len(unresolved)} could not clear a foreign via "
                             f"(manual: {', '.join(sorted(unresolved))})")

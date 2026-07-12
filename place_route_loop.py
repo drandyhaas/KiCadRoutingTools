@@ -24,6 +24,7 @@ Usage:
       --route-args '--nets "/*" "Net-*" --track-width 0.2 ...' \
       [quench options]
 """
+from __future__ import annotations
 
 import argparse
 import json
@@ -54,7 +55,11 @@ def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str):
     summary = json.loads(m.group(1))
 
     failed_nets = list(summary.get('failed_single', []))
-    failed_nets += list(summary.get('failed_multipoint', []))
+    # failed_multipoint entries are dicts {net_name, failed_pads}; keep just the
+    # name so failed_nets is uniformly net-name strings (downstream uses them as
+    # dict keys -> a dict here raises "unhashable type: 'dict'").
+    failed_nets += [d['net_name'] if isinstance(d, dict) else d
+                    for d in summary.get('failed_multipoint', [])]
     mp_deficit = (summary.get('multipoint_pads_total', 0)
                   - summary.get('multipoint_pads_connected', 0))
     failures = len(summary.get('failed_single', [])) + mp_deficit

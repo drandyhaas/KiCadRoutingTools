@@ -8,6 +8,7 @@ This module handles writing the routed PCB output file, including:
 - New segments and vias from routing
 - Debug visualization paths
 """
+from __future__ import annotations
 
 from typing import List, Dict, Optional
 from kicad_parser import is_kicad_10, board_uses_name_nets, KICAD_10_MIN_VERSION
@@ -37,7 +38,8 @@ def write_routed_output(
     skip_routing: bool = False,
     add_teardrops: bool = False,
     all_swap_segments: List = None,
-    segments_to_remove: List = None
+    segments_to_remove: List = None,
+    vias_to_remove: List = None
 ) -> bool:
     """
     Write the routed PCB output file.
@@ -97,11 +99,24 @@ def write_routed_output(
 
     # Strip original-file segments the dead-end sweep flagged (issue #84). Done
     # before swaps so matching uses the net the input file carries.
+    _strip_leftovers: list = []
     if segments_to_remove:
         content, removed = remove_segments_from_content(
-            content, segments_to_remove, net_id_to_name if kicad_v10 else None)
+            content, segments_to_remove, net_id_to_name if kicad_v10 else None,
+            unmatched_out=_strip_leftovers)
         if removed:
             print(f"Removed {removed} dead-end input segment(s) from the output")
+    # Strip original input-file vias of ripped/re-routed nets that are no longer
+    # on the final board (#103 rip-existing): without this the old via and its
+    # replacement both ship, stacking same-net drill pairs.
+    _via_strip_leftovers: list = []
+    if vias_to_remove:
+        from kicad_writer import remove_vias_from_content
+        content, removed_v = remove_vias_from_content(
+            content, vias_to_remove, net_id_to_name if kicad_v10 else None,
+            unmatched_out=_via_strip_leftovers)
+        if removed_v:
+            print(f"Removed {removed_v} stale input via(s) from the output")
 
     # Apply target swaps FIRST - layer modifications were recorded with post-swap net IDs,
     # so we need to swap the file content to match before applying layer modifications
@@ -116,6 +131,26 @@ def write_routed_output(
 
     # Apply pad and stub net swaps for polarity fixes
     content = _apply_polarity_swaps(content, pad_swaps, pcb_data, net_id_to_name if kicad_v10 else None)
+
+    # Residual strip pass: a strip target whose object was LAYER-SWAPPED (or
+    # net-swapped) in memory carries its FINAL layer/net, which cannot match
+    # the file text until the mods/swaps above have been applied -- the first
+    # strip pass misses it and a relabeled zombie block ships (ottercast
+    # BT_UART_RTS stubs, found by the FILE_LEDGER audit). Re-running the strip
+    # AFTER all text transforms is idempotent for blocks already removed and
+    # catches exactly these.
+    if _strip_leftovers:
+        content, removed2 = remove_segments_from_content(
+            content, _strip_leftovers, net_id_to_name if kicad_v10 else None)
+        if removed2:
+            print(f"Removed {removed2} layer/net-swapped input segment(s) from "
+                  f"the output (post-transform strip)")
+    if _via_strip_leftovers:
+        content, removed_v2 = remove_vias_from_content(
+            content, _via_strip_leftovers, net_id_to_name if kicad_v10 else None)
+        if removed_v2:
+            print(f"Removed {removed_v2} swapped input via(s) from the output "
+                  f"(post-transform strip)")
 
     # Generate routing text (new segments and vias)
     routing_text = _generate_routing_text(results, all_swap_vias, net_id_to_name if kicad_v10 else None,

@@ -4,6 +4,7 @@ Shared utilities for route.py and route_diff.py.
 This module contains common functions used by both single-ended and differential
 pair routing to avoid code duplication.
 """
+from __future__ import annotations
 
 import time
 from typing import List, Optional, Tuple, Dict, Set
@@ -13,7 +14,8 @@ from kicad_parser import (
     auto_detect_bga_exclusion_zones
 )
 from routing_config import GridRouteConfig
-from connectivity import get_net_endpoints
+from connectivity import get_net_endpoints, _point_in_polygon
+from check_drc import OFF_BOARD_TOLERANCE
 from obstacle_map import build_base_obstacle_map
 from obstacle_cache import (
     precompute_all_net_obstacles, build_working_obstacle_map, precompute_net_obstacles,
@@ -58,9 +60,13 @@ def setup_bga_exclusion_zones(
             disabled_refs = set(disable_bga_zones)
             for fp in bga_components:
                 if fp.reference not in disabled_refs:
-                    bounds = get_footprint_bounds(fp, margin=0.5)
+                    # Zone ends at the pad edge (get_footprint_bounds is pad-based);
+                    # fanout stubs exit past it, so the keep-out doesn't bury the
+                    # escape tips (issue #243). Keep in sync with
+                    # auto_detect_bga_exclusion_zones (margin=0).
+                    bounds = get_footprint_bounds(fp, margin=0.0)
                     pitch = detect_bga_pitch(fp)
-                    edge_tolerance = 0.5 + pitch * 1.1
+                    edge_tolerance = pitch * 1.1
                     bga_exclusion_zones.append((*bounds, edge_tolerance))
             if bga_exclusion_zones:
                 print(f"Auto-detected {len(bga_exclusion_zones)} BGA exclusion zone(s) (excluding {', '.join(disable_bga_zones)}):")
@@ -73,7 +79,9 @@ def setup_bga_exclusion_zones(
             return bga_exclusion_zones
 
     elif existing_zones is None:
-        bga_exclusion_zones = auto_detect_bga_exclusion_zones(pcb_data, margin=0.5)
+        # margin=0: zone ends at the BGA pad edge so fanout stubs (which exit past
+        # the pads) stay in open copper for leg attachment (issue #243).
+        bga_exclusion_zones = auto_detect_bga_exclusion_zones(pcb_data, margin=0.0)
         if bga_exclusion_zones:
             bga_components = find_components_by_type(pcb_data, 'BGA')
             print(f"Auto-detected {len(bga_exclusion_zones)} BGA exclusion zone(s):")
@@ -123,6 +131,96 @@ def resolve_net_ids(pcb_data: PCBData, net_names: List[str]) -> List[Tuple[str, 
             net_ids.append((net_name, net_id))
 
     return net_ids
+
+
+def _dist_point_to_polygon(x: float, y: float, polygon: List[Tuple[float, float]]) -> float:
+    """Minimum distance from (x, y) to the closest edge of a closed polygon."""
+    best = float('inf')
+    n = len(polygon)
+    for i in range(n):
+        x1, y1 = polygon[i]
+        x2, y2 = polygon[(i + 1) % n]
+        dx, dy = x2 - x1, y2 - y1
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq <= 1e-12:
+            d = ((x - x1) ** 2 + (y - y1) ** 2) ** 0.5
+        else:
+            t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / seg_len_sq))
+            cx, cy = x1 + t * dx, y1 + t * dy
+            d = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+        if d < best:
+            best = d
+    return best
+
+
+def warn_targets_outside_board(pcb_data: PCBData,
+                               net_ids: List[Tuple[str, int]],
+                               edge_margin: float = 0.0,
+                               label: str = "target") -> List[Tuple]:
+    """Warn about pads of the nets being routed that sit at/over the board edge.
+
+    A pad whose centre falls outside the board outline is unroutable -- the
+    router blocks routing beyond the edge -- and the only symptom is a silent
+    exhaustive-search failure (issue #195: a connector footprint hanging off the
+    bottom of the board). A pad just inside but within the edge keep-out is
+    likely unroutable too. Both are flagged here, before routing, so the cause is
+    obvious instead of looking like a router failure.
+
+    Returns the list of (net_name, where, x, y, kind) flagged pads ('outside' or
+    'near-edge'); also prints a human-readable warning block when non-empty.
+    """
+    bounds = getattr(pcb_data.board_info, 'board_bounds', None)
+    if not bounds:
+        return []
+    outlines = [o for o in (getattr(pcb_data.board_info, 'board_outlines', None) or [])
+                if len(o) >= 3]
+    if not outlines:
+        outline = getattr(pcb_data.board_info, 'board_outline', None)
+        outlines = [outline] if outline and len(outline) >= 3 else []
+    has_poly = bool(outlines)
+    min_x, min_y, max_x, max_y = bounds
+
+    flagged = []
+    seen = set()
+    for net_name, net_id in net_ids:
+        for pad in pcb_data.pads_by_net.get(net_id, []):
+            key = (round(pad.global_x, 3), round(pad.global_y, 3), net_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            x, y = pad.global_x, pad.global_y
+            if has_poly:
+                # multi-outline boards (#304): on-board = inside ANY outer ring
+                inside = any(_point_in_polygon(x, y, o) for o in outlines)
+                dist = (min(_dist_point_to_polygon(x, y, o) for o in outlines)
+                        if inside else -1.0)
+            else:
+                dist = min(x - min_x, max_x - x, y - min_y, max_y - y)
+                inside = dist >= 0
+            ref = getattr(pad, 'component_ref', '') or ''
+            padnum = getattr(pad, 'pad_number', '')
+            where = f"{ref}.{padnum}" if ref else f"pad {padnum}"
+            if not inside:
+                # Distinguish pads the router will actually SKIP (clearly
+                # outside, issue #291) from pads grazing the outline (kept
+                # routable -- castellated / edge-connector pads).
+                out_dist = (_dist_point_to_polygon(x, y, outline) if has_poly
+                            else -dist)
+                kind = 'outside' if out_dist > OFF_BOARD_TOLERANCE else 'near-edge'
+                flagged.append((net_name, where, x, y, kind))
+            elif edge_margin > 0 and dist < edge_margin:
+                flagged.append((net_name, where, x, y, 'near-edge'))
+
+    if flagged:
+        print(f"\nWARNING: {len(flagged)} {label} pad(s) at/over the board outline:")
+        for net_name, where, x, y, kind in flagged:
+            if kind == 'outside':
+                print(f"    {net_name} ({where}) at ({x:.2f}, {y:.2f}) is OUTSIDE the board "
+                      f"outline -- unreachable, SKIPPED (no copper will be drawn toward it, #291)")
+            else:
+                print(f"    {net_name} ({where}) at ({x:.2f}, {y:.2f}) is at/near the board "
+                      f"edge (inside the edge keep-out) -- may be unroutable")
+    return flagged
 
 
 def filter_already_routed(
@@ -326,10 +424,18 @@ def sync_pcb_data_segments(
                          if s.net_id not in routed_net_ids_set or id(s) in original_segment_ids]
     seg_count_after_remove = len(pcb_data.segments)
 
-    # Add current (possibly meandered) segments
+    # Add current (possibly meandered) segments. Never add an OBJECT that is
+    # already present: if a stale/aliased id survived the removal filter (id()
+    # of a garbage-collected original recycled onto a new segment), appending
+    # it again would put the same object in the list twice -- duplicate graph
+    # nodes then defeat the cleanup passes' connectivity gates (#195).
+    present = set(id(s) for s in pcb_data.segments)
     total_added = 0
     for net_id, result in routed_results.items():
         for seg in result.get('new_segments', []):
+            if id(seg) in present:
+                continue
+            present.add(id(seg))
             pcb_data.segments.append(seg)
             total_added += 1
     print(f"\nSync pcb_data: {seg_count_before} -> {seg_count_after_remove} (kept stubs) -> {len(pcb_data.segments)} (after adding {total_added})")
@@ -398,6 +504,7 @@ def get_common_config_kwargs(
     guide_corridor_spacing: float = 0.0,
     keepout_enabled: bool = False,
     keepout_layer: str = "User.2",
+    ripup_abandon_metric: str = 'stranded',
 ) -> Dict:
     """
     Build config kwargs dict from common parameters.
@@ -440,6 +547,7 @@ def get_common_config_kwargs(
         debug_lines=debug_lines,
         verbose=verbose,
         max_rip_up_count=max_rip_up_count,
+        ripup_abandon_metric=ripup_abandon_metric,
         target_swap_crossing_penalty=crossing_penalty,
         crossing_layer_check=crossing_layer_check,
         routing_clearance_margin=routing_clearance_margin,

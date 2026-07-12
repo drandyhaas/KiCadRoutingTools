@@ -4,6 +4,7 @@ Routing Exceptions
 Exception classes for routing operations, allowing the router to report
 errors through exceptions instead of sys.exit() calls.
 """
+from __future__ import annotations
 
 
 class RoutingError(Exception):

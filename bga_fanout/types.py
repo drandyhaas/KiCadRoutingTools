@@ -1,6 +1,7 @@
 """
 Data types for BGA fanout routing.
 """
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Tuple, Optional, List, TYPE_CHECKING

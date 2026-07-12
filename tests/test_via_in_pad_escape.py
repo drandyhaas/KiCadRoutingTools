@@ -52,7 +52,13 @@ def main():
     txt = run_route(out)
     checks = []
 
-    checks.append(("via-in-pad escape fired", "Via-in-pad unblock" in txt))
+    # The via-in-pad escape used to be REQUIRED here, but the exact obstacle
+    # keep-out (now the default) no longer over-blocks the pad's neighbours, so
+    # the boxed pad routes to an inner layer directly -- the #189 escape stays as
+    # a fallback for genuinely-boxed pads but isn't needed on this board. What we
+    # still guarantee is the boxed-pad subset routes fully and DRC-clean.
+    escape_fired = "Via-in-pad unblock" in txt
+    print(f"  (info) via-in-pad escape {'fired' if escape_fired else 'not needed (exact keep-out routed the boxed pad directly)'}")
 
     m = re.search(r"JSON_SUMMARY:\s*(\{.*\})", txt)
     checks.append(("JSON_SUMMARY line present", m is not None))

@@ -1,0 +1,17 @@
+[
+  {
+    "short_name": "rp2350_fpga_eensy",
+    "set": "set11",
+    "tier": "hard",
+    "repo": "adiuvo-engineering/forgix_public",
+    "raw_url": "https://bitbucket.org/adiuvo-engineering/forgix_public/raw/main/Kicad_Project/RP2350_FPGA_eensy-main.zip",
+    "zip_member": "RP2350_FPGA_eensy-main/RP2350_FPGA_eensy.kicad_pcb",
+    "local_path": "/Users/andy/Downloads/RP2350_FPGA_eensy-main/RP2350_FPGA_eensy.kicad_pcb",
+    "file": "/Users/andy/Documents/kicad_stress_test/sources/local_set11/RP2350_FPGA_eensy.kicad_pcb",
+    "license": "see repo (Adiuvo Engineering forgix_public)",
+    "note": "RP2350 + FPGA teensy-form-factor board by Adiuvo Engineering (published in the forgix_public Bitbucket repo as a zip); 6 copper layers, BGA-class fanout, board outline embedded in a footprint (prep rebuilds it at board level).",
+    "layers_est": 6,
+    "footprints": 61,
+    "routable_nets": 74
+  }
+]

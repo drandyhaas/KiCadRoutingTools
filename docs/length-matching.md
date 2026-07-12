@@ -24,6 +24,7 @@ For multi-point nets this happens between Phase 1 and Phase 3 of the MST-based a
 | `--time-matching` | false | Match propagation delay instead of physical length |
 | `--time-match-tolerance` | 1.0 | Acceptable delay variance within a group (ps) |
 | `--diff-pair-intra-match` | false | (`route_diff.py`) Match P and N lengths *within* each differential pair |
+| `--ac-couple-match` | false | (`route_diff.py`) End-to-end length-match AC-coupled pairs split by series DC-blocking caps (#196): match the concatenated P path vs N path across the caps |
 
 Examples:
 
@@ -102,6 +103,7 @@ Two forms of matching exist for differential pairs (`route_diff.py`):
 
 - **Group matching** — multiple pairs in a `--length-match-group` are matched pair-to-pair by meandering each pair's *centerline*; both P and N are regenerated from the modified centerline so the pair stays symmetric.
 - **Intra-pair matching** (`--diff-pair-intra-match`) — within one pair, meanders are added to the shorter of P/N to equalize them (`apply_intra_pair_length_matching()`). Bumps here are smaller (minimum amplitude 0.1mm) since they must fit between the pair and its surroundings; stub barrel lengths and polarity swaps are accounted for.
+- **End-to-end AC-coupled matching** (`--ac-couple-match`) — a pair split into two base-named pairs by series DC-blocking caps (the common PCIe/USB3/SATA TX case) is auto-detected as one *extended net* / XNet: a 2-pad cap bridging `A_P↔B_P` plus another bridging `A_N↔B_N`. Its concatenated P path (`A_P+B_P`) is matched against the concatenated N path (`A_N+B_N`) — the skew the receiver actually sees — with the compensating meander placed on whichever segment has room (`apply_ac_coupled_length_matching()`, sharing the meander engine with intra-pair via `_lengthen_net_with_meanders()`). This **supersedes** per-side intra-pair matching for the member pairs, reports the end-to-end skew in the JSON summary (`ac_coupled_xnets`), and is off by default. No-pop (DNP) caps are open circuits and are not stitched; only symmetric cap pairs (both polarities bridged) are joined. Detection requires the pair halves to be found first (so it inherits the `_P`/`_N` naming rules above).
 
 ## Time Matching
 

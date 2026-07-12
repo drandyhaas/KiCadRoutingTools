@@ -318,14 +318,26 @@ component — keeps crossing detection consistent across nets.
 ### Connectivity through zones
 
 ```python
-get_zone_connected_pad_groups(segments, vias, pads, zones,
-                              routing_layers=None) -> Dict[int, int]
+get_copper_connected_terminal_groups(pcb_data, net_id, pad_info)
+    -> Dict[int, int]
 ```
 
-Pad index → component ID, where pads sharing an ID are already connected
-through tracks **or copper zones/planes**. Used to skip MST edges between
-pads a plane already joins. Pads with no usable copper layer get unique
-negative IDs.
+`pad_info` index → component ID for multipoint terminals (rows as returned
+by `get_multipoint_net_pads`; real pads or stub free-ends), grouped by the
+net's **existing copper** using the authoritative overlap-aware definition
+(`check_net_connectivity`: cap overlap, T-junctions, zones, pad outlines).
+Drives the multipoint component MST — copper the checker already grades
+connected is never re-tapped (issue #317). Terminals not tied to any copper
+get unique negative IDs.
+
+```python
+compute_component_mst_edges(positions, components)
+    -> List[Tuple[int, int, float]]     # (index_a, index_b, length)
+```
+
+Minimum spanning tree over connected **components** of terminals: joining N
+components takes exactly N−1 edges, each realized by the closest terminal
+pair (Manhattan) between the two components it joins.
 
 ### Graph/geometry helpers
 

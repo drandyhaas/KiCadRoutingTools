@@ -1,6 +1,7 @@
 """
 DRC Checker - Find overlapping tracks and vias between different nets.
 """
+from __future__ import annotations
 
 import sys
 import argparse
@@ -14,8 +15,41 @@ from geometry_utils import (
     point_to_segment_distance,
     closest_point_on_segment,
     segment_to_segment_closest_points,
+    segment_to_segment_distance as _seg_seg_dist_coords,
 )
 from net_queries import expand_pad_layers
+import routing_defaults as defaults
+
+
+# Per-run memo for expand_pad_layers. Within one run_drc call routing_layers is a
+# single fixed list, and pads share a handful of distinct layer-sets (['F.Cu'],
+# ['*.Cu'], ...), yet expand_pad_layers is called once per pad per check (tens of
+# thousands of times). Caching by the pad's layer tuple collapses that to a few
+# real computations. Identical results -- the expansion is a pure function of
+# (pad_layers, routing_layers). The cache is keyed on the routing_layers object
+# identity; a new run passes a new list, which clears the cache. We hold a
+# reference to that list so its id() can't be recycled while the cache is live.
+_EXPAND_CACHE: Dict[tuple, List[str]] = {}
+_EXPAND_ROUTING = None
+
+# Same-net endpoints closer than this are treated as a COINCIDENT (clean) joint;
+# a larger gap that is still within cap-overlap is a fragile soft joint (#soft-joint).
+# ~10um is above grid-quantization noise (~8um) so a snapped junction is not flagged.
+_SOFT_JOINT_MIN_GAP = 0.010
+
+
+def _expand_cu(pad_layers: List[str], routing_layers: List[str]) -> List[str]:
+    """Memoized expand_pad_layers for the duration of one run_drc call."""
+    global _EXPAND_ROUTING
+    if routing_layers is not _EXPAND_ROUTING:
+        _EXPAND_CACHE.clear()
+        _EXPAND_ROUTING = routing_layers
+    key = tuple(pad_layers)
+    cached = _EXPAND_CACHE.get(key)
+    if cached is None:
+        cached = expand_pad_layers(pad_layers, routing_layers)
+        _EXPAND_CACHE[key] = cached
+    return cached
 
 
 class SpatialIndex:
@@ -71,11 +105,36 @@ class SpatialIndex:
         cell = self._get_cell(via.x, via.y)
         self.all_layer_cells[cell].append((via, net_id))
 
-    def add_pad(self, pad: Pad, net_id: int, expanded_layers: List[str]):
-        """Add a pad to the index."""
-        # Pad covers a rectangular area
+    @staticmethod
+    def _pad_half_extents(pad: Pad) -> Tuple[float, float]:
+        """Axis-aligned half-extents of the pad's REAL copper. A rotated pad's
+        corners protrude past the unrotated size_x/size_y bbox (a long pad at
+        30 deg bulges by up to half its length), and a custom pad's polygons can
+        extend past the anchor size -- under-indexing either lets copper sit in
+        cells the broad phase never registered, so a real violation is missed
+        (false clean)."""
         half_x = pad.size_x / 2
         half_y = pad.size_y / 2
+        rr = getattr(pad, 'rect_rotation', 0.0) or 0.0
+        if rr:
+            rad = math.radians(rr)
+            c, s = abs(math.cos(rad)), abs(math.sin(rad))
+            half_x, half_y = half_x * c + half_y * s, half_x * s + half_y * c
+        # pad.polygons are ABSOLUTE board coordinates (the exact checks feed
+        # board-space query points straight into _point_to_polys_distance) --
+        # measure their extent from the pad centre. Treating them as pad-local
+        # offsets gave ~board-sized half-extents and indexed every custom pad
+        # into every cell (sofle_pico: 266 custom pads -> a 40-minute grade).
+        for poly in (getattr(pad, 'polygons', None) or []):
+            for px, py in poly:
+                half_x = max(half_x, abs(px - pad.global_x))
+                half_y = max(half_y, abs(py - pad.global_y))
+        return half_x, half_y
+
+    def add_pad(self, pad: Pad, net_id: int, expanded_layers: List[str]):
+        """Add a pad to the index."""
+        # Pad covers a rectangular area (rotation/polygon-aware)
+        half_x, half_y = self._pad_half_extents(pad)
         min_cell = self._get_cell(pad.global_x - half_x, pad.global_y - half_y)
         max_cell = self._get_cell(pad.global_x + half_x, pad.global_y + half_y)
 
@@ -144,6 +203,43 @@ class SpatialIndex:
                     if isinstance(obj, Pad) and id(obj) not in seen:
                         seen.add(id(obj))
                         result.append((obj, net_id))
+        return result
+
+    def get_nearby_pads_for_pad(self, pad: "Pad", layer: str) -> List[Tuple["Pad", int]]:
+        """Get pads near another pad on a layer. Unlike get_nearby_pads (which
+        keys off a single point), this scans every cell the query pad spans plus
+        a one-cell margin, so a large pad does not miss a neighbour sitting near
+        its edge rather than its center (pad-pad check, #234)."""
+        half_x, half_y = self._pad_half_extents(pad)
+        min_cell = self._get_cell(pad.global_x - half_x, pad.global_y - half_y)
+        max_cell = self._get_cell(pad.global_x + half_x, pad.global_y + half_y)
+        layer_cells = self.cells_by_layer[layer]
+        seen = set()
+        result = []
+        for cx in range(min_cell[0] - 1, max_cell[0] + 2):
+            for cy in range(min_cell[1] - 1, max_cell[1] + 2):
+                for obj, net_id in layer_cells.get((cx, cy), []):
+                    if isinstance(obj, Pad) and id(obj) not in seen:
+                        seen.add(id(obj))
+                        result.append((obj, net_id))
+        return result
+
+    def get_nearby_pads_for_segment(self, seg: Segment) -> List[Tuple[Pad, int]]:
+        """Get pads near ANY point of a segment (its layer), not just its
+        endpoints. The pad-segment check used to query around the two endpoints
+        only, so a long straight segment grazing a pad mid-run (a few mm from
+        both ends) never saw that pad as a candidate -- a missed violation
+        (false clean)."""
+        layer_cells = self.cells_by_layer[seg.layer]
+        seen = set()
+        result = []
+        for (cx, cy) in self._get_segment_cells(seg):
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for obj, net_id in layer_cells.get((cx + dx, cy + dy), []):
+                        if isinstance(obj, Pad) and id(obj) not in seen:
+                            seen.add(id(obj))
+                            result.append((obj, net_id))
         return result
 
 
@@ -328,18 +424,37 @@ def segment_to_rect_distance(x1: float, y1: float, x2: float, y2: float,
     Returns:
         (distance, closest_point_on_segment)
     """
-    # Sample points along the segment and find minimum distance to rectangle
-    # This is a simplified approach - for production code would use proper geometry
+    # Sample points along the segment and find minimum distance to rectangle.
+    # point_to_rect_distance is inlined here (this is the DRC hotspot -- one call
+    # per sample, hundreds of thousands per board) with the corner-radius branch
+    # invariants hoisted out of the loop. The per-sample arithmetic is identical
+    # to point_to_rect_distance, so the result is unchanged.
     min_dist = float('inf')
     closest_pt = (x1, y1)
+    dx_seg = x2 - x1
+    dy_seg = y2 - y1
+    has_corner = corner_radius > 0
+    inner_half_x = half_x - corner_radius
+    inner_half_y = half_y - corner_radius
+    sqrt = math.sqrt
 
-    # Check endpoints and intermediate points
+    # Check endpoints and intermediate points (keep the original expression form
+    # verbatim so num_samples is bit-identical to before)
     num_samples = max(10, int(math.sqrt((x2-x1)**2 + (y2-y1)**2) / 0.05))  # Sample every ~0.05mm
     for i in range(num_samples + 1):
         t = i / num_samples
-        px = x1 + t * (x2 - x1)
-        py = y1 + t * (y2 - y1)
-        dist = point_to_rect_distance(px, py, cx, cy, half_x, half_y, corner_radius)
+        px = x1 + t * dx_seg
+        py = y1 + t * dy_seg
+        rel_x = abs(px - cx)
+        rel_y = abs(py - cy)
+        if has_corner and rel_x > inner_half_x and rel_y > inner_half_y:
+            ddx = rel_x - inner_half_x
+            ddy = rel_y - inner_half_y
+            dist = max(0, sqrt(ddx * ddx + ddy * ddy) - corner_radius)
+        else:
+            ex = max(0, rel_x - half_x)
+            ey = max(0, rel_y - half_y)
+            dist = sqrt(ex * ex + ey * ey)
         if dist < min_dist:
             min_dist = dist
             closest_pt = (px, py)
@@ -404,6 +519,256 @@ def _segment_to_polys_distance(x1: float, y1: float, x2: float, y2: float, polys
     return best, best_pt
 
 
+_GRAPHIC_EFFECTIVE_NETS = None  # set per check run by _build_graphic_unification
+
+
+def _build_graphic_unification(pcb_data):
+    """KiCad derives a copper GRAPHIC's net from CONNECTIVITY, unifying every
+    net whose copper physically touches the art (#337). Cluster touching
+    graphics (flood over edge-contact), then record each cluster's EFFECTIVE
+    net set = the file attributes plus every net whose segment/via/pad touches
+    the cluster. Pair checks treat a graphic as same-net with any effective
+    net -- eurorack's jack art carries a stale +12V attribute yet is soldered
+    into the OUT nets, so its 68um "grazes" are internal spacing of one
+    electrical net, which KiCad correctly ignores."""
+    import math as _m
+    global _GRAPHIC_EFFECTIVE_NETS
+    _GRAPHIC_EFFECTIVE_NETS = {}
+    graphics = [sg for sg in pcb_data.segments if getattr(sg, 'graphic', False)]
+    if not graphics:
+        return
+
+    def seg_seg_touch(a, b):
+        if a.layer != b.layer:
+            return False
+        lim = a.width / 2.0 + b.width / 2.0 + 1e-6
+        return _seg_seg_distance(a, b) <= lim
+
+    def _seg_seg_distance(a, b):
+        best = float('inf')
+        for (px, py) in ((a.start_x, a.start_y), (a.end_x, a.end_y)):
+            best = min(best, _pt_seg_d(px, py, b))
+        for (px, py) in ((b.start_x, b.start_y), (b.end_x, b.end_y)):
+            best = min(best, _pt_seg_d(px, py, a))
+        if best > 0:
+            # Endpoint sampling misses CROSSING strokes (distance 0 with all
+            # four endpoints far away) -- two graphic lines drawn as an X
+            # never clustered and their intersection graded as a short.
+            from check_drc import segments_cross as _sc
+            try:
+                crossed, _ = _sc(a, b)
+                if crossed:
+                    return 0.0
+            except Exception:
+                pass
+        return best
+
+    def _pt_seg_d(px, py, sgm):
+        x1, y1, x2, y2 = sgm.start_x, sgm.start_y, sgm.end_x, sgm.end_y
+        dx, dy = x2 - x1, y2 - y1
+        L2 = dx * dx + dy * dy
+        t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / L2))
+        return _m.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+    # union-find over graphics by physical contact
+    parent = list(range(len(graphics)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(len(graphics)):
+        for j in range(i + 1, len(graphics)):
+            if seg_seg_touch(graphics[i], graphics[j]):
+                parent[find(i)] = find(j)
+
+    clusters = {}
+    for i, g in enumerate(graphics):
+        clusters.setdefault(find(i), []).append(g)
+
+    for root, members in clusters.items():
+        eff = {g.net_id for g in members}
+        for g in members:
+            hw = g.width / 2.0
+            # touching routed/input segments
+            for sg in pcb_data.segments:
+                if getattr(sg, 'graphic', False) or sg.layer != g.layer:
+                    continue
+                if _seg_seg_distance(g, sg) <= hw + sg.width / 2.0 + 1e-6:
+                    eff.add(sg.net_id)
+            # touching vias (barrel spans all layers)
+            for v in pcb_data.vias:
+                if _pt_seg_d(v.x, v.y, g) <= hw + (v.size or 0.5) / 2.0 + 1e-6:
+                    eff.add(v.net_id)
+            # touching pads (on the graphic's layer)
+            for pads in pcb_data.pads_by_net.values():
+                for pd in pads:
+                    lys = pd.layers or []
+                    if g.layer not in lys and '*.Cu' not in lys:
+                        continue
+                    mid_d = min(point_to_pad_distance(g.start_x, g.start_y, pd),
+                                point_to_pad_distance(g.end_x, g.end_y, pd))
+                    if mid_d <= hw + 1e-6:
+                        eff.add(pd.net_id)
+        for g in members:
+            _GRAPHIC_EFFECTIVE_NETS[id(g)] = eff
+
+
+def _graphic_pair_is_same_net(seg_a, seg_b, net_a, net_b):
+    """True when a pair involving copper GRAPHICS is the same electrical net
+    under connectivity unification (see _build_graphic_unification). For a
+    graphic-vs-graphic pair, two clusters sharing ANY effective net are one
+    electrical net (eurorack's two jack arts both solder into the OUT nets)."""
+    if _GRAPHIC_EFFECTIVE_NETS is None:
+        return False
+    ga = seg_a is not None and getattr(seg_a, 'graphic', False)
+    gb = seg_b is not None and getattr(seg_b, 'graphic', False)
+    if ga and gb:
+        ea = _GRAPHIC_EFFECTIVE_NETS.get(id(seg_a)) or set()
+        eb = _GRAPHIC_EFFECTIVE_NETS.get(id(seg_b)) or set()
+        return bool(ea & eb)
+    for g, flag, other_net in ((seg_a, ga, net_b), (seg_b, gb, net_a)):
+        if flag:
+            eff = _GRAPHIC_EFFECTIVE_NETS.get(id(g))
+            if eff is not None and other_net in eff:
+                return True
+    return False
+
+
+def point_to_pad_distance(px: float, py: float, pad: Pad) -> float:
+    """Edge-to-edge distance from a point to a pad's copper (0 if inside the
+    copper). Handles custom-polygon pads, rounded/rect/circle/oval shapes, and
+    diagonal (rect_rotation) pads -- the same geometry the pad-segment and
+    pad-via checks use, factored out for reuse by the pad-pad check (#234)."""
+    pad_polys = getattr(pad, 'polygons', None)
+    if pad_polys:
+        return _point_to_polys_distance(px, py, pad_polys)
+
+    if pad.shape in ('circle', 'oval'):
+        corner_radius = min(pad.size_x, pad.size_y) / 2
+    elif pad.shape == 'roundrect':
+        corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
+    else:
+        corner_radius = 0.0
+
+    x, y = px, py
+    if pad.rect_rotation:
+        rad = math.radians(pad.rect_rotation)
+        x, y = _into_pad_frame(x, y, pad, math.cos(rad), math.sin(rad))
+    return point_to_rect_distance(x, y, pad.global_x, pad.global_y,
+                                  pad.size_x / 2, pad.size_y / 2, corner_radius)
+
+
+def _pad_perimeter_points(pad: Pad, n_per_side: int = 8) -> List[Tuple[float, float]]:
+    """Sample points around a pad's copper perimeter in global coordinates.
+    For custom-polygon pads, walk the real polygon edges; otherwise walk the
+    (rotated) rounded-rect outline that matches point_to_pad_distance --
+    circle/oval/roundrect corners are arcs, NOT the sharp bounding-box corners.
+    Sampling the bbox made two non-touching circle pads read as overlapping
+    (the corner sample sits sqrt(2)*r - r outside the real copper; issue #260,
+    same phantom class as the #232 custom-pad bboxes). Used to measure pad-pad
+    and pad-edge gaps by cross-sampling one pad's perimeter against the other
+    shape's distance fn."""
+    pad_polys = getattr(pad, 'polygons', None)
+    if pad_polys:
+        pts = []
+        for poly in pad_polys:
+            m = len(poly)
+            for i in range(m):
+                x1, y1 = poly[i]
+                x2, y2 = poly[(i + 1) % m]
+                for k in range(n_per_side):
+                    t = k / n_per_side
+                    pts.append((x1 + t * (x2 - x1), y1 + t * (y2 - y1)))
+        return pts
+
+    hx, hy = pad.size_x / 2, pad.size_y / 2
+    cx, cy = pad.global_x, pad.global_y
+    if pad.shape in ('circle', 'oval'):
+        r = min(hx, hy)
+    elif pad.shape == 'roundrect':
+        r = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
+    else:
+        r = 0.0
+    r = min(r, hx, hy)
+    ix, iy = hx - r, hy - r  # half-extents of the straight (un-rounded) sections
+    local = []
+    edges = [((-ix, -hy), (ix, -hy)), ((hx, -iy), (hx, iy)),
+             ((ix, hy), (-ix, hy)), ((-hx, iy), (-hx, -iy))]
+    for (x1, y1), (x2, y2) in edges:
+        if x1 == x2 and y1 == y2:
+            continue  # fully-round side (circle/stadium): no straight section
+        for k in range(n_per_side):
+            t = k / n_per_side
+            local.append((x1 + t * (x2 - x1), y1 + t * (y2 - y1)))
+    if r > 0.0:
+        # Quarter arcs joining the edges, centered on the inner-rect corners.
+        for acx, acy, a0 in ((ix, -iy, -90.0), (ix, iy, 0.0),
+                             (-ix, iy, 90.0), (-ix, -iy, 180.0)):
+            for k in range(n_per_side):
+                a = math.radians(a0 + 90.0 * k / n_per_side)
+                local.append((acx + r * math.cos(a), acy + r * math.sin(a)))
+    if pad.rect_rotation:
+        rad = math.radians(pad.rect_rotation)
+        c, s = math.cos(rad), math.sin(rad)
+        return [(cx + lx * c - ly * s, cy + lx * s + ly * c) for lx, ly in local]
+    return [(cx + lx, cy + ly) for lx, ly in local]
+
+
+def _pad_has_no_copper(pad: Pad) -> bool:
+    """True for pads with no copper to clearance-check: NPTH mechanical holes
+    (KiCad lists *.Cu on them for hole keep-out, but an np_thru_hole pad carries
+    no ring -- its 'size' is just the mask opening) and pads declaring no copper
+    layer at all. Their drill still matters and is covered by the hole checks
+    (copper-to-hole, drill-to-drill); flagging their phantom 'copper' against
+    neighbouring pads made KiCad-clean boards fail (issue #260)."""
+    if getattr(pad, 'pad_type', '') == 'np_thru_hole':
+        return True
+    return not any(l == '*.Cu' or l.endswith('.Cu') for l in pad.layers)
+
+
+def check_pad_pad_overlap(pad1: Pad, pad2: Pad, clearance: float,
+                          routing_layers: List[str],
+                          clearance_margin: float = 0.05
+                          ) -> Tuple[bool, float, Optional[Tuple[float, float]]]:
+    """Check if two pads of different nets are below clearance (or overlap/short)
+    on a shared copper layer (issue #234). KiCad flags these as clearance /
+    shorting_items; check_drc previously only had pad-segment and pad-via passes.
+
+    Distance is edge-to-edge, computed by cross-sampling each pad's perimeter
+    against the other pad's exact distance function (rect/roundrect/circle +
+    rect_rotation, or the real polygon for custom pads -- avoiding the #232
+    bounding-box phantom-hit caveat).
+
+    Returns (has_violation, overlap_mm, closest_point).
+    """
+    l1 = _expand_cu(pad1.layers, routing_layers)
+    l2 = _expand_cu(pad2.layers, routing_layers)
+    shared = any(l in l2 and l.endswith('.Cu') for l in l1)
+    if not shared:
+        return False, 0.0, None
+
+    best = float('inf')
+    best_pt = None
+    for px, py in _pad_perimeter_points(pad1):
+        d = point_to_pad_distance(px, py, pad2)
+        if d < best:
+            best = d
+            best_pt = (px, py)
+    for px, py in _pad_perimeter_points(pad2):
+        d = point_to_pad_distance(px, py, pad1)
+        if d < best:
+            best = d
+            best_pt = (px, py)
+
+    overlap = clearance - best
+    if overlap > clearance * clearance_margin:
+        return True, overlap, best_pt
+    return False, 0.0, None
+
+
 def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
                                routing_layers: List[str],
                                clearance_margin: float = 0.05) -> Tuple[bool, float, Optional[Tuple[float, float]]]:
@@ -420,7 +785,7 @@ def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
         (has_violation, overlap_mm, closest_point_on_segment)
     """
     # Expand pad layers (handles *.Cu wildcards)
-    expanded_layers = expand_pad_layers(pad.layers, routing_layers)
+    expanded_layers = _expand_cu(pad.layers, routing_layers)
 
     # Check if segment is on a layer the pad is on
     if seg.layer not in expanded_layers:
@@ -496,42 +861,15 @@ def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
         (has_violation, overlap_mm)
     """
     # Expand pad layers (handles *.Cu wildcards)
-    expanded_layers = expand_pad_layers(pad.layers, routing_layers)
+    expanded_layers = _expand_cu(pad.layers, routing_layers)
 
     # Vias are through-hole, so they conflict with pads on any copper layer
     if not any(layer.endswith('.Cu') for layer in expanded_layers):
         return False, 0.0
 
-    # Custom comb/finger pads: measure to the real copper polygon(s) (issue #188).
-    pad_polys = getattr(pad, 'polygons', None)
-    if pad_polys:
-        dist_to_pad = _point_to_polys_distance(via.x, via.y, pad_polys)
-        required_dist = via.size / 2 + clearance
-        overlap = required_dist - dist_to_pad
-        if overlap > clearance * clearance_margin:
-            return True, overlap
-        return False, 0.0
-
-    # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
-    if pad.shape in ('circle', 'oval'):
-        corner_radius = min(pad.size_x, pad.size_y) / 2
-    elif pad.shape == 'roundrect':
-        corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
-    else:
-        corner_radius = 0.0
-
-    # Distance from via center to pad edge (accounts for rounded corners).
-    # For diagonal pads, rotate the via center into the pad's local frame.
-    vx, vy = via.x, via.y
-    if pad.rect_rotation:
-        rad = math.radians(pad.rect_rotation)
-        vx, vy = _into_pad_frame(vx, vy, pad, math.cos(rad), math.sin(rad))
-    dist_to_pad = point_to_rect_distance(
-        vx, vy,
-        pad.global_x, pad.global_y,
-        pad.size_x / 2, pad.size_y / 2,
-        corner_radius
-    )
+    # Distance from via center to pad edge. Handles custom comb/finger polygons
+    # (issue #188), rounded corners, and diagonal (rect_rotation) pads.
+    dist_to_pad = point_to_pad_distance(via.x, via.y, pad)
 
     # Required clearance: via half-size + clearance
     # (dist_to_pad is already edge-to-edge from pad)
@@ -584,9 +922,18 @@ def check_pad_drill_via_overlap(pad: Pad, via: Via, hole_to_hole_clearance: floa
     if pad.drill <= 0:
         return False, 0.0  # SMD pad, no drill
 
-    # Required distance between drill hole centers
-    required_dist = pad.drill / 2 + via.drill / 2 + hole_to_hole_clearance
-    actual_dist = math.sqrt((pad.global_x - via.x)**2 + (pad.global_y - via.y)**2)
+    # Distance from the via's hole to the pad's drill CAPSULE (slot-aware:
+    # a slot's hole edge follows its axis, not a long-dimension circle).
+    from kicad_parser import pad_drill_capsule
+    (c1x, c1y), (c2x, c2y), prad = pad_drill_capsule(pad)
+    required_dist = prad + via.drill / 2 + hole_to_hole_clearance
+    ddx, ddy = c2x - c1x, c2y - c1y
+    len2 = ddx * ddx + ddy * ddy
+    if len2 > 0:
+        t = max(0.0, min(1.0, ((via.x - c1x) * ddx + (via.y - c1y) * ddy) / len2))
+        actual_dist = math.sqrt((via.x - (c1x + t * ddx))**2 + (via.y - (c1y + t * ddy))**2)
+    else:
+        actual_dist = math.sqrt((pad.global_x - via.x)**2 + (pad.global_y - via.y)**2)
     overlap = required_dist - actual_dist
 
     tolerance = hole_to_hole_clearance * clearance_margin
@@ -703,6 +1050,200 @@ def check_via_board_edge(via: Via, board_bounds: Tuple[float, float, float, floa
     return False, 0.0, ""
 
 
+# --- Real-outline board-edge geometry (issue #236) ---------------------------
+# The bbox checks above measure to the rectangular board extent. On a board with
+# an internal cutout, slot, or notch, copper routed INTO the cutout sits inside
+# the bbox and is never flagged. These helpers measure to the actual Edge.Cuts
+# outline (outer ring + interior cutouts), matching KiCad's copper_edge_clearance.
+
+def board_edge_geometry(board_info) -> Tuple[List[List[Tuple[float, float]]],
+                                             Optional[List[Tuple[float, float]]],
+                                             List[List[Tuple[float, float]]]]:
+    """Return (edge_rings, outer_outline, cutouts) for the real Edge.Cuts.
+
+    edge_rings is the flat list of closed vertex rings (outer outline + each
+    cutout) to measure clearance against; outer_outline / cutouts are returned
+    separately for the on-board (inside-outline, outside-cutouts) test. Any ring
+    is returned only if it has >=3 vertices; an empty edge_rings means the parser
+    found no usable outline and the caller should fall back to the bbox checks.
+    """
+    outlines = [o for o in (getattr(board_info, 'board_outlines', None) or [])
+                if len(o) >= 3]
+    if not outlines:
+        outline = getattr(board_info, 'board_outline', None) or []
+        outlines = [outline] if len(outline) >= 3 else []
+    cutouts = [c for c in (getattr(board_info, 'board_cutouts', None) or []) if len(c) >= 3]
+    # `outer` is a LIST of outer rings (multi-outline boards, issue #304:
+    # split keyboards carry several disjoint outlines in one file);
+    # _point_on_board accepts either form. None when the board has no outline.
+    outer = outlines or None
+    rings = list(outlines)
+    rings.extend(cutouts)
+    return rings, outer, cutouts
+
+
+def _point_to_rings_distance(x: float, y: float,
+                             rings: List[List[Tuple[float, float]]]) -> float:
+    """Min distance from a point to any edge ring's boundary."""
+    best = float('inf')
+    for ring in rings:
+        n = len(ring)
+        for i in range(n):
+            x1, y1 = ring[i]
+            x2, y2 = ring[(i + 1) % n]
+            d = point_to_segment_distance(x, y, x1, y1, x2, y2)
+            if d < best:
+                best = d
+    return best
+
+
+def _segment_to_rings_distance(x1: float, y1: float, x2: float, y2: float,
+                               rings: List[List[Tuple[float, float]]]) -> float:
+    """Min distance from a track segment to any edge ring's boundary (0 if it
+    crosses an edge)."""
+    best = float('inf')
+    for ring in rings:
+        n = len(ring)
+        for i in range(n):
+            ex1, ey1 = ring[i]
+            ex2, ey2 = ring[(i + 1) % n]
+            d = _seg_seg_dist_coords(x1, y1, x2, y2, ex1, ey1, ex2, ey2)
+            if d < best:
+                best = d
+    return best
+
+
+def _point_on_board(x: float, y: float, outer, cutouts) -> bool:
+    """True if (x, y) is on copper-bearing board: inside AN outer outline and
+    not inside any cutout. A point off-board / inside a cutout is a hard edge
+    violation regardless of its distance to the nearest edge segment.
+
+    ``outer`` may be one vertex ring or a LIST of outer rings (multi-outline
+    boards, issue #304); on-board means inside ANY of them.
+    """
+    if outer:
+        outers = [outer] if isinstance(outer[0], tuple) else outer
+        if not any(_point_in_poly(x, y, o) for o in outers):
+            return False
+    for cut in cutouts:
+        if _point_in_poly(x, y, cut):
+            return False
+    return True
+
+
+# A point must be at least this far outside the Edge.Cuts outline (or inside a
+# cutout) before routing treats it as unreachable and skips it (#291). Pads ON
+# or grazing the outline (castellated / edge connectors) stay routable.
+OFF_BOARD_TOLERANCE = 0.5
+
+
+def make_off_board_test(board_info, tolerance: float = OFF_BOARD_TOLERANCE):
+    """Return f(x, y) -> True when the point is clearly off the copper-bearing
+    board: outside the Edge.Cuts outline (or inside a cutout) by more than
+    `tolerance` mm, falling back to the board_bounds bbox when the parser found
+    no usable outline. Returns None when the board has neither (no test
+    possible).
+
+    Routing pre-flights use this to treat off-board pads as unreachable (issue
+    #291): the routable area stops at the board edge, so copper drawn toward an
+    off-board pad -- or between two off-board pads, beyond the edge keep-out's
+    blocked band -- can only end as board-edge DRC.
+    """
+    rings, outer, cutouts = board_edge_geometry(board_info)
+    if rings:
+        def test(x: float, y: float) -> bool:
+            if _point_on_board(x, y, outer, cutouts):
+                return False
+            return _point_to_rings_distance(x, y, rings) > tolerance
+        return test
+    bounds = getattr(board_info, 'board_bounds', None)
+    if bounds:
+        min_x, min_y, max_x, max_y = bounds
+        def test(x: float, y: float) -> bool:
+            return (x < min_x - tolerance or x > max_x + tolerance or
+                    y < min_y - tolerance or y > max_y + tolerance)
+        return test
+    return None
+
+
+def check_segment_board_edge_poly(seg: Segment, rings, outer, cutouts,
+                                   clearance: float,
+                                   clearance_margin: float = 0.05
+                                   ) -> Tuple[bool, float, str]:
+    """Board-edge clearance for a track measured against the real Edge.Cuts."""
+    required = clearance + seg.width / 2
+    tolerance = clearance * clearance_margin
+    # A track endpoint off-board / inside a cutout is a definite violation.
+    for x, y in [(seg.start_x, seg.start_y), (seg.end_x, seg.end_y)]:
+        if not _point_on_board(x, y, outer, cutouts):
+            dist = _point_to_rings_distance(x, y, rings)
+            return True, required + dist, "off-board"
+    dist = _segment_to_rings_distance(seg.start_x, seg.start_y, seg.end_x, seg.end_y, rings)
+    overlap = required - dist
+    if overlap > tolerance:
+        return True, overlap, "edge"
+    return False, 0.0, ""
+
+
+def check_via_board_edge_poly(via: Via, rings, outer, cutouts,
+                              clearance: float,
+                              clearance_margin: float = 0.05
+                              ) -> Tuple[bool, float, str]:
+    """Board-edge clearance for a via measured against the real Edge.Cuts."""
+    required = clearance + via.size / 2
+    tolerance = clearance * clearance_margin
+    if not _point_on_board(via.x, via.y, outer, cutouts):
+        dist = _point_to_rings_distance(via.x, via.y, rings)
+        return True, required + dist, "off-board"
+    dist = _point_to_rings_distance(via.x, via.y, rings)
+    overlap = required - dist
+    if overlap > tolerance:
+        return True, overlap, "edge"
+    return False, 0.0, ""
+
+
+def check_pad_board_edge(pad: Pad, rings, outer, cutouts,
+                         clearance: float, board_bounds,
+                         clearance_margin: float = 0.05
+                         ) -> Tuple[bool, float, str]:
+    """Board-edge clearance for a pad (issue #236). Measures the pad copper edge
+    (sampled perimeter, or the bbox-rectangle distance when no outline exists)
+    to the real Edge.Cuts. Returns (has_violation, overlap_mm, edge)."""
+    tolerance = clearance * clearance_margin
+    if rings:
+        best = float('inf')
+        off_board = False
+        for px, py in _pad_perimeter_points(pad):
+            if not _point_on_board(px, py, outer, cutouts):
+                off_board = True
+            d = _point_to_rings_distance(px, py, rings)
+            if d < best:
+                best = d
+        if off_board:
+            return True, clearance + best, "off-board"
+        overlap = clearance - best
+        if overlap > tolerance:
+            return True, overlap, "edge"
+        return False, 0.0, ""
+
+    # No usable outline -> bbox fallback, measured to the pad copper edge.
+    if board_bounds is None:
+        return False, 0.0, ""
+    min_x, min_y, max_x, max_y = board_bounds
+    best = float('inf')
+    edge = ""
+    for px, py in _pad_perimeter_points(pad):
+        for d, name in ((px - min_x, "left"), (max_x - px, "right"),
+                        (py - min_y, "bottom"), (max_y - py, "top")):
+            if d < best:
+                best = d
+                edge = name
+    overlap = clearance - best
+    if overlap > tolerance:
+        return True, overlap, edge
+    return False, 0.0, ""
+
+
 def check_track_width(seg: Segment, min_track_width: float,
                       size_margin: float = 0.0) -> Tuple[bool, float]:
     """Check if a segment is thinner than the minimum manufacturable track width.
@@ -787,14 +1328,24 @@ def write_debug_lines(pcb_file: str, violations: List[dict], clearance: float, l
     print(f"\nWrote {len(debug_lines)} debug line(s) to layer {layer}")
 
 
+def _edge_phrase(edge: str) -> str:
+    """Human-readable board-edge violation phrase from the edge label."""
+    if edge == 'off-board':
+        return "off the board / in a cutout"
+    if edge in ('', 'edge'):
+        return "too close to board edge"
+    return f"too close to {edge} board edge"  # bbox fallback: left/right/top/bottom
+
+
 def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[str]] = None,
             debug_output: bool = False, quiet: bool = False,
-            hole_to_hole_clearance: float = 0.2, board_edge_clearance: float = 0.0,
+            hole_to_hole_clearance: float = defaults.HOLE_TO_HOLE_CLEARANCE, board_edge_clearance: float = 0.0,
             clearance_margin: float = 0.05, max_print: int = 20,
             min_track_width: Optional[float] = None,
             min_via_diameter: Optional[float] = None,
             min_via_drill: Optional[float] = None,
-            check_sizes: bool = True, size_margin: float = 0.0):
+            check_sizes: bool = True, size_margin: float = 0.0,
+            check_pad_edge: bool = False):
     """Run DRC checks on the PCB file.
 
     Args:
@@ -804,7 +1355,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                      If provided, only checks involving at least one matching net are reported.
         debug_output: If True, write debug lines to User.7 layer showing violation locations
         quiet: If True, only print a summary line unless there are violations
-        hole_to_hole_clearance: Minimum clearance between drill hole edges in mm (default: 0.2)
+        hole_to_hole_clearance: Minimum clearance between drill hole edges in mm
+            (default: the fab floor, routing_defaults.HOLE_TO_HOLE_CLEARANCE)
         board_edge_clearance: Minimum clearance from board edge in mm (0 = use clearance)
         min_track_width: Minimum manufacturable track width in mm. None = derive the
             JLC fab floor from the board's copper-layer count (issue #176).
@@ -826,6 +1378,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         print(f"Loading {pcb_file}...")
 
     pcb_data = parse_kicad_pcb(pcb_file)
+    # #337: unify copper-graphic nets by connectivity before pair checks
+    _build_graphic_unification(pcb_data)
 
     if not quiet:
         print(f"Found {len(pcb_data.segments)} segments and {len(pcb_data.vias)} vias")
@@ -833,16 +1387,17 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # Resolve the fab-floor minimums for the track-width / via-size checks. Default
     # to the JLC manufacturing floor for the board's copper-layer count (issue #176).
     if check_sizes:
-        from list_nets import fab_floors
+        from list_nets import fab_floor_min
         copper_layers = getattr(pcb_data.board_info, 'copper_layers', None) or []
         copper_count = len(copper_layers) if copper_layers else 2
-        fab = fab_floors(copper_count)
-        # Use the FINE via floor (the smallest via the fab can make) as the hard
-        # minimum -- 0.30mm dia / 0.15mm drill on 4+ layers. Flagging at the
-        # larger standard via floor would reject legitimate fine-pitch vias.
+        # Grade against the DEEPEST floor the active fab tier can reach (fab_floor_min):
+        # for 'standard' that's the advanced rung it escalates to (0.25 dia / 0.15
+        # drill on 4+ layers), so legitimately-escalated fine vias aren't flagged;
+        # for 'advanced'/overrides it's the hard floor (issue #237).
+        fab = fab_floor_min(copper_count)
         eff_min_track = min_track_width if min_track_width is not None else fab['track_width']
-        eff_min_via_dia = min_via_diameter if min_via_diameter is not None else fab['fine_via_diameter']
-        eff_min_via_drill = min_via_drill if min_via_drill is not None else fab['fine_via_drill']
+        eff_min_via_dia = min_via_diameter if min_via_diameter is not None else fab['via_diameter']
+        eff_min_via_drill = min_via_drill if min_via_drill is not None else fab['via_drill']
         if not quiet:
             print(f"Size floors ({copper_count}-layer fab): track >= {eff_min_track}mm, "
                   f"via dia >= {eff_min_via_dia}mm, via drill >= {eff_min_via_drill}mm")
@@ -859,8 +1414,16 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     if net_patterns and not quiet:
         print(f"Filtering to nets matching: {net_patterns}")
 
-    # Get routing layers for pad layer expansion
-    routing_layers = list(set(seg.layer for seg in pcb_data.segments if seg.layer.endswith('.Cu')))
+    # Copper layers for pad layer expansion and the per-layer pad/via passes.
+    # Use the BOARD's copper layers, not the layers segments happen to sit on:
+    # a via can overlap a pad on a layer that carries no tracks yet (e.g. a
+    # fanout via ring vs a B.Cu test pad before anything routes on B.Cu), and
+    # the segment-derived list silently skipped that layer's checks (#253).
+    routing_layers = [l for l in (pcb_data.board_info.copper_layers or [])
+                      if l.endswith('.Cu')]
+    if not routing_layers:
+        routing_layers = list(set(seg.layer for seg in pcb_data.segments
+                                  if seg.layer.endswith('.Cu')))
     if not routing_layers:
         routing_layers = ['F.Cu', 'B.Cu']  # Fallback
 
@@ -881,7 +1444,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     pads_by_net = pcb_data.pads_by_net
     for net_id, pads in pads_by_net.items():
         for pad in pads:
-            expanded_layers = expand_pad_layers(pad.layers, routing_layers)
+            expanded_layers = _expand_cu(pad.layers, routing_layers)
             spatial_idx.add_pad(pad, net_id, expanded_layers)
 
     # Group vias by net (still needed for some checks)
@@ -929,6 +1492,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             checked_pairs.add(pair_key)
 
             has_violation, overlap, pt1, pt2 = check_segment_overlap(seg1, seg2, clearance, clearance_margin)
+            if has_violation and _graphic_pair_is_same_net(seg1, seg2, net1, net2):
+                has_violation = False
             if has_violation:
                 net1_name = pcb_data.nets.get(net1, None)
                 net2_name = pcb_data.nets.get(net2, None)
@@ -994,6 +1559,64 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'loc2': (seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y),
                 })
 
+    # Same-net SOFT JOINT: a DANGLING FREE END (a segment terminus that is NOT a
+    # shared vertex, NOT on a via, and NOT on an own-net pad) that reaches the rest
+    # of the net ONLY by cap-overlapping another dangling free end. A clean route
+    # ends every piece at a coincident vertex, a via, or a pad; a free end floating
+    # in copper means the real connecting segment was ripped and never restored (or
+    # a tap landed on-grid short of the off-grid endpoint), leaving the net held by
+    # a sliver of overlap -- a fragile near-open. Only DANGLING ends qualify, so
+    # parallel same-net tracks and normal bends (shared vertices) are not flagged.
+    if not quiet:
+        print("Checking for same-net soft joints (dangling free ends)...")
+    from collections import defaultdict as _dd
+    def _rk(x, y):
+        return (round(x, 3), round(y, 3))
+    _ep_count = _dd(int)
+    for s in pcb_data.segments:
+        if matching_net_ids is not None and s.net_id not in matching_net_ids:
+            continue
+        _ep_count[(s.net_id, s.layer, _rk(s.start_x, s.start_y))] += 1
+        _ep_count[(s.net_id, s.layer, _rk(s.end_x, s.end_y))] += 1
+    _via_by_net = _dd(list)
+    for v in pcb_data.vias:
+        _via_by_net[v.net_id].append((v.x, v.y, (getattr(v, 'size', 0) or 0) / 2.0))
+    def _at_anchor(nid, x, y):
+        for vx, vy, vr in _via_by_net.get(nid, []):
+            if math.hypot(x - vx, y - vy) <= vr + 0.01:
+                return True
+        for p in pcb_data.pads_by_net.get(nid, []):
+            if point_to_pad_distance(x, y, p) <= 0.02:
+                return True
+        return False
+    _dangles = _dd(list)  # (net_id, layer) -> [(x, y, width)]
+    for s in pcb_data.segments:
+        if matching_net_ids is not None and s.net_id not in matching_net_ids:
+            continue
+        for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+            if _ep_count[(s.net_id, s.layer, _rk(x, y))] != 1:
+                continue  # shared vertex = clean joint
+            if _at_anchor(s.net_id, x, y):
+                continue  # terminates on a via / own pad = legitimate
+            _dangles[(s.net_id, s.layer)].append((x, y, s.width))
+    for (net_id, layer), ends in _dangles.items():
+        for i in range(len(ends)):
+            xi, yi, wi = ends[i]
+            for j in range(i + 1, len(ends)):
+                xj, yj, wj = ends[j]
+                gap = math.hypot(xi - xj, yi - yj)
+                cap = (wi + wj) / 2.0
+                if _SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
+                    net_name = pcb_data.nets.get(net_id, None)
+                    net_str = net_name.name if net_name else f"net_{net_id}"
+                    violations.append({
+                        'type': 'segment-endpoint-gap',
+                        'net1': net_str, 'net2': net_str, 'layer': layer,
+                        'gap_mm': gap, 'overlap_mm': cap - gap,
+                        'loc1': (xi, yi), 'loc2': (xj, yj),
+                    })
+
+
     # Check via-to-segment violations using spatial index
     if not quiet:
         print("Checking via-to-segment clearances...")
@@ -1015,6 +1638,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     continue
 
                 has_violation, overlap = check_via_segment_overlap(via, seg, clearance, clearance_margin)
+                if has_violation and _graphic_pair_is_same_net(seg, None, seg_net, via_net):
+                    has_violation = False
                 if has_violation:
                     via_net_name = pcb_data.nets.get(via_net, None)
                     seg_net_name = pcb_data.nets.get(seg_net, None)
@@ -1075,35 +1700,39 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         seg_net = seg.net_id
         seg_net_matches = matching_net_ids is None or seg_net in matching_net_ids
 
-        # Get pads near the segment endpoints
-        for x, y in [(seg.start_x, seg.start_y), (seg.end_x, seg.end_y)]:
-            for pad, pad_net in spatial_idx.get_nearby_pads(x, y, seg.layer):
-                if pad_net == seg_net:
-                    continue  # Same net
+        # Get pads near ANY cell the segment passes through (endpoint-only
+        # queries missed a pad grazed mid-run on a long segment -- false clean)
+        for pad, pad_net in spatial_idx.get_nearby_pads_for_segment(seg):
+            if pad_net == seg_net:
+                continue  # Same net
+            if _pad_has_no_copper(pad):
+                continue  # NPTH hole: covered by the copper-to-hole check
 
-                pad_net_matches = matching_net_ids is None or pad_net in matching_net_ids
-                if not seg_net_matches and not pad_net_matches:
-                    continue
+            pad_net_matches = matching_net_ids is None or pad_net in matching_net_ids
+            if not seg_net_matches and not pad_net_matches:
+                continue
 
-                has_violation, overlap, closest_pt = check_pad_segment_overlap(
-                    pad, seg, clearance, routing_layers, clearance_margin
-                )
-                if has_violation:
-                    pad_net_name = pcb_data.nets.get(pad_net, None)
-                    seg_net_name = pcb_data.nets.get(seg_net, None)
-                    pad_net_str = pad_net_name.name if pad_net_name else f"net_{pad_net}"
-                    seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg_net}"
-                    violations.append({
-                        'type': 'pad-segment',
-                        'net1': pad_net_str,
-                        'net2': seg_net_str,
-                        'layer': seg.layer,
-                        'overlap_mm': overlap,
-                        'pad_loc': (pad.global_x, pad.global_y),
-                        'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
-                        'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
-                        'closest_pt': closest_pt,
-                    })
+            has_violation, overlap, closest_pt = check_pad_segment_overlap(
+                pad, seg, clearance, routing_layers, clearance_margin
+            )
+            if has_violation and _graphic_pair_is_same_net(seg, None, seg_net, pad_net):
+                has_violation = False
+            if has_violation:
+                pad_net_name = pcb_data.nets.get(pad_net, None)
+                seg_net_name = pcb_data.nets.get(seg_net, None)
+                pad_net_str = pad_net_name.name if pad_net_name else f"net_{pad_net}"
+                seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg_net}"
+                violations.append({
+                    'type': 'pad-segment',
+                    'net1': pad_net_str,
+                    'net2': seg_net_str,
+                    'layer': seg.layer,
+                    'overlap_mm': overlap,
+                    'pad_loc': (pad.global_x, pad.global_y),
+                    'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
+                    'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+                    'closest_pt': closest_pt,
+                })
 
     # Check pad-to-via violations using spatial index
     if not quiet:
@@ -1117,6 +1746,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             for pad, pad_net in spatial_idx.get_nearby_pads(via.x, via.y, layer):
                 if pad_net == via_net:
                     continue  # Same net
+                if _pad_has_no_copper(pad):
+                    continue  # NPTH hole: covered by the drill-to-drill check
 
                 pad_net_matches = matching_net_ids is None or pad_net in matching_net_ids
                 if not via_net_matches and not pad_net_matches:
@@ -1139,6 +1770,68 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
                         'via_loc': (via.x, via.y),
                     })
+
+    # Check pad-to-pad violations using spatial index (issue #234). Two pads of
+    # DIFFERENT nets that overlap (a short) or sit below clearance on a shared
+    # copper layer -- e.g. a placement step nudging a cap onto an IC pad. KiCad
+    # flags these (shorting_items / clearance); check_drc previously had only the
+    # pad-segment and pad-via passes.
+    if not quiet:
+        print("Checking pad-to-pad clearances...")
+    pad_pad_checked = set()
+    for pad_net, pads in pads_by_net.items():
+        net1_matches = matching_net_ids is None or pad_net in matching_net_ids
+        for pad1 in pads:
+            if _pad_has_no_copper(pad1):
+                continue  # NPTH hole: no copper to short/graze
+            for layer in _expand_cu(pad1.layers, routing_layers):
+                if not layer.endswith('.Cu'):
+                    continue
+                for pad2, pad2_net in spatial_idx.get_nearby_pads_for_pad(pad1, layer):
+                    if pad2 is pad1:
+                        continue
+                    if pad2_net == pad_net:
+                        continue  # Same net -- allowed to touch
+                    if _pad_has_no_copper(pad2):
+                        continue  # NPTH hole: no copper to short/graze
+                    # Skip pads of the SAME footprint: a component's own adjacent
+                    # pins are fixed library geometry (a fine-pitch part can have
+                    # pad gaps below the routing clearance), never something a
+                    # placement/routing step introduces or can fix. Flagging them
+                    # would flood grading with pre-existing noise. The cases #234
+                    # targets are between DIFFERENT footprints (e.g. a cap nudged
+                    # onto an IC pad).
+                    if pad2.component_ref == pad1.component_ref:
+                        continue
+                    net2_matches = matching_net_ids is None or pad2_net in matching_net_ids
+                    if not net1_matches and not net2_matches:
+                        continue
+                    pair_key = (min(id(pad1), id(pad2)), max(id(pad1), id(pad2)))
+                    if pair_key in pad_pad_checked:
+                        continue
+                    pad_pad_checked.add(pair_key)
+                    has_violation, overlap, closest_pt = check_pad_pad_overlap(
+                        pad1, pad2, clearance, routing_layers, clearance_margin)
+                    if has_violation:
+                        n1 = pcb_data.nets.get(pad_net, None)
+                        n2 = pcb_data.nets.get(pad2_net, None)
+                        n1s = n1.name if n1 else f"net_{pad_net}"
+                        n2s = n2.name if n2 else f"net_{pad2_net}"
+                        violations.append({
+                            'type': 'pad-pad',
+                            'net1': n1s,
+                            'net2': n2s,
+                            # A pad with no net cannot electrically short a net;
+                            # keep the clearance violation but not the SHORT tag.
+                            'no_net': pad_net == 0 or pad2_net == 0,
+                            'layer': layer,
+                            'overlap_mm': overlap,
+                            'pad_ref': f"{pad1.component_ref}.{pad1.pad_number}",
+                            'pad_ref2': f"{pad2.component_ref}.{pad2.pad_number}",
+                            'pad_loc': (pad1.global_x, pad1.global_y),
+                            'pad_loc2': (pad2.global_x, pad2.global_y),
+                            'closest_pt': closest_pt,
+                        })
 
     # Dummy variables for compatibility with remaining code
     via_net_ids = list(vias_by_net.keys())
@@ -1207,9 +1900,21 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 th_pads.append(pad)
                 th_pad_nets.append(pad_net)
         if th_pads and all_vias:
-            px = np.array([p.global_x for p in th_pads], dtype=np.float64)
-            py = np.array([p.global_y for p in th_pads], dtype=np.float64)
-            pdrill = np.array([p.drill for p in th_pads], dtype=np.float64)
+            # Each pad hole as its drill CAPSULE (slot-aware, see
+            # pad_drill_capsule): distance is via-centre to the capsule axis,
+            # radius is the slot's SHORT dimension. Round drills degenerate to
+            # the old centre-to-centre circle test.
+            from kicad_parser import pad_drill_capsule
+            _caps = [pad_drill_capsule(p) for p in th_pads]
+            p1x = np.array([c[0][0] for c in _caps], dtype=np.float64)
+            p1y = np.array([c[0][1] for c in _caps], dtype=np.float64)
+            p2x = np.array([c[1][0] for c in _caps], dtype=np.float64)
+            p2y = np.array([c[1][1] for c in _caps], dtype=np.float64)
+            prad = np.array([c[2] for c in _caps], dtype=np.float64)
+            cdx = p2x - p1x
+            cdy = p2y - p1y
+            clen2 = cdx * cdx + cdy * cdy
+            safe_clen2 = np.where(clen2 > 0, clen2, 1.0)
             if matching_pad_nets is None:
                 pmatch = None
             else:
@@ -1217,8 +1922,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             tolerance = hole_to_hole_clearance * 0.05
             for via in all_vias:
                 via_matches = matching_via_nets is None or via.net_id in matching_via_nets
-                required = pdrill / 2 + via.drill / 2 + hole_to_hole_clearance
-                actual = np.sqrt((px - via.x) ** 2 + (py - via.y) ** 2)
+                required = prad + via.drill / 2 + hole_to_hole_clearance
+                t = np.clip(((via.x - p1x) * cdx + (via.y - p1y) * cdy) / safe_clen2, 0.0, 1.0)
+                actual = np.sqrt((via.x - (p1x + t * cdx)) ** 2 + (via.y - (p1y + t * cdy)) ** 2)
                 overlap = required - actual
                 viol = overlap > tolerance
                 # Skip (via, pad) where neither net matches the filter. When the via
@@ -1243,18 +1949,115 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'via_loc': (via.x, via.y),
                     })
 
-    # Check board edge clearances
+    # Check copper-to-hole clearance: a TRACK too close to an NPTH (no-copper) drill
+    # hole of a DIFFERENT net (issue #233). The drill removes the copper that crosses
+    # it -- a real fab short the via-drill-only hole check above misses (e.g. a track
+    # routed straight across a connector mounting hole). PTH pads and vias carry
+    # copper, so their track clearance is already covered by the pad-segment /
+    # via-segment checks (with the real pad shape, not a round-drill approximation),
+    # and KiCad likewise reports only the NPTH cases. Mirrors KiCad's hole_clearance.
+    if not quiet:
+        print("Checking copper-to-hole (track <-> NPTH drill) clearances...")
+    # Each hole is its drill CAPSULE ((x1,y1),(x2,y2),r): a slot drill's real
+    # shape. Round drills degenerate to a zero-length capsule (the old circle).
+    from kicad_parser import pad_drill_capsule
+    holes = []  # (p1, p2, r, net_id, ref) -- NPTH (no-copper) pad holes only
+    for pad_net, pads in pads_by_net.items():
+        for pad in pads:
+            if pad.drill > 0 and _pad_has_no_copper(pad):
+                hp1, hp2, hr = pad_drill_capsule(pad)
+                holes.append((hp1, hp2, hr, pad_net,
+                              f"{pad.component_ref}.{pad.pad_number}"))
+    segs = list(pcb_data.segments)
+    if holes and segs:
+        sx1 = np.array([s.start_x for s in segs], dtype=np.float64)
+        sy1 = np.array([s.start_y for s in segs], dtype=np.float64)
+        sx2 = np.array([s.end_x for s in segs], dtype=np.float64)
+        sy2 = np.array([s.end_y for s in segs], dtype=np.float64)
+        sw = np.array([s.width for s in segs], dtype=np.float64)
+        snet = np.array([s.net_id for s in segs])
+        dx = sx2 - sx1
+        dy = sy2 - sy1
+        seglen2 = dx * dx + dy * dy
+        safe_len2 = np.where(seglen2 > 0, seglen2, 1.0)
+        # JLC "NPTH to Track" fab floor (never below the graded clearance).
+        npth_clr = max(clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
+        tolerance = npth_clr * clearance_margin
+        if matching_net_ids is not None:
+            seg_match = np.array([n in matching_net_ids for n in snet], dtype=bool)
+        def _pts_to_tracks(hx, hy):
+            # point -> per-track closest distance, vectorized over all tracks
+            t = np.clip(((hx - sx1) * dx + (hy - sy1) * dy) / safe_len2, 0.0, 1.0)
+            cxp = sx1 + t * dx
+            cyp = sy1 + t * dy
+            return np.sqrt((hx - cxp) ** 2 + (hy - cyp) ** 2)
+
+        for (h1x, h1y), (h2x, h2y), hr, hnet, ref in holes:
+            # Capsule(hole)-to-segment distance, vectorized over all tracks. A
+            # drill is a through-hole, so any track layer crossing it conflicts
+            # (no layer filter). The hole's own-net track legitimately connects
+            # to it -> skip. Segment-to-segment distance = min of the four
+            # endpoint-to-other-segment distances, or 0 when they intersect.
+            dist = np.minimum(_pts_to_tracks(h1x, h1y), _pts_to_tracks(h2x, h2y))
+            hdx, hdy = h2x - h1x, h2y - h1y
+            if hdx * hdx + hdy * hdy > 1e-12:
+                hlen2 = hdx * hdx + hdy * hdy
+                for px, py in ((sx1, sy1), (sx2, sy2)):
+                    t2 = np.clip(((px - h1x) * hdx + (py - h1y) * hdy) / hlen2, 0.0, 1.0)
+                    dist = np.minimum(dist, np.sqrt((px - (h1x + t2 * hdx)) ** 2 +
+                                                    (py - (h1y + t2 * hdy)) ** 2))
+                # Proper intersection -> distance 0 (orientation sign test)
+                d1 = (sx2 - sx1) * (h1y - sy1) - (sy2 - sy1) * (h1x - sx1)
+                d2 = (sx2 - sx1) * (h2y - sy1) - (sy2 - sy1) * (h2x - sx1)
+                d3 = hdx * (sy1 - h1y) - hdy * (sx1 - h1x)
+                d4 = hdx * (sy2 - h1y) - hdy * (sx2 - h1x)
+                crossing = (d1 * d2 < 0) & (d3 * d4 < 0)
+                dist = np.where(crossing, 0.0, dist)
+            overlap = (hr + sw / 2.0 + npth_clr) - dist
+            viol = (overlap > tolerance) & (snet != hnet)
+            if matching_net_ids is not None:
+                viol &= seg_match | (hnet in matching_net_ids)
+            for k in np.nonzero(viol)[0].tolist():
+                seg = segs[k]
+                hole_net_name = pcb_data.nets.get(hnet, None)
+                seg_net_name = pcb_data.nets.get(seg.net_id, None)
+                hole_net_str = hole_net_name.name if hole_net_name else f"net_{hnet}"
+                seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg.net_id}"
+                violations.append({
+                    'type': 'track-hole',
+                    'net1': hole_net_str,        # the drill's net (0 = NPTH)
+                    'net2': seg_net_str,         # the crossing track's net
+                    'hole_ref': ref or 'via',
+                    'layer': seg.layer,
+                    'overlap_mm': float(overlap[k]),
+                    'hole_loc': ((h1x + h2x) / 2.0, (h1y + h2y) / 2.0),
+                    'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+                })
+
+    # Check board edge clearances. Measure to the real Edge.Cuts outline (outer
+    # ring + interior cutouts) when the parser found one, so copper routed into a
+    # cutout/slot/notch -- which sits inside the bounding box -- is caught (issue
+    # #236). Fall back to the rectangular bounding box otherwise.
     board_bounds = pcb_data.board_info.board_bounds
     if board_bounds and effective_board_edge_clearance > 0:
+        edge_rings, edge_outer, edge_cutouts = board_edge_geometry(pcb_data.board_info)
+        use_poly = bool(edge_rings)
         if not quiet:
-            print("Checking board edge clearances...")
+            print("Checking board edge clearances "
+                  f"({'real Edge.Cuts outline' if use_poly else 'bounding box'})...")
 
         # Check segments
         for seg in pcb_data.segments:
             seg_matches = matching_seg_net_set is None or seg.net_id in matching_seg_net_set
             if matching_seg_net_set is not None and not seg_matches:
                 continue
-            has_violation, overlap, edge = check_segment_board_edge(seg, board_bounds, effective_board_edge_clearance)
+            if use_poly:
+                has_violation, overlap, edge = check_segment_board_edge_poly(
+                    seg, edge_rings, edge_outer, edge_cutouts,
+                    effective_board_edge_clearance, clearance_margin)
+            else:
+                has_violation, overlap, edge = check_segment_board_edge(
+                    seg, board_bounds, effective_board_edge_clearance, clearance_margin)
             if has_violation:
                 net_name = pcb_data.nets.get(seg.net_id, None)
                 net_str = net_name.name if net_name else f"net_{seg.net_id}"
@@ -1272,7 +2075,13 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             via_matches = matching_via_nets is None or via.net_id in matching_via_nets
             if matching_via_nets is not None and not via_matches:
                 continue
-            has_violation, overlap, edge = check_via_board_edge(via, board_bounds, effective_board_edge_clearance)
+            if use_poly:
+                has_violation, overlap, edge = check_via_board_edge_poly(
+                    via, edge_rings, edge_outer, edge_cutouts,
+                    effective_board_edge_clearance, clearance_margin)
+            else:
+                has_violation, overlap, edge = check_via_board_edge(
+                    via, board_bounds, effective_board_edge_clearance, clearance_margin)
             if has_violation:
                 net_name = pcb_data.nets.get(via.net_id, None)
                 net_str = net_name.name if net_name else f"net_{via.net_id}"
@@ -1283,6 +2092,33 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'overlap_mm': overlap,
                     'via_loc': (via.x, via.y),
                 })
+
+        # Check pads (issue #236). Off by default: pad-to-edge violations are
+        # almost always pre-existing edge-connector pads on the bare board (the
+        # router never places pads), so flagging them by default just adds noise
+        # to routed-board grading. Enable with --check-pad-edge to catch a
+        # placement step that pushed a component off the board / into a cutout.
+        if check_pad_edge:
+            for pad_net, pads in pads_by_net.items():
+                if matching_pad_nets is not None and pad_net not in matching_pad_nets:
+                    continue
+                for pad in pads:
+                    if _pad_has_no_copper(pad):
+                        continue  # No copper on this pad (pure NPTH)
+                    has_violation, overlap, edge = check_pad_board_edge(
+                        pad, edge_rings, edge_outer, edge_cutouts,
+                        effective_board_edge_clearance, board_bounds, clearance_margin)
+                    if has_violation:
+                        net_name = pcb_data.nets.get(pad_net, None)
+                        net_str = net_name.name if net_name else f"net_{pad_net}"
+                        violations.append({
+                            'type': 'pad-board-edge',
+                            'net1': net_str,
+                            'edge': edge,
+                            'overlap_mm': overlap,
+                            'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
+                            'pad_loc': (pad.global_x, pad.global_y),
+                        })
 
     # Check track widths and via/hole sizes against the fab floor (issue #176).
     # Unlike the clearance checks these are per-object (one net), so the net filter
@@ -1333,26 +2169,61 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'via_loc': (via.x, via.y),
                     })
 
-    # Same-net segment crossings are not DRC failures: same-net copper is allowed
+    # Same-net COPPER overlaps are not DRC failures: same-net copper is allowed
     # to overlap (KiCad's own DRC permits it -- it only enforces clearance between
-    # DIFFERENT nets). They are at most cosmetic clutter, so report them as
-    # warnings and keep them out of the violation count / exit status. (Same-net
-    # DRILL-hole checks stay violations -- those are real fab constraints.)
-    warnings = [v for v in violations if v['type'] == 'segment-crossing-same-net']
-    violations = [v for v in violations if v['type'] != 'segment-crossing-same-net']
+    # DIFFERENT nets). This covers both same-net segment crossings AND same-net
+    # via-to-via copper clearance (two vias on the same net may touch -- e.g. a
+    # plane stitching via next to a tap via). They are at most cosmetic clutter,
+    # so report them as warnings and keep them out of the violation count / exit
+    # status. (Same-net DRILL hole-to-hole checks -- 'via-drill-hole',
+    # 'pad-drill-via-drill-same-net' -- stay violations: drill spacing is a real
+    # fab constraint independent of net.)
+    # Same-net SOFT JOINTS ('segment-endpoint-gap') are a COUNTED violation
+    # (#320 step 3, promoted after #318/#322 drove the corpus to zero): a
+    # dangling free end held only by cap overlap is a fragile near-open --
+    # electrically connected today, an open after etch tolerance/rework. The
+    # repair pipeline (close_soft_joints + the neck/strict gates) now prevents
+    # or bridges every corpus instance, so a surviving one is a real defect
+    # the run must fail on.
+    #
+    # EXCEPT the sub-coincidence band: a gap at or below COINCIDENCE_TOL
+    # (0.02mm, connectivity.py -- THE strict tolerance) is quantization-level
+    # contact that every gate and cleanup pass deliberately treats as
+    # CONNECTED (so nothing will ever "fix" it), and the caps overlap by far
+    # more than any etch tolerance. Counting those would fail boards on gaps
+    # the pipeline defines as joined; report them as a warning instead
+    # (kuchen /USBH_DN: 0.010mm gap, 0.102mm cap overlap).
+    from connectivity import COINCIDENCE_TOL as _COINC_TOL
+    _samenet_copper = ('segment-crossing-same-net', 'via-via-same-net')
+    seg_warns = [v for v in violations if v['type'] == 'segment-crossing-same-net']
+    viavia_warns = [v for v in violations if v['type'] == 'via-via-same-net']
+    subcoinc_warns = [v for v in violations if v['type'] == 'segment-endpoint-gap'
+                      and v.get('gap_mm', 1.0) <= _COINC_TOL + 1e-9]
+    warnings = ([v for v in violations if v['type'] in _samenet_copper]
+                + subcoinc_warns)
+    _warn_ids = {id(v) for v in warnings}
+    violations = [v for v in violations if id(v) not in _warn_ids]
 
     def _warn_note():
         if warnings:
             print(f"\nWARNINGS ({len(warnings)}, not DRC failures):")
-            print(f"  same-net self-crossing: {len(warnings)} (same-net copper overlap; "
-                  f"permitted by KiCad DRC)")
+            if subcoinc_warns:
+                print(f"  sub-coincidence endpoint gap: {len(subcoinc_warns)} "
+                      f"(<= {_COINC_TOL}mm -- quantization-level; treated as "
+                      f"connected by routing and cleanup)")
+            if seg_warns:
+                print(f"  same-net self-crossing: {len(seg_warns)} (same-net copper overlap; "
+                      f"permitted by KiCad DRC)")
+            if viavia_warns:
+                print(f"  same-net via-via: {len(viavia_warns)} (same-net copper overlap; "
+                      f"permitted by KiCad DRC -- drill hole-to-hole checked separately)")
 
     # Report violations
     if quiet:
         if violations:
             print(f"FAILED ({len(violations)} violations)")
         else:
-            print("OK" + (f" ({len(warnings)} same-net-crossing warning(s))" if warnings else ""))
+            print("OK" + (f" ({len(warnings)} same-net copper warning(s))" if warnings else ""))
             return violations
 
     # Print detailed results (always for non-quiet, or when violations in quiet mode)
@@ -1396,6 +2267,12 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    Layer: {v['layer']}, Cross at: ({v['cross_point'][0]:.3f},{v['cross_point'][1]:.3f})")
                         print(f"    Seg1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})-({v['loc1'][2]:.2f},{v['loc1'][3]:.2f})")
                         print(f"    Seg2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})-({v['loc2'][2]:.2f},{v['loc2'][3]:.2f})")
+                    elif vtype == 'segment-endpoint-gap':
+                        print(f"  {v['net1']} (same-net soft joint)")
+                        print(f"    Layer: {v['layer']}, endpoint gap: {v['gap_mm']:.3f}mm "
+                              f"(cap overlap only {v['overlap_mm']:.3f}mm)")
+                        print(f"    Ends: ({v['loc1'][0]:.3f},{v['loc1'][1]:.3f}) <-> "
+                              f"({v['loc2'][0]:.3f},{v['loc2'][1]:.3f})")
                     elif vtype == 'pad-segment':
                         print(f"  Pad:{v['net1']} ({v['pad_ref']}) <-> Seg:{v['net2']}")
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
@@ -1406,6 +2283,13 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Pad: ({v['pad_loc'][0]:.2f},{v['pad_loc'][1]:.2f})")
                         print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
+                    elif vtype == 'pad-pad':
+                        short = (" [SHORT]" if v['overlap_mm'] >= clearance
+                                 and not v.get('no_net') else "")
+                        print(f"  Pad:{v['net1']} ({v['pad_ref']}) <-> Pad:{v['net2']} ({v['pad_ref2']}){short}")
+                        print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
+                        print(f"    Pad1: ({v['pad_loc'][0]:.2f},{v['pad_loc'][1]:.2f})")
+                        print(f"    Pad2: ({v['pad_loc2'][0]:.2f},{v['pad_loc2'][1]:.2f})")
                     elif vtype == 'via-drill-hole':
                         print(f"  Via:{v['net1']} <-> Via:{v['net2']} (drill hole clearance)")
                         print(f"    Overlap: {v['overlap_mm']:.3f}mm")
@@ -1417,14 +2301,26 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Pad: ({v['pad_loc'][0]:.2f},{v['pad_loc'][1]:.2f})")
                         print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
+                    elif vtype == 'track-hole':
+                        print(f"  Hole:{v['net1']} ({v['hole_ref']}) <-> Track:{v['net2']} (copper-to-hole)")
+                        print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
+                        print(f"    Hole: ({v['hole_loc'][0]:.2f},{v['hole_loc'][1]:.2f})")
+                        print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
                     elif vtype == 'segment-board-edge':
-                        print(f"  {v['net1']} too close to {v['edge']} board edge")
+                        where = _edge_phrase(v['edge'])
+                        print(f"  {v['net1']} {where}")
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
                     elif vtype == 'via-board-edge':
-                        print(f"  Via:{v['net1']} too close to {v['edge']} board edge")
+                        where = _edge_phrase(v['edge'])
+                        print(f"  Via:{v['net1']} {where}")
                         print(f"    Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
+                    elif vtype == 'pad-board-edge':
+                        where = _edge_phrase(v['edge'])
+                        print(f"  Pad:{v['net1']} ({v['pad_ref']}) {where}")
+                        print(f"    Overlap: {v['overlap_mm']:.3f}mm")
+                        print(f"    Pad: ({v['pad_loc'][0]:.2f},{v['pad_loc'][1]:.2f})")
                     elif vtype == 'track-width':
                         print(f"  {v['net1']} track too thin for fab")
                         print(f"    Layer: {v['layer']}, Width: {v['width']:.4f}mm "
@@ -1460,10 +2356,14 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Check PCB for DRC violations (clearance errors)')
     parser.add_argument('pcb', help='Input PCB file')
-    parser.add_argument('--clearance', '-c', type=float, default=0.2,
-                        help='Minimum clearance in mm (default: 0.2)')
-    parser.add_argument('--hole-to-hole-clearance', type=float, default=0.2,
-                        help='Minimum drill hole edge-to-edge clearance in mm (default: 0.2)')
+    parser.add_argument('--clearance', '-c', type=float, default=None,
+                        help='Minimum clearance in mm to grade against. If omitted, '
+                             'auto-detected from the sibling .kicad_pro Default net '
+                             'class (the value the board was routed/graded to); falls '
+                             'back to 0.2 if no project clearance is found.')
+    parser.add_argument('--hole-to-hole-clearance', type=float, default=defaults.HOLE_TO_HOLE_CLEARANCE,
+                        help=f'Minimum drill hole edge-to-edge clearance in mm '
+                             f'(default: {defaults.HOLE_TO_HOLE_CLEARANCE}, the fab floor — same as routing)')
     parser.add_argument('--board-edge-clearance', type=float, default=0.0,
                         help='Minimum clearance from board edge in mm (0 = use --clearance value)')
     parser.add_argument('--clearance-margin', type=float, default=0.05,
@@ -1488,8 +2388,48 @@ if __name__ == "__main__":
                         help='Minimum via drill diameter in mm (default: fab floor)')
     parser.add_argument('--size-margin', type=float, default=0.0,
                         help='Absolute tolerance in mm for the size checks (default: 0)')
+    parser.add_argument('--check-pad-edge', action='store_true',
+                        help='Also check pad-to-board-edge clearance (issue #236). '
+                             'Off by default: pad-edge violations are almost always '
+                             'pre-existing edge-connector pads, not router-introduced.')
 
+    from fab_tiers import add_fab_tier_args, fab_tier_from_args, set_default_fab_tier
+    add_fab_tier_args(parser)
     args = parser.parse_args()
+    set_default_fab_tier(*fab_tier_from_args(args))
+
+    # Grade at the clearance the board was actually routed to. When -c is not
+    # given, read the sibling .kicad_pro Default net-class clearance -- which the
+    # routers lower to the smallest clearance used in ANY step (incl. fine-pitch
+    # tap escalation). Grading stricter than that invents phantom violations on
+    # legitimately tight copper; grading looser hides real ones. (issue follow-up
+    # to the route_disconnected_planes fine-tap grading confusion.)
+    if args.clearance is None:
+        args.clearance = 0.2
+        found = False
+        try:
+            import os, json
+            from fix_kicad_drc_settings import find_project, project_copper_clearance
+            pro = find_project(args.pcb)
+            if os.path.isfile(pro):
+                with open(pro) as f:
+                    pc = project_copper_clearance(json.load(f))
+                if pc:
+                    args.clearance = pc
+                    found = True
+                    if not args.quiet:
+                        print(f"Grading at clearance {pc:.4g} mm "
+                              f"(from {os.path.basename(pro)} Default net class)")
+        except Exception as e:
+            print(f"  (could not read project clearance, using 0.2 mm: {e})")
+        if not found and not args.quiet:
+            print("Grading at clearance 0.2 mm (no project clearance found; "
+                  "pass -c to override)")
+            print(f"  WARNING: {os.path.basename(args.pcb)} has NO sibling .kicad_pro. "
+                  f"Opening it in KiCad will auto-create a project with DEFAULT "
+                  f"constraints and report hundreds of phantom annular/track/hole "
+                  f"violations on a fine-pitch board (#295). Generate one with:\n"
+                  f"    python3 fix_kicad_drc_settings.py {args.pcb}")
 
     violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet,
                          args.hole_to_hole_clearance, args.board_edge_clearance,
@@ -1498,5 +2438,6 @@ if __name__ == "__main__":
                          min_via_diameter=args.min_via_diameter,
                          min_via_drill=args.min_via_drill,
                          check_sizes=not args.no_size_checks,
-                         size_margin=args.size_margin)
+                         size_margin=args.size_margin,
+                         check_pad_edge=args.check_pad_edge)
     sys.exit(1 if violations else 0)

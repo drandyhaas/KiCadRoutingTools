@@ -4,6 +4,7 @@ Stub layer switching optimization for differential pair routing.
 Provides functions to switch stub layers to avoid vias when the
 source and target stubs are on different layers.
 """
+from __future__ import annotations
 
 import math
 from typing import List, Optional, Tuple, Dict
@@ -13,7 +14,8 @@ from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig
 from routing_utils import point_to_pad_rect_dist
 from connectivity import get_stub_segments, get_stub_direction
-from geometry_utils import segments_intersect_2d, point_to_segment_distance_seg
+from geometry_utils import (segments_intersect_2d, point_to_segment_distance_seg,
+                            segment_to_segment_distance_seg)
 from typing import Set
 
 # Layer swap tolerance constants
@@ -133,6 +135,18 @@ def get_stub_info(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: float,
             if dist < tolerance:
                 has_pad_via = True
                 break
+    if not has_pad_via:
+        # A plated through-hole pad's own barrel already ties every copper
+        # layer -- treat it like a pad via, or needs_pad_via_for_switch drills
+        # a NEW via coincident with the pin's hole on a layer switch (a
+        # hole-to-hole DRC bust on top of a connector pin, #289 audit).
+        from kicad_parser import pad_is_plated_through
+        for pad in net_pads:
+            if (pad_is_plated_through(pad)
+                    and abs(pad.global_x - pad_x) < tolerance
+                    and abs(pad.global_y - pad_y) < tolerance):
+                has_pad_via = True
+                break
 
     return StubInfo(
         net_id=net_id,
@@ -163,7 +177,8 @@ def needs_pad_via_for_switch(stub: StubInfo) -> bool:
 
 
 def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
-                             config: GridRouteConfig, debug: bool = True) -> Tuple[List[Via], List[Dict]]:
+                             config: GridRouteConfig, debug: bool = True,
+                             new_segments_out: Optional[List[Segment]] = None) -> Tuple[List[Via], List[Dict]]:
     """
     Switch a stub to a new layer by modifying segment layers.
 
@@ -214,11 +229,17 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
         if debug:
             print(f"          ({seg.start_x:.2f},{seg.start_y:.2f})->({seg.end_x:.2f},{seg.end_y:.2f}) {old_layer} -> {new_layer}")
 
-        # Record modification for file writing
+        # Record modification for file writing. Carry the net NAME too: KiCad 10
+        # files reference nets by name only, and matching by coordinates alone is
+        # ambiguous when two nets' fanout stubs share identical-geometry segments
+        # (stacked escape channels) -- the wrong net's segment got relabeled and
+        # left one segment on the wrong layer mid-run (issue #264).
+        net = pcb_data.nets.get(seg.net_id)
         segment_mods.append({
             'start': (seg.start_x, seg.start_y),
             'end': (seg.end_x, seg.end_y),
             'net_id': seg.net_id,
+            'net_name': net.name if net else '',
             'old_layer': old_layer,
             'new_layer': new_layer
         })
@@ -228,18 +249,87 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
 
     # Create pad via if needed (switching from F.Cu without existing via)
     if needs_pad_via_for_switch(stub):
-        via = Via(
-            x=stub.pad_x,
-            y=stub.pad_y,
-            size=config.via_size,
-            drill=config.via_drill,
-            layers=['F.Cu', 'B.Cu'],  # Through-hole via
-            net_id=stub.net_id
-        )
-        new_vias.append(via)
-        pcb_data.vias.append(via)
+        reused = False
+        if new_segments_out is not None:
+            reused = _reuse_nearby_same_net_via(
+                pcb_data, stub, new_layer, config, segment_mods,
+                new_segments_out, debug)
+        if not reused:
+            via = Via(
+                x=stub.pad_x,
+                y=stub.pad_y,
+                size=config.via_size,
+                drill=config.via_drill,
+                layers=['F.Cu', 'B.Cu'],  # Through-hole via
+                net_id=stub.net_id
+            )
+            new_vias.append(via)
+            pcb_data.vias.append(via)
 
     return new_vias, segment_mods
+
+
+def _reuse_nearby_same_net_via(pcb_data, stub, new_layer, config, segment_mods,
+                               new_segments_out, debug=False) -> bool:
+    """Reuse an existing same-net through-via instead of drilling a pad via
+    whose hole would violate the hole-to-hole floor against it (#340).
+
+    A layer-switch pad via drilled next to the net's own plane via ships
+    a fab-rejectable overlapping-drill pair (cparti SPIm_SCK/MOSI); rejecting
+    the swap outright costs completion. When such a via exists, anchor the
+    transition on IT: short connector segments pad->via on the OLD layer (pad
+    copper to barrel) and on new_layer (barrel to the moved stub) replace the
+    new hole. Connectors are validated against foreign pads and tracks with
+    the same validators the swap paths use; on any doubt the caller falls
+    back to the normal new-via path (whose fit funnel decides). Extends
+    issue #282 barrel-covers-pad reuse to the near-miss case. Returns True
+    on reuse."""
+    # Fab-tier-aware floor (the old hardcoded 0.2 ignored --fab-tier /
+    # --hole-to-hole-clearance overrides).
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.2) or 0.2
+    best = None
+    for ev in pcb_data.vias:
+        if ev.net_id != stub.net_id:
+            continue
+        lys = ev.layers or []
+        if lys and not ('F.Cu' in lys and 'B.Cu' in lys):
+            continue  # not a through via: may not span both layers
+        d = math.hypot(ev.x - stub.pad_x, ev.y - stub.pad_y)
+        if d < 1e-6:
+            continue  # coincident: the normal path already handles this
+        if (d < config.via_drill / 2.0 + (ev.drill or config.via_drill) / 2.0 + h2h
+                and (best is None or d < best[0])):
+            best = (d, ev)
+    if best is None:
+        return False
+    ev = best[1]
+    width = config.track_width
+    for seg in stub.segments:
+        width = seg.width
+        break
+    connectors = []
+    for layer in {stub.layer, new_layer}:
+        connectors.append(Segment(
+            start_x=stub.pad_x, start_y=stub.pad_y,
+            end_x=ev.x, end_y=ev.y,
+            width=width, layer=layer, net_id=stub.net_id))
+    for c in connectors:
+        ok_p, _ = stub_clear_of_foreign_pads([c], c.layer, stub.net_id,
+                                             pcb_data, config, set())
+        if not ok_p:
+            return False
+        ok_t, _ = stub_clear_of_foreign_tracks([c], c.layer, stub.net_id,
+                                               pcb_data, config, set())
+        if not ok_t:
+            return False
+    for c in connectors:
+        pcb_data.segments.append(c)
+        new_segments_out.append(c)
+        segment_mods.append({'added_seg': c, 'net_id': stub.net_id})
+    if debug:
+        print(f"          reused same-net via at ({ev.x:.3f},{ev.y:.3f}) "
+              f"{best[0]:.3f}mm from pad (no new hole, #340)")
+    return True
 
 
 def apply_bare_pad_target_via(pcb_data: PCBData, net_id: int, pad_x: float, pad_y: float,
@@ -255,6 +345,14 @@ def apply_bare_pad_target_via(pcb_data: PCBData, net_id: int, pad_x: float, pad_
     the via carries the connection back up to the F.Cu pad. This is the bare-pad
     analogue of apply_stub_layer_switch (which can only MOVE existing stub copper).
 
+    If an existing SAME-NET through-via's barrel already covers the pad
+    centre (a fanout via-in-pad right against the bare pad, e.g. butterstick's
+    CK1 termination resistors 0.125mm from the BGA ball via, #282), that via
+    is REUSED as the stub anchor instead of drilling a new hole: a second
+    drill that close is a fab hole-to-hole violation (net-independent floor),
+    and the pad copper already overlaps the via barrel, so the electrical
+    chain pad -> via -> inner stub holds without new copper on F.Cu.
+
     Args:
         pad_x, pad_y: target pad position (mm)
         new_layer: destination layer for the synthesized stub (the pair's source layer)
@@ -263,26 +361,43 @@ def apply_bare_pad_target_via(pcb_data: PCBData, net_id: int, pad_x: float, pad_
         stub_len: stub length in mm
 
     Returns:
-        (via, stub_segment) - both already appended to pcb_data.
+        (via, stub_segment) - the stub is already appended to pcb_data; via is
+        the NEW via (also appended) or None when an existing via was reused.
     """
-    dx, dy = toward_x - pad_x, toward_y - pad_y
+    # Reuse an existing same-net through-via whose barrel covers the pad centre.
+    via = None
+    anchor_x, anchor_y = pad_x, pad_y
+    best = None
+    for ev in pcb_data.vias:
+        if ev.net_id != net_id:
+            continue
+        lys = ev.layers or []
+        if lys and not ('F.Cu' in lys and 'B.Cu' in lys):
+            continue  # not a through via: may not span new_layer
+        d = math.hypot(ev.x - pad_x, ev.y - pad_y)
+        if d <= (ev.size or 0) / 2.0 and (best is None or d < best[0]):
+            best = (d, ev)
+    if best is not None:
+        anchor_x, anchor_y = best[1].x, best[1].y
+    else:
+        via = Via(
+            x=pad_x, y=pad_y,
+            size=config.via_size, drill=config.via_drill,
+            layers=['F.Cu', 'B.Cu'],  # through-hole
+            net_id=net_id,
+        )
+        pcb_data.vias.append(via)
+
+    dx, dy = toward_x - anchor_x, toward_y - anchor_y
     norm = math.hypot(dx, dy)
     if norm < 1e-6:
         dx, dy = 0.0, 1.0
     else:
         dx, dy = dx / norm, dy / norm
-    end_x, end_y = pad_x + dx * stub_len, pad_y + dy * stub_len
-
-    via = Via(
-        x=pad_x, y=pad_y,
-        size=config.via_size, drill=config.via_drill,
-        layers=['F.Cu', 'B.Cu'],  # through-hole
-        net_id=net_id,
-    )
-    pcb_data.vias.append(via)
+    end_x, end_y = anchor_x + dx * stub_len, anchor_y + dy * stub_len
 
     stub = Segment(
-        start_x=pad_x, start_y=pad_y,
+        start_x=anchor_x, start_y=anchor_y,
         end_x=end_x, end_y=end_y,
         width=config.track_width,
         layer=new_layer,
@@ -301,8 +416,15 @@ def revert_stub_layer_switch(pcb_data: 'PCBData', segment_mods: List[Dict], new_
         segment_mods: List of segment modifications from apply_stub_layer_switch
         new_vias: List of vias that were added (to be removed)
     """
+    # Remove reuse-connector segments (#340) before layer restoration
+    for mod in segment_mods:
+        c = mod.get('added_seg')
+        if c is not None and c in pcb_data.segments:
+            pcb_data.segments.remove(c)
     # Restore segment layers from modification records
     for mod in segment_mods:
+        if 'added_seg' in mod:
+            continue
         for seg in pcb_data.segments:
             if (seg.net_id == mod['net_id'] and
                 abs(seg.start_x - mod['start'][0]) < SEGMENT_MATCH_TOLERANCE and
@@ -547,11 +669,12 @@ def swap_would_orphan_smd_pad(pcb_data: PCBData, stub: StubInfo,
         return False, ""
     if stub.layer == 'F.Cu':
         return False, ""  # apply_stub_layer_switch adds a pad via for F.Cu
+    from kicad_parser import pad_is_plated_through
     for pad in pcb_data.pads_by_net.get(stub.net_id, []):
         if (abs(pad.global_x - stub.pad_x) < STUB_POSITION_TOLERANCE and
                 abs(pad.global_y - stub.pad_y) < STUB_POSITION_TOLERANCE):
-            if pad.drill > 0:
-                return False, ""  # through-hole pad spans all layers
+            if pad_is_plated_through(pad):
+                return False, ""  # plated through-hole spans all layers (#328)
             pad_copper = [l for l in (pad.layers or []) if l.endswith('.Cu')]
             if '*.Cu' in (pad.layers or []):
                 return False, ""
@@ -667,6 +790,108 @@ def stub_clear_of_foreign_pads(segments: List[Segment], dest_layer: str, net_id:
     return True, ""
 
 
+def connected_stub_segments_on_layer(pcb_data: PCBData, net_id: int, layer: str,
+                                     seed_segments: List[Segment],
+                                     tolerance: float = STUB_POSITION_TOLERANCE) -> List[Segment]:
+    """All same-net segments on `layer` in the connected component of `seed_segments`.
+
+    `get_stub_info().segments` can return just the pad nub (it walks from the
+    source endpoint, which for a source stub IS the pad, so it stops immediately),
+    while a layer switch drags the WHOLE source-side trace onto the new layer as
+    the router re-routes from the moved source. To validate the swap against
+    foreign copper we need that whole trace, so BFS the net's layer copper from
+    the seed endpoints. Returns the connected segment objects (incl. the seeds).
+    """
+    layer_segs = [s for s in pcb_data.segments
+                  if s.net_id == net_id and s.layer == layer]
+    if not layer_segs:
+        return list(seed_segments)
+
+    def near(ax, ay, bx, by):
+        return abs(ax - bx) < tolerance and abs(ay - by) < tolerance
+
+    seed_ids = {id(s) for s in seed_segments}
+    component = [s for s in layer_segs if id(s) in seed_ids] or list(layer_segs[:1])
+    in_comp = {id(s) for s in component}
+    frontier = list(component)
+    while frontier:
+        seg = frontier.pop()
+        for endpt in ((seg.start_x, seg.start_y), (seg.end_x, seg.end_y)):
+            for other in layer_segs:
+                if id(other) in in_comp:
+                    continue
+                if (near(other.start_x, other.start_y, *endpt) or
+                        near(other.end_x, other.end_y, *endpt)):
+                    in_comp.add(id(other))
+                    component.append(other)
+                    frontier.append(other)
+    return component
+
+
+def stub_clear_of_foreign_tracks(segments: List[Segment], dest_layer: str, net_id: int,
+                                 pcb_data: PCBData, config: GridRouteConfig,
+                                 exclude_net_ids: Set[int]) -> Tuple[bool, str]:
+    """Check stub segments moved onto dest_layer clear other-net routed copper
+    (tracks + vias) that already lives on that layer.
+
+    The other swap validators look at foreign PADS (stub_clear_of_foreign_pads),
+    the other swap STUBS being analysed (validate_*_no_overlap), and a single
+    setback point beyond the stub tip (validate_*_setback_clear) -- but NONE of
+    them test the moved stub's body against another net's *already-routed track*
+    on the destination layer. So a stub swapped onto a busy layer can land right
+    across a completed foreign trace (issue #238: DQ4's source stub swapped
+    In2.Cu->B.Cu crossed R_ODT_CA_A's finished B.Cu route -> tracks_crossing DRC).
+
+    Mirrors stub_clear_of_foreign_pads but over pcb_data.segments (foreign tracks
+    on dest_layer) and pcb_data.vias (through-hole, so all-layer like the obstacle
+    map). Own net and any swap-partner nets are excluded. Returns (clear, reason).
+    """
+    exclude = set(exclude_net_ids) | {net_id}
+    for seg in segments:
+        # Use the REAL widths of both tracks, not config.track_width: a netclass-
+        # wide stub (ulx5m DDMI0 at 0.125 vs --track-width 0.1) moved next to an
+        # equally wide foreign stub needs w/2 + w/2 + clearance = 0.225, but the
+        # old config-width centerline test demanded only 0.15 and shipped a
+        # kicad-confirmed 0.2mm-spacing graze (issue #357, TX2_P onto TX1_P's
+        # In3.Cu corridor).
+        seg_half = (seg.width if getattr(seg, 'width', 0) and seg.width > 0
+                    else config.track_width) / 2
+        sminx, smaxx = min(seg.start_x, seg.end_x), max(seg.start_x, seg.end_x)
+        sminy, smaxy = min(seg.start_y, seg.end_y), max(seg.start_y, seg.end_y)
+        bminx, bmaxx = sminx - 1.5, smaxx + 1.5
+        bminy, bmaxy = sminy - 1.5, smaxy + 1.5
+        # Foreign routed tracks living on the destination layer.
+        for other in pcb_data.segments:
+            if other.layer != dest_layer or other.net_id in exclude:
+                continue
+            if (max(other.start_x, other.end_x) < bminx or
+                    min(other.start_x, other.end_x) > bmaxx or
+                    max(other.start_y, other.end_y) < bminy or
+                    min(other.start_y, other.end_y) > bmaxy):
+                continue
+            other_half = (other.width if other.width > 0 else config.track_width) / 2
+            d = segment_to_segment_distance_seg(seg, other)
+            if d < seg_half + other_half + config.clearance:
+                net = pcb_data.nets.get(other.net_id)
+                nm = net.name if net else f"net {other.net_id}"
+                return False, (f"stub on {dest_layer} would graze {nm} track "
+                               f"(gap {d - seg_half - other_half:.3f}mm)")
+        # Foreign vias -- through-hole, so they block every layer (matches the
+        # obstacle map's all-layer via treatment).
+        for via in pcb_data.vias:
+            if via.net_id in exclude:
+                continue
+            if not (bminx <= via.x <= bmaxx and bminy <= via.y <= bmaxy):
+                continue
+            d = point_to_segment_distance_seg(via.x, via.y, seg) - (via.size or 0) / 2
+            if d < seg_half + config.clearance:
+                net = pcb_data.nets.get(via.net_id)
+                nm = net.name if net else f"net {via.net_id}"
+                return False, (f"stub on {dest_layer} would graze {nm} via "
+                               f"(gap {d - seg_half:.3f}mm)")
+    return True, ""
+
+
 def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
                   all_stubs_by_layer: Dict[str, List[Tuple[str, List[Segment]]]],
                   pcb_data: PCBData, config: GridRouteConfig,
@@ -743,13 +968,28 @@ def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
     # #168). Only the stub's OWN net and any swap-partner pair are exempt; the
     # coupled body itself is segments, not pads, so legitimate parallel running
     # is unaffected.
+    # Both checks validate the WHOLE connected source-side trace, not just the
+    # pad nub get_stub_info returns -- the switch drags that whole trace onto
+    # dest_layer (issues #238, #315).
     partner_excl = set(swap_partner_net_ids or set())
+    pair_excl = partner_excl | {stub_p.net_id, stub_n.net_id}
     for stub in (stub_p, stub_n):
+        moved_segs = connected_stub_segments_on_layer(
+            pcb_data, stub.net_id, stub.layer, stub.segments)
         pad_clear, pad_reason = stub_clear_of_foreign_pads(
-            stub.segments, dest_layer, stub.net_id, pcb_data, config,
+            moved_segs, dest_layer, stub.net_id, pcb_data, config,
             partner_excl | {stub.net_id})
         if not pad_clear:
             return False, pad_reason
+
+        # Check 6: the moved stub body must also clear other-net routed
+        # TRACKS/VIAS already on dest_layer (issue #238). The coupled partner's
+        # segments are exempt (legitimate parallel running); only foreign
+        # routed copper bites.
+        track_clear, track_reason = stub_clear_of_foreign_tracks(
+            moved_segs, dest_layer, stub.net_id, pcb_data, config, pair_excl)
+        if not track_clear:
+            return False, track_reason
 
     return True, ""
 
@@ -1026,13 +1266,31 @@ def validate_single_swap(stub: StubInfo, dest_layer: str,
         if not via_clear:
             return False, via_reason
 
+    # Checks 4+5 validate the WHOLE connected source-side trace, not just the
+    # pad nub get_stub_info returns -- a source switch re-routes that whole
+    # trace onto dest_layer.
+    moved_segs = connected_stub_segments_on_layer(
+        pcb_data, stub.net_id, stub.layer, stub.segments)
+
     # Check 4: stub copper moved onto dest_layer must clear other-net pads on
-    # that layer (issue #123: escape stub swapped onto a cap pad's layer).
+    # that layer (issue #123: escape stub swapped onto a cap pad's layer;
+    # issue #315: a BGA fanout stub legally running under the pad row on an
+    # inner layer swapped onto F.Cu straight through foreign pad copper --
+    # the nub-only check couldn't see it).
     pad_clear, pad_reason = stub_clear_of_foreign_pads(
-        stub.segments, dest_layer, stub.net_id, pcb_data, config,
+        moved_segs, dest_layer, stub.net_id, pcb_data, config,
         set(swap_partner_net_ids or set()))
     if not pad_clear:
         return False, pad_reason
+
+    # Check 5: the moved stub body must also clear other-net routed TRACKS/VIAS
+    # already on dest_layer (issue #238: swapping onto a busy layer crossed a
+    # finished foreign trace -- foreign pads/swap-stubs/setback don't cover this).
+    track_clear, track_reason = stub_clear_of_foreign_tracks(
+        moved_segs, dest_layer, stub.net_id, pcb_data, config,
+        set(swap_partner_net_ids or set()))
+    if not track_clear:
+        return False, track_reason
 
     return True, ""
 

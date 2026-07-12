@@ -40,14 +40,15 @@ setdir(){ echo "${2}_set$1"; }
 rundir(){ echo "$ROOT/$(setdir "$2" runs)/$1"; }
 resfile(){ echo "$ROOT/$(setdir "$2" results)/$1.json"; }
 is_done(){ [ -f "$(resfile "$1" "$2")" ]; }
-is_running(){  # our worker, any tool writing the run dir, or run dir touched <45min
+is_running(){  # our worker, any tool writing the run dir, or run dir touched <180min
   pgrep -f "run_board.sh $1 $2" >/dev/null 2>&1 && return 0
   local d; d=$(rundir "$1" "$2")
   pgrep -f "$d" >/dev/null 2>&1 && return 0
-  # 45 min, not 15: a big board (FPGA/USB3-class) can spend 30-60+ min in one
-  # signal-route step writing no intermediate files; a shorter window marks it
-  # idle and double-launches it, starving both copies (issue #148 daisho).
-  [ -d "$d" ] && [ -n "$(find "$d" -mmin -45 2>/dev/null | head -1)" ] && return 0
+  # 180 min, not 15: a big board (FPGA/USB3-class) can spend up to the 3-hour
+  # per-command cap in one signal-route step writing no intermediate files; a
+  # shorter window marks it idle and double-launches it, starving both copies
+  # (issue #148 daisho; cap raised to 3 h for issue #211 ulx3s).
+  [ -d "$d" ] && [ -n "$(find "$d" -mmin -180 2>/dev/null | head -1)" ] && return 0
   return 1
 }
 

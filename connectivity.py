@@ -4,6 +4,7 @@ Connectivity analysis utilities for PCB routing.
 Functions for finding endpoints, analyzing stubs, computing MST paths,
 and tracking segment connectivity.
 """
+from __future__ import annotations
 
 import math
 from typing import List, Optional, Tuple, Dict, Set
@@ -203,7 +204,58 @@ def is_edge_stub(pad_x: float, pad_y: float, bga_zones: List) -> bool:
     return False
 
 
-def find_connected_groups(segments: List[Segment], tolerance: float = 0.01,
+# THE strict endpoint-coincidence tolerance (#320). Every coincidence-based
+# consumer (segment grouping, stub free ends, cycle-prune port clustering,
+# dead-end chaining, and the cleanup gates' width-clamped strict graph) uses
+# this ONE constant: 0.02mm = 2 x check_drc's _SOFT_JOINT_MIN_GAP, i.e. two
+# endpoints may each carry quantization-level slack (<=10um) and still count
+# as coincident, while anything a soft joint could flag does not. The
+# PHYSICAL (overlap) definition in check_net_connectivity is deliberately
+# untouched: it grades electrical reality; this constant grades geometric
+# intent. See issue #320 for the role assignment.
+COINCIDENCE_TOL = 0.02
+
+
+def cluster_coincident_points(points, tol: float = COINCIDENCE_TOL):
+    """Union-find clustering of (x, y, layer) points by endpoint coincidence.
+
+    Two points join when |dx| < tol and |dy| < tol on the SAME layer (pass a
+    shared sentinel layer for layer-agnostic clustering). O(n) via spatial
+    hashing. Returns a list of cluster root indices, one per input point --
+    the ONE shared implementation behind every coincidence consumer (#320).
+    """
+    n = len(points)
+    parent = list(range(n))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    inv = 1.0 / tol
+    buckets: Dict[Tuple[int, int], List[int]] = {}
+    for i, (x, y, _layer) in enumerate(points):
+        buckets.setdefault((int(x * inv), int(y * inv)), []).append(i)
+    for i, (x, y, layer) in enumerate(points):
+        gx, gy = int(x * inv), int(y * inv)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for j in buckets.get((gx + dx, gy + dy), ()):
+                    if j <= i:
+                        continue
+                    ox, oy, olayer = points[j]
+                    if olayer == layer and abs(x - ox) < tol and abs(y - oy) < tol:
+                        union(i, j)
+    return [find(i) for i in range(n)]
+
+
+def find_connected_groups(segments: List[Segment], tolerance: float = COINCIDENCE_TOL,
                           layer_aware: bool = True, vias: List = None) -> List[List[Segment]]:
     """Find groups of connected segments using union-find with spatial hashing.
 
@@ -232,38 +284,37 @@ def find_connected_groups(segments: List[Segment], tolerance: float = 0.01,
         for via in vias:
             via_positions.add((round(via.x, 3), round(via.y, 3)))
 
-    # Spatial hash: map rounded coordinates to (segment_index, x, y, layer) tuples
-    # Use tolerance-based grid cells
-    inv_tol = 1.0 / tolerance
-    endpoint_map: Dict[Tuple[int, int], List[Tuple[int, float, float, str]]] = {}
-
-    # First pass: build spatial hash with actual coordinates
+    # Endpoint coincidence via the ONE shared primitive (#320). Cluster
+    # layer-agnostically, then apply the layer rule inside each spatial
+    # cluster: same layer joins outright; different layers join only through
+    # a via at that position (the original pairwise rule, unchanged).
+    _AGNOSTIC = None
+    points = []
+    owners = []  # (segment_index, layer, x, y)
     for i, seg in enumerate(segments):
         for x, y in [(seg.start_x, seg.start_y), (seg.end_x, seg.end_y)]:
-            key = (int(x * inv_tol), int(y * inv_tol))
-            if key not in endpoint_map:
-                endpoint_map[key] = []
-            endpoint_map[key].append((i, x, y, seg.layer))
-
-    # Second pass: check each endpoint against neighbors (handles bucket boundary issues)
-    for i, seg in enumerate(segments):
-        for x, y in [(seg.start_x, seg.start_y), (seg.end_x, seg.end_y)]:
-            gx, gy = int(x * inv_tol), int(y * inv_tol)
-            # Check current cell and 8 neighbors
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    key = (gx + dx, gy + dy)
-                    if key in endpoint_map:
-                        for j, ox, oy, other_layer in endpoint_map[key]:
-                            if i < j:  # Avoid duplicate checks
-                                if abs(x - ox) < tolerance and abs(y - oy) < tolerance:
-                                    # Check layer connectivity
-                                    if layer_aware and seg.layer != other_layer:
-                                        # Different layers - only connect if there's a via
-                                        pos_key = (round(x, 3), round(y, 3))
-                                        if pos_key not in via_positions:
-                                            continue  # Not connected without via
-                                    uf.union(i, j)
+            points.append((x, y, _AGNOSTIC))
+            owners.append((i, seg.layer, x, y))
+    roots = cluster_coincident_points(points, tolerance)
+    by_cluster: Dict[int, List[int]] = {}
+    for pi, r in enumerate(roots):
+        by_cluster.setdefault(r, []).append(pi)
+    for members in by_cluster.values():
+        if len(members) < 2:
+            continue
+        for a_idx in range(len(members)):
+            i, la, xa, ya = owners[members[a_idx]]
+            for b_idx in range(a_idx + 1, len(members)):
+                j, lb, xb, yb = owners[members[b_idx]]
+                if i == j:
+                    continue
+                if abs(xa - xb) >= tolerance or abs(ya - yb) >= tolerance:
+                    continue  # same cluster by transitivity, not direct contact
+                if layer_aware and la != lb:
+                    pos_key = (round(xa, 3), round(ya, 3))
+                    if pos_key not in via_positions:
+                        continue  # Not connected without via
+                uf.union(i, j)
 
     # Group segments by their root
     groups: Dict[int, List[Segment]] = {}
@@ -293,132 +344,195 @@ def _point_in_polygon(x: float, y: float, polygon: List[Tuple[float, float]]) ->
     return inside
 
 
-def get_zone_connected_pad_groups(
-    segments: List[Segment],
-    vias: List[Via],
-    pads: List[Pad],
-    zones: List[Zone],
-    routing_layers: List[str] = None
+def get_copper_connected_terminal_groups(
+    pcb_data: PCBData,
+    net_id: int,
+    pad_info: List[Tuple],
 ) -> Dict[int, int]:
-    """
-    Get connected component membership for each pad based on zone/plane connectivity.
+    """Group multipoint terminals by the net's EXISTING copper connectivity,
+    using the authoritative overlap-aware definition (check_net_connectivity:
+    cap overlap, T-junctions, zones, pad outlines and via-in-pad all count).
 
-    Returns a dict mapping pad index to component ID. Pads with the same component ID
-    are already connected through zones/tracks/vias and don't need MST edges between them.
+    Soft-jointed copper -- endpoints not coincident but caps overlapping -- is
+    ONE group here and must never be re-tapped (issue #317). This is what the
+    0.02mm endpoint-coincidence grouping of get_zone_connected_pad_groups got
+    wrong for MST seeding: it called overlap-joined escapes disconnected, so
+    the multipoint MST routed redundant loops between already-connected copper
+    while the genuinely missing edge could still fail.
+
+    pad_info rows are (gx, gy, layer_idx, orig_x, orig_y, endpoint_obj) as
+    returned by get_multipoint_net_pads; endpoint_obj is a real Pad or an
+    _EndpointStub sitting on a copper free end.
+
+    Returns {pad_info index -> component id}. Terminals that cannot be tied
+    to any copper/pad point each get a unique (negative) component.
+    """
+    components, _copper, _segs = get_terminal_component_info(
+        pcb_data, net_id, pad_info)
+    return components
+
+
+def get_terminal_component_info(
+    pcb_data: PCBData,
+    net_id: int,
+    pad_info: List[Tuple],
+) -> Tuple[Dict[int, int], Dict[int, int], Dict[int, List[Segment]]]:
+    """get_copper_connected_terminal_groups plus per-component copper (#348).
+
+    Returns (components, copper_count, segs_by_component):
+      components        -- {pad_info index -> component id} (see the wrapper)
+      copper_count      -- {component id -> number of existing net segments}
+      segs_by_component -- {component id -> [existing net Segment, ...]}
+    The phase-1-exhausted fallback uses copper_count to pick the copper-richest
+    base island and segs_by_component to seed tap sources from exactly that
+    island's copper. Stub terminals resolve through the same nearest-endpoint
+    matching as the wrapper, so islands whose terminal is a free end (not a
+    real pad) participate fully.
+    """
+    # Local import: check_connected -> net_queries -> connectivity would cycle.
+    from check_connected import check_net_connectivity
+
+    net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+    net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+    net_zones = [z for z in pcb_data.zones if z.net_id == net_id]
+    # ALL net pads (not just terminals): a non-terminal pad can be the copper
+    # that bridges two islands (e.g. both escapes land in one connector pad).
+    net_pads = pcb_data.pads_by_net.get(net_id, [])
+
+    res = check_net_connectivity(net_id, net_segments, net_vias, net_pads,
+                                 net_zones, return_graph=True)
+    graph = res.get('graph') or {}
+    uf = UnionFind()
+    for a, b in graph.get('edges', []):
+        uf.union(a, b)
+
+    # Map real-Pad terminals through the pad's representative point id; the
+    # terminal objects come from pads_by_net, so identity holds (objects are
+    # alive in net_pads, so id() keying is safe here).
+    pad_obj_repr = {id(net_pads[idx]): rep
+                    for idx, rep in graph.get('pad_index_repr', {}).items()}
+
+    # Stub terminals sit on a segment free end; segment i's endpoints are
+    # point ids 2i / 2i+1 in the connectivity graph.
+    endpoint_points = []  # (x, y, layer, point_id)
+    for si, seg in enumerate(net_segments):
+        endpoint_points.append((seg.start_x, seg.start_y, seg.layer, 2 * si))
+        endpoint_points.append((seg.end_x, seg.end_y, seg.layer, 2 * si + 1))
+
+    components: Dict[int, int] = {}
+    next_unique = -1
+    for i, info in enumerate(pad_info):
+        obj = info[5] if len(info) > 5 else None
+        rep = None
+        if obj is not None and id(obj) in pad_obj_repr:
+            rep = pad_obj_repr[id(obj)]
+        elif obj is not None:
+            # Stub (or unmatched pad-like) terminal: nearest same-layer
+            # segment endpoint within the coincidence tolerance that created
+            # the stub. Terminal coords are info[3]/info[4] (orig x/y).
+            tx, ty = info[3], info[4]
+            tlayer = getattr(obj, 'layer', None)
+            best = None
+            for ex, ey, elayer, pid in endpoint_points:
+                if tlayer is not None and elayer != tlayer:
+                    continue
+                d = abs(ex - tx) + abs(ey - ty)
+                if d < 0.01 and (best is None or d < best[0]):
+                    best = (d, pid)
+            if best is not None:
+                rep = best[1]
+        if rep is None:
+            components[i] = next_unique
+            next_unique -= 1
+        else:
+            components[i] = uf.find(rep)
+
+    copper_count: Dict[int, int] = {}
+    segs_by_component: Dict[int, List[Segment]] = {}
+    for si, seg in enumerate(net_segments):
+        root = uf.find(2 * si)
+        copper_count[root] = copper_count.get(root, 0) + 1
+        segs_by_component.setdefault(root, []).append(seg)
+    return components, copper_count, segs_by_component
+
+
+def compute_component_mst_edges(
+    positions: List[Tuple[float, float]],
+    components: Dict[int, int],
+) -> List[Tuple[int, int, float]]:
+    """Minimum spanning tree over connected COMPONENTS of terminals (#317).
+
+    Nodes are component ids; the distance between two components is the
+    minimum Manhattan distance over their terminal pairs, and the chosen MST
+    edge is realized by that closest pair. Joining N components takes exactly
+    N-1 routed connections; intra-component edges never appear, so copper the
+    authoritative checker already grades connected is never re-routed.
 
     Args:
-        segments: Track segments for this net
-        vias: Vias for this net
-        pads: Pads for this net
-        zones: Zones/planes for this net
-        routing_layers: List of routing layers (for expanding *.Cu pads)
+        positions: (x, y) per terminal, indexed like pad_info
+        components: {terminal index -> component id} (missing -> own index)
 
-    Returns:
-        Dict mapping pad index (0-based) to component ID
+    Returns [(idx_a, idx_b, dist)] with indices into `positions`; idx_a is on
+    the already-spanned side of the tree when the edge is added.
     """
-    if len(pads) < 2:
-        return {i: 0 for i in range(len(pads))}
+    n = len(positions)
+    comp_terminals: Dict[int, List[int]] = {}
+    for i in range(n):
+        comp_terminals.setdefault(components.get(i, i), []).append(i)
+    comp_ids = sorted(comp_terminals)
+    num_comps = len(comp_ids)
+    if num_comps <= 1:
+        return []
 
-    from net_queries import expand_pad_layers
+    # Classic O(C^2) Prim keyed on components, each candidate edge kept as its
+    # realizing closest terminal pair. best[c] = (dist, term_in_tree, term_in_c)
+    # is the cheapest connection from the current tree to component c. Growing
+    # the tree relaxes each outside component against ONLY the newly added
+    # component's terminals, so total terminal-pair work is sum(|A|*|B|) <=
+    # N^2/2 -- same order as the old pad-position MST (a fresh power net is all
+    # singleton components), never O(C^3) re-scans of tree-vs-outside pairs.
+    # Deterministic: sorted component ids, strict-< relaxation, id tie-break.
+    INF = float('inf')
+    best: Dict[int, Tuple[float, int, int]] = {c: (INF, -1, -1) for c in comp_ids}
 
-    uf = UnionFind()
+    def relax(from_comp: int) -> None:
+        for a in comp_terminals[from_comp]:
+            ax, ay = positions[a]
+            for c, entry in best.items():
+                for b in comp_terminals[c]:
+                    bx, by = positions[b]
+                    d = abs(ax - bx) + abs(ay - by)
+                    if d < entry[0]:
+                        entry = (d, a, b)
+                best[c] = entry
 
-    # Detect all copper layers
-    copper_layers = set()
-    for seg in segments:
-        if seg.layer.endswith('.Cu'):
-            copper_layers.add(seg.layer)
-    for via in vias:
-        if via.layers:
-            for layer in via.layers:
-                if layer.endswith('.Cu'):
-                    copper_layers.add(layer)
-    for zone in zones:
-        if zone.layer.endswith('.Cu'):
-            copper_layers.add(zone.layer)
-    if routing_layers:
-        copper_layers.update(routing_layers)
-    if not copper_layers:
-        copper_layers = {'F.Cu', 'B.Cu'}
-
-    all_copper_layers = sorted(copper_layers)
-
-    # Collect all points with pad index tracking
-    all_points = []  # (x, y, layer, point_id)
-    point_id = 0
-    pad_point_ids: Dict[int, List[int]] = {}  # pad_index -> list of point_ids
-
-    # Add segment endpoints
-    for seg in segments:
-        start_id = point_id
-        all_points.append((seg.start_x, seg.start_y, seg.layer, start_id))
-        point_id += 1
-        end_id = point_id
-        all_points.append((seg.end_x, seg.end_y, seg.layer, end_id))
-        point_id += 1
-        uf.union(start_id, end_id)
-
-    # Add vias
-    for via in vias:
-        via_layers = all_copper_layers if (via.layers and 'F.Cu' in via.layers and 'B.Cu' in via.layers) else (via.layers or all_copper_layers)
-        via_ids = []
-        for layer in via_layers:
-            all_points.append((via.x, via.y, layer, point_id))
-            via_ids.append(point_id)
-            point_id += 1
-        for vid in via_ids[1:]:
-            uf.union(via_ids[0], vid)
-
-    # Add pads with index tracking
-    for pad_idx, pad in enumerate(pads):
-        expanded_layers = expand_pad_layers(pad.layers, all_copper_layers)
-        this_pad_ids = []
-        for layer in expanded_layers:
-            if layer in copper_layers:
-                all_points.append((pad.global_x, pad.global_y, layer, point_id))
-                this_pad_ids.append(point_id)
-                point_id += 1
-        for pid in this_pad_ids[1:]:
-            uf.union(this_pad_ids[0], pid)
-        pad_point_ids[pad_idx] = this_pad_ids
-
-    # Connect points through zones
-    for zone in zones:
-        zone_layer = zone.layer
-        points_on_layer = [(x, y, layer, pid) for x, y, layer, pid in all_points if layer == zone_layer]
-        points_in_zone = [pid for x, y, layer, pid in points_on_layer if _point_in_polygon(x, y, zone.polygon)]
-        if len(points_in_zone) > 1:
-            for pid in points_in_zone[1:]:
-                uf.union(points_in_zone[0], pid)
-
-    # Connect nearby points on same layer
-    tolerance = 0.02
-    for i, (x1, y1, l1, id1) in enumerate(all_points):
-        for j, (x2, y2, l2, id2) in enumerate(all_points):
-            if i < j and l1 == l2:
-                if abs(x1 - x2) < tolerance and abs(y1 - y2) < tolerance:
-                    uf.union(id1, id2)
-
-    # Map each pad index to its component root
-    pad_components = {}
-    for pad_idx, point_ids in pad_point_ids.items():
-        if point_ids:
-            pad_components[pad_idx] = uf.find(point_ids[0])
-        else:
-            # Pad has no valid layers - give it a unique component
-            pad_components[pad_idx] = -pad_idx - 1
-
-    return pad_components
+    start = comp_ids[0]
+    del best[start]
+    relax(start)
+    edges: List[Tuple[int, int, float]] = []
+    while best:
+        next_comp = min(best, key=lambda c: (best[c][0], c))
+        d, a, b = best.pop(next_comp)
+        edges.append((a, b, d))
+        relax(next_comp)
+    return edges
 
 
-def find_stub_free_ends(segments: List[Segment], pads: List[Pad], tolerance: float = 0.05) -> List[Tuple[float, float, str]]:
+def find_stub_free_ends(segments: List[Segment], pads: List[Pad],
+                        tolerance: float = 0.05,
+                        coincidence_tol: float = COINCIDENCE_TOL) -> List[Tuple[float, float, str]]:
     """
     Find the free ends of a segment group (endpoints not connected to other segments or pads).
 
     Args:
         segments: Connected group of segments
         pads: Pads that might be connected to the segments
-        tolerance: Distance tolerance for considering points as connected
+        tolerance: PAD-attach tolerance -- an endpoint this close to a pad
+            center is a pad attach, not a free end. This is a pad-geometry
+            heuristic, deliberately NOT the copper-coincidence tolerance.
+        coincidence_tol: endpoint-to-endpoint coincidence (#320, the one
+            shared COINCIDENCE_TOL; was exact 1um rounding before, so
+            quantization-slop joins now correctly count as connected).
 
     Returns:
         List of (x, y, layer) tuples for free endpoints
@@ -426,29 +540,58 @@ def find_stub_free_ends(segments: List[Segment], pads: List[Pad], tolerance: flo
     if not segments:
         return []
 
-    # Count how many times each endpoint appears
-    endpoint_counts: Dict[Tuple[float, float, str], int] = {}
+    # Cluster endpoints with the ONE shared coincidence primitive (#320), then
+    # count SEGMENT INCIDENCES per cluster -- not raw endpoint multiplicity. A
+    # segment SHORTER than the tolerance contributes BOTH endpoints to one
+    # cluster; raw counting made such a stub tip read "not alone" and the
+    # whole stub lost its free end (lumenpnp PD7: fanout sub-grid jog, tip
+    # 15um from its junction -> stub invisible to routing -> MPS reorder ->
+    # board-wide re-roll). Degree of a cluster = segments with exactly ONE
+    # endpoint in it; degree 1 = a chain tip (report the member farthest from
+    # the incident segment's far end -- the true tip); degree 2+ = a joint.
+    points = []
     for seg in segments:
-        key_start = (round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS), seg.layer)
-        key_end = (round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS), seg.layer)
-        endpoint_counts[key_start] = endpoint_counts.get(key_start, 0) + 1
-        endpoint_counts[key_end] = endpoint_counts.get(key_end, 0) + 1
+        points.append((seg.start_x, seg.start_y, seg.layer))
+        points.append((seg.end_x, seg.end_y, seg.layer))
+    roots = cluster_coincident_points(points, coincidence_tol)
+    from collections import defaultdict
+    members: Dict[int, List[int]] = defaultdict(list)
+    for pi, r in enumerate(roots):
+        members[r].append(pi)
 
-    # Get pad positions
-    pad_positions = [(round(p.global_x, POSITION_DECIMALS), round(p.global_y, POSITION_DECIMALS)) for p in pads]
+    pad_positions = [(p.global_x, p.global_y) for p in pads]
 
-    # Free ends are endpoints that appear only once AND are not near a pad
+    def _near_pad(x, y):
+        return any(abs(x - px) < tolerance and abs(y - py) < tolerance
+                   for px, py in pad_positions)
+
     free_ends = []
-    for (x, y, layer), count in endpoint_counts.items():
-        if count == 1:
-            # Check if near a pad
-            near_pad = False
-            for px, py in pad_positions:
-                if abs(x - px) < tolerance and abs(y - py) < tolerance:
-                    near_pad = True
-                    break
-            if not near_pad:
-                free_ends.append((x, y, layer))
+    for r, pis in members.items():
+        seg_hits: Dict[int, int] = defaultdict(int)
+        for pi in pis:
+            seg_hits[pi // 2] += 1
+        open_segs = [si for si, c in seg_hits.items() if c == 1]
+        if len(open_segs) == 1:
+            si = open_segs[0]
+            seg = segments[si]
+            in_cluster = next(pi for pi in pis if pi // 2 == si)
+            far = ((seg.end_x, seg.end_y) if in_cluster % 2 == 0
+                   else (seg.start_x, seg.start_y))
+            x, y, layer = max((points[pi] for pi in pis),
+                              key=lambda p: (p[0]-far[0])**2 + (p[1]-far[1])**2)
+            if not _near_pad(x, y):
+                free_ends.append((round(x, POSITION_DECIMALS),
+                                  round(y, POSITION_DECIMALS), layer))
+        elif not open_segs and len(members) == 1:
+            # The whole group is one sub-tolerance blob: report its raw
+            # endpoints (old semantics) rather than nothing.
+            seen = set()
+            for pi in pis:
+                x, y, layer = points[pi]
+                key = (round(x, POSITION_DECIMALS), round(y, POSITION_DECIMALS), layer)
+                if key not in seen and not _near_pad(x, y):
+                    seen.add(key)
+                    free_ends.append(key)
 
     return free_ends
 
@@ -523,23 +666,29 @@ def get_stub_segments(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: flo
     current_x, current_y = stub_x, stub_y
 
     while True:
-        # Find segment connected at current position
+        # Find the connected segment at the current position. Among ALL segments
+        # whose endpoint is within tolerance, take the CLOSEST -- not the first.
+        # Picking the first let the walk "jump across" a short diagonal jog whose
+        # far end sits right at the per-axis tolerance (a 0.05mm-per-axis jog == the
+        # 0.05mm tolerance): the neighbour beyond the jog matched and the jog segment
+        # was skipped, dropping it from the stub. A later layer-swap then relocated
+        # only part of the stub and left a ~71um gap that severed the pad
+        # (fpga_sdram /D0-). Closest-wins keeps the chain intact -- the true next
+        # segment (shared endpoint, distance ~0) always beats a boundary-distance
+        # neighbour, while the per-axis gate preserves the original match set.
         found = None
+        best_d = None
         for seg in net_segments:
             if id(seg) in visited:
                 continue
-
-            # Check if start matches current position
             if abs(seg.start_x - current_x) < tolerance and abs(seg.start_y - current_y) < tolerance:
-                found = seg
-                next_x, next_y = seg.end_x, seg.end_y
-                break
-
-            # Check if end matches current position
+                d = math.hypot(seg.start_x - current_x, seg.start_y - current_y)
+                if best_d is None or d < best_d:
+                    found, best_d, next_x, next_y = seg, d, seg.end_x, seg.end_y
             if abs(seg.end_x - current_x) < tolerance and abs(seg.end_y - current_y) < tolerance:
-                found = seg
-                next_x, next_y = seg.start_x, seg.start_y
-                break
+                d = math.hypot(seg.end_x - current_x, seg.end_y - current_y)
+                if best_d is None or d < best_d:
+                    found, best_d, next_x, next_y = seg, d, seg.start_x, seg.start_y
 
         if found is None:
             break
@@ -646,6 +795,26 @@ def calculate_stub_via_barrel_length(stub_vias: List, stub_layer: str, pcb_data)
     return total
 
 
+def drop_off_board_pads(pcb_data: PCBData, pads: List[Pad]) -> List[Pad]:
+    """Drop pads whose centre is clearly outside the Edge.Cuts outline (#291).
+
+    Such pads are unreachable -- the edge keep-out blocks every legal cell
+    around the outline -- but the keep-out's blocked band only extends a few
+    grid cells past the outline bbox, so an edge between TWO off-board pads
+    routes entirely in the unblocked space beyond it and ships as board-edge
+    DRC (framework_dock: TX/VBUS multipoint copper 20-50mm below the board).
+    Filtering them out of the endpoint set means no copper is drawn toward
+    them and no search is wasted; the pre-route warning in batch_route names
+    them, and the final connectivity reconciliation still reports them as
+    failed pads.
+    """
+    from check_drc import make_off_board_test
+    off_board = make_off_board_test(pcb_data.board_info)
+    if off_board is None:
+        return pads
+    return [p for p in pads if not off_board(p.global_x, p.global_y)]
+
+
 def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                       use_stub_free_ends: bool = False) -> Tuple[List, List, str]:
     """
@@ -671,7 +840,7 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     layer_map = build_layer_map(config.layers)
 
     net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
-    net_pads = pcb_data.pads_by_net.get(net_id, [])
+    net_pads = drop_off_board_pads(pcb_data, pcb_data.pads_by_net.get(net_id, []))
     net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
 
     # Case 1: Multiple segment groups
@@ -938,7 +1107,7 @@ def get_multipoint_net_pads(
     # does not netlist individually; they must not become routing targets or
     # they show up as failed pads with component_ref '?' (issue #94). They are
     # still copper, so they keep blocking via pcb_data.pads_by_net elsewhere.
-    net_pads = [p for p in pcb_data.pads_by_net.get(net_id, [])
+    net_pads = [p for p in drop_off_board_pads(pcb_data, pcb_data.pads_by_net.get(net_id, []))
                 if (p.pad_number or '').strip() != '']
     net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
 
@@ -993,8 +1162,25 @@ def get_multipoint_net_pads(
             px, py = pad.global_x, pad.global_y
             pad_layers = _pad_layers(pad)
             reach_pad = min(pad.size_x, pad.size_y) / 4 if (pad.size_x and pad.size_y) else 0.05
+            # A via-in-pad fans an SMD pad out to every copper layer, so the
+            # group's copper may legitimately reach the pad on a layer the pad
+            # does not itself live on (e.g. an F.Cu pad escaped to B.Cu). Treat
+            # such a pad like a through-hole pad and skip the layer gate; else it
+            # is mis-classed as unconnected and the net is falsely promoted to a
+            # multi-point route that re-runs the already-routed leg. The test is
+            # deliberately a genuine via-IN-pad (via centre inside the pad
+            # rectangle), NOT mere annulus overlap: a same-net via merely grazing
+            # the pad edge is some neighbour's escape, and crediting it would
+            # collapse endpoints the router still needs, perturbing dense
+            # multi-drop nets.
+            half_x = (pad.size_x or 0) / 2
+            half_y = (pad.size_y or 0) / 2
+            reaches_all_layers = pad.drill > 0 or any(
+                abs(v.x - px) <= half_x and abs(v.y - py) <= half_y
+                for v in net_vias
+            )
             for seg in group:
-                if seg.layer not in pad_layers and pad.drill == 0:
+                if seg.layer not in pad_layers and not reaches_all_layers:
                     continue
                 dx = seg.end_x - seg.start_x
                 dy = seg.end_y - seg.start_y

@@ -1,0 +1,42 @@
+# ---------------------------------------------------------------------------
+# Example fab-floor override file  (KiCad Routing Tools, issue #237)
+#
+# Pass it on the command line:    route.py board.kicad_pcb --fab-overrides fab_overrides.example.txt
+# or in the GUI:                  Basic tab -> "Fab Overrides File" -> Browse...
+#
+# It OVERLAYS the selected --fab-tier: only the values listed here change; every
+# other floor comes from the base tier (standard unless --fab-tier advanced).
+# Supplying an override file PINS the floor to one hard rung -- it disables the
+# automatic standard->advanced escalation, because this file states YOUR exact fab
+# capability. Copy this file, delete the lines you don't need, and edit the rest.
+#
+# Format: one "key = value" (mm) per line. "key: value" and "key value" also work.
+# Everything after "#" is a comment. Values must be > 0. Unknown keys are warned
+# and ignored.
+#
+# Keys and the built-in tier values for reference (per copper-layer count):
+#
+#   key                standard           advanced ("more costly")
+#   ----------------   ----------------   ------------------------
+#   via_diameter       0.45               0.25
+#   via_drill          0.20               0.15
+#   clearance          0.127 (2L)/0.10(4+) 0.10 (2L) / 0.09 (4+)
+#   track_width        0.127 (2L)/0.0889(4+) 0.10 (2L) / 0.0762 (4+)
+#   hole_to_hole       0.20               0.20      (via drill-to-drill)
+#   pad_hole_to_hole   0.45               0.45      (pad drill-to-drill)
+#   annular            0.25 (2L)/0.20(4+) 0.18 (2L) / 0.15 (4+)   (informational)
+#
+# NOTE: track_width and clearance are LAYER-DEPENDENT in the tier tables, but an
+# override here is a SINGLE value applied on every board regardless of layer count.
+# Only override them if you really want one fixed floor for 2- and 4+-layer boards.
+# ---------------------------------------------------------------------------
+
+# --- Example: a fab that does JLCPCB's tighter "advanced" vias and drills, which
+#     I've confirmed I'm willing to pay for, but I keep clearance conservative. ---
+
+via_diameter = 0.25      # smallest via outer diameter the fab will make
+via_drill    = 0.15      # smallest finished drill diameter
+hole_to_hole = 0.20      # min via drill edge-to-edge spacing
+
+# clearance  = 0.09      # uncomment to allow 0.09 mm copper clearance (all layers)
+# track_width = 0.09     # uncomment to allow 0.09 mm tracks (all layers)

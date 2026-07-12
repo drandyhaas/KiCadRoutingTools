@@ -55,7 +55,9 @@ it forever and never terminates. The watchdog also runs standalone next to a
 manually-driven queue.
 
 Each worker (`run_board.sh <board> <set> [model]`) routes one board per
-`RUNBOOK.md` and writes `$STRESS_DIR/results[_set2]/<board>.json` plus a
+`RUNBOOK.md` (note RUNBOOK rule 1a': never `cp`/`mv`/alias board files in the
+run dir -- only tool `--output`s may create them, or the redo manifest's
+replay chain is silently severed) and writes `$STRESS_DIR/results[_set2]/<board>.json` plus a
 `FINDINGS.md`. It also captures the agent transcript (`transcript.jsonl`) and
 auto-derives `agent_narrative.md` — a compact routing decision trail (the agent's
 narration paired with the actual route/diff/plane/fanout commands) via

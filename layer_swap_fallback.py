@@ -5,6 +5,7 @@ When routing fails due to blocked cells, this module attempts to swap the blocke
 side's stubs to another layer as a fallback strategy. It includes rip-up and
 reroute logic if the initial route after swap fails.
 """
+from __future__ import annotations
 
 from typing import List, Optional, Tuple, Dict
 
@@ -208,7 +209,7 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
     """
     from stub_layer_switching import (get_stub_info, apply_stub_layer_switch,
         validate_swap, collect_stubs_by_layer, collect_stub_endpoints_by_layer,
-        check_segments_overlap)
+        check_segments_overlap, revert_stub_layer_switch)
     from diff_pair_routing import get_diff_pair_endpoints, route_diff_pair_with_obstacles
 
     # Get current endpoint info
@@ -319,6 +320,21 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
             vias2, mods2 = apply_stub_layer_switch(pcb_data, n_stub, candidate_layer, config, debug=False)
             all_mods = mods1 + mods2
             all_vias = vias1 + vias2
+
+            # #299: switching P and N from F.Cu drops a pad via on EACH pad; at a
+            # tight pad pitch (hackrf IA+/IA- on a 0.5mm-pitch opamp) the two via
+            # bodies collide below clearance and nothing else on this path checks
+            # them (validate_swap excludes the pair's own nets). Same guard as the
+            # solo-switch paths (#277): shrink toward the fab via floor to fit;
+            # if even the floor via overlaps, revert and give up on the fallback
+            # (the fit doesn't depend on the candidate layer, so no point trying
+            # the others).
+            from layer_swap_optimization import _swap_vias_fit_or_shrink
+            if all_vias and not _swap_vias_fit_or_shrink(pcb_data, all_vias, config):
+                revert_stub_layer_switch(pcb_data, all_mods, all_vias)
+                print(f"    Fallback {side} swap reverted: pad vias overlap, "
+                      f"can't shrink to fab floor")
+                break
 
             # Note: No net_id translation needed - we looked up stubs with the correct
             # net_ids (swap partner's for target side), so modifications are recorded correctly

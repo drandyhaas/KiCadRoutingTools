@@ -55,17 +55,24 @@ From the impedance, derive the routing flags:
 
 - `--impedance <Z>` computes per-layer widths and gap from the stackup (preferred when the stackup is realistic — see `/recommend-stackup`), or set `--track-width`/`--diff-pair-gap` explicitly.
 - `--diff-pair-intra-match` for interfaces fast enough that P/N skew matters (USB HS+, PCIe, SATA, HDMI, LVDS at high rates).
-- Note which pairs allow polarity swapping at the receiver (PCIe, most SerDes are polarity-tolerant; USB is not) — relevant to whether `--no-fix-polarity` is safe to relax.
+- Classify every pair's polarity-swappability from the datasheet pin functions and report a machine-readable verdict per pair: `polarity_swappable: yes|no|unknown`. `yes` = an endpoint can compensate a P/N swap (FPGA/CPLD generic I/O pin pairs, PCIe lanes, SerDes with RX/TX polarity-invert, 1000BASE-T MDI); `no` = polarity-critical (USB D+/D-, MIPI, TMDS/HDMI/DP, CAN, RS-485/422, DDR CK/DQS, fixed-function receivers, connectors to unknown hardware, or an asymmetric attachment like a single-sided pull-up on one net); `unknown` = treat as `no`. Feed the `yes` pairs into `route_diff.py --polarity-swap-nets <patterns>` (swaps are denied by default, #279).
 
 ## Step 4: Output
 
 1. **Confirmed pairs**, grouped by interface, each group with a ready-to-run command:
 
 ```bash
+# USB is polarity-critical: no --polarity-swap-nets (swaps denied by default)
 python3 -X utf8 route_diff.py board.kicad_pcb board_usb.kicad_pcb \
     --nets "USB_DP" "USB_DM" \
     --impedance 90 --diff-pair-intra-match \
     2>&1 | tee /tmp/route_usb.txt
+
+# FPGA generic-I/O pairs CAN swap (pin functions reassigned in gateware)
+python3 -X utf8 route_diff.py board.kicad_pcb board_lvds.kicad_pcb \
+    --nets "lvds_*" --impedance 100 \
+    --polarity-swap-nets "lvds_*" \
+    2>&1 | tee /tmp/route_lvds.txt
 ```
 
 2. **Suspected pairs** with the evidence (matching pin functions but unverified part, name-only pairing), asking the user to confirm before routing them as pairs.

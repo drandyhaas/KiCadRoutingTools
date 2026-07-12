@@ -210,6 +210,16 @@ Pass the computed `--via-size via --via-drill via_drill --track-width track
 escape even at the fab floor → switch to `--escape-method underpad` and/or add
 escape layers; don't ship the graze.
 
+**Plan params can set ANY GUI option:** in the GUI's RESULT schema, each
+step's `params` may include any option shown on that step's tab or the shared
+options panel, keyed by its snake_case field name (`max_iterations`,
+`max_ripup`, `grid_step`, `board_edge_clearance`, `hole_to_hole_clearance`,
+`via_cost`, `heuristic_weight`, `turn_cost`, `ordering_strategy`, ...).
+Unknown names are ignored with a note in the plan log. Use this to carry the
+same values the equivalent CLI chain would pass (e.g. `--max-iterations
+1000000 --max-ripup 10 --grid-step 0.05`), so a GUI plan run matches a stress
+run step for step.
+
 **Why this heuristic matters for the GUI:** the plugin runs `/plan-pcb-routing` in
 *plan-only* mode — it never executes the fanout and never runs the DRC↔smaller-via
 retry loop, so it cannot discover a too-big via after the fact and shrink it. The
@@ -313,6 +323,20 @@ Use the printed flags as-is:
   computes it from the stackup and clamps it to the floor). `route_diff.py` then
   auto-updates the Default net class to those tight values (only-loosen, via
   `fix_kicad_drc_settings.py`), so the `.kicad_pro` stops advertising the wide gap.
+- **Diff-pair sizing default + shrink-to-succeed.** Default `route_diff.py` to
+  **`--track-width 0.1` and `--diff-pair-gap 0.1`** (the fab floor) — a thin, tight
+  bundle routes on congested boards where a fat pair is dropped. If the interface
+  is impedance-controlled, ALSO pass `--impedance <ohms>`: the router derives the
+  width from the stackup and clamps it to the floor, so the target impedance is
+  **maintained** while the geometry stays as small as it can. **When a pair fails
+  or falls back** — `route_diff.py`'s `JSON_SUMMARY` lists it in `failed_diff_pairs`
+  or `single_ended_diff_pairs`, or DRC shows an intra-pair / via-via graze — re-run
+  the failing pairs with **smaller track width, smaller gap, AND smaller vias**
+  (`--via-size`/`--via-drill` toward the fab via floor). A tighter track+gap fits a
+  narrower channel, and smaller vias fit a tight pad pitch (measured: lumenpnp
+  USB_D's two 0.5 mm vias collide by 0.1 mm at the connector pitch — a smaller via
+  clears it). Step **toward, never below**, the fab floors, and keep `--impedance`
+  so the ohms target is held as the geometry shrinks.
 - **Escape clearance — trigger on dropped balls, not pitch (issue #122):** the
   inter-ball channel is too narrow to fit a track at the net-class clearance on
   more BGAs than just "fine-pitch" ones. Even an **0.8 mm-pitch** BGA drops balls
@@ -364,12 +388,21 @@ Use the printed flags as-is:
 - **Non-Default classes:** route those nets separately with that class's
   `--clearance`/`--track-width` (clearance is the one per-class DRC value, so keep
   each class's nets at their own clearance rather than forcing one global value).
-- **Diff pairs:** `--track-width`/`--diff-pair-gap` from the Default class for `route_diff.py`.
+- **Diff pairs:** default `--track-width 0.1 --diff-pair-gap 0.1` for `route_diff.py`
+  (NOT the wide net-class values), plus `--impedance` when the interface is
+  impedance-controlled; shrink track/gap/via further toward the fab floor for any
+  pair that fails or grazes (see "Diff-pair sizing default + shrink-to-succeed").
 
 **Verification (DRC/connectivity) grades at the manufacturing floor**, not the
 inflated net-class clearance — that is the same rule the human original passes, so
-it's the honest delta. Use the printed `check_drc.py` flags
-(`--clearance <floor> --hole-to-hole-clearance <floor>`); see Step 6.
+it's the honest delta. The routing/plane/fanout steps now **record the smallest
+clearance any step actually used** (route_planes/route_disconnected_planes and the
+single-ended multipoint taps auto-step the fine-pitch tap clearance DOWN toward the
+fab floor as the geometry demands) into the output `.kicad_pro` DRC floor and into
+`JSON_SUMMARY` (`min_clearance_used`). `check_drc.py` **auto-grades at that
+`.kicad_pro` clearance when `-c` is omitted**, so a bare `check_drc.py board.kicad_pcb`
+already grades at the true routed floor. Passing `--clearance <floor>` still works
+as an explicit override; see Step 6.
 
 Only fall back to tool defaults when neither net classes nor Constraints are found
 (`--design-rules` then prints the JLCPCB fab floor for the board's layer count).
@@ -398,9 +431,30 @@ If differential pairs are found:
 > few pairs, run `/identify-diff-pairs` for datasheet-based detection by pin function and
 > per-interface gap/impedance recommendations.
 
-Also note: `route_diff.py` resolves P/N polarity mismatches automatically, which can swap
-target pad net assignments. Swaps are reported in the output — when they happen, the
-schematic sync step below applies (see "Schematic Synchronization After Swaps").
+**Polarity-swap policy (#279).** `route_diff.py` can resolve a P/N polarity mismatch by
+swapping the target pads' net assignments — but a swap physically cross-connects one
+device's P pin to the other's N pin, and is only harmless when an endpoint can compensate.
+Swaps are **denied by default**; grant them per pair with `--polarity-swap-nets <patterns>`.
+Before emitting the route_diff command, classify each pair's electrical endpoints (walk
+through series AC caps/resistors to the real device):
+
+- **Allow** pairs with an FPGA/CPLD generic-I/O endpoint (pin functions are reassigned in
+  gateware — look for paired `IO_LxxP/N`-style pinfunctions on Xilinx/Lattice/Altera/Gowin
+  parts), and protocol-tolerant links (PCIe lanes, SerDes with polarity-invert, 1000BASE-T).
+- **Deny** USB `D+/D-`, MIPI, TMDS/HDMI/DP, CAN, RS-485/422, DDR `CK/DQS`, clock/analog
+  inputs to fixed-function parts, anything reaching a connector or unknown part, and any
+  pair whose nets carry an asymmetric attachment (e.g. a single-sided pull-up) — it stays
+  on its net and would land on the wrong physical wire. MCUs/SoCs do NOT count as
+  programmable (their diff functions are fixed silicon). **When in doubt, deny** — a
+  skipped pair beats a dead interface. `/identify-diff-pairs` reports a per-pair
+  `polarity_swappable` verdict from datasheet pin functions for the ambiguous cases.
+
+Pass the resulting allowlist, e.g. `--polarity-swap-nets '/fpga/IO_*'` (use `'*'` only when
+every pair classifies swappable). Applied swaps are listed in `polarity_swapped_pairs` —
+when they happen, the schematic sync step below applies (see "Schematic Synchronization
+After Swaps"). Pairs that *wanted* a swap but were denied are listed in
+`polarity_swap_denied_pairs` — surface these to the user (they either routed via the
+opposite-side flip or failed honestly and may need a manual pin swap in the schematic).
 
 **Far-apart terminal pads → single-ended follow-up (issue #121).** A "diff pair"
 sometimes has pads that aren't a coupled connection — e.g. a P and an N test point
@@ -776,12 +830,14 @@ python3 -X utf8 route.py board_step5_repair.kicad_pcb board_step5.kicad_pcb \
 ### Step 6: Verify Results
 Invoke `/review-routed-board board_step5.kicad_pcb` for the full review (DRC,
 connectivity, orphan stubs, length-match tolerances, GND return via coverage,
-diff pair checks). If that skill is unavailable, run the raw checks — DRC at the
-**manufacturing floor** from Step 4's `--design-rules` output (the
-`check_drc.py` flags it printed), NOT a hardcoded 0.25, so legitimately-tight
-fine-pitch escapes that are still fabbable don't read as violations (#111):
+diff pair checks). If that skill is unavailable, run the raw checks — `check_drc.py`
+**auto-grades at the `.kicad_pro` clearance the routing steps wrote** (the smallest
+clearance any step used, including auto-stepped fine-pitch taps), NOT a hardcoded
+0.25, so legitimately-tight fine-pitch escapes that are still fabbable don't read as
+violations (#111/#226). A bare invocation is correct; pass `--clearance <floor>`
+(from Step 4's `--design-rules` output) only to override:
 
-python3 -X utf8 check_drc.py board_step5.kicad_pcb --clearance <floor> --hole-to-hole-clearance <floor> 2>&1 | tee /tmp/step6_drc.txt
+python3 -X utf8 check_drc.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_drc.txt
 python3 -X utf8 check_connected.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_connectivity.txt
 python3 -X utf8 check_orphan_stubs.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_orphans.txt
 ```

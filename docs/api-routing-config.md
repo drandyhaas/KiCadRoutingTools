@@ -93,9 +93,9 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | `min_turning_radius` | `0.2` | Minimum turning radius for pose-based diff routing |
 | `max_setback_angle` | `45.0` | Max angle when searching setback positions |
 | `max_turn_angle` | `180.0` | Cumulative turn limit before reset (prevents U-turns) |
-| `fix_polarity` | `True` | Allow P/N pad swap when polarity is crossed |
 | `gnd_via_enabled` | `True` | Place GND return vias next to diff-pair signal vias |
 | `diff_pair_intra_match` | `False` | Meander the shorter of P/N to match lengths within the pair |
+| `ac_couple_match` | `False` | End-to-end length-match AC-coupled pairs split by series caps: concatenated P vs N path (#196) |
 | `diff_chamfer_extra` | `1.5` | Meander chamfer multiplier for pairs (avoids P/N crossings) |
 
 ### Length / time matching
@@ -121,7 +121,7 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | Field | Default | Meaning |
 |-------|---------|---------|
 | `routing_clearance_margin` | `1.0` | Multiplier on track-to-via clearance (1.0 = exact DRC minimum) |
-| `hole_to_hole_clearance` | `0.2` | Drill-to-drill clearance, edge to edge |
+| `hole_to_hole_clearance` | `0.25` | Drill-to-drill clearance, edge to edge |
 | `board_edge_clearance` | `0.0` | Clearance from board edge (0 = use `clearance`) |
 
 ### Strategies and recovery
@@ -129,6 +129,7 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | Field | Default | Meaning |
 |-------|---------|---------|
 | `max_rip_up_count` | `3` | Max blocking routes ripped up at once (progressive 1..N) |
+| `ripup_abandon_metric` | `'stranded'` | Keep-retry vs abandon rule for multipoint tap rip-ups (see [rip-up-reroute.md](rip-up-reroute.md#abandon-metrics)) |
 | `stub_layer_swap` | `True` | Allow moving stubs to other layers to resolve conflicts (never moves an SMD pad's stub off the one layer that pad lives on — that would orphan the pad) |
 | `target_swap_crossing_penalty` | `1000.0` | Penalty for crossing assignments during target swap |
 | `crossing_layer_check` | `True` | Only count crossings between routes sharing a layer |
@@ -245,9 +246,14 @@ class DiffPairNet:
     n_net_id: Optional[int] = None
     p_net_name: Optional[str] = None
     n_net_name: Optional[str] = None
+    polarity_swap_allowed: bool = False  # may P/N pad nets be swapped (#279)?
 
     is_complete  # property: both net IDs present
 ```
+
+`polarity_swap_allowed` is stamped by `batch_route_diff_pairs` from its
+`polarity_swap_nets` glob patterns (CLI `--polarity-swap-nets`); the default
+denies swaps for every pair.
 
 Produced by
 [`net_queries.find_differential_pairs`](api-net-analysis.md#find_differential_pairs)

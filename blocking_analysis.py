@@ -20,6 +20,7 @@ Usage:
         )
         print_blocking_analysis(blockers)
 """
+from __future__ import annotations
 
 from typing import List, Tuple, Dict, Set, Optional
 from dataclasses import dataclass
@@ -28,8 +29,8 @@ import numpy as np
 
 from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import build_layer_map, square_offsets, circle_offsets, pad_rect_halfspan
-from bresenham_utils import walk_line
+from check_drc import point_to_pad_distance
+from routing_utils import build_layer_map, segment_blocked_cells_array, pad_rect_halfspan
 
 _PACK_OFFSET = 1 << 20  # grid coords stay well within +/-2^20 at any allowed grid step
 _COORD_MASK = (1 << 21) - 1
@@ -60,6 +61,46 @@ def invalidate_obstacle_cache(cache: Dict, net_id: int) -> None:
         del cache[k]
 
 
+# Geometry-keyed memo under the per-loop obstacle_cache dicts (#341). Those
+# dicts are recreated per loop (and the nested phase-3 rip/reroute calls pass
+# obstacle_cache=None), so every new dict re-rasterizes every routed net even
+# though almost none of their copper changed. This memo keeps the last computed
+# cell sets per (net_id, extra_clearance) TOGETHER WITH the exact geometry +
+# config values they were computed from; a hit requires the stored signature to
+# equal the net's current signature, so a reused value is byte-for-byte what a
+# fresh compute_net_obstacle_cells call would return. It only serves MISSES of
+# the caller's obstacle_cache -- cache-hit semantics there are untouched.
+_NET_CELLS_MEMO: Dict[Tuple[int, float], Tuple[tuple, Tuple[frozenset, frozenset]]] = {}
+
+
+def _net_geometry_signature(net_id, path, segments, vias, config, extra_clearance):
+    """Value-based signature of every input compute_net_obstacle_cells reads.
+
+    Numeric geometry is stored as raw numpy byte blobs rather than tuples of
+    Python numbers: exact same value-equality (identical floats/ints have
+    identical bit patterns; a -0.0/0.0 flip merely forces a spurious
+    recompute), at ~7x less retained memory per path point / segment.
+    """
+    params = (config.grid_step, config.clearance, config.track_width,
+              config.via_size, tuple(config.layers),
+              tuple(config.get_track_width(l) for l in config.layers),
+              extra_clearance)
+    if path:
+        path_arr = np.asarray(path)
+        if path_arr.dtype == object:  # ragged/exotic contents: keep exact tuples
+            path_sig = tuple(map(tuple, path))
+        else:
+            path_sig = (path_arr.dtype.str, path_arr.shape, path_arr.tobytes())
+    else:
+        path_sig = None
+    seg_sig = (np.array([(s.start_x, s.start_y, s.end_x, s.end_y, s.width)
+                         for s in segments], dtype=np.float64).tobytes(),
+               tuple(s.layer for s in segments))
+    via_sig = np.array([(v.x, v.y, v.size) for v in vias],
+                       dtype=np.float64).tobytes()
+    return (params, path_sig, seg_sig, via_sig)
+
+
 @dataclass
 class BlockingInfo:
     """Information about how much a net blocks a route."""
@@ -80,9 +121,14 @@ def compute_net_obstacle_cells(
     path: Optional[List[Tuple[int, int, int]]],
     config: GridRouteConfig,
     extra_clearance: float = 0.0,
+    net_segments: Optional[List[Segment]] = None,
+    net_vias: Optional[List[Via]] = None,
 ) -> Tuple["np.ndarray", "np.ndarray"]:
     """
     Compute all obstacle cells for a net (tracks and vias).
+
+    net_segments/net_vias: this net's copper, pre-bucketed by the caller (in
+    pcb_data list order) to skip the full pcb_data scan; None = scan here.
 
     Returns (track_keys, via_keys): sorted unique int64 arrays of packed
     (gx, gy, layer) cell keys (see _pack_cells).
@@ -90,26 +136,34 @@ def compute_net_obstacle_cells(
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
     num_layers = len(config.layers)
-
-    # Match the expansion used in obstacle_map.py add_net_stubs_as_obstacles
-    # expansion = existing_track_half + clearance + routing_track_half
-    expansion_mm = config.track_width / 2 + config.clearance + config.track_width / 2 + extra_clearance
-    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
-    via_expansion_grid = max(1, coord.to_grid_dist(
-        config.via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance))
-
-    track_offs = square_offsets(expansion_grid)
-    via_offs = circle_offsets(via_expansion_grid, via_expansion_grid * via_expansion_grid)
+    grid_step = config.grid_step
     all_layers = np.arange(num_layers, dtype=np.int64)
 
     track_parts: List["np.ndarray"] = []
     via_parts: List["np.ndarray"] = []
-    via_centers: List[Tuple[int, int]] = []
 
-    def add_track_line(gx1, gy1, gx2, gy2, layer_idx):
-        line = np.array(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int32)
-        cells = (line[:, None, :] + track_offs[None, :, :]).reshape(-1, 2)
-        track_parts.append(_pack_cells(cells, layer_idx))
+    def add_track_segment(x1, y1, x2, y2, layer_idx, seg_width):
+        # Exact capsule keep-out from the TRUE float segment, matching
+        # obstacle_map.add_net_stubs_as_obstacles / _add_segment_obstacle. The old
+        # square box + bresenham line over-reached by ~sqrt(2) in diagonal corners
+        # and shifted off-grid endpoints, so a frontier cell blocked by one net's
+        # real capsule also fell inside another net's square over-reach and the
+        # wrong net got ripped (#203). Distances are measured from the real segment.
+        layer_track_width = config.get_track_width(config.layers[layer_idx])
+        expansion_mm = layer_track_width / 2 + seg_width / 2 + config.clearance + extra_clearance
+        cells = segment_blocked_cells_array(x1, y1, x2, y2, expansion_mm, grid_step)
+        if len(cells):
+            track_parts.append(_pack_cells(cells, layer_idx))
+
+    def add_via_keepout(x, y, via_size):
+        # A via blocks tracks on EVERY layer within its via->track keep-out radius.
+        # A zero-length capsule is a disc, measured from the true float via centre
+        # (so an off-grid via is covered without the old floored-circle drift).
+        via_margin = via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance
+        cells = segment_blocked_cells_array(x, y, x, y, via_margin, grid_step)
+        if len(cells):
+            base = _pack_cells(cells, 0)
+            via_parts.append((base[:, None] | all_layers[None, :]).ravel())
 
     # Add cells from routed path
     if path:
@@ -117,32 +171,30 @@ def compute_net_obstacle_cells(
             gx1, gy1, layer1 = path[i]
             gx2, gy2, layer2 = path[i + 1]
             if layer1 != layer2:
-                via_centers.append((gx1, gy1))  # via blocks all layers
+                # via blocks all layers
+                vx, vy = coord.to_float(gx1, gy1)
+                add_via_keepout(vx, vy, config.via_size)
             else:
-                add_track_line(gx1, gy1, gx2, gy2, layer1)
+                x1, y1 = coord.to_float(gx1, gy1)
+                x2, y2 = coord.to_float(gx2, gy2)
+                add_track_segment(x1, y1, x2, y2, layer1, config.track_width)
 
     # Add cells from original stubs
-    for seg in pcb_data.segments:
-        if seg.net_id != net_id:
-            continue
+    if net_segments is None:
+        net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+    for seg in net_segments:
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
-        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-        add_track_line(gx1, gy1, gx2, gy2, layer_idx)
+        seg_width = seg.width if getattr(seg, 'width', 0) > 0 else config.get_track_width(seg.layer)
+        add_track_segment(seg.start_x, seg.start_y, seg.end_x, seg.end_y, layer_idx, seg_width)
 
     # Add cells from existing vias (block all layers)
-    for via in pcb_data.vias:
-        if via.net_id != net_id:
-            continue
-        via_centers.append(coord.to_grid(via.x, via.y))
-
-    if via_centers:
-        centers = np.array(via_centers, dtype=np.int32)
-        cells = (centers[:, None, :] + via_offs[None, :, :]).reshape(-1, 2)
-        layerless = _pack_cells(cells, 0)
-        via_parts.append((layerless[:, None] | all_layers[None, :]).ravel())
+    if net_vias is None:
+        net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+    for via in net_vias:
+        via_size = via.size if getattr(via, 'size', 0) > 0 else config.via_size
+        add_via_keepout(via.x, via.y, via_size)
 
     track_keys = np.unique(np.concatenate(track_parts)) if track_parts else np.empty(0, dtype=np.int64)
     via_keys = np.unique(np.concatenate(via_parts)) if via_parts else np.empty(0, dtype=np.int64)
@@ -211,6 +263,12 @@ def analyze_frontier_blocking(
     # intersect1d did -- byte-for-byte identical blocker counts/ranking.
     blocked_fs = frozenset(blocked_keys.tolist())
 
+    # One pass over pcb_data buckets every candidate net's copper (#341); built
+    # lazily on the first obstacle_cache miss, since a fully-cached call needs
+    # neither the buckets nor the signatures.
+    segs_by_net = None
+    vias_by_net = None
+
     for net_id, path in routed_net_paths.items():
         if net_id in exclude_net_ids:
             continue
@@ -221,10 +279,35 @@ def analyze_frontier_blocking(
         cache_key = (net_id, extra_clearance)
         cached = local_cache.get(cache_key)
         if cached is None:
-            track_keys, via_keys = compute_net_obstacle_cells(
-                pcb_data, net_id, path, config, extra_clearance
-            )
-            cached = (frozenset(track_keys.tolist()), frozenset(via_keys.tolist()))
+            if segs_by_net is None:
+                candidate_ids = set(routed_net_paths) - exclude_net_ids
+                segs_by_net = {nid: [] for nid in candidate_ids}
+                for seg in pcb_data.segments:
+                    bucket = segs_by_net.get(seg.net_id)
+                    if bucket is not None:
+                        bucket.append(seg)
+                vias_by_net = {nid: [] for nid in candidate_ids}
+                for via in pcb_data.vias:
+                    bucket = vias_by_net.get(via.net_id)
+                    if bucket is not None:
+                        bucket.append(via)
+            net_segments = segs_by_net.get(net_id, [])
+            net_vias = vias_by_net.get(net_id, [])
+            # Rasterizing is the phase-3 hot path (#341); the geometry-keyed
+            # memo returns the identical cell sets when nothing this net's
+            # cells depend on has changed since they were last computed.
+            sig = _net_geometry_signature(net_id, path, net_segments, net_vias,
+                                          config, extra_clearance)
+            memo_entry = _NET_CELLS_MEMO.get(cache_key)
+            if memo_entry is not None and memo_entry[0] == sig:
+                cached = memo_entry[1]
+            else:
+                track_keys, via_keys = compute_net_obstacle_cells(
+                    pcb_data, net_id, path, config, extra_clearance,
+                    net_segments=net_segments, net_vias=net_vias
+                )
+                cached = (frozenset(track_keys.tolist()), frozenset(via_keys.tolist()))
+                _NET_CELLS_MEMO[cache_key] = (sig, cached)
             local_cache[cache_key] = cached
         track_set, via_set = cached
 
@@ -353,13 +436,19 @@ def analyze_static_blockers(
             expand_x = max(1, coord.to_grid_dist(pad_half_w + margin))
             expand_y = max(1, coord.to_grid_dist(pad_half_h + margin))
 
-            # Check if any blocked cells fall within this pad's area
+            # Check if any blocked cells fall within this pad's area. The bbox
+            # (expand_x/y) is a fast PREFILTER; confirm with the pad's TRUE copper
+            # shape so a round pad's bbox corner doesn't over-attribute a blocked
+            # cell it doesn't actually cover (matches the shape-aware obstacle map).
             for cell in blocked_set:
                 gx, gy, layer_idx = cell
                 layer_name = config.layers[layer_idx] if layer_idx < len(config.layers) else None
                 if layer_name and layer_name not in pad.layers:
                     continue
                 if abs(gx - pad_gx) <= expand_x and abs(gy - pad_gy) <= expand_y:
+                    cx, cy = coord.to_float(gx, gy)
+                    if point_to_pad_distance(cx, cy, pad) > margin:
+                        continue  # inside the bbox but outside the real pad shape
                     if net_name not in pad_blockers:
                         pad_blockers[net_name] = set()
                     pad_blockers[net_name].add(pad.component_ref)

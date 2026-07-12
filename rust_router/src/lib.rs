@@ -8,6 +8,9 @@ use numpy::PyReadonlyArray2;
 use rustc_hash::FxHashSet;
 use std::collections::HashMap;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;  // v0.17.3: return freed pages to OS
+
 mod types;
 mod obstacle_map;
 mod router;

@@ -1,15 +1,20 @@
 """
 Configuration classes and coordinate utilities for PCB routing.
 """
+from __future__ import annotations
 
 import math
 from typing import List, Optional, Tuple, Dict
 from dataclasses import dataclass, field
 
+from routing_constants import FORBIDDEN_LAYER_COST
+
 # Cost knobs (proximity costs, via_cost, attraction bonuses) are calibrated at
 # this grid step: GridRouteConfig.cell_cost / via_cost_units scale them so the
 # cost per mm of path is the same at any --grid-step, and identical to
-# historical behavior at 0.1mm.
+# historical behavior at 0.1mm. This is a FIXED calibration baseline, NOT the
+# grid-step default (routing_defaults.GRID_STEP) -- it must stay 0.1 even if the
+# default grid changes, so the two are intentionally separate constants.
 REFERENCE_GRID_STEP = 0.1  # mm
 
 
@@ -21,6 +26,11 @@ class DiffPairNet:
     n_net_id: Optional[int] = None
     p_net_name: Optional[str] = None
     n_net_name: Optional[str] = None
+    # Whether a P/N polarity pad swap may be applied to THIS pair (#279).
+    # Set by batch_route_diff_pairs from --polarity-swap-nets; a swap is only
+    # harmless when an endpoint can compensate (FPGA generic I/O, polarity-
+    # tolerant protocol), so the default is deny.
+    polarity_swap_allowed: bool = False
 
     @property
     def is_complete(self) -> bool:
@@ -53,6 +63,9 @@ class GridRouteConfig:
     # Differential pair routing parameters
     diff_pair_gap: float = 0.101  # mm - gap between P and N traces (center-to-center = track_width + gap)
     diff_pair_centerline_setback: float = None  # mm - distance in front of stubs to start centerline route (None = 2 * spacing)
+    diff_pair_setback_no_ladder: bool = False  # when True, _setback_ladder yields ONLY
+    # the configured setback (no 0.75/0.5/floor/1.5/2x expansion) -- used by the pinch
+    # retry in _maybe_swap_to_hybrid so each attempt routes at the EXACT setback asked.
     # In a multi-point pair, a "terminal" whose P and N pads are farther apart
     # than diff_pair_uncouple_factor * (track_width + diff_pair_gap) is not a
     # coupled differential connection (e.g. spread-out test points). If the full
@@ -60,10 +73,14 @@ class GridRouteConfig:
     # routed single-ended (P->P, N->N) instead (issue #121).
     diff_pair_uncouple_factor: float = 6.0  # multiples of pair spacing (track+gap)
     min_turning_radius: float = 0.2  # mm - minimum turning radius for pose-based routing
-    fix_polarity: bool = True  # Swap target pad nets if polarity swap needed
     debug_lines: bool = False  # Output debug geometry on User.2/3/8/9 layers
     verbose: bool = False  # Print detailed diagnostic output
     max_rip_up_count: int = 3  # Maximum blockers to rip up at once during rip-up and retry (1 to N)
+    # How the #85 arbitration decides keep-retry vs abandon after a Phase 3
+    # tap rip-up cascade (docs/rip-up-reroute.md "Abandon metrics"). One of
+    # phase3_routing.ABANDON_METRICS: stranded | total-pads | complete-nets |
+    # congestion | history | weighted | probe | weighted-probe
+    ripup_abandon_metric: str = 'stranded'
     max_setback_angle: float = 45.0  # Maximum angle (degrees) for setback position search
     track_proximity_distance: float = 2.0  # mm - radius around routed tracks to penalize (same layer)
     stub_layer_swap: bool = True  # Enable stub layer switching optimization
@@ -71,7 +88,9 @@ class GridRouteConfig:
     target_swap_crossing_penalty: float = 1000.0  # Penalty for crossing assignments in target swap
     crossing_layer_check: bool = True  # Only count crossings when routes share a layer
     routing_clearance_margin: float = 1.0  # Multiplier on track-via clearance (1.0 = minimum DRC)
-    hole_to_hole_clearance: float = 0.2  # mm - minimum clearance between drill holes (edge to edge)
+    hole_to_hole_clearance: float = 0.20  # mm - edge-to-edge via drill spacing; JLC "Via
+                                           # Hole-to-Hole Spacing" (keep in sync with
+                                           # routing_defaults.HOLE_TO_HOLE_CLEARANCE)
     board_edge_clearance: float = 0.0  # mm - clearance from board edge (0 = use track clearance)
     max_turn_angle: float = 180.0  # Max cumulative turn angle (degrees) before reset, to prevent U-turns
     # Power-tap neck-down (issue #72): when a wide power-net tap edge fails,
@@ -94,6 +113,11 @@ class GridRouteConfig:
     meander_amplitude: float = 1.0  # mm - height of meander perpendicular to trace
     diff_chamfer_extra: float = 1.5  # Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings)
     diff_pair_intra_match: bool = False  # Enable intra-pair P/N length matching (meander shorter track)
+    ac_couple_match: bool = False  # End-to-end length-match AC-coupled pairs split by series caps (#196)
+    # Hybrid escape: when a coupled pair's terminal connector can't clear foreign
+    # copper (#165 graze), keep the coupled middle and defer each terminal leg to
+    # a point-to-point single-ended join instead of failing the whole pair.
+    diff_pair_hybrid_escape: bool = True
     # Time matching (alternative to length matching) - matches propagation delay instead of length
     time_matching: bool = False  # If True, match by propagation time instead of length
     time_match_tolerance: float = 1.0  # ps - acceptable time variance within group
@@ -177,12 +201,24 @@ class GridRouteConfig:
 
         Returns costs scaled by 1000 (1000 = 1.0x, 1500 = 1.5x penalty).
         If layer_costs is empty or shorter than layers list, uses 1000 (1.0x) for missing layers.
+        A cost of -1 (FORBIDDEN_LAYER_COST) is emitted VERBATIM (not scaled): the Rust
+        router skips track placement on any layer whose cost is negative, while the layer
+        stays an obstacle and through-vias may span it.
         """
         layer_costs = self.layer_costs or []  # may be None when set explicitly
         costs = []
         for i in range(len(self.layers)):
             if i < len(layer_costs):
-                costs.append(int(layer_costs[i] * 1000))
+                cost = layer_costs[i]
+                if cost < 0:
+                    # Forbidden: emit the canonical sentinel UNSCALED. The Rust
+                    # router treats ANY negative entry as forbidden, so every
+                    # negative input folds to one value here -- this also avoids
+                    # int(cost * 1000) truncating a tiny negative in (-0.001, 0)
+                    # up to 0 (a zero-cost layer, NOT forbidden).
+                    costs.append(FORBIDDEN_LAYER_COST)
+                else:
+                    costs.append(int(cost * 1000))
             else:
                 costs.append(1000)  # Default 1.0x
         return costs

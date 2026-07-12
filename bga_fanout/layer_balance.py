@@ -3,6 +3,7 @@ Layer rebalancing for BGA fanout routing.
 
 Distributes routes evenly across available layers after initial assignment.
 """
+from __future__ import annotations
 
 from typing import List, Dict, Set, Tuple
 from bga_fanout.types import FanoutRoute
@@ -23,6 +24,19 @@ def _build_route_segments(route: FanoutRoute) -> List[Tuple[Tuple[float, float],
     else:
         segs.append((route.pad_pos, route.stub_end))
     segs.append((route.stub_end, route.exit_pos))
+    # The decorative end-jog (#149) is real emitted copper and moves with the
+    # route: leaving it out let rebalance_layers place a route whose jog
+    # (computed for the OLD layer's left/right convention) lands within
+    # clearance of another net's jog on the destination layer -- two adjacent
+    # 0.4mm-pitch balls' jogs converged to a 0.08mm gap (#254, eis U1).
+    jog_end = getattr(route, 'jog_end', None)
+    if jog_end:
+        jog_ext = getattr(route, 'jog_extension', None)
+        if jog_ext:
+            segs.append((route.exit_pos, jog_ext))
+            segs.append((jog_ext, jog_end))
+        else:
+            segs.append((route.exit_pos, jog_end))
     return segs
 
 

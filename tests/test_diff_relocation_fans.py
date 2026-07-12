@@ -91,6 +91,24 @@ def main():
     check("fan via on its own relocated pad allowed",
           _fans_fit(pcb_own, [(_via(0.0, 0.0), None)], [own_pad], cfg))
 
+    # 5. #311: apply_bare_pad_target_via REUSES an existing same-net via (#282)
+    #    instead of drilling a new one, recording (None, stub) as the fan entry.
+    #    _fans_fit must skip the None via (it once dereferenced .size -> crash)
+    #    and still validate the real partner fan via.
+    reused_none = [(None, None), (_via(0.0, 2.0), None)]
+    try:
+        ok = _fans_fit(pcb, reused_none, [], cfg)
+    except AttributeError:
+        ok = "CRASH"
+    check("reused (None) fan via does not crash _fans_fit", ok is True)
+    # ...and a colliding partner is still caught even when one entry is reused.
+    reused_collide = [(None, None), (_via(0.0, 0.0), None), (_via(0.0, 0.4), None)]
+    try:
+        bad = _fans_fit(pcb, reused_collide, [], cfg)
+    except AttributeError:
+        bad = "CRASH"
+    check("colliding partner still rejected past a None entry", bad is False)
+
     # --- _attach_fans ---
     # Fan copper must land on a real leg result (legs[0]) so the writer emits it.
     via, seg = _via(1.0, 1.0), ('seg-stub',)
@@ -101,6 +119,16 @@ def main():
     check("fan via attached to leg result (reaches output)", via in legs[0]['new_vias'])
     check("fan stub attached to leg result", seg in legs[0]['new_segments'])
     check("merged kept consistent for obstacle sync", via in merged['new_vias'])
+
+    # #311: a reused (None) via must NOT be emitted as a new via (it is already
+    # committed elsewhere; re-emitting duplicates the hole in the output).
+    reused_seg = ('reused-stub',)
+    legs2 = [{'new_segments': [], 'new_vias': []}]
+    merged2 = {'new_segments': [], 'new_vias': []}
+    _attach_fans(merged2, [(None, reused_seg)], legs2)
+    check("reused (None) via not emitted to new_vias",
+          None not in legs2[0]['new_vias'] and None not in merged2['new_vias'])
+    check("reused via's stub still emitted", reused_seg in legs2[0]['new_segments'])
 
     passed = sum(1 for _, ok in results if ok)
     total = len(results)

@@ -32,6 +32,8 @@ def get_dialog_settings(dialog):
         'grid_step': dialog.grid_step.GetValue(),
         'via_cost': dialog.via_cost.GetValue(),
         'max_ripup': dialog.max_ripup.GetValue(),
+        'ripup_abandon_metric': dialog.ripup_abandon_metric.GetString(
+            dialog.ripup_abandon_metric.GetSelection()),
         'obey_design_rules': dialog.obey_drc_check.GetValue(),
 
         # Layer selections
@@ -43,6 +45,7 @@ def get_dialog_settings(dialog):
         'add_teardrops_check': dialog.add_teardrops_check.GetValue(),
         'fix_drc_settings': dialog.fix_drc_check.GetValue(),
         'keep_thermal': dialog.keep_thermal_check.GetValue(),
+        'no_clamp_netclasses': dialog.no_clamp_netclasses_check.GetValue(),
         'power_nets': dialog.power_nets_ctrl.GetValue(),
         'power_widths': dialog.power_widths_ctrl.GetValue(),
         'no_bga_zones': dialog.no_bga_zones_ctrl.GetValue(),
@@ -58,6 +61,9 @@ def get_dialog_settings(dialog):
         'turn_cost': dialog.turn_cost.GetValue(),
         'direction_preference_cost': dialog.direction_preference_cost.GetValue(),
         'ordering_strategy': dialog.ordering_strategy.GetSelection(),
+        'fab_tier': dialog.fab_tier.GetSelection(),
+        'fab_overrides_path': dialog.fab_overrides_path.GetValue(),
+        'fab_overrides_recent': list(dialog.fab_overrides_path.GetStrings()),
         'bga_proximity_radius': dialog.bga_proximity_radius.GetValue(),
         'bga_proximity_cost': dialog.bga_proximity_cost.GetValue(),
         'stub_proximity_radius': dialog.stub_proximity_radius.GetValue(),
@@ -152,20 +158,23 @@ def get_dialog_settings(dialog):
         'max_turn_angle': dialog.differential_tab.max_turn_angle.GetValue(),
         'chamfer_extra': dialog.differential_tab.chamfer_extra.GetValue(),
         'centerline_setback': dialog.differential_tab.centerline_setback.GetValue(),
-        'fix_polarity_check': dialog.differential_tab.fix_polarity_check.GetValue(),
+        'polarity_swap_nets_text': dialog.differential_tab.polarity_swap_nets_text.GetValue(),
         'gnd_via_check': dialog.differential_tab.gnd_via_check.GetValue(),
         'intra_match_check': dialog.differential_tab.intra_match_check.GetValue(),
+        'ac_couple_check': dialog.differential_tab.ac_couple_check.GetValue(),
+        'diff_hide_short': dialog.differential_tab.hide_short_check.GetValue(),
 
         # Fanout tab settings
         'fanout_type': dialog.fanout_tab.fanout_type.GetSelection(),
         'fanout_bga_exit_margin': dialog.fanout_tab.bga_options.exit_margin.GetValue(),
+        'fanout_bga_same_net_escapes': dialog.fanout_tab.bga_options.same_net_escapes.GetValue(),
         'fanout_bga_differential': dialog.fanout_tab.bga_options.differential_check.GetValue(),
         'fanout_bga_escape_direction': dialog.fanout_tab.bga_options.escape_direction.GetSelection(),
         'fanout_bga_force_escape': dialog.fanout_tab.bga_options.force_escape.GetValue(),
         'fanout_bga_rebalance': dialog.fanout_tab.bga_options.rebalance_escape.GetValue(),
         'fanout_bga_check_previous': dialog.fanout_tab.bga_options.check_previous.GetValue(),
         'fanout_bga_no_inner_top': dialog.fanout_tab.bga_options.no_inner_top.GetValue(),
-        'fanout_bga_underpad': dialog.fanout_tab.bga_options.underpad_escape.GetValue(),
+        'fanout_bga_escape_method': dialog.fanout_tab.bga_options.get_escape_method(),
         'fanout_bga_optimize_caps': dialog.fanout_tab.bga_options.optimize_caps.GetValue(),
         'fanout_bga_cap_capture_radius': dialog.fanout_tab.bga_options.cap_capture_radius.GetValue(),
         'fanout_bga_cap_near_margin': dialog.fanout_tab.bga_options.cap_near_margin.GetValue(),
@@ -196,6 +205,7 @@ def get_dialog_settings(dialog):
         'planes_gnd_via_net': dialog.planes_tab.create_options.gnd_via_net.GetValue(),
         # Repair mode options
         'planes_repair_max_track_width': dialog.planes_tab.repair_options.max_track_width.GetValue(),
+        'planes_repair_min_track_width': dialog.planes_tab.repair_options.min_track_width.GetValue(),
         'planes_repair_analysis_grid': dialog.planes_tab.repair_options.analysis_grid.GetValue(),
         'planes_repair_pads': dialog.planes_tab.repair_options.repair_pads.GetValue(),
         'planes_repair_rip_blocker_check': dialog.planes_tab.repair_options.rip_blocker_check.GetValue(),
@@ -257,6 +267,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.via_cost.SetValue(settings['via_cost'])
     if 'max_ripup' in settings:
         dialog.max_ripup.SetValue(settings['max_ripup'])
+    if 'ripup_abandon_metric' in settings:
+        dialog.ripup_abandon_metric.SetStringSelection(settings['ripup_abandon_metric'])
     if 'obey_design_rules' in settings:
         dialog.obey_drc_check.SetValue(settings['obey_design_rules'])
 
@@ -277,6 +289,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.fix_drc_check.SetValue(settings['fix_drc_settings'])
     if 'keep_thermal' in settings:
         dialog.keep_thermal_check.SetValue(settings['keep_thermal'])
+    if 'no_clamp_netclasses' in settings:
+        dialog.no_clamp_netclasses_check.SetValue(settings['no_clamp_netclasses'])
     if 'power_nets' in settings:
         dialog.power_nets_ctrl.SetValue(settings['power_nets'])
     if 'power_widths' in settings:
@@ -305,6 +319,12 @@ def restore_dialog_settings(dialog, settings):
         dialog.direction_preference_cost.SetValue(settings['direction_preference_cost'])
     if 'ordering_strategy' in settings:
         dialog.ordering_strategy.SetSelection(settings['ordering_strategy'])
+    if 'fab_overrides_recent' in settings:
+        dialog.fab_overrides_path.Set(list(settings['fab_overrides_recent']))
+    if 'fab_overrides_path' in settings:
+        dialog.fab_overrides_path.SetValue(settings['fab_overrides_path'])
+    if 'fab_tier' in settings:
+        dialog.fab_tier.SetSelection(settings['fab_tier'])
     if 'bga_proximity_radius' in settings:
         dialog.bga_proximity_radius.SetValue(settings['bga_proximity_radius'])
     if 'bga_proximity_cost' in settings:
@@ -499,12 +519,22 @@ def restore_dialog_settings(dialog, settings):
         dialog.differential_tab.chamfer_extra.SetValue(settings['chamfer_extra'])
     if 'centerline_setback' in settings:
         dialog.differential_tab.centerline_setback.SetValue(settings['centerline_setback'])
-    if 'fix_polarity_check' in settings:
-        dialog.differential_tab.fix_polarity_check.SetValue(settings['fix_polarity_check'])
+    if 'polarity_swap_nets_text' in settings:
+        dialog.differential_tab.polarity_swap_nets_text.SetValue(
+            settings['polarity_swap_nets_text'])
+    elif 'fix_polarity_check' in settings:
+        # Migrate the pre-#279 boolean: True -> allow all pairs, False -> none.
+        dialog.differential_tab.polarity_swap_nets_text.SetValue(
+            '*' if settings['fix_polarity_check'] else '')
     if 'gnd_via_check' in settings:
         dialog.differential_tab.gnd_via_check.SetValue(settings['gnd_via_check'])
     if 'intra_match_check' in settings:
         dialog.differential_tab.intra_match_check.SetValue(settings['intra_match_check'])
+    if 'ac_couple_check' in settings:
+        dialog.differential_tab.ac_couple_check.SetValue(settings['ac_couple_check'])
+    if 'diff_hide_short' in settings:
+        dialog.differential_tab.hide_short_check.SetValue(settings['diff_hide_short'])
+        dialog.differential_tab.pair_panel.set_hide_short(settings['diff_hide_short'])
 
     # Restore fanout tab settings
     if 'fanout_type' in settings:
@@ -513,6 +543,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab._on_type_changed(None)
     if 'fanout_bga_exit_margin' in settings:
         dialog.fanout_tab.bga_options.exit_margin.SetValue(settings['fanout_bga_exit_margin'])
+    if 'fanout_bga_same_net_escapes' in settings:
+        dialog.fanout_tab.bga_options.same_net_escapes.SetValue(settings['fanout_bga_same_net_escapes'])
     if 'fanout_bga_differential' in settings:
         dialog.fanout_tab.bga_options.differential_check.SetValue(settings['fanout_bga_differential'])
     if 'fanout_bga_escape_direction' in settings:
@@ -525,8 +557,13 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.check_previous.SetValue(settings['fanout_bga_check_previous'])
     if 'fanout_bga_no_inner_top' in settings:
         dialog.fanout_tab.bga_options.no_inner_top.SetValue(settings['fanout_bga_no_inner_top'])
-    if 'fanout_bga_underpad' in settings:
-        dialog.fanout_tab.bga_options.underpad_escape.SetValue(settings['fanout_bga_underpad'])
+    if 'fanout_bga_escape_method' in settings:
+        dialog.fanout_tab.bga_options.set_escape_method(settings['fanout_bga_escape_method'])
+    elif 'fanout_bga_underpad' in settings:
+        # Migrate the pre-dropdown checkbox (#288): checked meant under-pad,
+        # unchecked meant the default engine (now 'auto').
+        dialog.fanout_tab.bga_options.set_escape_method(
+            'underpad' if settings['fanout_bga_underpad'] else 'auto')
     if 'fanout_bga_optimize_caps' in settings:
         dialog.fanout_tab.bga_options.optimize_caps.SetValue(settings['fanout_bga_optimize_caps'])
     if 'fanout_bga_cap_capture_radius' in settings:
@@ -588,6 +625,8 @@ def restore_dialog_settings(dialog, settings):
     # Repair mode options
     if 'planes_repair_max_track_width' in settings:
         dialog.planes_tab.repair_options.max_track_width.SetValue(settings['planes_repair_max_track_width'])
+    if 'planes_repair_min_track_width' in settings:
+        dialog.planes_tab.repair_options.min_track_width.SetValue(settings['planes_repair_min_track_width'])
     if 'planes_repair_analysis_grid' in settings:
         dialog.planes_tab.repair_options.analysis_grid.SetValue(settings['planes_repair_analysis_grid'])
     if 'planes_repair_pads' in settings:

@@ -1,6 +1,6 @@
 # Claude Code Skills
 
-The repository ships eight [Claude Code](https://claude.ai/claude-code) skills in `.claude/skills/`. They combine the project's deterministic Python tooling (`kicad_parser`, `list_nets.py`, `analyze_power_paths.py`, the checkers) with AI judgment where it's actually needed — reading datasheets, classifying components, planning workflows, and diagnosing failures. Outputs are formatted as ready-to-use CLI arguments so they feed straight back into the routing tools.
+The repository ships nine [Claude Code](https://claude.ai/claude-code) skills in `.claude/skills/`. They combine the project's deterministic Python tooling (`kicad_parser`, `list_nets.py`, `analyze_power_paths.py`, the checkers) with AI judgment where it's actually needed — reading datasheets, classifying components, planning workflows, and diagnosing failures. Outputs are formatted as ready-to-use CLI arguments so they feed straight back into the routing tools.
 
 ## Using the Skills
 
@@ -38,6 +38,15 @@ transcript, and parses a machine-readable `RESULT=` last line back into controls
 The Claude tab's **Model** and **Effort** dropdowns apply to every button above and
 persist with the other dialog settings. Each run shows a startup header (Claude Code
 version, model, discovered skills) so you can confirm what actually ran.
+
+**Saving and replaying a plan.** Next to the step list the Claude tab has **Save…**
+and **Load…** buttons. **Save…** writes the current plan steps (actions, nets/pairs/
+assignments, and per-step parameters) to a JSON file; **Load…** reads one back into the
+step list so **Run Selected Steps** replays the exact same routing chain **without another
+Claude run** — useful for re-running a vetted plan or sharing it. `Load…` also accepts a
+plan exported by `tests/stress/manifest_to_plan.py`, which turns a stress-test
+`redo_commands.sh` manifest into a loadable plan JSON, so a recorded no-LLM stress chain
+can be driven through the GUI plan executor.
 
 ## The Skills
 

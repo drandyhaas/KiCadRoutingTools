@@ -27,6 +27,7 @@ The router recognizes common differential pair naming conventions:
 | `P` / `N` suffix | `DATA0P` | `DATA0N` |
 | `DP` / `DM` / `DN`, `DPLUS` / `DMINUS` (USB) | `USB_DP`, `USB_DPLUS` | `USB_DM`, `USB_DN`, `USB_DMINUS` |
 | `+` / `-` suffix | `CLK+` | `CLK-` |
+| `+` / `-` before an `_`-led suffix | `D+_L` | `D-_L` |
 
 For the indexed `_PX` / `_NX` convention the trailing index is kept in the base
 name, so each index pairs only with its own twin (`FE_CLK_P0` pairs with
@@ -177,6 +178,46 @@ routed as a **chain** of 2-point legs (`diff_pair_multipoint.py`):
    constraints depend on routing order, so a reversed chain can succeed
    where the forward one wraps itself into a corner.
 
+### Electrically-Short Pairs (Single-Ended Deferral)
+
+A coupled pair only earns its keep over an *electrically long* run. A leg
+shorter than a few millimetres has no real coupled middle section — you spend
+~1 setback fanning in and ~1 fanning out — so coupling buys nothing and only
+tangles the pair through clustered connector pads (e.g. a USB connector's
+D+/D-). Such legs are routed **single-ended** instead: the router defers them,
+and the downstream `route.py` single-ended pass connects them as plain tracks.
+
+A leg is electrically short when `min(P-run, N-run) < threshold`, where
+(`diff_pair_min_coupled_length`):
+
+```
+threshold = max( 5 × setback,        # geometric: keep short fan-ins from tangling
+                 3.0 mm )            # electrical: λ/10 at 5 GHz on FR4
+setback   = centerline_setback (if set) else 4 × (track_width + diff_pair_gap)/2
+```
+
+- A **2-terminal** pair whose single leg is short is deferred whole.
+- A **multi-point** pair defers short legs individually; if *every* leg is
+  short the whole pair is left for single-ended.
+
+**Why the 3 mm absolute floor.** The geometric term alone (`5 × setback =
+10 × (width+gap)` in the auto case) drops to only ~2 mm at tight pitch, which
+is *below* the length at which coupling matters electrically. Below ~λ/10 at
+the design's top frequency a pair is electrically short — SE vs coupled is
+indistinguishable (no meaningful reflection, skew-induced common-mode, or
+radiation difference). On FR4, `v = c/√εr_eff ≈ 145–173 mm/ns`
+(stripline…microstrip), so at **5 GHz**, `λ = v/f ≈ 29–35 mm` and
+`λ/10 ≈ 3 mm`. The floor therefore governs all pairs with
+`width + gap ≤ 0.3 mm` (most real diff pairs); only wider pairs
+(e.g. 0.2/0.2 → 4 mm) are bounded by the larger geometric term. The floor
+assumes a ≤5 GHz design; a much faster board would warrant a smaller value.
+
+This rule is shared by the CLI (`route_diff.py`) and the GUI. In the GUI's
+Differential tab, the **"Hide short routes"** option (on by default) uses the
+same test to drop these pairs from the differential pair list, and keeps their
+nets visible on the Basic tab — even under "Hide differential" — so they get
+routed single-ended.
+
 ### Pose-Based Centerline Routing
 
 The centerline is routed using orientation-aware A* search with state space (x, y, θ, layer):
@@ -296,12 +337,14 @@ bare-pad endpoints can flip - stub directions are fixed by existing copper.
 Flipped attempts get a full-loop turn budget since they must wrap around
 their endpoint, and every candidate is validated for P/N track crossings.
 
-With polarity fixing **enabled** (CLI default), the pad-swap and connector-flip
+For a pair with swaps allowed (`--polarity-swap-nets`), the pad-swap and
+connector-flip
 candidates **compete by routed length** and the shortest clean route wins; if
 only one mechanism succeeds, it is used. (When no end can flip - e.g. both
 ends have stubs - the swap is committed directly without re-routing.)
 
-With `--no-fix-polarity` (the KiCad plugin GUI default), pad swaps never
+For a pair NOT matching `--polarity-swap-nets` (or with the flag absent
+entirely - the default), pad swaps never
 happen: only the flip resolution is tried, and if no flip produces a clean
 route the pair is **skipped** with a warning (no crossing tracks are ever
 written).
@@ -414,6 +457,96 @@ identify which pairs on your board are high-speed if uncertain.
 
 Simple straight connectors link the original stub endpoints to the corresponding P/N track start/end points.
 
+## Inner-Layer Launch via Escape Vias
+
+The setback search (above) launches the coupled pair from the **stub's own
+layer**. When that layer's launch corridor is jammed — e.g. a QFN/BGA fanout
+whose escape stubs face *into* a dense pad field on `F.Cu` — but the terminal
+sits on a **through-via or through-hole pad**, the pair can launch on any
+routing layer that barrel spans instead (issue #195). The setback search retries
+on the via-reachable inner/back layers and prefers a clean launch there:
+
+```
+source: F.Cu corridor jammed - launching on In1.Cu (reachable through the endpoint via)
+```
+
+A via is associated with a terminal when it sits within ~a via-radius of the
+pad/stub tip (`_launch_assoc_tol`), so a hand- or auto-placed escape via that is
+slightly offset still counts. This makes under-pad fanout (`bga_fanout` /
+`qfn_fanout --escape-method underpad`) compose with coupled routing: the fanout
+drops the escape vias, and the diff route picks the pair up on the open inner
+layer.
+
+When a launch can be found only by rotating the escape direction (the stub faces
+away from the route), the search also tries launching **toward the other
+terminal** and keeps a clean launch there if one exists, so the centerline heads
+down the open corridor instead of U-turning off the stub.
+
+## Hybrid Escape (Direct Coupled Middle + Point-to-Point Legs)
+
+Some terminal geometries have **no clean connector join** for the coupled
+centerline at all: the straight P/N connectors graze the partner's escape via
+(issue #165), or the pair must **swap sides** between the two ends (P above N at
+one terminal, below at the other), or no valid setback exists in any direction.
+The normal centerline+connector pipeline fails these.
+
+As a **last resort** — only after rip-up and the polarity/flip retries are
+exhausted — the router falls back to a hybrid that decouples the coupled middle
+from the terminal escapes (`_route_direct_coupled_middle`):
+
+1. **Direct coupled middle.** Route the centerline *straight* from the source
+   via-midpoint to the target via-midpoint on the best open layer — no
+   escape-direction setback, no connectors, no polarity stage. Candidate layers
+   are all routing layers (preferring those an existing via barrel spans, then
+   inner, then `F.Cu`/`B.Cu`). Offset the centerline into a clean parallel P/N
+   pair. The pair runs the open corridor as close to each terminal as it can.
+
+2. **Polarity by minimum crossings.** There is no coupled polarity stage; the
+   P/N offset side is chosen to **minimise terminal-leg crossings** — align the P
+   track with the side P's vias are actually on. A genuine side-swap still costs
+   one crossing leg either way, but both legs never cross gratuitously.
+
+3. **Point-to-point legs.** Attach each terminal to its middle near-end with a
+   short single-ended A* leg (`_route_hybrid_legs`). The leg starts on the
+   terminal's own through-via (any layer) or the bare pad's layer and **drops its
+   own escape via** for the layer change to the middle. The **partner net's
+   copper** — its middle, its terminal vias, the first net's just-routed legs, and
+   the partner's **original fanout stub** (excluded from the diff-pair obstacle
+   map, so re-added here) — is added as an obstacle, so a side-swap leg routes
+   *around* it. That is where polarity is resolved: at the pads, by independent A*,
+   with no coupled crossing.
+
+   **Boxed-endpoint handling.** A bare-pad stub tip can sit in a foreign keep-out
+   tight enough that the leg can't get a via in *at the tip* — but a via still
+   fits a short walk away. This used to need a local escape (`apply_endpoint_escape`),
+   because the obstacle map's approximations near a diagonal stub were wrong: the
+   conservative **square** track stamp blocked the tip's Euclidean-legal neighbours
+   (so the leg couldn't step off it), and the bresenham via-block **under-covered**
+   the diagonal stub (so an escape via landed a hair too close). Both are now fixed
+   *globally* by the **exact (capsule) obstacle keep-out** (`build_base` measures
+   track and via clearance from the true float segment, matching the cache —
+   issue #173). With exact geometry the boxed tip's clear cells are no longer
+   falsely blocked and the escape via lands clean, so the special-case escape code
+   was retired. This is what routes the stock *surface-fanned* watchy `USB_D` pair
+   (boxed by the adjacent `USB_DET` stub, ~0.225 mm away) 1/1 with no hand-placed
+   vias — issue #197.
+
+The result is a fully-connected, DRC-clean pair: coupled where it matters (the
+parallel run) and single-ended only on the last millimetre at each terminal,
+where coupling buys nothing and flexibility is everything.
+
+**Scope.** The hybrid needs each terminal to have *room* for inner-layer access —
+a through-via/THT pad, or a bare pad with a clean via spot within a short walk of
+the tip (the exact keep-out lets the leg reach it even when the tip itself is packed
+against a neighbour stub). It does **not** rewrite placement: a terminal with **no
+via-legal cell anywhere near** it (a neighbour stub hard against the pad on every
+side) genuinely has nowhere to escape, and no amount of routing fixes that — fan
+such pairs out **under-pad** (escape vias instead of surface stubs) so they are
+not boxed, or open the obstruction in placement. The hybrid is gated by
+`diff_pair_hybrid_escape` (default on) and returns the pair to the normal failure
+path (single-ended follow-up) when it can't lay a clean route, so it never makes a
+pair worse.
+
 ## Debug Visualization
 
 With `--debug-lines`, debug geometry is output on User layers as graphic lines:
@@ -423,7 +556,7 @@ With `--debug-lines`, debug geometry is output on User layers as graphic lines:
 | `User.3` | Connectors (stub to P/N track) |
 | `User.4` | Stub direction arrows (1mm arrows from midpoint at src/tgt) |
 | `User.5` | BGA exclusion-zone rectangles (inner zone + proximity outer) and stub/pad proximity circles |
-| `User.6` | Boundary position labels (from `--mps-unroll`) |
+| `User.6` | Boundary position labels |
 | `User.7` | DRC violation lines (from `check_drc.py --debug-lines`) |
 | `User.8` | Simplified centerline path |
 | `User.9` | Raw A* centerline path |
@@ -434,19 +567,18 @@ This helps visualize the routing structure without affecting the actual routed c
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--diff-pairs` | - | Glob patterns for diff pair nets |
-| `--diff-pair-gap` | 0.1 | Gap between P and N traces (mm) |
+| `--diff-pair-gap` | 0.101 | Gap between P and N traces (mm) |
 | `--diff-pair-centerline-setback` | 2x P-N dist | Distance in front of stubs to start centerline (mm) |
 | `--min-turning-radius` | 0.2 | Minimum turning radius for pose-based routing (mm) |
 | `--max-turn-angle` | 180 | Max cumulative turn angle (degrees) to prevent U-turns |
-| `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap is needed |
+| `--polarity-swap-nets` | (none = deny all) | Glob patterns naming the pairs ALLOWED to resolve a P/N mismatch by a pad-net swap (#279). `'*'` = all pairs; omit for no swaps ever |
 | `--no-gnd-vias` | false | Disable GND via placement near signal vias |
 | `--swappable-nets` | - | Glob patterns for diff pair nets that can have targets swapped |
 | `--crossing-penalty` | 1000.0 | Penalty for crossing assignments in target swap optimization |
 | `--debug-lines` | false | Output debug geometry on User.3/4/5/6/8/9 layers |
 | `--stub-proximity-radius` | 2.0 | Radius around stubs to penalize routing (mm) |
 | `--stub-proximity-cost` | 0.2 | Cost penalty near stubs (mm equivalent) |
-| `--bga-proximity-radius` | 10.0 | Radius around BGA edges to penalize routing (mm) |
+| `--bga-proximity-radius` | 7.0 | Radius around BGA edges to penalize routing (mm) |
 | `--bga-proximity-cost` | 0.2 | Cost penalty near BGA edges (mm equivalent) |
 | `--track-proximity-distance` | 2.0 | Radius around routed tracks to penalize (mm, same layer) |
 | `--track-proximity-cost` | 0.0 | Cost penalty near routed tracks (0 = disabled) |
@@ -534,7 +666,7 @@ python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" \
 
 ## Limitations
 
-1. **Polarity swap** - Enabled by default on the CLI (disabled by default in the plugin GUI); use `--no-fix-polarity` to disable automatic target pad swapping. With fixing disabled, a mismatched pair is re-routed with the connectors out the opposite side at one end (bare-pad endpoints only), and skipped with a warning if that is not possible
+1. **Polarity swap** - Off by default; allow it per pair with `--polarity-swap-nets <patterns>` (`'*'` = every pair; the GUI's "Polarity-swap allowed nets" field, default `*`). Only allow pairs an endpoint can compensate (FPGA generic I/O, polarity-tolerant SerDes) - never USB/MIPI/TMDS (#279). For a denied pair, a mismatch is re-routed with the connectors out the opposite side at one end (bare-pad endpoints only), and skipped with a warning if that is not possible; denied-but-wanted swaps are listed in `polarity_swap_denied_pairs` in the JSON summary
 2. **Fixed spacing** - Spacing is constant along the route (no tapering)
 3. **Grid snapping** - Centerline endpoints snap to grid for the search; the
    terminal endpoints of the generated geometry are un-snapped back to the

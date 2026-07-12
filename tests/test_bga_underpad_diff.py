@@ -115,18 +115,31 @@ def main():
               "--clearance", "0.1", "--diff-pair-gap", "0.101",
               "--layers", *LAYERS, "--output", fan], verbose)
 
-        # Escape itself is DRC-clean (track/track, via/track) among the routed nets.
-        drc = _run(["check_drc.py", fan, "--clearance", "0.1"], verbose)
-        check("under-pad escape is DRC-clean", "NO DRC VIOLATIONS" in drc)
+        # Escape + cap-opt is DRC-clean. The raw fanout legitimately leaves
+        # via-in-pads overlapping MOVABLE decoupling caps -- the next pipeline
+        # step (place_fanout_clearance) relocates those; check_drc now grades
+        # every board copper layer (not just layers with segments, #253), so
+        # the intermediate overlaps are visible and the test must mirror the
+        # real pipeline before asserting cleanliness.
+        capopt = _tmp("glasgow_cap_")
+        _run(["place_fanout_clearance.py", fan, capopt, "--clearance", "0.1"],
+             verbose)
+        drc = _run(["check_drc.py", capopt, "--clearance", "0.1"], verbose)
+        check("under-pad escape + cap-opt is DRC-clean", "NO DRC VIOLATIONS" in drc)
+        fan = capopt  # route_diff consumes the pipeline state, as in production
 
         nets = []
         for base in pairs:
             short = base.split("/")[-1].replace("IO_Banks/", "")
             nets += [f"/IO_Banks/{short}_P", f"/IO_Banks/{short}_N"]
         routed = _tmp("glasgow_rd_")
+        # FPGA generic-I/O pairs are the polarity-swappable class (#279):
+        # the pin functions are reassigned in gateware, so allow swaps here
+        # as the planner would.
         out = _run(["route_diff.py", fan, routed, "--nets", *nets,
                     "--track-width", "0.12", "--diff-pair-gap", "0.101",
-                    "--clearance", "0.1", "--layers", *LAYERS, "--no-gnd-vias"],
+                    "--clearance", "0.1", "--layers", *LAYERS, "--no-gnd-vias",
+                    "--polarity-swap-nets", "*"],
                    verbose)
         ok = f"{npairs}/{npairs} routed" in out
         check(f"route_diff couples all {npairs} Z-pairs end-to-end", ok,

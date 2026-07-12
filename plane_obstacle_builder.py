@@ -5,6 +5,7 @@ Provides functions to build obstacle maps for:
 - Via placement (considering all layers)
 - Single-layer routing (for via-to-pad traces)
 """
+from __future__ import annotations
 
 import math
 from typing import List, Dict, Tuple, Optional
@@ -13,15 +14,18 @@ import numpy as np
 
 from kicad_parser import PCBData, Pad, Segment
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import iter_pad_blocked_cells
+from routing_utils import iter_pad_blocked_cells, pad_blocked_cells_array, segment_blocked_cells_array
 from obstacle_map import (point_in_polygon, point_to_polygon_edge_distance,
                           add_user_keepout_obstacles, add_rule_area_keepout_obstacles,
-                          block_via_cells_near_drills,
+                          block_via_cells_near_drills, block_track_cells_near_drills,
+                          _pad_has_copper,
                           _rasterize_polygon, _points_inside_polygon,
-                          _points_edge_distance, _block_cells_on_layers)
+                          _points_edge_distance, _block_cells_on_layers,
+                          _batch_cells_one_layer, _batch_vias)
 
 import sys
 import os
+import routing_defaults as defaults
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
 from grid_router import GridObstacleMap
 
@@ -38,36 +42,6 @@ def _precompute_circle_offsets(radius_sq: float) -> np.ndarray:
             if ex * ex + ey * ey <= radius_sq:
                 offsets.append((ex, ey))
     return np.array(offsets, dtype=np.int32)
-
-
-def _bresenham_centers(gx1: int, gy1: int, gx2: int, gy2: int) -> List[Tuple[int, int]]:
-    """Walk a Bresenham line and return all grid center points."""
-    centers = []
-    dx = abs(gx2 - gx1)
-    dy = abs(gy2 - gy1)
-    sx = 1 if gx1 < gx2 else -1
-    sy = 1 if gy1 < gy2 else -1
-    x, y = gx1, gy1
-    if dx > dy:
-        err = dx / 2
-        while x != gx2:
-            centers.append((x, y))
-            err -= dy
-            if err < 0:
-                y += sy
-                err += dx
-            x += sx
-    else:
-        err = dy / 2
-        while y != gy2:
-            centers.append((x, y))
-            err -= dx
-            if err < 0:
-                x += sx
-                err += dy
-            y += sy
-    centers.append((gx2, gy2))
-    return centers
 
 
 def _batch_block_circles_via(obstacles: GridObstacleMap, centers: List[Tuple[int, int]],
@@ -133,6 +107,102 @@ def _point_in_pad_copper(pad: Pad, x: float, y: float, extra: float = 0.0) -> bo
             abs(ly) <= pad.size_y / 2 + extra)
 
 
+def _points_in_pad_copper_mask(pad: Pad, xs, ys, extra=0.0):
+    """Vectorized twin of _point_in_pad_copper: boolean mask over the point
+    arrays (xs, ys). `extra` may be a scalar or a per-point array (e.g. via
+    radius). Rotation-aware via the pad's residual rect_rotation."""
+    dx = xs - pad.global_x
+    dy = ys - pad.global_y
+    rot = math.radians(getattr(pad, 'rect_rotation', 0.0) or 0.0)
+    cos_r = math.cos(rot)
+    sin_r = math.sin(rot)
+    lx = dx * cos_r + dy * sin_r
+    ly = -dx * sin_r + dy * cos_r
+    return (np.abs(lx) <= pad.size_x / 2 + extra) & (np.abs(ly) <= pad.size_y / 2 + extra)
+
+
+class _NetConnGraph:
+    __slots__ = ("seg_adj", "via_at", "pad_at", "via_arrays", "seg_ends_by_layer")
+
+
+# Cache of _NetConnGraph keyed by (id(pcb_data), net_id). _smd_pad_reaches_layer
+# was rebuilding this whole same-net graph on EVERY call (794x / 22s on daisho);
+# it depends only on (net_id, copper), so build it once and reuse across every
+# pad of the net. Invalidated when the board's segment/via count or tolerance
+# changes (copper only grows during routing, so a count change is a real change).
+_NET_GRAPH_CACHE: Dict[Tuple, Tuple] = {}
+
+
+def _net_conn_graph(net_id: int, pcb_data: PCBData, inv_tol: float) -> "_NetConnGraph":
+    key = (id(pcb_data), net_id)
+    token = (len(pcb_data.segments), len(pcb_data.vias), inv_tol)
+    hit = _NET_GRAPH_CACHE.get(key)
+    if hit is not None and hit[0] == token:
+        return hit[1]
+
+    def pkey(x, y):
+        return (round(x * inv_tol), round(y * inv_tol))
+
+    if pcb_data.board_info and getattr(pcb_data.board_info, 'copper_layers', None):
+        all_cu = [l for l in pcb_data.board_info.copper_layers if l.endswith('.Cu')]
+    else:
+        all_cu = ['F.Cu', 'B.Cu']
+
+    # Segment adjacency + per-layer endpoint arrays (for vectorized pad seeding).
+    seg_adj: Dict[Tuple, set] = {}
+    seg_ends_tmp: Dict[str, Tuple[list, list, list]] = {}
+    for s in pcb_data.segments:
+        if s.net_id != net_id:
+            continue
+        k1 = (pkey(s.start_x, s.start_y), s.layer)
+        k2 = (pkey(s.end_x, s.end_y), s.layer)
+        seg_adj.setdefault(k1, set()).add(k2)
+        seg_adj.setdefault(k2, set()).add(k1)
+        xs, ys, ks = seg_ends_tmp.setdefault(s.layer, ([], [], []))
+        xs.append(s.start_x); ys.append(s.start_y); ks.append(k1[0])
+        xs.append(s.end_x);   ys.append(s.end_y);   ks.append(k2[0])
+
+    def via_layers(v) -> List[str]:
+        if not v.layers or ('F.Cu' in v.layers and 'B.Cu' in v.layers):
+            return all_cu
+        return v.layers
+
+    via_at: Dict[Tuple, set] = {}
+    vx, vy, vr, vkeys, vlayers = [], [], [], [], []
+    for v in pcb_data.vias:
+        if v.net_id != net_id:
+            continue
+        k = pkey(v.x, v.y)
+        vl = via_layers(v)
+        via_at.setdefault(k, set()).update(vl)
+        vx.append(v.x); vy.append(v.y); vr.append(v.size / 2); vkeys.append(k); vlayers.append(vl)
+
+    pad_at: Dict[Tuple, set] = {}
+    for p in pcb_data.pads_by_net.get(net_id, []):
+        k = pkey(p.global_x, p.global_y)
+        if p.drill > 0:
+            pad_at.setdefault(k, set()).update(all_cu)
+        else:
+            for pl in p.layers:
+                if pl == '*.Cu':
+                    pad_at.setdefault(k, set()).update(all_cu)
+                elif pl.endswith('.Cu') and not pl.startswith('*'):
+                    pad_at.setdefault(k, set()).add(pl)
+
+    g = _NetConnGraph()
+    g.seg_adj = seg_adj
+    g.via_at = via_at
+    g.pad_at = pad_at
+    g.via_arrays = (np.asarray(vx, dtype=float), np.asarray(vy, dtype=float),
+                    np.asarray(vr, dtype=float), vkeys, vlayers)
+    g.seg_ends_by_layer = {
+        L: (np.asarray(xs, dtype=float), np.asarray(ys, dtype=float), ks)
+        for L, (xs, ys, ks) in seg_ends_tmp.items()
+    }
+    _NET_GRAPH_CACHE[key] = (token, g)
+    return g
+
+
 def _smd_pad_reaches_layer(pad: Pad, target_layer: str, net_id: int,
                             pcb_data: PCBData, tolerance: float = 0.01) -> bool:
     """Return True if the SMD `pad` already has an electrical path to
@@ -161,77 +231,41 @@ def _smd_pad_reaches_layer(pad: Pad, target_layer: str, net_id: int,
         return True
 
     inv_tol = 1.0 / tolerance
+
     def pkey(x: float, y: float):
         return (round(x * inv_tol), round(y * inv_tol))
 
-    if pcb_data.board_info and getattr(pcb_data.board_info, 'copper_layers', None):
-        all_cu = [l for l in pcb_data.board_info.copper_layers if l.endswith('.Cu')]
-    else:
-        all_cu = ['F.Cu', 'B.Cu']
-
-    # Segment adjacency keyed by (pos_key, layer).
-    seg_adj: Dict[Tuple, set] = {}
-    for s in pcb_data.segments:
-        if s.net_id != net_id:
-            continue
-        k1 = (pkey(s.start_x, s.start_y), s.layer)
-        k2 = (pkey(s.end_x, s.end_y), s.layer)
-        seg_adj.setdefault(k1, set()).add(k2)
-        seg_adj.setdefault(k2, set()).add(k1)
-
-    def via_layers(v) -> List[str]:
-        """Copper layers a via connects. A through via is written with
-        (layers F.Cu B.Cu) in KiCad but spans every copper layer."""
-        if not v.layers or ('F.Cu' in v.layers and 'B.Cu' in v.layers):
-            return all_cu
-        return v.layers
-
-    # Via vertical jumps keyed by pos_key -> set of layers.
-    via_at: Dict[Tuple, set] = {}
-    for v in pcb_data.vias:
-        if v.net_id != net_id:
-            continue
-        k = pkey(v.x, v.y)
-        via_at.setdefault(k, set()).update(via_layers(v))
-
-    # Pads at each position - through-hole pads bridge all copper layers.
-    pad_at: Dict[Tuple, set] = {}
-    for p in pcb_data.pads_by_net.get(net_id, []):
-        k = pkey(p.global_x, p.global_y)
-        if p.drill > 0:
-            pad_at.setdefault(k, set()).update(all_cu)
-        else:
-            for pl in p.layers:
-                if pl == '*.Cu':
-                    pad_at.setdefault(k, set()).update(all_cu)
-                elif pl.endswith('.Cu') and not pl.startswith('*'):
-                    pad_at.setdefault(k, set()).add(pl)
+    # Same-net connectivity graph (built once per net + copper-state, cached).
+    graph = _net_conn_graph(net_id, pcb_data, inv_tol)
+    seg_adj = graph.seg_adj
+    via_at = graph.via_at
+    pad_at = graph.pad_at
 
     start = (pkey(pad.global_x, pad.global_y), pad_layer)
     visited = {start}
     queue = [start]
 
-    # Seed from same-net copper that lands inside this pad's copper:
+    # Seed from same-net copper that lands inside this pad's copper (vectorized):
     # - a via overlapping the pad connects the pad to all the via's layers
     # - a segment endpoint inside the pad (on the pad's layer) connects there
-    for v in pcb_data.vias:
-        if v.net_id != net_id:
-            continue
-        if _point_in_pad_copper(pad, v.x, v.y, extra=v.size / 2):
-            for vl in via_layers(v):
-                state = (pkey(v.x, v.y), vl)
+    vx, vy, vr, vkeys, vlayers = graph.via_arrays
+    if len(vx):
+        mask = _points_in_pad_copper_mask(pad, vx, vy, extra=vr)
+        for i in np.nonzero(mask)[0]:
+            for vl in vlayers[i]:
+                state = (vkeys[i], vl)
                 if state not in visited:
                     visited.add(state)
                     queue.append(state)
-    for s in pcb_data.segments:
-        if s.net_id != net_id or s.layer != pad_layer:
-            continue
-        for ex, ey in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
-            if _point_in_pad_copper(pad, ex, ey):
-                state = (pkey(ex, ey), pad_layer)
-                if state not in visited:
-                    visited.add(state)
-                    queue.append(state)
+    seg_ends = graph.seg_ends_by_layer.get(pad_layer)
+    if seg_ends is not None:
+        ex, ey, ekeys = seg_ends
+        mask = _points_in_pad_copper_mask(pad, ex, ey)
+        for i in np.nonzero(mask)[0]:
+            state = (ekeys[i], pad_layer)
+            if state not in visited:
+                visited.add(state)
+                queue.append(state)
 
     while queue:
         pos, layer = queue.pop(0)
@@ -272,7 +306,22 @@ def identify_target_pads(
     target_pads = []
     pads = pcb_data.pads_by_net.get(net_id, [])
 
+    # A pad clearly outside the Edge.Cuts outline can never reach the plane
+    # (the fill is clipped to the outline) and any via/trace drawn toward it
+    # lands as board-edge DRC (issue #291, framework_dock GND). Classify it
+    # off_board so no copper is drawn for it; callers report the count.
+    from check_drc import make_off_board_test
+    off_board = make_off_board_test(pcb_data.board_info)
+
     for pad in pads:
+        if off_board is not None and off_board(pad.global_x, pad.global_y):
+            target_pads.append({
+                'pad': pad,
+                'type': 'off_board',
+                'needs_via': False,
+                'needs_trace': False
+            })
+            continue
         # Check if pad has drill (through-hole)
         if pad.drill > 0:
             # Through-hole pad - directly connects to all layers including plane
@@ -361,19 +410,25 @@ def build_via_obstacle_map(
 
     obstacles = GridObstacleMap(num_layers)
 
-    # Precompute expansion for via-via clearance (squared, in grid units)
-    # Add half grid step cushion to account for grid discretization
+    # Half grid step cushion to account for grid discretization.
     grid_cushion = config.grid_step / 2
-    via_via_expansion_mm = config.via_size + config.clearance + grid_cushion
-    via_via_radius_sq = (via_via_expansion_mm / config.grid_step) ** 2
-    via_via_radius_int = int(math.ceil(math.sqrt(via_via_radius_sq)))
 
-    # Add existing vias as obstacles (including same net - can't place via too close to another)
-    # Batched: pre-compute circle template, collect all centers, expand with numpy
+    # Add existing vias as obstacles (including same net - can't place a new via
+    # too close to another). The via-to-via clearance is the EXISTING via's
+    # radius + the NEW via's radius + clearance, so it must use each existing
+    # via's ACTUAL size (issue #173, parity with route.py's add_vias_list_as_
+    # obstacles). The old form used config.via_size for both radii, so a larger
+    # existing via (e.g. a 0.5mm plane via vs a 0.3mm repair via) was under-
+    # blocked and a new via could land within clearance of it. Group by actual
+    # via size so each size gets its own keep-out disc.
     t0 = time.time()
-    circle_offsets = _precompute_circle_offsets(via_via_radius_sq)
-    via_centers = [(coord.to_grid(via.x, via.y)) for via in pcb_data.vias]
-    _batch_block_circles_via(obstacles, via_centers, circle_offsets)
+    centers_by_size: Dict[float, List[Tuple[int, int]]] = {}
+    for via in pcb_data.vias:
+        centers_by_size.setdefault(via.size, []).append(coord.to_grid(via.x, via.y))
+    for vsize, via_centers in centers_by_size.items():
+        via_via_expansion_mm = vsize / 2 + config.via_size / 2 + config.clearance + grid_cushion
+        circle_offsets = _precompute_circle_offsets((via_via_expansion_mm / config.grid_step) ** 2)
+        _batch_block_circles_via(obstacles, via_centers, circle_offsets)
     if verbose:
         print(f"  Vias: {len(pcb_data.vias)} vias in {time.time() - t0:.2f}s")
 
@@ -434,14 +489,14 @@ def build_via_obstacle_map(
 
 def _add_segment_via_obstacle(obstacles: GridObstacleMap, seg: Segment,
                                coord: GridCoord, expansion_mm: float):
-    """Add a segment as via blocking obstacle using batched numpy operations."""
-    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-
-    radius_sq = (expansion_mm / coord.grid_step) ** 2
-    circle_offsets = _precompute_circle_offsets(radius_sq)
-    centers = _bresenham_centers(gx1, gy1, gx2, gy2)
-    _batch_block_circles_via(obstacles, centers, circle_offsets)
+    """Add a segment as via-blocking obstacle: an exact point-to-segment
+    (capsule) keep-out from the TRUE float segment, shared with route.py's
+    obstacle builder (issue #173). The previous bresenham stamp snapped the
+    endpoints to the grid and walked integer cells, so an off-grid/diagonal
+    segment's via keep-out under-covered sub-cell and a later via grazed it."""
+    vias = segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                       seg.end_x, seg.end_y, expansion_mm, coord.grid_step)
+    _batch_vias(obstacles, vias)
 
 
 def _block_custom_pad_polys(obstacles, pad, coord, margin, via_mode, layer_idx=None):
@@ -491,11 +546,19 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
     else:
         corner_radius = 0
 
-    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius,
-                                                   off_x=pad.global_x - gx * coord.grid_step,
-                                                   off_y=pad.global_y - gy * coord.grid_step,
-                                                   rotation_deg=pad.rect_rotation):
-        obstacles.add_blocked_via(cell_gx, cell_gy)
+    # Vectorized: pad_blocked_cells_array is the bit-identical twin of
+    # iter_pad_blocked_cells (verified in tests/test_pad_offset_keepout.py), and
+    # one add_blocked_vias_batch replaces a per-cell Python loop + per-cell Rust
+    # call. This is the route.py obstacle-builder path (obstacle_map.py), which
+    # the plane via map had not yet picked up (#225 -- ~38M scalar cell calls per
+    # GND build on daisho).
+    cells = pad_blocked_cells_array(gx, gy, half_width, half_height, margin,
+                                    config.grid_step, corner_radius,
+                                    off_x=pad.global_x - gx * coord.grid_step,
+                                    off_y=pad.global_y - gy * coord.grid_step,
+                                    rotation_deg=pad.rect_rotation)
+    if len(cells):
+        obstacles.add_blocked_vias_batch(cells)
 
 
 def _is_rectangular_outline(board_outline: List[Tuple[float, float]],
@@ -538,13 +601,23 @@ def _board_edge_cell_mask(coord: GridCoord, board_outline, gmin_x: int, gmin_y: 
     px = gx_flat.astype(np.float64) * coord.grid_step
     py = gy_flat.astype(np.float64) * coord.grid_step
 
-    poly = np.array(board_outline, dtype=np.float64)
-    x1 = poly[:, 0]
-    y1 = poly[:, 1]
-    x2 = np.roll(poly[:, 0], -1)
-    y2 = np.roll(poly[:, 1], -1)
-
-    inside = _points_inside_polygon(px, py, x1, y1, x2, y2)
+    # One outer ring or a LIST of them (#304): inside ANY ring is on-board,
+    # edge distance is the minimum over all rings' edges.
+    rings = [board_outline] if board_outline and isinstance(board_outline[0], tuple) \
+        else list(board_outline)
+    inside = None
+    ex1, ey1, ex2, ey2 = [], [], [], []
+    for ring in rings:
+        poly = np.array(ring, dtype=np.float64)
+        x1 = poly[:, 0]
+        y1 = poly[:, 1]
+        x2 = np.roll(poly[:, 0], -1)
+        y2 = np.roll(poly[:, 1], -1)
+        ex1.append(x1); ey1.append(y1); ex2.append(x2); ey2.append(y2)
+        ins = _points_inside_polygon(px, py, x1, y1, x2, y2)
+        inside = ins if inside is None else (inside | ins)
+    x1, y1 = np.concatenate(ex1), np.concatenate(ey1)
+    x2, y2 = np.concatenate(ex2), np.concatenate(ey2)
     mask = ~inside
     in_idx = np.nonzero(inside)[0]
     if in_idx.size:
@@ -575,9 +648,16 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     gmax_x, gmax_y = coord.to_grid(max_x, max_y)
     grid_margin = via_expand + 5
 
-    # Check for non-rectangular board outline
-    board_outline = pcb_data.board_info.board_outline
-    use_polygon = board_outline and len(board_outline) >= 3 and not _is_rectangular_outline(board_outline, board_bounds)
+    # Check for non-rectangular board outline; multi-outline boards (#304)
+    # pass ALL outer rings so both halves of a split board stay usable.
+    board_outlines = [o for o in (getattr(pcb_data.board_info, 'board_outlines', None) or [])
+                      if len(o) >= 3]
+    board_outline = (board_outlines if len(board_outlines) > 1
+                     else pcb_data.board_info.board_outline)
+    single = board_outlines[0] if len(board_outlines) == 1 else pcb_data.board_info.board_outline
+    use_polygon = bool(len(board_outlines) > 1 or
+                       (single and len(single) >= 3
+                        and not _is_rectangular_outline(single, board_bounds)))
 
     if use_polygon:
         # Polygon board: rasterize the outline bbox + margin in one shot. Every
@@ -631,9 +711,16 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     gmax_x, gmax_y = coord.to_grid(max_x, max_y)
     grid_margin = track_expand + 5
 
-    # Check for non-rectangular board outline
-    board_outline = pcb_data.board_info.board_outline
-    use_polygon = board_outline and len(board_outline) >= 3 and not _is_rectangular_outline(board_outline, board_bounds)
+    # Check for non-rectangular board outline; multi-outline boards (#304)
+    # pass ALL outer rings so both halves of a split board stay usable.
+    board_outlines = [o for o in (getattr(pcb_data.board_info, 'board_outlines', None) or [])
+                      if len(o) >= 3]
+    board_outline = (board_outlines if len(board_outlines) > 1
+                     else pcb_data.board_info.board_outline)
+    single = board_outlines[0] if len(board_outlines) == 1 else pcb_data.board_info.board_outline
+    use_polygon = bool(len(board_outlines) > 1 or
+                       (single and len(single) >= 3
+                        and not _is_rectangular_outline(single, board_bounds)))
 
     if use_polygon:
         # Polygon board: rasterize the outline bbox + margin once and block (on this
@@ -678,10 +765,13 @@ def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # hole-to-hole minimum of a same-net TH pad -- issue #125
     # (PAD-DRILL-VIA-DRILL-SAME-NET). A same-net TH pad already reaches the
     # plane through its own barrel, so blocking vias around it costs nothing.
+    from kicad_parser import pad_drill_circles
     for net_id, pads in pcb_data.pads_by_net.items():
         for pad in pads:
             if pad.drill > 0:
-                drill_holes.append((pad.global_x, pad.global_y, pad.drill))
+                # slot-aware (see pad_drill_circles): a milled slot blocks along
+                # its axis at its short dimension, not as a long-dimension disc
+                drill_holes.extend(pad_drill_circles(pad))
 
     # Enforce the keepout by REAL mm distance from each drill centre (shared with
     # the signal router) rather than a disk centred on the quantized drill cell,
@@ -749,6 +839,10 @@ def build_routing_obstacle_map(
     # Single layer routing
     num_layers = 1
     layer_idx = 0
+    # Use THIS layer's routing width for keep-out math (issue #173 parity with
+    # route.py's per-layer via/track expansion); == config.track_width unless
+    # per-layer widths are set (impedance routing).
+    route_track_w = config.get_track_width(route_layer)
 
     # Calculate grid dimensions for info
     board_bounds = pcb_data.board_info.board_bounds
@@ -779,7 +873,7 @@ def build_routing_obstacle_map(
                     # board global), else copper routes within the pad's
                     # required clearance (no-net fiducial DRC, upduino #146).
                     pad_clr = max(config.clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
-                    margin = config.track_width / 2 + pad_clr
+                    margin = route_track_w / 2 + pad_clr
                     if getattr(pad, 'polygons', None):
                         _block_custom_pad_polys(obstacles, pad, coord, margin,
                                                 via_mode=False, layer_idx=layer_idx)
@@ -792,11 +886,17 @@ def build_routing_obstacle_map(
                         corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
                     else:
                         corner_radius = 0
-                    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius,
-                                                                   off_x=pad.global_x - gx * coord.grid_step,
-                                                                   off_y=pad.global_y - gy * coord.grid_step,
-                                                                   rotation_deg=pad.rect_rotation):
-                        obstacles.add_blocked_cell(cell_gx, cell_gy, layer_idx)
+                    # Vectorized (bit-identical twin + batch), mirroring route.py's
+                    # obstacle builder; the plane routing map had kept the scalar
+                    # per-cell loop (#225).
+                    cells = pad_blocked_cells_array(gx, gy, half_width, half_height, margin,
+                                                    config.grid_step, corner_radius,
+                                                    off_x=pad.global_x - gx * coord.grid_step,
+                                                    off_y=pad.global_y - gy * coord.grid_step,
+                                                    rotation_deg=pad.rect_rotation)
+                    if len(cells):
+                        layer_col = np.full((cells.shape[0], 1), layer_idx, dtype=np.int32)
+                        obstacles.add_blocked_cells_batch(np.hstack([cells, layer_col]))
                     pad_count += 1
     if verbose:
         print(f"  Pads: {pad_count} pads in {time.time() - t0:.2f}s")
@@ -811,12 +911,11 @@ def build_routing_obstacle_map(
         if seg.layer != route_layer:
             continue
         # Clearance needed: our track half-width + existing segment half-width + clearance.
-        # Round the expansion UP (ceil): flooring leaves the blocked halo short of the
-        # real clearance envelope, so connection traces route within clearance of signal
-        # copper (#146 — the dominant plane-vs-signal DRC source on dense boards).
-        seg_expansion_mm = config.track_width / 2 + seg.width / 2 + config.clearance
-        seg_expansion_grid = max(1, coord.to_grid_dist_safe(seg_expansion_mm))
-        _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_grid)
+        # The exact capsule keep-out measures from the real segment, so the blocked
+        # halo matches the true clearance envelope without the grid-rounding that used
+        # to leave connection traces within clearance of signal copper (#146/#173).
+        seg_expansion_mm = route_track_w / 2 + seg.width / 2 + config.clearance
+        _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_mm)
         seg_count += 1
     if verbose:
         print(f"  Segments: {seg_count} tracks in {time.time() - t0:.2f}s")
@@ -833,18 +932,45 @@ def build_routing_obstacle_map(
         # so a sub-cell via offset can't let a 0.3 mm plane trace sit inside the
         # clearance envelope (#70). The grid-circle-on-quantised-cell form lost up
         # to ~half a cell on the via side.
-        r_mm = via.size / 2 + config.track_width / 2 + config.clearance + config.grid_step / 2
+        r_mm = via.size / 2 + route_track_w / 2 + config.clearance + config.grid_step / 2
         rg = coord.to_grid_dist_safe(r_mm)
         r_sq = r_mm * r_mm
-        for ex in range(-rg, rg + 1):
-            for ey in range(-rg, rg + 1):
-                ddx = (gx + ex) * config.grid_step - via.x
-                ddy = (gy + ey) * config.grid_step - via.y
-                if ddx * ddx + ddy * ddy <= r_sq:
-                    obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+        # Vectorized real-centre disc (bit-identical to the scalar double loop:
+        # same (gx+ex)*step - via.x distance and <= r_sq test), one batch call (#225).
+        ex = np.arange(-rg, rg + 1, dtype=np.int32)
+        exg, eyg = np.meshgrid(ex, ex, indexing="ij")
+        ddx = (gx + exg) * config.grid_step - via.x
+        ddy = (gy + eyg) * config.grid_step - via.y
+        mask = (ddx * ddx + ddy * ddy) <= r_sq
+        if mask.any():
+            vcells = np.empty((int(mask.sum()), 3), dtype=np.int32)
+            vcells[:, 0] = exg[mask] + gx
+            vcells[:, 1] = eyg[mask] + gy
+            vcells[:, 2] = layer_idx
+            obstacles.add_blocked_cells_batch(vcells)
         via_count += 1
     if verbose:
         print(f"  Vias: {via_count} vias in {time.time() - t0:.2f}s")
+
+    # Keep plane-routing tracks off NPTH (no-copper) drill holes (issue #233).
+    # An NPTH mounting pad carries drill>0 but only a *.Mask layer, so the pad loop
+    # above stamps no cell for it; without this a plane tap / repair track routes
+    # straight across the hole. PTH pads/vias have copper, already blocked above.
+    # Single-layer map, so block layer 0 only (the drill goes through every layer).
+    t0 = time.time()
+    npth_holes = []
+    for net_id, pads in pcb_data.pads_by_net.items():
+        if net_id == exclude_net_id:
+            continue
+        for pad in pads:
+            if pad.drill > 0 and not _pad_has_copper(pad):
+                from kicad_parser import pad_drill_circles
+                npth_holes.extend(pad_drill_circles(pad))
+    npth_clr = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
+    block_track_cells_near_drills(obstacles, npth_holes, route_track_w,
+                                  npth_clr, config.grid_step, [layer_idx])
+    if verbose:
+        print(f"  NPTH-hole track keep-out: {len(npth_holes)} holes in {time.time() - t0:.2f}s")
 
     # Add board edge track blocking (supports non-rectangular boards)
     t0 = time.time()
@@ -864,12 +990,11 @@ def build_routing_obstacle_map(
 
 
 def _add_segment_routing_obstacle(obstacles: GridObstacleMap, seg: Segment,
-                                    coord: GridCoord, layer_idx: int, expansion_grid: int):
-    """Add a segment as a routing obstacle on a specific layer using batched numpy operations."""
-    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-
-    radius_sq = expansion_grid * expansion_grid
-    circle_offsets = _precompute_circle_offsets(radius_sq)
-    centers = _bresenham_centers(gx1, gy1, gx2, gy2)
-    _batch_block_circles_cell(obstacles, centers, circle_offsets, layer_idx)
+                                    coord: GridCoord, layer_idx: int, expansion_mm: float):
+    """Add a segment as a routing obstacle on a specific layer: an exact
+    point-to-segment (capsule) keep-out from the TRUE float segment, shared with
+    route.py's obstacle builder (issue #173). Replaces the bresenham stamp that
+    snapped endpoints to the grid and under-covered off-grid/diagonal copper."""
+    cells = segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                        seg.end_x, seg.end_y, expansion_mm, coord.grid_step)
+    _batch_cells_one_layer(obstacles, cells, layer_idx)

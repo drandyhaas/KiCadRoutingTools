@@ -7,6 +7,65 @@ use std::collections::BinaryHeap;
 use crate::obstacle_map::GridObstacleMap;
 use crate::types::{GridState, OpenEntry, BlockedCellTracker, RouteStats, DIRECTIONS, ORTHO_COST, DIAG_COST, DEFAULT_TURN_COST};
 
+/// Sentinel `parent` for source states (which have no parent). Distinguishes a
+/// node that is present-with-a-parent from a source, preserving the old
+/// `parents.contains_key` / `parents.get -> None` semantics after the g_costs +
+/// parents + steps_from_source maps were folded into one (memory: 3 copies of
+/// every explored cell's u64 key -> 1).
+const NO_PARENT: u64 = u64::MAX;
+
+/// Per-explored-cell A* state. Replaces the three parallel
+/// `FxHashMap<u64, _>` (g_costs / parents / steps_from_source) that each stored
+/// the SAME cell key; one map keyed once cuts key duplication + per-map hashing
+/// and improves cache locality. `path_vias` stays a separate (conditional,
+/// heap-Vec) map on purpose.
+#[derive(Clone, Copy)]
+struct NodeState {
+    g: i32,
+    parent: u64,   // NO_PARENT for source cells
+    steps: i32,
+}
+
+/// Thin wrapper centralizing the g/parent/steps accessors so every call site is
+/// an unambiguous method and the NO_PARENT sentinel handling lives in one place.
+/// All methods are trivial and inline to the same code the parallel maps emitted.
+#[derive(Default)]
+struct NodeMap {
+    m: FxHashMap<u64, NodeState>,
+}
+
+impl NodeMap {
+    #[inline]
+    fn g(&self, key: u64) -> i32 {
+        self.m.get(&key).map_or(i32::MAX, |n| n.g)
+    }
+    #[inline]
+    fn steps(&self, key: u64) -> i32 {
+        self.m.get(&key).map_or(i32::MAX, |n| n.steps)
+    }
+    /// The cell's parent, or None for a source / undiscovered cell (matches the
+    /// old `parents.get(&key).copied()`).
+    #[inline]
+    fn parent(&self, key: u64) -> Option<u64> {
+        self.m.get(&key).and_then(|n| if n.parent != NO_PARENT { Some(n.parent) } else { None })
+    }
+    /// Matches the old `parents.contains_key(&key)`.
+    #[inline]
+    fn has_parent(&self, key: u64) -> bool {
+        self.m.get(&key).map_or(false, |n| n.parent != NO_PARENT)
+    }
+    /// Source cell: g + steps=0, no parent (old: g_costs+steps inserted, parents NOT).
+    #[inline]
+    fn set_source(&mut self, key: u64, g: i32) {
+        self.m.insert(key, NodeState { g, parent: NO_PARENT, steps: 0 });
+    }
+    /// Relaxed cell: g + parent + steps inserted together (old: three inserts).
+    #[inline]
+    fn relax(&mut self, key: u64, g: i32, parent: u64, steps: i32) {
+        self.m.insert(key, NodeState { g, parent, steps });
+    }
+}
+
 /// Grid A* Router
 #[pyclass]
 pub struct GridRouter {
@@ -176,18 +235,13 @@ impl GridRouter {
 
         // Initialize open set with all sources
         let mut open_set = BinaryHeap::new();
-        let mut g_costs: FxHashMap<u64, i32> = FxHashMap::default();
-        let mut parents: FxHashMap<u64, u64> = FxHashMap::default();
+        let mut nodes = NodeMap::default();
         let mut closed: FxHashSet<u64> = FxHashSet::default();
         let mut counter: u32 = 0;
 
         // Track via positions for each node's path (only used if via_exclusion_radius > 0)
         // Maps node key -> list of (gx, gy) via positions on path to that node
         let mut path_vias: FxHashMap<u64, Vec<(i32, i32)>> = FxHashMap::default();
-
-        // Track steps from source for direction constraint
-        // Maps node key -> steps from nearest source
-        let mut steps_from_source: FxHashMap<u64, i32> = FxHashMap::default();
 
         // Normalize start direction if provided
         let norm_start_dir: Option<(i32, i32)> = start_direction.map(|(dx, dy)| {
@@ -246,14 +300,16 @@ impl GridRouter {
 
 
         // Find minimum layer cost for initial g penalty
-        let min_layer_cost = self.layer_costs.iter().copied().min().unwrap_or(1000);
+        // A1: exclude FORBIDDEN sentinels (< 0) — else min() returns the sentinel
+        // and pollutes the start penalty + the admissibility-scaled heuristic.
+        let min_layer_cost = self.layer_costs.iter().copied().filter(|&c| c >= 0).min().unwrap_or(1000);
         let mut best_initial_h = i32::MAX;
 
         for (gx, gy, layer) in sources {
             let state = GridState::new(gx, gy, layer);
             let key = state.as_key();
             // Penalize starting on expensive layers
-            let layer_cost = self.layer_costs.get(layer as usize).copied().unwrap_or(1000);
+            let layer_cost = self.layer_cost_or_default(layer as usize);
             let initial_g = layer_cost - min_layer_cost;
             let h = self.heuristic_to_targets(&state, &target_states);
             best_initial_h = best_initial_h.min(h);
@@ -265,13 +321,11 @@ impl GridRouter {
             });
             counter += 1;
             stats.cells_pushed += 1;
-            g_costs.insert(key, initial_g);
+            nodes.set_source(key, initial_g);
             // Source nodes start with no vias on their path
             if via_exclusion_radius > 0 {
                 path_vias.insert(key, Vec::new());
             }
-            // Source nodes are at step 0
-            steps_from_source.insert(key, 0);
         }
         stats.initial_h = best_initial_h;
 
@@ -297,7 +351,7 @@ impl GridRouter {
             if target_set.contains(&current_key) {
                 // If end_direction is specified, verify we arrived from a compatible direction
                 let arrival_ok = if let Some((end_dx, end_dy)) = norm_end_dir {
-                    if let Some(&parent_key) = parents.get(&current_key) {
+                    if let Some(parent_key) = nodes.parent(current_key) {
                         let (px, py, _) = Self::unpack_key(parent_key);
                         let arrive_dx = (current.gx - px) as f64;
                         let arrive_dy = (current.gy - py) as f64;
@@ -322,7 +376,7 @@ impl GridRouter {
 
                 if arrival_ok {
                     // Reconstruct path
-                    let path = self.reconstruct_path(&parents, current_key, &g_costs);
+                    let path = self.reconstruct_path(&nodes, current_key);
                     stats.path_length = path.len() as u32;
                     stats.path_cost = g;
                     stats.final_g = g;
@@ -348,7 +402,7 @@ impl GridRouter {
             // 2. If we're one step after a via exit: must be within ±45° of the pre-via direction
             // This ensures clean via geometry for differential pairs
             let (required_direction, allowed_45deg_from): (Option<(i32, i32)>, Option<(i32, i32)>) = if collinear_vias {
-                self.get_via_direction_constraints(&parents, current_key, &current)
+                self.get_via_direction_constraints(&nodes, current_key, &current)
             } else {
                 (None, None)
             };
@@ -361,10 +415,10 @@ impl GridRouter {
             };
 
             // Get steps from source for direction constraint
-            let current_steps = steps_from_source.get(&current_key).copied().unwrap_or(i32::MAX);
+            let current_steps = nodes.steps(current_key);
 
             // Get previous direction (parent -> current) for turn cost calculation
-            let prev_direction: Option<(i32, i32)> = parents.get(&current_key).map(|&parent_key| {
+            let prev_direction: Option<(i32, i32)> = nodes.parent(current_key).map(|parent_key| {
                 let (px, py, _) = Self::unpack_key(parent_key);
                 let pdx = current.gx - px;
                 let pdy = current.gy - py;
@@ -378,6 +432,7 @@ impl GridRouter {
 
             // Expand neighbors - 8 directions
             for (dx, dy) in DIRECTIONS {
+                if self.layer_forbidden(current.layer as usize) { break; }  // G2: no track on a forbidden source layer
                 // If we have a required exact direction (just came through via), only allow that direction
                 if let Some((req_dx, req_dy)) = required_direction {
                     if dx != req_dx || dy != req_dy {
@@ -403,7 +458,7 @@ impl GridRouter {
                 let ngx = current.gx + dx;
                 let ngy = current.gy + dy;
 
-                if obstacles.is_blocked_with_margin(ngx, ngy, current.layer as usize, track_margin) {
+                if obstacles.segment_blocked(current.gx, current.gy, ngx, ngy, current.layer as usize, track_margin as f64) {
                     continue;
                 }
 
@@ -421,7 +476,7 @@ impl GridRouter {
 
                 let base_move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
                 // Apply layer cost multiplier (1000 = 1.0x, 1500 = 1.5x, etc.)
-                let layer_multiplier = self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
+                let layer_multiplier = self.layer_cost_or_default(current.layer as usize);
                 let move_cost = (base_move_cost as i64 * layer_multiplier as i64 / 1000) as i32;
                 // Add turn cost if direction changes (encourages straighter paths)
                 let turn_cost = match prev_direction {
@@ -450,19 +505,16 @@ impl GridRouter {
                 let path_attraction_bonus = self.get_path_attraction_bonus(ngx, ngy, current.layer, dx, dy);
                 let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty - attraction_bonus - path_attraction_bonus;
 
-                let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
+                let existing_g = nodes.g(neighbor_key);
                 if new_g < existing_g {
                     if existing_g != i32::MAX {
                         stats.cells_revisited += 1;
                     }
-                    g_costs.insert(neighbor_key, new_g);
-                    parents.insert(neighbor_key, current_key);
+                    nodes.relax(neighbor_key, new_g, current_key, current_steps + 1);
                     // Propagate via list to neighbor (same vias since no layer change)
                     if via_exclusion_radius > 0 {
                         path_vias.insert(neighbor_key, current_vias.clone());
                     }
-                    // Update steps from source for neighbor
-                    steps_from_source.insert(neighbor_key, current_steps + 1);
                     let h = self.heuristic_to_targets(&neighbor, &target_states);
                     let f = new_g + h;
                     open_set.push(OpenEntry {
@@ -482,10 +534,10 @@ impl GridRouter {
             // This requires at least 2 steps before via (great-grandparent must exist),
             // and direction into via must be within ±45° of previous direction
             let can_place_via = if collinear_vias {
-                if let Some(&parent_key) = parents.get(&current_key) {
-                    if let Some(&grandparent_key) = parents.get(&parent_key) {
+                if let Some(parent_key) = nodes.parent(current_key) {
+                    if let Some(grandparent_key) = nodes.parent(parent_key) {
                         // Need great-grandparent to ensure 2 full steps before via
-                        if !parents.contains_key(&grandparent_key) {
+                        if !nodes.has_parent(grandparent_key) {
                             false // Only 1 step before via - need at least 2
                         } else {
                             // Have great-grandparent - check that approach direction is within ±45° of previous
@@ -546,9 +598,12 @@ impl GridRouter {
                     if layer == current.layer {
                         continue;
                     }
+                    if self.layer_forbidden(layer as usize) {
+                        continue;  // FORBIDDEN LAYER: never end a via here
+                    }
 
                     // Check if destination layer is blocked at this position
-                    if obstacles.is_blocked_with_margin(current.gx, current.gy, layer as usize, track_margin) {
+                    if obstacles.segment_blocked(current.gx, current.gy, current.gx, current.gy, layer as usize, track_margin as f64) {
                         continue;
                     }
 
@@ -566,20 +621,19 @@ impl GridRouter {
                         + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize))
                         * self.via_proximity_cost;
                     // Layer transition cost: penalize switching TO expensive layers, discount switching to cheaper
-                    let current_layer_cost = self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
-                    let dest_layer_cost = self.layer_costs.get(layer as usize).copied().unwrap_or(1000);
+                    let current_layer_cost = self.layer_cost_or_default(current.layer as usize);
+                    let dest_layer_cost = self.layer_cost_or_default(layer as usize);
                     let layer_transition_cost = dest_layer_cost - current_layer_cost;
                     // Combined via cost can be as low as 0 when switching to a much cheaper layer
                     let combined_via_cost = (via_cost + layer_transition_cost).max(0);
                     let new_g = g + combined_via_cost + proximity_cost;
 
-                    let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
+                    let existing_g = nodes.g(neighbor_key);
                     if new_g < existing_g {
                         if existing_g != i32::MAX {
                             stats.cells_revisited += 1;
                         }
-                        g_costs.insert(neighbor_key, new_g);
-                        parents.insert(neighbor_key, current_key);
+                        nodes.relax(neighbor_key, new_g, current_key, current_steps);
                         // Track via positions (only real vias, not free vias at through-holes)
                         if via_exclusion_radius > 0 {
                             if is_free {
@@ -590,8 +644,6 @@ impl GridRouter {
                                 path_vias.insert(neighbor_key, new_vias);
                             }
                         }
-                        // Via doesn't count as a step for direction constraint
-                        steps_from_source.insert(neighbor_key, current_steps);
                         let h = self.heuristic_to_targets(&neighbor, &target_states);
                         let f = new_g + h;
                         open_set.push(OpenEntry {
@@ -650,12 +702,10 @@ impl GridRouter {
             .collect();
 
         let mut open_set = BinaryHeap::new();
-        let mut g_costs: FxHashMap<u64, i32> = FxHashMap::default();
-        let mut parents: FxHashMap<u64, u64> = FxHashMap::default();
+        let mut nodes = NodeMap::default();
         let mut closed: FxHashSet<u64> = FxHashSet::default();
         let mut counter: u32 = 0;
         let mut path_vias: FxHashMap<u64, Vec<(i32, i32)>> = FxHashMap::default();
-        let mut steps_from_source: FxHashMap<u64, i32> = FxHashMap::default();
 
         let norm_start_dir: Option<(i32, i32)> = start_direction.map(|(dx, dy)| {
             let ndx = if dx != 0 { dx / dx.abs() } else { 0 };
@@ -689,20 +739,21 @@ impl GridRouter {
         };
 
         // Find minimum layer cost for initial g penalty
-        let min_layer_cost = self.layer_costs.iter().copied().min().unwrap_or(1000);
+        // A1: exclude FORBIDDEN sentinels (< 0) — else min() returns the sentinel
+        // and pollutes the start penalty + the admissibility-scaled heuristic.
+        let min_layer_cost = self.layer_costs.iter().copied().filter(|&c| c >= 0).min().unwrap_or(1000);
 
         for (gx, gy, layer) in sources {
             let state = GridState::new(gx, gy, layer);
             let key = state.as_key();
             // Penalize starting on expensive layers
-            let layer_cost = self.layer_costs.get(layer as usize).copied().unwrap_or(1000);
+            let layer_cost = self.layer_cost_or_default(layer as usize);
             let initial_g = layer_cost - min_layer_cost;
             let h = self.heuristic_to_targets(&state, &target_states);
             open_set.push(OpenEntry { f_score: initial_g + h, g_score: initial_g, state, counter });
             counter += 1;
-            g_costs.insert(key, initial_g);
+            nodes.set_source(key, initial_g);
             if via_exclusion_radius > 0 { path_vias.insert(key, Vec::new()); }
-            steps_from_source.insert(key, 0);
         }
 
         let mut iterations: u32 = 0;
@@ -719,7 +770,7 @@ impl GridRouter {
 
             if target_set.contains(&current_key) {
                 let arrival_ok = if let Some((end_dx, end_dy)) = norm_end_dir {
-                    if let Some(&parent_key) = parents.get(&current_key) {
+                    if let Some(parent_key) = nodes.parent(current_key) {
                         let (px, py, _) = Self::unpack_key(parent_key);
                         let arrive_dx = (current.gx - px) as f64;
                         let arrive_dy = (current.gy - py) as f64;
@@ -732,7 +783,7 @@ impl GridRouter {
                 } else { true };
 
                 if arrival_ok {
-                    let path = self.reconstruct_path(&parents, current_key, &g_costs);
+                    let path = self.reconstruct_path(&nodes, current_key);
                     return (Some(path), iterations, Vec::new());
                 }
                 continue;
@@ -741,17 +792,17 @@ impl GridRouter {
             closed.insert(current_key);
 
             let (required_direction, allowed_45deg_from) = if collinear_vias {
-                self.get_via_direction_constraints(&parents, current_key, &current)
+                self.get_via_direction_constraints(&nodes, current_key, &current)
             } else { (None, None) };
 
             let current_vias: Vec<(i32, i32)> = if via_exclusion_radius > 0 {
                 path_vias.get(&current_key).cloned().unwrap_or_default()
             } else { Vec::new() };
 
-            let current_steps = steps_from_source.get(&current_key).copied().unwrap_or(i32::MAX);
+            let current_steps = nodes.steps(current_key);
 
             // Get previous direction (parent -> current) for turn cost calculation
-            let prev_direction: Option<(i32, i32)> = parents.get(&current_key).map(|&parent_key| {
+            let prev_direction: Option<(i32, i32)> = nodes.parent(current_key).map(|parent_key| {
                 let (px, py, _) = Self::unpack_key(parent_key);
                 let pdx = current.gx - px;
                 let pdy = current.gy - py;
@@ -759,6 +810,7 @@ impl GridRouter {
             });
 
             for (dx, dy) in DIRECTIONS {
+                if self.layer_forbidden(current.layer as usize) { break; }  // G2: no track on a forbidden source layer
                 if let Some((req_dx, req_dy)) = required_direction {
                     if dx != req_dx || dy != req_dy { continue; }
                 } else if let Some((base_dx, base_dy)) = allowed_45deg_from {
@@ -774,7 +826,7 @@ impl GridRouter {
                 let ngx = current.gx + dx;
                 let ngy = current.gy + dy;
 
-                if obstacles.is_blocked_with_margin(ngx, ngy, current.layer as usize, track_margin) {
+                if obstacles.segment_blocked(current.gx, current.gy, ngx, ngy, current.layer as usize, track_margin as f64) {
                     tracker.track(ngx, ngy, current.layer);
                     continue;
                 }
@@ -790,7 +842,7 @@ impl GridRouter {
 
                 let base_move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
                 // Apply layer cost multiplier (1000 = 1.0x, 1500 = 1.5x, etc.)
-                let layer_multiplier = self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
+                let layer_multiplier = self.layer_cost_or_default(current.layer as usize);
                 let move_cost = (base_move_cost as i64 * layer_multiplier as i64 / 1000) as i32;
                 let turn_cost = match prev_direction {
                     Some((pdx, pdy)) if pdx != 0 || pdy != 0 => {
@@ -818,12 +870,10 @@ impl GridRouter {
                 let path_attraction_bonus = self.get_path_attraction_bonus(ngx, ngy, current.layer, dx, dy);
                 let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty - attraction_bonus - path_attraction_bonus;
 
-                let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
+                let existing_g = nodes.g(neighbor_key);
                 if new_g < existing_g {
-                    g_costs.insert(neighbor_key, new_g);
-                    parents.insert(neighbor_key, current_key);
+                    nodes.relax(neighbor_key, new_g, current_key, current_steps + 1);
                     if via_exclusion_radius > 0 { path_vias.insert(neighbor_key, current_vias.clone()); }
-                    steps_from_source.insert(neighbor_key, current_steps + 1);
                     let h = self.heuristic_to_targets(&neighbor, &target_states);
                     open_set.push(OpenEntry { f_score: new_g + h, g_score: new_g, state: neighbor, counter });
                     counter += 1;
@@ -832,9 +882,9 @@ impl GridRouter {
 
             // Via expansion
             let can_place_via = if collinear_vias {
-                if let Some(&parent_key) = parents.get(&current_key) {
-                    if let Some(&grandparent_key) = parents.get(&parent_key) {
-                        if !parents.contains_key(&grandparent_key) { false }
+                if let Some(parent_key) = nodes.parent(current_key) {
+                    if let Some(grandparent_key) = nodes.parent(parent_key) {
+                        if !nodes.has_parent(grandparent_key) { false }
                         else {
                             let (parent_x, parent_y, _) = Self::unpack_key(parent_key);
                             let (gp_x, gp_y, _) = Self::unpack_key(grandparent_key);
@@ -872,8 +922,9 @@ impl GridRouter {
                 && (!obstacles.is_via_blocked(current.gx, current.gy) || free_here) {
                 for layer in 0..obstacles.num_layers as u8 {
                     if layer == current.layer { continue; }
+                    if self.layer_forbidden(layer as usize) { continue; }  // FORBIDDEN LAYER: never end a via here
 
-                    if obstacles.is_blocked_with_margin(current.gx, current.gy, layer as usize, track_margin) {
+                    if obstacles.segment_blocked(current.gx, current.gy, current.gx, current.gy, layer as usize, track_margin as f64) {
                         tracker.track(current.gx, current.gy, layer);
                         continue;
                     }
@@ -890,17 +941,16 @@ impl GridRouter {
                         + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize))
                         * self.via_proximity_cost;
                     // Layer transition cost: penalize switching TO expensive layers, discount switching to cheaper
-                    let current_layer_cost = self.layer_costs.get(current.layer as usize).copied().unwrap_or(1000);
-                    let dest_layer_cost = self.layer_costs.get(layer as usize).copied().unwrap_or(1000);
+                    let current_layer_cost = self.layer_cost_or_default(current.layer as usize);
+                    let dest_layer_cost = self.layer_cost_or_default(layer as usize);
                     let layer_transition_cost = dest_layer_cost - current_layer_cost;
                     // Combined via cost can be as low as 0 when switching to a much cheaper layer
                     let combined_via_cost = (via_cost + layer_transition_cost).max(0);
                     let new_g = g + combined_via_cost + proximity_cost;
 
-                    let existing_g = g_costs.get(&neighbor_key).copied().unwrap_or(i32::MAX);
+                    let existing_g = nodes.g(neighbor_key);
                     if new_g < existing_g {
-                        g_costs.insert(neighbor_key, new_g);
-                        parents.insert(neighbor_key, current_key);
+                        nodes.relax(neighbor_key, new_g, current_key, current_steps);
                         // Track via positions (only real vias, not free vias at through-holes)
                         if via_exclusion_radius > 0 {
                             if is_free {
@@ -911,7 +961,6 @@ impl GridRouter {
                                 path_vias.insert(neighbor_key, new_vias);
                             }
                         }
-                        steps_from_source.insert(neighbor_key, current_steps);
                         let h = self.heuristic_to_targets(&neighbor, &target_states);
                         open_set.push(OpenEntry { f_score: new_g + h, g_score: new_g, state: neighbor, counter });
                         counter += 1;
@@ -925,12 +974,33 @@ impl GridRouter {
 }
 
 impl GridRouter {
+    /// FORBIDDEN LAYER (`--layer-costs -1` => a negative entry in `layer_costs`):
+    /// the router never places a track on, nor ends a via on, such a layer. It
+    /// still acts as an obstacle (its copper blocks via barrels) and through-vias
+    /// may SPAN it (a via is one direct edge to its target layer).
+    #[inline]
+    fn layer_forbidden(&self, layer: usize) -> bool {
+        self.layer_costs.get(layer).map_or(false, |&c| c < 0)
+    }
+
+    /// Cost to use in arithmetic; a forbidden/missing layer folds to the neutral
+    /// 1.0x (1000) so the sentinel can never leak into a subtraction/multiply.
+    #[inline]
+    fn layer_cost_or_default(&self, layer: usize) -> i32 {
+        match self.layer_costs.get(layer).copied() {
+            Some(c) if c >= 0 => c,
+            _ => 1000,
+        }
+    }
+
     /// Octile distance heuristic to nearest target
     /// Uses minimum layer cost to remain admissible (never overestimate)
     #[inline]
     fn heuristic_to_targets(&self, state: &GridState, targets: &[GridState]) -> i32 {
         // Use minimum layer cost for admissibility
-        let min_layer_cost = self.layer_costs.iter().copied().min().unwrap_or(1000);
+        // A1: exclude FORBIDDEN sentinels (< 0) — else min() returns the sentinel
+        // and pollutes the start penalty + the admissibility-scaled heuristic.
+        let min_layer_cost = self.layer_costs.iter().copied().filter(|&c| c >= 0).min().unwrap_or(1000);
 
         let mut min_h = i32::MAX;
         for target in targets {
@@ -954,12 +1024,11 @@ impl GridRouter {
         (min_h as f32 * self.h_weight) as i32
     }
 
-    /// Reconstruct path from parents map
+    /// Reconstruct path from the node map (follows parent links to the source).
     fn reconstruct_path(
         &self,
-        parents: &FxHashMap<u64, u64>,
+        nodes: &NodeMap,
         goal_key: u64,
-        _g_costs: &FxHashMap<u64, i32>,
     ) -> Vec<(i32, i32, u8)> {
         let mut path = Vec::new();
         let mut current_key = goal_key;
@@ -975,8 +1044,8 @@ impl GridRouter {
 
             path.push((x, y, layer));
 
-            match parents.get(&current_key) {
-                Some(&parent_key) => current_key = parent_key,
+            match nodes.parent(current_key) {
+                Some(parent_key) => current_key = parent_key,
                 None => break,
             }
         }
@@ -1035,13 +1104,13 @@ impl GridRouter {
     /// Returns (required_exact_direction, allowed_45deg_base_direction)
     fn get_via_direction_constraints(
         &self,
-        parents: &FxHashMap<u64, u64>,
+        nodes: &NodeMap,
         current_key: u64,
         current: &GridState,
     ) -> (Option<(i32, i32)>, Option<(i32, i32)>) {
         // Get parent
-        let parent_key = match parents.get(&current_key) {
-            Some(&k) => k,
+        let parent_key = match nodes.parent(current_key) {
+            Some(k) => k,
             None => return (None, None),
         };
         let (parent_x, parent_y, parent_layer) = Self::unpack_key(parent_key);
@@ -1051,7 +1120,7 @@ impl GridRouter {
 
         if parent_is_via {
             // We just came through a via - need exact same direction as before via
-            if let Some(&grandparent_key) = parents.get(&parent_key) {
+            if let Some(grandparent_key) = nodes.parent(parent_key) {
                 let (gp_x, gp_y, _) = Self::unpack_key(grandparent_key);
                 let dx = parent_x - gp_x;
                 let dy = parent_y - gp_y;
@@ -1066,8 +1135,8 @@ impl GridRouter {
 
         // Check if grandparent was a via (we're one step after via exit)
         // Still require exact same direction for symmetry when path is reversed
-        let grandparent_key = match parents.get(&parent_key) {
-            Some(&k) => k,
+        let grandparent_key = match nodes.parent(parent_key) {
+            Some(k) => k,
             None => return (None, None),
         };
         let (gp_x, gp_y, gp_layer) = Self::unpack_key(grandparent_key);
@@ -1077,7 +1146,7 @@ impl GridRouter {
         if grandparent_is_via {
             // We're one step after via exit - still require exact same direction
             // (This ensures 2 straight steps after via for symmetric geometry when reversed)
-            if let Some(&great_grandparent_key) = parents.get(&grandparent_key) {
+            if let Some(great_grandparent_key) = nodes.parent(grandparent_key) {
                 let (ggp_x, ggp_y, _) = Self::unpack_key(great_grandparent_key);
                 let dx = gp_x - ggp_x;
                 let dy = gp_y - ggp_y;
@@ -1091,8 +1160,8 @@ impl GridRouter {
         }
 
         // Check if great-grandparent was a via (we're two steps after via exit)
-        let great_grandparent_key = match parents.get(&grandparent_key) {
-            Some(&k) => k,
+        let great_grandparent_key = match nodes.parent(grandparent_key) {
+            Some(k) => k,
             None => return (None, None),
         };
         let (ggp_x, ggp_y, ggp_layer) = Self::unpack_key(great_grandparent_key);
@@ -1101,7 +1170,7 @@ impl GridRouter {
 
         if great_grandparent_is_via {
             // We're two steps after via exit - allow ±45° turn
-            if let Some(&gggp_key) = parents.get(&great_grandparent_key) {
+            if let Some(gggp_key) = nodes.parent(great_grandparent_key) {
                 let (gggp_x, gggp_y, _) = Self::unpack_key(gggp_key);
                 let dx = ggp_x - gggp_x;
                 let dy = ggp_y - gggp_y;

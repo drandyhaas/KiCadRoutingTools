@@ -207,7 +207,7 @@ After MPS layer swap:
 
 - Requires available alternative layers (swaps fail if all layers have existing routes)
 - Adds vias when swapping layers (2 vias per stub moved)
-- Only helps when `--crossing-layer-check` is enabled (default) - routes on different layers don't count as crossing
+- Only helps when the crossing-layer check is enabled (default; disable with `--no-crossing-layer-check`) - routes on different layers don't count as crossing
 
 ### Routing-Aware Distance Calculation
 

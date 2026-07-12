@@ -32,6 +32,7 @@ Usage:
 Output: dist/KiCadRoutingTools-<version>.zip plus a .meta.json sidecar
 containing sha256/download_size/install_size for metadata.json patching.
 """
+from __future__ import annotations
 
 import argparse
 import copy

@@ -3,6 +3,7 @@ Layer assignment for BGA fanout routing.
 
 Assigns routes to layers to avoid collisions during initial fanout creation.
 """
+from __future__ import annotations
 
 from typing import List, Dict, Set, Tuple, Optional
 from collections import defaultdict

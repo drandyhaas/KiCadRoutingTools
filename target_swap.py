@@ -9,6 +9,7 @@ Cost factors:
 - Layer penalty (via cost) if source and target are on different layers
 - Crossing penalty if assignments would cause route crossings
 """
+from __future__ import annotations
 
 import math
 from typing import Dict, List, Optional, Tuple, Set, Callable, TYPE_CHECKING

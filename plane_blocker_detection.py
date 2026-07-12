@@ -4,11 +4,13 @@ Blocker detection for copper plane via placement.
 Identifies which nets are blocking via placement or routing,
 and provides rip-up functionality to remove blockers.
 """
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional, Set
 
 import numpy as np
+import os
 
 from kicad_parser import PCBData, Pad
 from routing_config import GridRouteConfig, GridCoord
@@ -90,7 +92,8 @@ def find_via_position_blocker(
     pcb_data: PCBData,
     config: GridRouteConfig,
     exclude_net_id: int,
-    protected_net_ids: Optional[Set[int]] = None
+    protected_net_ids: Optional[Set[int]] = None,
+    quiet: bool = False
 ) -> Optional[int]:
     """
     Find the net that is blocking via placement at a specific position.
@@ -147,7 +150,8 @@ def find_via_position_blocker(
                 best_blocker = via.net_id
 
     # Report protected blocker if it's closer than any non-protected blocker
-    if best_protected_blocker is not None and best_protected_dist_sq < best_dist_sq:
+    if (not quiet and best_protected_blocker is not None
+            and best_protected_dist_sq < best_dist_sq):
         net = pcb_data.nets.get(best_protected_blocker)
         blocker_name = net.name if net else f"net_{best_protected_blocker}"
         print(f"blocked by {blocker_name} (protected, cannot rip)...", end=" ")
@@ -185,6 +189,21 @@ def find_route_blocker_from_frontier(
     blocked_set = set(blocked_cells)
     protected = protected_net_ids or set()
 
+    # Frontier bbox prefilter (#225): every membership test below is on layer 0,
+    # so only layer-0 frontier cells can ever match, and a segment/via contributes
+    # only if its clearance-expanded window overlaps that frontier. The router's
+    # blocked frontier is local, but this function used to walk EVERY board track
+    # and via (with a per-cell window scan), costing ~27s of rip-up handling on
+    # daisho. Skipping copper whose expanded bbox can't reach the frontier is an
+    # exact necessary-condition cull -- the counts (and the chosen blocker) are
+    # unchanged. No layer-0 frontier cell -> nothing can match (was: empty tally).
+    _l0x = [gx for (gx, gy, l) in blocked_set if l == 0]
+    if not _l0x:
+        return None
+    _l0y = [gy for (gx, gy, l) in blocked_set if l == 0]
+    bb_min_x, bb_max_x = min(_l0x), max(_l0x)
+    bb_min_y, bb_max_y = min(_l0y), max(_l0y)
+
     # Count how many blocked cells each net is responsible for (including protected)
     net_block_count: Dict[int, int] = {}
 
@@ -210,6 +229,13 @@ def find_route_blocker_from_frontier(
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
         gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
 
+        # Skip segments whose expanded window can't reach the frontier bbox.
+        if (max(gx1, gx2) + expansion_grid < bb_min_x or
+                min(gx1, gx2) - expansion_grid > bb_max_x or
+                max(gy1, gy2) + expansion_grid < bb_min_y or
+                min(gy1, gy2) - expansion_grid > bb_max_y):
+            continue
+
         count = 0
         for gx, gy in walk_line(gx1, gy1, gx2, gy2):
             # Check expansion around this point
@@ -233,6 +259,10 @@ def find_route_blocker_from_frontier(
         via_expansion_grid = max(1, coord.to_grid_dist(via_r + config.track_width / 2 + config.clearance))
 
         gx, gy = coord.to_grid(via.x, via.y)
+        # Skip vias whose expanded window can't reach the frontier bbox.
+        if (gx + via_expansion_grid < bb_min_x or gx - via_expansion_grid > bb_max_x or
+                gy + via_expansion_grid < bb_min_y or gy - via_expansion_grid > bb_max_y):
+            continue
         count = 0
         for ex in range(-via_expansion_grid, via_expansion_grid + 1):
             for ey in range(-via_expansion_grid, via_expansion_grid + 1):
@@ -274,6 +304,13 @@ class ViaPlacementResult:
     segments: List[Dict]
     ripped_net_ids: List[int]  # Nets that were ripped up to achieve success
     via_at_pad_center: bool
+    # Ripped nets restored (fully or partially) by the collision-checked
+    # settle: (net_id, kept_segments, kept_vias, dropped_piece_count).
+    # The caller must strip the net's INPUT copper from the output and emit
+    # the kept pieces as new copper -- the writer works from the input file,
+    # so a pcb_data-only restore would resurrect the dropped pieces (#319
+    # board==file contract).
+    restored_nets: List = None
 
 
 def _point_to_segment_dist_sq(px: float, py: float,
@@ -313,6 +350,19 @@ def _restored_piece_collides(seg: Optional[Dict], via: Optional[Dict],
         for pv in plane_vias:
             if (via['x'] - pv['x']) ** 2 + (via['y'] - pv['y']) ** 2 < thresh_sq:
                 return True
+        # Restored via vs plane SEGMENTS (the barrel spans all layers, so a
+        # segment on any layer counts). The original #88.1 call sites only
+        # restored against stitching VIAS so this was never needed; the #329
+        # tap restore also checks against the tap's new TRACE copper --
+        # without this, a restored via sat on 13 fresh +3V3 trace segments
+        # (glasgow /IO_Banks/DA2, 0707b wave set1).
+        for ps in plane_segments:
+            ps_half_w = ps.get('width', 0.2) / 2.0
+            v_thresh = vr + ps_half_w + clearance
+            if _point_to_segment_dist_sq(via['x'], via['y'],
+                                         ps['start'][0], ps['start'][1],
+                                         ps['end'][0], ps['end'][1]) < v_thresh * v_thresh:
+                return True
         return False
 
     if seg is not None:
@@ -333,8 +383,10 @@ def _restored_piece_collides(seg: Optional[Dict], via: Optional[Dict],
             ps_half_w = ps.get('width', 0.2) / 2.0
             s_thresh = half_w + ps_half_w + clearance
             s_thresh_sq = s_thresh * s_thresh
-            # Sample endpoints of each segment against the other (cheap, and
-            # sufficient for the short axis-overlap case we are guarding).
+            # Endpoint sampling covers the short axis-overlap case; an X
+            # CROSSING has all four endpoints far apart, so also test true
+            # intersection (#329 restore checks restored signal traces
+            # against the tap's new trace copper, where crossings happen).
             px0, py0 = ps['start'][0], ps['start'][1]
             px1, py1 = ps['end'][0], ps['end'][1]
             if (_point_to_segment_dist_sq(px0, py0, sx0, sy0, sx1, sy1) < s_thresh_sq or
@@ -342,9 +394,106 @@ def _restored_piece_collides(seg: Optional[Dict], via: Optional[Dict],
                     _point_to_segment_dist_sq(sx0, sy0, px0, py0, px1, py1) < s_thresh_sq or
                     _point_to_segment_dist_sq(sx1, sy1, px0, py0, px1, py1) < s_thresh_sq):
                 return True
+            from geometry_utils import segments_intersect_2d
+            if segments_intersect_2d((sx0, sy0), (sx1, sy1), (px0, py0), (px1, py1)):
+                return True
         return False
 
     return False
+
+
+
+def _settle_ripped_nets(ripped_data, pcb_data, via_obstacle_cache, obstacles,
+                        routing_obstacles_cache, plane_vias, plane_segments,
+                        via_size, clearance, new_via_pos=None, new_segments=None,
+                        config=None, all_copper_layers=None):
+    """Collision-checked restore of ripped nets (#88.1, extended to the tap
+    SUCCESS path -- the route_planes side of the #329 fix): restore every
+    ripped net whose copper overlaps neither the plane copper placed this run
+    nor the NEW tap copper (via + trace); leave colliding nets ripped and
+    return them for the caller's honest reroute handoff. Shipping every
+    successful-tap rip destroyed 11 routed signal nets on ottercast (the
+    entire remaining zero-copper cluster: AP_CK32KO, +1V1, EPHY_TX_N/P, ...).
+    """
+    check_vias = list(plane_vias or [])
+    check_segs = list(plane_segments or [])
+    if new_via_pos is not None:
+        check_vias.append({'x': new_via_pos[0], 'y': new_via_pos[1], 'size': via_size})
+    # A net ripped a SECOND time is checked against lists that still hold its
+    # own previously-emitted copper at identical coordinates -- without
+    # filtering, every piece "collides with itself" and the whole net is
+    # wrongly left ripped (+1V1 on ottercast: C98.2 restore, R82.2 re-rip).
+    def _universe(nid):
+        return ([v for v in check_vias if v.get('net_id') != nid],
+                [c for c in check_segs if c.get('net_id') != nid])
+    for ns in (new_segments or []):
+        if isinstance(ns, dict):
+            check_segs.append({'start': tuple(ns['start']), 'end': tuple(ns['end']),
+                               'width': ns.get('width', 0.2), 'layer': ns.get('layer')})
+        else:
+            check_segs.append({'start': (ns.start_x, ns.start_y),
+                               'end': (ns.end_x, ns.end_y),
+                               'width': ns.width, 'layer': ns.layer})
+    still_ripped: List[int] = []
+    restored: List[Tuple[int, list, list, int]] = []
+    any_restored = False
+    partial: List[Tuple[int, int]] = []  # (net_id, dropped_piece_count)
+    for blocker_id, removed_segs, removed_vias in ripped_data:
+        u_vias, u_segs = _universe(blocker_id)
+        keep_segs, keep_vias, dropped = [], [], 0
+        for rs in removed_segs:
+            seg_dict = {'start': (rs.start_x, rs.start_y), 'end': (rs.end_x, rs.end_y),
+                        'width': rs.width, 'layer': rs.layer}
+            if _restored_piece_collides(seg_dict, None, u_vias, u_segs,
+                                        via_size, clearance):
+                dropped += 1
+            else:
+                keep_segs.append(rs)
+        for rv in removed_vias:
+            via_dict = {'x': rv.x, 'y': rv.y, 'size': rv.size}
+            if _restored_piece_collides(None, via_dict, u_vias, u_segs,
+                                        via_size, clearance):
+                dropped += 1
+            else:
+                keep_vias.append(rv)
+        if not keep_segs and not keep_vias:
+            # Nothing restorable: leave fully ripped for the caller's honest
+            # reroute handoff (net excluded from output + reported).
+            still_ripped.append(blocker_id)
+            continue
+        restore_net_to_pcb_data(pcb_data, keep_segs, keep_vias)
+        any_restored = True
+        restored.append((blocker_id, keep_segs, keep_vias, dropped))
+        if dropped:
+            partial.append((blocker_id, dropped))
+        # Re-add the net's obstacle footprint. The cache covers the FULL pre-rip
+        # net, which is exact for a FULL restore. For a PARTIAL restore, re-adding
+        # the full cache leaked the DROPPED pieces' keep-out cells -- blocked in
+        # the maintained map but open in a fresh rebuild (#342: 242 leaked cells
+        # on the balance test). Recompute the keep-out from the net's now-KEPT
+        # pcb_data copper (restore_net_to_pcb_data above already put the kept
+        # pieces back) so the map == fresh rebuild, and REPLACE the cache so a
+        # later re-rip removes exactly what was added.
+        if blocker_id in via_obstacle_cache:
+            cache = via_obstacle_cache[blocker_id]
+            if dropped and config is not None:
+                cache = precompute_via_placement_obstacles(
+                    pcb_data, blocker_id, config, all_copper_layers or [])
+                via_obstacle_cache[blocker_id] = cache
+            if len(cache.blocked_vias) > 0:
+                obstacles.add_blocked_vias_batch(cache.blocked_vias)
+            for layer, cells in cache.blocked_cells_by_layer.items():
+                if layer in routing_obstacles_cache and len(cells) > 0:
+                    cells_3d = np.column_stack([cells, np.zeros(len(cells), dtype=np.int32)])
+                    routing_obstacles_cache[layer].add_blocked_cells_batch(cells_3d)
+    if any_restored:
+        print("(restored) ", end="")
+    if partial:
+        names = ', '.join(f"net_{nid}(-{n})" for nid, n in partial)
+        print(f"(partial restore, dropped colliding pieces: {names}) ", end="")
+    if still_ripped:
+        print(f"(left {len(still_ripped)} colliding net(s) ripped) ", end="")
+    return still_ripped, restored
 
 
 def try_place_via_with_ripup(
@@ -429,9 +578,15 @@ def try_place_via_with_ripup(
                 via_at_pad_center = (abs(via_pos[0] - pad.global_x) < 0.001 and
                                      abs(via_pos[1] - pad.global_y) < 0.001)
                 if via_at_pad_center or not pad_layer:
+                    still, restored = _settle_ripped_nets(
+                        ripped_data, pcb_data, via_obstacle_cache, obstacles,
+                        routing_obstacles_cache, plane_vias, plane_segments,
+                        via_size, clearance, new_via_pos=via_pos,
+                        config=config, all_copper_layers=all_copper_layers)
                     return ViaPlacementResult(
                         success=True, via_pos=via_pos, segments=[],
-                        ripped_net_ids=ripped_net_ids, via_at_pad_center=via_at_pad_center
+                        ripped_net_ids=still, via_at_pad_center=via_at_pad_center,
+                        restored_nets=restored
                     )
 
                 # Try routing
@@ -445,9 +600,16 @@ def try_place_via_with_ripup(
                 )
 
                 if route_result.success:
+                    still, restored = _settle_ripped_nets(
+                        ripped_data, pcb_data, via_obstacle_cache, obstacles,
+                        routing_obstacles_cache, plane_vias, plane_segments,
+                        via_size, clearance, new_via_pos=via_pos,
+                        new_segments=route_result.segments,
+                        config=config, all_copper_layers=all_copper_layers)
                     return ViaPlacementResult(
                         success=True, via_pos=via_pos, segments=route_result.segments,
-                        ripped_net_ids=ripped_net_ids, via_at_pad_center=False
+                        ripped_net_ids=still, via_at_pad_center=False,
+                        restored_nets=restored
                     )
 
                 # Routing failed - find blocker from frontier
@@ -499,62 +661,12 @@ def try_place_via_with_ripup(
             for rp in ripped_pads:
                 pending_pads.append({'pad': rp, 'needs_via': True})
 
-    # Failed - restore ripped nets, but collision-aware (issue #88.1).
-    #
-    # The old behaviour restored every ripped net verbatim, which re-added
-    # copper on top of plane vias/segments placed during this run, shipping
-    # shorts (28/38 of castor_pollux's DRC violations were restored
-    # -12V-vs-GND overlaps). Now: a net is restored only if NONE of its
-    # segments/vias would overlap newly-placed plane copper. If any piece
-    # collides, leave the whole net ripped and return it in ripped_net_ids so
-    # the caller re-routes it cleanly instead of restoring a short.
-    plane_vias = plane_vias or []
-    plane_segments = plane_segments or []
-    still_ripped: List[int] = []
-    if ripped_data:
-        any_restored = False
-        for blocker_id, removed_segs, removed_vias in ripped_data:
-            # Test this net's copper against newly-placed plane copper.
-            collides = False
-            for s in removed_segs:
-                seg_dict = {
-                    'start': (s.start_x, s.start_y),
-                    'end': (s.end_x, s.end_y),
-                    'width': s.width, 'layer': s.layer,
-                }
-                if _restored_piece_collides(seg_dict, None, plane_vias,
-                                            plane_segments, via_size, clearance):
-                    collides = True
-                    break
-            if not collides:
-                for v in removed_vias:
-                    via_dict = {'x': v.x, 'y': v.y, 'size': v.size}
-                    if _restored_piece_collides(None, via_dict, plane_vias,
-                                                plane_segments, via_size, clearance):
-                        collides = True
-                        break
-
-            if collides:
-                # Leave ripped: do NOT re-add copper or obstacles. Caller will
-                # see this net in ripped_net_ids and re-route it.
-                still_ripped.append(blocker_id)
-                continue
-
-            restore_net_to_pcb_data(pcb_data, removed_segs, removed_vias)
-            any_restored = True
-            # Restore obstacles from cache
-            if blocker_id in via_obstacle_cache:
-                cache = via_obstacle_cache[blocker_id]
-                if len(cache.blocked_vias) > 0:
-                    obstacles.add_blocked_vias_batch(cache.blocked_vias)
-                for layer, cells in cache.blocked_cells_by_layer.items():
-                    if layer in routing_obstacles_cache and len(cells) > 0:
-                        cells_3d = np.column_stack([cells, np.zeros(len(cells), dtype=np.int32)])
-                        routing_obstacles_cache[layer].add_blocked_cells_batch(cells_3d)
-        if any_restored:
-            print("(restored) ", end="")
-        if still_ripped:
-            print(f"(left {len(still_ripped)} colliding net(s) ripped) ", end="")
+    # Failed - restore ripped nets, collision-aware (issue #88.1); shared
+    # with the success paths via _settle_ripped_nets.
+    still_ripped, _restored = _settle_ripped_nets(
+        ripped_data, pcb_data, via_obstacle_cache, obstacles,
+        routing_obstacles_cache, plane_vias, plane_segments,
+        via_size, clearance, config=config, all_copper_layers=all_copper_layers)
 
     return ViaPlacementResult(
         success=False, via_pos=None, segments=[],
@@ -562,5 +674,6 @@ def try_place_via_with_ripup(
         # restoring them would short onto plane copper) are returned so the
         # caller marks them ripped and re-routes them.
         ripped_net_ids=still_ripped,
-        via_at_pad_center=False
+        via_at_pad_center=False,
+        restored_nets=_restored
     )

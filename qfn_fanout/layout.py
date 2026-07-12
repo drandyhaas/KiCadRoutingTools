@@ -3,6 +3,7 @@ QFN/QFP layout analysis functions.
 
 Analyzes footprint geometry to extract package parameters and pad information.
 """
+from __future__ import annotations
 
 import math
 from typing import Optional, Tuple

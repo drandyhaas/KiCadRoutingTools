@@ -1,6 +1,7 @@
 """
 Configuration and color schemes for the routing visualizer.
 """
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Dict, Tuple, List

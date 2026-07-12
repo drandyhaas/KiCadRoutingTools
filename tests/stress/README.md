@@ -63,7 +63,7 @@ Operational limits (baked into the scripts / learned the hard way):
   4-in-flight works on an 8 GB machine and the per-job watchdog backstops any
   spike. (Lower the concurrency arg if you see swapping.)
 - Each worker runs its routing commands in the foreground under a hard
-  20-min/command cap and ~45-min board budget (RUNBOOK rule 12). The queue
+  3-hour/command cap and ~3.5-hour board budget (RUNBOOK rule 12). The queue
   manager and `stress_status.sh` track liveness from disk (results JSON +
   run-dir activity), so dropped/stale notifications can't mislead them.
 
@@ -83,10 +83,18 @@ the `REDO_MANIFEST` env var (a no-op when unset); `run_board.sh` sets it to
 when a command isn't routed through `run_limited.sh` — which the agent does
 inconsistently — so the manifest is a complete, replayable transcript of the run.
 
-`redo_stress_test.py` replays a manifest verbatim — no LLM, no API calls,
+`redo_stress_test.py` replays a manifest — no LLM, no API calls,
 seconds-to-minutes instead of tens of minutes, and immune to API outages. The
 router is deterministic, so a replay reproduces the recorded board exactly (only
 the freshly-assigned track/via UUIDs differ; geometry and nets are identical).
+
+By default the replay is **pruned to the file-dependency chain** that produces
+the final board (issue #231): the agent's superseded retries (a route command it
+ran 5× — only the last feeds downstream) and dead-end branches (an output nothing
+consumes) are skipped. Each kept command re-reads its own input board, so dropping
+the overwritten writes can't change the result — the final board is identical, just
+reached in far fewer steps (e.g. ottercast 24 → 11 commands, same DRC). Pass
+`--verbatim` to replay every recorded command literally.
 
 ```bash
 # Replay a recorded run in place (re-runs the exact recorded sequence):
@@ -120,6 +128,12 @@ a `summary.json`. Run it once per code version ("wave"), then `--compare` the tw
 summaries for a per-board regression table (chains broken in either wave are
 excluded). DRC is graded at each board's routed clearance, not a guessed one.
 
+**Connectivity is graded on total incomplete nets** (`incompl` column =
+unrouted + connectivity-issue nets), *not* the raw connectivity-issue count: a
+net that loses its copper entirely leaves the connectivity-issue bucket for the
+unrouted bucket, so the issue count can *drop* while the board got worse. The
+per-board flag and the net verdict both key off this incomplete-net delta.
+
 ```bash
 # the engine change is uncommitted in the working tree:
 git stash push file1.py file2.py            # baseline = HEAD
@@ -131,6 +145,15 @@ python3 tests/stress/ab_replay_grade.py --compare ab/old/summary.json ab/new/sum
 
 The two waves must be sequential (they share the live repo's git state), but the
 boards within a wave run in parallel (`--jobs`, default 4).
+
+**Provenance — every output dir records its checkout.** Each wave dir gets a
+`git_version.txt` (+ `git_version.json`) naming the exact commit that produced it
+(`describe --tags --dirty`, full hash, branch, subject, capture time), so a wave
+is never ambiguous after the fact. `--compare` reads both waves' `git_version.json`
+and prints an `old = … new = …` header. `redo_stress_test.py` writes the same
+file into its `--workdir` (a single-board replay), and the live stress worker
+`run_board.sh` writes one into each board's run dir. A `-dirty` describe means the
+tree had uncommitted changes when the wave ran.
 
 **Grade at the routed clearance.** Each board is graded at the **minimum**
 `--clearance` across its manifest's routing steps — the copper was built to that
@@ -227,9 +250,9 @@ truth for a manufacturable board; large gaps are router-improvement findings.
 Wired into RUNBOOK step 11b; output goes into the results JSON `comparison` /
 `suggestions` fields.
 
-## Two 15-board sets
+## Board sets
 
-Each corpus is exactly **15 boards**:
+Sets 1–3 are exactly **15 boards** each; set 4 starts smaller and grows:
 
 - **Set 1** — the original 15 (curated in `fetch_boards.py` / `normalize_boards.py`).
   `spirit_cm5` (6-layer) was dropped and replaced by `lpddr4_testbed`
@@ -251,14 +274,21 @@ Each corpus is exactly **15 boards**:
   the text parser can't read pre-v6 directly, so the pcbnew round-trip in
   `prep_set3.sh` upgrades them first — extra coverage of that rescue path. Boards
   live in `boards_unrouted_set3/`; results in `results_set3/`.
+- **Set 4** — listed in `manifest_set4.json`, fetched by `fetch_set4.py` to
+  `$STRESS_DIR/sources/github_set4/`. Starts as a single board:
+  `Rahul9-spb/FPGA-1` (`PCB/FPGA_SDRAM.kicad_pcb`) — an FPGA + SDRAM design
+  (BGA/QFN/SOIC/SOT, 4-layer, KiCad 10; 126 footprints / 305 nets). Append more
+  entries to the manifest (and a `MAP` line in `prep_set4.sh`) to grow it. Boards
+  live in `boards_unrouted_set4/`; results in `results_set4/`.
 
-Prepare set 2 / set 3 (KiCad Python; loads each board once):
+Prepare set 2 / set 3 / set 4 (KiCad Python; loads each board once):
 
 ```bash
 bash prep_set2.sh    # -> boards_set2/ (normalized routed + .kicad_pro)
                      #    boards_unrouted_set2/ (stripped, to route)
 
 python3 fetch_set3.py && bash prep_set3.sh   # set 3: fetch + normalize + strip
+python3 fetch_set4.py && bash prep_set4.sh   # set 4: fetch + normalize + strip
 ```
 
 `prep_set2.py <src> <routed_dst> <stripped_dst>` normalizes the routed reference

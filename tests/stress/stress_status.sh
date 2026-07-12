@@ -5,9 +5,10 @@
 # cold (see RUNBOOK.md "Driving the run"):
 #   DONE    = results JSON exists
 #   RUNNING = a process matches the run-dir path, OR the run dir was touched in
-#             the last 45 min (covers the pgrep blind-spot while an agent is
+#             the last 180 min (covers the pgrep blind-spot while an agent is
 #             between commands, AND a long single signal-route step on a big
-#             board that writes no intermediate files; matches RUNBOOK threshold)
+#             board that writes no intermediate files, up to the 3-hour
+#             per-command cap; matches RUNBOOK threshold)
 #   TODO    = everything else (safe to launch)
 #
 # Board lists are derived from boards_unrouted*/ so this never goes stale when
@@ -33,7 +34,7 @@ check() { # $1 board, $2 set(1|2|3...)
   resdir="$ROOT/results_set$s"; rundir="runs_set$s/$b"
   if [ -f "$resdir/$b.json" ]; then done_n=$((done_n+1)); done_l="$done_l $b"; return; fi
   if pgrep -f "$rundir" >/dev/null 2>&1; then run_n=$((run_n+1)); run_l="$run_l ${b}[s$s]"; return; fi
-  if [ -d "$ROOT/$rundir" ] && [ -n "$(find "$ROOT/$rundir" -mmin -45 2>/dev/null | head -1)" ]; then
+  if [ -d "$ROOT/$rundir" ] && [ -n "$(find "$ROOT/$rundir" -mmin -180 2>/dev/null | head -1)" ]; then
     run_n=$((run_n+1)); run_l="$run_l ${b}[s$s,idle?]"; return; fi
   todo_n=$((todo_n+1)); todo_l="$todo_l ${b}[s$s]"
 }

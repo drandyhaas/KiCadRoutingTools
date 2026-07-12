@@ -40,6 +40,28 @@ python route.py in.kicad_pcb out.kicad_pcb --nets "Net-(*CLK*)" "Net-(*DATA*)"
 python route.py in.kicad_pcb out.kicad_pcb --component U1
 ```
 
+### Ripping Pre-Existing Routes
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--rip-existing-nets` | off (untouched) | Net name patterns of **pre-existing** routed nets that may be ripped up and re-routed when they block a net being routed |
+
+By default the router **never** rips committed tracks that were already on the
+input board — only nets it routed *in this run* are candidates for rip-up (see
+[Rip-Up and Reroute](rip-up-reroute.md)). `--rip-existing-nets PATTERN` lifts
+that restriction for the matching pre-existing routed nets, so the router may
+tear them up and re-route them when they block a net it is trying to route (for
+example on a board already routed by a previous run). Use `'*'` to allow any
+non-plane net.
+
+```bash
+# Let the router rip and re-route any pre-existing DATA net that gets in the way
+python route.py in.kicad_pcb out.kicad_pcb --nets "*CLK*" --rip-existing-nets "*DATA*"
+
+# Allow ripping any pre-existing (non-plane) net
+python route.py in.kicad_pcb out.kicad_pcb --nets "*" --rip-existing-nets "*"
+```
+
 ### Geometry Options
 
 | Option | Default | Description |
@@ -52,6 +74,89 @@ python route.py in.kicad_pcb out.kicad_pcb --component U1
 | `--grid-step` | 0.1 | Grid resolution in mm |
 
 **Impedance-controlled routing:** When `--impedance` is specified, track widths are automatically calculated per layer using IPC-2141 formulas based on the board stackup. Outer layers use microstrip formulas (typically wider tracks) and inner layers use stripline formulas (typically narrower tracks). Via clearance calculations account for the varying track widths per layer.
+
+### Fab Tier Options
+
+The **fab tier** is the JLCPCB manufacturing floor every routing step shrinks tracks,
+vias and clearances *down toward* when it needs to. It is shared by every CLI
+(`route.py`, `route_diff.py`, `route_planes.py`, `route_disconnected_planes.py`,
+`bga_fanout.py`, `qfn_fanout.py`, `check_drc.py`, `fix_kicad_drc_settings.py`,
+`list_nets.py`) and the GUI (one selector on the Basic tab). Values are sourced from
+[jlcpcb.com/capabilities](https://jlcpcb.com/capabilities).
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--fab-tier` | `standard` | `standard` (no extra fab cost) or `advanced` (tighter, "more costly") |
+| `--fab-overrides` | - | Path to a file overlaying the tier's floors (only the keys it lists) |
+
+The tier is a **floor ladder**:
+
+- **`standard`** — the cheap floor (per layer count: 2-layer track/clearance 0.127/0.127,
+  4+ layer 0.0889/0.10; via 0.45 / drill 0.20; via hole-to-hole 0.20). Routing prefers
+  it but **auto-escalates to the `advanced` floor — printing a one-line warning** — when a
+  fine-pitch fan-out genuinely cannot escape at the standard floor.
+- **`advanced`** — the JLC "more costly" floor (track/clearance 0.10/0.10 on 2-layer,
+  0.0762/0.09 on 4+; via 0.25 / drill 0.15). A **hard** floor: no escalation.
+
+| Floor (per layer count) | standard | advanced |
+|---|---|---|
+| via diameter / drill | 0.45 / 0.20 | 0.25 / 0.15 |
+| track / clearance (2-layer) | 0.127 / 0.127 | 0.10 / 0.10 |
+| track / clearance (4+ layer) | 0.0889 / 0.10 | 0.0762 / 0.09 |
+| via hole-to-hole / pad hole-to-hole | 0.20 / 0.45 | 0.20 / 0.45 |
+
+**Override file** (`--fab-overrides`) — a plain, human-editable file overlaying the
+selected tier. Only the floor values it lists change; the rest come from the base tier.
+Supplying one **disables escalation** (the floor becomes exactly *base tier + file*),
+since the file states your exact fab limits. One `key = value` (or `key: value`, or
+`key value`) per line; `#` starts a comment; keys are `track_width`, `clearance`,
+`via_diameter`, `via_drill`, `hole_to_hole`, `pad_hole_to_hole`, `annular`:
+
+```
+# my_fab.txt — JLC + a tighter drill I've confirmed
+via_drill = 0.15
+clearance = 0.09
+```
+
+A ready-to-copy, fully-commented template listing every key and the built-in tier
+values lives at **[`fab_overrides.example.txt`](../fab_overrides.example.txt)** in the
+repo root. (`track_width` / `clearance` are layer-dependent in the tier tables, but an
+override sets one fixed value for every board — override them only if you want that.)
+
+```bash
+# Route to the cheap floor (default); dense fan-outs warn when they escalate
+python route.py in.kicad_pcb out.kicad_pcb --nets "Net*"
+
+# Opt the whole board into the tighter, more-costly floor
+python route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-tier advanced
+
+# Declare your own fab capability
+python route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-overrides my_fab.txt
+```
+
+**Floor enforcement.** The CLI **errors** if `--track-width`, `--clearance`,
+`--via-size`, `--via-drill` or `--hole-to-hole-clearance` is set below the active tier's
+floor (raise the value, or declare a smaller capability with `--fab-overrides`). The GUI
+instead **pins** the corresponding Basic-tab spin control to the floor and warns. Grade
+verification (`check_drc.py`) defaults its size/clearance floors to the same tier, so
+legitimately-escalated fine geometry is not flagged.
+
+### Post-Route DRC Settings
+
+As their final step, all four routing CLIs (`route.py`, `route_diff.py`,
+`route_planes.py`, `route_disconnected_planes.py`) rewrite the output's sibling
+`.kicad_pro` so KiCad's Board Setup floors match the clearances/sizes just routed
+— a manual DRC in KiCad then flags only genuine problems instead of stock-default
+noise (issue #160). The [DRC Settings Fixer](utilities.md#drc-settings-fixer-fix_kicad_drc_settingspy)
+does the work; these flags tune it. The GUI plugin applies the equivalent on the
+live board via the pcbnew API.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--no-fix-drc-settings` | off (fix is on) | Do **not** adjust the output's `.kicad_pro` DRC constraints afterwards; leave KiCad's stock floors |
+| `--keep-thermal` | off | Leave `starved_thermal` (thermal-relief) severity untouched instead of demoting it to a warning |
+| `--no-clamp-netclasses` | off (clamp is on) | Do **not** clamp non-Default net classes' clearance/track/via floors down to the routed values (issue #295). Pass this for a **final** board whose net-class rules *are* the spec and must survive |
+| `--enable-used-layers` | off | Add any layer the board uses but is missing from its `(layers)` table back into the `.kicad_pcb`, so KiCad stops flagging `item_on_disabled_layer`. Off by default because it edits the board, not just DRC settings |
 
 ### Power Net Options
 
@@ -85,9 +190,9 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 | `--heuristic-weight` | 1.9 | A* greediness (>1 = faster, <1 = more optimal) |
 | `--turn-cost` | 1000 | Penalty for direction changes (encourages straighter paths) |
 | `--max-ripup` | 3 | Max blockers to rip up at once during rip-up and retry |
-| `--max-setback-angle` | 45.0 | Maximum angle for setback position search (degrees) |
+| `--ripup-abandon-metric` | `stranded` | Keep-retry vs abandon rule for multipoint tap rip-ups (see [rip-up-reroute.md](rip-up-reroute.md#abandon-metrics)) |
 | `--routing-clearance-margin` | 1.0 | Multiplier on track-via clearance (1.0 = minimum DRC) |
-| `--hole-to-hole-clearance` | 0.2 | Minimum drill hole edge-to-edge clearance (mm) |
+| `--hole-to-hole-clearance` | 0.20 | Minimum drill hole edge-to-edge clearance (mm) |
 | `--board-edge-clearance` | 0.0 | Clearance from board edge in mm (0 = use track clearance) |
 | `--proximity-heuristic-factor` | 0.02 | Factor for proximity-aware A* heuristic (higher = faster but may find suboptimal paths, 0 = disabled) |
 | `--ripped-route-avoidance-radius` | 1.0 | Radius around ripped route corridors to apply soft penalty (mm) |
@@ -101,7 +206,7 @@ See [Rip-Up and Reroute](rip-up-reroute.md) for how failed routes trigger rip-up
 |--------|---------|-------------|
 | `--ordering` / `-o` | mps | Net ordering: `mps`, `inside_out`, or `original` |
 | `--direction` / `-d` | forward | Direction: `forward` or `backward` |
-| `--layers` / `-l` | F.Cu B.Cu | Routing layers |
+| `--layers` / `-l` | all copper layers | Routing layers. For `route.py` the default is all of the board's copper layers; `route_diff.py` and `bga_fanout.py` default to `F.Cu B.Cu` |
 | `--layer-costs` | (see below) | Per-layer cost multipliers (1.0-1000). Default: all 1.0 for 4+ layers; F.Cu=1.0, B.Cu=3.0 for 2 layers |
 | `--no-bga-zones [REFS...]` | (auto-detect) | Disable BGA exclusion zones. No args = all. With refs (U1 U3) = only those |
 
@@ -230,7 +335,7 @@ These options are only available in `route_diff.py`. All nets passed to route_di
 | `--min-turning-radius` | 0.2 | Minimum turning radius for pose-based routing (mm) |
 | `--max-turn-angle` | 180 | Max cumulative turn angle (degrees) to prevent U-turns |
 | `--max-setback-angle` | 45.0 | Maximum angle for setback position search (degrees) |
-| `--no-fix-polarity` | false | Don't swap target pad nets when polarity swap needed |
+| `--polarity-swap-nets` | (none = deny all) | Glob patterns naming pairs allowed to polarity-swap; `'*'` = all (#279) |
 | `--no-gnd-vias` | false | Disable GND via placement near signal vias |
 | `--diff-chamfer-extra` | 1.5 | Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings) |
 | `--diff-pair-intra-match` | false | Match P/N lengths within each diff pair |
@@ -338,7 +443,7 @@ Available in `route.py` only (not `route_diff.py` or `route_planes.py`). See the
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--debug-lines` | false | Output debug geometry on User.3/4/5/6/8/9 layers (zones + proximity circles on User.5) |
+| `--debug-lines` | false | Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*) |
 | `--verbose` / `-v` | false | Print detailed diagnostic output (setback checks, bus routing order, etc.) |
 | `--skip-routing` | false | Skip actual routing, only do swaps and write debug info |
 | `--debug-memory` | false | Print memory usage statistics at key points during routing |
@@ -372,9 +477,10 @@ class GridRouteConfig:
     heuristic_weight: float = 1.9
     turn_cost: int = 1000         # penalty for direction changes (straighter paths)
     max_rip_up_count: int = 3     # max blockers to rip up at once (progressive N+1)
+    ripup_abandon_metric: str = 'stranded'  # tap rip-up abandon rule (docs/rip-up-reroute.md)
     max_setback_angle: float = 45.0  # degrees
     routing_clearance_margin: float = 1.0  # multiplier on track-via clearance (1.0 = min DRC)
-    hole_to_hole_clearance: float = 0.2  # mm - minimum drill hole edge-to-edge clearance
+    hole_to_hole_clearance: float = 0.20  # mm - drill-to-drill fab floor
     board_edge_clearance: float = 0.0    # mm - clearance from board edge (0 = use clearance)
     proximity_heuristic_factor: float = 0.02  # factor for proximity-aware heuristic (0 = disabled)
     ripped_route_avoidance_radius: float = 1.0  # mm - radius around ripped route corridors
@@ -412,7 +518,6 @@ class GridRouteConfig:
     diff_pair_centerline_setback: float = None  # mm in front of stubs (None = 2x P-N spacing)
     min_turning_radius: float = 0.2      # mm for pose-based routing
     max_turn_angle: float = 180.0        # degrees, prevents U-turns
-    fix_polarity: bool = True            # swap target pads if polarity swap needed
     stub_layer_swap: bool = True         # enable stub layer switching optimization
     gnd_via_enabled: bool = True         # place GND vias near signal vias
     target_swap_crossing_penalty: float = 1000.0  # penalty for crossing assignments

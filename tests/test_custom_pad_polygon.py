@@ -8,9 +8,10 @@ Covers:
      over the solid body it does not);
   3. obstacle map + per-net cache: the channel cell stays OPEN for the comb
      polygon but is BLOCKED by the bounding-box control;
-  4. reading real repo boards: a board with custom-poly pads populates polygons,
-     and a board whose custom pads have non-gr_poly primitives falls back to the
-     bounding box (polygons None) -- no regression.
+  4. reading real repo boards: a board with custom-poly pads populates polygons;
+  5. gr_circle / gr_rect / gr_line primitives are modelled as their real shape
+     (a round mounting/logo pad becomes its disc at the true offset, not the
+     anchor-centred bounding box) -- issue #232.
 
     python3 tests/test_custom_pad_polygon.py
 """
@@ -130,8 +131,32 @@ def run():
     tg = parse_kicad_pcb('kicad_files/tigard.kicad_pcb')
     tg_custom = [pd for fp in tg.footprints.values() for pd in fp.pads if pd.shape == 'custom']
     check("tigard: has custom pads", len(tg_custom) > 0)
-    check("tigard: non-gr_poly custom pads fall back to bbox (polygons None)",
-          all(pd.polygons is None for pd in tg_custom))
+    # #232: tigard's custom pads mix gr_poly + gr_circle -- now modelled (not bbox).
+    check("tigard: gr_circle custom pads carry polygons (#232)",
+          all(pd.polygons for pd in tg_custom))
+    check("tigard: custom pad polygons well-formed",
+          all(len(p) >= 3 and all(len(v) == 2 for v in p)
+              for pd in tg_custom for p in pd.polygons))
+
+    # 5. gr_circle ring -> disc at the true offset, not the anchor bbox (#232) -----
+    # A round mounting pad: ring centerline r=1.35 at local (1.35,0), stroke 0.4,
+    # so real copper is a disc out to r+w/2=1.55 centred at local (1.35,0). The
+    # (size) bbox would be ~5.8x3.1 centred on the anchor with a big empty -x half.
+    RING = """(pad "1" smd custom (at 0 0 0) (size 5.8 3.1)
+      (primitives (gr_circle (center 1.35 0) (end 2.7 0) (width 0.4) (fill no))))"""
+    rpolys = _custom_pad_global_polygons(RING, 100.0, 50.0, 0.0)
+    check("gr_circle: one disc polygon", rpolys is not None and len(rpolys) == 1)
+    if rpolys:
+        rp = rpolys[0]
+        rxs = [x for x, y in rp]; rys = [y for x, y in rp]
+        # disc spans local x[1.35-1.55, 1.35+1.55]=[-0.2,2.9], y[-1.55,1.55] -> global +100/+50
+        check("gr_circle: disc at offset centre (+x side only)",
+              abs(min(rxs) - 99.8) < 0.05 and abs(max(rxs) - 102.9) < 0.05 and
+              abs(min(rys) - 48.45) < 0.05 and abs(max(rys) - 51.55) < 0.05)
+        # the empty -x half of the old bbox (local x ~ -2) is now OUTSIDE the copper
+        check("gr_circle: anchor-side empty region no longer copper",
+              not _pip(98.0, 50.0, rp))
+        check("gr_circle: disc centre is copper", _pip(101.35, 50.0, rp))
 
     print("=" * 60)
     if fails:

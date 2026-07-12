@@ -47,35 +47,18 @@ _CONSTRAINT_FIELDS = ('min_clearance', 'min_track_width', 'min_via_diameter',
                       'min_via_annular_width', 'min_hole_to_hole',
                       'min_through_hole_diameter')
 
-# JLCPCB standard (no-extra-charge) manufacturing floors, by copper-layer count.
-# Used as the BACKSTOP when a board leaves a Constraint at 0/unset (common --
-# e.g. min_clearance is frequently 0). The router never goes below these, and
-# DRC/connectivity are graded at them. Source: jlcpcb.com/capabilities (2026-06).
-# 'fine_via_*' is the smaller JLC "advanced" (small extra-cost) via, available
-# on 4+ layer boards, for FINE-PITCH ESCAPE only (sub-~0.5mm BGA/QFN balls the
-# 0.45mm standard via can't via-in-pad / dog-bone between). Not the default --
-# general routing uses the standard via. On 2-layer it equals the standard via
-# (advanced small vias are a multilayer option).
-# 'track_width' is the fab PHYSICAL minimum trace width, and it is LAYER-DEPENDENT:
-# JLCPCB allows 3.5 mil (0.0889 mm) only on 4+ layer boards; 2-layer is limited to
-# 5 mil (0.127 mm). It is deliberately BELOW the board's own min_track_width
-# constraint, which is usually conservative (human originals route dense channels
-# at the fab minimum, e.g. ottercast 0.127 mm under its 0.2 mm board rule). Dense/
-# congested signals route down to this (see list_nets --design-rules "fine-pitch
-# signal track floor"); power/impedance nets keep their net-class width.
-_FAB_FLOORS = {
-    2: {'clearance': 0.127, 'track_width': 0.127, 'via_diameter': 0.45,
-        'via_drill': 0.20, 'hole_to_hole': 0.25, 'annular': 0.13,
-        'fine_via_diameter': 0.45, 'fine_via_drill': 0.20},
-    4: {'clearance': 0.10, 'track_width': 0.0889, 'via_diameter': 0.45,
-        'via_drill': 0.20, 'hole_to_hole': 0.25, 'annular': 0.13,
-        'fine_via_diameter': 0.30, 'fine_via_drill': 0.15},
-}
-
-
-def fab_floors(copper_layer_count):
-    """JLCPCB manufacturing floors for the given copper-layer count (2 vs 4+)."""
-    return _FAB_FLOORS[2] if (copper_layer_count or 2) <= 2 else _FAB_FLOORS[4]
+# JLCPCB manufacturing floors are modelled as selectable cost TIERS (issue #237)
+# in fab_tiers.py. Re-exported here so existing `from list_nets import fab_floors`
+# call sites keep working. `fab_floors(n)` is the NOMINAL (preferred) floor of the
+# active tier; `fab_floor_min(n)` is the DEEPEST floor it can reach (the advanced
+# rung that 'standard' escalates to, or the hard floor of 'advanced'/overrides) --
+# used to grade DRC so legitimately-escalated fine geometry isn't false-flagged.
+# The retired 'fine_via_*' keys are now just the advanced tier's via (fab_floor_min).
+from fab_tiers import (  # noqa: E402  (re-export)
+    fab_floors, fab_floor_min, fab_floor_ladder,
+    set_default_fab_tier, get_default_fab_tier,
+    add_fab_tier_args, fab_tier_from_args, warn_fab_escalation,
+)
 
 
 def _count_copper_layers(content):
@@ -102,7 +85,8 @@ def effective_floors(constraints, copper_layers):
         `min_clearance` is an unreliable edit-floor (often 0, sometimes a stale large
         value that would re-flood the DRC), so it is deliberately NOT used here.
     """
-    fab = fab_floors(copper_layers)
+    fab = fab_floors(copper_layers)        # nominal (preferred) floor of the active tier
+    fmin = fab_floor_min(copper_layers)    # deepest reachable floor (escalation/hard)
 
     def floor(constraint_val, fab_val):
         return max(constraint_val or 0.0, fab_val)
@@ -110,20 +94,21 @@ def effective_floors(constraints, copper_layers):
     return {
         'working_via_diameter': floor(constraints.get('min_via_diameter'), fab['via_diameter']),
         'working_via_drill':    floor(constraints.get('min_through_hole_diameter'), fab['via_drill']),
-        # Advanced small via for fine-pitch escape only (4+ layer). The fab's
-        # smallest, not floored by the board's nominal min via.
-        'fine_via_diameter':    fab['fine_via_diameter'],
-        'fine_via_drill':       fab['fine_via_drill'],
+        # Advanced small via for fine-pitch escape only. The fab's smallest reachable
+        # via (the rung 'standard' escalates to), not floored by the board's nominal.
+        'fine_via_diameter':    fmin['via_diameter'],
+        'fine_via_drill':       fmin['via_drill'],
         # DRC-enforced track floor: the board's own min_track_width if set, else the
         # fab minimum. min_track_width IS a DRC rule, so this is what DRC checks.
         'min_track_width':      floor(constraints.get('min_track_width'), fab['track_width']),
         # Fab PHYSICAL track minimum, NOT clamped to the board constraint. Dense/
         # congested signals route down to this (below the board's min_track_width,
         # like the human originals); it's the routing-capability floor, distinct
-        # from the DRC floor above.
-        'fab_track_width':      fab['track_width'],
-        'drc_clearance':        fab['clearance'],
-        'drc_hole_to_hole':     fab['hole_to_hole'],
+        # from the DRC floor above. The deepest reachable, so DRC grades pass it.
+        'fab_track_width':      fmin['track_width'],
+        'drc_clearance':        fmin['clearance'],
+        'drc_hole_to_hole':     fmin['hole_to_hole'],
+        'pad_hole_to_hole':     fmin['pad_hole_to_hole'],
         'fab': fab,
     }
 
@@ -243,14 +228,18 @@ def print_design_rules(pcb_path):
     if dr['constraints']:
         cons = "  ".join(f"{k}={v}" for k, v in dr['constraints'].items())
         print(f"\nBoard Constraints (DRC-enforced minima, {dr['copper_layers']}-layer): {cons}")
-    print(f"Manufacturing floor (Constraint or JLC fab min, whichever is larger): "
+    _tier, _ovr = get_default_fab_tier()
+    _tier_desc = f"{_tier}" + (f" + overrides({','.join(sorted(_ovr))})" if _ovr else "")
+    print(f"Manufacturing floor (active fab tier: {_tier_desc}; Constraint or JLC fab "
+          f"min, whichever is larger): "
           f"via {eff['working_via_diameter']}/{eff['working_via_drill']}  "
           f"clearance {eff['drc_clearance']}  hole-to-hole {eff['drc_hole_to_hole']}  "
           f"track {eff['min_track_width']} (DRC track floor = board min_track_width)")
     # The router must honour these as DISTINCT rules (issue #125):
-    print(f"  - hole-to-hole {eff['drc_hole_to_hole']} = drill-to-drill minimum, "
-          "net-INDEPENDENT: applies to via/via, via/pad-drill and pad-drill/pad-drill "
-          "on ALL nets, INCLUDING same-net.")
+    print(f"  - via hole-to-hole {eff['drc_hole_to_hole']} = drill-to-drill minimum, "
+          "net-INDEPENDENT (via/via and via/pad-drill, all nets incl. same-net); "
+          f"pad-drill/pad-drill is the larger {eff['pad_hole_to_hole']} (JLC pad "
+          "hole-to-hole, fixed by placement).")
     print(f"  - copper clearance {eff['drc_clearance']} = via/pad and via/via copper, "
           "between DIFFERENT nets. Same-net via-pad copper clearance is 0 "
           "(via-in-pad) where the fab allows it; hole-to-hole still applies.")
@@ -448,7 +437,9 @@ def main():
     parser.add_argument('--top', '-t', type=int, default=10, help='Show top N most-connected nets (default: 10)')
     parser.add_argument('--pattern', help='Filter nets by glob pattern')
 
+    add_fab_tier_args(parser)
     args = parser.parse_args()
+    set_default_fab_tier(*fab_tier_from_args(args))
 
     # Design rules read from project metadata, not the parsed PCB object.
     if args.design_rules:

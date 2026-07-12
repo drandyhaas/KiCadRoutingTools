@@ -282,8 +282,15 @@ class CreatePlanesOptionsPanel(wx.Panel):
         self.via_in_pad_check.SetToolTip(
             "When checked, stitching vias may be placed on top of same-net pads, "
             "ignoring 'Same-net Pad Clearance'.")
-        self.via_in_pad_check.SetValue(False)
+        # Default ON = same_net_pad_clearance -1.0, matching route_planes.py's
+        # SAME_NET_PAD_CLEARANCE default. A same-net stitching via on its own
+        # net's pad can't short; enforcing a positive clearance instead (the old
+        # GUI default 0.25) blocks stitches and left 24 MORE pads unconnected at
+        # plane create on rp2350 (67 vs 43) -- a CLI/GUI parity gap that drove
+        # the plane-repair overshoot (#362). Uncheck to enforce a clearance.
+        self.via_in_pad_check.SetValue(True)
         self.via_in_pad_check.Bind(wx.EVT_CHECKBOX, self._on_via_in_pad_toggle)
+        self.same_net_pad_clearance.Enable(False)  # sync with default-checked box
         zone_sizer.Add(self.via_in_pad_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         sizer.Add(zone_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
@@ -398,6 +405,20 @@ class RepairPlanesOptionsPanel(wx.Panel):
         self.max_track_width.Bind(wx.EVT_SPINCTRLDOUBLE, self._on_max_track_width_changed)
         grid.Add(self.max_track_width, 0, wx.EXPAND)
 
+        # Min track width -- the FLOOR on region-connection trace width (CLI
+        # --min-track-width). Kept separate from the Basic-tab routing Track
+        # Width: the region-connection router picks a width in
+        # [min_track_width, max_track_width]. Defaults to REPAIR_MIN_TRACK_WIDTH
+        # (0.2) like the CLI, so plane connections aren't forced down to the fine
+        # routing width unless the user asks (#362 plane-parity).
+        grid.Add(wx.StaticText(self, label="Min Track Width (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        r = defaults.PARAM_RANGES['repair_min_track_width']
+        self.min_track_width = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
+                                                 initial=defaults.REPAIR_MIN_TRACK_WIDTH, inc=r['inc'])
+        self.min_track_width.SetDigits(r['digits'])
+        self.min_track_width.SetToolTip("Minimum track width for region connections (CLI --min-track-width)")
+        grid.Add(self.min_track_width, 0, wx.EXPAND)
+
         # Analysis grid step
         grid.Add(wx.StaticText(self, label="Analysis Grid (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         r = defaults.PARAM_RANGES['repair_analysis_grid_step']
@@ -440,6 +461,7 @@ class RepairPlanesOptionsPanel(wx.Panel):
         """Get the configuration values."""
         return {
             'max_track_width': self.max_track_width.GetValue(),
+            'min_track_width': self.min_track_width.GetValue(),
             'analysis_grid_step': self.analysis_grid.GetValue(),
             'repair_pads': self.repair_pads.GetValue(),
             'rip_blocker_nets': self.rip_blocker_check.GetValue(),        }
@@ -832,6 +854,8 @@ class PlanesTab(wx.Panel):
         """Run plane operation in background thread."""
         import sys
 
+        from fab_tiers import set_fab_tier_from_config
+        set_fab_tier_from_config(config)
         original_stdout = sys.stdout
         if self.append_log:
             sys.stdout = StdoutRedirector(self.append_log, original_stdout)
@@ -850,14 +874,45 @@ class PlanesTab(wx.Panel):
         finally:
             sys.stdout = original_stdout
 
+    def _make_progress_callback(self):
+        """Engine progress hook (issue #364): marshals engine-thread milestone
+        updates onto the UI thread so the status bar / gauge track the plane
+        create/repair phases instead of freezing on "Creating planes...".
+        The plan executor mirrors status_text/progress_bar into the Claude
+        tab via _status_source, so it lights up there too."""
+        import time as _time
+
+        def on_progress(current, total, label=""):
+            wx.CallAfter(self._update_progress, current, total, label)
+            # Brief sleep releases the GIL so the main thread can paint the
+            # CallAfter update (same pattern as the route tab's callback).
+            _time.sleep(0.01)
+        return on_progress
+
+    def _update_progress(self, current, total, label):
+        """Update progress bar and status text (must run on the UI thread)."""
+        if total > 0:
+            self.progress_bar.SetRange(100)
+            self.progress_bar.SetValue(min(100, int(100 * current / total)))
+            self.status_text.SetLabel(f"{label} ({current}/{total})")
+        else:
+            self.progress_bar.Pulse()  # Indeterminate phase
+            self.status_text.SetLabel(label)
+
     def _run_create_planes(self, config):
         """Run plane creation."""
-        # The pour doesn't delete ripped tracks via pcbnew; clear any stale set
-        # from a prior repair run so the apply step doesn't remove copper.
+        # Cleared here; repopulated from create_plane's returned ripped set
+        # below (rip_blocker_nets rips signal nets whose original copper must
+        # be deleted from the live board before the new/restored copper is
+        # applied -- CLI strip-and-replace parity, b2557cd).
         self._ripped_net_ids = []
         # Remember the routed floors so _apply_results_to_board can make the live
         # board's DRC constraints consistent with them (issue #160).
         self._plane_drc_config = dict(config)
+        # Start a fresh clearance ledger so a prior operation's fine-pitch
+        # clearance doesn't leak into this board's DRC floor.
+        import clearance_ledger
+        clearance_ledger.reset()
         from route_planes import create_plane
         from add_gnd_vias import add_gnd_vias_to_existing_board
         from routing_config import GridRouteConfig, GridCoord
@@ -866,8 +921,22 @@ class PlanesTab(wx.Panel):
         # Get assignments: each is (nets_list, layers_list)
         assignments = config['assignments']
 
-        # Get all copper layers for routing
-        all_layers = self._get_all_copper_layers()
+        # Routing layers for the plane-connection traces. CLI/GUI PARITY:
+        # route_planes.py defaults all_layers to ['F.Cu'] + plane_layers +
+        # ['B.Cu'] (outer layers + the pour layers) when --layers is omitted, NOT
+        # every copper layer. Passing all 6 copper layers (the old GUI behavior)
+        # hands the router 2 extra inner layers to thread connection traces
+        # through -> different, worse-balanced plane routing than the CLI on the
+        # same board. Mirror the CLI default: outer layers + the assignment's
+        # plane layers, deduped in order. (#362 plane-parity)
+        _plane_layers_in_order = []
+        for _nets_list, _layers_list in config['assignments']:
+            for _L in _layers_list:
+                if _L not in _plane_layers_in_order:
+                    _plane_layers_in_order.append(_L)
+        _seen = set()
+        all_layers = [l for l in (['F.Cu'] + _plane_layers_in_order + ['B.Cu'])
+                      if not (l in _seen or _seen.add(l))]
 
         total_vias = 0
         total_traces = 0
@@ -902,10 +971,14 @@ class PlanesTab(wx.Panel):
             print("No net/layer assignments to process")
             return
 
+        # Remember which nets this plane op touched, so the post-apply plane
+        # copper cleanup (CLI parity) scopes to them (see _apply_results_to_board).
+        self._plane_net_names = list(dict.fromkeys(expanded_nets))
+
         failed_pads = 0
         try:
             (vias, traces, pads_needing, new_vias, new_segments, new_zones,
-             failed_pads) = create_plane(
+             failed_pads, ripped_net_ids) = create_plane(
                 input_file=self.board_filename,
                 output_file="",
                 net_names=expanded_nets,
@@ -920,11 +993,22 @@ class PlanesTab(wx.Panel):
                 max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
                 max_via_reuse_radius=defaults.PLANE_MAX_VIA_REUSE_RADIUS,
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
-                board_edge_clearance=config.get('board_edge_clearance', defaults.BOARD_EDGE_CLEARANCE),
+                # PLANE_EDGE_CLEARANCE (0.5), NOT the generic BOARD_EDGE_CLEARANCE
+                # (0.0): route_planes.py defaults board_edge_clearance to
+                # defaults.PLANE_EDGE_CLEARANCE, keeping plane copper 0.5mm off
+                # the board edge. Using 0.0 let GUI plane pours run to the edge
+                # -- a CLI/GUI parity gap and a fab concern (#362).
+                # `or` (not a plain default): the shared Basic-tab
+                # board_edge_clearance is a ROUTING value that defaults to 0.0
+                # and gets merged into the plane config, overriding a plain
+                # default. Planes need PLANE_EDGE_CLEARANCE (0.5); fall back to it
+                # whenever the shared value is 0/unset, but honor an explicitly
+                # set positive edge clearance. (#362)
+                board_edge_clearance=(config.get('board_edge_clearance') or defaults.PLANE_EDGE_CLEARANCE),
                 all_layers=all_layers,
                 dry_run=True,  # Don't write to file, apply via pcbnew
                 rip_blocker_nets=config.get('rip_blocker_nets', False),
-                max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),                # Re-route a ripped wide power net at its proper width.
+                max_rip_nets=config.get('max_rip_nets', defaults.PLANE_MAX_RIP_NETS),                # Re-route a ripped wide power net at its proper width.
                 power_nets=config.get('power_nets'),
                 power_nets_widths=config.get('power_nets_widths'),
                 # Match signal routing's No-BGA-Zones intent when rerouting
@@ -936,6 +1020,8 @@ class PlanesTab(wx.Panel):
                 layer_nets=layer_nets,
                 same_net_pad_clearance=config.get('same_net_pad_clearance', defaults.SAME_NET_PAD_CLEARANCE),
                 skip_existing_zones=True,
+                progress_callback=self._make_progress_callback(),
+                cancel_check=lambda: self._cancel_requested,
             )
 
             total_vias = vias
@@ -944,6 +1030,7 @@ class PlanesTab(wx.Panel):
             self._new_vias = new_vias
             self._new_segments = new_segments
             self._new_zones = new_zones
+            self._ripped_net_ids = ripped_net_ids
 
             # Add GND return vias if enabled
             if config.get('add_gnd_vias', False):
@@ -1020,6 +1107,10 @@ class PlanesTab(wx.Panel):
         # board's DRC constraints consistent with them (issue #160), mirroring
         # route_disconnected_planes.py's auto-fix.
         self._plane_drc_config = dict(config)
+        # Start a fresh clearance ledger so a prior operation's fine-pitch
+        # clearance doesn't leak into this board's DRC floor.
+        import clearance_ledger
+        clearance_ledger.reset()
 
         # Flatten assignments into parallel net_names and plane_layers lists
         # For each (nets_list, layers_list) assignment, create an entry for
@@ -1035,24 +1126,43 @@ class PlanesTab(wx.Panel):
 
         all_layers = self._get_all_copper_layers()
 
+        # Nets this repair touched, for the post-apply plane copper cleanup.
+        self._plane_net_names = list(dict.fromkeys(net_names))
+
         print(f"Repairing zones: {list(zip(net_names, plane_layers))}")
 
         try:
-            routes_added, regions_connected, new_vias, new_segments, ripped_net_ids = repair_planes(
+            (routes_added, regions_connected, new_vias, new_segments,
+             ripped_net_ids, strip_segments) = repair_planes(
                 input_file=self.board_filename,
                 output_file="",
                 net_names=net_names,
                 plane_layers=plane_layers,
                 track_width=config.get('track_width', defaults.TRACK_WIDTH),
                 max_track_width=config.get('max_track_width', defaults.REPAIR_MAX_TRACK_WIDTH),
-                min_track_width=config.get('track_width', defaults.TRACK_WIDTH),
+                # Own control/default (REPAIR_MIN_TRACK_WIDTH), NOT the routing
+                # track_width -- CLI parity: route_disconnected_planes has a
+                # separate --min-track-width defaulting to REPAIR_MIN_TRACK_WIDTH
+                # (0.2). Conflating it with track_width let GUI region
+                # connections go down to the fine routing width (#362).
+                min_track_width=config.get('min_track_width', defaults.REPAIR_MIN_TRACK_WIDTH),
                 clearance=config.get('clearance', defaults.CLEARANCE),
                 via_size=config.get('via_size', defaults.VIA_SIZE),
                 via_drill=config.get('via_drill', defaults.VIA_DRILL),
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
                 analysis_grid_step=config.get('analysis_grid_step', defaults.REPAIR_ANALYSIS_GRID_STEP),
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
-                board_edge_clearance=config.get('board_edge_clearance', defaults.BOARD_EDGE_CLEARANCE),
+                # PLANE_EDGE_CLEARANCE (0.5) not BOARD_EDGE_CLEARANCE (0.0) --
+                # route_disconnected_planes.py defaults board_edge_clearance to
+                # defaults.PLANE_EDGE_CLEARANCE; match it (#362, keeps plane
+                # copper off the board edge).
+                # `or` (not a plain default): the shared Basic-tab
+                # board_edge_clearance is a ROUTING value that defaults to 0.0
+                # and gets merged into the plane config, overriding a plain
+                # default. Planes need PLANE_EDGE_CLEARANCE (0.5); fall back to it
+                # whenever the shared value is 0/unset, but honor an explicitly
+                # set positive edge clearance. (#362)
+                board_edge_clearance=(config.get('board_edge_clearance') or defaults.PLANE_EDGE_CLEARANCE),
                 # Honor the panel's max-search-radius slider on Repair too, not
                 # just Create -- a boxed plane pad reaches a farther via/trace
                 # when the user widens it (issue #180).
@@ -1061,7 +1171,7 @@ class PlanesTab(wx.Panel):
                 routing_layers=all_layers,
                 repair_pads=config.get('repair_pads', True),
                 rip_blocker_nets=config.get('rip_blocker_nets', False),
-                max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),                power_nets=config.get('power_nets'),
+                max_rip_nets=config.get('max_rip_nets', defaults.PLANE_MAX_RIP_NETS),                power_nets=config.get('power_nets'),
                 power_nets_widths=config.get('power_nets_widths'),
                 # The route tab's "ALL" no-BGA-zones intent, mirrored when
                 # re-routing ripped nets on a BGA board (issue #88).
@@ -1069,6 +1179,8 @@ class PlanesTab(wx.Panel):
                 dry_run=True,  # Don't write to file, apply via pcbnew
                 pcb_data=self.pcb_data,
                 return_results=True,
+                progress_callback=self._make_progress_callback(),
+                cancel_check=lambda: self._cancel_requested,
             )
 
             self._new_vias = new_vias
@@ -1077,6 +1189,9 @@ class PlanesTab(wx.Panel):
             # re-routed (their new copper is in new_segments/new_vias); the apply
             # step deletes the old tracks before adding the new ones.
             self._ripped_net_ids = ripped_net_ids
+            # Input copper the in-memory cleanup removed (dead-end trims on
+            # non-ripped plane nets): the applier deletes these individually.
+            self._strip_segments = strip_segments
             self._operation_result = {
                 'mode': 'repair',
                 'routes_added': routes_added,
@@ -1108,8 +1223,16 @@ class PlanesTab(wx.Panel):
 
     def _on_operation_complete(self):
         """Handle operation completion."""
-        self.action_btn.Enable()
-        self.cancel_btn.SetLabel("Close")
+        # Button re-enabled AFTER apply (finally): it is the plan executor's
+        # busy signal, and error/completion MessageBoxes pump events -- an
+        # early enable let the executor start the next step mid-apply.
+        try:
+            self._on_operation_complete_body()
+        finally:
+            self.action_btn.Enable()
+            self.cancel_btn.SetLabel("Close")
+
+    def _on_operation_complete_body(self):
         self.progress_bar.SetValue(0)
 
         if self._cancel_requested:
@@ -1168,7 +1291,10 @@ class PlanesTab(wx.Panel):
                 print(f"Warning: failed to build plane suggestions: {e}")
 
         msg += "\nUse Edit -> Undo to revert changes."
-        wx.MessageBox(msg, "Operation Complete", wx.OK | wx.ICON_INFORMATION)
+        if getattr(getattr(self, 'GetTopLevelParent', lambda: self)(), '_suppress_completion_popups', False):
+            print(msg)  # unattended plan run: no per-step OK dialog
+        else:
+            wx.MessageBox(msg, "Operation Complete", wx.OK | wx.ICON_INFORMATION)
 
         # Callback - hand the parent the nets that were just touched so it
         # can invalidate their connectivity cache entries.
@@ -1182,6 +1308,76 @@ class PlanesTab(wx.Panel):
 
         # Refresh net list
         self.net_panel.refresh()
+
+    def _run_kicad_oracle_after_apply(self, board):
+        """GUI/stress parity (gap closure): the CLI plane fronts finish with
+        the kicad-oracle recheck on their written file. Here the LIVE board
+        is temp-saved, the same oracle routes the exact links kicad-cli
+        reports missing, and the returned copper is applied to the board.
+        Skips quietly when kicad-cli is unavailable."""
+        import sys
+        _orig_stdout = sys.stdout
+        if getattr(self, 'append_log', None):
+            # The worker-thread redirect has already been unwound by the
+            # time apply runs (main thread) -- without this, the oracle's
+            # output goes to the invisible console instead of the Log tab
+            # and the user cannot tell it ran.
+            sys.stdout = StdoutRedirector(self.append_log, _orig_stdout)
+        try:
+            import routing_defaults as defaults
+            from routing_config import GridRouteConfig
+            from kicad_ipc_adapter import apply_oracle_reconnect
+            cfg_src = getattr(self, '_plane_drc_config', {}) or {}
+            nets = []
+            for a in (cfg_src.get('assignments') or []):
+                nets.extend(a[0])
+            for n in (cfg_src.get('power_nets') or []):
+                nets.append(n)
+            if not nets:
+                return
+            ocfg = GridRouteConfig(
+                clearance=cfg_src.get('clearance', defaults.CLEARANCE),
+                track_width=cfg_src.get('track_width', defaults.TRACK_WIDTH),
+                via_size=cfg_src.get('via_size', defaults.VIA_SIZE),
+                via_drill=cfg_src.get('via_drill', defaults.VIA_DRILL),
+                grid_step=cfg_src.get('grid_step', defaults.GRID_STEP))
+
+            def _oracle_progress(current, total, label=""):
+                # Apply runs on the MAIN thread: update and force-repaint the
+                # status controls directly -- a CallAfter would not execute
+                # until this whole pass returned, i.e. too late to be seen
+                # (#364 follow-up: oracle rounds were the last silent phase).
+                try:
+                    if total > 0:
+                        self.progress_bar.SetRange(100)
+                        self.progress_bar.SetValue(
+                            min(100, int(100 * current / total)))
+                        self.status_text.SetLabel(f"{label} ({current}/{total})")
+                    else:
+                        self.progress_bar.Pulse()
+                        self.status_text.SetLabel(label)
+                    self.status_text.Update()
+                    self.progress_bar.Update()
+                except Exception:
+                    pass
+
+            # Snapshot-save + oracle-route + apply the copper all happen inside
+            # the IPC adapter (the only module that touches kipy); here we just
+            # build the config, net list, and progress callback.
+            orc = apply_oracle_reconnect(
+                board, nets=nets, config=ocfg, pcb_data=self.pcb_data,
+                track_via_clearance=cfg_src.get(
+                    'track_via_clearance', defaults.PLANE_TRACK_VIA_CLEARANCE),
+                hole_to_hole_clearance=cfg_src.get(
+                    'hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
+                progress_callback=_oracle_progress)
+            if orc.get('links_routed'):
+                print(f"KiCad-oracle (GUI): routed {orc['links_routed']} "
+                      f"missing link(s), applied to the live board")
+        except Exception as e:
+            print(f"KiCad-oracle (GUI) skipped: {e}")
+        finally:
+            sys.stdout = _orig_stdout
 
     def _apply_results_to_board(self):
         """Apply planes results (zones + stitch vias + tracks) via the IPC adapter."""
@@ -1255,8 +1451,52 @@ class PlanesTab(wx.Panel):
             from gui_utils import apply_drc_settings_fix
             apply_drc_settings_fix(getattr(self, "_plane_drc_config", None))
 
+        # Plane-copper cleanup (CLI/GUI parity): dead-end trims, stub-gap snaps,
+        # micro-shift / soft-joint connectors, applied to the live board via the
+        # IPC adapter. Best-effort; runs before the oracle so it sees the
+        # cleaned copper.
+        self._run_plane_copper_cleanup(board)
+
+        # Repair mode only: run the kicad-oracle recheck the CLI repair front
+        # runs on its written output -- route the links kicad-cli reports
+        # missing and apply the copper (IPC adapter temp-saves a snapshot, so
+        # the user's open file is untouched). After plane CREATION the gaps are
+        # the repair step's job, so this is skipped (matches the CLI create
+        # front dropping its oracle hook).
+        _result = getattr(self, '_operation_result', {}) or {}
+        if _result.get('mode') == 'repair':
+            self._run_kicad_oracle_after_apply(board)
+
+        # Sync AFTER cleanup + oracle so the rebuilt pcb_data reflects every
+        # commit. update_live_drc_floors / refill_all_zones are NOT needed under
+        # IPC: apply_drc_settings_fix (above) wrote the .kicad_pro floors and
+        # KiCad fills zones server-side on each commit.
         if self.sync_pcb_data_callback:
             self.sync_pcb_data_callback()
+
+    def _run_plane_copper_cleanup(self, board):
+        """CLI/GUI parity: apply the shared plane-copper cleanup delta
+        (pcb_modification.compute_plane_copper_cleanup -- the SAME core the CLI
+        clean_plane_copper file front runs) to the LIVE board via the IPC
+        adapter (no SWIG). Best-effort; a failure never blocks the plane result
+        already applied."""
+        names = getattr(self, '_plane_net_names', None)
+        if not names:
+            return
+        try:
+            import routing_defaults as defaults
+            from kicad_ipc_adapter import apply_plane_copper_cleanup
+            cfg = getattr(self, '_plane_drc_config', {}) or {}
+            clearance = cfg.get('clearance') or defaults.CLEARANCE
+            grid_step = cfg.get('grid_step', defaults.GRID_STEP)
+            res = apply_plane_copper_cleanup(
+                board, net_names=names, clearance=clearance, grid_step=grid_step)
+            if res.get('removed') or res.get('added') or res.get('snapped'):
+                print(f"Plane cleanup: closed {res.get('snapped', 0)} stub "
+                      f"gap(s), removed {res.get('removed', 0)} dead-end "
+                      f"copper item(s), added {res.get('added', 0)} connector(s)")
+        except Exception as e:
+            print(f"Warning: plane copper cleanup skipped ({e})")
 
     def get_assignments(self):
         """Get list of net→layer assignments."""

@@ -1,11 +1,13 @@
 """
 KiCad PCB Parser - Extracts pads, nets, tracks, vias, and board info from .kicad_pcb files.
 """
+from __future__ import annotations
 
 import os
 import re
 import math
 import json
+import routing_defaults as defaults  # fab-floor outline width for 0-stroke copper polys (#337/M2)
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
@@ -63,8 +65,22 @@ class Pad:
     net_name: str
     rotation: float = 0.0  # Total rotation in degrees (pad + footprint)
     pinfunction: str = ""
-    drill: float = 0.0  # Drill size for through-hole pads (0 for SMD)
+    drill: float = 0.0  # Drill size for through-hole pads (0 for SMD). For an
+                         # oval/slot drill this is max(w, h) (back-compat: the
+                         # slot's long axis); use pad_drill_capsule()/
+                         # pad_drill_circles() for the real slot geometry.
+    drill_w: float = 0.0  # Oval/slot drill x-size in the PAD frame (0 = round)
+    # Hole position (#324/#325): pads with a copper offset ((drill (offset ..)))
+    # have global_x/global_y at the COPPER CENTER (what every clearance/DRC/
+    # obstacle consumer wants) while the drill stays at the anchor. None =
+    # hole coincides with global_x/global_y (the overwhelmingly common case).
+    hole_x: object = None
+    hole_y: object = None
+    drill_h: float = 0.0  # Oval/slot drill y-size in the PAD frame (0 = round)
     pintype: str = ""
+    pad_type: str = ""  # KiCad pad kind: 'smd', 'thru_hole', 'np_thru_hole',
+    # 'connect'. NPTH pads have NO copper (their size is just a mask opening /
+    # keep-out), so copper-vs-copper DRC must skip them; only the hole matters.
     roundrect_rratio: float = 0.0  # Corner radius ratio for roundrect pads
     rect_rotation: float = 0.0  # Residual rect tilt in global frame for non-
     # orthogonal pads (deg, in (-90,90]). 0 for axis-aligned pads (the common
@@ -111,6 +127,11 @@ class Segment:
     start_y_str: str = ""
     end_x_str: str = ""
     end_y_str: str = ""
+    # True for copper derived from a gr_line/gr_arc GRAPHIC on a copper layer
+    # (#337): real copper for DRC/obstacles, but NOT a track -- cleanup passes
+    # must never prune it and writers cannot strip it (there is no (segment)
+    # block to match).
+    graphic: bool = False
 
 
 @dataclass
@@ -142,6 +163,11 @@ class Footprint:
     layer: str
     pads: List[Pad] = field(default_factory=list)
     value: str = ""  # Component value (e.g., "MCF5213", "100nF", "10K")
+    dnp: bool = False  # Do-not-populate / no-pop. A no-pop series part is an open
+                       # circuit, so its pads do NOT bridge two nets into one signal.
+    locked: bool = False  # Footprint (locked yes) flag: the user pinned this part,
+                          # so placement passes must not move it and routing/fanout
+                          # cannot assume a later step will move it out of the way.
 
 
 @dataclass
@@ -172,7 +198,19 @@ class BoardInfo:
     stackup: List[StackupLayer] = field(default_factory=list)  # ordered top to bottom
     board_outline: List[Tuple[float, float]] = field(default_factory=list)  # Polygon vertices for non-rectangular boards
     board_cutouts: List[List[Tuple[float, float]]] = field(default_factory=list)  # Interior cutout polygons
+    # ALL outer boundary rings (issue #304). A board can carry several disjoint
+    # outlines in one file (split keyboards drawn as left+right halves,
+    # panelized boards); board_outline keeps the LARGEST for back-compat, this
+    # holds every outer ring. Empty on single-outline/rectangular boards means
+    # "use board_outline".
+    board_outlines: List[List[Tuple[float, float]]] = field(default_factory=list)
     keepouts: List[dict] = field(default_factory=list)  # Keep-out rule areas: {polygon, layers:set, tracks_allowed, vias_allowed}
+    # Smallest copper clearance any routing step actually used on this board this
+    # run -- e.g. a fine-pitch tap that escalated below the nominal --clearance.
+    # None until a step records one. Routers fold this into the .kicad_pro DRC
+    # floor and JSON so check_drc grades at the true routed clearance, not the
+    # nominal one (which would flag legitimately tight copper).
+    min_clearance_used: Optional[float] = None
 
 
 @dataclass
@@ -255,6 +293,79 @@ def local_to_global(fp_x: float, fp_y: float, fp_rotation_deg: float,
 _PAD_ORTHO_TOL = 1.0
 
 
+# 3-point arc entry, two spellings with identical fields: (arc ...) inside a
+# KiCad 7+ polygon point list, and a standalone (gr_arc ...) pad primitive.
+#   (pts (arc (start x y) (mid x y) (end x y)) (xy x y) ...)
+_PTS_ARC_RE = (r'\((?:gr_)?arc\s+\(start\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+'
+               r'\(mid\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+'
+               r'\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)')
+
+
+def _custom_pad_primitive_points(pad_text: str):
+    """Per-primitive (points, half_stroke) tuples from a custom pad's
+    (primitives ...) block, in the pad's local frame. Arcs (gr_poly pts arcs
+    AND standalone gr_arc) are linearized; gr_circle yields its axis extremes.
+    Used by the board-frame extent below."""
+    pm = re.search(r'\(primitives\b', pad_text)
+    if not pm:
+        return []
+    prim = pad_text[pm.start():find_matching_paren(pad_text, pm.start()) - 1]
+    out = []
+    for m2 in re.finditer(r'\(gr_(poly|circle|rect|line|arc)\b', prim):
+        block = prim[m2.start():find_matching_paren(prim, m2.start()) - 1]
+        wm = re.search(r'\(width\s+(-?[\d.]+)\)', block)
+        hw = (float(wm.group(1)) / 2.0) if wm else 0.0
+        pts = []
+        for m in re.finditer(r'\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block):
+            pts.append((float(m.group(1)), float(m.group(2))))
+        for m in re.finditer(_PTS_ARC_RE, block):
+            s = (float(m.group(1)), float(m.group(2)))
+            mid = (float(m.group(3)), float(m.group(4)))
+            e = (float(m.group(5)), float(m.group(6)))
+            for p1, p2 in _arc_to_segments(s, mid, e):
+                pts.append(p1); pts.append(p2)
+        cm = re.search(r'\(center\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block)
+        if cm and m2.group(1) == 'circle':
+            cx, cy, ex, ey = map(float, cm.groups())
+            r = math.hypot(ex - cx, ey - cy)
+            pts += [(cx - r, cy), (cx + r, cy), (cx, cy - r), (cx, cy + r)]
+        elif m2.group(1) in ('rect', 'line'):
+            sm = re.search(r'\(start\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block)
+            if sm:
+                x1, y1, x2, y2 = map(float, sm.groups())
+                pts += [(x1, y1), (x2, y2)] if m2.group(1) == 'line' else \
+                       [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+        if pts:
+            out.append((pts, hw))
+    return out
+
+
+def _custom_pad_board_extent(pad_text: str, abs_rotation_deg: float,
+                             anchor_x: float, anchor_y: float) -> Tuple[float, float]:
+    """Board-frame half-extents (|x|, |y|) of a custom pad's copper about its
+    anchor: primitive points (per-primitive stroke half-width) plus the anchor
+    rect's corners, all rotated by the pad's ABSOLUTE angle (KiCad negate
+    convention). Matches build_pcb_data_from_board's symmetric bounding box, so
+    a 27deg/45deg custom pad models the same axis-aligned copper on both paths
+    (sofle_pico D26/LED*, eurorack_pmod U1). Returns (0, 0) with no primitives.
+    """
+    prims = _custom_pad_primitive_points(pad_text)
+    if not prims:
+        return 0.0, 0.0
+    rad = math.radians(-abs_rotation_deg)
+    cos_r, sin_r = math.cos(rad), math.sin(rad)
+    ext_x = ext_y = 0.0
+    hx, hy = anchor_x / 2.0, anchor_y / 2.0
+    prims = prims + [([(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)], 0.0)]
+    for pts, hw in prims:
+        for vx, vy in pts:
+            bx = vx * cos_r - vy * sin_r
+            by = vx * sin_r + vy * cos_r
+            ext_x = max(ext_x, abs(bx) + hw)
+            ext_y = max(ext_y, abs(by) + hw)
+    return ext_x, ext_y
+
+
 def _custom_pad_local_extent(pad_text: str) -> Tuple[float, float]:
     """Half-extent (|x|, |y|) of a custom pad's real copper in the pad's local
     frame, from its (primitives ...) block. A custom pad's (size ...) is only the
@@ -271,6 +382,23 @@ def _custom_pad_local_extent(pad_text: str) -> Tuple[float, float]:
     xs, ys = [], []
     for m in re.finditer(r'\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\)', prim):
         xs.append(float(m.group(1))); ys.append(float(m.group(2)))
+    # A gr_poly outline can be drawn entirely from arc entries (rounded pads,
+    # e.g. thunderscope U11's B0QFN): zero (xy ...) matches, so without this the
+    # extent came back (0,0) and the pad was modelled at its 0.2mm anchor.
+    # Linearize each arc so its bulge is covered, not just its endpoints. The
+    # regex also matches standalone gr_arc PRIMITIVES (comexpress7 H1..H10
+    # thermal-spoke pads draw their ring from ten of them).
+    for m in re.finditer(_PTS_ARC_RE, prim):
+        s = (float(m.group(1)), float(m.group(2)))
+        mid = (float(m.group(3)), float(m.group(4)))
+        e = (float(m.group(5)), float(m.group(6)))
+        for p1, p2 in _arc_to_segments(s, mid, e):
+            xs += [p1[0], p2[0]]; ys += [p1[1], p2[1]]
+    # gr_rect / gr_line reach: their (start)/(end) corners
+    for m in re.finditer(r'\(gr_(?:rect|line)\s+\(start\s+(-?[\d.]+)\s+(-?[\d.]+)\)'
+                         r'\s+\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', prim):
+        xs += [float(m.group(1)), float(m.group(3))]
+        ys += [float(m.group(2)), float(m.group(4))]
     # gr_circle: (center x y) (end x y) -> radius reaches center +/- r on both axes
     for m in re.finditer(r'\(gr_circle\s+\(center\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', prim):
         cx, cy, ex, ey = map(float, m.groups())
@@ -299,29 +427,237 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
     the footprint rotation), applied with KiCad's negate convention -- same as
     local_to_global. Verified against pcbnew GetEffectivePolygon for bitaxe Q1/Q2.
 
-    Returns a list of vertex lists, or None when the pad has no primitives or has
-    any NON-gr_poly primitive (gr_circle/gr_line/gr_rect) -- those rarer shapes are
-    left to the conservative bounding-box model rather than approximated here.
-    """
+    Handles gr_poly, gr_circle, gr_rect and gr_line primitives -- each becomes one
+    polygon (their union is the real copper; the obstacle map and DRC already treat
+    polygons as a list and OR/min over them). A round mounting/logo pad drawn as a
+    gr_circle thus models its true disc instead of the (size) bounding box, killing
+    the phantom over-block on the empty side of the anchor (issue #232).
+
+    Returns a list of vertex lists, or None when the pad has no primitives, only
+    sub-3-vertex shapes, or any gr_arc / gr_curve primitive -- those curved shapes
+    are still left to the conservative bounding-box model rather than approximated."""
     pm = re.search(r'\(primitives\b', pad_text)
     if not pm:
         return None
     prim = pad_text[pm.start():find_matching_paren(pad_text, pm.start()) - 1]
-    # Bail out (bbox fallback) if any non-polygon primitive is present.
-    if re.search(r'\(gr_(circle|line|rect|arc|curve)\b', prim):
+    # Beziers aren't approximated yet -- fall back to the bbox for the whole pad.
+    # (gr_arc strokes ARE handled below: linearized into a width band. sofle_pico's
+    # rotated LED lens pads are drawn from gr_arc+gr_line strokes; bailing to the
+    # bbox modelled ~10x more copper than exists and made phantom PAD-SEGMENT.)
+    if re.search(r'\(gr_curve\b', prim):
         return None
     rad = math.radians(-pad_abs_rotation_deg)
     cos_r, sin_r = math.cos(rad), math.sin(rad)
+
+    def to_global(local_pts):
+        return [(global_x + (vx * cos_r - vy * sin_r),
+                 global_y + (vx * sin_r + vy * cos_r)) for vx, vy in local_pts]
+
+    def _field(block, name, n):
+        m = re.search(r'\(' + name + r'\s+' + r'\s+'.join([r'(-?[\d.]+)'] * n) + r'\)', block)
+        return tuple(map(float, m.groups())) if m else None
+
+    def _width(block):
+        m = re.search(r'\(width\s+(-?[\d.]+)\)', block)
+        return float(m.group(1)) if m else 0.0
+
+    def _stroke_band(pts, hw):
+        """Polygon for a stroked polyline: offset +-hw using per-vertex averaged
+        normals, ends extended by hw (square cap covers the round cap)."""
+        if len(pts) < 2 or hw <= 0:
+            return None
+        # extend ends along their tangents so the cap is covered
+        (x0, y0), (x1, y1) = pts[0], pts[1]
+        d0 = math.hypot(x1 - x0, y1 - y0) or 1.0
+        pts = [(x0 - (x1 - x0) / d0 * hw, y0 - (y1 - y0) / d0 * hw)] + pts[1:]
+        (xa, ya), (xb, yb) = pts[-2], pts[-1]
+        d1 = math.hypot(xb - xa, yb - ya) or 1.0
+        pts = pts[:-1] + [(xb + (xb - xa) / d1 * hw, yb + (yb - ya) / d1 * hw)]
+        normals = []
+        for i in range(len(pts)):
+            acc_x = acc_y = 0.0
+            for j in (i - 1, i):
+                if 0 <= j < len(pts) - 1:
+                    dx = pts[j + 1][0] - pts[j][0]
+                    dy = pts[j + 1][1] - pts[j][1]
+                    L = math.hypot(dx, dy)
+                    if L > 1e-12:
+                        acc_x += -dy / L
+                        acc_y += dx / L
+            L = math.hypot(acc_x, acc_y)
+            normals.append((acc_x / L, acc_y / L) if L > 1e-12 else (0.0, 0.0))
+        left = [(p[0] + n[0] * hw, p[1] + n[1] * hw) for p, n in zip(pts, normals)]
+        right = [(p[0] - n[0] * hw, p[1] - n[1] * hw) for p, n in zip(pts, normals)]
+        return left + right[::-1]
+
     polys = []
-    for pm2 in re.finditer(r'\(gr_poly\b', prim):
+    # Iterate primitives in order; one polygon per primitive, transformed to global.
+    for pm2 in re.finditer(r'\(gr_(poly|circle|rect|line|arc)\b', prim):
+        kind = pm2.group(1)
         block = prim[pm2.start():find_matching_paren(prim, pm2.start()) - 1]
-        pts = [(float(a), float(b))
-               for a, b in re.findall(r'\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block)]
-        if len(pts) < 3:
-            continue
-        polys.append([(global_x + (vx * cos_r - vy * sin_r),
-                       global_y + (vx * sin_r + vy * cos_r)) for vx, vy in pts])
+        local = None
+        if kind == 'poly':
+            # Walk the pts list in order; KiCad 7+ outlines mix (xy ...) with
+            # (arc (start)(mid)(end)) entries -- and can be arcs ONLY
+            # (thunderscope U11's rounded B0QFN pads). Linearize each arc in
+            # place so the polygon follows the real curved outline.
+            pts = []
+            for m in re.finditer(r'\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\)|' + _PTS_ARC_RE, block):
+                if m.group(1) is not None:
+                    pts.append((float(m.group(1)), float(m.group(2))))
+                else:
+                    s = (float(m.group(3)), float(m.group(4)))
+                    a_mid = (float(m.group(5)), float(m.group(6)))
+                    e = (float(m.group(7)), float(m.group(8)))
+                    segs = _arc_to_segments(s, a_mid, e)
+                    pts.append(segs[0][0])
+                    for _p1, p2 in segs:
+                        pts.append(p2)
+            local = pts if len(pts) >= 3 else None
+        elif kind == 'circle':
+            c = _field(block, 'center', 2)
+            e = _field(block, 'end', 2)
+            if c and e:
+                # Solid disc out to the outer copper edge (centerline radius + half
+                # stroke); a filled circle has the same outer extent. The interior
+                # is modelled solid (the union has no holes) -- conservative, and
+                # exact for clearance to external copper, which is all that matters.
+                R = math.hypot(e[0] - c[0], e[1] - c[1]) + _width(block) / 2.0
+                if R > 0:
+                    N = 32
+                    local = [(c[0] + R * math.cos(2 * math.pi * k / N),
+                              c[1] + R * math.sin(2 * math.pi * k / N)) for k in range(N)]
+        elif kind == 'rect':
+            s = _field(block, 'start', 2)
+            e = _field(block, 'end', 2)
+            if s and e:
+                hw = _width(block) / 2.0
+                x0, x1 = min(s[0], e[0]) - hw, max(s[0], e[0]) + hw
+                y0, y1 = min(s[1], e[1]) - hw, max(s[1], e[1]) + hw
+                local = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        elif kind == 'arc':
+            # 3-point arc stroke: linearize the centerline, offset into a band.
+            am = re.search(_PTS_ARC_RE, block)
+            if am:
+                s = (float(am.group(1)), float(am.group(2)))
+                a_mid = (float(am.group(3)), float(am.group(4)))
+                e = (float(am.group(5)), float(am.group(6)))
+                cpts = [s]
+                for _p1, p2 in _arc_to_segments(s, a_mid, e):
+                    cpts.append(p2)
+                local = _stroke_band(cpts, max(_width(block) / 2.0, 1e-3))
+        elif kind == 'line':
+            s = _field(block, 'start', 2)
+            e = _field(block, 'end', 2)
+            if s and e:
+                hw = _width(block) / 2.0 or 1e-6
+                dx, dy = e[0] - s[0], e[1] - s[1]
+                L = math.hypot(dx, dy)
+                if L > 0:
+                    ux, uy = dx / L, dy / L          # along
+                    px, py = -uy, ux                 # perpendicular
+                    # Capsule approximated by its oriented bounding rectangle:
+                    # extend each end by hw and offset +/- hw perpendicular.
+                    sx, sy = s[0] - ux * hw, s[1] - uy * hw
+                    ex, ey = e[0] + ux * hw, e[1] + uy * hw
+                    local = [(sx + px * hw, sy + py * hw), (ex + px * hw, ey + py * hw),
+                             (ex - px * hw, ey - py * hw), (sx - px * hw, sy - py * hw)]
+        if local:
+            polys.append(to_global(local))
+
+    # A custom pad's copper is the ANCHOR SHAPE union the primitives (#337).
+    # Modeling primitives alone under-covers: urchin's router drilled a via
+    # inside D31.2's 0.95x2.29 anchor rect because only the small finger
+    # primitive was in the polygon set, and check_drc graded the real contact
+    # clean for the same reason. KiCad's default anchor is a circle; the file
+    # writes (options ... (anchor rect)) when it is a rectangle.
+    sm = re.search(r'\(size\s+(-?[\d.]+)\s+(-?[\d.]+)\)', pad_text)
+    if sm:
+        ax, ay = float(sm.group(1)), float(sm.group(2))
+        if ax > 0 and ay > 0:
+            am = re.search(r'\(anchor\s+(\w+)\)', pad_text)
+            akind = am.group(1) if am else 'circle'
+            if akind == 'rect':
+                anchor_local = [(-ax / 2, -ay / 2), (ax / 2, -ay / 2),
+                                (ax / 2, ay / 2), (-ax / 2, ay / 2)]
+            else:
+                r = min(ax, ay) / 2.0
+                anchor_local = [(r * math.cos(i * math.pi / 8),
+                                 r * math.sin(i * math.pi / 8)) for i in range(16)]
+            polys.append(to_global(anchor_local))
     return polys or None
+
+
+def pad_drill_capsule(pad) -> Tuple[Tuple[float, float], Tuple[float, float], float]:
+    """A pad's drill hole as a capsule: (end1, end2, radius) in board mm.
+
+    KiCad slot drills -- ``(drill oval w h)`` -- are milled slots, not round
+    holes. Modelling one as a circle of its LONG dimension (the back-compat
+    ``pad.drill`` scalar) turns a 30.2x1mm milled slot into a phantom 15mm-
+    radius hole that "conflicts" with every track within reach (thunderscope:
+    817 phantom copper-to-hole violations; KiCad's own DRC reports none).
+    The capsule axis follows the pad's absolute rotation with the same negate
+    convention as local_to_global. Round drills (and drills parsed before the
+    slot fields existed) return a zero-length capsule at the pad centre.
+    """
+    w = getattr(pad, 'drill_w', 0.0) or 0.0
+    h = getattr(pad, 'drill_h', 0.0) or 0.0
+    # Offset pads (#325): the DRILL stays at the anchor (hole_x/hole_y) while
+    # global_x/global_y is the copper centre.
+    hx = getattr(pad, 'hole_x', None)
+    hy = getattr(pad, 'hole_y', None)
+    px = hx if hx is not None else pad.global_x
+    py = hy if hy is not None else pad.global_y
+    if w <= 0 or h <= 0 or abs(w - h) < 1e-9:
+        centre = (px, py)
+        return centre, centre, (pad.drill or max(w, h)) / 2.0
+    radius = min(w, h) / 2.0
+    half_span = (max(w, h) - min(w, h)) / 2.0
+    # Local long-axis direction: +x when w >= h, else +y; rotate to board frame.
+    rad = math.radians(-(getattr(pad, 'rotation', 0.0) or 0.0))
+    cos_r, sin_r = math.cos(rad), math.sin(rad)
+    if w >= h:
+        ux, uy = cos_r, sin_r          # local (1, 0)
+    else:
+        ux, uy = -sin_r, cos_r         # local (0, 1)
+    p1 = (px - ux * half_span, py - uy * half_span)
+    p2 = (px + ux * half_span, py + uy * half_span)
+    return p1, p2, radius
+
+
+def pad_is_plated_through(pad) -> bool:
+    """True if the pad's hole has a PLATED copper barrel tying every copper
+    layer together (a real through-hole pin/via-in-pad). `drill > 0` alone is
+    NOT enough: an NPTH pad (`pad_type == 'np_thru_hole'`) has a hole but NO
+    copper, so treating it as an all-layer connection point invents copper
+    that isn't there (issue #328 -- a net-tied mounting hole would seed a
+    plane / offer launch layers on nothing). Use this instead of bare
+    `pad.drill > 0` wherever the question is "does this pad connect layers"."""
+    return ((getattr(pad, 'drill', 0.0) or 0.0) > 0
+            and getattr(pad, 'pad_type', '') != 'np_thru_hole')
+
+
+def pad_drill_circles(pad, step: float = 0.0) -> List[Tuple[float, float, float]]:
+    """A pad's drill hole as (x, y, diameter) circles for circle-based hole
+    keep-outs (obstacle maps, via hole-to-hole tests).
+
+    Round drills yield the single (x, y, drill) circle -- identical to the old
+    behaviour. Slot drills yield circles of the slot's SHORT dimension sampled
+    along the capsule axis (default spacing radius/2, max union sag ~3%% of the
+    radius), so the keep-out follows the real slot instead of a long-axis disc.
+    """
+    p1, p2, r = pad_drill_capsule(pad)
+    if r <= 0:
+        return []
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    span = math.hypot(dx, dy)
+    if span < 1e-9:
+        return [(p1[0], p1[1], 2.0 * r)]
+    if step <= 0:
+        step = r / 2.0
+    n = max(1, int(math.ceil(span / step)))
+    return [(p1[0] + dx * (i / n), p1[1] + dy * (i / n), 2.0 * r)
+            for i in range(n + 1)]
 
 
 def _resolve_pad_rect(size_x: float, size_y: float,
@@ -350,6 +686,20 @@ def _resolve_pad_rect(size_x: float, size_y: float,
     g = (-pad_rotation_deg) % 180.0          # global-frame tilt, folded to [0,180)
     rect_rotation = g if g <= 90.0 else g - 180.0
     return size_x, size_y, rect_rotation
+
+
+def _unescape_kicad_string(s: str) -> str:
+    """Undo KiCad s-expression string escapes (backslash and quote).
+
+    The file stores net names like ROT_RDY\\ROT_GPIO0 with the backslash
+    escaped; pcbnew returns the unescaped name, so keeping the raw text made
+    every such net name diff between the two parsers. Applied to DISPLAY
+    names only -- name_to_id lookups key on the raw file text, which every
+    in-file reference shares.
+    """
+    if '\\' not in s:
+        return s
+    return s.replace('\\\\', '\\').replace('\\"', '"')
 
 
 def find_matching_paren(content: str, open_idx: int) -> int:
@@ -444,13 +794,15 @@ def extract_layers(content: str) -> BoardInfo:
     # Extract board bounds from Edge.Cuts
     bounds = extract_board_bounds(content)
 
-    # Extract board outline polygon and cutouts for non-rectangular boards
-    outline, cutouts = extract_board_contours(content)
+    # Extract board outline polygon(s) and cutouts for non-rectangular boards
+    outers, cutouts = extract_board_contours(content)
 
     # Extract stackup information
     stackup = extract_stackup(content)
 
-    return BoardInfo(layers=layers, copper_layers=copper_layers, board_bounds=bounds, stackup=stackup, board_outline=outline, board_cutouts=cutouts)
+    return BoardInfo(layers=layers, copper_layers=copper_layers, board_bounds=bounds,
+                     stackup=stackup, board_outline=(outers[0] if outers else []),
+                     board_outlines=outers, board_cutouts=cutouts)
 
 
 def extract_stackup(content: str) -> List[StackupLayer]:
@@ -563,6 +915,17 @@ def _arc_to_segments(start: Tuple[float, float], mid: Tuple[float, float],
         # CW direction, sweep is negative
         sweep = end_ccw - 2 * math.pi
 
+    # Adaptive resolution: cap the chord sag at ~5um so a large-radius,
+    # wide-sweep arc (nebula_watch's ~350deg, r~20mm watch outline) doesn't
+    # under-reach its true extremes -- 16 fixed segments left the board
+    # outline 57um short of the real bounding box. Small arcs keep the old
+    # cost; the count is capped to stay bounded on huge radii.
+    if radius > 0:
+        max_step = 2.0 * math.acos(max(-1.0, min(1.0, 1.0 - 0.005 / radius)))
+        if max_step > 0:
+            num_segments = max(num_segments,
+                               min(512, int(math.ceil(abs(sweep) / max_step))))
+
     # Generate points along the arc, using exact start/end to preserve chaining
     points = [start]
     for i in range(1, num_segments):
@@ -583,11 +946,119 @@ def _arc_to_segments(start: Tuple[float, float], mid: Tuple[float, float],
 # token. A plain `.*?` gap let a silk/fab gr_* element match across element
 # boundaries to a later Edge.Cuts token, consuming the real edge elements in
 # between (issue #77). Shared by the Edge.Cuts and guide-corridor readers.
-_GR_ELEMENT_GAP = r'(?:(?!\(gr_)[\s\S])*?'
+# ... and must not cross a (layer ...)/(layers ...) tag either: the first
+# layer tag after an element's fields is that element's own layer, so allowing
+# the gap to run past one lets a layer-less element (e.g. a pad-primitive
+# gr_line) borrow a LATER element's layer tag and materialize as a phantom
+# board graphic.
+_GR_ELEMENT_GAP = r'(?:(?!\(gr_|\(layers?\b)[\s\S])*?'
+
+
+def _mask_pad_primitives(content: str) -> str:
+    """Blank out pad ``(primitives ...)`` blocks before board-level graphic scans.
+
+    Custom pads draw their copper with gr_line/gr_arc/gr_poly PRIMITIVES. The
+    board-level gr_* scanners (Edge.Cuts bounds/outline, guide corridors,
+    keepouts) regex over the whole file with a gap that only refuses to cross
+    another ``(gr_`` token -- so a primitive's coordinates could be stitched to
+    a LATER element's layer tag (comexpress7: a thermal-spoke gr_line inside an
+    F.Paste aperture pad + a footprint fp_line's ``(layer "User.1")`` = a
+    phantom guide path with pad-local coordinates). Masking the primitives
+    blocks keeps those scans to real board graphics. Returns content unchanged
+    when there are no primitives.
+    """
+    out = []
+    pos = 0
+    for m in re.finditer(r'\(primitives\b', content):
+        if m.start() < pos:
+            continue
+        end = find_matching_paren(content, m.start())
+        if end <= m.start():
+            continue
+        out.append(content[pos:m.start()])
+        # Leave a (gr_ barrier token in place of the block: the gr_* scanners'
+        # gap regex refuses to cross (gr_ tokens, and blanking the primitives
+        # entirely would REMOVE barriers that stopped an earlier element's
+        # scan from bridging across this pad.
+        barrier = '(gr_masked)'
+        pad_len = end - m.start()
+        out.append(barrier + ' ' * (pad_len - len(barrier)) if pad_len >= len(barrier)
+                   else ' ' * pad_len)
+        pos = end
+    if not out:
+        return content
+    out.append(content[pos:])
+    return ''.join(out)
+
+
+def _footprint_edge_points(content: str) -> List[Tuple[float, float]]:
+    """GLOBAL points of footprint-embedded Edge.Cuts shapes (fp_line/fp_rect/
+    fp_arc/fp_circle/fp_poly), transformed by each footprint's (at x y rot).
+
+    Some boards keep their entire outline inside a footprint (Adiuvo's
+    rp2350_fpga_eensy: fp_lines on Edge.Cuts in an outline footprint); a
+    board-level gr_* scan alone reports no bounds, which silently disables
+    the routing edge keep-out. KiCad's own edges bounding box includes
+    footprint shapes, so these points belong in board_bounds."""
+    pts: List[Tuple[float, float]] = []
+    if '"Edge.Cuts"' not in content:
+        return pts
+    for m in re.finditer(r'\(footprint\s+"', content):
+        start = m.start()
+        end = find_matching_paren(content, start)
+        fp_text = content[start:end]
+        if '"Edge.Cuts"' not in fp_text:
+            continue
+        at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)', fp_text)
+        if not at_match:
+            continue
+        fx, fy = float(at_match.group(1)), float(at_match.group(2))
+        frot = float(at_match.group(3)) if at_match.group(3) else 0.0
+        local: List[Tuple[float, float]] = []
+        for sm in re.finditer(
+                r'\(fp_(line|rect)\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+                r'\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP +
+                r'\(layer\s+"Edge\.Cuts"\)', fp_text, re.DOTALL):
+            x1, y1, x2, y2 = (float(sm.group(i)) for i in range(2, 6))
+            if sm.group(1) == 'rect':
+                # all four corners: under rotation the rect tilts, and the
+                # two derived corners bound it where start/end alone don't
+                local += [(x1, y1), (x2, y2), (x1, y2), (x2, y1)]
+            else:
+                local += [(x1, y1), (x2, y2)]
+        for sm in re.finditer(
+                r'\(fp_arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+                r'\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+                r'\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP +
+                r'\(layer\s+"Edge\.Cuts"\)', fp_text, re.DOTALL):
+            sx, sy, mx, my, ex, ey = (float(sm.group(i)) for i in range(1, 7))
+            for seg in _arc_to_segments((sx, sy), (mx, my), (ex, ey)):
+                local += list(seg)
+        for lx, ly in local:
+            pts.append(local_to_global(fx, fy, frot, lx, ly))
+        for sm in re.finditer(
+                r'\(fp_circle\s+\(center\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+                r'\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP +
+                r'\(layer\s+"Edge\.Cuts"\)', fp_text, re.DOTALL):
+            cx, cy, ex, ey = (float(sm.group(i)) for i in range(1, 5))
+            r = math.hypot(ex - cx, ey - cy)
+            gcx, gcy = local_to_global(fx, fy, frot, cx, cy)
+            # circle bounds are rotation-invariant about the moved center
+            pts += [(gcx - r, gcy - r), (gcx + r, gcy + r)]
+        for pm in re.finditer(r'\(fp_poly\s*\(pts', fp_text):
+            p_end = find_matching_paren(fp_text, pm.start())
+            poly_text = fp_text[pm.start():p_end]
+            if not re.search(r'\(layer\s+"Edge\.Cuts"\)', poly_text):
+                continue
+            for xm in re.finditer(r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)', poly_text):
+                pts.append(local_to_global(fx, fy, frot,
+                                           float(xm.group(1)), float(xm.group(2))))
+    return pts
 
 
 def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, float]]:
     """Extract board outline bounds from Edge.Cuts layer."""
+    content = _mask_pad_primitives(content)  # pad primitives are not board graphics
     min_x = min_y = float('inf')
     max_x = max_y = float('-inf')
     found = False
@@ -637,19 +1108,54 @@ def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, fl
         if poly:
             found = True
 
+    # Footprint-embedded Edge.Cuts (fp_* shapes, transformed to global):
+    # boards whose outline lives in a footprint otherwise report no bounds
+    # and route with no edge keep-out. Mirrored in build_pcb_data_from_board.
+    for px, py in _footprint_edge_points(content):
+        min_x = min(min_x, px)
+        max_x = max(max_x, px)
+        min_y = min(min_y, py)
+        max_y = max(max_y, py)
+        found = True
+
     if found:
         return (min_x, min_y, max_x, max_y)
     return None
 
 
+def _bezier_to_segments(p0, p1, p2, p3, num_segments: int = 16):
+    """Cubic bezier -> consecutive line segments (de Casteljau sampling)."""
+    pts = []
+    for i in range(num_segments + 1):
+        t = i / num_segments
+        mt = 1.0 - t
+        x = (mt ** 3) * p0[0] + 3 * (mt ** 2) * t * p1[0] + 3 * mt * (t ** 2) * p2[0] + (t ** 3) * p3[0]
+        y = (mt ** 3) * p0[1] + 3 * (mt ** 2) * t * p1[1] + 3 * mt * (t ** 2) * p2[1] + (t ** 3) * p3[1]
+        pts.append((x, y))
+    return list(zip(pts, pts[1:]))
+
+
+def _circle_to_segments(cx, cy, r, num_segments: int = 64):
+    """Circle -> closed ring of line segments."""
+    pts = [(cx + r * math.cos(2 * math.pi * k / num_segments),
+            cy + r * math.sin(2 * math.pi * k / num_segments))
+           for k in range(num_segments + 1)]
+    return list(zip(pts, pts[1:]))
+
+
 def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
     """Parse all gr_line, gr_arc, and gr_rect segments on Edge.Cuts from file content."""
+    content = _mask_pad_primitives(content)  # pad primitives are not board graphics
     segments = []
 
     # gr_line
     line_pattern = r'\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)'
     for m in re.finditer(line_pattern, content, re.DOTALL):
         x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
+        # Skip degenerate zero-length lines (matches the pcbnew extraction):
+        # zynq_ad9364 has dot-lines on Edge.Cuts that only duplicate vertices.
+        if abs(x2 - x1) < 0.001 and abs(y2 - y1) < 0.001:
+            continue
         segments.append(((x1, y1), (x2, y2)))
 
     # gr_arc - approximate as polyline
@@ -674,11 +1180,90 @@ def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float],
         for i in range(len(poly)):
             segments.append((poly[i], poly[(i + 1) % len(poly)]))
 
+    # gr_curve - cubic bezier corner/edge (#304: crkbd's outline corners are
+    # 100 gr_curves; without them the outline never chains closed, the halves'
+    # small slots masquerade as the whole outline, and every track "leaves the
+    # board"). Control points are (pts (xy)x4) in GLOBAL coords.
+    curve_pattern = (r'\(gr_curve\s+\(pts\s+'
+                     r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)\s*\(xy\s+([\d.-]+)\s+([\d.-]+)\)\s*'
+                     r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)\s*\(xy\s+([\d.-]+)\s+([\d.-]+)\)\s*\)'
+                     + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)')
+    for m in re.finditer(curve_pattern, content, re.DOTALL):
+        g = [float(v) for v in m.groups()]
+        segments.extend(_bezier_to_segments((g[0], g[1]), (g[2], g[3]),
+                                            (g[4], g[5]), (g[6], g[7])))
+
+    # gr_circle - a standalone ring (mounting hole / round cutout)
+    circle_pattern = (r'\(gr_circle\s+\(center\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+                      r'\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP
+                      + r'\(layer\s+"Edge\.Cuts"\)')
+    for m in re.finditer(circle_pattern, content, re.DOTALL):
+        cx, cy, ex, ey = (float(v) for v in m.groups())
+        r = math.hypot(ex - cx, ey - cy)
+        if r > 1e-6:
+            segments.extend(_circle_to_segments(cx, cy, r))
+
+    # Footprint-embedded Edge.Cuts (#304): reversible split keyboards draw
+    # per-LED cutout windows as fp_lines on Edge.Cuts inside the LED
+    # footprints (crkbd: 184 of them). File-local coords are already
+    # side-resolved; transform = footprint position + rotation with the KiCad
+    # negate convention (verified against pcbnew GraphicalItems on crkbd
+    # LED16, flipped + rot 180).
+    segments.extend(_collect_footprint_edge_segments(content))
+
     return segments
+
+
+def _collect_footprint_edge_segments(content: str):
+    """Edge.Cuts fp_line/fp_arc/fp_circle/fp_rect segments inside footprints,
+    transformed to global coordinates (issue #304)."""
+    out = []
+    for fm in re.finditer(r'\(footprint\s+"[^"]*"', content):
+        end = find_matching_paren(content, fm.start())
+        block = content[fm.start():end]
+        if '"Edge.Cuts"' not in block:
+            continue
+        at = re.search(r'\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)', block)
+        if not at:
+            continue
+        fx, fy = float(at.group(1)), float(at.group(2))
+        rot = float(at.group(3)) if at.group(3) else 0.0
+        rad = math.radians(-rot)
+        cos_r, sin_r = math.cos(rad), math.sin(rad)
+
+        def to_g(x, y):
+            return (fx + x * cos_r - y * sin_r, fy + x * sin_r + y * cos_r)
+
+        gap = _GR_ELEMENT_GAP
+        for m in re.finditer(r'\(fp_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)'
+                             + gap + r'\(layer\s+"Edge\.Cuts"\)', block, re.DOTALL):
+            a = to_g(float(m.group(1)), float(m.group(2)))
+            b = to_g(float(m.group(3)), float(m.group(4)))
+            if abs(b[0] - a[0]) >= 0.001 or abs(b[1] - a[1]) >= 0.001:
+                out.append((a, b))
+        for m in re.finditer(r'\(fp_rect\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)'
+                             + gap + r'\(layer\s+"Edge\.Cuts"\)', block, re.DOTALL):
+            x1, y1, x2, y2 = (float(v) for v in m.groups())
+            c = [to_g(x1, y1), to_g(x2, y1), to_g(x2, y2), to_g(x1, y2)]
+            out.extend([(c[0], c[1]), (c[1], c[2]), (c[2], c[3]), (c[3], c[0])])
+        for m in re.finditer(r'\(fp_arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)'
+                             + gap + r'\(layer\s+"Edge\.Cuts"\)', block, re.DOTALL):
+            g = [float(v) for v in m.groups()]
+            for p1, p2 in _arc_to_segments((g[0], g[1]), (g[2], g[3]), (g[4], g[5])):
+                out.append((to_g(*p1), to_g(*p2)))
+        for m in re.finditer(r'\(fp_circle\s+\(center\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)'
+                             + gap + r'\(layer\s+"Edge\.Cuts"\)', block, re.DOTALL):
+            cx, cy, ex, ey = (float(v) for v in m.groups())
+            r = math.hypot(ex - cx, ey - cy)
+            if r > 1e-6:
+                for p1, p2 in _circle_to_segments(cx, cy, r):
+                    out.append((to_g(*p1), to_g(*p2)))
+    return out
 
 
 def _parse_gr_polys_on_layer(content: str, layer: str) -> List[List[Tuple[float, float]]]:
     """Return the vertex list of every gr_poly drawn on the given layer."""
+    content = _mask_pad_primitives(content)  # pad primitives are not board graphics
     layer_re = re.escape(layer)
     pattern = (
         r'\(gr_poly\s+\(pts\s+((?:\(xy\s+[\d.-]+\s+[\d.-]+\)\s*)+)\)'
@@ -705,6 +1290,7 @@ def parse_guide_paths(content: str, layer: str) -> List["GuidePath"]:
     Returns:
         List of GuidePath (mm coordinates). Empty if none found.
     """
+    content = _mask_pad_primitives(content)  # pad primitives are not board graphics
     layer_re = re.escape(layer)
     paths: List[GuidePath] = []
 
@@ -775,6 +1361,7 @@ def parse_keepout_zones(content: str, layer: str) -> List["GuidePath"]:
     Returns:
         List of closed GuidePath (mm coordinates). Empty if none found.
     """
+    content = _mask_pad_primitives(content)  # pad primitives are not board graphics
     layer_re = re.escape(layer)
     zones: List[GuidePath] = []
 
@@ -873,8 +1460,33 @@ def _chain_segments_into_contours(segments: List[Tuple[Tuple[float, float], Tupl
                 by = int(pt[1] / bucket_size)
                 seg_buckets[(bx, by)].append(i)
 
-        polygon = [group_segs[0][0], group_segs[0][1]]
-        used = {0}
+        # Loose ends = endpoints with no partner within tol. A group with
+        # exactly two is an OPEN chain: KiCad's outline assembler
+        # (ConvertOutlineToPolygon) closes it straight back to its start
+        # rather than discarding it -- bus_pirate5's two panel slots close
+        # across a 60mm synthesized edge. Walk such a chain from a loose
+        # end (starting mid-chain consumes only one side and drops the
+        # group); the self-intersection guard below then mirrors pcbnew's
+        # normalization dropping sliver rings whose closure crosses their
+        # own chain (the same board's panel-frame strips).
+        endpoints = []
+        for seg in group_segs:
+            endpoints.append(seg[0])
+            endpoints.append(seg[1])
+        loose = [p for p in endpoints
+                 if sum(1 for q in endpoints if approx_equal(p, q)) == 1]
+        start_idx, start_flip = 0, False
+        if len(loose) == 2:
+            for i, seg in enumerate(group_segs):
+                if approx_equal(seg[0], loose[0]):
+                    start_idx, start_flip = i, False
+                    break
+                if approx_equal(seg[1], loose[0]):
+                    start_idx, start_flip = i, True
+                    break
+        s0 = group_segs[start_idx]
+        polygon = [s0[1], s0[0]] if start_flip else [s0[0], s0[1]]
+        used = {start_idx}
 
         max_iterations = len(group_segs) * 2
         for _ in range(max_iterations):
@@ -911,13 +1523,112 @@ def _chain_segments_into_contours(segments: List[Tuple[Tuple[float, float], Tupl
                 break
 
         # Remove duplicate closing point
+        gap_filled = False
         if len(polygon) > 1 and approx_equal(polygon[0], polygon[-1]):
             polygon = polygon[:-1]
+        elif len(loose) == 2 and len(used) == len(group_segs):
+            gap_filled = True  # open chain: ring closes polygon[-1]->polygon[0]
 
-        if len(used) == len(group_segs) and len(polygon) >= 3:
-            contours.append(polygon)
+        if len(used) != len(group_segs) or len(polygon) < 3:
+            continue
+        if gap_filled:
+            # pcbnew parity: a gap-filled ring whose synthesized closing edge
+            # properly CROSSES its own chain is a degenerate sliver (an open
+            # panel-frame strip, not a real cutout) -- polygon normalization
+            # drops it on the pcbnew side, so drop it here too. "Properly"
+            # means penetrating deeper than the chaining tolerance: a real
+            # slot's chain can graze its closure line by a sub-micron
+            # excursion at the loose ends (bus_pirate5: 0.8um), while a
+            # sliver strip oscillates across it by its full ~0.1mm width.
+            c1, c2 = polygon[-1], polygon[0]
+            clen = ((c2[0] - c1[0]) ** 2 + (c2[1] - c1[1]) ** 2) ** 0.5
+            crosses = False
+            if clen > tol:
+                ux, uy = (c2[0] - c1[0]) / clen, (c2[1] - c1[1]) / clen
+                for k in range(1, len(polygon) - 2):
+                    p1, p2 = polygon[k], polygon[k + 1]
+                    # signed perpendicular distance to the closure line
+                    s1 = (p1[0] - c1[0]) * uy - (p1[1] - c1[1]) * ux
+                    s2 = (p2[0] - c1[0]) * uy - (p2[1] - c1[1]) * ux
+                    if (s1 > 0) == (s2 > 0) or min(abs(s1), abs(s2)) <= tol:
+                        continue  # same side, or grazing shallower than tol
+                    # crossing point must lie within the closure segment
+                    t = s1 / (s1 - s2)
+                    cx = p1[0] + (p2[0] - p1[0]) * t
+                    cy = p1[1] + (p2[1] - p1[1]) * t
+                    along = (cx - c1[0]) * ux + (cy - c1[1]) * uy
+                    if tol < along < clen - tol:
+                        crosses = True
+                        break
+            if crosses:
+                continue
+            area = 0.0
+            perim = 0.0
+            for k in range(len(polygon)):
+                x1, y1 = polygon[k]
+                x2, y2 = polygon[(k + 1) % len(polygon)]
+                area += x1 * y2 - x2 * y1
+                perim += ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+            area = abs(area) / 2.0
+            # Mean-thickness sliver rule: a gap-filled ring thinner than any
+            # manufacturable cutout (fab min slot ~0.8mm) is a V-cut / tab
+            # guide LINE, not a hole -- pcbnew's normalization drops these
+            # (bus_pirate5's three panel-frame strips, 0.013-0.24mm thick,
+            # vs its real slots at ~3.8mm; the rule only applies to rings we
+            # closed OURSELVES, never to deliberately drawn thin rings).
+            if perim < tol or (2.0 * area) / perim < 0.5:
+                continue
+        contours.append(polygon)
 
     return contours
+
+
+def _pt_in_ring(x: float, y: float, ring) -> bool:
+    """Ray-cast point-in-polygon for a vertex ring."""
+    inside = False
+    n = len(ring)
+    j = n - 1
+    for i in range(n):
+        xi, yi = ring[i]
+        xj, yj = ring[j]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _classify_contours(contours):
+    """Split closed Edge.Cuts contours into (outers, cutouts) by CONTAINMENT.
+
+    The old rule -- largest contour is THE outline, everything else a cutout --
+    breaks boards with several disjoint outlines in one file (split keyboards:
+    crkbd's right half became a "cutout", so every track in it graded as a
+    board-edge violation, issue #304). A contour is a CUTOUT only if it lies
+    inside another contour; disjoint top-level contours are all outer
+    boundaries. Containment is decided by majority vote over sampled vertices
+    (robust to shared/touching vertices). Nested islands (ring inside a cutout)
+    are rare and classified as cutouts -- conservative.
+    Returns (outers sorted largest-first, cutouts).
+    """
+    def bbox_area(c):
+        xs = [p[0] for p in c]
+        ys = [p[1] for p in c]
+        return (max(xs) - min(xs)) * (max(ys) - min(ys))
+
+    outers, cutouts = [], []
+    for i, c in enumerate(contours):
+        samples = c[:: max(1, len(c) // 5)][:5]
+        contained = False
+        for j, other in enumerate(contours):
+            if j == i or len(other) < 3:
+                continue
+            votes = sum(1 for (px, py) in samples if _pt_in_ring(px, py, other))
+            if votes * 2 > len(samples):
+                contained = True
+                break
+        (cutouts if contained else outers).append(c)
+    outers.sort(key=bbox_area, reverse=True)
+    return outers, cutouts
 
 
 def extract_board_outline(content: str) -> List[Tuple[float, float]]:
@@ -927,17 +1638,18 @@ def extract_board_outline(content: str) -> List[Tuple[float, float]]:
     closed polygons. Returns the largest contour as the board outline.
     Returns an empty list if no outline is found or if it's a simple rectangle.
     """
-    outline, _ = extract_board_contours(content)
-    return outline
+    outers, _ = extract_board_contours(content)
+    return outers[0] if outers else []
 
 
-def extract_board_contours(content: str) -> Tuple[List[Tuple[float, float]], List[List[Tuple[float, float]]]]:
+def extract_board_contours(content: str) -> Tuple[List[List[Tuple[float, float]]], List[List[Tuple[float, float]]]]:
     """Extract board outline and cutout polygons from Edge.Cuts layer.
 
     Returns:
-        (outline, cutouts) where outline is the outer boundary polygon vertices
-        and cutouts is a list of interior cutout polygons.
-        outline is empty if no outline found or if it's a simple axis-aligned rectangle.
+        (outers, cutouts): outers is the list of OUTER boundary rings (largest
+        first -- several on split-keyboard/panelized boards, issue #304), and
+        cutouts the truly-contained interior rings. outers is empty if no
+        outline is found or if it's a simple axis-aligned rectangle.
     """
     segments = _collect_edge_cuts_segments(content)
 
@@ -962,17 +1674,10 @@ def extract_board_contours(content: str) -> Tuple[List[Tuple[float, float]], Lis
     if not contours:
         return [], []
 
-    # Find the largest contour by bounding box area (outer boundary)
-    def contour_bbox_area(contour):
-        xs = [p[0] for p in contour]
-        ys = [p[1] for p in contour]
-        return (max(xs) - min(xs)) * (max(ys) - min(ys))
-
-    contours.sort(key=contour_bbox_area, reverse=True)
-    outline = contours[0]
-    cutouts = contours[1:]
-
-    return outline, cutouts
+    outers, cutouts = _classify_contours(contours)
+    if not outers:
+        return [], []
+    return outers, cutouts
 
 
 def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], Dict[str, int]]:
@@ -990,12 +1695,17 @@ def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], 
         # Discover all net names from their usage in pads, segments, vias, and zones.
         # Match (net "name") anywhere in the file — deduplicate to build the net list.
         net_pattern = r'\(net\s+"([^"]*)"\)'
+        # (net "") is the canonical NO-NET (net 0), not a real net: pcbnew maps
+        # it to net code 0, so synthesizing an id for it split no-net copper
+        # onto a phantom net (comexpress7's two dangling F.Cu segments).
+        name_to_id[""] = 0
         synthetic_id = 1
         for m in re.finditer(net_pattern, content):
             net_name = m.group(1)
             if net_name in name_to_id:
                 continue  # Already seen
-            nets[synthetic_id] = Net(net_id=synthetic_id, name=net_name)
+            nets[synthetic_id] = Net(net_id=synthetic_id,
+                                     name=_unescape_kicad_string(net_name))
             name_to_id[net_name] = synthetic_id
             synthetic_id += 1
     else:
@@ -1004,7 +1714,9 @@ def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], 
         for m in re.finditer(net_pattern, content):
             net_id = int(m.group(1))
             net_name = m.group(2)
-            nets[net_id] = Net(net_id=net_id, name=net_name)
+            # Display name unescaped (pcbnew parity); raw name keeps resolving
+            # in-file references.
+            nets[net_id] = Net(net_id=net_id, name=_unescape_kicad_string(net_name))
             name_to_id[net_name] = net_id
 
     return nets, name_to_id
@@ -1026,8 +1738,11 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
 
         fp_text = content[start:end]
 
-        # Extract footprint name
-        fp_name_match = re.search(r'\(footprint\s+"([^"]+)"', fp_text)
+        # Extract footprint name. May be EMPTY: KiCad writes (footprint "")
+        # for reference-less drill/graphic footprints (thunderscope's 86 locked
+        # NPTH dots) -- requiring a non-empty name silently dropped them and
+        # their hole obstacles.
+        fp_name_match = re.search(r'\(footprint\s+"([^"]*)"', fp_text)
         if not fp_name_match:
             continue
         fp_name = fp_name_match.group(1)
@@ -1052,11 +1767,38 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
         ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
         if not ref_match:
             ref_match = re.search(r'\(fp_text\s+reference\s+"([^"]+)"', fp_text)
-        reference = ref_match.group(1) if ref_match else "?"
+        if ref_match:
+            reference = ref_match.group(1)
+        else:
+            # Reference-less footprint (e.g. a locked NPTH drill dot). The
+            # footprints dict is keyed by reference, so a shared '' / '?' key
+            # would collapse them all onto one entry and lose the rest's pads
+            # (86 NPTH holes on thunderscope). Key by the footprint's uuid --
+            # build_pcb_data_from_board synthesizes the same key, so the GUI
+            # and file models stay comparable.
+            uid_match = re.search(r'\(uuid\s+"([^"]+)"', fp_text)
+            reference = "#" + uid_match.group(1) if uid_match else "?"
 
         # Extract value (component part number or value)
         value_match = re.search(r'\(property\s+"Value"\s+"([^"]+)"', fp_text)
         value = value_match.group(1) if value_match else ""
+
+        # Extract the do-not-populate flag from the footprint (attr ...) token.
+        # KiCad 7+ writes a standalone `dnp` keyword among the attr flags
+        # (e.g. "(attr smd dnp exclude_from_pos_files)"). A no-pop part is an
+        # open circuit, so callers must not treat its pads as bridging two nets.
+        attr_match = re.search(r'\(attr\b([^)]*)\)', fp_text)
+        is_dnp = bool(attr_match and re.search(r'\bdnp\b', attr_match.group(1)))
+
+        # Footprint-level (locked yes): appears in the block header, before the
+        # first nested element. Limit the search there so a locked PAD or
+        # graphic inside the footprint doesn't read as a locked footprint.
+        _hdr_end = len(fp_text)
+        for _tok in ('(property', '(pad', '(fp_'):
+            _i = fp_text.find(_tok)
+            if _i != -1:
+                _hdr_end = min(_hdr_end, _i)
+        is_locked = bool(re.search(r'\(locked\s+yes\)', fp_text[:_hdr_end]))
 
         footprint = Footprint(
             reference=reference,
@@ -1065,12 +1807,14 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             y=fp_y,
             rotation=fp_rotation,
             layer=fp_layer,
-            value=value
+            value=value,
+            dnp=is_dnp,
+            locked=is_locked
         )
 
         # Extract pads
         # Pattern for pad: (pad "num" type shape ... (at x y [rot]) ... (size sx sy) ... (net id "name") ...)
-        pad_pattern = r'\(pad\s+"([^"]+)"\s+(\w+)\s+(\w+)(.*?)\)\s*(?=\(pad|\(model|\(zone|\Z|$)'
+        pad_pattern = r'\(pad\s+"([^"]*)"\s+(\w+)\s+(\w+)(.*?)\)\s*(?=\(pad|\(model|\(zone|\Z|$)'
 
         # Simpler approach: find pad starts and extract info
         # Note: pad number can be empty string (pad "") so use [^"]* not [^"]+
@@ -1110,22 +1854,33 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             # covers the full local extent -- conservative (may over-block the
             # empty side of an asymmetric pad) but DRC-safe; modelling only the
             # anchor lets tracks graze copper that reaches past it.
+            custom_resolved = False
             if pad_shape == 'custom':
-                ext_x, ext_y = _custom_pad_local_extent(pad_text)
-                if ext_x > 0:
-                    size_x = max(size_x, 2.0 * ext_x)
-                if ext_y > 0:
-                    size_y = max(size_y, 2.0 * ext_y)
+                # pad_rotation: the file's (at ...) angle is the pad's ABSOLUTE
+                # board angle (same convention as _custom_pad_global_polygons /
+                # _resolve_pad_rect).
+                ext_bx, ext_by = _custom_pad_board_extent(
+                    pad_text, pad_rotation, size_x, size_y)
+                if ext_bx > 0 or ext_by > 0:
+                    # Board-frame symmetric box about the anchor, matching the
+                    # pcbnew builder's convention exactly (rect_rotation 0) --
+                    # a rotated custom pad otherwise modelled a different
+                    # rectangle on the two paths.
+                    size_x, size_y = 2.0 * ext_bx, 2.0 * ext_by
+                    rect_rotation = 0.0
+                    custom_resolved = True
 
             # Resolve the pad rectangle into board space. size_x/size_y are in
-            # the pad's own frame; its absolute board orientation is the pad
-            # ``(at ...)`` angle, which already includes the footprint rotation
-            # (keying the swap on a relative angle misses pads whose footprint
-            # supplies the 90° and models them 90° off their real shape). For the
-            # common orthogonal cases bake the rotation into the dimensions so all
-            # downstream axis-aligned geometry stays exact; genuine diagonal pads
-            # keep a residual rect_rotation the obstacle/DRC geometry applies.
-            size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
+            # the pad's own frame; its absolute board orientation is
+            # total_rotation (pad + footprint), NOT pad_rotation alone — keying
+            # the swap on pad_rotation misses pads whose footprint supplies the
+            # 90° (e.g. a -135° footprint with a 225° pad lands at total 90° and
+            # was left un-swapped, modelled 90° off its real shape). For the
+            # common orthogonal cases bake the rotation into the dimensions so
+            # all downstream axis-aligned geometry stays exact; genuine diagonal
+            # pads keep a residual rect_rotation the obstacle/DRC geometry applies.
+            if not custom_resolved:
+                size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
 
             # Extract layers - use findall to get all quoted layer names
             layers_section = re.search(r'\(layers\s+([^)]+)\)', pad_text)
@@ -1137,13 +1892,13 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             net_match = re.search(r'\(net\s+(\d+)\s+"([^"]*)"\)', pad_text)
             if net_match:
                 net_id = int(net_match.group(1))
-                net_name = net_match.group(2)
+                net_name = _unescape_kicad_string(net_match.group(2))
             else:
                 # KiCad 10: (net "name") with no numeric ID
                 net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', pad_text)
                 if net_match_v10 and name_to_id:
-                    net_name = net_match_v10.group(1)
-                    net_id = name_to_id.get(net_name, 0)
+                    net_id = name_to_id.get(net_match_v10.group(1), 0)
+                    net_name = _unescape_kicad_string(net_match_v10.group(1))
                 else:
                     net_id = 0
                     net_name = ""
@@ -1159,12 +1914,27 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             # Extract drill size for through-hole pads. Oval/slot drills are
             # (drill oval w h); take max(w, h) so the pad keeps drill>0 (TH)
             # semantics instead of being misread as SMD (issue #106).
-            oval_match = re.search(r'\(drill\s+oval\s+([\d.]+)\s+([\d.]+)', pad_text)
+            oval_match = re.search(r'\(drill\s+oval\s+([\d.]+)(?:\s+([\d.]+))?', pad_text)
+            drill_w = drill_h = 0.0
             if oval_match:
-                drill_size = max(float(oval_match.group(1)), float(oval_match.group(2)))
+                # (drill oval w) with a single value is legal and means w x w
+                # (dilemma J102) -- requiring two numbers parsed it as drill 0.
+                drill_w = float(oval_match.group(1))
+                drill_h = float(oval_match.group(2)) if oval_match.group(2) else drill_w
+                drill_size = max(drill_w, drill_h)
             else:
                 drill_match = re.search(r'\(drill\s+([\d.]+)', pad_text)
                 drill_size = float(drill_match.group(1)) if drill_match else 0.0
+
+            # Pad copper offset (#324): (drill (offset x y)) displaces the
+            # pad COPPER relative to the pad anchor/hole (castellated module
+            # paddles: RPi_Pico's 3.5x1.7 SMD pads carry (offset 0.9 0)).
+            # Ignoring it modelled the copper up to its full offset away from
+            # reality -- the router laid tracks THROUGH real pad copper and
+            # check_drc graded the shorts clean (piantor).
+            offset_match = re.search(r'\(offset\s+([-\d.]+)\s+([-\d.]+)\)', pad_text)
+            pad_offset_x = float(offset_match.group(1)) if offset_match else 0.0
+            pad_offset_y = float(offset_match.group(2)) if offset_match else 0.0
 
             # Extract roundrect_rratio for roundrect pads
             rratio_match = re.search(r'\(roundrect_rratio\s+([\d.]+)\)', pad_text)
@@ -1178,6 +1948,24 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
 
             # Calculate global coordinates
             global_x, global_y = local_to_global(fp_x, fp_y, fp_rotation, local_x, local_y)
+
+            # Fold the copper offset into the pad position (#324/#325): the
+            # shifted rect IS the pad copper, so every clearance/DRC/obstacle
+            # consumer gets it for free. The offset rotates with the pad's
+            # ABSOLUTE angle (the file's (at) angle; same negate convention as
+            # local_to_global). For drilled pads the HOLE stays at the anchor:
+            # recorded in hole_x/hole_y for the drill-geometry consumers
+            # (pad_drill_capsule / through-hole cells). caravel U8 proved the
+            # drilled case is not rare: its THT pins carry a 0.3mm copper
+            # offset, and modelling the copper at the hole shipped 89 real
+            # cross-net shorts that check_drc graded clean.
+            pad_hole_x = pad_hole_y = None
+            if pad_offset_x or pad_offset_y:
+                if drill_size > 0:
+                    pad_hole_x, pad_hole_y = global_x, global_y
+                _orad = math.radians(-pad_rotation)
+                global_x += pad_offset_x * math.cos(_orad) - pad_offset_y * math.sin(_orad)
+                global_y += pad_offset_x * math.sin(_orad) + pad_offset_y * math.cos(_orad)
 
             # Custom comb/finger pads: carry the real copper polygon(s) so the
             # obstacle map / DRC model the notches instead of the bounding box
@@ -1204,11 +1992,16 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
                 rotation=total_rotation,
                 pinfunction=pinfunction,
                 pintype=pintype,
+                pad_type=pad_type,
                 drill=drill_size,
+                drill_w=drill_w,
+                drill_h=drill_h,
                 roundrect_rratio=roundrect_rratio,
                 rect_rotation=rect_rotation,
                 local_clearance=local_clearance,
-                polygons=pad_polygons
+                polygons=pad_polygons,
+                hole_x=pad_hole_x,
+                hole_y=pad_hole_y
             )
 
             footprint.pads.append(pad)
@@ -1233,7 +2026,8 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
 
     # Try KiCad 9 format first: (net <id>)
     # Strict field ordering: at → size → drill → layers → (free?) → net → uuid
-    via_pattern = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s+(?:\(free\s+(yes|no)\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
+    # (via blind ...) / (via micro ...): the type token precedes (at ...)
+    via_pattern = r'\(via\s+(?:blind\s+|micro\s+)?\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s+(?:\(free\s+(yes|no)\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
 
     for m in re.finditer(via_pattern, content, re.DOTALL):
         free_value = m.group(7)  # "yes", "no", or None
@@ -1257,7 +2051,7 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
         # name-style via when any numeric one existed (issue #79).
         # Use flexible matching between layers and net to handle new v10 fields
         # (tenting, covering, plugging, capping, filling) that appear after layers.
-        via_pattern_v10 = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\).*?\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
+        via_pattern_v10 = r'\(via\s+(?:blind\s+|micro\s+)?\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\).*?\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
         for m in re.finditer(via_pattern_v10, content, re.DOTALL):
             net_name = m.group(7)
             via = Via(
@@ -1271,8 +2065,13 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
                 free=False  # Parse free from content if present
             )
             vias.append(via)
-        # Check for free flag in matched vias
-        if vias:
+        # Check for free flag in matched vias. The free_pattern below has two
+        # DOTALL `.*?` gaps, so on a board with NO free via it backtracks from
+        # every `(via` to EOF looking for a `(free yes)` that isn't there --
+        # O(vias x filesize), ~32s on daisho's 1574 vias (issue #225). Guard on a
+        # single linear scan for the token; absent it, no via is free and
+        # free_uuids is empty (identical result).
+        if vias and re.search(r'\(free\s+yes\)', content):
             free_pattern = r'\(via\s+\(at\s+[\d.-]+\s+[\d.-]+\).*?\(free\s+yes\).*?\(uuid\s+"([^"]+)"\)'
             free_uuids = {m.group(1) for m in re.finditer(free_pattern, content, re.DOTALL)}
             for via in vias:
@@ -1362,6 +2161,108 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                         float(m.group(5)), float(m.group(6)), float(m.group(7)), m.group(8),
                         name_to_id.get(m.group(9), 0), m.group(10))
 
+    # Net-tied copper GRAPHICS (#337): KiCad renders gr_line / gr_arc drawn on
+    # a copper layer as real copper (optionally carrying a (net ...)). They are
+    # invisible as (segment) records, so without this pass both check_drc and
+    # the router's obstacle model were blind to them -- openstint's router
+    # placed a via 62um from a hand-drawn GND gr_line it could not see, and
+    # kicad-cli flagged dozens of such contacts we graded clean. Parse them
+    # into Segments tagged graphic=True (obstacle/DRC-real, never prunable).
+    def _resolve_net(tok):
+        if tok is None:
+            return 0
+        tok = tok.strip()
+        if tok.startswith('"'):
+            return name_to_id.get(tok[1:-1], 0) if name_to_id else 0
+        try:
+            return int(tok)
+        except ValueError:
+            return 0
+
+    # #337: model copper GRAPHICS (gr_line/gr_arc/gr_poly/gr_rect/gr_circle on a
+    # copper layer) as graphic=True copper. BLOCK-BASED extraction -- find each
+    # (gr_* ...) block, then pull each field from within it regardless of ORDER
+    # or extra tokens. A fixed field-order regex silently dropped a graphic with
+    # a (locked yes) token, KiCad-6/7 (tstamp ..) instead of (uuid ..), net-
+    # before-layer ordering, or extra stroke fields -- a silent miss in a
+    # "never miss real copper" pass. Lines/arcs need a real stroke (width>0);
+    # filled poly/rect/circle default the outline to the fab track width.
+    def _emit_outline(pts, w, layer, nid, uuid, closed=True):
+        if len(pts) < 2:
+            return
+        ew = w if w > 0 else defaults.TRACK_WIDTH
+        seq = pts + [pts[0]] if closed else pts
+        for a, b in zip(seq, seq[1:]):
+            segments.append(Segment(
+                start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1],
+                width=ew, layer=layer, net_id=nid, uuid=uuid, graphic=True))
+
+    def _blk_fields(blk):
+        lm = re.search(r'\(layer\s+"([^"]+)"\)', blk)
+        wm = re.search(r'\(width\s+([-\d.]+)\)', blk)
+        nm = re.search(r'\(net\s+("[^"]*"|\d+)\)', blk)
+        um = (re.search(r'\(uuid\s+"([^"]+)"\)', blk)
+              or re.search(r'\(tstamp\s+([-\w]+)\)', blk))
+        layer = lm.group(1) if lm else None
+        return (layer, float(wm.group(1)) if wm else 0.0,
+                _resolve_net(nm.group(1)) if nm else 0,
+                um.group(1) if um else '')
+
+    def _xy(blk, name):
+        m = re.search(r'\(' + name + r'\s+([-\d.]+)\s+([-\d.]+)\)', blk)
+        return (float(m.group(1)), float(m.group(2))) if m else None
+
+    for tag in ('gr_line', 'gr_arc', 'gr_poly', 'gr_rect', 'gr_circle'):
+        needle = '(' + tag
+        pos = 0
+        while True:
+            i = content.find(needle, pos)
+            if i < 0:
+                break
+            nxt = content[i + len(needle): i + len(needle) + 1]
+            if nxt and (nxt.isalnum() or nxt == '_'):
+                pos = i + len(needle)
+                continue
+            j = find_matching_paren(content, i)
+            blk = content[i:j]
+            pos = j
+            layer, w, nid, uuid = _blk_fields(blk)
+            if not layer or not layer.endswith('.Cu'):
+                continue
+            if tag == 'gr_line':
+                if w <= 0:
+                    continue
+                a, b = _xy(blk, 'start'), _xy(blk, 'end')
+                if a and b:
+                    segments.append(Segment(
+                        start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1],
+                        width=w, layer=layer, net_id=nid, uuid=uuid, graphic=True))
+            elif tag == 'gr_arc':
+                if w <= 0:
+                    continue
+                a, mid, b = _xy(blk, 'start'), _xy(blk, 'mid'), _xy(blk, 'end')
+                if a and mid and b:
+                    for p0, p1 in _arc_to_segments(a, mid, b):
+                        segments.append(Segment(
+                            start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
+                            width=w, layer=layer, net_id=nid, uuid=uuid, graphic=True))
+            elif tag == 'gr_poly':
+                pts = [(float(x), float(y)) for x, y in
+                       re.findall(r'\(xy\s+([-\d.]+)\s+([-\d.]+)\)', blk)]
+                _emit_outline(pts, w, layer, nid, uuid)
+            elif tag == 'gr_rect':
+                a, b = _xy(blk, 'start'), _xy(blk, 'end')
+                if a and b:
+                    _emit_outline([(a[0], a[1]), (b[0], a[1]),
+                                   (b[0], b[1]), (a[0], b[1])], w, layer, nid, uuid)
+            elif tag == 'gr_circle':
+                c, e = _xy(blk, 'center'), _xy(blk, 'end')
+                if c and e:
+                    r = math.hypot(e[0] - c[0], e[1] - c[1])
+                    _emit_outline([(c[0] + r * math.cos(k * math.pi / 8),
+                                    c[1] + r * math.sin(k * math.pi / 8))
+                                   for k in range(16)], w, layer, nid, uuid)
+
     return segments
 
 
@@ -1396,33 +2297,59 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
     for zone_content in _iter_zone_blocks(content):
         # Extract net id - try KiCad 9 format first, then KiCad 10
         net_match = re.search(r'\(net\s+(\d+)\)', zone_content)
+        net_match_v10 = None
         if net_match:
             net_id = int(net_match.group(1))
-        elif name_to_id:
-            # KiCad 10: (net "name") - first net reference in zone
-            net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', zone_content)
-            if not net_match_v10:
-                continue
-            net_name_v10 = net_match_v10.group(1)
-            net_id = name_to_id.get(net_name_v10, 0)
         else:
-            continue
+            # KiCad 10: (net "name") - first net reference in zone
+            if name_to_id:
+                net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', zone_content)
+            if net_match_v10:
+                net_name_v10 = net_match_v10.group(1)
+                net_id = name_to_id.get(net_name_v10, 0)
+            elif '(keepout' in zone_content:
+                continue  # rule area, not copper (the builder skips them too)
+            else:
+                # No net clause at all: a NO-NET copper pour (net 0). It still
+                # pours real copper (nitrokey/vfo_ctrl decorative fills), and
+                # pcbnew keeps it -- dropping it under-modelled the board.
+                net_id = 0
 
         # Extract net name
         net_name_match = re.search(r'\(net_name\s+"([^"]*)"\)', zone_content)
         if net_name_match:
             net_name = net_name_match.group(1)
-        elif net_match is None and name_to_id:
+        elif net_match_v10 is not None:
             # KiCad 10: net name was already captured above
             net_name = net_name_v10
         else:
             net_name = ""
 
-        # Extract layer
-        layer_match = re.search(r'\(layer\s+"([^"]+)"\)', zone_content)
-        if not layer_match:
-            continue
-        layer = layer_match.group(1)
+        # Extract layer(s). A zone can span several copper layers via
+        # (layers "F.Cu" "In2.Cu" ...) -- emit one Zone per copper layer so the
+        # obstacle/connectivity model sees its copper everywhere it exists
+        # (single-layer (layer "...") zones are the common case). Search the
+        # zone HEADER only: each (filled_polygon ...) inside the zone carries
+        # its own (layer "...") tag, which would mask the (layers ...) clause
+        # and pin a 5-layer zone to just its first filled layer.
+        _hdr_end = len(zone_content)
+        for _tok in ('(polygon', '(filled_polygon', '(keepout'):
+            _i = zone_content.find(_tok)
+            if _i != -1:
+                _hdr_end = min(_hdr_end, _i)
+        zone_header = zone_content[:_hdr_end]
+        layer_match = re.search(r'\(layer\s+"([^"]+)"\)', zone_header)
+        if layer_match:
+            zone_layers = [layer_match.group(1)]
+        else:
+            layers_match = re.search(r'\(layers\s+((?:"[^"]+"\s*)+)\)', zone_header)
+            if not layers_match:
+                continue
+            zone_layers = [l for l in re.findall(r'"([^"]+)"', layers_match.group(1))
+                           if l.endswith('.Cu') or l == '*.Cu']
+            if not zone_layers:
+                continue
+        layer = zone_layers[0]
 
         # Extract UUID
         uuid_match = re.search(r'\(uuid\s+"([^"]+)"\)', zone_content)
@@ -1454,14 +2381,14 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
         if not polygon:
             continue
 
-        zone = Zone(
-            net_id=net_id,
-            net_name=net_name,
-            layer=layer,
-            polygon=polygon,
-            uuid=uuid
-        )
-        zones.append(zone)
+        for zl in zone_layers:
+            zones.append(Zone(
+                net_id=net_id,
+                net_name=net_name,
+                layer=zl,
+                polygon=polygon,
+                uuid=uuid
+            ))
 
     return zones
 
@@ -1967,6 +2894,7 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
         board_bounds=board_bounds,
         stackup=stackup,
         board_outline=board_outline,
+        board_outlines=board_outlines,
         board_cutouts=board_cutouts
     )
 
@@ -1991,6 +2919,20 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
         fp_layer = get_layer_name(getattr(fp, "layer", None))
         fp_value = _fp_value(fp)
 
+        # DNP (do-not-populate) flag — kept at parity with the text parser. A
+        # no-pop series part is an open circuit, so its pads must not be treated
+        # as bridging two nets into one logical net. IsDNP() is KiCad 7+.
+        try:
+            fp_dnp = bool(fp.IsDNP())
+        except Exception:
+            fp_dnp = False
+
+        # Locked flag — parity with the text parser's footprint (locked yes).
+        try:
+            fp_locked = bool(fp.IsLocked())
+        except Exception:
+            fp_locked = False
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -1998,7 +2940,9 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
             y=fp_y,
             rotation=fp_rotation,
             layer=fp_layer,
-            value=fp_value
+            value=fp_value,
+            dnp=fp_dnp,
+            locked=fp_locked
         )
 
         for pad in _fp_pads(fp):
@@ -2032,14 +2976,28 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
             start_x, start_y = _vec_to_xy_mm(track.start)
             end_x, end_y = _vec_to_xy_mm(track.end)
             net_id, _ = resolve_net(getattr(track, "net", None))
-            seg = Segment(
-                start_x=start_x, start_y=start_y,
-                end_x=end_x, end_y=end_y,
-                width=_nm_to_mm(getattr(track, "width", 0)),
-                layer=get_layer_name(getattr(track, "layer", None)),
-                net_id=net_id,
-            )
-            segments.append(seg)
+            width = _nm_to_mm(getattr(track, "width", 0))
+            layer = get_layer_name(getattr(track, "layer", None))
+            # Arc tracks: kipy models them as a distinct ArcTrack carrying a
+            # `.mid` point (a straight Track has none). Linearize the bulge with
+            # the SAME helper the text parser uses (three defining points), so
+            # the GUI/IPC obstacle + connectivity model sees the real arc-routed
+            # copper instead of just its chord -- skipping it left the model
+            # blind to arc-routed tracks (thunderscope: ~19.5k file-only
+            # segments in validate-board). Parity with the pcbnew builder.
+            mid = getattr(track, "mid", None)
+            if mid is not None:
+                mid_x, mid_y = _vec_to_xy_mm(mid)
+                for p0, p1 in _arc_to_segments((start_x, start_y),
+                                               (mid_x, mid_y), (end_x, end_y)):
+                    segments.append(Segment(
+                        start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
+                        width=width, layer=layer, net_id=net_id))
+            else:
+                segments.append(Segment(
+                    start_x=start_x, start_y=start_y,
+                    end_x=end_x, end_y=end_y,
+                    width=width, layer=layer, net_id=net_id))
         except Exception:
             continue
 
@@ -2995,7 +3953,30 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                         tuple(sorted(p.layers)))
             b_pads = sorted(bf.pads, key=_pad_key)
             f_pads = sorted(ff.pads, key=_pad_key)
-            for bp, fp in zip(b_pads, f_pads):
+            # Sub-micron board/file coordinate differences can straddle the
+            # rounding above (e.g. -11.7875 -> -11.787 vs -11.788) and scramble
+            # the zip pairing into cascade mismatches (crkbd EXSW). Re-pair by
+            # nearest same-number pad within a small tolerance first; anything
+            # left over keeps the sorted order.
+            unmatched_f = list(f_pads)
+            pairs = []
+            leftovers_b = []
+            for bp in b_pads:
+                best = None
+                best_d = 0.02  # mm; well above float noise, below any pitch
+                for fp2 in unmatched_f:
+                    if fp2.pad_number != bp.pad_number:
+                        continue
+                    d = max(abs(fp2.global_x - bp.global_x), abs(fp2.global_y - bp.global_y))
+                    if d < best_d:
+                        best, best_d = fp2, d
+                if best is not None:
+                    unmatched_f.remove(best)
+                    pairs.append((bp, best))
+                else:
+                    leftovers_b.append(bp)
+            pairs.extend(zip(leftovers_b, unmatched_f))
+            for bp, fp in pairs:
                 if not close(bp.global_x, fp.global_x) or not close(bp.global_y, fp.global_y):
                     diffs.append(f"Footprint {ref} pad pairing mismatch (position): "
                                  f"board {bp.pad_number}@({bp.global_x:.3f},{bp.global_y:.3f}) "
@@ -3043,9 +4024,38 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
     def _q(v):
         return round(v, 3)
 
-    def _seg_sig(s):
-        ends = tuple(sorted([(_q(s.start_x), _q(s.start_y)), (_q(s.end_x), _q(s.end_y))]))
-        return (ends, _q(s.width), s.layer, s.net_id)
+    def _net_label(pcb, nid):
+        # Compare by NAME, not raw id: for nets carried only by copper
+        # GRAPHICS (#337, no pads/tracks anchor them), pcbnew's renumbered
+        # code and the file's net-table id legitimately differ (openstint
+        # /A-: board 3 vs file 14) while naming the same net.
+        n = pcb.nets.get(nid)
+        return n.name if n is not None else nid
+
+    def _seg_sig_for(pcb):
+        def _seg_sig(s):
+            ends = tuple(sorted([(_q(s.start_x), _q(s.start_y)), (_q(s.end_x), _q(s.end_y))]))
+            if getattr(s, 'graphic', False):
+                # KiCad RECOMPUTES a copper graphic's net from connectivity on
+                # load (openstint: file attribute /A-, pcbnew says GND for the
+                # same art). Same copper either way -- compare geometry only.
+                return (ends, _q(s.width), s.layer, '<graphic>')
+            return (ends, _q(s.width), s.layer, _net_label(pcb, s.net_id))
+        return _seg_sig
+
+    def _multiset_diff_2sig(board_items, file_items, sig_b, sig_f, label, fmt):
+        from collections import Counter
+        cb = Counter(sig_b(x) for x in board_items)
+        cf = Counter(sig_f(x) for x in file_items)
+        only_board = list((cb - cf).elements())
+        only_file = list((cf - cb).elements())
+        if only_board or only_file:
+            diffs.append(f"{label} count: board={len(board_items)} file={len(file_items)}; "
+                         f"{len(only_board)} only in board, {len(only_file)} only in file")
+            for s in only_board[:5]:
+                diffs.append(f"  {label} only in board: {fmt(s)}")
+            for s in only_file[:5]:
+                diffs.append(f"  {label} only in file: {fmt(s)}")
 
     def _multiset_diff(board_items, file_items, sig, label, fmt):
         from collections import Counter
@@ -3061,8 +4071,9 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
             for s in only_file[:5]:
                 diffs.append(f"  {label} only in file: {fmt(s)}")
 
-    _multiset_diff(from_board.segments, from_file.segments, _seg_sig, "Segment",
-                   lambda s: f"ends={s[0]} w={s[1]} layer={s[2]} net={s[3]}")
+    _multiset_diff_2sig(from_board.segments, from_file.segments,
+                        _seg_sig_for(from_board), _seg_sig_for(from_file), "Segment",
+                        lambda s: f"ends={s[0]} w={s[1]} layer={s[2]} net={s[3]}")
 
     # --- Compare vias (geometry, not just count) ---
     def _via_sig(v):
@@ -3095,6 +4106,11 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
     cut_f = bi_f.board_cutouts or []
     if len(cut_b) != len(cut_f):
         diffs.append(f"Board cutout count: board={len(cut_b)} file={len(cut_f)}")
+    # Multi-outline boards (#304): both sides must agree on the OUTER ring set
+    outs_b = sorted(len(o) for o in (getattr(bi_b, 'board_outlines', None) or []))
+    outs_f = sorted(len(o) for o in (getattr(bi_f, 'board_outlines', None) or []))
+    if outs_b != outs_f:
+        diffs.append(f"Board outer-ring set: board={outs_b} file={outs_f}")
 
     # --- Compare keepout zones (routing obstacles) ---
     kz_b = from_board.keepout_zones or []
@@ -3379,19 +4395,28 @@ def detect_bga_pitch(footprint: Footprint) -> float:
     return 1.0
 
 
-def auto_detect_bga_exclusion_zones(pcb_data: 'PCBData', margin: float = 0.5) -> List[Tuple[float, float, float, float, float]]:
+def auto_detect_bga_exclusion_zones(pcb_data: 'PCBData', margin: float = 0.0) -> List[Tuple[float, float, float, float, float]]:
     """
     Auto-detect BGA exclusion zones from all BGA components in the PCB.
 
     Via placement should be avoided inside BGA packages to prevent shorts
     with the BGA balls.
 
+    The zone is anchored to the BGA's PAD bounding box (get_footprint_bounds is
+    pad-edge based), not the courtyard, and defaults to margin=0 so the zone ends
+    exactly at the edge of the outermost pads. The fanout escapes every pad to a
+    stub that exits PAST the pad edge (>= (pitch - pad_size)/2, and ideally
+    BGA_EXIT_MARGIN), so a pad-edge zone leaves those stub tips in open copper --
+    a coupled/single-ended leg can then attach to a tip outside the keep-out
+    instead of being marooned inside it. The old margin=0.5 pushed the zone ~0.3mm
+    PAST where the escapes exit, burying the tips (issue #243).
+
     Returns zones as 5-tuples: (min_x, min_y, max_x, max_y, edge_tolerance)
     where edge_tolerance = margin + pitch * 1.1 (pitch + 10%)
 
     Args:
         pcb_data: Parsed PCB data
-        margin: Extra margin around BGA bounds (in mm)
+        margin: Extra margin around the pad bounding box (in mm); 0 = end at pad edge
 
     Returns:
         List of (min_x, min_y, max_x, max_y, edge_tolerance) tuples for each BGA

@@ -1,6 +1,7 @@
 """
 Collision detection utilities for BGA fanout routing.
 """
+from __future__ import annotations
 
 import math
 from typing import Tuple, List, Dict, Set
