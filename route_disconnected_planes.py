@@ -537,7 +537,12 @@ def route_planes(
     # (max_search_radius, the --max-search-radius CLI value) so a boxed pad whose
     # nearest existing same-net via sits past a smaller cap is still reachable
     # (issue #180: castor_pollux U5.4's nearest GND via was at 4.62mm).
-    distant_radius = max_search_radius if rip_blocker_nets else 0.0
+    # Without --rip-blocker-nets the trace step still runs at STRAP scale
+    # (issue #349): an unconnected pad adjacent to an already-repaired same-net
+    # pad straps to it instead of drilling another via, so a fine-pitch pad
+    # cluster shares one via + short straps.
+    distant_radius = (max_search_radius if rip_blocker_nets
+                      else min(max_search_radius, defaults.PLANE_PAD_STRAP_RADIUS))
 
     for net_id, (net_name, net_zone_layers) in unique_nets.items():
         if cancel_check and cancel_check():

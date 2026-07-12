@@ -2229,6 +2229,7 @@ def create_plane(
         new_segments = []
         vias_placed = 0
         vias_reused = 0
+        pads_strapped = 0
         traces_added = 0
         failed_pads = 0
         ripped_net_ids: List[int] = []  # Nets ripped for this net
@@ -2353,6 +2354,64 @@ def create_plane(
                     vias_reused += 1
                     print(f"reused nearby via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {dist:.2f}mm away")
                     processed_pad_ids.add(current_pad_key)
+                    continue
+
+            # Issue #349: before drilling, strap to an ADJACENT same-net pad that
+            # is already plane-connected (processed earlier this run, or a plated
+            # through-hole). Adjacent same-net pad clusters (fine-pitch power
+            # pins, GND rows) then share ONE via plus short pad-layer straps
+            # instead of a via per pad -- fewer drills and less via congestion
+            # near connectors (the #347/#348 corridor-contention class). The
+            # strap uses the same obstacle-aware trace as via reuse, so a strap
+            # that doesn't fit falls through to normal via placement below.
+            if pad_layer:
+                strap_cands = []
+                for npad in pcb_data.pads_by_net.get(net_id, []):
+                    nkey = (npad.global_x, npad.global_y)
+                    if nkey == current_pad_key:
+                        continue
+                    if not (nkey in processed_pad_ids or pad_is_plated_through(npad)):
+                        continue
+                    if not (pad_layer in npad.layers
+                            or any(l.startswith('*') for l in npad.layers)
+                            or pad_is_plated_through(npad)):
+                        continue
+                    d = ((npad.global_x - pad.global_x) ** 2 +
+                         (npad.global_y - pad.global_y) ** 2) ** 0.5
+                    if d > defaults.PLANE_PAD_STRAP_RADIUS:
+                        continue
+                    # Anchor the strap on the neighbour's VIA when one sits in
+                    # its pad copper (via-in-pad taps land off-center): the
+                    # connectivity graph follows exact endpoint/via keys, so a
+                    # strap ending at the pad CENTER next to an off-center
+                    # in-pad via reads as unconnected and gets re-tapped by the
+                    # repair pass. A plated through-hole neighbour conducts at
+                    # its center (barrel), so the center is the right anchor.
+                    npos = nkey
+                    if not pad_is_plated_through(npad):
+                        nv = via_index.find_nearest(
+                            npad.global_x, npad.global_y,
+                            max(npad.size_x, npad.size_y) / 2)
+                        if nv is not None:
+                            npos = nv
+                    strap_cands.append((d, npos))
+                strapped = False
+                for d, npos in sorted(strap_cands):
+                    routing_obs = get_routing_obstacles(pad_layer)
+                    route_result = route_via_to_pad(npos, pad, pad_layer, net_id,
+                                                    routing_obs, config, verbose=verbose,
+                                                    return_blocked_cells=True,
+                                                    router=via_pad_router)
+                    if route_result.success and route_result.segments:
+                        new_segments.extend(route_result.segments)
+                        traces_added += len(route_result.segments)
+                        pads_strapped += 1
+                        print(f"strapped to same-net pad at ({npos[0]:.2f}, {npos[1]:.2f}), "
+                              f"{d:.2f}mm away, {len(route_result.segments)} segment(s), no via (#349)")
+                        processed_pad_ids.add(current_pad_key)
+                        strapped = True
+                        break
+                if strapped:
                     continue
 
             # Next, try to place via within pad boundary (preferred - no trace needed)
@@ -2786,6 +2845,8 @@ def create_plane(
             print(f"  Zone created on {plane_layer}{suffix}")
         print(f"  New vias placed: {vias_placed}")
         print(f"  Existing vias reused: {vias_reused}")
+        if pads_strapped > 0:
+            print(f"  Pads strapped to adjacent same-net pads (no via, #349): {pads_strapped}")
         print(f"  Traces added: {traces_added}")
         if failed_pads > 0:
             print(f"  Failed pads: {failed_pads}")

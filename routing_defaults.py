@@ -164,6 +164,9 @@ PLANE_MIN_THICKNESS = 0.1  # mm - minimum zone copper thickness
 PLANE_EDGE_CLEARANCE = 0.5  # mm - zone clearance from board edge
 PLANE_MAX_SEARCH_RADIUS = 10.0  # mm - max radius to search for via position
 PLANE_MAX_VIA_REUSE_RADIUS = 1.0  # mm - max radius to reuse existing via
+PLANE_PAD_STRAP_RADIUS = 1.5  # mm - max distance to strap a plane pad to an
+                              # adjacent already-connected same-net pad instead
+                              # of drilling another via (issue #349)
 PLANE_MAX_RIP_NETS = 3  # max blocker nets to rip up
 PLANE_TRACK_VIA_CLEARANCE = 0.8  # mm - clearance from track center to other nets' via centers
 SAME_NET_PAD_CLEARANCE = -1.0  # mm - edge-to-edge clearance between via and same-net pads
