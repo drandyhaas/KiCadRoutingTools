@@ -60,13 +60,29 @@ def main():
     escaped_nets = {t["net_id"] for t in tracks} | {v["net_id"] for v in vias}
     checks.append((f"{RAIL} rail is fanned (not skipped as a phantom plane)",
                    rail_nid in escaped_nets))
-    # Every +2V5 ball drops a via-in-pad in the under-pad escape.
+    # Every +2V5 ball must carry rail copper it can actually reach: an escape
+    # via in the pad, or (escape priority, #129) a same-net strap on the
+    # ball's own layer. The #218 regression this guards against was balls
+    # silently left with NOTHING (phantom-plane skip).
     via_pts = [(v["x"], v["y"]) for v in vias if v["net_id"] == rail_nid]
-    escaped_balls = sum(
-        any(abs(vx - p.global_x) < 0.3 and abs(vy - p.global_y) < 0.3
-            for vx, vy in via_pts)
-        for p in rail_pads)
-    checks.append((f"all {len(rail_pads)} {RAIL} balls got an escape via",
+
+    def _ball_connected(p):
+        if any(abs(vx - p.global_x) < 0.3 and abs(vy - p.global_y) < 0.3
+               for vx, vy in via_pts):
+            return True
+        pl = next((l for l in (p.layers or [])
+                   if l.endswith(".Cu") and not l.startswith("*")), None)
+        return any(
+            t["net_id"] == rail_nid and (pl is None or t["layer"] == pl) and (
+                (abs(t["start"][0] - p.global_x) < 0.3
+                 and abs(t["start"][1] - p.global_y) < 0.3)
+                or (abs(t["end"][0] - p.global_x) < 0.3
+                    and abs(t["end"][1] - p.global_y) < 0.3))
+            for t in tracks)
+
+    escaped_balls = sum(_ball_connected(p) for p in rail_pads)
+    checks.append((f"all {len(rail_pads)} {RAIL} balls carry reachable rail "
+                   f"copper (escape via or #129 strap)",
                    escaped_balls == len(rail_pads)))
     # The excluded planes must still be skipped (kept as obstacles, not fanned).
     gnd_nid = next((p.net_id for p in fp.pads if p.net_name == "GND"), None)

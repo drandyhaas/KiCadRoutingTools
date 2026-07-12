@@ -1,4 +1,12 @@
-ef4b285 2026-07-12 audited 8b41e5a..HEAD (18 commits); 0 gaps found.
+f2dcd12 2026-07-12 audited 8b41e5a..HEAD (18 commits); 0 gaps found.
+
+ADDENDUM (post-audit, same day): the #129 same_net_escapes design this
+audit verified was REPLACED by the parameterless escape-priority redo
+(the commit FOLLOWING this marker; history squashed). No CLI flag, no
+GUI control, no engine kwarg -- the parity surface is unchanged and the
+no-wx gates were re-run green after the redo. The same_net_escapes
+threading notes below describe the audited-then, now-removed design;
+the next audit picks up from this marker and covers the redo commit.
 
 Small range, one new engine param. Method: git log/diff over the range on the
 CLI scripts + kicad_routing_plugin/, classify every hunk by location (engine

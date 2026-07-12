@@ -28,7 +28,7 @@ from __future__ import annotations
 import heapq
 import math
 from collections import Counter
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from kicad_parser import Footprint, PCBData
 from bga_fanout.types import BGAGrid
@@ -218,7 +218,8 @@ def generate_underpad_escape(footprint: Footprint,
                              outer_rings: float = 2.0,
                              keepout_margin: float = 0.0,
                              verbose: bool = True,
-                             grid_step: float = 0.0
+                             grid_step: float = 0.0,
+                             only_pad_keys: Optional[Set[Tuple[float, float]]] = None
                              ) -> Tuple[List[Dict], List[Dict], List[str]]:
     """Route BGA signal balls to the boundary under the pad field.
 
@@ -284,10 +285,16 @@ def generate_underpad_escape(footprint: Footprint,
                 break
 
     plane_pads = [p for p in fp_pads if is_plane(p)]
+    # only_pad_keys (issue #129 escape priority): when given, membership is
+    # authoritative -- fan exactly these balls, even if their net already has
+    # fanout copper (the priority pass fanned the net's primary ball; this
+    # pass adds escapes for the remaining balls).
     signal_pads = [p for p in fp_pads
                    if not is_plane(p) and not is_nc(p)
-                   and p.net_id not in fanned_net_ids
-                   and (net_filter_fn is None or net_filter_fn(p.net_name))]
+                   and (net_filter_fn is None or net_filter_fn(p.net_name))
+                   and ((p.global_x, p.global_y) in only_pad_keys
+                        if only_pad_keys is not None
+                        else p.net_id not in fanned_net_ids)]
 
     # Region: BGA bbox plus margin so routes can exit past the boundary.
     # Grid resolution defaults to ~1/32 of the pitch - fine enough to place the
@@ -374,9 +381,13 @@ def generate_underpad_escape(footprint: Footprint,
             continue
         if not (bounds[0] <= s.start_x <= bounds[2] and bounds[1] <= s.start_y <= bounds[3]):
             continue
-        if s.net_id in route_net_ids:
-            continue  # our own future nets - don't preblock (fanned nets are NOT
-                      # in this set, so their existing copper IS kept as obstacle)
+        if s.net_id in route_net_ids and only_pad_keys is None:
+            # our own future nets - don't preblock (fanned nets are NOT in this
+            # set, so their existing copper IS kept as obstacle). In an escape-
+            # priority extras pass (#129, only_pad_keys set) the set nets'
+            # existing copper is their PASS-1 primary escape -- real committed
+            # copper every extra (own net included) must route clear of.
+            continue
         li = layers.index(s.layer)
         occ.block_segment(li, (s.start_x, s.start_y), (s.end_x, s.end_y),
                           s.width / 2 + track_width / 2 + clearance)
