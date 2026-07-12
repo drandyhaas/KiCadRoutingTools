@@ -991,11 +991,39 @@ def tap_pad_with_escalation(
         # butterflies neighbouring plane pads -- measured on castor_pollux).
         # Reaching a far EXISTING via is handled separately and safely by
         # distant_trace_radius (= max_search_radius); see try_tap_pad step 1b.
-        for fine_config in fine_tap_configs(config, pad, pcb_data):
+        #
+        # Shrink the tap via to fit INSIDE a fine-pitch pad (via-in-pad),
+        # borrowing the underpad-fanout clamp (#360). A default 0.5 mm via cannot
+        # drop into a 0.4 mm-pitch WLCSP ball: its ring grazes the neighbour balls
+        # so no via site exists however fine the grid (the 6-pad completion
+        # ceiling on rp2350_fpga_eensy). Clamping the via to the pad's smallest
+        # dimension -- down to the fab via floor, escalating standard→advanced
+        # (0.25/0.15) with the SAME warning the fanout emits, and honouring an
+        # explicit --fab-tier / --fab-overrides pin -- lets the fine pass place a
+        # via-in-pad tap where a full via never fit. clamp_via_to_pad is a no-op
+        # ('fits') for pads a full via already fits, so normal taps are unchanged.
+        # Shrink BOTH the emitted via (scalar args) AND config.via_size, which
+        # find_via_position / build_via_obstacle_map use for the placement halo.
+        from bga_fanout.geometry import clamp_via_to_pad
+        from list_nets import fab_floor_ladder, warn_fab_escalation
+        fine_via_size, fine_via_drill = via_size, via_drill
+        n_layers = len(pcb_data.board_info.copper_layers) or 2
+        cvs, cvd, vstatus, vrung = clamp_via_to_pad(
+            via_size, via_drill, pad, fab_floor_ladder(n_layers))
+        # Only adopt the clamp when it genuinely produces a SMALLER via than the
+        # caller's -- a pad the caller's via already fits ('fits'), or a pad so
+        # small the clamp can't shrink below the fab floor it's already at, leaves
+        # the via unchanged and must not emit a misleading escalation warning.
+        if cvs < via_size - 1e-9:
+            fine_via_size, fine_via_drill = cvs, cvd
+            if vrung > 0:
+                warn_fab_escalation(f"plane tap {pad.component_ref}.{pad.pad_number}")
+        via_config = replace(config, via_size=fine_via_size, via_drill=fine_via_drill)
+        for fine_config in fine_tap_configs(via_config, pad, pcb_data):
             result = try_tap_pad(
                 pad, pad_layer, net_id, pcb_data, fine_config,
                 min(max_search_radius, FINE_TAP_SEARCH_RADIUS),
-                via_size, via_drill, same_net_pad_clearance,
+                fine_via_size, fine_via_drill, same_net_pad_clearance,
                 pending_pads, extra_vias, extra_segments, verbose,
                 routing_clearance_cushion=True,
                 distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse,
