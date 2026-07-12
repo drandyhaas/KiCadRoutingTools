@@ -1681,7 +1681,8 @@ def generate_bga_fanout(footprint: Footprint,
                         grid_step: float = 0.0,
                         layer_costs: Optional[List[float]] = None,
                         _pad_filter: Optional[Set[Tuple[float, float]]] = None,
-                        _ignore_prefanned: bool = False) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                        _ignore_prefanned: bool = False,
+                        _single_pass: bool = False) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """
     Generate BGA fanout tracks for a footprint.
 
@@ -1762,7 +1763,7 @@ def generate_bga_fanout(footprint: Footprint,
     #           the main router and reported.
     # Boards without multi-ball nets take a single pass, byte-identical to
     # the old behavior.
-    if _pad_filter is None:
+    if _pad_filter is None and not _single_pass:
         _nc_ids = single_pad_net_ids(footprint, pcb_data)
         _pair_nets: Set[str] = set()
         if diff_pair_patterns:
@@ -1802,19 +1803,6 @@ def generate_bga_fanout(footprint: Footprint,
             else:
                 _seen_nets.add(_p.net_id)
         if _extras:
-            # The fab-floor track clamp (issue #223) lives below this block;
-            # the strap helper and cross-pass guard must use the CLAMPED width
-            # (each recursive pass clamps its own escape copper internally).
-            from list_nets import fab_floors as _ff
-            _ncu = (len(pcb_data.board_info.copper_layers)
-                    if pcb_data.board_info.copper_layers else 2)
-            _tw = max(track_width, _ff(_ncu)['track_width'])
-            _all_keys = {(_p.global_x, _p.global_y) for _p in footprint.pads}
-            _extra_keys = {(_p.global_x, _p.global_y) for _p in _extras}
-            _n_nets = len({_p.net_id for _p in _extras})
-            print(f"  Escape priority (issue #129): {_n_nets} net(s) have "
-                  f"{len(_extras)} extra ball(s); fanning one ball per net "
-                  f"first, extra escapes second")
             _kw = dict(
                 net_filter=net_filter, diff_pair_patterns=diff_pair_patterns,
                 layers=layers, track_width=track_width, clearance=clearance,
@@ -1825,6 +1813,31 @@ def generate_bga_fanout(footprint: Footprint,
                 via_drill=via_drill, no_inner_top_layer=no_inner_top_layer,
                 escape_method=escape_method, grid_step=grid_step,
                 layer_costs=layer_costs)
+            # Coverage gate (issue #367): the legacy single pass runs FIRST.
+            # When it escapes every ball there is nothing for prioritization
+            # to improve -- reshuffling the escape competition only butterflies
+            # the downstream chain (ottercast_audio: 4 needlessly strapped
+            # balls cascaded into +10 disconnected nets). Escape priority is
+            # strictly a RESCUE for boards where the single pass drops balls.
+            t0, v0, vr0, f0 = generate_bga_fanout(
+                footprint, pcb_data, check_for_previous=check_for_previous,
+                _single_pass=True, **_kw)
+            if not f0:
+                return t0, v0, vr0, f0
+            _n_nets = len({_p.net_id for _p in _extras})
+            print(f"  Escape priority (issue #129): single pass dropped "
+                  f"{len(f0)} ball(s) and {_n_nets} multi-ball net(s) have "
+                  f"{len(_extras)} extra ball(s) -- retrying with one escape "
+                  f"per net first, extra escapes second")
+            # The fab-floor track clamp (issue #223) lives below this block;
+            # the strap helper and cross-pass guard must use the CLAMPED width
+            # (each recursive pass clamps its own escape copper internally).
+            from list_nets import fab_floors as _ff
+            _ncu = (len(pcb_data.board_info.copper_layers)
+                    if pcb_data.board_info.copper_layers else 2)
+            _tw = max(track_width, _ff(_ncu)['track_width'])
+            _all_keys = {(_p.global_x, _p.global_y) for _p in footprint.pads}
+            _extra_keys = {(_p.global_x, _p.global_y) for _p in _extras}
             tracks, vias_to_add, vias_to_remove, failed_nets = generate_bga_fanout(
                 footprint, pcb_data, check_for_previous=check_for_previous,
                 _pad_filter=_all_keys - _extra_keys, **_kw)
@@ -1992,7 +2005,16 @@ def generate_bga_fanout(footprint: Footprint,
                       f"escape room; strapped {_n_strap} to their net's fanout "
                       f"inside the BGA ({len(_still)} left for the router)"
                       + (f": {', '.join(_still)}" if _still else ""))
-            return tracks, vias_to_add, vias_to_remove, failed_nets
+            # Keep whichever result covers more nets; ties keep the single
+            # pass (issue #367 -- mirror the channel/underpad auto-retry's
+            # "ties keep the incumbent").
+            if len(failed_nets) < len(f0):
+                print(f"  Escape priority wins: {len(f0)} -> "
+                      f"{len(failed_nets)} dropped ball(s); using it")
+                return tracks, vias_to_add, vias_to_remove, failed_nets
+            print(f"  Escape priority did not improve ({len(failed_nets)} vs "
+                  f"{len(f0)} dropped) - keeping the single-pass result")
+            return t0, v0, vr0, f0
 
     # --layer-costs (issue #288): same semantics as route.py -- a NEGATIVE cost
     # forbids the layer (no escape copper placed there; e.g. a soon-to-be-plane
@@ -2628,7 +2650,7 @@ def generate_bga_fanout(footprint: Footprint,
             check_for_previous=check_for_previous,
             no_inner_top_layer=no_inner_top_layer, escape_method='underpad',
             grid_step=grid_step, _pad_filter=_pad_filter,
-            _ignore_prefanned=_ignore_prefanned)
+            _ignore_prefanned=_ignore_prefanned, _single_pass=_single_pass)
         if len(up_failed) < len(failed_nets):
             print(f"  Under-pad escape wins: {len(failed_nets)} -> "
                   f"{len(up_failed)} dropped ball(s); using it")
