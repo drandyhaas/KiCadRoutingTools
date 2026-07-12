@@ -21,6 +21,7 @@ from stub_layer_switching import (
     collect_stubs_by_layer,
     collect_stub_endpoints_by_layer, validate_swap, validate_single_swap,
     collect_single_ended_stubs_by_layer, revert_stub_layer_switch,
+    needs_pad_via_for_switch, connected_stub_segments_on_layer,
     STUB_OVERLAP_Y_TOLERANCE, STUB_POSITION_TOLERANCE
 )
 from diff_pair_routing import get_diff_pair_endpoints
@@ -1625,6 +1626,141 @@ def _stub_free_end_is_open(pcb_data: PCBData, stub, tolerance: float,
     return True
 
 
+def _collapse_multipoint_net_to_common_layer(
+    pcb_data: PCBData,
+    config: GridRouteConfig,
+    net_name: str,
+    net_id: int,
+    endpoints: List[Tuple],
+    can_swap_to_top_layer: bool,
+    combined_stubs_by_layer: Dict,
+    all_segment_modifications: List,
+    all_swap_vias: List,
+    all_swap_segments: Optional[List],
+    connected_pads: set,
+    verbose: bool = False
+) -> int:
+    """Move every stub of a multi-point net onto one common layer (issue #265).
+
+    Multi-point nets (3+ unconnected endpoints) are routed incrementally
+    (closest pair, then taps), so the two-point (source, target) swap model
+    doesn't apply. Conservative first cut: find a single layer every endpoint
+    can live on — bare through-hole / via'd pads reach all layers, bare SMD
+    pads are fixed to their copper layers, stubs count as movable only when
+    their free end is a genuinely dangling fanout stub — and swap all
+    off-layer movable stubs onto it, so the incremental routing needs no
+    layer-change vias. Mixed-layer (per-cluster) assignment is a later pass.
+
+    `endpoints` is get_multipoint_net_pads() output:
+    [(gx, gy, layer_idx, orig_x, orig_y, endpoint_obj), ...].
+
+    Returns: number of stubs moved (> 0 = applied), 0 = a common layer already
+    exists with nothing to move, -1 = no feasible/validated common layer.
+    """
+    from net_queries import expand_pad_layers
+    from kicad_parser import pad_is_plated_through
+
+    tol = STUB_POSITION_TOLERANCE
+
+    def _has_via_at(px, py):
+        return any(v.net_id == net_id and abs(v.x - px) < tol and abs(v.y - py) < tol
+                   for v in pcb_data.vias)
+
+    # Classify each endpoint: ok_layers (None = compatible with every layer
+    # without moving anything), plus a StubInfo when the endpoint is movable.
+    entries = []
+    for gx, gy, layer_idx, ox, oy, obj in endpoints:
+        if layer_idx >= len(config.layers):
+            return -1
+        layer_name = config.layers[layer_idx]
+        stub = get_stub_info(pcb_data, net_id, ox, oy, layer_name)
+        if stub is not None and stub.segments:
+            movable = _stub_free_end_is_open(pcb_data, stub, tol, connected_pads)
+            if movable:
+                # apply_stub_layer_switch moves the walked chain (plus
+                # pad-touching segments); if the free-end walk did not cover
+                # the group's whole same-layer component (T-branch, tolerance
+                # jump), moving the subset would sever the group mid-trace.
+                comp = connected_stub_segments_on_layer(
+                    pcb_data, net_id, stub.layer, stub.segments)
+                if len(comp) != len(stub.segments):
+                    movable = False
+            entries.append({'ok': {layer_name}, 'stub': stub if movable else None})
+        else:
+            # Bare endpoint: a pad (or free-end position) with no copper here.
+            if pad_is_plated_through(obj) or _has_via_at(ox, oy):
+                entries.append({'ok': None, 'stub': None})  # reaches all layers
+            else:
+                fixed = set(expand_pad_layers(getattr(obj, 'layers', None) or [],
+                                              config.layers)) or {layer_name}
+                entries.append({'ok': fixed, 'stub': None})
+
+    # Rank candidate destination layers: fewest new pad vias, then fewest
+    # moved stubs, then stack order. A zero-move candidate means some layer
+    # already satisfies every endpoint — nothing to do.
+    candidates = []
+    for L in config.layers:
+        to_move = []
+        feasible = True
+        for e in entries:
+            if e['ok'] is None or L in e['ok']:
+                continue
+            if e['stub'] is not None:
+                to_move.append(e['stub'])
+            else:
+                feasible = False
+                break
+        if not feasible:
+            continue
+        if not to_move:
+            return 0
+        if L == 'F.Cu' and not can_swap_to_top_layer:
+            continue
+        new_via_count = sum(1 for s in to_move if needs_pad_via_for_switch(s))
+        candidates.append((new_via_count, len(to_move), config.layers.index(L), L, to_move))
+    candidates.sort(key=lambda c: (c[0], c[1], c[2]))
+
+    for _, _, _, dest_layer, to_move in candidates:
+        ok = True
+        for stub in to_move:
+            valid, reason = validate_single_swap(
+                stub, dest_layer, combined_stubs_by_layer, pcb_data, config)
+            if not valid:
+                if verbose:
+                    print(f"  Multi-point swap rejected: {net_name} -> {dest_layer}: {reason}")
+                ok = False
+                break
+        if not ok:
+            continue
+        # Apply all of the net's swaps, then via-fit the new pad vias
+        # COLLECTIVELY (they were validated independently and against the
+        # pre-swap board, so two new same-net pad vias were never checked
+        # against each other — same funnel as the #299 swap-pair audit).
+        net_vias, net_mods = [], []
+        net_segments = [] if all_swap_segments is not None else None
+        for stub in to_move:
+            vias, mods = apply_stub_layer_switch(
+                pcb_data, stub, dest_layer, config, debug=False,
+                new_segments_out=net_segments)
+            net_vias.extend(vias)
+            net_mods.extend(mods)
+        if net_vias and not _swap_vias_fit_or_shrink(pcb_data, net_vias, config):
+            revert_stub_layer_switch(pcb_data, net_mods, net_vias)
+            if verbose:
+                print(f"  Multi-point swap REJECTED (pad vias do not fit): "
+                      f"{net_name} -> {dest_layer}")
+            continue
+        all_swap_vias.extend(net_vias)
+        all_segment_modifications.extend(net_mods)
+        if all_swap_segments is not None and net_segments:
+            all_swap_segments.extend(net_segments)
+        print(f"  Multi-point collapse: {net_name} -> {dest_layer} "
+              f"({len(to_move)} stub(s) moved)")
+        return len(to_move)
+
+    return -1
+
+
 def apply_single_ended_layer_swaps(
     pcb_data: PCBData,
     config: GridRouteConfig,
@@ -1654,14 +1790,14 @@ def apply_single_ended_layer_swaps(
     """
     # Collect layer info for single-ended nets
     single_net_layer_info = {}  # net_name -> (src_layer, tgt_layer, sources, targets, net_id)
-    skipped_multipoint = []
+    multipoint_candidates = []  # (net_name, net_id, endpoints) spanning >1 layer (#265)
     for net_name, net_id in single_ended_net_ids:
-        # Skip multi-point nets - layer swaps not yet supported for them
+        # Multi-point nets get the common-layer collapse in PHASE 3 below
         multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
         if multipoint_pads:
             layers_used = {config.layers[ep[2]] for ep in multipoint_pads}
             if len(layers_used) > 1:
-                skipped_multipoint.append(net_name)
+                multipoint_candidates.append((net_name, net_id, multipoint_pads))
             continue
         sources, targets, error = get_net_endpoints(pcb_data, net_id, config)
         if error or not sources or not targets:
@@ -1671,20 +1807,11 @@ def apply_single_ended_layer_swaps(
         if src_layer != tgt_layer:  # Only track nets needing via
             single_net_layer_info[net_name] = (src_layer, tgt_layer, sources, targets, net_id)
 
-    if skipped_multipoint:
-        print(f"\nWARNING: Skipping stub layer swapping for {len(skipped_multipoint)} multi-point net(s) (not yet supported)")
-        if len(skipped_multipoint) <= 5:
-            for name in skipped_multipoint:
-                print(f"    - {name}")
-        else:
-            for name in skipped_multipoint[:3]:
-                print(f"    - {name}")
-            print(f"    ... and {len(skipped_multipoint) - 3} more")
-
-    if not single_net_layer_info:
+    if not single_net_layer_info and not multipoint_candidates:
         return 0
 
-    print(f"\nAnalyzing layer swaps for {len(single_net_layer_info)} single-ended net(s) needing via...")
+    if single_net_layer_info:
+        print(f"\nAnalyzing layer swaps for {len(single_net_layer_info)} single-ended net(s) needing via...")
 
     # Pre-collect single-ended stubs by layer
     single_stubs_by_layer = collect_single_ended_stubs_by_layer(pcb_data, single_net_layer_info, config)
@@ -1851,9 +1978,38 @@ def apply_single_ended_layer_swaps(
         if verbose:
             print(f"  No swap found: {net_name} ({src_layer}->{tgt_layer}) - will need via")
 
+    # PHASE 3 (#265): multi-point nets whose endpoints span several layers.
+    # Runs AFTER the two-point phases so validation (which reads live
+    # pcb_data copper) sees their moves as committed; conservative
+    # common-layer collapse only — see _collapse_multipoint_net_to_common_layer.
+    multipoint_collapse_count = 0
+    multipoint_unswapped = []
+    if multipoint_candidates:
+        print(f"\nAnalyzing layer swaps for {len(multipoint_candidates)} multi-point net(s) spanning layers...")
+    for net_name, net_id, endpoints in multipoint_candidates:
+        moved = _collapse_multipoint_net_to_common_layer(
+            pcb_data, config, net_name, net_id, endpoints,
+            can_swap_to_top_layer, combined_stubs_by_layer,
+            all_segment_modifications, all_swap_vias, all_swap_segments,
+            _conn_pads(net_id), verbose=verbose)
+        if moved > 0:
+            multipoint_collapse_count += 1
+            total_layer_swaps += moved
+        elif moved < 0:
+            multipoint_unswapped.append(net_name)
+        # moved == 0: some layer already satisfies every endpoint - no swap needed
+
+    if multipoint_unswapped:
+        print(f"  No common layer found for {len(multipoint_unswapped)} multi-point net(s) (left as-is)")
+        if verbose:
+            for name in multipoint_unswapped:
+                print(f"    - {name}")
+
     if swap_pair_count > 0:
         print(f"Applied {swap_pair_count} single-ended swap pair(s) ({swap_pair_count * 2} nets)")
     if solo_switch_count > 0:
         print(f"Applied {solo_switch_count} single-ended solo switch(es)")
+    if multipoint_collapse_count > 0:
+        print(f"Applied {multipoint_collapse_count} multi-point common-layer collapse(s)")
 
     return total_layer_swaps
