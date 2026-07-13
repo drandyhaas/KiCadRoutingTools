@@ -63,14 +63,23 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
 
     saved_result = routed_results[net_id]
     ripped_net_ids = []
-    was_in_results = saved_result in results
+    # #369 A2: a multi-leg multipoint diff pair registers a MERGED dict in
+    # routed_results while the write-list carries its per-LEG dicts -- the
+    # old value-equality test (`saved_result in results`) never matched, so
+    # the legs stayed in the write-list after the rip and their copper
+    # shipped alongside the reroute's. Match by IDENTITY over the merged
+    # dict AND its legs (identity also stops equality from removing a
+    # different net's identical-valued dict).
+    _members = list(saved_result.get('leg_results') or []) + [saved_result]
+    _member_ids = {id(r) for r in _members}
+    was_in_results = any(id(r) in _member_ids for r in results)
 
     # Remove from pcb_data
     remove_route_from_pcb_data(pcb_data, saved_result)
 
     # Remove from results list if present
     if was_in_results:
-        results.remove(saved_result)
+        results[:] = [r for r in results if id(r) not in _member_ids]
 
     # Update tracking structures
     if net_id in diff_pair_by_net_id:
@@ -310,9 +319,15 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
     # Add back to pcb_data
     add_route_to_pcb_data(pcb_data, saved_result, debug_lines=config.debug_lines)
 
-    # Add back to results list if it was there (and not already present)
-    if was_in_results and saved_result not in results:
-        results.append(saved_result)
+    # Add back to results list if it was there (and not already present).
+    # #369 A2: restore the per-LEG dicts for a multi-leg multipoint pair --
+    # they are what the write-list carried (the merged dict duplicates their
+    # copper); identity membership, mirroring rip_up_net.
+    if was_in_results:
+        _members = list(saved_result.get('leg_results') or []) or [saved_result]
+        for _r in _members:
+            if not any(_r is _x for _x in results):
+                results.append(_r)
 
     # Restore tracking structures
     if net_id in diff_pair_by_net_id:

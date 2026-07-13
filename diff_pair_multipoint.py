@@ -639,19 +639,30 @@ def _terminal_stub_endpoint(pcb_data: PCBData, terminal: Tuple[Pad, Pad],
         if not comp:
             return None
         ends = find_stub_free_ends(comp, [pad])
-        if not ends:
-            return None
-        fx, fy, flayer = max(ends, key=lambda e: math.hypot(e[0] - pad.global_x,
-                                                            e[1] - pad.global_y))
-        if flayer not in config.layers:
-            return None
-        return fx, fy, config.layers.index(flayer)
+        return [(fx, fy, config.layers.index(flayer))
+                for fx, fy, flayer in ends if flayer in config.layers]
 
-    pt, nt = tip(pp), tip(nn)
-    if pt is None or nt is None:
+    p_tips, n_tips = tip(pp), tip(nn)
+    if not p_tips or not n_tips:
         return None
-    px, py, pl = pt
-    nx, ny, nl = nt
+    # #369 A14: the endpoint tuple carries ONE layer slot; the old code took
+    # each polarity's farthest tip independently and stamped P's layer on N's
+    # coordinates -- tips on different layers made the leg emit N's connector
+    # on P's layer with no via (an open). Pick the farthest SAME-LAYER tip
+    # pair instead, and bail to the pad-midpoint fallback when no common
+    # layer exists (mirrors the 2-terminal path's n_layer == p_layer gate).
+    best = None
+    for px, py, pl in p_tips:
+        for nx, ny, nl in n_tips:
+            if pl != nl:
+                continue
+            score = (math.hypot(px - pp.global_x, py - pp.global_y)
+                     + math.hypot(nx - nn.global_x, ny - nn.global_y))
+            if best is None or score > best[0]:
+                best = (score, px, py, nx, ny, pl)
+    if best is None:
+        return None
+    _, px, py, nx, ny, pl = best
     p_gx, p_gy = coord.to_grid(px, py)
     n_gx, n_gy = coord.to_grid(nx, ny)
     return (p_gx, p_gy, n_gx, n_gy, pl, px, py, nx, ny)
@@ -831,6 +842,12 @@ def _route_terminal_set(state, pair: DiffPairNet, pair_name: str,
             merged['iterations'] = sum(r.get('iterations', 0) for r in leg_results)
             merged['p_path'] = [pt for r in leg_results for pt in (r.get('p_path') or [])]
             merged['n_path'] = [pt for r in leg_results for pt in (r.get('n_path') or [])]
+            # #369 A2: the write-list carries the per-LEG dicts while rip-up
+            # sees only this merged dict via routed_results -- carry the legs
+            # so rip_up_net/restore_net can remove/restore the actual
+            # write-list members (value-equality never matched the merged
+            # dict, so ripped legs' copper shipped alongside the reroute).
+            merged['leg_results'] = leg_results
             return leg_results, merged, se_terminals
     return None, None, []
 
