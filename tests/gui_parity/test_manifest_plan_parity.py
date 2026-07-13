@@ -108,6 +108,11 @@ def check_pair(argv, step):
     params = step.get('params', {})
     scalar = dict(SCALAR_FLAGS)
     scalar.update(ACTION_SCALAR_OVERRIDES.get(step.get('action'), {}))
+    # #381 D7: a QFN fanout step's --width/--clearance land on the QFN panel's
+    # own controls (qfn_track_width/qfn_clearance), not the Basic-tab ones.
+    if step.get('action') == 'fanout' and step.get('kind') == 'qfn':
+        scalar['--width'] = 'qfn_track_width'
+        scalar['--clearance'] = 'qfn_clearance'
     bad = []
     n = 0
     i = 0
@@ -160,11 +165,12 @@ _ACTION_BLOCK_HANDLED = {
     'max_track_width', 'min_track_width',
 }
 
-# Params that MUST resolve to a GUI control (the D5 fallback list + D3 polarity).
+# Params that MUST resolve to a GUI control (the D5 fallback list + D3 polarity
+# + D7 QFN width/clearance).
 _MUST_RESOLVE = {
     'rip_existing_nets', 'impedance', 'ordering', 'direction', 'time_matching',
     'keepout', 'guide_corridor', 'length_match_groups', 'swappable_nets',
-    'polarity_swap_nets',
+    'polarity_swap_nets', 'qfn_track_width', 'qfn_clearance',
 }
 
 

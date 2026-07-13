@@ -80,9 +80,10 @@ BOOL_FLAGS = {
 # --output still feeds the chain-pruning file list.
 IGNORE_FLAGS = {'--output', '--summary-json', '--schematic-dir', '--report'}
 
-# Per-tool flag renames: qfn/bga_fanout call the trace width --width.
+# Per-tool flag renames: bga_fanout calls the trace width --width (routed to the
+# Basic-tab track_width, which BGA fanout reads). qfn_fanout also uses --width
+# but its GUI home is the QFN panel's own control (see TOOL_FLAG_PARAMS, #381 D7).
 TOOL_FLAG_ALIASES = {
-    'qfn_fanout.py': {'--width': '--track-width'},
     'bga_fanout.py': {'--width': '--track-width'},
 }
 
@@ -92,8 +93,12 @@ TOOL_FLAG_ALIASES = {
 # FLAG_PARAMS would target). Without this override a recorded route_diff
 # --track-width 0.2 set the Basic-tab width and left the diff tab at its default,
 # so a plan-replayed diff routed at the wrong width.
+# #381 D7: qfn_fanout.py's --width/--clearance map to the QFN panel's own
+# controls (default 0.1/0.1), not the Basic-tab track_width/clearance that
+# BGA/route use, so a plan-replayed QFN fanout keeps its fine-pitch width.
 TOOL_FLAG_PARAMS = {
     'route_diff.py': {'--track-width': 'diff_pair_width'},
+    'qfn_fanout.py': {'--width': 'qfn_track_width', '--clearance': 'qfn_clearance'},
 }
 
 

@@ -212,7 +212,11 @@ def apply_step_params(step, dialog):
         "route_planes": {"add_gnd_vias", "gnd_via_distance", "gnd_via_net",
                          "rip_blocker_nets"},
         "repair_planes": {"rip_blocker_nets"},
-        "fanout": set(),
+        # #381 D7: QFN width/clearance are set by the fanout action block onto
+        # the QFN panel's own controls; skip them in the generic loop (which has
+        # no same-named control on the fanout owners) to avoid a spurious
+        # "no control, ignored" note.
+        "fanout": {"qfn_track_width", "qfn_clearance"},
     }
 
     def _owners():
@@ -511,6 +515,16 @@ def apply_step_params(step, dialog):
                     opts.extension.SetValue(float(params["extension"]))
                 except (TypeError, ValueError):
                     notes.append(f"ignored non-numeric extension={params['extension']!r}")
+            # #381 D7: QFN width/clearance live on the QFN panel's own controls
+            # (default 0.1/0.1), not the Basic tab. manifest_to_plan maps
+            # qfn_fanout --width/--clearance to qfn_track_width/qfn_clearance.
+            for _pname, _ctl in (("qfn_track_width", "qfn_track_width"),
+                                 ("qfn_clearance", "qfn_clearance")):
+                if _pname in params:
+                    try:
+                        getattr(opts, _ctl).SetValue(float(params[_pname]))
+                    except (TypeError, ValueError):
+                        notes.append(f"ignored non-numeric {_pname}={params[_pname]!r}")
     return notes
 
 

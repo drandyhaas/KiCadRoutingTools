@@ -2061,6 +2061,19 @@ class RoutingDialog(wx.Dialog):
                         _ctl.SetSelection(0)
                     except Exception:
                         pass
+            # #381 D7: QFN width/clearance controls live on qfn_options; reset
+            # them to the QFN-tuned defaults so a plan step doesn't inherit a
+            # prior step's value (the plan executor resets through here).
+            _qo = getattr(_ft, 'qfn_options', None)
+            if _qo is not None:
+                for _n, _v in (('qfn_track_width', defaults.QFN_TRACK_WIDTH),
+                               ('qfn_clearance', defaults.QFN_CLEARANCE)):
+                    _ctl = getattr(_qo, _n, None)
+                    if _ctl is not None:
+                        try:
+                            _ctl.SetValue(_v)
+                        except Exception:
+                            pass
         except Exception:
             pass
         try:
