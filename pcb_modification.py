@@ -472,7 +472,11 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
     from check_drc import _SOFT_JOINT_MIN_GAP, point_to_pad_distance
     from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
                                        _seg_foreign_via_dist, _seg_foreign_hole_dist)
+    from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     clr = config.clearance if clearance is None else clearance
+    # NPTH holes are graded at the higher NPTH-to-track fab floor, not the
+    # routing clearance (#370 B2; mirrors the microshift's #308 term).
+    npth_clr = max(clr, NPTH_TO_TRACK_CLEARANCE)
 
     def rk(x, y):
         return (round(x, 3), round(y, 3))
@@ -512,9 +516,10 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
     def clears(nid, x1, y1, x2, y2, layer, w):
         d = min(_seg_foreign_pad_dist(pcb_data, nid, x1, y1, x2, y2, layer),
                 _seg_foreign_seg_dist(pcb_data, nid, x1, y1, x2, y2, layer),
-                _seg_foreign_via_dist(pcb_data, nid, x1, y1, x2, y2, layer),
-                _seg_foreign_hole_dist(pcb_data, nid, x1, y1, x2, y2))
-        return d >= clr + w / 2.0 - 1e-4
+                _seg_foreign_via_dist(pcb_data, nid, x1, y1, x2, y2, layer))
+        hd = _seg_foreign_hole_dist(pcb_data, nid, x1, y1, x2, y2)
+        return (d >= clr + w / 2.0 - 1e-4 and
+                hd >= npth_clr + w / 2.0 - 1e-4)
 
     new_conns = []
     for (net_id, layer), ends in dangles.items():
@@ -700,10 +705,20 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
 
 def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
     """True if a candidate connector segment keeps `clearance` from all OTHER
-    nets' copper (segments on its layer, vias on any layer, pads on its layer)."""
+    nets' copper (segments on its layer, vias on any layer, pads on its layer)
+    and the higher NPTH-to-track floor from copper-less drill holes."""
     from geometry_utils import segment_to_segment_distance, point_to_segment_distance
     from check_drc import segment_to_rect_distance
+    from single_ended_routing import _seg_foreign_hole_dist
+    from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     half = width / 2
+    # NPTH (no-copper) drill holes (#370 B2): the pad/via/segment loops below
+    # all measure to COPPER, so a connector drawn straight across a mounting
+    # hole passed every check. Slot/offset drills handled by the capsule.
+    npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
+    if _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2) \
+            < npth_clr + half - 1e-4:
+        return False
     for s in pcb_data.segments:
         if s.net_id == net_id or s.layer != layer:
             continue
@@ -2300,7 +2315,14 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     Returns (segments_changed, nets_changed, original_segments_to_remove)."""
     from collections import defaultdict
     from check_connected import check_net_connectivity
-    from single_ended_routing import _seg_foreign_pad_dist, _seg_foreign_seg_dist, _seg_foreign_via_dist
+    from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
+                                      _seg_foreign_via_dist, _seg_foreign_hole_dist)
+    from routing_defaults import NPTH_TO_TRACK_CLEARANCE
+
+    # NPTH (no-copper) drill holes are graded at the higher NPTH-to-track floor,
+    # and the copper distance terms don't see them (#370 B2; the microshift
+    # sibling gained this term for #308, this re-bend path never did).
+    npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
 
     routed_seg_result = {}
     for r in results:
@@ -2344,7 +2366,13 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer))
-        return d >= clearance + w / 2.0 - 1e-4 and edge_clears(x1, y1, x2, y2, w)
+        # NPTH drill holes at the higher NPTH-to-track floor (#370 B2): the
+        # copper terms above never see a copper-less hole, so a re-bend could
+        # land the jog across a mounting hole.
+        hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
+        return (d >= clearance + w / 2.0 - 1e-4 and
+                hd >= npth_clr + w / 2.0 - 1e-4 and
+                edge_clears(x1, y1, x2, y2, w))
 
     def vk(x, y):
         return (round(x, 3), round(y, 3))
@@ -2930,12 +2958,21 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
     # Every drill hole on the board (vias + through-hole pads, ANY net --
     # hole-to-hole is a fab rule, not an electrical one).
     import numpy as _np
+    from kicad_parser import pad_drill_circles
     hole_list = [(id(v), v.x, v.y, (getattr(v, 'drill', 0) or 0) / 2.0)
                  for v in pcb_data.vias if (getattr(v, 'drill', 0) or 0) > 0]
     for fp in pcb_data.footprints.values():
         for p in fp.pads:
+            # Offset-hole / slot-aware circles (#370 B7): a pad's drill can
+            # sit away from the copper centre (castellated pads) or be a
+            # milled slot; check_drc measures the real capsule, so validating
+            # against (global_x, global_y, drill/2) judged vias against the
+            # wrong hole. Round centred drills yield the same single circle
+            # as before. (Duplicate id keys for a slot's circles are fine:
+            # hole_idx only ever excludes the moving VIA itself.)
             if (p.drill or 0) > 0:
-                hole_list.append((id(p), p.global_x, p.global_y, p.drill / 2.0))
+                for hx, hy, hd in pad_drill_circles(p):
+                    hole_list.append((id(p), hx, hy, hd / 2.0))
     hole_idx = {hid: i for i, (hid, _, _, _) in enumerate(hole_list)}
     hole_x = _np.asarray([h[1] for h in hole_list], dtype=float)
     hole_y = _np.asarray([h[2] for h in hole_list], dtype=float)

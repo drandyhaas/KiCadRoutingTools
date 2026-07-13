@@ -325,7 +325,7 @@ def _foreign_hole_capsules(pcb_data):
         nid, ax, ay, bx, by, r = [], [], [], [], [], []
         for pad_net, pads in pcb_data.pads_by_net.items():
             for pad in pads:
-                if pad.drill > 0 and _pad_has_no_copper(pad):
+                if (getattr(pad, 'drill', 0) or 0) > 0 and _pad_has_no_copper(pad):
                     (p1x, p1y), (p2x, p2y), hr = pad_drill_capsule(pad)
                     nid.append(pad_net)
                     ax.append(p1x); ay.append(p1y); bx.append(p2x); by.append(p2y)

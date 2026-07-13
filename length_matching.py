@@ -190,6 +190,57 @@ class ClearanceIndex:
         return result
 
 
+def _board_edge_geom(pcb_data):
+    """(rings, outer_outline, cutouts) of the real Edge.Cuts geometry, cached on
+    the PCBData object (amplitude probing runs per meander bump, so the rings are
+    fetched many times per board). Empty rings = no usable outline; callers fall
+    back to the board_bounds bbox test."""
+    if pcb_data is None or getattr(pcb_data, 'board_info', None) is None:
+        return [], None, []
+    cached = getattr(pcb_data, '_meander_edge_geom', None)
+    if cached is None:
+        from check_drc import board_edge_geometry
+        cached = board_edge_geometry(pcb_data.board_info)
+        pcb_data._meander_edge_geom = cached
+    return cached
+
+
+def _bump_edge_clear(bump_segs, edge_geom, board_bounds, edge_margin) -> bool:
+    """True when every bump segment stays ON the board and >= edge_margin from
+    the real board outline AND every interior cutout (#370 B1, same class as the
+    #256 octolinear fix): the old bbox test was blind to cutouts and non-
+    rectangular outlines, so bumps could print over a switch window or past a
+    curved edge. Bbox fallback when the board has no usable outline rings."""
+    edge_rings, edge_outer, edge_cutouts = edge_geom
+    if edge_rings:
+        from check_drc import _point_on_board, _segment_to_rings_distance
+        for bx1, by1, bx2, by2 in bump_segs:
+            if not (_point_on_board(bx1, by1, edge_outer, edge_cutouts) and
+                    _point_on_board(bx2, by2, edge_outer, edge_cutouts)):
+                return False
+            if _segment_to_rings_distance(bx1, by1, bx2, by2, edge_rings) < edge_margin:
+                return False
+        return True
+    if board_bounds is not None:
+        b_min_x = min(min(bx1, bx2) for bx1, by1, bx2, by2 in bump_segs)
+        b_max_x = max(max(bx1, bx2) for bx1, by1, bx2, by2 in bump_segs)
+        b_min_y = min(min(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
+        b_max_y = max(max(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
+        return not (b_min_x < board_bounds[0] + edge_margin or
+                    b_max_x > board_bounds[2] - edge_margin or
+                    b_min_y < board_bounds[1] + edge_margin or
+                    b_max_y > board_bounds[3] - edge_margin)
+    return True
+
+
+# Spatial-query slack for foreign copper wider than the config defaults (#370
+# B1): the per-object checks below grow the keep-out by (width - track_width)/2
+# (or (via.size - via_size)/2), so the cell queries must reach at least that much
+# further or an extra-wide trunk could be missed by the index scan entirely.
+# 2.0mm covers a 4mm-wide strap; the index build margin adds more on top.
+_FOREIGN_WIDTH_SLACK = 2.0
+
+
 def get_bump_segments(
     cx: float, cy: float,
     ux: float, uy: float,
@@ -307,8 +358,10 @@ def get_safe_amplitude_at_point(
     # common case (net_w == track_width) byte-identical; only wider nets grow their
     # keep-out. own_width is the actual width of the meandered segment, so a segment
     # widened beyond its netclass is honored too (mirrors obstacle_cache's
-    # max(net_w, seg.width)). We only bump the meandered net's OWN half-width; the
-    # neighbor half-width stays the generic track_width/2.
+    # max(net_w, seg.width)). The neighbor half-width below starts from the
+    # generic track_width/2 and is grown per-object to the FOREIGN copper's real
+    # width/via size (#370 B1) -- max()'d with the config values, so the common
+    # case stays byte-identical.
     net_w = max(config.track_width, config.get_net_track_width(net_id, layer), own_width)
     net_half = net_w / 2
     # Add corner margin for track width bloat at 45-degree chamfered corners
@@ -321,12 +374,14 @@ def get_safe_amplitude_at_point(
     # Board-edge keep-out (meanders overran the board outline). The A* router avoids
     # the edge via add_board_edge_obstacles, but this geometric meander pass never
     # did, so bumps near the edge printed past it. A bump arm carries the net's
-    # width, so its centerline must stay edge_clearance + net_half inside the bounds
-    # (mirrors obstacle_map: edge_clearance + track_width/2). board_edge_clearance
-    # overrides config.clearance when set, matching add_board_edge_obstacles.
+    # width, so its centerline must stay edge_clearance + net_half inside the REAL
+    # outline/cutout geometry (#370 B1; bbox fallback when no rings parsed).
+    # board_edge_clearance overrides config.clearance when set, matching
+    # add_board_edge_obstacles.
     board_bounds = getattr(pcb_data.board_info, 'board_bounds', None) if pcb_data and pcb_data.board_info else None
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
     edge_margin = edge_clearance + net_half
+    edge_geom = _board_edge_geom(pcb_data)
 
     # Binary search for safe amplitude
     # Start with max_amplitude and reduce if there are conflicts
@@ -351,21 +406,17 @@ def get_safe_amplitude_at_point(
         bump_min_y = min(min(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
         bump_max_y = max(max(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
 
-        # Reject amplitudes whose bump would print past the board edge (copper edge
-        # = centerline bbox expanded by net_half must stay edge_clearance inside).
-        if board_bounds is not None and (
-            bump_min_x < board_bounds[0] + edge_margin or
-            bump_max_x > board_bounds[2] - edge_margin or
-            bump_min_y < board_bounds[1] + edge_margin or
-            bump_max_y > board_bounds[3] - edge_margin
-        ):
+        # Reject amplitudes whose bump would print past the board edge or over an
+        # interior cutout (real Edge.Cuts geometry; bbox fallback, #370 B1).
+        if not _bump_edge_clear(bump_segs, edge_geom, board_bounds, edge_margin):
             continue  # try a smaller amplitude that stays inside the outline
 
         # Use spatial index if available, otherwise fall back to full iteration
         if clearance_index is not None:
             # Query segments in the bump region
             nearby_segments = clearance_index.query_segments(
-                bump_min_x, bump_min_y, bump_max_x, bump_max_y, required_clearance
+                bump_min_x, bump_min_y, bump_max_x, bump_max_y,
+                required_clearance + _FOREIGN_WIDTH_SLACK
             )
 
             # Check each bump segment against nearby segments on the same layer
@@ -385,6 +436,10 @@ def get_safe_amplitude_at_point(
                         check_clearance = paired_clearance
                     else:
                         check_clearance = required_clearance
+                    # Foreign copper at its REAL width (#370 B1): a wide power
+                    # trunk's edge extends (width - track_width)/2 beyond the
+                    # generic keep-out. max() keeps the common case identical.
+                    check_clearance += max(0.0, (other_seg.width - config.track_width) / 2.0)
 
                     # Check segment-to-segment distance
                     dist = segment_to_segment_distance(
@@ -399,7 +454,8 @@ def get_safe_amplitude_at_point(
             # Check bump segments against nearby vias
             if not conflict_found:
                 nearby_vias = clearance_index.query_vias(
-                    bump_min_x, bump_min_y, bump_max_x, bump_max_y, via_clearance
+                    bump_min_x, bump_min_y, bump_max_x, bump_max_y,
+                    via_clearance + _FOREIGN_WIDTH_SLACK
                 )
 
                 for bx1, by1, bx2, by2 in bump_segs:
@@ -410,10 +466,11 @@ def get_safe_amplitude_at_point(
                         if via.net_id == net_id:
                             continue
 
-                        # Distance from via center to bump segment
+                        # Distance from via center to bump segment; the FOREIGN
+                        # via's real size when larger than the default (#370 B1).
                         dist = point_to_segment_distance(via.x, via.y, bx1, by1, bx2, by2)
 
-                        if dist < via_clearance:
+                        if dist < via_clearance + max(0.0, ((getattr(via, 'size', 0) or 0) - config.via_size) / 2.0):
                             conflict_found = True
                             break
 
@@ -455,6 +512,8 @@ def get_safe_amplitude_at_point(
                         check_clearance = paired_clearance
                     else:
                         check_clearance = required_clearance
+                    # Foreign copper at its REAL width (#370 B1).
+                    check_clearance += max(0.0, (other_seg.width - config.track_width) / 2.0)
 
                     # Quick distance check
                     seg_center_x = (other_seg.start_x + other_seg.end_x) / 2
@@ -465,7 +524,7 @@ def get_safe_amplitude_at_point(
                     bump_center_y = (by1 + by2) / 2
                     rough_dist = math.sqrt((bump_center_x - seg_center_x)**2 + (bump_center_y - seg_center_y)**2)
 
-                    if rough_dist > test_amp + seg_half_len + required_clearance + 1.0:
+                    if rough_dist > test_amp + seg_half_len + check_clearance + 1.0:
                         continue
 
                     # Check segment-to-segment distance
@@ -490,6 +549,8 @@ def get_safe_amplitude_at_point(
                             check_clearance = paired_clearance
                         else:
                             check_clearance = required_clearance
+                        # Foreign copper at its REAL width (#370 B1).
+                        check_clearance += max(0.0, (other_seg.width - config.track_width) / 2.0)
 
                         dist = segment_to_segment_distance(
                             bx1, by1, bx2, by2,
@@ -512,7 +573,8 @@ def get_safe_amplitude_at_point(
 
                         dist = point_to_segment_distance(via.x, via.y, bx1, by1, bx2, by2)
 
-                        if dist < via_clearance:
+                        # The FOREIGN via's real size when larger (#370 B1).
+                        if dist < via_clearance + max(0.0, ((getattr(via, 'size', 0) or 0) - config.via_size) / 2.0):
                             conflict_found = True
                             break
 
@@ -524,7 +586,7 @@ def get_safe_amplitude_at_point(
 
                             dist = point_to_segment_distance(via.x, via.y, bx1, by1, bx2, by2)
 
-                            if dist < via_clearance:
+                            if dist < via_clearance + max(0.0, ((getattr(via, 'size', 0) or 0) - config.via_size) / 2.0):
                                 conflict_found = True
                                 break
 
@@ -2135,8 +2197,9 @@ def get_safe_amplitude_for_diff_pair(
     # power width). The meandered arms carry the pair's ACTUAL width, so drive the
     # own-width term of the keep-out from it (#175). max() keeps the common case
     # (net_w == track_width) byte-identical; only wider pairs grow their keep-out.
-    # spacing_mm already reflects the routed P/N offset. Neighbor half-width stays
-    # the generic track_width/2.
+    # spacing_mm already reflects the routed P/N offset. The neighbor half-width
+    # starts from the generic track_width/2 and is grown per-object to the
+    # FOREIGN copper's real width / via size (#370 B1).
     net_w = max(config.track_width,
                 config.get_net_track_width(p_net_id, layer_name),
                 config.get_net_track_width(n_net_id, layer_name))
@@ -2153,6 +2216,7 @@ def get_safe_amplitude_for_diff_pair(
     board_bounds = getattr(pcb_data.board_info, 'board_bounds', None) if pcb_data and pcb_data.board_info else None
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
     edge_margin = edge_clearance + diff_pair_extra + net_half
+    edge_geom = _board_edge_geom(pcb_data)
 
     # Combine all segments and vias
     all_segments = list(pcb_data.segments)
@@ -2178,17 +2242,10 @@ def get_safe_amplitude_for_diff_pair(
 
         conflict_found = False
 
-        # Reject amplitudes whose P/N copper would print past the board edge.
-        if board_bounds is not None:
-            b_min_x = min(min(bx1, bx2) for bx1, by1, bx2, by2 in bump_segs)
-            b_max_x = max(max(bx1, bx2) for bx1, by1, bx2, by2 in bump_segs)
-            b_min_y = min(min(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
-            b_max_y = max(max(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
-            if (b_min_x < board_bounds[0] + edge_margin or
-                b_max_x > board_bounds[2] - edge_margin or
-                b_min_y < board_bounds[1] + edge_margin or
-                b_max_y > board_bounds[3] - edge_margin):
-                continue  # try a smaller amplitude that stays inside the outline
+        # Reject amplitudes whose P/N copper would print past the board edge or
+        # over an interior cutout (real Edge.Cuts geometry; bbox fallback, #370 B1).
+        if not _bump_edge_clear(bump_segs, edge_geom, board_bounds, edge_margin):
+            continue  # try a smaller amplitude that stays inside the outline
 
         # Check each bump segment
         for bx1, by1, bx2, by2 in bump_segs:
@@ -2202,6 +2259,10 @@ def get_safe_amplitude_for_diff_pair(
                 if other_seg.layer != layer_name:
                     continue
 
+                # Foreign copper at its REAL width (#370 B1).
+                check_clearance = required_clearance + max(
+                    0.0, (other_seg.width - config.track_width) / 2.0)
+
                 # Quick distance check
                 seg_center_x = (other_seg.start_x + other_seg.end_x) / 2
                 seg_center_y = (other_seg.start_y + other_seg.end_y) / 2
@@ -2211,7 +2272,7 @@ def get_safe_amplitude_for_diff_pair(
                 bump_center_y = (by1 + by2) / 2
                 rough_dist = math.sqrt((bump_center_x - seg_center_x)**2 + (bump_center_y - seg_center_y)**2)
 
-                if rough_dist > test_amp + seg_half_len + required_clearance + 1.0:
+                if rough_dist > test_amp + seg_half_len + check_clearance + 1.0:
                     continue
 
                 dist = segment_to_segment_distance(
@@ -2219,7 +2280,7 @@ def get_safe_amplitude_for_diff_pair(
                     other_seg.start_x, other_seg.start_y, other_seg.end_x, other_seg.end_y
                 )
 
-                if dist < required_clearance:
+                if dist < check_clearance:
                     conflict_found = True
                     break
 
@@ -2235,7 +2296,9 @@ def get_safe_amplitude_for_diff_pair(
 
                     dist = point_to_segment_distance(via.x, via.y, bx1, by1, bx2, by2)
 
-                    if dist < via_clearance:
+                    # The FOREIGN via's real size when larger (#370 B1).
+                    if dist < via_clearance + max(0.0, ((getattr(via, 'size', 0) or 0)
+                                                        - config.via_size) / 2.0):
                         conflict_found = True
                         break
 
