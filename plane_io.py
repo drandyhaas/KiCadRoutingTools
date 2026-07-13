@@ -34,28 +34,19 @@ def extract_zones(pcb_file: str) -> List[ZoneInfo]:
     with open(pcb_file, 'r', encoding='utf-8') as f:
         content = f.read()
 
-    zones = []
-    # KiCad 9: (zone (net <id>) (net_name "name") (layer "layer"))
-    zone_pattern = r'\(zone\s+\(net\s+(\d+)\)\s+\(net_name\s+"([^"]+)"\)\s+\(layer\s+"([^"]+)"\)'
-
-    for match in re.finditer(zone_pattern, content):
-        zones.append(ZoneInfo(
-            net_id=int(match.group(1)),
-            net_name=match.group(2),
-            layer=match.group(3)
-        ))
-
-    if not zones:
-        # KiCad 10: (zone (net "name") (layer "layer")) - no numeric ID, no net_name line
-        zone_pattern_v10 = r'\(zone\s+\(net\s+"([^"]+)"\)\s+\(layer\s+"([^"]+)"\)'
-        for match in re.finditer(zone_pattern_v10, content):
-            zones.append(ZoneInfo(
-                net_id=0,  # No numeric ID in KiCad 10
-                net_name=_unescape_kicad_string(match.group(1)),
-                layer=match.group(2)
-            ))
-
-    return zones
+    # #369 A12: delegate to kicad_parser's block-based zone reader instead of
+    # a fixed-token-order regex. The regex demanded a single (layer "...") in
+    # exact position, so a multi-layer (layers "In1.Cu" "In2.Cu") pour was
+    # INVISIBLE here -- check_existing_zones then answered "create" and
+    # route_planes poured a full-layer zone over another net's existing pour
+    # (a mass short after refill). The parser reader emits one Zone per copper
+    # layer, handles v5/v6 single-line zones, unquoted layers, and unescaped
+    # net names, and is the same model route_planes' other path already uses.
+    from kicad_parser import extract_zones as _parser_extract_zones
+    from kicad_parser import extract_nets, detect_kicad_version
+    _, name_to_id = extract_nets(content, detect_kicad_version(content))
+    return [ZoneInfo(net_id=z.net_id, net_name=z.net_name, layer=z.layer)
+            for z in _parser_extract_zones(content, name_to_id)]
 
 
 def check_existing_zones(zones: List[ZoneInfo], target_layer: str, target_net_name: str,

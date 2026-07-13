@@ -426,7 +426,21 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
 
         ko_layers = ko.get('layers') or set()
         if ko_layers:
-            layer_idxs = [layer_map[ln] for ln in ko_layers if ln in layer_map]
+            # #369 A5: expand composite copper tokens -- KiCad writes rule
+            # areas with (layers "*.Cu") or (layers F&B.Cu), and resolving
+            # only literal layer names left layer_idxs empty, which DISABLED
+            # track blocking below: the router routed straight through the
+            # user's all-copper keep-out.
+            resolved = set()
+            for ln in ko_layers:
+                if ln in layer_map:
+                    resolved.add(layer_map[ln])
+                elif ln == '*.Cu':
+                    resolved.update(layer_map.values())
+                elif ln in ('F&B.Cu', 'F&B'):
+                    resolved.update(layer_map[l] for l in ('F.Cu', 'B.Cu')
+                                    if l in layer_map)
+            layer_idxs = sorted(resolved)
         else:
             layer_idxs = list(range(len(layer_list)))
         if block_tracks and not layer_idxs:

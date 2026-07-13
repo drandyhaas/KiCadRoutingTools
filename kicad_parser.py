@@ -2377,16 +2377,21 @@ def _iter_zone_blocks(content: str):
     content between the opening ``(zone`` line and its matching closing paren.
     Shared by :func:`extract_zones` and :func:`extract_keepouts`.
     """
-    zone_start_pattern = r'\r?\n\t\(zone\s*\r?\n'
+    # #369 A5: match the zone header token itself, not "(zone" + NEWLINE --
+    # KiCad v5/v6 write zones single-line ("(zone (net 0) (layer F.Cu) ...")
+    # and the newline-anchored pattern parsed ZERO zones/keepouts from those
+    # files (every pour and rule area silently dropped).
+    zone_start_pattern = r'\r?\n\t\(zone(?=[\s(])'
     for start_match in re.finditer(zone_start_pattern, content):
         # Find the matching closing paren (string-aware, so a lone paren inside
         # a quoted token cannot run the scan past the zone end — see issue #113).
         # start_match begins at the newline before "(zone"; locate that "(".
         open_idx = content.index('(', start_match.start())
         zone_end = find_matching_paren(content, open_idx) - 1
-        if zone_end <= open_idx:
+        body_start = open_idx + len('(zone')
+        if zone_end <= body_start:
             continue
-        yield content[start_match.end():zone_end]
+        yield content[body_start:zone_end]
 
 
 def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]:
@@ -2398,32 +2403,40 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
     zones = []
 
     for zone_content in _iter_zone_blocks(content):
+        # Rule areas are routing restrictions, not copper -- skip regardless
+        # of net clause. v5/v6 keepouts DO carry (net 0), so the old skip
+        # (inside the no-numeric-net branch only) would have modeled them as
+        # phantom net-0 pours once single-line zones parse (#369 A5).
+        if '(keepout' in zone_content:
+            continue
         # Extract net id - try KiCad 9 format first, then KiCad 10
         net_match = re.search(r'\(net\s+(\d+)\)', zone_content)
         net_match_v10 = None
         if net_match:
             net_id = int(net_match.group(1))
         else:
-            # KiCad 10: (net "name") - first net reference in zone
+            # KiCad 10: (net "name") - first net reference in zone. Unescape
+            # before the lookup: name_to_id is keyed by UNESCAPED Net.name
+            # (#369 A12 -- escaped zone names resolved to net 0).
             if name_to_id:
-                net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', zone_content)
+                net_match_v10 = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"\)', zone_content)
             if net_match_v10:
-                net_name_v10 = net_match_v10.group(1)
+                net_name_v10 = _unescape_kicad_string(net_match_v10.group(1))
                 net_id = name_to_id.get(net_name_v10, 0)
-            elif '(keepout' in zone_content:
-                continue  # rule area, not copper (the builder skips them too)
             else:
                 # No net clause at all: a NO-NET copper pour (net 0). It still
                 # pours real copper (nitrokey/vfo_ctrl decorative fills), and
                 # pcbnew keeps it -- dropping it under-modelled the board.
                 net_id = 0
 
-        # Extract net name
-        net_name_match = re.search(r'\(net_name\s+"([^"]*)"\)', zone_content)
+        # Extract net name. Unescaped like every other net_name in the model
+        # (#369 A12: zones kept the RAW file text, so backslash/quote-named
+        # plane nets evaded --nets filters and zone dedup keys).
+        net_name_match = re.search(r'\(net_name\s+"((?:[^"\\]|\\.)*)"\)', zone_content)
         if net_name_match:
-            net_name = net_name_match.group(1)
+            net_name = _unescape_kicad_string(net_name_match.group(1))
         elif net_match_v10 is not None:
-            # KiCad 10: net name was already captured above
+            # KiCad 10: net name was already captured (and unescaped) above
             net_name = net_name_v10
         else:
             net_name = ""
@@ -2441,14 +2454,18 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
             if _i != -1:
                 _hdr_end = min(_hdr_end, _i)
         zone_header = zone_content[:_hdr_end]
-        layer_match = re.search(r'\(layer\s+"([^"]+)"\)', zone_header)
+        # Layer tokens are UNQUOTED in v5/v6 files ((layer F.Cu)) -- accept
+        # both spellings (#369 A5).
+        layer_match = re.search(r'\(layer\s+"?([^")\s]+)"?\)', zone_header)
         if layer_match:
             zone_layers = [layer_match.group(1)]
         else:
-            layers_match = re.search(r'\(layers\s+((?:"[^"]+"\s*)+)\)', zone_header)
+            layers_match = re.search(r'\(layers\s+([^)]+)\)', zone_header)
             if not layers_match:
                 continue
-            zone_layers = [l for l in re.findall(r'"([^"]+)"', layers_match.group(1))
+            _toks = [t.strip('"') for t in
+                     re.findall(r'"[^"]+"|\S+', layers_match.group(1))]
+            zone_layers = [l for l in _toks
                            if l.endswith('.Cu') or l == '*.Cu']
             if not zone_layers:
                 continue
@@ -2541,9 +2558,11 @@ def extract_keepouts(content: str) -> List[dict]:
         tracks_allowed = 'tracks not_allowed' not in ko_body
         vias_allowed = 'vias not_allowed' not in ko_body
 
-        # Layers: (layers "F.Cu" "In1.Cu" ...) or single (layer "F.Cu")
-        lm = re.search(r'\(layers\s+([^)]+)\)', zc) or re.search(r'\(layer\s+("[^"]+")\)', zc)
-        layers = set(re.findall(r'"([^"]+)"', lm.group(1))) if lm else set()
+        # Layers: (layers "F.Cu" "In1.Cu" ...) or single (layer "F.Cu").
+        # v5/v6 write tokens UNQUOTED ((layers F&B.Cu)) -- accept both (#369 A5).
+        lm = re.search(r'\(layers\s+([^)]+)\)', zc) or re.search(r'\(layer\s+("?[^")\s]+"?)\)', zc)
+        layers = ({t.strip('"') for t in re.findall(r'"[^"]+"|\S+', lm.group(1))}
+                  if lm else set())
 
         # Outline polygons. A rule area can have several (polygon (pts ...))
         # blocks: the first is the outer outline, any further ones are HOLES
