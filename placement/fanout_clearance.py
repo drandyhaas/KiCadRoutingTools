@@ -71,6 +71,24 @@ def _rotate_local_bounds(lmin_x, lmin_y, lmax_x, lmax_y, rotation):
     return min(xs), min(ys), max(xs), max(ys)
 
 
+def _ring_is_rect(ring):
+    """True when an outline ring is an axis-aligned rectangle equal to its own
+    bbox (shoelace area == bbox area) -- then the bbox inset test is exact and
+    the per-candidate ring checks can be skipped entirely (#370 B2)."""
+    xs = [p[0] for p in ring]
+    ys = [p[1] for p in ring]
+    bbox_area = (max(xs) - min(xs)) * (max(ys) - min(ys))
+    if bbox_area <= 0:
+        return False
+    a = 0.0
+    n = len(ring)
+    for i in range(n):
+        x1, y1 = ring[i]
+        x2, y2 = ring[(i + 1) % n]
+        a += x1 * y2 - x2 * y1
+    return abs(abs(a) / 2.0 - bbox_area) <= max(1e-6, 1e-3 * bbox_area)
+
+
 def _rect_gap(a, b):
     """Smallest axis-aligned gap between two rects (negative if overlapping)."""
     dx = max(a[0] - b[2], b[0] - a[2])
@@ -259,6 +277,23 @@ class _Repair:
         margin = max(clearance, board_edge_clearance)
         self.usable = (bounds[0] + margin, bounds[1] + margin,
                        bounds[2] - margin, bounds[3] - margin)
+        # Real board outline / cutouts (#370 B2): `usable` is a bbox inset,
+        # blind to interior cutouts and non-rectangular outlines, so a cap
+        # could be nudged over a switch window or past a curved edge. When the
+        # outline is not exactly the bbox (or cutouts exist), candidate rects
+        # are additionally gated against the true Edge.Cuts rings in
+        # _blocked_geom. Per-cap laziness: only caps whose reachable disk can
+        # touch a ring pay for the exact test.
+        from check_drc import board_edge_geometry
+        e_rings, e_outer, e_cuts = board_edge_geometry(pcb_data.board_info)
+        self._edge_rings, self._edge_outer, self._edge_cutouts = \
+            e_rings, e_outer, e_cuts
+        self._edge_margin = margin
+        self._edge_active = bool(e_rings) and (
+            bool(e_cuts) or len(e_rings) > 1 or
+            not _ring_is_rect(e_rings[0]))
+        self._max_disp_cap = max_displacement_cap
+        self._cap_near_edge: Dict[str, bool] = {}
         self.clearance = clearance
         self.grid_step = grid_step
         self.capture_radius = capture_radius
@@ -351,8 +386,27 @@ class _Repair:
             self.static_rects.append(((fp.x + b[0], fp.y + b[1],
                                        fp.x + b[2], fp.y + b[3]), side))
             # record this part's copper pads as foreign-pad keep-outs
+            from check_drc import _pad_has_no_copper
+            from kicad_parser import pad_drill_circles
             for p in fp.pads:
                 copper = [l for l in p.layers if str(l).endswith('.Cu')]
+                if _pad_has_no_copper(p):
+                    # Copper-less drilled pad (NPTH mounting hole -- an
+                    # np_thru_hole lists *.Cu but carries NO ring, #370 B2):
+                    # the DRILL still removes any copper closer than the
+                    # NPTH-to-track floor, so a cap pad slid over it is a real
+                    # fab violation regardless of net. Blocks BOTH sides
+                    # (through hole); graded at the NPTH floor by inflating
+                    # the rect; net -1 never matches a cap pad's net (even a
+                    # net-tied mounting hole is not connectable copper, #328).
+                    if (p.drill or 0) > 0:
+                        grow = max(0.0, defaults.NPTH_TO_TRACK_CLEARANCE
+                                   - clearance)
+                        for hx, hy, hd in pad_drill_circles(p):
+                            hr = hd / 2.0 + grow
+                            self.foreign_pads.append(
+                                (hx - hr, hy - hr, hx + hr, hy + hr, -1, None))
+                    continue
                 if not copper:
                     continue  # paste/mask-only aperture
                 through = (p.drill or 0) > 0
@@ -491,6 +545,51 @@ class _Repair:
                 return True
         return False
 
+    def _cap_may_reach_edge(self, ref, cap):
+        """Cached prune for the real-outline gate (#370 B2): a cap moves at
+        most max_displacement_cap from its seed, so only caps whose reachable
+        disk can touch an Edge.Cuts ring ever need the exact ring test."""
+        near = self._cap_near_edge.get(ref)
+        if near is None:
+            r = cap.rect(cap.seed_x, cap.seed_y, cap.seed_rot)
+            cx, cy = (r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0
+            span = math.hypot(r[2] - cx, r[3] - cy)
+            reach = self._max_disp_cap + span + self._edge_margin + EPS
+            near = False
+            for ring in self._edge_rings:
+                n = len(ring)
+                for i in range(n):
+                    x1, y1 = ring[i]
+                    x2, y2 = ring[(i + 1) % n]
+                    if _point_to_seg_dist(cx, cy, x1, y1, x2, y2) <= reach:
+                        near = True
+                        break
+                if near:
+                    break
+            self._cap_near_edge[ref] = near
+        return near
+
+    def _rect_edge_blocked(self, rect):
+        """True when a candidate courtyard rect leaves the REAL board outline,
+        enters a cutout, or comes within the edge margin of either (#370 B2 --
+        the bbox `usable` inset is blind to cutouts / curved outlines)."""
+        from check_drc import _point_on_board, _segment_to_rings_distance
+        x0, y0, x1, y1 = rect
+        for (px, py) in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
+            if not _point_on_board(px, py, self._edge_outer, self._edge_cutouts):
+                return True
+        for (ax, ay, bx, by) in ((x0, y0, x1, y0), (x1, y0, x1, y1),
+                                 (x1, y1, x0, y1), (x0, y1, x0, y0)):
+            if _segment_to_rings_distance(ax, ay, bx, by, self._edge_rings) \
+                    < self._edge_margin:
+                return True
+        # A cutout ring FULLY INSIDE the rect evades both tests above.
+        for cut in self._edge_cutouts:
+            cx, cy = cut[0]
+            if x0 <= cx <= x1 and y0 <= cy <= y1:
+                return True
+        return False
+
     def _overlap(self, a, b):
         """Courtyard-clearance shortfall between two rects (0 if clear)."""
         return max(0.0, self.clearance - _rect_gap(a, b))
@@ -572,6 +671,11 @@ class _Repair:
         rect = cap.rect(x, y, rot)
         if (rect[0] < self.usable[0] or rect[1] < self.usable[1]
                 or rect[2] > self.usable[2] or rect[3] > self.usable[3]):
+            return True
+        # Real outline / cutout gate (#370 B2): only when the bbox inset is
+        # not exact (non-rect outline or cutouts) and this cap can reach one.
+        if self._edge_active and self._cap_may_reach_edge(ref, cap) \
+                and self._rect_edge_blocked(rect):
             return True
         # only same-side parts/caps within reach can collide (pre-pruned)
         for idx, r in self.cap_static[ref]:

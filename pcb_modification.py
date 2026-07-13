@@ -472,7 +472,11 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
     from check_drc import _SOFT_JOINT_MIN_GAP, point_to_pad_distance
     from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
                                        _seg_foreign_via_dist, _seg_foreign_hole_dist)
+    from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     clr = config.clearance if clearance is None else clearance
+    # NPTH holes are graded at the higher NPTH-to-track fab floor, not the
+    # routing clearance (#370 B2; mirrors the microshift's #308 term).
+    npth_clr = max(clr, NPTH_TO_TRACK_CLEARANCE)
 
     def rk(x, y):
         return (round(x, 3), round(y, 3))
@@ -512,9 +516,10 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
     def clears(nid, x1, y1, x2, y2, layer, w):
         d = min(_seg_foreign_pad_dist(pcb_data, nid, x1, y1, x2, y2, layer),
                 _seg_foreign_seg_dist(pcb_data, nid, x1, y1, x2, y2, layer),
-                _seg_foreign_via_dist(pcb_data, nid, x1, y1, x2, y2, layer),
-                _seg_foreign_hole_dist(pcb_data, nid, x1, y1, x2, y2))
-        return d >= clr + w / 2.0 - 1e-4
+                _seg_foreign_via_dist(pcb_data, nid, x1, y1, x2, y2, layer))
+        hd = _seg_foreign_hole_dist(pcb_data, nid, x1, y1, x2, y2)
+        return (d >= clr + w / 2.0 - 1e-4 and
+                hd >= npth_clr + w / 2.0 - 1e-4)
 
     new_conns = []
     for (net_id, layer), ends in dangles.items():
@@ -700,10 +705,20 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
 
 def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
     """True if a candidate connector segment keeps `clearance` from all OTHER
-    nets' copper (segments on its layer, vias on any layer, pads on its layer)."""
+    nets' copper (segments on its layer, vias on any layer, pads on its layer)
+    and the higher NPTH-to-track floor from copper-less drill holes."""
     from geometry_utils import segment_to_segment_distance, point_to_segment_distance
     from check_drc import segment_to_rect_distance
+    from single_ended_routing import _seg_foreign_hole_dist
+    from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     half = width / 2
+    # NPTH (no-copper) drill holes (#370 B2): the pad/via/segment loops below
+    # all measure to COPPER, so a connector drawn straight across a mounting
+    # hole passed every check. Slot/offset drills handled by the capsule.
+    npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
+    if _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2) \
+            < npth_clr + half - 1e-4:
+        return False
     for s in pcb_data.segments:
         if s.net_id == net_id or s.layer != layer:
             continue
@@ -2300,7 +2315,14 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     Returns (segments_changed, nets_changed, original_segments_to_remove)."""
     from collections import defaultdict
     from check_connected import check_net_connectivity
-    from single_ended_routing import _seg_foreign_pad_dist, _seg_foreign_seg_dist, _seg_foreign_via_dist
+    from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
+                                      _seg_foreign_via_dist, _seg_foreign_hole_dist)
+    from routing_defaults import NPTH_TO_TRACK_CLEARANCE
+
+    # NPTH (no-copper) drill holes are graded at the higher NPTH-to-track floor,
+    # and the copper distance terms don't see them (#370 B2; the microshift
+    # sibling gained this term for #308, this re-bend path never did).
+    npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
 
     routed_seg_result = {}
     for r in results:
@@ -2344,7 +2366,13 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer))
-        return d >= clearance + w / 2.0 - 1e-4 and edge_clears(x1, y1, x2, y2, w)
+        # NPTH drill holes at the higher NPTH-to-track floor (#370 B2): the
+        # copper terms above never see a copper-less hole, so a re-bend could
+        # land the jog across a mounting hole.
+        hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
+        return (d >= clearance + w / 2.0 - 1e-4 and
+                hd >= npth_clr + w / 2.0 - 1e-4 and
+                edge_clears(x1, y1, x2, y2, w))
 
     def vk(x, y):
         return (round(x, 3), round(y, 3))
