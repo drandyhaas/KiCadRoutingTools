@@ -9,7 +9,7 @@ use std::collections::BinaryHeap;
 
 use crate::dubins::DubinsCalculator;
 use crate::obstacle_map::GridObstacleMap;
-use crate::types::{PoseState, PoseOpenEntry, BlockedCellTracker, DIRECTIONS, ORTHO_COST, DIAG_COST};
+use crate::types::{PoseState, PoseOpenEntry, SearchSink, NullSink, FrontierSink, DIRECTIONS, ORTHO_COST, DIAG_COST};
 
 /// The `closed` flag lives in the top bit of `PoseNodeState.parent` (S1-A):
 /// pose keys are at most 49 bits, so bit 63 can never be part of a real parent
@@ -184,7 +184,10 @@ impl PoseRouter {
     ///     (path, iterations, gnd_via_directions) where:
     ///     - path is list of (gx, gy, theta_idx, layer) or None
     ///     - gnd_via_directions is list of i8 (1=ahead, -1=behind) for each layer change
+    ///
+    /// C1: thin wrapper over the shared pose_search core with a NullSink.
     #[pyo3(signature = (obstacles, src_x, src_y, src_layer, src_theta_idx, tgt_x, tgt_y, tgt_layer, tgt_theta_idx, max_iterations, diff_pair_via_spacing=None))]
+    #[allow(clippy::too_many_arguments)]
     pub fn route_pose(
         &self,
         obstacles: &GridObstacleMap,
@@ -193,285 +196,11 @@ impl PoseRouter {
         max_iterations: u32,
         diff_pair_via_spacing: Option<i32>,
     ) -> (Option<Vec<(i32, i32, u8, u8)>>, u32, Vec<i8>) {
-        let dubins = DubinsCalculator::new(self.min_radius_grid);
-
-        let start = PoseState::new(src_x, src_y, src_theta_idx, src_layer);
-        let goal = PoseState::new(tgt_x, tgt_y, tgt_theta_idx, tgt_layer);
-        let goal_key = goal.as_key();
-
-        let mut open_set = BinaryHeap::new();
-        // One map per pose (g/parent/steps + the four straight/turn constraint
-        // counters), keyed and hashed ONCE -- see PoseNodeMap.
-        let mut nodes = PoseNodeMap::default();
-        let mut counter: u32 = 0;
-
-        // Initialize with start pose
-        let start_key = start.as_key();
-        let h = self.dubins_heuristic(&dubins, &start, &goal);
-        open_set.push(PoseOpenEntry {
-            f_score: h,
-            g_score: 0,
-            state: start,
-            counter,
-        });
-        counter += 1;
-        nodes.set_source(start_key);
-
-        let mut iterations: u32 = 0;
-
-        while let Some(current_entry) = open_set.pop() {
-            if iterations >= max_iterations {
-                break;
-            }
-            iterations += 1;
-
-            let current = current_entry.state;
-            let current_key = current.as_key();
-            let g = current_entry.g_score;
-
-            if nodes.is_closed(current_key) {
-                continue;
-            }
-
-            // Goal check: position AND orientation must match
-            if current_key == goal_key {
-                let path = self.reconstruct_pose_path(&nodes, current_key);
-                let gnd_via_dirs = self.compute_gnd_via_directions(obstacles, &path);
-                return (Some(path), iterations, gnd_via_dirs);
-            }
-
-            nodes.set_closed(current_key);
-
-            // Get current constraint state
-            let (current_steps, current_straight_remaining, current_straight_taken, current_turn_1, current_turn_2) = nodes.constraints(current_key);
-
-            // Expand neighbors: can move forward OR turn in place
-            // 1. Move forward in current direction
-            let (dx, dy) = current.direction();
-            let nx = current.gx + dx;
-            let ny = current.gy + dy;
-
-            if !self.layer_forbidden(current.layer as usize) && !obstacles.is_blocked(nx, ny, current.layer as usize) {  // G2: no track on a forbidden source layer
-                let neighbor = PoseState::new(nx, ny, current.theta_idx, current.layer);
-                let neighbor_key = neighbor.as_key();
-
-                if !nodes.is_closed(neighbor_key) {
-                    let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
-                    let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
-                        + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
-                    let attraction_bonus = obstacles.get_cross_layer_attraction(
-                        nx, ny, current.layer as usize,
-                        self.vertical_attraction_radius, self.vertical_attraction_bonus);
-                    let new_g = g + move_cost + proximity_cost - attraction_bonus;
-
-                    if new_g < nodes.g(neighbor_key) {
-                        // Update constraint tracking for straight move
-                        let new_steps = current_steps + 1;
-                        // Reset counters at their respective intervals (no turn delta for straight move)
-                        let new_turn_1 = if new_steps % 100 == 0 { 0 } else { current_turn_1 };
-                        let new_turn_2 = if new_steps % 100 == 50 { 0 } else { current_turn_2 };
-                        nodes.relax_move(neighbor_key, new_g, current_key, new_steps,
-                            (current_straight_remaining - 1).max(0), current_straight_taken + 1, new_turn_1, new_turn_2);
-                        let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
-                        open_set.push(PoseOpenEntry {
-                            f_score: new_g + h,
-                            g_score: new_g,
-                            state: neighbor,
-                            counter,
-                        });
-                        counter += 1;
-                    }
-                }
-            }
-
-            // 2. Move + turn by ±45°: move in the new direction while changing heading
-            // With a minimum turning radius, you can't turn in place - must move along an arc
-            // CONSTRAINTS:
-            // - First move from start must be straight in src_theta direction
-            // - After a via, must go straight for 2 steps (no turns)
-            // - For diff pairs, limit cumulative turn to prevent loops
-            if !self.layer_forbidden(current.layer as usize) && current_key != start_key && current_straight_remaining <= 0 {  // G2: no turns on a forbidden source layer
-                for delta in [-1i8, 1i8] {
-                    let new_steps = current_steps + 1;
-                    // Calculate new turn values, resetting at respective intervals
-                    let new_turn_1 = if new_steps % 100 == 0 { delta as i32 } else { current_turn_1 + delta as i32 };
-                    let new_turn_2 = if new_steps % 100 == 50 { delta as i32 } else { current_turn_2 + delta as i32 };
-
-                    // For diff pairs, check both cumulative turn limits (max_turn_units * 45°)
-                    if self.diff_pair_spacing > 0 && (new_turn_1.abs() > self.max_turn_units || new_turn_2.abs() > self.max_turn_units) {
-                        continue;  // Would form a loop
-                    }
-
-                    let new_theta = ((current.theta_idx as i8 + delta + 8) % 8) as u8;
-                    let (dx, dy) = DIRECTIONS[new_theta as usize];
-                    let nx = current.gx + dx;
-                    let ny = current.gy + dy;
-
-                    if !self.layer_forbidden(current.layer as usize) && !obstacles.is_blocked(nx, ny, current.layer as usize) {  // G2: no track on a forbidden source layer
-                        let neighbor = PoseState::new(nx, ny, new_theta, current.layer);
-                        let neighbor_key = neighbor.as_key();
-
-                        if !nodes.is_closed(neighbor_key) {
-                            // Cost = movement + turn arc cost
-                            let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
-                            let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
-                                + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
-                            let attraction_bonus = obstacles.get_cross_layer_attraction(
-                                nx, ny, current.layer as usize,
-                                self.vertical_attraction_radius, self.vertical_attraction_bonus);
-                            let new_g = g + move_cost + self.turn_cost + proximity_cost - attraction_bonus;
-
-                            if new_g < nodes.g(neighbor_key) {
-                                // Update constraint tracking for turn move: require
-                                // min_radius_grid straight steps before next turn, and
-                                // reset taken to 1 (first step in the new direction).
-                                nodes.relax_move(neighbor_key, new_g, current_key, new_steps,
-                                    self.min_radius_grid.ceil() as i32, 1, new_turn_1, new_turn_2);
-                                let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
-                                open_set.push(PoseOpenEntry {
-                                    f_score: new_g + h,
-                                    g_score: new_g,
-                                    state: neighbor,
-                                    counter,
-                                });
-                                counter += 1;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 3. Via to other layer (keep same position and heading)
-            // CONSTRAINTS for collinear vias:
-            // - Need at least 2 steps from source before placing a via
-            // - Cannot place via while still in post-via straight requirement
-            // - Must approach via straight for min_radius steps (prevents P/N curving near each other's vias)
-            // - After via, must go straight for min_radius steps
-            // - If diff_pair_via_spacing is set, check that offset positions are also clear
-            let can_place_via = current_steps >= 2
-                && current_straight_remaining <= 0
-                && current_straight_taken >= self.straight_after_via;
-
-            // Check centerline via position
-            let mut via_positions_clear = !obstacles.is_via_blocked(current.gx, current.gy);
-
-            // For diff pairs, also check the perpendicular offset positions where P/N vias will go
-            if via_positions_clear {
-                if let Some(spacing) = diff_pair_via_spacing {
-                    let (dx, dy) = current.direction();
-                    // Perpendicular direction: rotate 90° -> (-dy, dx)
-                    let perp_x = -dy;
-                    let perp_y = dx;
-                    // Check both offset positions
-                    let p_via_x = current.gx + perp_x * spacing;
-                    let p_via_y = current.gy + perp_y * spacing;
-                    let n_via_x = current.gx - perp_x * spacing;
-                    let n_via_y = current.gy - perp_y * spacing;
-                    if obstacles.is_via_blocked(p_via_x, p_via_y) || obstacles.is_via_blocked(n_via_x, n_via_y) {
-                        via_positions_clear = false;
-                    }
-
-                    // Check GND via positions if enabled (gnd_via_perp_offset > 0)
-                    // GND vias are placed outside P/N tracks, offset along heading (ahead or behind)
-                    // We also check that the P/N track path has sufficient clearance from GND vias.
-                    if via_positions_clear && self.gnd_via_perp_offset > 0 {
-                        let gnd_p_base_x = current.gx + perp_x * self.gnd_via_perp_offset;
-                        let gnd_p_base_y = current.gy + perp_y * self.gnd_via_perp_offset;
-                        let gnd_n_base_x = current.gx - perp_x * self.gnd_via_perp_offset;
-                        let gnd_n_base_y = current.gy - perp_y * self.gnd_via_perp_offset;
-
-                        // Try ahead first (+heading), then behind (-heading)
-                        let ahead_offset_x = dx * self.gnd_via_along_offset;
-                        let ahead_offset_y = dy * self.gnd_via_along_offset;
-
-                        let gnd_p_ahead_x = gnd_p_base_x + ahead_offset_x;
-                        let gnd_p_ahead_y = gnd_p_base_y + ahead_offset_y;
-                        let gnd_n_ahead_x = gnd_n_base_x + ahead_offset_x;
-                        let gnd_n_ahead_y = gnd_n_base_y + ahead_offset_y;
-
-                        // For "ahead" placement: need straight continuation after via
-                        // Check GND via positions aren't blocked
-                        let ahead_clear = !obstacles.is_via_blocked(gnd_p_ahead_x, gnd_p_ahead_y)
-                            && !obstacles.is_via_blocked(gnd_n_ahead_x, gnd_n_ahead_y);
-
-                        // For "behind" placement: already had straight approach (enforced by can_place_via)
-                        // Check GND via positions aren't blocked
-                        let gnd_p_behind_x = gnd_p_base_x - ahead_offset_x;
-                        let gnd_p_behind_y = gnd_p_base_y - ahead_offset_y;
-                        let gnd_n_behind_x = gnd_n_base_x - ahead_offset_x;
-                        let gnd_n_behind_y = gnd_n_base_y - ahead_offset_y;
-
-                        let behind_clear = !obstacles.is_via_blocked(gnd_p_behind_x, gnd_p_behind_y)
-                            && !obstacles.is_via_blocked(gnd_n_behind_x, gnd_n_behind_y);
-
-                        // Prefer ahead, but if blocked fall back to behind
-                        if !ahead_clear && !behind_clear {
-                            // Both ahead and behind blocked - can't place GND vias here
-                            via_positions_clear = false;
-                        }
-                    }
-                }
-            }
-
-            // Block or penalize vias within stub proximity or BGA proximity (for diff pairs)
-            // If via_proximity_cost is 0, block vias in these areas; otherwise multiply via cost
-            let in_stub_proximity = obstacles.get_stub_proximity_cost(current.gx, current.gy) > 0;
-            let in_bga_proximity = obstacles.is_in_bga_proximity(current.gx, current.gy);
-            let in_proximity_zone = in_stub_proximity || in_bga_proximity;
-
-            if via_positions_clear && diff_pair_via_spacing.is_some() && self.via_proximity_cost == 0 {
-                if in_proximity_zone {
-                    via_positions_clear = false;
-                }
-            }
-
-            if can_place_via && via_positions_clear {
-                for layer in 0..obstacles.num_layers as u8 {
-                    if layer == current.layer {
-                        continue;
-                    }
-                    if self.layer_forbidden(layer as usize) {
-                        continue;  // FORBIDDEN LAYER: never end a via here
-                    }
-
-                    if obstacles.is_blocked(current.gx, current.gy, layer as usize) {
-                        continue;
-                    }
-
-                    let neighbor = PoseState::new(current.gx, current.gy, current.theta_idx, layer);
-                    let neighbor_key = neighbor.as_key();
-
-                    if !nodes.is_closed(neighbor_key) {
-                        // Multiply via cost by via_proximity_cost in stub/BGA proximity zones
-                        let via_cost = if in_proximity_zone {
-                            self.via_cost * self.via_proximity_cost
-                        } else {
-                            self.via_cost
-                        };
-                        // Layer transition: penalize a via INTO a costlier layer, discount into a cheaper one (issue #193)
-                        let layer_transition = self.layer_cost_or_default(layer as usize)
-                            - self.layer_cost_or_default(current.layer as usize);
-                        let new_g = g + (via_cost + layer_transition).max(0);
-
-                        if new_g < nodes.g(neighbor_key) {
-                            // Via doesn't count as a step, but sets straight requirement.
-                            // straight_taken/turn counters intentionally left untouched.
-                            nodes.relax_via(neighbor_key, new_g, current_key, current_steps, self.straight_after_via);
-                            let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
-                            open_set.push(PoseOpenEntry {
-                                f_score: new_g + h,
-                                g_score: new_g,
-                                state: neighbor,
-                                counter,
-                            });
-                            counter += 1;
-                        }
-                    }
-                }
-            }
-        }
-
-        (None, iterations, Vec::new())
+        let mut sink = NullSink;
+        self.pose_search(obstacles,
+                         src_x, src_y, src_layer, src_theta_idx,
+                         tgt_x, tgt_y, tgt_layer, tgt_theta_idx,
+                         max_iterations, diff_pair_via_spacing, &mut sink)
     }
 
     /// Route with frontier analysis - returns blocked cells on failure.
@@ -482,7 +211,10 @@ impl PoseRouter {
     /// Returns (path, iterations, blocked_cells, gnd_via_directions) where:
     /// - On success: path is Some, blocked_cells is empty, gnd_via_directions has entries
     /// - On failure: path is None, blocked_cells contains cells that blocked expansion
+    ///
+    /// C1: thin wrapper over the shared pose_search core with a FrontierSink.
     #[pyo3(signature = (obstacles, src_x, src_y, src_layer, src_theta_idx, tgt_x, tgt_y, tgt_layer, tgt_theta_idx, max_iterations, diff_pair_via_spacing=None))]
+    #[allow(clippy::too_many_arguments)]
     pub fn route_pose_with_frontier(
         &self,
         obstacles: &GridObstacleMap,
@@ -491,257 +223,17 @@ impl PoseRouter {
         max_iterations: u32,
         diff_pair_via_spacing: Option<i32>,
     ) -> (Option<Vec<(i32, i32, u8, u8)>>, u32, Vec<(i32, i32, u8)>, Vec<i8>) {
-        let mut tracker = BlockedCellTracker::new();
-        let dubins = DubinsCalculator::new(self.min_radius_grid);
-
-        let start = PoseState::new(src_x, src_y, src_theta_idx, src_layer);
-        let goal = PoseState::new(tgt_x, tgt_y, tgt_theta_idx, tgt_layer);
-        let goal_key = goal.as_key();
-
-        let mut open_set = BinaryHeap::new();
-        // One map per pose, keyed and hashed ONCE -- see PoseNodeMap.
-        let mut nodes = PoseNodeMap::default();
-        let mut counter: u32 = 0;
-
-        let start_key = start.as_key();
-        let h = self.dubins_heuristic(&dubins, &start, &goal);
-        open_set.push(PoseOpenEntry { f_score: h, g_score: 0, state: start, counter });
-        counter += 1;
-        nodes.set_source(start_key);
-
-        let mut iterations: u32 = 0;
-
-        while let Some(current_entry) = open_set.pop() {
-            if iterations >= max_iterations { break; }
-            iterations += 1;
-
-            let current = current_entry.state;
-            let current_key = current.as_key();
-            let g = current_entry.g_score;
-
-            if nodes.is_closed(current_key) { continue; }
-
-            if current_key == goal_key {
-                let path = self.reconstruct_pose_path(&nodes, current_key);
-                let gnd_via_dirs = self.compute_gnd_via_directions(obstacles, &path);
-                return (Some(path), iterations, Vec::new(), gnd_via_dirs);
-            }
-
-            nodes.set_closed(current_key);
-
-            let (current_steps, current_straight_remaining, current_straight_taken, current_turn_1, current_turn_2) = nodes.constraints(current_key);
-
-            // 1. Move forward in current direction
-            let (dx, dy) = current.direction();
-            let nx = current.gx + dx;
-            let ny = current.gy + dy;
-
-            if self.layer_forbidden(current.layer as usize) || obstacles.is_blocked(nx, ny, current.layer as usize) {  // G2: no track on a forbidden source layer
-                tracker.track(nx, ny, current.layer);
-            } else {
-                let neighbor = PoseState::new(nx, ny, current.theta_idx, current.layer);
-                let neighbor_key = neighbor.as_key();
-
-                if !nodes.is_closed(neighbor_key) {
-                    let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
-                    let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
-                        + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
-                    let attraction_bonus = obstacles.get_cross_layer_attraction(
-                        nx, ny, current.layer as usize,
-                        self.vertical_attraction_radius, self.vertical_attraction_bonus);
-                    let new_g = g + move_cost + proximity_cost - attraction_bonus;
-
-                    if new_g < nodes.g(neighbor_key) {
-                        let new_steps = current_steps + 1;
-                        let new_turn_1 = if new_steps % 100 == 0 { 0 } else { current_turn_1 };
-                        let new_turn_2 = if new_steps % 100 == 50 { 0 } else { current_turn_2 };
-                        nodes.relax_move(neighbor_key, new_g, current_key, new_steps,
-                            (current_straight_remaining - 1).max(0), current_straight_taken + 1, new_turn_1, new_turn_2);
-                        let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
-                        open_set.push(PoseOpenEntry { f_score: new_g + h, g_score: new_g, state: neighbor, counter });
-                        counter += 1;
-                    }
-                }
-            }
-
-            // 2. Move + turn by ±45°
-            if !self.layer_forbidden(current.layer as usize) && current_key != start_key && current_straight_remaining <= 0 {  // G2: no turns on a forbidden source layer
-                for delta in [-1i8, 1i8] {
-                    let new_steps = current_steps + 1;
-                    let new_turn_1 = if new_steps % 100 == 0 { delta as i32 } else { current_turn_1 + delta as i32 };
-                    let new_turn_2 = if new_steps % 100 == 50 { delta as i32 } else { current_turn_2 + delta as i32 };
-
-                    // For diff pairs, check both cumulative turn limits (max_turn_units * 45°)
-                    if self.diff_pair_spacing > 0 && (new_turn_1.abs() > self.max_turn_units || new_turn_2.abs() > self.max_turn_units) {
-                        continue;  // Would form a loop
-                    }
-
-                    let new_theta = ((current.theta_idx as i8 + delta + 8) % 8) as u8;
-                    let (dx, dy) = DIRECTIONS[new_theta as usize];
-                    let nx = current.gx + dx;
-                    let ny = current.gy + dy;
-
-                    if self.layer_forbidden(current.layer as usize) || obstacles.is_blocked(nx, ny, current.layer as usize) {  // G2: no track on a forbidden source layer
-                        tracker.track(nx, ny, current.layer);
-                        continue;
-                    }
-
-                    let neighbor = PoseState::new(nx, ny, new_theta, current.layer);
-                    let neighbor_key = neighbor.as_key();
-
-                    if !nodes.is_closed(neighbor_key) {
-                        let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
-                        let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
-                            + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
-                        let attraction_bonus = obstacles.get_cross_layer_attraction(
-                            nx, ny, current.layer as usize,
-                            self.vertical_attraction_radius, self.vertical_attraction_bonus);
-                        let new_g = g + move_cost + self.turn_cost + proximity_cost - attraction_bonus;
-
-                        if new_g < nodes.g(neighbor_key) {
-                            // After a turn, require min_radius_grid straight steps
-                            // before next turn; reset taken to 1 (first step new dir).
-                            nodes.relax_move(neighbor_key, new_g, current_key, new_steps,
-                                self.min_radius_grid.ceil() as i32, 1, new_turn_1, new_turn_2);
-                            let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
-                            open_set.push(PoseOpenEntry { f_score: new_g + h, g_score: new_g, state: neighbor, counter });
-                            counter += 1;
-                        }
-                    }
-                }
-            }
-
-            // 3. Via to other layer
-            let can_place_via = current_steps >= 2
-                && current_straight_remaining <= 0
-                && current_straight_taken >= self.straight_after_via;
-            let mut via_positions_clear = !obstacles.is_via_blocked(current.gx, current.gy);
-
-            // Track via blocking for all layers
-            if !via_positions_clear {
-                for layer in 0..obstacles.num_layers as u8 {
-                    if layer != current.layer {
-                        tracker.track(current.gx, current.gy, layer);
-                    }
-                }
-            }
-
-            if via_positions_clear {
-                if let Some(spacing) = diff_pair_via_spacing {
-                    let (dx, dy) = current.direction();
-                    let perp_x = -dy;
-                    let perp_y = dx;
-                    let p_via_x = current.gx + perp_x * spacing;
-                    let p_via_y = current.gy + perp_y * spacing;
-                    let n_via_x = current.gx - perp_x * spacing;
-                    let n_via_y = current.gy - perp_y * spacing;
-                    let p_blocked = obstacles.is_via_blocked(p_via_x, p_via_y);
-                    let n_blocked = obstacles.is_via_blocked(n_via_x, n_via_y);
-                    if p_blocked || n_blocked {
-                        via_positions_clear = false;
-                        // Track the blocked via offset positions on all layers
-                        for layer in 0..obstacles.num_layers as u8 {
-                            if p_blocked {
-                                tracker.track(p_via_x, p_via_y, layer);
-                            }
-                            if n_blocked {
-                                tracker.track(n_via_x, n_via_y, layer);
-                            }
-                        }
-                    }
-
-                    // Check GND via positions if enabled (gnd_via_perp_offset > 0)
-                    // We also check that the P/N track path has sufficient clearance from GND vias.
-                    if via_positions_clear && self.gnd_via_perp_offset > 0 {
-                        let gnd_p_base_x = current.gx + perp_x * self.gnd_via_perp_offset;
-                        let gnd_p_base_y = current.gy + perp_y * self.gnd_via_perp_offset;
-                        let gnd_n_base_x = current.gx - perp_x * self.gnd_via_perp_offset;
-                        let gnd_n_base_y = current.gy - perp_y * self.gnd_via_perp_offset;
-
-                        let ahead_offset_x = dx * self.gnd_via_along_offset;
-                        let ahead_offset_y = dy * self.gnd_via_along_offset;
-
-                        // Check ahead positions
-                        let gnd_p_ahead_x = gnd_p_base_x + ahead_offset_x;
-                        let gnd_p_ahead_y = gnd_p_base_y + ahead_offset_y;
-                        let gnd_n_ahead_x = gnd_n_base_x + ahead_offset_x;
-                        let gnd_n_ahead_y = gnd_n_base_y + ahead_offset_y;
-
-                        let ahead_clear = !obstacles.is_via_blocked(gnd_p_ahead_x, gnd_p_ahead_y)
-                            && !obstacles.is_via_blocked(gnd_n_ahead_x, gnd_n_ahead_y);
-
-                        // Check behind positions
-                        let gnd_p_behind_x = gnd_p_base_x - ahead_offset_x;
-                        let gnd_p_behind_y = gnd_p_base_y - ahead_offset_y;
-                        let gnd_n_behind_x = gnd_n_base_x - ahead_offset_x;
-                        let gnd_n_behind_y = gnd_n_base_y - ahead_offset_y;
-
-                        let behind_clear = !obstacles.is_via_blocked(gnd_p_behind_x, gnd_p_behind_y)
-                            && !obstacles.is_via_blocked(gnd_n_behind_x, gnd_n_behind_y);
-
-                        if !ahead_clear && !behind_clear {
-                            // Both blocked - track all GND via positions
-                            via_positions_clear = false;
-                            for layer in 0..obstacles.num_layers as u8 {
-                                tracker.track(gnd_p_ahead_x, gnd_p_ahead_y, layer);
-                                tracker.track(gnd_n_ahead_x, gnd_n_ahead_y, layer);
-                                tracker.track(gnd_p_behind_x, gnd_p_behind_y, layer);
-                                tracker.track(gnd_n_behind_x, gnd_n_behind_y, layer);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Block or penalize vias within stub proximity or BGA proximity (for diff pairs)
-            let in_stub_proximity = obstacles.get_stub_proximity_cost(current.gx, current.gy) > 0;
-            let in_bga_proximity = obstacles.is_in_bga_proximity(current.gx, current.gy);
-            let in_proximity_zone = in_stub_proximity || in_bga_proximity;
-
-            if via_positions_clear && diff_pair_via_spacing.is_some() && self.via_proximity_cost == 0 {
-                if in_proximity_zone {
-                    via_positions_clear = false;
-                }
-            }
-
-            if can_place_via && via_positions_clear {
-                for layer in 0..obstacles.num_layers as u8 {
-                    if layer == current.layer { continue; }
-                    if self.layer_forbidden(layer as usize) { continue; }  // FORBIDDEN LAYER: never end a via here
-
-                    if obstacles.is_blocked(current.gx, current.gy, layer as usize) {
-                        tracker.track(current.gx, current.gy, layer);
-                        continue;
-                    }
-
-                    let neighbor = PoseState::new(current.gx, current.gy, current.theta_idx, layer);
-                    let neighbor_key = neighbor.as_key();
-
-                    if !nodes.is_closed(neighbor_key) {
-                        // Multiply via cost by via_proximity_cost in stub/BGA proximity zones
-                        let via_cost = if in_proximity_zone {
-                            self.via_cost * self.via_proximity_cost
-                        } else {
-                            self.via_cost
-                        };
-                        // Layer transition: penalize a via INTO a costlier layer, discount into a cheaper one (issue #193)
-                        let layer_transition = self.layer_cost_or_default(layer as usize)
-                            - self.layer_cost_or_default(current.layer as usize);
-                        let new_g = g + (via_cost + layer_transition).max(0);
-
-                        if new_g < nodes.g(neighbor_key) {
-                            // straight_taken/turn counters intentionally left untouched.
-                            nodes.relax_via(neighbor_key, new_g, current_key, current_steps, self.straight_after_via);
-                            let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
-                            open_set.push(PoseOpenEntry { f_score: new_g + h, g_score: new_g, state: neighbor, counter });
-                            counter += 1;
-                        }
-                    }
-                }
-            }
+        let mut sink = FrontierSink::new();
+        let (path, iterations, gnd_via_dirs) = self.pose_search(
+            obstacles,
+            src_x, src_y, src_layer, src_theta_idx,
+            tgt_x, tgt_y, tgt_layer, tgt_theta_idx,
+            max_iterations, diff_pair_via_spacing, &mut sink);
+        if path.is_some() {
+            (path, iterations, Vec::new(), gnd_via_dirs)
+        } else {
+            (None, iterations, sink.tracker.get_blocked(), Vec::new())
         }
-
-        (None, iterations, tracker.get_blocked(), Vec::new())
     }
 }
 
@@ -790,6 +282,354 @@ impl PoseRouter {
         (h as f32 * self.h_weight) as i32
     }
 
+
+    /// C1 (issue #387): THE pose A* search core; route_pose and
+    /// route_pose_with_frontier drive this one loop with different sinks
+    /// (NullSink / FrontierSink), so there is exactly one copy of the pose
+    /// expansion logic.
+    ///
+    /// B6 (issue #386): forbidden-layer cells are no longer reported to the
+    /// sink as "blocked" -- a forbidden layer is a routing rule, not copper,
+    /// and tracking it polluted rip-up candidate scoring (the grid router
+    /// never tracked them).
+    #[allow(clippy::too_many_arguments)]
+    fn pose_search<S: SearchSink>(
+        &self,
+        obstacles: &GridObstacleMap,
+        src_x: i32, src_y: i32, src_layer: u8, src_theta_idx: u8,
+        tgt_x: i32, tgt_y: i32, tgt_layer: u8, tgt_theta_idx: u8,
+        max_iterations: u32,
+        diff_pair_via_spacing: Option<i32>,
+        sink: &mut S,
+    ) -> (Option<Vec<(i32, i32, u8, u8)>>, u32, Vec<i8>) {
+        let dubins = DubinsCalculator::new(self.min_radius_grid);
+
+        let start = PoseState::new(src_x, src_y, src_theta_idx, src_layer);
+        let goal = PoseState::new(tgt_x, tgt_y, tgt_theta_idx, tgt_layer);
+        let goal_key = goal.as_key();
+
+        let mut open_set = BinaryHeap::new();
+        // One map per pose (g/parent/steps + the four straight/turn constraint
+        // counters), keyed and hashed ONCE -- see PoseNodeMap.
+        let mut nodes = PoseNodeMap::default();
+        let mut counter: u32 = 0;
+
+        // Initialize with start pose
+        let start_key = start.as_key();
+        let h = self.dubins_heuristic(&dubins, &start, &goal);
+        open_set.push(PoseOpenEntry {
+            f_score: h,
+            g_score: 0,
+            state: start,
+            counter,
+        });
+        counter += 1;
+        sink.on_push();
+        nodes.set_source(start_key);
+
+        let mut iterations: u32 = 0;
+
+        while let Some(current_entry) = open_set.pop() {
+            if iterations >= max_iterations {
+                break;
+            }
+            iterations += 1;
+
+            let current = current_entry.state;
+            let current_key = current.as_key();
+            let g = current_entry.g_score;
+
+            if nodes.is_closed(current_key) {
+                sink.on_duplicate_skip();
+                continue;
+            }
+            sink.on_expand();
+
+            // Goal check: position AND orientation must match
+            if current_key == goal_key {
+                let path = self.reconstruct_pose_path(&nodes, current_key);
+                let gnd_via_dirs = self.compute_gnd_via_directions(obstacles, &path);
+                return (Some(path), iterations, gnd_via_dirs);
+            }
+
+            nodes.set_closed(current_key);
+
+            // Get current constraint state
+            let (current_steps, current_straight_remaining, current_straight_taken,
+                 current_turn_1, current_turn_2) = nodes.constraints(current_key);
+
+            // G2: a forbidden source layer allows neither moves nor turns.
+            // S6-style hoist: this test was repeated inside each branch below.
+            let layer_ok = !self.layer_forbidden(current.layer as usize);
+
+            // Expand neighbors: can move forward OR turn while moving
+            // 1. Move forward in current direction
+            let (dx, dy) = current.direction();
+            let nx = current.gx + dx;
+            let ny = current.gy + dy;
+
+            if layer_ok {
+                if obstacles.is_blocked(nx, ny, current.layer as usize) {
+                    // B6: only genuinely blocked cells reach the tracker
+                    sink.on_blocked(nx, ny, current.layer);
+                } else {
+                    let neighbor = PoseState::new(nx, ny, current.theta_idx, current.layer);
+                    let neighbor_key = neighbor.as_key();
+
+                    if !nodes.is_closed(neighbor_key) {
+                        let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
+                        let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
+                            + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
+                        let attraction_bonus = obstacles.get_cross_layer_attraction(
+                            nx, ny, current.layer as usize,
+                            self.vertical_attraction_radius, self.vertical_attraction_bonus);
+                        let new_g = g + move_cost + proximity_cost - attraction_bonus;
+
+                        if new_g < nodes.g(neighbor_key) {
+                            // Update constraint tracking for straight move;
+                            // reset counters at their respective intervals
+                            // (no turn delta for a straight move)
+                            let new_steps = current_steps + 1;
+                            let new_turn_1 = if new_steps % 100 == 0 { 0 } else { current_turn_1 };
+                            let new_turn_2 = if new_steps % 100 == 50 { 0 } else { current_turn_2 };
+                            nodes.relax_move(neighbor_key, new_g, current_key, new_steps,
+                                (current_straight_remaining - 1).max(0), current_straight_taken + 1, new_turn_1, new_turn_2);
+                            let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
+                            open_set.push(PoseOpenEntry {
+                                f_score: new_g + h,
+                                g_score: new_g,
+                                state: neighbor,
+                                counter,
+                            });
+                            counter += 1;
+                            sink.on_push();
+                        }
+                    }
+                }
+            }
+
+            // 2. Move + turn by ±45°: move in the new direction while changing heading
+            // With a minimum turning radius, you can't turn in place - must move along an arc
+            // CONSTRAINTS:
+            // - First move from start must be straight in src_theta direction
+            // - After a via, must go straight (straight_remaining) before turning
+            // - For diff pairs, limit cumulative turn to prevent loops
+            if layer_ok && current_key != start_key && current_straight_remaining <= 0 {
+                for delta in [-1i8, 1i8] {
+                    let new_steps = current_steps + 1;
+                    // Calculate new turn values, resetting at respective intervals
+                    let new_turn_1 = if new_steps % 100 == 0 { delta as i32 } else { current_turn_1 + delta as i32 };
+                    let new_turn_2 = if new_steps % 100 == 50 { delta as i32 } else { current_turn_2 + delta as i32 };
+
+                    // For diff pairs, check both cumulative turn limits (max_turn_units * 45°)
+                    if self.diff_pair_spacing > 0 && (new_turn_1.abs() > self.max_turn_units || new_turn_2.abs() > self.max_turn_units) {
+                        continue;  // Would form a loop
+                    }
+
+                    let new_theta = ((current.theta_idx as i8 + delta + 8) % 8) as u8;
+                    let (dx, dy) = DIRECTIONS[new_theta as usize];
+                    let nx = current.gx + dx;
+                    let ny = current.gy + dy;
+
+                    if obstacles.is_blocked(nx, ny, current.layer as usize) {
+                        sink.on_blocked(nx, ny, current.layer);  // B6: real blocks only
+                        continue;
+                    }
+
+                    let neighbor = PoseState::new(nx, ny, new_theta, current.layer);
+                    let neighbor_key = neighbor.as_key();
+
+                    if !nodes.is_closed(neighbor_key) {
+                        // Cost = movement + turn arc cost
+                        let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
+                        let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
+                            + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
+                        let attraction_bonus = obstacles.get_cross_layer_attraction(
+                            nx, ny, current.layer as usize,
+                            self.vertical_attraction_radius, self.vertical_attraction_bonus);
+                        let new_g = g + move_cost + self.turn_cost + proximity_cost - attraction_bonus;
+
+                        if new_g < nodes.g(neighbor_key) {
+                            // After a turn, require min_radius_grid straight steps
+                            // before the next turn; reset taken to 1 (first step in
+                            // the new direction).
+                            nodes.relax_move(neighbor_key, new_g, current_key, new_steps,
+                                self.min_radius_grid.ceil() as i32, 1, new_turn_1, new_turn_2);
+                            let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
+                            open_set.push(PoseOpenEntry {
+                                f_score: new_g + h,
+                                g_score: new_g,
+                                state: neighbor,
+                                counter,
+                            });
+                            counter += 1;
+                            sink.on_push();
+                        }
+                    }
+                }
+            }
+
+            // 3. Via to other layer (keep same position and heading)
+            // CONSTRAINTS for collinear vias:
+            // - Need at least 2 steps from source before placing a via
+            // - Cannot place via while still in post-via straight requirement
+            // - Must approach via straight for min_radius steps (prevents P/N curving near each other's vias)
+            // - After via, must go straight for min_radius steps
+            // - If diff_pair_via_spacing is set, check that offset positions are also clear
+            let can_place_via = current_steps >= 2
+                && current_straight_remaining <= 0
+                && current_straight_taken >= self.straight_after_via;
+
+            // Check centerline via position
+            let mut via_positions_clear = !obstacles.is_via_blocked(current.gx, current.gy);
+
+            // Track via blocking for all layers
+            if !via_positions_clear {
+                for layer in 0..obstacles.num_layers as u8 {
+                    if layer != current.layer {
+                        sink.on_blocked(current.gx, current.gy, layer);
+                    }
+                }
+            }
+
+            // For diff pairs, also check the perpendicular offset positions where P/N vias will go
+            if via_positions_clear {
+                if let Some(spacing) = diff_pair_via_spacing {
+                    let (dx, dy) = current.direction();
+                    // Perpendicular direction: rotate 90° -> (-dy, dx)
+                    let perp_x = -dy;
+                    let perp_y = dx;
+                    // Check both offset positions
+                    let p_via_x = current.gx + perp_x * spacing;
+                    let p_via_y = current.gy + perp_y * spacing;
+                    let n_via_x = current.gx - perp_x * spacing;
+                    let n_via_y = current.gy - perp_y * spacing;
+                    let p_blocked = obstacles.is_via_blocked(p_via_x, p_via_y);
+                    let n_blocked = obstacles.is_via_blocked(n_via_x, n_via_y);
+                    if p_blocked || n_blocked {
+                        via_positions_clear = false;
+                        // Track the blocked via offset positions on all layers
+                        for layer in 0..obstacles.num_layers as u8 {
+                            if p_blocked {
+                                sink.on_blocked(p_via_x, p_via_y, layer);
+                            }
+                            if n_blocked {
+                                sink.on_blocked(n_via_x, n_via_y, layer);
+                            }
+                        }
+                    }
+
+                    // Check GND via positions if enabled (gnd_via_perp_offset > 0).
+                    // GND vias are placed outside the P/N tracks, offset along the
+                    // heading (ahead preferred, behind as fallback).
+                    if via_positions_clear && self.gnd_via_perp_offset > 0 {
+                        let (sites, ahead_clear, behind_clear) = self.gnd_via_sites(
+                            obstacles, current.gx, current.gy, dx, dy, perp_x, perp_y);
+                        if !ahead_clear && !behind_clear {
+                            // Both ahead and behind blocked - can't place GND vias here
+                            via_positions_clear = false;
+                            for layer in 0..obstacles.num_layers as u8 {
+                                for &(sx, sy) in &sites {
+                                    sink.on_blocked(sx, sy, layer);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Block or penalize vias within stub proximity or BGA proximity (for diff pairs)
+            // If via_proximity_cost is 0, block vias in these areas; otherwise multiply via cost
+            let in_stub_proximity = obstacles.get_stub_proximity_cost(current.gx, current.gy) > 0;
+            let in_bga_proximity = obstacles.is_in_bga_proximity(current.gx, current.gy);
+            let in_proximity_zone = in_stub_proximity || in_bga_proximity;
+
+            if via_positions_clear && diff_pair_via_spacing.is_some() && self.via_proximity_cost == 0 {
+                if in_proximity_zone {
+                    via_positions_clear = false;
+                }
+            }
+
+            if can_place_via && via_positions_clear {
+                for layer in 0..obstacles.num_layers as u8 {
+                    if layer == current.layer {
+                        continue;
+                    }
+                    if self.layer_forbidden(layer as usize) {
+                        continue;  // FORBIDDEN LAYER: never end a via here
+                    }
+
+                    if obstacles.is_blocked(current.gx, current.gy, layer as usize) {
+                        sink.on_blocked(current.gx, current.gy, layer);
+                        continue;
+                    }
+
+                    let neighbor = PoseState::new(current.gx, current.gy, current.theta_idx, layer);
+                    let neighbor_key = neighbor.as_key();
+
+                    if !nodes.is_closed(neighbor_key) {
+                        // Multiply via cost by via_proximity_cost in stub/BGA proximity zones
+                        let via_cost = if in_proximity_zone {
+                            self.via_cost * self.via_proximity_cost
+                        } else {
+                            self.via_cost
+                        };
+                        // Layer transition: penalize a via INTO a costlier layer, discount into a cheaper one (issue #193)
+                        let layer_transition = self.layer_cost_or_default(layer as usize)
+                            - self.layer_cost_or_default(current.layer as usize);
+                        let new_g = g + (via_cost + layer_transition).max(0);
+
+                        if new_g < nodes.g(neighbor_key) {
+                            // Via doesn't count as a step, but sets the straight
+                            // requirement. straight_taken/turn counters are
+                            // intentionally left untouched.
+                            nodes.relax_via(neighbor_key, new_g, current_key, current_steps, self.straight_after_via);
+                            let h = self.dubins_heuristic(&dubins, &neighbor, &goal);
+                            open_set.push(PoseOpenEntry {
+                                f_score: new_g + h,
+                                g_score: new_g,
+                                state: neighbor,
+                                counter,
+                            });
+                            counter += 1;
+                            sink.on_push();
+                        }
+                    }
+                }
+            }
+        }
+
+        (None, iterations, Vec::new())
+    }
+
+    /// GND-via candidate sites for a signal via at (gx, gy) with heading
+    /// (dx, dy) and perpendicular (perp_x, perp_y). Returns
+    /// ([p_ahead, n_ahead, p_behind, n_behind], ahead_clear, behind_clear).
+    /// C1: this ahead/behind block existed in three verbatim copies (both
+    /// search forks + compute_gnd_via_directions).
+    #[allow(clippy::too_many_arguments)]
+    fn gnd_via_sites(&self, obstacles: &GridObstacleMap, gx: i32, gy: i32,
+                     dx: i32, dy: i32, perp_x: i32, perp_y: i32)
+                     -> ([(i32, i32); 4], bool, bool) {
+        // GND via base positions (perpendicular offset from centerline)
+        let gnd_p_base_x = gx + perp_x * self.gnd_via_perp_offset;
+        let gnd_p_base_y = gy + perp_y * self.gnd_via_perp_offset;
+        let gnd_n_base_x = gx - perp_x * self.gnd_via_perp_offset;
+        let gnd_n_base_y = gy - perp_y * self.gnd_via_perp_offset;
+        // Along-heading offsets
+        let ahead_offset_x = dx * self.gnd_via_along_offset;
+        let ahead_offset_y = dy * self.gnd_via_along_offset;
+        let p_ahead = (gnd_p_base_x + ahead_offset_x, gnd_p_base_y + ahead_offset_y);
+        let n_ahead = (gnd_n_base_x + ahead_offset_x, gnd_n_base_y + ahead_offset_y);
+        let p_behind = (gnd_p_base_x - ahead_offset_x, gnd_p_base_y - ahead_offset_y);
+        let n_behind = (gnd_n_base_x - ahead_offset_x, gnd_n_base_y - ahead_offset_y);
+        let ahead_clear = !obstacles.is_via_blocked(p_ahead.0, p_ahead.1)
+            && !obstacles.is_via_blocked(n_ahead.0, n_ahead.1);
+        let behind_clear = !obstacles.is_via_blocked(p_behind.0, p_behind.1)
+            && !obstacles.is_via_blocked(n_behind.0, n_behind.1);
+        ([p_ahead, n_ahead, p_behind, n_behind], ahead_clear, behind_clear)
+    }
+
     /// Compute GND via directions for each layer change in the path.
     /// Returns a Vec<i8> with one entry per layer change: 1 = ahead, -1 = behind.
     /// If gnd_via_perp_offset is 0, returns empty vec.
@@ -813,43 +653,16 @@ impl PoseRouter {
                 let perp_x = -dy;
                 let perp_y = dx;
 
-                // GND via base positions (perpendicular offset from centerline)
-                let gnd_p_base_x = gx + perp_x * self.gnd_via_perp_offset;
-                let gnd_p_base_y = gy + perp_y * self.gnd_via_perp_offset;
-                let gnd_n_base_x = gx - perp_x * self.gnd_via_perp_offset;
-                let gnd_n_base_y = gy - perp_y * self.gnd_via_perp_offset;
-
-                // Along-heading offsets
-                let ahead_offset_x = dx * self.gnd_via_along_offset;
-                let ahead_offset_y = dy * self.gnd_via_along_offset;
-
-                // Check ahead positions
-                let gnd_p_ahead_x = gnd_p_base_x + ahead_offset_x;
-                let gnd_p_ahead_y = gnd_p_base_y + ahead_offset_y;
-                let gnd_n_ahead_x = gnd_n_base_x + ahead_offset_x;
-                let gnd_n_ahead_y = gnd_n_base_y + ahead_offset_y;
-
-                let ahead_clear = !obstacles.is_via_blocked(gnd_p_ahead_x, gnd_p_ahead_y)
-                    && !obstacles.is_via_blocked(gnd_n_ahead_x, gnd_n_ahead_y);
+                let (_sites, ahead_clear, behind_clear) =
+                    self.gnd_via_sites(obstacles, gx, gy, dx, dy, perp_x, perp_y);
 
                 if ahead_clear {
-                    directions.push(1);  // Use ahead
+                    directions.push(1); // Use ahead
+                } else if behind_clear {
+                    directions.push(-1); // Use behind
                 } else {
-                    // Try behind
-                    let gnd_p_behind_x = gnd_p_base_x - ahead_offset_x;
-                    let gnd_p_behind_y = gnd_p_base_y - ahead_offset_y;
-                    let gnd_n_behind_x = gnd_n_base_x - ahead_offset_x;
-                    let gnd_n_behind_y = gnd_n_base_y - ahead_offset_y;
-
-                    let behind_clear = !obstacles.is_via_blocked(gnd_p_behind_x, gnd_p_behind_y)
-                        && !obstacles.is_via_blocked(gnd_n_behind_x, gnd_n_behind_y);
-
-                    if behind_clear {
-                        directions.push(-1);  // Use behind
-                    } else {
-                        // Both blocked - shouldn't happen if routing succeeded, but default to ahead
-                        directions.push(1);
-                    }
+                    // Both blocked - shouldn't happen if routing succeeded, but default to ahead
+                    directions.push(1);
                 }
             }
         }

@@ -5,7 +5,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BinaryHeap;
 
 use crate::obstacle_map::GridObstacleMap;
-use crate::types::{GridState, OpenEntry, BlockedCellTracker, RouteStats, DIRECTIONS, ORTHO_COST, DIAG_COST, DEFAULT_TURN_COST};
+use crate::types::{GridState, OpenEntry, RouteStats, SearchSink, StatsSink, FrontierSink, DIRECTIONS, ORTHO_COST, DIAG_COST, DEFAULT_TURN_COST};
 
 /// S1-B (issue #384): tiled flat-array node store. Replaces the per-node
 /// FxHashMap<u64, NodeState> (S1-A) with 64x64-cell tiles per layer: a node
@@ -46,7 +46,7 @@ struct Tile {
 /// g()==MAX means unvisited, parent()==None means source-or-unvisited, the
 /// closed bit is only ever set on popped nodes and never relaxed away
 /// (call sites gate every relax on !closed).
-struct NodeStore {
+pub(crate) struct NodeStore {
     tiles: Vec<Tile>,
     index: FxHashMap<u64, u32>, // tile key -> index into tiles
     closed_count: u32,
@@ -149,7 +149,7 @@ impl NodeStore {
     }
 
     #[inline]
-    fn closed_len(&self) -> u32 {
+    pub(crate) fn closed_len(&self) -> u32 {
         self.closed_count
     }
 
@@ -166,6 +166,564 @@ impl NodeStore {
     fn relax(&mut self, gx: i32, gy: i32, layer: u8, g: i32, parent_idx: u32, steps: i32) {
         let idx = self.ensure_index(gx, gy, layer);
         *self.slot_mut(idx) = NodeSlot { g, parent: parent_idx, steps };
+    }
+
+    /// Reconstruct the path by following parent indices back to the source
+    /// (whose parent is NO_PARENT32 -> None -> loop terminates).
+    pub(crate) fn reconstruct_path(&self, goal_idx: u32) -> Vec<(i32, i32, u8)> {
+        let mut path = Vec::new();
+        let mut idx = goal_idx;
+        loop {
+            path.push(self.coords(idx));
+            match self.parent(idx) {
+                Some(parent_idx) => idx = parent_idx,
+                None => break,
+            }
+        }
+        path.reverse();
+        path
+    }
+
+    /// All closed cells, up to `limit` (visualizer snapshots only).
+    pub(crate) fn closed_cells(&self, limit: usize) -> Vec<(i32, i32, u8)> {
+        let mut out = Vec::new();
+        'tiles: for tile in &self.tiles {
+            for (i, slot) in tile.slots.iter().enumerate() {
+                if slot.parent & CLOSED_BIT32 != 0 {
+                    let i = i as i32;
+                    out.push((tile.base_x + (i & TILE_MASK), tile.base_y + (i >> TILE_BITS), tile.layer));
+                    if out.len() >= limit {
+                        break 'tiles;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// All visited-but-not-closed cells, up to `limit` (visualizer snapshots
+    /// only; the old visualizer's "open" dump was g_costs keys minus closed).
+    pub(crate) fn visited_open_cells(&self, limit: usize) -> Vec<(i32, i32, u8)> {
+        let mut out = Vec::new();
+        'tiles: for tile in &self.tiles {
+            for (i, slot) in tile.slots.iter().enumerate() {
+                if slot.g != i32::MAX && slot.parent & CLOSED_BIT32 == 0 {
+                    let i = i as i32;
+                    out.push((tile.base_x + (i & TILE_MASK), tile.base_y + (i >> TILE_BITS), tile.layer));
+                    if out.len() >= limit {
+                        break 'tiles;
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+
+/// Outcome of one GridSearch step (one open-set pop).
+pub(crate) enum SearchStep {
+    /// A node was expanded normally (payload: the expanded state, for the
+    /// visualizer's cursor; run-to-completion callers ignore it).
+    Progress(GridState),
+    /// The pop was a duplicate (already closed) or a target reached from a
+    /// rejected arrival direction; nothing was expanded.
+    Skipped,
+    /// A target was reached: (goal node index, final g).
+    Found(u32, i32),
+    /// The iteration budget is exhausted (the popped entry is discarded,
+    /// matching the historical pop-then-check loop shape).
+    IterationCap,
+    /// The open set ran dry.
+    Exhausted,
+}
+
+/// Per-search options (route_multi's optional arguments, pre-normalized).
+pub(crate) struct SearchOptions {
+    collinear_vias: bool,
+    via_exclusion_radius: i32,
+    norm_start_dir: Option<(i32, i32)>,
+    norm_end_dir: Option<(f64, f64)>,
+    direction_steps: i32,
+    track_margin: f64,
+}
+
+impl SearchOptions {
+    pub(crate) fn new(
+        collinear_vias: bool,
+        via_exclusion_radius: i32,
+        start_direction: Option<(i32, i32)>,
+        end_direction: Option<(f64, f64)>,
+        direction_steps: i32,
+        track_margin: i32,
+    ) -> Self {
+        // Normalize start direction if provided
+        let norm_start_dir = start_direction.map(|(dx, dy)| (dx.signum(), dy.signum()));
+        // Normalize end direction if provided (direction we want to arrive FROM);
+        // this is a continuous (f64, f64) unit vector
+        let norm_end_dir = end_direction.map(|(dx, dy)| {
+            let len = (dx * dx + dy * dy).sqrt();
+            if len > 0.0 { (dx / len, dy / len) } else { (0.0, 0.0) }
+        });
+        Self {
+            collinear_vias,
+            via_exclusion_radius,
+            norm_start_dir,
+            norm_end_dir,
+            direction_steps,
+            track_margin: track_margin as f64,
+        }
+    }
+}
+
+/// Check if position (nx, ny) would violate via exclusion: true if blocked
+/// (too close to one of the path's own vias and not moving away from it).
+/// C1: was a closure duplicated verbatim in route_multi and route_with_frontier.
+fn check_via_exclusion(nx: i32, ny: i32, current_gx: i32, current_gy: i32,
+                       vias: &[(i32, i32)], radius: i32) -> bool {
+    if radius <= 0 {
+        return false;
+    }
+    for &(vx, vy) in vias {
+        let dist_to_neighbor = (nx - vx).abs().max((ny - vy).abs());
+        let dist_to_current = (current_gx - vx).abs().max((current_gy - vy).abs());
+        // If we're outside the radius, block re-entry
+        if dist_to_neighbor <= radius && dist_to_current > radius {
+            return true;
+        }
+        // If we're inside the radius, only allow moves that increase distance from
+        // the via - this prevents perpendicular drift within the exclusion zone
+        if dist_to_current <= radius && dist_to_neighbor <= dist_to_current {
+            if dist_to_neighbor < dist_to_current {
+                // Moving closer to via - block
+                return true;
+            }
+            // Same distance - block perpendicular moves deep inside the zone
+            if dist_to_neighbor == dist_to_current && dist_to_current > 0 {
+                let dx_from_via = (nx - vx).abs() - (current_gx - vx).abs();
+                let dy_from_via = (ny - vy).abs() - (current_gy - vy).abs();
+                if (dx_from_via > 0 && dy_from_via < 0) || (dx_from_via < 0 && dy_from_via > 0) {
+                    if dist_to_current <= radius / 2 {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// C1 (issue #387): THE grid A* search core. route_multi, route_with_frontier
+/// and the visualizer all drive this one step() loop with different sinks, so
+/// there is exactly one copy of the expansion logic (the visualizer fork had
+/// drifted -- B1 in #386). step() pops and processes ONE open-set entry;
+/// run-to-completion callers just loop it.
+pub(crate) struct GridSearch {
+    pub(crate) open_set: BinaryHeap<OpenEntry>,
+    pub(crate) store: NodeStore,
+    path_vias: FxHashMap<u64, Vec<(i32, i32)>>,
+    counter: u32,
+    pub(crate) iterations: u32,
+    pub(crate) max_iterations: u32,
+    target_set: FxHashSet<u64>,
+    target_states: Vec<GridState>,
+    opts: SearchOptions,
+    /// Best heuristic over the sources (RouteStats.initial_h).
+    pub(crate) initial_h: i32,
+}
+
+impl GridSearch {
+    pub(crate) fn new<S: SearchSink>(
+        router: &GridRouter,
+        sources: Vec<(i32, i32, u8)>,
+        targets: Vec<(i32, i32, u8)>,
+        max_iterations: u32,
+        opts: SearchOptions,
+        sink: &mut S,
+    ) -> Self {
+        let target_set: FxHashSet<u64> = targets
+            .iter()
+            .map(|(gx, gy, layer)| GridState::new(*gx, *gy, *layer).as_key())
+            .collect();
+        let target_states: Vec<GridState> = targets
+            .iter()
+            .map(|(gx, gy, layer)| GridState::new(*gx, *gy, *layer))
+            .collect();
+
+        let mut open_set = BinaryHeap::new();
+        let mut store = NodeStore::new();
+        // Track via positions for each node's path (only if via_exclusion_radius > 0):
+        // node key -> list of (gx, gy) via positions on the path to that node
+        let mut path_vias: FxHashMap<u64, Vec<(i32, i32)>> = FxHashMap::default();
+        let mut counter: u32 = 0;
+
+        // Find minimum layer cost for the initial g penalty (A1: FORBIDDEN
+        // sentinels excluded inside min_valid_layer_cost).
+        let min_layer_cost = router.min_valid_layer_cost();
+        let mut initial_h = i32::MAX;
+
+        for (gx, gy, layer) in sources {
+            let state = GridState::new(gx, gy, layer);
+            let key = state.as_key();
+            // Penalize starting on expensive layers
+            let layer_cost = router.layer_cost_or_default(layer as usize);
+            let initial_g = layer_cost - min_layer_cost;
+            let h = router.heuristic_to_targets(&state, &target_states);
+            initial_h = initial_h.min(h);
+            open_set.push(OpenEntry {
+                f_score: initial_g.saturating_add(h),
+                g_score: initial_g,
+                state,
+                counter,
+            });
+            counter += 1;
+            sink.on_push();
+            store.set_source(gx, gy, layer, initial_g);
+            // Source nodes start with no vias on their path
+            if opts.via_exclusion_radius > 0 {
+                path_vias.insert(key, Vec::new());
+            }
+        }
+
+        Self {
+            open_set,
+            store,
+            path_vias,
+            counter,
+            iterations: 0,
+            max_iterations,
+            target_set,
+            target_states,
+            opts,
+            initial_h,
+        }
+    }
+
+    /// True when the search cannot make further progress.
+    pub(crate) fn is_done(&self) -> bool {
+        self.open_set.is_empty() || self.iterations >= self.max_iterations
+    }
+
+    /// Pop and process one open-set entry.
+    pub(crate) fn step<S: SearchSink>(
+        &mut self,
+        router: &GridRouter,
+        obstacles: &GridObstacleMap,
+        sink: &mut S,
+    ) -> SearchStep {
+        let current_entry = match self.open_set.pop() {
+            Some(e) => e,
+            None => return SearchStep::Exhausted,
+        };
+        if self.iterations >= self.max_iterations {
+            return SearchStep::IterationCap;
+        }
+        self.iterations += 1;
+
+        let current = current_entry.state;
+        let current_key = current.as_key();
+        let current_idx = self.store.ensure_index(current.gx, current.gy, current.layer);
+        let g = current_entry.g_score;
+
+        if self.store.is_closed(current_idx) {
+            sink.on_duplicate_skip();
+            return SearchStep::Skipped;
+        }
+        sink.on_expand();
+
+        // Check if reached target
+        if self.target_set.contains(&current_key) {
+            // If end_direction is specified, verify we arrived from a compatible direction
+            let arrival_ok = if let Some((end_dx, end_dy)) = self.opts.norm_end_dir {
+                if let Some(parent_idx) = self.store.parent(current_idx) {
+                    let (px, py, _) = self.store.coords(parent_idx);
+                    let arrive_dx = (current.gx - px) as f64;
+                    let arrive_dy = (current.gy - py) as f64;
+                    let arrive_len = (arrive_dx * arrive_dx + arrive_dy * arrive_dy).sqrt();
+                    if arrive_len > 0.0 {
+                        // Arrival direction must be within ±120° of the required end
+                        // direction: cos(120°) = -0.5, so the dot must be >= -0.5
+                        let dot = (arrive_dx / arrive_len) * end_dx + (arrive_dy / arrive_len) * end_dy;
+                        dot >= -0.5
+                    } else {
+                        true // Same position as parent (via), allow it
+                    }
+                } else {
+                    true // No parent (source is target), allow it
+                }
+            } else {
+                true // No end direction constraint
+            };
+
+            if arrival_ok {
+                return SearchStep::Found(current_idx, g);
+            }
+            // Arrival direction not ok - DON'T close, allow reaching from another direction
+            return SearchStep::Skipped;
+        }
+
+        self.store.set_closed(current_idx);
+
+        // Via direction constraints for diff pair routing (collinear_vias mode):
+        // 1. Just came through a via: must continue in the exact pre-via direction
+        // 2. One step after a via exit: must stay within ±45° of the pre-via direction
+        let (required_direction, allowed_45deg_from): (Option<(i32, i32)>, Option<(i32, i32)>) =
+            if self.opts.collinear_vias {
+                router.get_via_direction_constraints(&self.store, current_idx, &current)
+            } else {
+                (None, None)
+            };
+
+        // Current node's via list for exclusion checking
+        let current_vias: Vec<(i32, i32)> = if self.opts.via_exclusion_radius > 0 {
+            self.path_vias.get(&current_key).cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Steps from source for the start-direction constraint
+        let current_steps = self.store.steps_of(current_idx);
+
+        // Previous direction (parent -> current) for turn cost calculation
+        let prev_direction: Option<(i32, i32)> = self.store.parent(current_idx).map(|parent_idx| {
+            let (px, py, _) = self.store.coords(parent_idx);
+            let pdx = current.gx - px;
+            let pdy = current.gy - py;
+            // Normalize to unit direction (vias produce a zero delta)
+            if pdx == 0 && pdy == 0 { (0, 0) } else { (pdx.signum(), pdy.signum()) }
+        });
+
+        // Expand neighbors - 8 directions.
+        // S6: the layer_forbidden(current.layer) test is hoisted out of the
+        // direction loop (G2: no track on a forbidden source layer; it was an
+        // unconditional first-iteration `break` inside the loop).
+        if !router.layer_forbidden(current.layer as usize) {
+            for (dx, dy) in DIRECTIONS {
+                // Just came through a via: only the exact pre-via direction is allowed
+                if let Some((req_dx, req_dy)) = required_direction {
+                    if dx != req_dx || dy != req_dy {
+                        continue;
+                    }
+                }
+                // One step after a via exit: within ±45° of the pre-via direction
+                else if let Some((base_dx, base_dy)) = allowed_45deg_from {
+                    if !GridRouter::is_within_45_degrees(dx, dy, base_dx, base_dy) {
+                        continue;
+                    }
+                }
+
+                // Start direction constraint for the first N steps
+                if let Some((start_dx, start_dy)) = self.opts.norm_start_dir {
+                    if current_steps < self.opts.direction_steps
+                        && !GridRouter::is_within_45_degrees(dx, dy, start_dx, start_dy) {
+                        continue;
+                    }
+                }
+
+                let ngx = current.gx + dx;
+                let ngy = current.gy + dy;
+
+                if obstacles.segment_blocked(current.gx, current.gy, ngx, ngy,
+                                             current.layer as usize, self.opts.track_margin) {
+                    sink.on_blocked(ngx, ngy, current.layer);
+                    continue;
+                }
+
+                // Via exclusion - can't approach our own vias once we've moved away
+                if check_via_exclusion(ngx, ngy, current.gx, current.gy,
+                                       &current_vias, self.opts.via_exclusion_radius) {
+                    continue;
+                }
+
+                let neighbor = GridState::new(ngx, ngy, current.layer);
+                let neighbor_key = neighbor.as_key();
+
+                let (existing_g, neighbor_closed) = self.store.g_closed_at(ngx, ngy, current.layer);
+                if neighbor_closed {
+                    continue;
+                }
+
+                let base_move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
+                // Apply layer cost multiplier (1000 = 1.0x, 1500 = 1.5x, etc.)
+                let layer_multiplier = router.layer_cost_or_default(current.layer as usize);
+                let move_cost = (base_move_cost as i64 * layer_multiplier as i64 / 1000) as i32;
+                // Turn cost if direction changes (encourages straighter paths)
+                let turn_cost = match prev_direction {
+                    Some((pdx, pdy)) if pdx != 0 || pdy != 0 => {
+                        if dx != pdx || dy != pdy { router.turn_cost } else { 0 }
+                    }
+                    _ => 0, // No previous direction (source node or via)
+                };
+                // Stub and layer proximity costs
+                let proximity_cost = obstacles.get_stub_proximity_cost(ngx, ngy)
+                    + obstacles.get_layer_proximity_cost(ngx, ngy, current.layer as usize);
+                // Attraction bonus for positions aligned with tracks on other layers
+                let attraction_bonus = obstacles.get_cross_layer_attraction(
+                    ngx, ngy, current.layer as usize,
+                    router.vertical_attraction_radius, router.vertical_attraction_bonus);
+                // Layer direction preference penalty (0=horizontal pref, 1=vertical pref)
+                let direction_penalty = if router.direction_preference_cost > 0 {
+                    let preferred = router.layer_direction_preferences
+                        .get(current.layer as usize).copied().unwrap_or(255);
+                    match preferred {
+                        0 => if dy != 0 && dx == 0 { router.direction_preference_cost } else { 0 },
+                        1 => if dx != 0 && dy == 0 { router.direction_preference_cost } else { 0 },
+                        _ => 0, // No preference (255 or other)
+                    }
+                } else { 0 };
+                // Path attraction bonus for bus routing - direction-based, no spiraling
+                let path_attraction_bonus =
+                    router.get_path_attraction_bonus(ngx, ngy, current.layer, dx, dy);
+                let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty
+                    - attraction_bonus - path_attraction_bonus;
+
+                if new_g < existing_g {
+                    if existing_g != i32::MAX {
+                        sink.on_revisit();
+                    }
+                    self.store.relax(ngx, ngy, current.layer, new_g, current_idx, current_steps + 1);
+                    // Propagate via list to neighbor (same vias since no layer change)
+                    if self.opts.via_exclusion_radius > 0 {
+                        self.path_vias.insert(neighbor_key, current_vias.clone());
+                    }
+                    let h = router.heuristic_to_targets(&neighbor, &self.target_states);
+                    self.open_set.push(OpenEntry {
+                        f_score: new_g.saturating_add(h), // B4: no i32 wrap on huge h
+                        g_score: new_g,
+                        state: neighbor,
+                        counter: self.counter,
+                    });
+                    self.counter += 1;
+                    sink.on_push();
+                }
+            }
+        }
+
+        // Try via to other layers.
+        // For collinear_vias mode, enforce the symmetric constraint around the via:
+        // ±45° -> direction D -> VIA -> direction D -> ±45°. Requires at least 2
+        // steps before the via (great-grandparent must exist), and the approach
+        // direction must be within ±45° of the previous direction.
+        let can_place_via = if self.opts.collinear_vias {
+            if let Some(parent_idx) = self.store.parent(current_idx) {
+                if let Some(grandparent_idx) = self.store.parent(parent_idx) {
+                    if self.store.parent(grandparent_idx).is_none() {
+                        false // Only 1 step before via - need at least 2
+                    } else {
+                        let (parent_x, parent_y, _) = self.store.coords(parent_idx);
+                        let (gp_x, gp_y, _) = self.store.coords(grandparent_idx);
+                        // Previous direction (grandparent -> parent) vs approach
+                        // direction (parent -> current)
+                        let prev_dx = parent_x - gp_x;
+                        let prev_dy = parent_y - gp_y;
+                        let approach_dx = current.gx - parent_x;
+                        let approach_dy = current.gy - parent_y;
+                        if (prev_dx != 0 || prev_dy != 0) && (approach_dx != 0 || approach_dy != 0) {
+                            GridRouter::is_within_45_degrees(
+                                approach_dx.signum(), approach_dy.signum(),
+                                prev_dx.signum(), prev_dy.signum())
+                        } else {
+                            false
+                        }
+                    }
+                } else {
+                    false // No grandparent - too close to start
+                }
+            } else {
+                false // No parent at all - this is a source node
+            }
+        } else {
+            true
+        };
+
+        // Would this via be too close to existing vias in the path?
+        let via_too_close = if self.opts.via_exclusion_radius > 0 {
+            current_vias.iter().any(|&(vx, vy)| {
+                let dist = (current.gx - vx).abs().max((current.gy - vy).abs());
+                dist <= self.opts.via_exclusion_radius * 2 // Need 2x radius for via-via clearance
+            })
+        } else {
+            false
+        };
+
+        // A free via is an existing same-net hole (via-in-pad / through-hole pad);
+        // changing layers through it is always legal and adds no new drill, so it
+        // overrides both the via-blocked veto and the path's via-too-close test.
+        // Without this, the same cell can be flagged free_via AND via_blocked at
+        // once (its own clearance ring blocks the center), and the via branch is
+        // skipped before is_free_via is ever read -- forcing a redundant via to be
+        // dropped a couple cells away beside a perfectly good via-in-pad.
+        let free_here = obstacles.is_free_via(current.gx, current.gy);
+        if can_place_via && (!via_too_close || free_here)
+            && (!obstacles.is_via_blocked(current.gx, current.gy) || free_here) {
+            for layer in 0..obstacles.num_layers as u8 {
+                if layer == current.layer {
+                    continue;
+                }
+                if router.layer_forbidden(layer as usize) {
+                    continue; // FORBIDDEN LAYER: never end a via here
+                }
+
+                // Check if destination layer is blocked at this position
+                if obstacles.segment_blocked(current.gx, current.gy, current.gx, current.gy,
+                                             layer as usize, self.opts.track_margin) {
+                    sink.on_blocked(current.gx, current.gy, layer);
+                    continue;
+                }
+
+                let neighbor = GridState::new(current.gx, current.gy, layer);
+                let neighbor_key = neighbor.as_key();
+
+                let (existing_g, neighbor_closed) = self.store.g_closed_at(current.gx, current.gy, layer);
+                if neighbor_closed {
+                    continue;
+                }
+
+                // Zero cost for free via positions (through-hole pads on same net).
+                // S6: is_free_via was recomputed for every destination layer;
+                // free_here is loop-invariant, reuse it.
+                let via_cost = if free_here { 0 } else { router.via_cost };
+                let proximity_cost = (obstacles.get_stub_proximity_cost(current.gx, current.gy)
+                    + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize))
+                    * router.via_proximity_cost;
+                // Layer transition cost: penalize switching TO expensive layers,
+                // discount switching to cheaper ones
+                let current_layer_cost = router.layer_cost_or_default(current.layer as usize);
+                let dest_layer_cost = router.layer_cost_or_default(layer as usize);
+                let layer_transition_cost = dest_layer_cost - current_layer_cost;
+                // Combined via cost can be as low as 0 when switching to a much cheaper layer
+                let combined_via_cost = (via_cost + layer_transition_cost).max(0);
+                let new_g = g + combined_via_cost + proximity_cost;
+
+                if new_g < existing_g {
+                    if existing_g != i32::MAX {
+                        sink.on_revisit();
+                    }
+                    self.store.relax(current.gx, current.gy, layer, new_g, current_idx, current_steps);
+                    // Track via positions (only real vias, not free vias at through-holes)
+                    if self.opts.via_exclusion_radius > 0 {
+                        if free_here {
+                            self.path_vias.insert(neighbor_key, current_vias.clone());
+                        } else {
+                            let mut new_vias = current_vias.clone();
+                            new_vias.push((current.gx, current.gy));
+                            self.path_vias.insert(neighbor_key, new_vias);
+                        }
+                    }
+                    let h = router.heuristic_to_targets(&neighbor, &self.target_states);
+                    self.open_set.push(OpenEntry {
+                        f_score: new_g.saturating_add(h), // B4: no i32 wrap on huge h
+                        g_score: new_g,
+                        state: neighbor,
+                        counter: self.counter,
+                    });
+                    self.counter += 1;
+                    sink.on_push();
+                }
+            }
+        }
+
+        SearchStep::Progress(current)
     }
 }
 
@@ -187,8 +745,9 @@ pub struct GridRouter {
     attraction_path: Vec<(i32, i32, u8, i8, i8)>,  // Path to attract to with direction
     attraction_radius: i32,  // Grid units for attraction (0 = disabled)
     attraction_bonus: i32,   // Cost reduction when moving parallel to path (same layer)
-    // Spatial hash for efficient path distance lookup
-    attraction_path_hash: FxHashMap<u64, i32>,  // cell_key -> min distance to path point in that cell
+    // Spatial hash for efficient path distance lookup (C2: was a map whose
+    // values were never read; membership is all that matters)
+    attraction_path_hash: FxHashSet<u64>,  // buckets with path points nearby
 }
 
 #[pymethods]
@@ -214,7 +773,7 @@ impl GridRouter {
             attraction_path: Vec::new(),
             attraction_radius,
             attraction_bonus,
-            attraction_path_hash: FxHashMap::default(),
+            attraction_path_hash: FxHashSet::default(),
         }
     }
 
@@ -277,9 +836,9 @@ impl GridRouter {
                     let cell_bx = bx + dbx;
                     let cell_by = by + dby;
                     // Pack bucket coords + layer into key
-                    let key = Self::pack_bucket_key(cell_bx, cell_by, layer, bucket_size);
+                    let key = Self::pack_bucket_key(cell_bx, cell_by, layer);
                     // Store that this bucket has path points nearby
-                    self.attraction_path_hash.entry(key).or_insert(0);
+                    self.attraction_path_hash.insert(key);
                 }
             }
         }
@@ -309,7 +868,10 @@ impl GridRouter {
     /// direction_steps: Number of steps to constrain at start (default 2).
     /// track_margin: Extra margin in grid cells for wide tracks (e.g., power nets).
     /// When > 0, checks cells within this radius for obstacles.
+    ///
+    /// C1: thin wrapper over the shared GridSearch core with a StatsSink.
     #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=0))]
+    #[allow(clippy::too_many_arguments)]
     pub fn route_multi(
         &self,
         obstacles: &GridObstacleMap,
@@ -323,450 +885,42 @@ impl GridRouter {
         direction_steps: i32,
         track_margin: i32,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, std::collections::HashMap<String, f64>) {
-        let mut stats = RouteStats::default();
+        let opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
+                                      start_direction, end_direction,
+                                      direction_steps, track_margin);
+        let mut sink = StatsSink::default();
+        let mut search = GridSearch::new(self, sources, targets, max_iterations, opts, &mut sink);
+        sink.stats.initial_h = search.initial_h;
 
-        // Convert targets to set for O(1) lookup
-        let target_set: FxHashSet<u64> = targets
-            .iter()
-            .map(|(gx, gy, layer)| GridState::new(*gx, *gy, *layer).as_key())
-            .collect();
-
-        let target_states: Vec<GridState> = targets
-            .iter()
-            .map(|(gx, gy, layer)| GridState::new(*gx, *gy, *layer))
-            .collect();
-
-        // Initialize open set with all sources
-        let mut open_set = BinaryHeap::new();
-        let mut store = NodeStore::new();
-        let mut counter: u32 = 0;
-
-        // Track via positions for each node's path (only used if via_exclusion_radius > 0)
-        // Maps node key -> list of (gx, gy) via positions on path to that node
-        let mut path_vias: FxHashMap<u64, Vec<(i32, i32)>> = FxHashMap::default();
-
-        // Normalize start direction if provided
-        let norm_start_dir: Option<(i32, i32)> = start_direction.map(|(dx, dy)| {
-            let ndx = if dx != 0 { dx / dx.abs() } else { 0 };
-            let ndy = if dy != 0 { dy / dy.abs() } else { 0 };
-            (ndx, ndy)
-        });
-
-        // Normalize end direction if provided (direction we want to arrive FROM)
-        // This is a continuous (f64, f64) unit vector
-        let norm_end_dir: Option<(f64, f64)> = end_direction.map(|(dx, dy)| {
-            let len = (dx * dx + dy * dy).sqrt();
-            if len > 0.0 { (dx / len, dy / len) } else { (0.0, 0.0) }
-        });
-
-        // Helper: check if position (nx, ny) would violate via exclusion
-        // Returns true if blocked (too close to a via and not moving away from it)
-        let check_via_exclusion = |nx: i32, ny: i32, current_gx: i32, current_gy: i32, vias: &[(i32, i32)], radius: i32| -> bool {
-            if radius <= 0 {
-                return false;
-            }
-            for &(vx, vy) in vias {
-                let dist_to_neighbor = (nx - vx).abs().max((ny - vy).abs());
-                let dist_to_current = (current_gx - vx).abs().max((current_gy - vy).abs());
-                // If we're outside the radius, block re-entry
-                if dist_to_neighbor <= radius && dist_to_current > radius {
-                    return true;
-                }
-                // If we're inside the radius, only allow moves that increase distance from via
-                // This prevents perpendicular drift within the exclusion zone
-                if dist_to_current <= radius && dist_to_neighbor <= dist_to_current {
-                    // Allow only if we're moving directly away from via (increasing distance)
-                    // or staying at same distance in the escape direction
-                    if dist_to_neighbor < dist_to_current {
-                        // Moving closer to via - block
-                        return true;
-                    }
-                    // Same distance - check if perpendicular movement
-                    // Block perpendicular moves within the exclusion zone
-                    if dist_to_neighbor == dist_to_current && dist_to_current > 0 {
-                        // Check if this is a perpendicular move by seeing if both x and y changed
-                        let dx_from_via = (nx - vx).abs() - (current_gx - vx).abs();
-                        let dy_from_via = (ny - vy).abs() - (current_gy - vy).abs();
-                        // If moving perpendicular (one axis increases while other decreases)
-                        // and still within half the radius, block
-                        if (dx_from_via > 0 && dy_from_via < 0) || (dx_from_via < 0 && dy_from_via > 0) {
-                            if dist_to_current <= radius / 2 {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-            false
-        };
-
-
-        // Find minimum layer cost for initial g penalty
-        // A1: exclude FORBIDDEN sentinels (< 0) — else min() returns the sentinel
-        // and pollutes the start penalty + the admissibility-scaled heuristic.
-        let min_layer_cost = self.layer_costs.iter().copied().filter(|&c| c >= 0).min().unwrap_or(1000);
-        let mut best_initial_h = i32::MAX;
-
-        for (gx, gy, layer) in sources {
-            let state = GridState::new(gx, gy, layer);
-            let key = state.as_key();
-            // Penalize starting on expensive layers
-            let layer_cost = self.layer_cost_or_default(layer as usize);
-            let initial_g = layer_cost - min_layer_cost;
-            let h = self.heuristic_to_targets(&state, &target_states);
-            best_initial_h = best_initial_h.min(h);
-            open_set.push(OpenEntry {
-                f_score: initial_g + h,
-                g_score: initial_g,
-                state,
-                counter,
-            });
-            counter += 1;
-            stats.cells_pushed += 1;
-            store.set_source(gx, gy, layer, initial_g);
-            // Source nodes start with no vias on their path
-            if via_exclusion_radius > 0 {
-                path_vias.insert(key, Vec::new());
-            }
-        }
-        stats.initial_h = best_initial_h;
-
-        let mut iterations: u32 = 0;
-
-        while let Some(current_entry) = open_set.pop() {
-            if iterations >= max_iterations {
-                break;
-            }
-            iterations += 1;
-
-            let current = current_entry.state;
-            let current_key = current.as_key();
-            let current_idx = store.ensure_index(current.gx, current.gy, current.layer);
-            let g = current_entry.g_score;
-
-            if store.is_closed(current_idx) {
-                stats.duplicate_skips += 1;
-                continue;
-            }
-            stats.cells_expanded += 1;
-
-            // Check if reached target
-            if target_set.contains(&current_key) {
-                // If end_direction is specified, verify we arrived from a compatible direction
-                let arrival_ok = if let Some((end_dx, end_dy)) = norm_end_dir {
-                    if let Some(parent_idx) = store.parent(current_idx) {
-                        let (px, py, _) = store.coords(parent_idx);
-                        let arrive_dx = (current.gx - px) as f64;
-                        let arrive_dy = (current.gy - py) as f64;
-                        let arrive_len = (arrive_dx * arrive_dx + arrive_dy * arrive_dy).sqrt();
-                        if arrive_len > 0.0 {
-                            // Normalize arrival direction and compute dot product
-                            let norm_arrive_dx = arrive_dx / arrive_len;
-                            let norm_arrive_dy = arrive_dy / arrive_len;
-                            let dot = norm_arrive_dx * end_dx + norm_arrive_dy * end_dy;
-                            // Check if arrival direction is within ±120° of required end direction
-                            // cos(120°) = -0.5, so dot product must be >= -0.5
-                            dot >= -0.5
-                        } else {
-                            true // Same position as parent (via), allow it
-                        }
-                    } else {
-                        true // No parent (source is target), allow it
-                    }
-                } else {
-                    true // No end direction constraint
-                };
-
-                if arrival_ok {
-                    // Reconstruct path
-                    let path = self.reconstruct_path(&store, current_idx);
+        loop {
+            match search.step(self, obstacles, &mut sink) {
+                SearchStep::Found(goal_idx, g) => {
+                    let path = search.store.reconstruct_path(goal_idx);
+                    let stats = &mut sink.stats;
                     stats.path_length = path.len() as u32;
                     stats.path_cost = g;
                     stats.final_g = g;
-                    stats.open_set_size = open_set.len() as u32;
-                    stats.closed_set_size = store.closed_len();
+                    stats.open_set_size = search.open_set.len() as u32;
+                    stats.closed_set_size = search.store.closed_len();
                     // Count vias in path
                     for i in 1..path.len() {
-                        if path[i].2 != path[i-1].2 {
+                        if path[i].2 != path[i - 1].2 {
                             stats.via_count += 1;
                         }
                     }
-                    let stats_dict = self.stats_to_dict(&stats);
-                    return (Some(path), iterations, stats_dict);
+                    let stats_dict = self.stats_to_dict(&sink.stats);
+                    return (Some(path), search.iterations, stats_dict);
                 }
-                // Arrival direction not ok - DON'T add to closed, allow reaching from different direction
-                continue;
-            }
-
-            store.set_closed(current_idx);
-
-            // Check via constraints for diff pair routing (collinear_vias mode):
-            // 1. If we just came through a via: must continue in exact same direction as before via
-            // 2. If we're one step after a via exit: must be within ±45° of the pre-via direction
-            // This ensures clean via geometry for differential pairs
-            let (required_direction, allowed_45deg_from): (Option<(i32, i32)>, Option<(i32, i32)>) = if collinear_vias {
-                self.get_via_direction_constraints(&store, current_idx, &current)
-            } else {
-                (None, None)
-            };
-
-            // Get current node's via list for exclusion checking
-            let current_vias: Vec<(i32, i32)> = if via_exclusion_radius > 0 {
-                path_vias.get(&current_key).cloned().unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-
-            // Get steps from source for direction constraint
-            let current_steps = store.steps_of(current_idx);
-
-            // Get previous direction (parent -> current) for turn cost calculation
-            let prev_direction: Option<(i32, i32)> = store.parent(current_idx).map(|parent_idx| {
-                let (px, py, _) = store.coords(parent_idx);
-                let pdx = current.gx - px;
-                let pdy = current.gy - py;
-                // Normalize to unit direction (handle multi-step moves like vias)
-                if pdx == 0 && pdy == 0 {
-                    (0, 0) // Via (same position), no direction
-                } else {
-                    (pdx.signum(), pdy.signum())
-                }
-            });
-
-            // Expand neighbors - 8 directions
-            for (dx, dy) in DIRECTIONS {
-                if self.layer_forbidden(current.layer as usize) { break; }  // G2: no track on a forbidden source layer
-                // If we have a required exact direction (just came through via), only allow that direction
-                if let Some((req_dx, req_dy)) = required_direction {
-                    if dx != req_dx || dy != req_dy {
-                        continue;
-                    }
-                }
-                // If we're one step after via, must be within ±45° of the pre-via direction
-                else if let Some((base_dx, base_dy)) = allowed_45deg_from {
-                    if !Self::is_within_45_degrees(dx, dy, base_dx, base_dy) {
-                        continue;
-                    }
-                }
-
-                // Check start direction constraint for first N steps
-                if let Some((start_dx, start_dy)) = norm_start_dir {
-                    if current_steps < direction_steps {
-                        if !Self::is_within_45_degrees(dx, dy, start_dx, start_dy) {
-                            continue;
-                        }
-                    }
-                }
-
-                let ngx = current.gx + dx;
-                let ngy = current.gy + dy;
-
-                if obstacles.segment_blocked(current.gx, current.gy, ngx, ngy, current.layer as usize, track_margin as f64) {
-                    continue;
-                }
-
-                // Check via exclusion - can't approach our own vias once we've moved away
-                if check_via_exclusion(ngx, ngy, current.gx, current.gy, &current_vias, via_exclusion_radius) {
-                    continue;
-                }
-
-                let neighbor = GridState::new(ngx, ngy, current.layer);
-                let neighbor_key = neighbor.as_key();
-
-                let (existing_g, neighbor_closed) = store.g_closed_at(ngx, ngy, current.layer);
-                if neighbor_closed {
-                    continue;
-                }
-
-                let base_move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
-                // Apply layer cost multiplier (1000 = 1.0x, 1500 = 1.5x, etc.)
-                let layer_multiplier = self.layer_cost_or_default(current.layer as usize);
-                let move_cost = (base_move_cost as i64 * layer_multiplier as i64 / 1000) as i32;
-                // Add turn cost if direction changes (encourages straighter paths)
-                let turn_cost = match prev_direction {
-                    Some((pdx, pdy)) if pdx != 0 || pdy != 0 => {
-                        if dx != pdx || dy != pdy { self.turn_cost } else { 0 }
-                    }
-                    _ => 0, // No previous direction (source node or via)
-                };
-                // Stub and layer proximity costs
-                let proximity_cost = obstacles.get_stub_proximity_cost(ngx, ngy)
-                    + obstacles.get_layer_proximity_cost(ngx, ngy, current.layer as usize);
-                // Subtract attraction bonus for positions aligned with tracks on other layers
-                let attraction_bonus = obstacles.get_cross_layer_attraction(
-                    ngx, ngy, current.layer as usize,
-                    self.vertical_attraction_radius, self.vertical_attraction_bonus);
-                // Layer direction preference penalty (0=horizontal preferred, 1=vertical preferred)
-                let direction_penalty = if self.direction_preference_cost > 0 {
-                    let preferred = self.layer_direction_preferences.get(current.layer as usize).copied().unwrap_or(255);
-                    match preferred {
-                        0 => if dy != 0 && dx == 0 { self.direction_preference_cost } else { 0 },  // Horizontal pref, penalize pure vertical
-                        1 => if dx != 0 && dy == 0 { self.direction_preference_cost } else { 0 },  // Vertical pref, penalize pure horizontal
-                        _ => 0  // No preference (255 or other)
-                    }
-                } else { 0 };
-                // Path attraction bonus for bus routing - direction-based to prevent spiraling
-                let path_attraction_bonus = self.get_path_attraction_bonus(ngx, ngy, current.layer, dx, dy);
-                let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty - attraction_bonus - path_attraction_bonus;
-
-                if new_g < existing_g {
-                    if existing_g != i32::MAX {
-                        stats.cells_revisited += 1;
-                    }
-                    store.relax(ngx, ngy, current.layer, new_g, current_idx, current_steps + 1);
-                    // Propagate via list to neighbor (same vias since no layer change)
-                    if via_exclusion_radius > 0 {
-                        path_vias.insert(neighbor_key, current_vias.clone());
-                    }
-                    let h = self.heuristic_to_targets(&neighbor, &target_states);
-                    let f = new_g + h;
-                    open_set.push(OpenEntry {
-                        f_score: f,
-                        g_score: new_g,
-                        state: neighbor,
-                        counter,
-                    });
-                    counter += 1;
-                    stats.cells_pushed += 1;
-                }
-            }
-
-            // Try via to other layers
-            // For collinear_vias mode, enforce symmetric constraint around via:
-            // ±45° -> direction D -> VIA -> direction D -> ±45°
-            // This requires at least 2 steps before via (great-grandparent must exist),
-            // and direction into via must be within ±45° of previous direction
-            let can_place_via = if collinear_vias {
-                if let Some(parent_idx) = store.parent(current_idx) {
-                    if let Some(grandparent_idx) = store.parent(parent_idx) {
-                        // Need great-grandparent to ensure 2 full steps before via
-                        if store.parent(grandparent_idx).is_none() {
-                            false // Only 1 step before via - need at least 2
-                        } else {
-                            // Have great-grandparent - check that approach direction is within ±45° of previous
-                            let (parent_x, parent_y, _) = store.coords(parent_idx);
-                            let (gp_x, gp_y, _) = store.coords(grandparent_idx);
-
-                            // Direction from grandparent to parent (previous direction)
-                            let prev_dx = parent_x - gp_x;
-                            let prev_dy = parent_y - gp_y;
-
-                            // Direction from parent to current (approach direction)
-                            let approach_dx = current.gx - parent_x;
-                            let approach_dy = current.gy - parent_y;
-
-                            if (prev_dx != 0 || prev_dy != 0) && (approach_dx != 0 || approach_dy != 0) {
-                                let norm_prev_dx = if prev_dx != 0 { prev_dx / prev_dx.abs() } else { 0 };
-                                let norm_prev_dy = if prev_dy != 0 { prev_dy / prev_dy.abs() } else { 0 };
-                                let norm_approach_dx = if approach_dx != 0 { approach_dx / approach_dx.abs() } else { 0 };
-                                let norm_approach_dy = if approach_dy != 0 { approach_dy / approach_dy.abs() } else { 0 };
-
-                                // Approach must be same or within ±45° of previous
-                                Self::is_within_45_degrees(norm_approach_dx, norm_approach_dy, norm_prev_dx, norm_prev_dy)
-                            } else {
-                                false
-                            }
-                        }
-                    } else {
-                        false // No grandparent - too close to start
-                    }
-                } else {
-                    false // No parent at all - this is a source node
-                }
-            } else {
-                true
-            };
-
-            // Check if this via would be too close to existing vias in the path
-            let via_too_close = if via_exclusion_radius > 0 {
-                current_vias.iter().any(|&(vx, vy)| {
-                    let dist = (current.gx - vx).abs().max((current.gy - vy).abs());
-                    dist <= via_exclusion_radius * 2  // Need 2x radius for via-via clearance
-                })
-            } else {
-                false
-            };
-
-            // A free via is an existing same-net hole (via-in-pad / through-hole pad);
-            // changing layers through it is always legal and adds no new drill, so it
-            // overrides both the via-blocked veto and the path's via-too-close test.
-            // Without this, the same cell can be flagged free_via AND via_blocked at
-            // once (its own clearance ring blocks the center), and the via branch is
-            // skipped before is_free_via is ever read -- forcing a redundant via to be
-            // dropped a couple cells away beside a perfectly good via-in-pad.
-            let free_here = obstacles.is_free_via(current.gx, current.gy);
-            if can_place_via && (!via_too_close || free_here)
-                && (!obstacles.is_via_blocked(current.gx, current.gy) || free_here) {
-                for layer in 0..obstacles.num_layers as u8 {
-                    if layer == current.layer {
-                        continue;
-                    }
-                    if self.layer_forbidden(layer as usize) {
-                        continue;  // FORBIDDEN LAYER: never end a via here
-                    }
-
-                    // Check if destination layer is blocked at this position
-                    if obstacles.segment_blocked(current.gx, current.gy, current.gx, current.gy, layer as usize, track_margin as f64) {
-                        continue;
-                    }
-
-                    let neighbor = GridState::new(current.gx, current.gy, layer);
-                    let neighbor_key = neighbor.as_key();
-
-                    let (existing_g, neighbor_closed) = store.g_closed_at(current.gx, current.gy, layer);
-                    if neighbor_closed {
-                        continue;
-                    }
-
-                    // Use zero cost for free via positions (through-hole pads on same net)
-                    let is_free = obstacles.is_free_via(current.gx, current.gy);
-                    let via_cost = if is_free { 0 } else { self.via_cost };
-                    let proximity_cost = (obstacles.get_stub_proximity_cost(current.gx, current.gy)
-                        + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize))
-                        * self.via_proximity_cost;
-                    // Layer transition cost: penalize switching TO expensive layers, discount switching to cheaper
-                    let current_layer_cost = self.layer_cost_or_default(current.layer as usize);
-                    let dest_layer_cost = self.layer_cost_or_default(layer as usize);
-                    let layer_transition_cost = dest_layer_cost - current_layer_cost;
-                    // Combined via cost can be as low as 0 when switching to a much cheaper layer
-                    let combined_via_cost = (via_cost + layer_transition_cost).max(0);
-                    let new_g = g + combined_via_cost + proximity_cost;
-
-                    if new_g < existing_g {
-                        if existing_g != i32::MAX {
-                            stats.cells_revisited += 1;
-                        }
-                        store.relax(current.gx, current.gy, layer, new_g, current_idx, current_steps);
-                        // Track via positions (only real vias, not free vias at through-holes)
-                        if via_exclusion_radius > 0 {
-                            if is_free {
-                                path_vias.insert(neighbor_key, current_vias.clone());
-                            } else {
-                                let mut new_vias = current_vias.clone();
-                                new_vias.push((current.gx, current.gy));
-                                path_vias.insert(neighbor_key, new_vias);
-                            }
-                        }
-                        let h = self.heuristic_to_targets(&neighbor, &target_states);
-                        let f = new_g + h;
-                        open_set.push(OpenEntry {
-                            f_score: f,
-                            g_score: new_g,
-                            state: neighbor,
-                            counter,
-                        });
-                        counter += 1;
-                        stats.cells_pushed += 1;
-                    }
-                }
+                SearchStep::IterationCap | SearchStep::Exhausted => break,
+                SearchStep::Progress(_) | SearchStep::Skipped => {}
             }
         }
 
         // No path found - fill in final stats
-        stats.open_set_size = open_set.len() as u32;
-        stats.closed_set_size = store.closed_len();
-        let stats_dict = self.stats_to_dict(&stats);
-        (None, iterations, stats_dict)
+        sink.stats.open_set_size = search.open_set.len() as u32;
+        sink.stats.closed_set_size = search.store.closed_len();
+        let stats_dict = self.stats_to_dict(&sink.stats);
+        (None, search.iterations, stats_dict)
     }
 
     /// Route with frontier analysis - returns blocked cells on failure.
@@ -778,7 +932,10 @@ impl GridRouter {
     /// Returns (path, iterations, blocked_cells) where:
     /// - On success: path is Some, blocked_cells is empty
     /// - On failure: path is None, blocked_cells contains cells that blocked expansion
+    ///
+    /// C1: thin wrapper over the shared GridSearch core with a FrontierSink.
     #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=0))]
+    #[allow(clippy::too_many_arguments)]
     pub fn route_with_frontier(
         &self,
         obstacles: &GridObstacleMap,
@@ -792,287 +949,24 @@ impl GridRouter {
         direction_steps: i32,
         track_margin: i32,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, Vec<(i32, i32, u8)>) {
-        let mut tracker = BlockedCellTracker::new();
+        let opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
+                                      start_direction, end_direction,
+                                      direction_steps, track_margin);
+        let mut sink = FrontierSink::new();
+        let mut search = GridSearch::new(self, sources, targets, max_iterations, opts, &mut sink);
 
-        let target_set: FxHashSet<u64> = targets
-            .iter()
-            .map(|(gx, gy, layer)| GridState::new(*gx, *gy, *layer).as_key())
-            .collect();
-
-        let target_states: Vec<GridState> = targets
-            .iter()
-            .map(|(gx, gy, layer)| GridState::new(*gx, *gy, *layer))
-            .collect();
-
-        let mut open_set = BinaryHeap::new();
-        let mut store = NodeStore::new();
-        let mut counter: u32 = 0;
-        let mut path_vias: FxHashMap<u64, Vec<(i32, i32)>> = FxHashMap::default();
-
-        let norm_start_dir: Option<(i32, i32)> = start_direction.map(|(dx, dy)| {
-            let ndx = if dx != 0 { dx / dx.abs() } else { 0 };
-            let ndy = if dy != 0 { dy / dy.abs() } else { 0 };
-            (ndx, ndy)
-        });
-
-        let norm_end_dir: Option<(f64, f64)> = end_direction.map(|(dx, dy)| {
-            let len = (dx * dx + dy * dy).sqrt();
-            if len > 0.0 { (dx / len, dy / len) } else { (0.0, 0.0) }
-        });
-
-        let check_via_exclusion = |nx: i32, ny: i32, current_gx: i32, current_gy: i32, vias: &[(i32, i32)], radius: i32| -> bool {
-            if radius <= 0 { return false; }
-            for &(vx, vy) in vias {
-                let dist_to_neighbor = (nx - vx).abs().max((ny - vy).abs());
-                let dist_to_current = (current_gx - vx).abs().max((current_gy - vy).abs());
-                if dist_to_neighbor <= radius && dist_to_current > radius { return true; }
-                if dist_to_current <= radius && dist_to_neighbor <= dist_to_current {
-                    if dist_to_neighbor < dist_to_current { return true; }
-                    if dist_to_neighbor == dist_to_current && dist_to_current > 0 {
-                        let dx_from_via = (nx - vx).abs() - (current_gx - vx).abs();
-                        let dy_from_via = (ny - vy).abs() - (current_gy - vy).abs();
-                        if (dx_from_via > 0 && dy_from_via < 0) || (dx_from_via < 0 && dy_from_via > 0) {
-                            if dist_to_current <= radius / 2 { return true; }
-                        }
-                    }
+        loop {
+            match search.step(self, obstacles, &mut sink) {
+                SearchStep::Found(goal_idx, _g) => {
+                    let path = search.store.reconstruct_path(goal_idx);
+                    return (Some(path), search.iterations, Vec::new());
                 }
-            }
-            false
-        };
-
-        // Find minimum layer cost for initial g penalty
-        // A1: exclude FORBIDDEN sentinels (< 0) — else min() returns the sentinel
-        // and pollutes the start penalty + the admissibility-scaled heuristic.
-        let min_layer_cost = self.layer_costs.iter().copied().filter(|&c| c >= 0).min().unwrap_or(1000);
-
-        for (gx, gy, layer) in sources {
-            let state = GridState::new(gx, gy, layer);
-            let key = state.as_key();
-            // Penalize starting on expensive layers
-            let layer_cost = self.layer_cost_or_default(layer as usize);
-            let initial_g = layer_cost - min_layer_cost;
-            let h = self.heuristic_to_targets(&state, &target_states);
-            open_set.push(OpenEntry { f_score: initial_g + h, g_score: initial_g, state, counter });
-            counter += 1;
-            store.set_source(gx, gy, layer, initial_g);
-            if via_exclusion_radius > 0 { path_vias.insert(key, Vec::new()); }
-        }
-
-        let mut iterations: u32 = 0;
-
-        while let Some(current_entry) = open_set.pop() {
-            if iterations >= max_iterations { break; }
-            iterations += 1;
-
-            let current = current_entry.state;
-            let current_key = current.as_key();
-            let current_idx = store.ensure_index(current.gx, current.gy, current.layer);
-            let g = current_entry.g_score;
-
-            if store.is_closed(current_idx) { continue; }
-
-            if target_set.contains(&current_key) {
-                let arrival_ok = if let Some((end_dx, end_dy)) = norm_end_dir {
-                    if let Some(parent_idx) = store.parent(current_idx) {
-                        let (px, py, _) = store.coords(parent_idx);
-                        let arrive_dx = (current.gx - px) as f64;
-                        let arrive_dy = (current.gy - py) as f64;
-                        let arrive_len = (arrive_dx * arrive_dx + arrive_dy * arrive_dy).sqrt();
-                        if arrive_len > 0.0 {
-                            let dot = (arrive_dx / arrive_len) * end_dx + (arrive_dy / arrive_len) * end_dy;
-                            dot >= -0.5
-                        } else { true }
-                    } else { true }
-                } else { true };
-
-                if arrival_ok {
-                    let path = self.reconstruct_path(&store, current_idx);
-                    return (Some(path), iterations, Vec::new());
-                }
-                continue;
-            }
-
-            store.set_closed(current_idx);
-
-            let (required_direction, allowed_45deg_from) = if collinear_vias {
-                self.get_via_direction_constraints(&store, current_idx, &current)
-            } else { (None, None) };
-
-            let current_vias: Vec<(i32, i32)> = if via_exclusion_radius > 0 {
-                path_vias.get(&current_key).cloned().unwrap_or_default()
-            } else { Vec::new() };
-
-            let current_steps = store.steps_of(current_idx);
-
-            // Get previous direction (parent -> current) for turn cost calculation
-            let prev_direction: Option<(i32, i32)> = store.parent(current_idx).map(|parent_idx| {
-                let (px, py, _) = store.coords(parent_idx);
-                let pdx = current.gx - px;
-                let pdy = current.gy - py;
-                if pdx == 0 && pdy == 0 { (0, 0) } else { (pdx.signum(), pdy.signum()) }
-            });
-
-            for (dx, dy) in DIRECTIONS {
-                if self.layer_forbidden(current.layer as usize) { break; }  // G2: no track on a forbidden source layer
-                if let Some((req_dx, req_dy)) = required_direction {
-                    if dx != req_dx || dy != req_dy { continue; }
-                } else if let Some((base_dx, base_dy)) = allowed_45deg_from {
-                    if !Self::is_within_45_degrees(dx, dy, base_dx, base_dy) { continue; }
-                }
-
-                if let Some((start_dx, start_dy)) = norm_start_dir {
-                    if current_steps < direction_steps && !Self::is_within_45_degrees(dx, dy, start_dx, start_dy) {
-                        continue;
-                    }
-                }
-
-                let ngx = current.gx + dx;
-                let ngy = current.gy + dy;
-
-                if obstacles.segment_blocked(current.gx, current.gy, ngx, ngy, current.layer as usize, track_margin as f64) {
-                    tracker.track(ngx, ngy, current.layer);
-                    continue;
-                }
-
-                if check_via_exclusion(ngx, ngy, current.gx, current.gy, &current_vias, via_exclusion_radius) {
-                    continue;
-                }
-
-                let neighbor = GridState::new(ngx, ngy, current.layer);
-                let neighbor_key = neighbor.as_key();
-
-                let (existing_g, neighbor_closed) = store.g_closed_at(ngx, ngy, current.layer);
-                if neighbor_closed { continue; }
-
-                let base_move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
-                // Apply layer cost multiplier (1000 = 1.0x, 1500 = 1.5x, etc.)
-                let layer_multiplier = self.layer_cost_or_default(current.layer as usize);
-                let move_cost = (base_move_cost as i64 * layer_multiplier as i64 / 1000) as i32;
-                let turn_cost = match prev_direction {
-                    Some((pdx, pdy)) if pdx != 0 || pdy != 0 => {
-                        if dx != pdx || dy != pdy { self.turn_cost } else { 0 }
-                    }
-                    _ => 0,
-                };
-                // Stub and layer proximity costs
-                let proximity_cost = obstacles.get_stub_proximity_cost(ngx, ngy)
-                    + obstacles.get_layer_proximity_cost(ngx, ngy, current.layer as usize);
-                // Subtract attraction bonus for positions aligned with tracks on other layers
-                let attraction_bonus = obstacles.get_cross_layer_attraction(
-                    ngx, ngy, current.layer as usize,
-                    self.vertical_attraction_radius, self.vertical_attraction_bonus);
-                // Layer direction preference penalty (0=horizontal preferred, 1=vertical preferred)
-                let direction_penalty = if self.direction_preference_cost > 0 {
-                    let preferred = self.layer_direction_preferences.get(current.layer as usize).copied().unwrap_or(255);
-                    match preferred {
-                        0 => if dy != 0 && dx == 0 { self.direction_preference_cost } else { 0 },
-                        1 => if dx != 0 && dy == 0 { self.direction_preference_cost } else { 0 },
-                        _ => 0
-                    }
-                } else { 0 };
-                // Path attraction bonus for bus routing - direction-based to prevent spiraling
-                let path_attraction_bonus = self.get_path_attraction_bonus(ngx, ngy, current.layer, dx, dy);
-                let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty - attraction_bonus - path_attraction_bonus;
-
-                if new_g < existing_g {
-                    store.relax(ngx, ngy, current.layer, new_g, current_idx, current_steps + 1);
-                    if via_exclusion_radius > 0 { path_vias.insert(neighbor_key, current_vias.clone()); }
-                    let h = self.heuristic_to_targets(&neighbor, &target_states);
-                    open_set.push(OpenEntry { f_score: new_g + h, g_score: new_g, state: neighbor, counter });
-                    counter += 1;
-                }
-            }
-
-            // Via expansion
-            let can_place_via = if collinear_vias {
-                if let Some(parent_idx) = store.parent(current_idx) {
-                    if let Some(grandparent_idx) = store.parent(parent_idx) {
-                        if store.parent(grandparent_idx).is_none() { false }
-                        else {
-                            let (parent_x, parent_y, _) = store.coords(parent_idx);
-                            let (gp_x, gp_y, _) = store.coords(grandparent_idx);
-                            let prev_dx = parent_x - gp_x;
-                            let prev_dy = parent_y - gp_y;
-                            let approach_dx = current.gx - parent_x;
-                            let approach_dy = current.gy - parent_y;
-                            if (prev_dx != 0 || prev_dy != 0) && (approach_dx != 0 || approach_dy != 0) {
-                                let norm_prev_dx = if prev_dx != 0 { prev_dx / prev_dx.abs() } else { 0 };
-                                let norm_prev_dy = if prev_dy != 0 { prev_dy / prev_dy.abs() } else { 0 };
-                                let norm_approach_dx = if approach_dx != 0 { approach_dx / approach_dx.abs() } else { 0 };
-                                let norm_approach_dy = if approach_dy != 0 { approach_dy / approach_dy.abs() } else { 0 };
-                                Self::is_within_45_degrees(norm_approach_dx, norm_approach_dy, norm_prev_dx, norm_prev_dy)
-                            } else { false }
-                        }
-                    } else { false }
-                } else { false }
-            } else { true };
-
-            let via_too_close = if via_exclusion_radius > 0 {
-                current_vias.iter().any(|&(vx, vy)| {
-                    (current.gx - vx).abs().max((current.gy - vy).abs()) <= via_exclusion_radius * 2
-                })
-            } else { false };
-
-            // A free via is an existing same-net hole (via-in-pad / through-hole pad);
-            // changing layers through it is always legal and adds no new drill, so it
-            // overrides both the via-blocked veto and the path's via-too-close test.
-            // Without this, the same cell can be flagged free_via AND via_blocked at
-            // once (its own clearance ring blocks the center), and the via branch is
-            // skipped before is_free_via is ever read -- forcing a redundant via to be
-            // dropped a couple cells away beside a perfectly good via-in-pad.
-            let free_here = obstacles.is_free_via(current.gx, current.gy);
-            if can_place_via && (!via_too_close || free_here)
-                && (!obstacles.is_via_blocked(current.gx, current.gy) || free_here) {
-                for layer in 0..obstacles.num_layers as u8 {
-                    if layer == current.layer { continue; }
-                    if self.layer_forbidden(layer as usize) { continue; }  // FORBIDDEN LAYER: never end a via here
-
-                    if obstacles.segment_blocked(current.gx, current.gy, current.gx, current.gy, layer as usize, track_margin as f64) {
-                        tracker.track(current.gx, current.gy, layer);
-                        continue;
-                    }
-
-                    let neighbor = GridState::new(current.gx, current.gy, layer);
-                    let neighbor_key = neighbor.as_key();
-
-                    let (existing_g, neighbor_closed) = store.g_closed_at(current.gx, current.gy, layer);
-                    if neighbor_closed { continue; }
-
-                    // Use zero cost for free via positions (through-hole pads on same net)
-                    let is_free = obstacles.is_free_via(current.gx, current.gy);
-                    let via_cost = if is_free { 0 } else { self.via_cost };
-                    let proximity_cost = (obstacles.get_stub_proximity_cost(current.gx, current.gy)
-                        + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize))
-                        * self.via_proximity_cost;
-                    // Layer transition cost: penalize switching TO expensive layers, discount switching to cheaper
-                    let current_layer_cost = self.layer_cost_or_default(current.layer as usize);
-                    let dest_layer_cost = self.layer_cost_or_default(layer as usize);
-                    let layer_transition_cost = dest_layer_cost - current_layer_cost;
-                    // Combined via cost can be as low as 0 when switching to a much cheaper layer
-                    let combined_via_cost = (via_cost + layer_transition_cost).max(0);
-                    let new_g = g + combined_via_cost + proximity_cost;
-
-                    if new_g < existing_g {
-                        store.relax(current.gx, current.gy, layer, new_g, current_idx, current_steps);
-                        // Track via positions (only real vias, not free vias at through-holes)
-                        if via_exclusion_radius > 0 {
-                            if is_free {
-                                path_vias.insert(neighbor_key, current_vias.clone());
-                            } else {
-                                let mut new_vias = current_vias.clone();
-                                new_vias.push((current.gx, current.gy));
-                                path_vias.insert(neighbor_key, new_vias);
-                            }
-                        }
-                        let h = self.heuristic_to_targets(&neighbor, &target_states);
-                        open_set.push(OpenEntry { f_score: new_g + h, g_score: new_g, state: neighbor, counter });
-                        counter += 1;
-                    }
-                }
+                SearchStep::IterationCap | SearchStep::Exhausted => break,
+                SearchStep::Progress(_) | SearchStep::Skipped => {}
             }
         }
 
-        (None, iterations, tracker.get_blocked())
+        (None, search.iterations, sink.tracker.get_blocked())
     }
 }
 
@@ -1096,14 +990,25 @@ impl GridRouter {
         }
     }
 
+    /// Minimum non-forbidden layer cost (A1: exclude FORBIDDEN sentinels < 0 —
+    /// else min() returns the sentinel and pollutes the start penalty + the
+    /// admissibility-scaled heuristic). Shared by the source init + heuristic.
+    #[inline]
+    fn min_valid_layer_cost(&self) -> i32 {
+        self.layer_costs.iter().copied().filter(|&c| c >= 0).min().unwrap_or(1000)
+    }
+
     /// Octile distance heuristic to nearest target
     /// Uses minimum layer cost to remain admissible (never overestimate)
     #[inline]
     fn heuristic_to_targets(&self, state: &GridState, targets: &[GridState]) -> i32 {
-        // Use minimum layer cost for admissibility
-        // A1: exclude FORBIDDEN sentinels (< 0) — else min() returns the sentinel
-        // and pollutes the start penalty + the admissibility-scaled heuristic.
-        let min_layer_cost = self.layer_costs.iter().copied().filter(|&c| c >= 0).min().unwrap_or(1000);
+        // B4: an empty target list used to fall through as i32::MAX, and the
+        // f = g + h addition then wrapped in release builds, corrupting the
+        // heap order into a silent max-iterations burn. No target -> h = 0.
+        if targets.is_empty() {
+            return 0;
+        }
+        let min_layer_cost = self.min_valid_layer_cost();
 
         let mut min_h = i32::MAX;
         for target in targets {
@@ -1125,39 +1030,6 @@ impl GridRouter {
             min_h = min_h.min(h);
         }
         (min_h as f32 * self.h_weight) as i32
-    }
-
-    /// Reconstruct path from the node store (follows parent indices back to
-    /// the source, whose parent is NO_PARENT32 -> None -> loop terminates).
-    fn reconstruct_path(
-        &self,
-        store: &NodeStore,
-        goal_idx: u32,
-    ) -> Vec<(i32, i32, u8)> {
-        let mut path = Vec::new();
-        let mut idx = goal_idx;
-
-        loop {
-            path.push(store.coords(idx));
-            match store.parent(idx) {
-                Some(parent_idx) => idx = parent_idx,
-                None => break,
-            }
-        }
-
-        path.reverse();
-        path
-    }
-
-    /// Helper to unpack a key back to coordinates
-    #[inline]
-    pub fn unpack_key(key: u64) -> (i32, i32, u8) {
-        let layer = (key & 0xFF) as u8;
-        let y = ((key >> 8) & 0xFFFFF) as i32;
-        let x = ((key >> 28) & 0xFFFFF) as i32;
-        let x = if x & 0x80000 != 0 { x | !0xFFFFF_i32 } else { x };
-        let y = if y & 0x80000 != 0 { y | !0xFFFFF_i32 } else { y };
-        (x, y, layer)
     }
 
     /// Check if direction (dx, dy) is within ±45° of (base_dx, base_dy)
@@ -1281,10 +1153,9 @@ impl GridRouter {
     }
 
     /// Pack bucket coordinates into a key for spatial hash lookup
+    /// (C2: the unused bucket_size parameter was dropped)
     #[inline]
-    fn pack_bucket_key(bx: i32, by: i32, layer: u8, bucket_size: i32) -> u64 {
-        // Use bucket_size as part of key to avoid collisions between different bucket sizes
-        let _ = bucket_size; // Currently not used in key, but kept for future flexibility
+    fn pack_bucket_key(bx: i32, by: i32, layer: u8) -> u64 {
         let layer_bits = layer as u64;
         let bx_bits = ((bx as u32) & 0xFFFFF) as u64;
         let by_bits = ((by as u32) & 0xFFFFF) as u64;
@@ -1317,9 +1188,9 @@ impl GridRouter {
         let bucket_size = (self.attraction_radius / 2).max(1);
         let bx = x / bucket_size;
         let by = y / bucket_size;
-        let key = Self::pack_bucket_key(bx, by, layer, bucket_size);
+        let key = Self::pack_bucket_key(bx, by, layer);
 
-        if !self.attraction_path_hash.contains_key(&key) {
+        if !self.attraction_path_hash.contains(&key) {
             return 0;
         }
 
@@ -1378,7 +1249,6 @@ impl GridRouter {
         dict.insert("path_cost".to_string(), stats.path_cost as f64);
         dict.insert("initial_h".to_string(), stats.initial_h as f64);
         dict.insert("final_g".to_string(), stats.final_g as f64);
-        dict.insert("max_f_score".to_string(), stats.max_f_score as f64);
         dict.insert("open_set_size".to_string(), stats.open_set_size as f64);
         dict.insert("closed_set_size".to_string(), stats.closed_set_size as f64);
         dict.insert("via_count".to_string(), stats.via_count as f64);

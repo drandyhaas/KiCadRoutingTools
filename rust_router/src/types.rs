@@ -220,6 +220,7 @@ impl Default for BlockedCellTracker {
 }
 
 /// Statistics from an A* search for debugging and performance analysis.
+/// (C2: the never-written max_f_score stat was removed.)
 #[derive(Clone, Debug, Default)]
 pub struct RouteStats {
     /// Cells popped from open set and processed (not skipped as duplicates)
@@ -238,12 +239,84 @@ pub struct RouteStats {
     pub initial_h: i32,
     /// Final g-cost (actual cost to reach goal)
     pub final_g: i32,
-    /// Maximum f-score seen in open set (indicates search spread)
-    pub max_f_score: i32,
     /// Size of open set at termination
     pub open_set_size: u32,
     /// Size of closed set (unique cells visited)
     pub closed_set_size: u32,
     /// Number of via transitions in path
     pub via_count: u32,
+}
+
+/// C1 (issue #387): one search core, several sinks. The grid and pose A*
+/// cores are generic over this trait; each variant's side-band behavior
+/// (stats counting, blocked-frontier tracking, or nothing) is a sink, and
+/// monomorphization compiles the no-op hooks out entirely. This replaces the
+/// four hand-forked copies of the search loop (route_multi vs
+/// route_with_frontier, route_pose vs route_pose_with_frontier, plus the
+/// drifted visual_router fork -- B1 in #386).
+pub trait SearchSink {
+    /// A node was pushed to the open set (including the initial sources).
+    #[inline]
+    fn on_push(&mut self) {}
+    /// A popped node was expanded (not a duplicate skip).
+    #[inline]
+    fn on_expand(&mut self) {}
+    /// A popped node was skipped because it was already closed.
+    #[inline]
+    fn on_duplicate_skip(&mut self) {}
+    /// A relax improved an already-visited node's g.
+    #[inline]
+    fn on_revisit(&mut self) {}
+    /// Expansion into (gx, gy, layer) was vetoed by an obstacle.
+    #[inline]
+    fn on_blocked(&mut self, _gx: i32, _gy: i32, _layer: u8) {}
+}
+
+/// Sink that ignores everything (route_pose, and any caller that wants the
+/// bare search result).
+pub struct NullSink;
+impl SearchSink for NullSink {}
+
+/// Sink that records blocked cells for the failure frontier
+/// (route_with_frontier / route_pose_with_frontier rip-up analysis).
+pub struct FrontierSink {
+    pub tracker: BlockedCellTracker,
+}
+
+impl FrontierSink {
+    pub fn new() -> Self {
+        Self { tracker: BlockedCellTracker::new() }
+    }
+}
+
+impl SearchSink for FrontierSink {
+    #[inline]
+    fn on_blocked(&mut self, gx: i32, gy: i32, layer: u8) {
+        self.tracker.track(gx, gy, layer);
+    }
+}
+
+/// Sink that accumulates RouteStats (route_multi and the visualizer).
+#[derive(Default)]
+pub struct StatsSink {
+    pub stats: RouteStats,
+}
+
+impl SearchSink for StatsSink {
+    #[inline]
+    fn on_push(&mut self) {
+        self.stats.cells_pushed += 1;
+    }
+    #[inline]
+    fn on_expand(&mut self) {
+        self.stats.cells_expanded += 1;
+    }
+    #[inline]
+    fn on_duplicate_skip(&mut self) {
+        self.stats.duplicate_skips += 1;
+    }
+    #[inline]
+    fn on_revisit(&mut self) {
+        self.stats.cells_revisited += 1;
+    }
 }
