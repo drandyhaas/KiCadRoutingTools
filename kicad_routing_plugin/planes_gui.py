@@ -1036,12 +1036,11 @@ class PlanesTab(wx.Panel):
                 return_results=True,
                 layer_nets=layer_nets,
                 same_net_pad_clearance=config.get('same_net_pad_clearance', defaults.SAME_NET_PAD_CLEARANCE),
-                # #381 D6: was hardcoded True, opposite the CLI default (False).
-                # Now config-driven, defaulting to the CLI's False so a
-                # plan-replayed create matches route_planes.py. (Interactive
-                # re-runs previously relied on True to avoid re-emitting an
-                # existing zone; set skip_existing_zones in the plan if needed.)
-                skip_existing_zones=config.get('skip_existing_zones', False),
+                # #381 D6: config-driven (was hardcoded True). Interactive
+                # default stays True -- an interactive re-create on a live board
+                # should skip re-emitting an existing zone. A plan can override
+                # to False (the CLI default) to match a route_planes.py replay.
+                skip_existing_zones=config.get('skip_existing_zones', True),
                 progress_callback=self._make_progress_callback(),
                 cancel_check=lambda: self._cancel_requested,
             )
