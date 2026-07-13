@@ -1345,7 +1345,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             min_via_diameter: Optional[float] = None,
             min_via_drill: Optional[float] = None,
             check_sizes: bool = True, size_margin: float = 0.0,
-            check_pad_edge: bool = False):
+            check_pad_edge: bool = False, print_summary: bool = True):
     """Run DRC checks on the PCB file.
 
     Args:
@@ -2218,12 +2218,18 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 print(f"  same-net via-via: {len(viavia_warns)} (same-net copper overlap; "
                       f"permitted by KiCad DRC -- drill hole-to-hole checked separately)")
 
-    # Report violations
+    # Report violations. #383: print_summary=False lets an IN-PROCESS caller
+    # (kicad_drc_compare.run_check_drc, run under a ThreadPoolExecutor) get the
+    # violations back WITHOUT this quiet-summary print -- the old caller wrapped
+    # the call in a process-global redirect_stdout, which under concurrency
+    # swallowed other worker threads' result lines into its buffer.
     if quiet:
         if violations:
-            print(f"FAILED ({len(violations)} violations)")
+            if print_summary:
+                print(f"FAILED ({len(violations)} violations)")
         else:
-            print("OK" + (f" ({len(warnings)} same-net copper warning(s))" if warnings else ""))
+            if print_summary:
+                print("OK" + (f" ({len(warnings)} same-net copper warning(s))" if warnings else ""))
             return violations
 
     # Print detailed results (always for non-quiet, or when violations in quiet mode)

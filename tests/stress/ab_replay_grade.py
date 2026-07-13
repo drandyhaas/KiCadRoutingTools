@@ -271,13 +271,34 @@ def run_wave(set_dir, out_dir, label, jobs):
     print(f"[{label}] code under test: {format_version(ver)}  (commit {ver.get('commit')})")
     print(f"[{label}] replaying {len(boards)} boards from {set_dir} -> {out_dir} ({jobs} parallel)")
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
-        futs = [ex.submit(do_board, set_dir, out_dir, label, b) for b in boards]
-        for f in concurrent.futures.as_completed(futs):  # report as boards finish
-            results.append(f.result())
-    results.sort(key=lambda r: r["board"])
     summary = out_dir / "summary.json"
-    summary.write_text(json.dumps(results, indent=2))
+
+    def _flush():
+        # #383: stream partial results to disk as boards finish, so a mid-run
+        # death still leaves the completed boards' grades on disk (the wave
+        # driver used to write summary.json only at the very end).
+        summary.write_text(json.dumps(sorted(results, key=lambda r: r["board"]), indent=2))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
+        fut_board = {ex.submit(do_board, set_dir, out_dir, label, b): b for b in boards}
+        for f in concurrent.futures.as_completed(fut_board):  # report as boards finish
+            b = fut_board[f]
+            try:
+                results.append(f.result())
+            except BaseException as e:  # noqa: BLE001 -- one board must never kill the wave
+                # #383: a worker raising SystemExit/KeyboardInterrupt (a bare
+                # sys.exit() deep in a grading helper) used to propagate through
+                # f.result() and out of main(), leaving NO summary and no error
+                # line. Degrade that board to a NORESULT row and keep going.
+                print(f"[{label}] {b}: NORESULT ({type(e).__name__}: {e})", flush=True)
+                results.append({"board": b, "clearance": None, "replay_rc": None,
+                                "final": None, "chain_complete": False,
+                                "drc": None, "conn": None, "nets_total": None,
+                                "nets_incomplete": None, "completion_pct": None,
+                                "error": f"{type(e).__name__}: {e}"})
+            _flush()
+    results.sort(key=lambda r: r["board"])
+    _flush()
     complete = sum(1 for r in results if r["chain_complete"])
     print(f"[{label}] wrote {summary}: {complete}/{len(results)} chains complete")
     return results

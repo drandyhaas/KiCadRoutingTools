@@ -100,12 +100,12 @@ def run_check_drc(board: str, clearance: float = None):
     """Run check_drc.run_drc, return counted violations (post warning-split)
     as {type, nets:frozenset, pos:(x,y)}."""
     from check_drc import run_drc
-    from contextlib import redirect_stdout
-    import io
-    buf = io.StringIO()
     kw = {"clearance": clearance} if clearance else {}
-    with redirect_stdout(buf):
-        violations = run_drc(board, quiet=True, **kw)
+    # #383: NO redirect_stdout -- swapping the process-global sys.stdout inside
+    # a worker thread stole other concurrent boards' prints (result lines) into
+    # this buffer. print_summary=False makes run_drc emit nothing in the success
+    # path, so no capture is needed.
+    violations = run_drc(board, quiet=True, print_summary=False, **kw)
     out = []
     for v in violations or []:
         nets = frozenset(str(v.get(k)) for k in ("net1", "net2") if v.get(k))
