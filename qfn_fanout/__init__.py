@@ -741,6 +741,12 @@ def main():
     from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
                            enforce_fab_floors, count_copper_layers_in_file)
     add_fab_tier_args(parser)
+    # #381 D8: define --no-fix-drc-settings (and the shared DRC-fix flags) that
+    # the writeback below already reads via getattr but that was never declared.
+    # store_true default keeps no_fix_drc_settings=False => writeback ON =>
+    # identical behavior for existing commands.
+    from fix_kicad_drc_settings import add_drc_fix_args
+    add_drc_fix_args(parser)
     args = parser.parse_args()
     set_default_fab_tier(*fab_tier_from_args(args))
     enforce_fab_floors(
