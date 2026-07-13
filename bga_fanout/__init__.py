@@ -641,6 +641,65 @@ def manage_vias(
                 return True
         return False
 
+    # #370 B4: physical validation the body-overlap test above misses,
+    # mirroring check_drc / _bare_pad_pair_vias_fit. Precomputed once: pads
+    # are static and manage_vias runs before any of ITS vias exist.
+    from routing_defaults import HOLE_TO_HOLE_CLEARANCE
+    from kicad_parser import pad_drill_capsule
+    drill_capsules = []
+    for _pads in pcb_data.pads_by_net.values():
+        for _p in _pads:
+            if (getattr(_p, 'drill', 0) or 0) > 0:
+                drill_capsules.append(pad_drill_capsule(_p))
+
+    def via_in_pad_conflict(x, y, v_size, v_drill, net_id):
+        """Reason a via physically cannot go at (x, y), or None (#370 B4):
+
+        * drill hole-to-hole vs EVERY existing via and TH/NPTH pad drill --
+          net-INDEPENDENT, exactly the fab floor (same-net drill overlap is
+          still a fab violation, #282); slot/offset drills via the capsule;
+        * the via ring vs foreign tracks on ANY layer (a through via's
+          barrel spans every copper layer).
+        """
+        vdr = (v_drill or 0.0) / 2.0
+        for ov in pcb_data.vias:
+            if math.hypot(ov.x - x, ov.y - y) < \
+                    vdr + (getattr(ov, 'drill', 0) or 0) / 2.0 \
+                    + HOLE_TO_HOLE_CLEARANCE - 1e-6:
+                return "drill hole-to-hole vs an existing via"
+        for (c1x, c1y), (c2x, c2y), prad in drill_capsules:
+            ddx, ddy = c2x - c1x, c2y - c1y
+            L2 = ddx * ddx + ddy * ddy
+            if L2 > 0:
+                t = max(0.0, min(1.0, ((x - c1x) * ddx + (y - c1y) * ddy) / L2))
+                d = math.hypot(x - (c1x + t * ddx), y - (c1y + t * ddy))
+            else:
+                d = math.hypot(x - c1x, y - c1y)
+            if d < vdr + prad + HOLE_TO_HOLE_CLEARANCE - 1e-6:
+                return "drill hole-to-hole vs a pad drill"
+        vr = v_size / 2.0
+        for s in pcb_data.segments:
+            if s.net_id == net_id:
+                continue
+            need = vr + (s.width or 0.0) / 2.0 + clearance - 1e-6
+            if (x < min(s.start_x, s.end_x) - need or
+                    x > max(s.start_x, s.end_x) + need or
+                    y < min(s.start_y, s.end_y) - need or
+                    y > max(s.start_y, s.end_y) + need):
+                continue
+            ddx, ddy = s.end_x - s.start_x, s.end_y - s.start_y
+            L2 = ddx * ddx + ddy * ddy
+            if L2 > 0:
+                t = max(0.0, min(1.0, ((x - s.start_x) * ddx
+                                       + (y - s.start_y) * ddy) / L2))
+                d = math.hypot(x - (s.start_x + t * ddx),
+                               y - (s.start_y + t * ddy))
+            else:
+                d = math.hypot(x - s.start_x, y - s.start_y)
+            if d < need:
+                return "via ring grazes a foreign track"
+        return None
+
     vias_to_add: List[Dict] = []
     vias_to_remove: List[Dict] = []
     via_blocked_routes: List['FanoutRoute'] = []
@@ -706,6 +765,13 @@ def manage_vias(
                     # ball on the pad's own layer.
                     via_blocked_routes.append(route)
                     continue
+                # #370 B4: drill hole-to-hole (net-independent) and foreign
+                # tracks -- fail the escape honestly like the #253 case above
+                # rather than ship a via check_drc / the fab would flag.
+                if via_in_pad_conflict(pad_x, pad_y, v_size, v_drill,
+                                       route.net_id) is not None:
+                    via_blocked_routes.append(route)
+                    continue
                 if not would_overlap_existing_via(pad_x, pad_y, v_size):
                     vias_to_add.append({
                         'x': pad_x,
@@ -732,7 +798,8 @@ def manage_vias(
         names = sorted(r.pad.net_name or f"net{r.net_id}" for r in via_blocked_routes)
         print(f"  WARNING: {len(via_blocked_routes)} escape(s) dropped: via-in-pad "
               f"would hit an immovable foreign pad (locked part/connector/test "
-              f"point, #253): {', '.join(names)}")
+              f"point, #253), a drill within hole-to-hole of another hole, or a "
+              f"foreign track (#370): {', '.join(names)}")
 
     return vias_to_add, vias_to_remove, via_blocked_routes
 

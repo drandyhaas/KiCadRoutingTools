@@ -424,6 +424,71 @@ def test_b3():
 
 
 # ---------------------------------------------------------------------------
+# B4 -- bga_fanout via placement: hole-to-hole + foreign tracks
+# ---------------------------------------------------------------------------
+
+def test_b4():
+    print("\nB4: bga_fanout via-in-pad validates drills + foreign tracks")
+    from bga_fanout import manage_vias
+    from bga_fanout.types import FanoutRoute
+
+    NET = 7
+
+    def ball_route():
+        ball = _mk_pad(10.0, 10.0, net_id=NET, size=0.5, pad_type='smd',
+                       layers=['F.Cu'], ref='U1', num='A1')
+        return FanoutRoute(pad=ball, pad_pos=(10.0, 10.0),
+                           stub_end=(10.5, 10.5), exit_pos=(11.0, 10.5),
+                           layer='B.Cu')
+
+    def run(vias=(), segments=(), extra_pads=()):
+        r = ball_route()
+        pcb = _board(vias=vias, segments=segments,
+                     pads_by_net={NET: [r.pad], **({0: list(extra_pads)}
+                                                   if extra_pads else {})})
+        return manage_vias([r], pcb, 'F.Cu', 0.45, 0.2, 0.1)
+
+    # clean board: via-in-pad added (no over-rejection)
+    add, _rm, blocked = run()
+    check("clean board: via added", len(add) == 1 and not blocked)
+
+    # NPTH mounting hole 0.4mm away: drills 0.1+0.25 + 0.2 floor = 0.55 > 0.4.
+    # Nothing checked pad drills before -- the via shipped a drill overlap.
+    add, _rm, blocked = run(extra_pads=[_npth(10.0, 10.4, 0.5)])
+    check("via drill within hole-to-hole of an NPTH drill: escape dropped",
+          len(add) == 0 and len(blocked) == 1)
+
+    # same-net TH pad drill 0.35mm away (net-INDEPENDENT rule, #282 class)
+    th = _mk_pad(10.35, 10.0, net_id=NET, drill=0.3, size=0.6, ref='U2')
+    add, _rm, blocked = run(extra_pads=[th])
+    check("via drill within hole-to-hole of a SAME-net pad drill: dropped",
+          len(add) == 0 and len(blocked) == 1)
+
+    # foreign track on an inner layer 0.3mm from the ball: ring 0.225 + w/2
+    # 0.1 + clearance 0.1 = 0.425 > 0.3 -- was never checked.
+    trk = Segment(start_x=8.0, start_y=10.3, end_x=12.0, end_y=10.3,
+                  width=0.2, layer="In1.Cu", net_id=9)
+    add, _rm, blocked = run(segments=[trk])
+    check("via ring grazing a foreign inner track: escape dropped",
+          len(add) == 0 and len(blocked) == 1)
+    # ...but a track at 0.5mm clears 0.425 (no over-rejection)
+    trk2 = Segment(start_x=8.0, start_y=10.5, end_x=12.0, end_y=10.5,
+                   width=0.2, layer="In1.Cu", net_id=9)
+    add, _rm, blocked = run(segments=[trk2])
+    check("foreign track at legal distance: via still added",
+          len(add) == 1 and not blocked)
+
+    # existing same-net via 0.5mm away, drill-heavy: drill req 0.1+0.25+0.2 =
+    # 0.55 > 0.5. Pre-fix the body test silently skipped the via (leaving the
+    # escape dangling); now the escape is dropped honestly.
+    fat = Via(x=10.0, y=10.5, size=0.6, drill=0.5,
+              layers=["F.Cu", "B.Cu"], net_id=NET)
+    add, _rm, blocked = run(vias=[fat])
+    check("via drill within hole-to-hole of an existing via drill: dropped",
+          len(add) == 0 and len(blocked) == 1)
+
+
+# ---------------------------------------------------------------------------
 
 def main():
     test_b1()
@@ -432,6 +497,7 @@ def main():
     test_b2_soft_joints()
     test_b2_cap_optimizer()
     test_b3()
+    test_b4()
     print()
     if FAILS:
         print(f"{len(FAILS)} check(s) FAILED")
