@@ -1,59 +1,51 @@
-f2dcd12 2026-07-12 audited 8b41e5a..HEAD (18 commits); 0 gaps found.
+066fc7d 2026-07-13 Tier D parity sweep (#381) + Tier E (#382); gaps D1-D9 FIXED.
 
-ADDENDUM (post-audit, same day): the #129 same_net_escapes design this
-audit verified was REPLACED by the parameterless escape-priority redo
-(the commit FOLLOWING this marker; history squashed). No CLI flag, no
-GUI control, no engine kwarg -- the parity surface is unchanged and the
-no-wx gates were re-run green after the redo. The same_net_escapes
-threading notes below describe the audited-then, now-removed design;
-the next audit picks up from this marker and covers the redo commit.
+This is not just an audit — issue #381 (review #368 Tier D) found and FIXED
+the CLI/GUI parity gaps D1-D9, so the parity surface changed and was
+re-verified end to end. Merged fe7a94d (#381) + 066fc7d (#382).
 
-Small range, one new engine param. Method: git log/diff over the range on the
-CLI scripts + kicad_routing_plugin/, classify every hunk by location (engine
-function vs CLI main() vs GUI-only), then the three gates.
+WHAT #381 CLOSED (the gaps the previous marker listed as "still not swept" —
+the diff-pair tab and the fanout advanced knobs — are now swept):
+  * D1 differential_gui._run_diff_routing threads the FULL merged config to
+    batch_route_diff_pairs (was dropping ~30 params incl. ordering_strategy,
+    which made GUI diff order pairs differently from CLI). Added a
+    KICAD_DUMP_BATCH_KWARGS dump to batch_route_diff_pairs so the diff path is
+    now instrumentable like batch_route.
+  * D2 reset_params_to_defaults diff GND-via -> True (matches CLI default-on).
+  * D3 polarity-swap control+reset default empty=deny (#279); claude_plan
+    alias polarity_swap_nets -> polarity_swap_nets_text.
+  * D4 manifest_to_plan aliases route_diff --track-width -> diff_pair_width;
+    GUI DIFF_PAIR_WIDTH default 0.1 -> 0.3 (GUI-side, to match CLI).
+  * D5 claude_plan resolves rip_existing_nets/impedance/ordering/direction/
+    time_matching/keepout/guide_corridor/length_match_groups/swappable_nets to
+    their controls; parity gate extended with a param->control resolution check.
+  * D6 planes create/repair thread layer_costs + plane knobs; skip_existing_zones
+    config-driven, interactive default kept True.
+  * D7 QFN fanout GUI controls default 0.1/0.1 (QFN_TRACK_WIDTH/QFN_CLEARANCE).
+  * D8 add_drc_fix_args in both fanout parsers; check_drc registered in the
+    postpass-coverage lint (run_drc = KNOWN_CLI_ONLY).
+  * D9 argparse synonyms (--output on plane scripts, --plane-track-via-clearance
+    <-> --track-via-clearance, --no-bga-zones <-> --no-bga-zone).
+  DEFERRED (noted, not shipped): route_diff --rip-existing-nets (engine has no
+  such param), place_fanout_clearance fab-tier args (would change CLI default).
 
-NEW ENGINE PARAM in range: same_net_escapes (--same-net-escapes, #129
-ef4b285). Threaded through ALL surfaces at introduction time and re-verified
-here per the CLAUDE.md checklist:
-  * argparse default 1 == engine default == defaults.BGA_SAME_NET_ESCAPES ==
-    GUI spin control initial == reset_params_to_defaults value.
-  * fanout_gui BGAOptionsPanel control named same_net_escapes; get_config;
-    engine call passes it; settings_persistence save/load.
-  * claude_plan fanout/bga branch applies params["same_net_escapes"].
-  * manifest_to_plan FLAG_PARAMS carries --same-net-escapes; verified by
-    converting a synthetic manifest: plan step params include
-    "same_net_escapes": 2.
-No other new flags/params in range (checked: git diff over CLI mains for
-add_argument; engine signatures for new kwargs).
+#382 (Tier E) additions relevant to parity: an AST GridRouteConfig field-parity
+gate in run_doc_examples.py; and fixed the per-netclass GUI multi-batch
+aggregator dropping vias_to_remove (GUI route + --rip-existing-nets shipped
+stale vias).
 
-Everything else in range is engine-internal (shared by both fronts for free)
-or GUI-only:
-  * #129 deferral/connect + scoped re-escape, #349 plane-pad strapping +
-    repair strap-scale distant_radius, #351 region-join perf, #360 tap via
-    clamp, #357 diff-pair validator fixes, #356 rotated-pad kernels + qfn
-    own-pad scan -- ALL inside generate_bga_fanout / create_plane /
-    route_disconnected_planes.route_planes / generate_qfn_fanout / shared
-    modules. No new CLI-main post-pass (Class-2 clean).
-  * route_planes/create_plane gained progress_callback/cancel_check kwargs
-    (#364) -- runtime plumbing, default None, CLI passes nothing, GUI passes
-    callables; deliberately NOT Claude-settable (no CLI flag). route.py's
-    _dump_engine_config now skips them by name so the kwargs-diff harness
-    doesn't see phantom keys.
-  * GUI-only: Claude-tab Stop/cancel UX (#364 bc48cce/2d566c9), plan executor
-    optimize_caps inheriting BGA options (dc771db -- deliberate exception to
-    the per-step reset).
-  * generate_underpad_escape gained skip_pad_keys (internal; no GUI call site
-    -- GUI reaches underpad only through generate_bga_fanout).
+VERIFICATION (all green):
+  * CLI byte-identical: corpus A/B 45 boards (sets 1/2/5) zero-delta on every
+    deterministic metric; the one kicad_drc move (urchin 9->10) is proven
+    identical copper (same geometry hash = kicad-cli grading noise).
+  * test_manifest_plan_parity.py: 6201 flag-checks, 0 mismatches; param->control
+    resolution 12/12.
+  * test_cli_postpass_coverage.py: 0 failures.
+  * test_gui_engine_parity.py (KiCad python, splitflap): VERDICT PARITY -- CLI
+    and GUI fully connected, 0 DRC, 0 kicad-unconnected; copper differs only by
+    the documented A* tie-break/UUID class.
 
-GATES (all green):
-  * test_manifest_plan_parity.py: 6201 flag-checks across 157 manifests, 0
-    mismatches.
-  * test_cli_postpass_coverage.py: 4 registered, 6 in active CLI use, 0
-    failures.
-  * test_gui_engine_parity.py (KiCad python, rp2350 chain): VERDICT PARITY --
-    CLI and GUI both fully connected, 0 DRC, 0 kicad-unconnected; copper sets
-    differ only by the documented A* tie-break class.
-
-Still not swept (carried over from 8b41e5a): the diff-pair tab beyond what
-the rp2350/#362 chain exercises, and the fanout tab's non-plane advanced
-knobs. Nothing in this range touched their GUI layers.
+STILL NOT DIRECTLY GUI-ENGINE-TESTED (structurally covered by the no-wx gates,
+but the KiCad-python test only ran splitflap = single-ended + planes): a diff
+route through the GUI engine exercising D1's threaded ordering/rip-up/costs, and
+a QFN GUI fanout at the D7 defaults. Next audit picks up from this marker.
