@@ -205,6 +205,42 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         If return_results=False: (successful_count, failed_count, total_time)
         If return_results=True: (successful_count, failed_count, total_time, results_data)
     """
+    # --- #381 D1: parameter-parity probe for the DIFF path, mirroring
+    # batch_route's dump so the GUI/plan diff front can be diffed key-by-key
+    # against `route_diff.py` on identical inputs (this is what would have caught
+    # D1/D2 automatically -- previously only batch_route was instrumented).
+    # Default: overwrite the file and RETURN without routing (single-call A/B).
+    # CONTINUE mode (KICAD_DUMP_BATCH_KWARGS_CONTINUE=1): APPEND one JSONL line
+    # per call and keep routing, so a whole multi-step GUI plan is captured.
+    if os.environ.get('KICAD_DUMP_BATCH_KWARGS'):
+        import json as _json
+        _snap = dict(locals())
+        for _k in ('input_file', 'output_file', 'net_names', 'pcb_data',
+                   'mem_start'):
+            _snap.pop(_k, None)
+        _dump = {}
+        for _k, _v in sorted(_snap.items()):
+            if callable(_v) or _k in ('vis_callback', 'cancel_check',
+                                      'progress_callback'):
+                continue
+            try:
+                _json.dumps(_v)
+                _dump[_k] = _v
+            except (TypeError, ValueError):
+                _dump[_k] = repr(_v)
+        _dump['net_names'] = net_names
+        _dump['_engine'] = 'batch_route_diff_pairs'
+        if os.environ.get('KICAD_DUMP_BATCH_KWARGS_CONTINUE') == '1':
+            with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'a') as _f:
+                _f.write(_json.dumps(_dump, sort_keys=True) + '\n')
+            # fall through -- route normally
+        else:
+            with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'w') as _f:
+                _json.dump(_dump, _f, indent=1, sort_keys=True)
+            if return_results:
+                return 0, 0, 0.0, {'results': [], 'segments_to_remove': []}
+            return 0, 0, 0.0
+
     # Track memory if debug_memory enabled
     mem_start = get_process_memory_mb() if debug_memory else 0.0
     if debug_memory:

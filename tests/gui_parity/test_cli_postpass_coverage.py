@@ -35,8 +35,13 @@ PLUGIN = REPO / "kicad_routing_plugin"
 # CLI front mains to audit. route.py/route_diff/*_fanout put their finalization
 # INSIDE the shared engine (Class 1) -- included so the discovery pass still
 # guards them if that ever changes.
+# #381 D8: bga_fanout.py / qfn_fanout.py are THIN WRAPPERS ('from pkg import
+# main') with no main() def, so scanning them saw nothing -- the fanout
+# post-passes (run_drc graze audit, fix_project_for_output) were a blind spot.
+# Point at the package __init__ where main() actually lives.
 CLI_MAINS = ["route.py", "route_diff.py", "route_planes.py",
-             "route_disconnected_planes.py", "bga_fanout.py", "qfn_fanout.py"]
+             "route_disconnected_planes.py",
+             "bga_fanout/__init__.py", "qfn_fanout/__init__.py"]
 
 # Known post-engine passes -> GUI counterpart symbol(s). A pass is "covered" if
 # ANY listed symbol appears anywhere under kicad_routing_plugin/. Keep the RHS
@@ -58,15 +63,31 @@ REGISTRY = {
 
 # Modules whose public functions are ALL post-route finalization passes: a
 # never-before-seen symbol from these, called in a CLI main, must be reviewed.
-POSTPASS_MODULES = ['kicad_oracle', 'fix_kicad_drc_settings']
+# #381 D8: added 'check_drc' -- the fanout mains run a post-engine DRC graze
+# audit (check_drc.run_drc) that the lint's module list couldn't see.
+POSTPASS_MODULES = ['kicad_oracle', 'fix_kicad_drc_settings', 'check_drc']
 
 # Symbols intentionally exempt from discovery (helpers/args, not passes).
 DISCOVERY_EXEMPT = {'add_drc_fix_args', 'drc_fix_kwargs', 'find_kicad_cli',
                     'compute_targets', 'severity_plan'}
 
+# #381 D8: post-engine passes that are CLI-only BY DESIGN -- report/audit ONLY,
+# they do NOT mutate the output board, so the GUI producing an identical board
+# without them is correct (they feed JSON_SUMMARY for the LLM planner's fanout
+# retry loop). Tracked here so the lint SEES them (closing the check_drc blind
+# spot) without demanding a GUI counterpart. A board-MUTATING pass must go in
+# REGISTRY (with a real GUI counterpart), never here.
+KNOWN_CLI_ONLY = {
+    'run_drc': 'bga/qfn fanout post-engine DRC graze audit -> JSON_SUMMARY '
+               'drc_grazes (report-only, no board mutation)',
+}
+
 
 def _main_calls(path):
-    """Set of called function names inside the file's main() (AST)."""
+    """Set of called function names inside the file's main() (AST). Resolves
+    `from mod import name as alias` (incl. LOCAL imports inside main) so a call
+    through the alias is recorded under the REAL name -- the fanout mains do
+    `from check_drc import run_drc as _run_drc` (#381 D8)."""
     src = Path(path).read_text()
     try:
         tree = ast.parse(src)
@@ -75,11 +96,17 @@ def _main_calls(path):
     calls = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == 'main':
+            aliases = {}  # local alias -> real imported name
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.ImportFrom):
+                    for a in sub.names:
+                        if a.asname:
+                            aliases[a.asname] = a.name
             for sub in ast.walk(node):
                 if isinstance(sub, ast.Call):
                     f = sub.func
                     if isinstance(f, ast.Name):
-                        calls.add(f.id)
+                        calls.add(aliases.get(f.id, f.id))
                     elif isinstance(f, ast.Attribute):
                         calls.add(f.attr)
             break
@@ -116,22 +143,26 @@ def main():
         if not p.exists():
             continue
         for sym in _main_calls(p):
-            if sym in REGISTRY or sym in postpass_funcs:
+            if sym in REGISTRY or sym in postpass_funcs or sym in KNOWN_CLI_ONLY:
                 used.setdefault(sym, []).append(cli)
 
     failures = []
     warnings = []
+    acknowledged = []
 
     # C. Discovery: a finalization-module symbol used in a CLI main but not
     # registered = a new/unreviewed CLI-only post-pass.
     for sym, files in used.items():
         if sym in DISCOVERY_EXEMPT:
             continue
+        if sym in KNOWN_CLI_ONLY:
+            acknowledged.append(f"{sym} in {files}: {KNOWN_CLI_ONLY[sym]}")
+            continue
         if sym not in REGISTRY:
             failures.append(
                 f"UNREGISTERED post-pass '{sym}' called in {files} -- add it to "
-                f"REGISTRY with its GUI counterpart (or confirm it's engine-internal "
-                f"and exempt it).")
+                f"REGISTRY with its GUI counterpart, KNOWN_CLI_ONLY (report-only, "
+                f"no board mutation), or DISCOVERY_EXEMPT (helper, not a pass).")
 
     # A/B. Every registered pass in active CLI use must have a GUI counterpart.
     for sym, guis in REGISTRY.items():
@@ -147,8 +178,10 @@ def main():
                 f"run will diverge from the CLI chain (Class-2 drift).")
 
     print(f"CLI post-pass coverage: {len(REGISTRY)} registered, "
-          f"{len(used)} in active CLI use, {len(failures)} failure(s), "
-          f"{len(warnings)} warning(s).")
+          f"{len(used)} in active CLI use, {len(acknowledged)} CLI-only "
+          f"acknowledged, {len(failures)} failure(s), {len(warnings)} warning(s).")
+    for a in acknowledged:
+        print(f"  CLI-ONLY: {a}")
     for w in warnings:
         print(f"  WARN: {w}")
     for f in failures:

@@ -987,11 +987,29 @@ class PlanesTab(wx.Panel):
                 track_width=config.get('track_width', defaults.TRACK_WIDTH),
                 clearance=config.get('clearance', defaults.CLEARANCE),
                 zone_clearance=config.get('zone_clearance', defaults.PLANE_ZONE_CLEARANCE),
-                min_thickness=defaults.PLANE_MIN_THICKNESS,
+                min_thickness=config.get('min_thickness', defaults.PLANE_MIN_THICKNESS),
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
                 max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
-                max_via_reuse_radius=defaults.PLANE_MAX_VIA_REUSE_RADIUS,
+                max_via_reuse_radius=config.get('max_via_reuse_radius', defaults.PLANE_MAX_VIA_REUSE_RADIUS),
+                close_via_radius=config.get('close_via_radius'),
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
+                # #381 D6: per-layer cost bias from the shared Basic-tab control
+                # (route_planes.py passes --layer-costs); None -> engine default.
+                layer_costs=config.get('layer_costs') or None,
+                # #381 D6: plane knobs the CLI threads but the GUI dropped -- now
+                # config-driven, defaulting to the same value route_planes.py's
+                # argparse uses so current GUI behavior is unchanged unless a
+                # plan/control sets them.
+                reroute_ripped_nets=config.get('reroute_ripped_nets', False),
+                plane_proximity_radius=config.get('plane_proximity_radius', 3.0),
+                plane_proximity_cost=config.get('plane_proximity_cost', 2.0),
+                plane_track_via_clearance=config.get('plane_track_via_clearance',
+                                                     defaults.PLANE_TRACK_VIA_CLEARANCE),
+                voronoi_seed_interval=config.get('voronoi_seed_interval', 2.0),
+                plane_max_iterations=config.get('plane_max_iterations', defaults.MAX_ITERATIONS),
+                debug_lines=config.get('debug_lines', False),
+                add_teardrops=config.get('add_teardrops', False),
+                verbose=config.get('verbose', False),
                 # PLANE_EDGE_CLEARANCE (0.5), NOT the generic BOARD_EDGE_CLEARANCE
                 # (0.0): route_planes.py defaults board_edge_clearance to
                 # defaults.PLANE_EDGE_CLEARANCE, keeping plane copper 0.5mm off
@@ -1018,7 +1036,11 @@ class PlanesTab(wx.Panel):
                 return_results=True,
                 layer_nets=layer_nets,
                 same_net_pad_clearance=config.get('same_net_pad_clearance', defaults.SAME_NET_PAD_CLEARANCE),
-                skip_existing_zones=True,
+                # #381 D6: config-driven (was hardcoded True). Interactive
+                # default stays True -- an interactive re-create on a live board
+                # should skip re-emitting an existing zone. A plan can override
+                # to False (the CLI default) to match a route_planes.py replay.
+                skip_existing_zones=config.get('skip_existing_zones', True),
                 progress_callback=self._make_progress_callback(),
                 cancel_check=lambda: self._cancel_requested,
             )
@@ -1146,6 +1168,17 @@ class PlanesTab(wx.Panel):
                 # connections go down to the fine routing width (#362).
                 min_track_width=config.get('min_track_width', defaults.REPAIR_MIN_TRACK_WIDTH),
                 clearance=config.get('clearance', defaults.CLEARANCE),
+                # #381 D6: zone-fill and track-to-via clearances the CLI
+                # (route_disconnected_planes.py --zone-clearance / --track-via-
+                # clearance) threads but the GUI repair dropped. Config-driven,
+                # defaulting to the same PLANE_* values the CLI uses, so current
+                # behavior is unchanged unless a plan sets them.
+                zone_clearance=config.get('zone_clearance', defaults.PLANE_ZONE_CLEARANCE),
+                track_via_clearance=config.get('track_via_clearance',
+                                               defaults.PLANE_TRACK_VIA_CLEARANCE),
+                reroute_ripped_nets=config.get('reroute_ripped_nets', False),
+                debug_lines=config.get('debug_lines', False),
+                verbose=config.get('verbose', False),
                 via_size=config.get('via_size', defaults.VIA_SIZE),
                 via_drill=config.get('via_drill', defaults.VIA_DRILL),
                 grid_step=config.get('grid_step', defaults.GRID_STEP),

@@ -1475,6 +1475,11 @@ class RoutingDialog(wx.Dialog):
                 'max_iterations': int(self.max_iterations.GetValue()),
                 'max_ripup': int(self.max_ripup.GetValue()),
                 'board_edge_clearance': edge_clearance,
+                # #381 D6: per-layer cost multipliers from the shared Basic-tab
+                # control, so the Planes tab honors --layer-costs like the CLI
+                # (route_planes.py) does; empty/invalid -> [] -> engine uses 1.0
+                # (or its F.Cu/inner default). Previously dropped entirely.
+                'layer_costs': self._selected_layer_costs(),
                 # Share the route tab's No-BGA-Zones intent so plane rip-up
                 # reroutes match signal routing on BGA boards (issue #88).
                 'no_bga_zones_text': self.no_bga_zones_ctrl.GetValue().strip(),
@@ -2056,6 +2061,19 @@ class RoutingDialog(wx.Dialog):
                         _ctl.SetSelection(0)
                     except Exception:
                         pass
+            # #381 D7: QFN width/clearance controls live on qfn_options; reset
+            # them to the QFN-tuned defaults so a plan step doesn't inherit a
+            # prior step's value (the plan executor resets through here).
+            _qo = getattr(_ft, 'qfn_options', None)
+            if _qo is not None:
+                for _n, _v in (('qfn_track_width', defaults.QFN_TRACK_WIDTH),
+                               ('qfn_clearance', defaults.QFN_CLEARANCE)):
+                    _ctl = getattr(_qo, _n, None)
+                    if _ctl is not None:
+                        try:
+                            _ctl.SetValue(_v)
+                        except Exception:
+                            pass
         except Exception:
             pass
         try:
@@ -2200,8 +2218,15 @@ class RoutingDialog(wx.Dialog):
         self.differential_tab.max_setback_angle.SetValue(defaults.DIFF_PAIR_MAX_SETBACK_ANGLE)
         self.differential_tab.max_turn_angle.SetValue(defaults.DIFF_PAIR_MAX_TURN_ANGLE)
         self.differential_tab.chamfer_extra.SetValue(defaults.DIFF_PAIR_CHAMFER_EXTRA)
-        self.differential_tab.polarity_swap_nets_text.SetValue("*")
-        self.differential_tab.gnd_via_check.SetValue(False)
+        # #381 D3: reset to EMPTY (deny all swaps) to match tab creation and the
+        # CLI deny-by-default (#279); '*' here silently widened plan-replay swaps.
+        self.differential_tab.polarity_swap_nets_text.SetValue("")
+        # #381 D2: diff GND return vias default ON, matching tab creation
+        # (differential_gui.py) and the CLI (route_diff.py's negative flag
+        # --no-gnd-vias defaults gnd_via_enabled True). Resetting to False here
+        # meant every plan-replayed diff step routed without GND return vias --
+        # a silent SI regression, since a manifest records nothing when ON.
+        self.differential_tab.gnd_via_check.SetValue(True)
         self.differential_tab.intra_match_check.SetValue(False)
         self.differential_tab.ac_couple_check.SetValue(False)
 

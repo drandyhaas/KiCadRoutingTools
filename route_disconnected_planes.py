@@ -1306,6 +1306,9 @@ Examples:
 
     parser.add_argument("input_file", help="Input KiCad PCB file")
     parser.add_argument("output_file", nargs="?", help="Output KiCad PCB file (default: input_routed.kicad_pcb)")
+    # #381 D9: accept --output FILE like route.py / route_diff.py.
+    parser.add_argument("--output", metavar="FILE",
+                        help="Output KiCad PCB file (flag alternative to the positional output)")
     parser.add_argument("--overwrite", "-O", action="store_true",
                         help="Overwrite input file instead of creating _routed copy")
 
@@ -1330,7 +1333,10 @@ Examples:
                         help="Trace-to-trace clearance in mm (default: 0.25)")
     parser.add_argument("--zone-clearance", type=float, default=defaults.PLANE_ZONE_CLEARANCE,
                         help="Zone fill clearance around obstacles in mm (default: 0.2)")
-    parser.add_argument("--track-via-clearance", type=float, default=defaults.PLANE_TRACK_VIA_CLEARANCE,
+    # #381 D9: accept route_planes.py's --plane-track-via-clearance spelling too
+    # (same constant; dest stays track_via_clearance).
+    parser.add_argument("--track-via-clearance", "--plane-track-via-clearance",
+                        type=float, default=defaults.PLANE_TRACK_VIA_CLEARANCE,
                         help="Clearance from tracks to other nets' vias in mm (default: 0.8)")
     parser.add_argument("--board-edge-clearance", type=float, default=defaults.PLANE_EDGE_CLEARANCE,
                         help="Clearance from board edge in mm (default: 0.5)")
@@ -1384,7 +1390,8 @@ Examples:
                         help="Power net names that need wider tracks when re-routing ripped nets.")
     parser.add_argument("--power-nets-widths", nargs="+", type=float, default=None,
                         help="Track width (mm) per --power-nets entry, used when re-routing ripped nets.")
-    parser.add_argument("--no-bga-zone", action="store_true",
+    # #381 D9: accept the plural --no-bga-zones spelling too (route.py uses it).
+    parser.add_argument("--no-bga-zone", "--no-bga-zones", action="store_true",
                         help="Disable BGA auto-exclusion zones when re-routing ripped nets "
                              "(match the original signal run's --no-bga-zone).")
 
@@ -1414,6 +1421,11 @@ Examples:
     for _pname, _pfloor in _pinned_floors.items():
         setattr(args, _pname, _pfloor)
 
+    # #381 D9: --output FILE overrides the positional (matches route.py/route_diff).
+    if getattr(args, 'output', None) is not None:
+        if args.output_file is not None and args.output_file != args.output:
+            parser.error("both a positional output and --output were given and differ")
+        args.output_file = args.output
     # Handle output file: use --overwrite, explicit output, or auto-generate with _routed suffix
     if args.output_file is None:
         if args.overwrite:
