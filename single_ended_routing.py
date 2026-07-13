@@ -21,7 +21,7 @@ from connectivity import (
     get_copper_connected_terminal_groups,
     compute_component_mst_edges,
 )
-from obstacle_map import build_obstacle_map, get_same_net_through_hole_positions
+from obstacle_map import get_same_net_through_hole_positions
 from bresenham_utils import walk_line
 from geometry_utils import simplify_path
 

@@ -376,13 +376,9 @@ large file:
 | `extract_vias(content, name_to_id=None)` | `List[Via]` |
 | `extract_zones(content, name_to_id=None)` | `List[Zone]` |
 | `extract_keepouts(content)` | `List[dict]` (keepout rule areas) |
-| `extract_board_outline(content)` | Outline polygon vertices |
 | `extract_board_contours(content)` | `(outline, cutouts)` |
 | `parse_guide_paths(content, layer)` | `List[GuidePath]` from a user layer |
 | `parse_keepout_zones(content, layer)` | `List[GuidePath]` (closed only) |
-
-There is also `parse_s_expression(text)`, a small recursive S-expression
-parser returning nested lists, for ad-hoc digging.
 
 ## Gotchas
 

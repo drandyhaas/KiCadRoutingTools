@@ -175,15 +175,6 @@ def calculate_via_barrel_length(vias: List[Via], pcb_data) -> float:
     return total
 
 
-def find_pad_at_position(pcb_data: PCBData, x: float, y: float, tolerance: float = 0.01) -> Optional[Pad]:
-    """Find a pad at the given position within tolerance."""
-    for pads in pcb_data.pads_by_net.values():
-        for pad in pads:
-            if abs(pad.global_x - x) < tolerance and abs(pad.global_y - y) < tolerance:
-                return pad
-    return None
-
-
 def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
                         exclude_unconnected: bool = True) -> List[str]:
     """
@@ -772,47 +763,6 @@ def find_containing_or_nearest_bga_zone(
             best_zone = zone
 
     return best_zone
-
-
-def get_source_chip_center(
-    pcb_data: PCBData,
-    source_pads: List[Pad]
-) -> Optional[Tuple[float, float]]:
-    """
-    Get the center of the source chip/component from source pads.
-
-    Args:
-        pcb_data: PCB data with footprint information
-        source_pads: List of pads belonging to the source stub
-
-    Returns:
-        (x, y) center of the source component, or None if not found
-    """
-    if not source_pads:
-        return None
-
-    # Get component reference from the first pad
-    component_ref = source_pads[0].component_ref
-    if not component_ref:
-        # Fall back to centroid of pads if no component_ref
-        cx = sum(p.global_x for p in source_pads) / len(source_pads)
-        cy = sum(p.global_y for p in source_pads) / len(source_pads)
-        return (cx, cy)
-
-    # Look up footprint bounds
-    footprint = pcb_data.footprints.get(component_ref)
-    if footprint and footprint.pads:
-        # Calculate center from pad extents
-        pad_xs = [p.global_x for p in footprint.pads]
-        pad_ys = [p.global_y for p in footprint.pads]
-        center_x = (min(pad_xs) + max(pad_xs)) / 2
-        center_y = (min(pad_ys) + max(pad_ys)) / 2
-        return (center_x, center_y)
-
-    # Fall back to pad centroid
-    cx = sum(p.global_x for p in source_pads) / len(source_pads)
-    cy = sum(p.global_y for p in source_pads) / len(source_pads)
-    return (cx, cy)
 
 
 def compute_routing_aware_distance(

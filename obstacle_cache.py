@@ -637,40 +637,6 @@ class ViaPlacementObstacleData:
     blocked_cells_by_layer: Dict[str, np.ndarray]
 
 
-def _bresenham_line_points(gx1: int, gy1: int, gx2: int, gy2: int) -> "np.ndarray":
-    """Grid cells along the Bresenham line (both endpoints inclusive) as an (L, 2)
-    int32 array. Reproduces precompute_via_placement_obstacles' original integer
-    midpoint walk (err = d // 2) cell-for-cell so the broadcast circle stamps land
-    on exactly the same line as the old scalar loops."""
-    dx = abs(gx2 - gx1)
-    dy = abs(gy2 - gy1)
-    sx = 1 if gx1 < gx2 else -1
-    sy = 1 if gy1 < gy2 else -1
-
-    pts = []
-    x, y = gx1, gy1
-    if dx > dy:
-        err = dx // 2
-        while x != gx2:
-            pts.append((x, y))
-            err -= dy
-            if err < 0:
-                y += sy
-                err += dx
-            x += sx
-    else:
-        err = dy // 2
-        while y != gy2:
-            pts.append((x, y))
-            err -= dx
-            if err < 0:
-                x += sx
-                err += dy
-            y += sy
-    pts.append((x, y))  # final point
-    return np.array(pts, dtype=np.int32)
-
-
 def precompute_via_placement_obstacles(
     pcb_data: PCBData,
     net_id: int,

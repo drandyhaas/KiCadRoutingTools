@@ -299,10 +299,9 @@ Squared distance from a point to a rounded rectangle centered at the origin
 (0 inside).
 
 ```python
-square_offsets(expansion) -> np.ndarray
 circle_offsets(block_range, effective_sq) -> np.ndarray
 ```
-Cached offset grids for expanding obstacles (square / circular footprints).
+Cached offset grids for expanding obstacles (circular footprint).
 
 ### Example
 

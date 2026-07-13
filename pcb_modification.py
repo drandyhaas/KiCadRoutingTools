@@ -18,32 +18,6 @@ _COLLAPSE_DEBUG = os.environ.get('KICAD_COLLAPSE_DEBUG')
 _PRUNE_CONN_VERIFY = os.environ.get('PRUNE_CONN_VERIFY')
 
 
-def get_copper_layers_from_segments(segments: List[Segment], existing_segments: List[Segment] = None) -> List[str]:
-    """
-    Build a list of all copper layers from segments.
-
-    For through-hole vias that connect all layers, we need to know all copper layers
-    present in the design. This function extracts them from the segments.
-
-    Args:
-        segments: New segments being processed
-        existing_segments: Optional existing segments to also consider
-
-    Returns:
-        List of copper layer names (always includes F.Cu and B.Cu for through-hole vias)
-    """
-    all_copper_layers = set()
-    for seg in segments:
-        all_copper_layers.add(seg.layer)
-    if existing_segments:
-        for seg in existing_segments:
-            all_copper_layers.add(seg.layer)
-    # Ensure F.Cu and B.Cu are always included for through-hole vias
-    all_copper_layers.add('F.Cu')
-    all_copper_layers.add('B.Cu')
-    return list(all_copper_layers)
-
-
 def _point_anchored(x: float, y: float, layer: str, via_pts, pad_pts,
                     seg_index, cell: float, ignore_seg, tol: float) -> bool:
     """A segment endpoint is anchored if it lands on a same-net via (vias span

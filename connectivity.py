@@ -56,102 +56,6 @@ def _get_pad_coords(p) -> Tuple[float, float]:
         raise ValueError(f"Unknown pad type: {type(p)}")
 
 
-def find_farthest_pad_pair(pads) -> Tuple[int, int]:
-    """
-    Find the two farthest pads/endpoints by Manhattan distance.
-
-    Manhattan distance is used because PCB routing follows horizontal/vertical
-    paths, making it a better estimate of actual route length than Euclidean.
-
-    Args:
-        pads: List of Pad objects or dicts with 'x'/'y' keys (must have at least 2)
-
-    Returns:
-        (idx_a, idx_b): Indices of the two farthest pads
-    """
-    if len(pads) < 2:
-        raise ValueError("Need at least 2 pads to find farthest pair")
-
-    max_dist = -1
-    best_pair = (0, 1)
-
-    for i in range(len(pads)):
-        for j in range(i + 1, len(pads)):
-            x1, y1 = _get_pad_coords(pads[i])
-            x2, y2 = _get_pad_coords(pads[j])
-            dist = abs(x1 - x2) + abs(y1 - y2)
-            if dist > max_dist:
-                max_dist = dist
-                best_pair = (i, j)
-
-    return best_pair
-
-
-def find_closest_point_on_segments(
-    segments: List[Segment],
-    target_x: float,
-    target_y: float,
-    target_layers: List[str]
-) -> Tuple[float, float, str, float]:
-    """
-    Find the closest point on any segment to a target location.
-
-    For multi-point net routing, this finds where to tap into an existing
-    track to reach an additional pad.
-
-    Args:
-        segments: List of routed segments to search
-        target_x, target_y: Target location coordinates
-        target_layers: Preferred layers for the target (from pad.layers)
-
-    Returns:
-        (x, y, layer, distance): Closest point coordinates, its layer, and distance
-        Returns None if no segments provided
-    """
-    if not segments:
-        return None
-
-    best_point = None
-    best_dist = float('inf')
-    best_layer = None
-
-    for seg in segments:
-        # Project target point onto segment line
-        sx, sy = seg.start_x, seg.start_y
-        ex, ey = seg.end_x, seg.end_y
-
-        # Vector from start to end
-        dx = ex - sx
-        dy = ey - sy
-        seg_len_sq = dx * dx + dy * dy
-
-        if seg_len_sq < 1e-10:
-            # Degenerate segment (point)
-            px, py = sx, sy
-        else:
-            # Parameter t for projection onto line
-            t = ((target_x - sx) * dx + (target_y - sy) * dy) / seg_len_sq
-            # Clamp to segment bounds
-            t = max(0.0, min(1.0, t))
-            px = sx + t * dx
-            py = sy + t * dy
-
-        # Distance from projected point to target
-        dist = math.sqrt((px - target_x) ** 2 + (py - target_y) ** 2)
-
-        # Prefer same-layer connections (reduce via cost implicitly)
-        layer_bonus = 0.0 if seg.layer in target_layers else 0.5
-
-        effective_dist = dist + layer_bonus
-
-        if effective_dist < best_dist:
-            best_dist = effective_dist
-            best_point = (px, py)
-            best_layer = seg.layer
-
-    return (best_point[0], best_point[1], best_layer, best_dist) if best_point else None
-
-
 def calculate_stub_length(pcb_data, net_id: int) -> float:
     """
     Calculate the total length of existing stub segments for a net.
@@ -1254,54 +1158,6 @@ def get_multipoint_net_pads(
     return None
 
 
-def normalize_endpoints_by_component(
-    pcb_data: PCBData,
-    sources: List,
-    targets: List,
-    net_id: int
-) -> Tuple[List, List]:
-    """
-    Normalize source/target endpoints so that source is always from the
-    alphabetically-first component. This ensures consistent ordering across
-    all nets for crossing detection and distance calculations.
-
-    Args:
-        pcb_data: PCB data with pad information
-        sources: List of source endpoints (gx, gy, layer_idx, orig_x, orig_y)
-        targets: List of target endpoints (gx, gy, layer_idx, orig_x, orig_y)
-        net_id: Net ID for looking up pads
-
-    Returns:
-        (normalized_sources, normalized_targets) - may be swapped if needed
-    """
-    if not sources or not targets:
-        return sources, targets
-
-    net_pads = pcb_data.pads_by_net.get(net_id, [])
-    if len(net_pads) < 2:
-        return sources, targets
-
-    # Find which component each endpoint is connected to
-    def find_component_for_endpoint(endpoint):
-        """Find the component_ref for the pad nearest to this endpoint."""
-        ex, ey = endpoint[3], endpoint[4]  # orig_x, orig_y
-        for pad in net_pads:
-            if abs(pad.global_x - ex) < 1.0 and abs(pad.global_y - ey) < 1.0:
-                return pad.component_ref
-        return None
-
-    src_component = find_component_for_endpoint(sources[0])
-    tgt_component = find_component_for_endpoint(targets[0])
-
-    if src_component and tgt_component:
-        # Sort alphabetically - first component is source
-        if src_component > tgt_component:
-            # Swap so alphabetically-first component is source
-            return targets, sources
-
-    return sources, targets
-
-
 def get_stub_endpoints(pcb_data: PCBData, net_ids: List[int]) -> List[Tuple[float, float, str]]:
     """Get free end positions of unrouted net stubs for proximity avoidance.
 
@@ -1324,32 +1180,6 @@ def get_stub_endpoints(pcb_data: PCBData, net_ids: List[int]) -> List[Tuple[floa
                 for fe_x, fe_y, fe_layer in free_ends:
                     stubs.append((fe_x, fe_y, fe_layer))
     return stubs
-
-
-def get_net_stub_centroids(pcb_data: PCBData, net_id: int) -> List[Tuple[float, float]]:
-    """
-    Get centroids of each connected stub group for a net.
-    Returns list of (x, y) centroids, typically 2 for a 2-point net.
-    """
-    net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
-    if len(net_segments) < 2:
-        return []
-    net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
-    groups = find_connected_groups(net_segments, vias=net_vias)
-    if len(groups) < 2:
-        return []
-
-    centroids = []
-    for group in groups:
-        points = []
-        for seg in group:
-            points.append((seg.start_x, seg.start_y))
-            points.append((seg.end_x, seg.end_y))
-        if points:
-            cx = sum(p[0] for p in points) / len(points)
-            cy = sum(p[1] for p in points) / len(points)
-            centroids.append((cx, cy))
-    return centroids
 
 
 def segments_intersect(a1: Tuple[float, float], a2: Tuple[float, float],

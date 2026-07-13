@@ -73,45 +73,6 @@ def microstrip_z0(w: float, h: float, t: float, er: float) -> float:
     return max(z0, 0.0)
 
 
-def microstrip_z0_hammerstad(w: float, h: float, t: float, er: float) -> float:
-    """
-    Calculate microstrip impedance using Hammerstad-Jensen formula.
-
-    More accurate for a wider range of w/h ratios.
-
-    Args:
-        w: Trace width in mm
-        h: Dielectric height in mm
-        t: Trace thickness in mm
-        er: Dielectric constant
-
-    Returns:
-        Characteristic impedance Z0 in ohms
-    """
-    if w <= 0 or h <= 0 or er <= 0:
-        return 0.0
-
-    # Effective width correction for thickness
-    if t > 0:
-        delta_w = (t / math.pi) * math.log(1 + (4 * math.e * h) / (t * (1 / math.tanh(math.sqrt(6.517 * w / h)))**2))
-        w_eff = w + delta_w
-    else:
-        w_eff = w
-
-    u = w_eff / h
-
-    # Effective dielectric constant
-    a = 1 + (1/49) * math.log((u**4 + (u/52)**2) / (u**4 + 0.432)) + (1/18.7) * math.log(1 + (u/18.1)**3)
-    b = 0.564 * ((er - 0.9) / (er + 3))**0.053
-    er_eff = (er + 1) / 2 + ((er - 1) / 2) * (1 + 10/u)**(-a * b)
-
-    # Characteristic impedance in free space
-    f = 6 + (2 * math.pi - 6) * math.exp(-(30.666 / u)**0.7528)
-    z0_air = (60 / math.sqrt(er_eff)) * math.log(f / u + math.sqrt(1 + (2/u)**2))
-
-    return z0_air
-
-
 def stripline_z0(w: float, h: float, t: float, er: float) -> float:
     """
     Calculate single-ended stripline characteristic impedance.

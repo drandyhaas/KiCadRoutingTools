@@ -68,25 +68,6 @@ class UnionFind:
         return self.find(x) == self.find(y)
 
 
-def point_key(x: float, y: float, layer: str, tolerance: float = 0.02) -> Tuple[int, int, str]:
-    """
-    Create a hashable key for a point, quantized to tolerance.
-
-    Args:
-        x: X coordinate in mm
-        y: Y coordinate in mm
-        layer: Layer name
-        tolerance: Quantization tolerance in mm (default 0.02mm = 20 microns)
-
-    Returns:
-        Tuple of (quantized_x, quantized_y, layer) suitable for use as dict key
-    """
-    return (round(x / tolerance), round(y / tolerance), layer)
-
-if TYPE_CHECKING:
-    from kicad_parser import Segment
-
-
 def point_to_segment_distance(px: float, py: float,
                                x1: float, y1: float,
                                x2: float, y2: float) -> float:
