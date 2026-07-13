@@ -28,6 +28,7 @@ minimum), so order does not matter within a run.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Optional
 
 _min_clearance: Optional[float] = None
@@ -62,3 +63,23 @@ def reset() -> None:
     in a long-lived process (e.g. the GUI plugin)."""
     global _min_clearance
     _min_clearance = None
+
+
+@contextmanager
+def fresh_run():
+    """Scope one independent routing operation in a long-lived process (#382 E10).
+
+    Resets the ledger on ENTRY so an earlier board's tight clearance can't leak
+    into this operation, then leaves the newly-recorded minimum intact on exit
+    (it is NOT reset when the block ends) -- callers read :func:`get_min` /
+    :func:`effective` after the engine call, so the value must survive the block.
+
+    Replaces the scattered manual ``clearance_ledger.reset()`` calls in the GUI
+    actions (planes / diff-pair / route tabs) with one self-documenting guard::
+
+        with clearance_ledger.fresh_run():
+            ... run the engine ...
+        floor = clearance_ledger.get_min()
+    """
+    reset()
+    yield

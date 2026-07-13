@@ -38,7 +38,14 @@ except ImportError:
     VisualRouter = None
 
 # Read once at import: checked inside per-via-record emit paths (hot).
-_UNBLOCK_DEBUG = bool(os.environ.get('KICAD_UNBLOCK_DEBUG'))
+def _unblock_debug() -> bool:
+    """KICAD_UNBLOCK_DEBUG, read PER CALL (#382 E10).
+
+    Was a module-level constant frozen at import, so a GUI process that set the
+    env var after the module loaded (or unset it) saw the stale import-time
+    value. Reading os.environ each call matches every other KICAD_* debug flag.
+    """
+    return bool(os.environ.get('KICAD_UNBLOCK_DEBUG'))
 
 
 # Pads farther than this from a query point can't change a neck/merge decision:
@@ -444,7 +451,7 @@ def _emit_via_size(pcb_data, gx, gy, config, net_id=None, x=None, y=None):
     # first candidate fits). If even the smallest grazes, ship rec -- honest.
     if net_id is not None and x is not None and y is not None:
         refit = _unblock_via_refit(pcb_data, net_id, x, y, rec, config)
-        if _UNBLOCK_DEBUG:
+        if _unblock_debug():
             print(f"      EMIT-REFIT: cell=({gx},{gy}) {rec} -> {refit} net={net_id} at ({x},{y})")
         if refit is not None:
             return refit
@@ -1686,7 +1693,7 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
     lim = config.max_probe_iterations
     coord = GridCoord(config.grid_step)
 
-    _dbg = _UNBLOCK_DEBUG
+    _dbg = _unblock_debug()
     placed = []  # (via, vgx, vgy, pad_layer_idx)
     new_sources, new_targets = sources, targets
     # backward probe (from targets) exhausted -> the TARGET pad is boxed
