@@ -153,6 +153,13 @@ def move_copper_graphics_to_silkscreen(content: str) -> str:
             net_match = re.search(r'\(net\s+(\d+)(?:\s+"([^"]*)")?\)', block)
             net_tied = net_match and (int(net_match.group(1)) != 0
                                       or (net_match.group(2) or '') != '')
+            # #369 A6: KiCad 10 boards reference nets by NAME only -- the
+            # numeric-first regex missed (net "GND") entirely, classing real
+            # net-tied copper as decoration and deleting the connection the
+            # router still models (#337 immutable-copper class).
+            if not net_tied:
+                name_match = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"\)', block)
+                net_tied = bool(name_match and name_match.group(1) != '')
             if layer_match and not net_tied:
                 layer = layer_match.group(1)
                 new_layer = 'F.SilkS' if layer == 'F.Cu' else 'B.SilkS'
@@ -445,36 +452,45 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
     # Remove existing vias if specified
     if remove_vias:
         import re
+
+        # #369 A9: match ANY numeric spelling of the coordinate. Our own writer
+        # emits %.6f WITH trailing zeros ("104.140000") while the old
+        # zero-stripped pattern only matched KiCad-normalized short forms
+        # ("104.14"), so a re-run's stale-via removal silently no-op'd on this
+        # tool's own previous output (bga_fanout --check-for-previous) and the
+        # stale via shipped under the pad.
+        def _num_pat(v):
+            s = f"{v:.6f}".rstrip('0').rstrip('.')
+            if '.' in s:
+                return re.escape(s) + '0*'
+            return re.escape(s) + r'(?:\.0+)?'
+
         removed_count = 0
         for via_to_remove in remove_vias:
             x, y = via_to_remove['x'], via_to_remove['y']
-            # Match via at this position
-            # KiCad format: (via\n\t\t(at X Y)\n\t\t(size ...)\n\t\t(drill ...)\n\t\t(layers ...)\n\t\t(net ...)\n\t\t(uuid ...)\n\t)
-            # Build pattern that matches the multi-line via block
-            x_str = f"{x:.6f}".rstrip('0').rstrip('.')
-            y_str = f"{y:.6f}".rstrip('0').rstrip('.')
-
-            # Also try integer format if coordinates are whole numbers
-            x_patterns = [re.escape(x_str)]
-            y_patterns = [re.escape(y_str)]
-            if x == int(x):
-                x_patterns.append(str(int(x)))
-            if y == int(y):
-                y_patterns.append(str(int(y)))
-
-            # Build pattern that matches via block with any of the coordinate formats
-            for x_pat in x_patterns:
-                for y_pat in y_patterns:
-                    # Match entire via block from opening to closing parenthesis
-                    # Use non-greedy match for content between (at ...) and final )
-                    pattern = rf'\t\(via\s*\n\s*\(at\s+{x_pat}\s+{y_pat}\)[\s\S]*?\n\t\)'
-                    new_content = re.sub(pattern, '', content)
-                    if new_content != content:
-                        content = new_content
-                        removed_count += 1
-                        break
-                else:
-                    continue
+            want_net = via_to_remove.get('net_id')
+            pattern = re.compile(
+                rf'\t\(via\s*\n\s*\(at\s+{_num_pat(x)}\s+{_num_pat(y)}\)[\s\S]*?\n\t\)')
+            for m in pattern.finditer(content):
+                block = m.group(0)
+                # Net gate (was net-blind): never delete a DIFFERENT net's via
+                # that happens to sit at the requested position. Soft -- if the
+                # block's net can't be determined, keep the old match-by-
+                # position behavior.
+                if want_net is not None:
+                    nm = re.search(r'\(net\s+(\d+)\)', block)
+                    if nm is not None and int(nm.group(1)) != want_net:
+                        continue
+                    if nm is None and net_id_to_name:
+                        nn = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"\)', block)
+                        want_name = net_id_to_name.get(want_net)
+                        if nn is not None and want_name is not None \
+                                and _unescape_kicad_string(nn.group(1)) != want_name:
+                            continue
+                # Remove exactly this one block: the old re.sub removed EVERY
+                # match at the position while counting a single removal.
+                content = content[:m.start()] + content[m.end():]
+                removed_count += 1
                 break
         if removed_count > 0:
             print(f"  Removed {removed_count} vias from file")
@@ -583,13 +599,19 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
 
     count = 0
 
-    # Pattern to match segment blocks - handle both KiCad 9 (net <id>) and KiCad 10 (net "name")
+    # Pattern to match segment blocks - handle both KiCad 9 (net <id>) and
+    # KiCad 10 (net "name"). (locked yes) is optional at the same two spots the
+    # parser's segment patterns allow it (#150 / #369 A7): without it a LOCKED
+    # segment silently never matched, the mod no-op'd, and the in-memory model
+    # said the copper moved layers while the file kept it on the old one.
     segment_pattern = re.compile(
         r'(\(segment\s*\n?\s*'
         r'\(start\s+([\d.-]+)\s+([\d.-]+)\)\s*\n?\s*'
         r'\(end\s+([\d.-]+)\s+([\d.-]+)\)\s*\n?\s*'
         r'\(width\s+[\d.]+\)\s*\n?\s*'
+        r'(?:\(locked\s+yes\)\s*\n?\s*)?'
         r'\(layer\s+")([^"]+)("\)\s*\n?\s*'
+        r'(?:\(locked\s+yes\)\s*\n?\s*)?'
         r'\(net\s+(?:(\d+)|"((?:[^"\\]|\\.)*)")\))',
         re.MULTILINE
     )
@@ -731,7 +753,14 @@ def remove_segments_from_content(content: str, segments: List,
     if not segments:
         return content, 0
 
-    use_names = net_id_to_name is not None and is_kicad_10(content)
+    # #369 A1: gate on the net-token format the file ACTUALLY uses, like
+    # the caller (output_writer) does -- a pre-2025 header board that a
+    # previous pass round-tripped already carries (net "name") refs, and
+    # the old is_kicad_10 (header-only) gate made every strip a silent
+    # no-op there: ripped copper shipped alongside its replacement
+    # (stacked same-net drills; the #163/#344 stale-guard family).
+    from kicad_parser import board_uses_name_nets
+    use_names = net_id_to_name is not None and board_uses_name_nets(content)
 
     def seg_key(p1, p2, layer, net_token):
         return (frozenset((p1, p2)), layer, net_token)
@@ -839,7 +868,14 @@ def remove_vias_from_content(content: str, vias: List,
     if not vias:
         return content, 0
 
-    use_names = net_id_to_name is not None and is_kicad_10(content)
+    # #369 A1: gate on the net-token format the file ACTUALLY uses, like
+    # the caller (output_writer) does -- a pre-2025 header board that a
+    # previous pass round-tripped already carries (net "name") refs, and
+    # the old is_kicad_10 (header-only) gate made every strip a silent
+    # no-op there: ripped copper shipped alongside its replacement
+    # (stacked same-net drills; the #163/#344 stale-guard family).
+    from kicad_parser import board_uses_name_nets
+    use_names = net_id_to_name is not None and board_uses_name_nets(content)
 
     # Counted multiset like the segment strip (#318 follow-up): only remove as
     # many blocks per key as were actually strip-listed.
@@ -1074,9 +1110,19 @@ def swap_pad_nets_in_content(content: str, pad1: Pad, pad2: Pad) -> str:
 
     Finds each pad by its component reference and pad number, then swaps their (net ...) declarations.
     """
-    def find_pad_net_in_footprint(content: str, component_ref: str, pad_number: str) -> Optional[Tuple[int, int, str]]:
-        """Find the (net id "name") part of a pad and return (start, end, match_text)."""
+    def find_pad_net_spans(content: str, component_ref: str, pad_number: str) -> List[Tuple[int, int, str]]:
+        """(start, end, match_text) of EVERY matching pad's (net ...) token.
+
+        #369 A8: returns ALL same-number pads, not just the first -- connector
+        shields / split EP paddles legally repeat one pad number, and swapping
+        only the first left the twins on the old net (half-applied swap =
+        short/open at the target). Footprint references are matched via
+        (property "Reference" ...) with an (fp_text reference ...) fallback,
+        like the parser -- KiCad 6/7 boards only carry the latter, and bailing
+        here AFTER the segment/via relabels already applied shipped mixed-net
+        copper."""
         fp_start_pattern = r'\(footprint\s+"[^"]*"'
+        spans = []
 
         for fp_match in re.finditer(fp_start_pattern, content):
             fp_start = fp_match.start()
@@ -1094,12 +1140,15 @@ def swap_pad_nets_in_content(content: str, pad1: Pad, pad2: Pad) -> str:
 
             fp_text = content[fp_start:fp_end]
 
-            # Check if this footprint has the right Reference
+            # Check if this footprint has the right Reference (KiCad 8+
+            # property, else the KiCad 6/7 fp_text form)
             ref_pattern = rf'\(property\s+"Reference"\s+"{re.escape(component_ref)}"'
-            if not re.search(ref_pattern, fp_text):
+            legacy_ref_pattern = rf'\(fp_text\s+reference\s+"{re.escape(component_ref)}"'
+            if not (re.search(ref_pattern, fp_text)
+                    or re.search(legacy_ref_pattern, fp_text)):
                 continue
 
-            # Find the pad with this number in this footprint
+            # Find every pad with this number in this footprint
             pad_pattern = rf'\(pad\s+"{re.escape(pad_number)}"\s+\w+\s+\w+'
             for pad_match in re.finditer(pad_pattern, fp_text):
                 pad_start_rel = pad_match.start()
@@ -1118,39 +1167,39 @@ def swap_pad_nets_in_content(content: str, pad1: Pad, pad2: Pad) -> str:
                 pad_text = fp_text[pad_start_rel:pad_end_rel]
 
                 # Find the (net id "name") or (net "name") in this pad
-                net_match = re.search(r'\(net\s+\d+\s+"[^"]*"\)', pad_text)
+                net_match = re.search(r'\(net\s+\d+\s+"(?:[^"\\]|\\.)*"\)', pad_text)
                 if not net_match:
                     # KiCad 10: (net "name") with no numeric ID
-                    net_match = re.search(r'\(net\s+"[^"]*"\)', pad_text)
+                    net_match = re.search(r'\(net\s+"(?:[^"\\]|\\.)*"\)', pad_text)
                 if net_match:
                     # Convert to absolute positions in content
                     abs_start = fp_start + pad_start_rel + net_match.start()
                     abs_end = fp_start + pad_start_rel + net_match.end()
-                    return (abs_start, abs_end, net_match.group())
+                    spans.append((abs_start, abs_end, net_match.group()))
+            if spans:
+                return spans  # the right footprint was found; done
 
-        return None
+        return spans
 
-    # Find both pads' net declarations
-    result1 = find_pad_net_in_footprint(content, pad1.component_ref, pad1.pad_number)
-    result2 = find_pad_net_in_footprint(content, pad2.component_ref, pad2.pad_number)
+    # Find both pads' net declarations (all same-number twins included)
+    spans1 = find_pad_net_spans(content, pad1.component_ref, pad1.pad_number)
+    spans2 = find_pad_net_spans(content, pad2.component_ref, pad2.pad_number)
 
-    if not result1 or not result2:
+    if not spans1 or not spans2:
         print(f"  WARNING: Could not find pad(s) to swap nets")
-        if not result1:
+        if not spans1:
             print(f"    Missing: {pad1.component_ref} pad {pad1.pad_number}")
-        if not result2:
+        if not spans2:
             print(f"    Missing: {pad2.component_ref} pad {pad2.pad_number}")
         return content
 
-    start1, end1, net1_text = result1
-    start2, end2, net2_text = result2
+    net1_text = spans1[0][2]
+    net2_text = spans2[0][2]
 
-    # Swap the net declarations (replace higher position first to preserve indices)
-    if start1 < start2:
-        content = content[:start2] + net1_text + content[end2:]
-        content = content[:start1] + net2_text + content[end1:]
-    else:
-        content = content[:start1] + net2_text + content[end1:]
-        content = content[:start2] + net1_text + content[end2:]
+    # Swap every span, highest file position first so indices stay valid
+    repls = ([(s, e, net2_text) for s, e, _ in spans1]
+             + [(s, e, net1_text) for s, e, _ in spans2])
+    for s, e, txt in sorted(repls, key=lambda r: r[0], reverse=True):
+        content = content[:s] + txt + content[e:]
 
     return content

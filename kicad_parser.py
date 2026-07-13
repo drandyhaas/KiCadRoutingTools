@@ -62,7 +62,9 @@ class Pad:
     layers: List[str]
     net_id: int
     net_name: str
-    rotation: float = 0.0  # Total rotation in degrees (pad + footprint)
+    rotation: float = 0.0  # Pad's ABSOLUTE board angle in degrees. The file's
+    # (at ... angle) / pcbnew GetOrientation already include the footprint's
+    # rotation -- do NOT add it again (#369 A4; slot-drill capsules orient by this)
     pinfunction: str = ""
     drill: float = 0.0  # Drill size for through-hole pads (0 for SMD). For an
                          # oval/slot drill this is max(w, h) (back-compat: the
@@ -1933,8 +1935,12 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             local_y = float(pad_at_match.group(2))
             pad_rotation = float(pad_at_match.group(3)) if pad_at_match.group(3) else 0.0
 
-            # Total rotation = pad rotation + footprint rotation
-            total_rotation = (pad_rotation + fp_rotation) % 360
+            # #369 A4: the file's (at ... angle) is the pad's ABSOLUTE board
+            # angle (3d197c0, verified physically) -- adding fp_rotation
+            # double-counted it, so Pad.rotation was wrong on every rotated
+            # footprint and pad_drill_capsule oriented slot drills 90° off
+            # (size resolution below was already fixed to the absolute angle).
+            total_rotation = pad_rotation % 360
 
             # Extract size
             size_match = re.search(r'\(size\s+([\d.-]+)\s+([\d.-]+)\)', pad_text)
@@ -1966,14 +1972,12 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
                     custom_resolved = True
 
             # Resolve the pad rectangle into board space. size_x/size_y are in
-            # the pad's own frame; its absolute board orientation is
-            # total_rotation (pad + footprint), NOT pad_rotation alone — keying
-            # the swap on pad_rotation misses pads whose footprint supplies the
-            # 90° (e.g. a -135° footprint with a 225° pad lands at total 90° and
-            # was left un-swapped, modelled 90° off its real shape). For the
-            # common orthogonal cases bake the rotation into the dimensions so
-            # all downstream axis-aligned geometry stays exact; genuine diagonal
-            # pads keep a residual rect_rotation the obstacle/DRC geometry applies.
+            # the pad's own frame; its absolute board orientation is the file's
+            # pad_rotation (the (at ...) angle already includes the footprint's
+            # rotation -- 3d197c0). For the common orthogonal cases bake the
+            # rotation into the dimensions so all downstream axis-aligned
+            # geometry stays exact; genuine diagonal pads keep a residual
+            # rect_rotation the obstacle/DRC geometry applies.
             if not custom_resolved:
                 size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
 
@@ -2233,10 +2237,14 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
     # Linearize each arc into straight Segments via the existing helper so the
     # copper graph is complete. (The router never emits arcs, so its own output
     # is unaffected; this only matters when ingesting hand-routed boards.)
+    # (locked yes) is optional at the same two spots the segment patterns
+    # allow it (#150 / #369 A7) -- without it a LOCKED arc parses to nothing,
+    # never becomes an obstacle, and the router routes straight through it.
     arc_fields = (r'\(arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+'
                   r'\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+'
                   r'\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+'
-                  r'\(width\s+([\d.-]+)\)\s+\(layer\s+"([^"]+)"\)\s+\(net\s+')
+                  r'\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?'
+                  r'\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+')
 
     def _append_arc(sx, sy, mx, my, ex, ey, width, layer, net_id, uuid):
         for (p0, p1) in _arc_to_segments((sx, sy), (mx, my), (ex, ey)):
@@ -3031,7 +3039,10 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 except Exception:
                     pad_rotation = pad.GetOrientation() / 10.0
 
-            total_rotation = (pad_rotation + fp_rotation) % 360
+            # #369 A4: pcbnew's GetOrientation is the pad's ABSOLUTE board
+            # angle (GetFPRelativeOrientation is the relative one) -- adding
+            # fp_rotation double-counted, mirroring the text-parser bug.
+            total_rotation = pad_rotation % 360
 
             # Custom pads: GetSize() is only the anchor; enclose the real copper
             # via the effective bounding box, centred on the connection point so

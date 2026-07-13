@@ -678,7 +678,10 @@ def manage_vias(
             if existing_via:
                 vias_to_remove.append({
                     'x': existing_via.x,
-                    'y': existing_via.y
+                    'y': existing_via.y,
+                    # #369 A9: lets the writer's removal refuse to delete a
+                    # DIFFERENT net's via coincidentally at this position
+                    'net_id': existing_via.net_id
                 })
         else:
             # Routing on inner/bottom layer - via needed only for SMD pads

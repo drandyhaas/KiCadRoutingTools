@@ -562,8 +562,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # already-connected, or failed nets -- while still excluding nets the user
     # left out (GND / power planes routed in a later stage). Issue #84.
     _scope_names = set(net_names or [])
-    sweep_scope_ids = {nid for nid, net in pcb_data.nets.items()
-                       if net.name in _scope_names} or set(net_ids)
+    # #369 A16: resolve_net_ids returns (name, id) TUPLES -- the old
+    # `or set(net_ids)` fallback filled the scope with tuples that can never
+    # equal an int net_id, silently no-op'ing the dead-end sweep and the
+    # stale-copper strips whenever the name scope came up empty. Union the
+    # resolved ids in directly (as ints): pad-only nets, present in
+    # pads_by_net but absent from pcb.nets, match no pcb.nets name and fell
+    # out of scope entirely.
+    sweep_scope_ids = ({nid for nid, net in pcb_data.nets.items()
+                        if net.name in _scope_names}
+                       | {nid for _name, nid in net_ids})
     if not net_ids:
         print("No valid nets to route!")
         if return_results:
