@@ -97,6 +97,9 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | `diff_pair_intra_match` | `False` | Meander the shorter of P/N to match lengths within the pair |
 | `ac_couple_match` | `False` | End-to-end length-match AC-coupled pairs split by series caps: concatenated P vs N path (#196) |
 | `diff_chamfer_extra` | `1.5` | Meander chamfer multiplier for pairs (avoids P/N crossings) |
+| `diff_pair_hybrid_escape` | `True` | When a coupled pair's terminal connector can't clear foreign copper (#165 graze), keep the coupled middle and defer each terminal leg to a single-ended point-to-point join instead of failing the whole pair |
+| `diff_pair_setback_no_ladder` | `False` | When `True`, the setback ladder yields ONLY the configured setback (no 0.75/0.5/floor/1.5/2× expansion) — used by the pinch retry so each attempt routes at the exact setback asked |
+| `diff_pair_uncouple_factor` | `6.0` | Multiples of pair spacing (`track_width + diff_pair_gap`); a multi-point terminal whose P/N pads are farther apart than this is treated as uncoupled and routed single-ended (#121) |
 
 ### Length / time matching
 
@@ -151,6 +154,7 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | `guide_corridor_enabled` | `False` | Follow a user-drawn polyline as waypoints |
 | `guide_corridor_layer` | `'User.1'` | Layer the guide is drawn on |
 | `guide_corridor_spacing` | `0.0` | Waypoint subdivision spacing (0 = endpoints only) |
+| `corridor_waypoints` | `[]` | Prebuilt grid `(gx, gy)` waypoints the router threads in order; set programmatically as an alternative to a drawn guide |
 | `keepout_enabled` | `False` | Honor a user-drawn keepout polygon |
 | `keepout_layer` | `'User.2'` | Layer the keepout is drawn on |
 
