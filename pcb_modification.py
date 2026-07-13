@@ -194,7 +194,8 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
 # is deliberately asymmetric (measure reality physically; refuse to ship
 # fragility). See issue #322 (smartknob +5V: mid-chain removals each passed
 # the overlap gate until 5 pads were genuinely disconnected).
-from connectivity import COINCIDENCE_TOL as _STRICT_GATE_WIDTH  # one constant (#320)
+from connectivity import COINCIDENCE_TOL
+_STRICT_GATE_WIDTH = COINCIDENCE_TOL  # one constant (#320): strict twin gate width
 
 
 def _strict_conn_graph(net_id, universe, vias, pads, zones,
@@ -402,7 +403,7 @@ def _nearest_pad_point(px, py, pad):
 
 
 def _duplicate_connector(px: float, py: float, tx: float, ty: float,
-                         segs, tol: float = 0.02) -> bool:
+                         segs, tol: float = COINCIDENCE_TOL) -> bool:
     """True if a same-net segment in ``segs`` already directly joins (px,py) and
     (tx,ty) on this layer.
 
@@ -443,7 +444,8 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
     """
     import math
     from collections import defaultdict
-    from check_drc import _SOFT_JOINT_MIN_GAP, point_to_pad_distance
+    from routing_constants import SOFT_JOINT_MIN_GAP
+    from check_drc import point_to_pad_distance
     from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
                                        _seg_foreign_via_dist, _seg_foreign_hole_dist)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
@@ -472,7 +474,7 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
             if math.hypot(x - vx, y - vy) <= vr + 0.01:
                 return True
         for p in pcb_data.pads_by_net.get(nid, []):
-            if point_to_pad_distance(x, y, p) <= 0.02:
+            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
                 return True
         return False
 
@@ -508,7 +510,7 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 xj, yj, wj = ends[j]
                 gap = math.hypot(xi - xj, yi - yj)
                 cap = (wi + wj) / 2.0
-                if _SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
+                if SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
                     w = min(wi, wj)
                     if not clears(net_id, xi, yi, xj, yj, layer, w):
                         continue
@@ -864,7 +866,7 @@ def _soft_joint_pairs(segs, vias, pads):
             if math.hypot(x - vx, y - vy) <= vr + 0.01:
                 return True
         for p in (pads or []):
-            if point_to_pad_distance(x, y, p) <= 0.02:
+            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
                 return True
         return False
 

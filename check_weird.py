@@ -12,7 +12,7 @@ Categories:
                      report-only). Reports the dangling length.
   soft-joint         same-net endpoints whose caps overlap but are not
                      coincident (check_drc's 'segment-endpoint-gap' class;
-                     reuses its _SOFT_JOINT_MIN_GAP constant and approach).
+                     reuses routing_constants.SOFT_JOINT_MIN_GAP and approach).
   redundant-cycle    same-net loop edges whose removal leaves connectivity
                      identical (pcb_modification._prune_net_cycles machinery,
                      report-only; zoned nets skipped -- planes are meshes).
@@ -54,8 +54,9 @@ from kicad_parser import parse_kicad_pcb, PCBData
 from check_connected import (matches_any_pattern, check_net_connectivity,
                              analyze_conn_excluding, point_in_polygon,
                              _point_in_pad)
-from check_drc import _SOFT_JOINT_MIN_GAP, point_to_pad_distance
+from check_drc import point_to_pad_distance
 from connectivity import COINCIDENCE_TOL
+from routing_constants import SOFT_JOINT_MIN_GAP
 from pcb_modification import _point_anchored, _prune_net_cycles, _pt_seg_dist
 
 CATEGORIES = ['dangling-end', 'soft-joint', 'redundant-cycle',
@@ -112,7 +113,7 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads, findings):
             if math.hypot(x - vx, y - vy) <= vr + 0.01:
                 return True
         for p in net_pads:
-            if point_to_pad_distance(x, y, p) <= 0.02:
+            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
                 return True
         return False
 
@@ -141,7 +142,7 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads, findings):
                 xj, yj, wj = ends[j]
                 gap = math.hypot(xi - xj, yi - yj)
                 cap = (wi + wj) / 2.0
-                if _SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
+                if SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
                     # size=None: soft joints bypass the --tolerance filter.
                     # Filtering by GAP inverted the severity metric (small
                     # gap = still fragile) and on <=0.1mm-width routing every
@@ -455,7 +456,7 @@ def _check_unsupported_vias(net_id, name, net_segs, net_vias, net_pads,
                 else:
                     pl = set(p.layers or [])
                     on_layer = bool(span & pl) or any('*' in L for L in pl)
-                if on_layer and _point_in_pad(v.x, v.y, p, margin=0.02):
+                if on_layer and _point_in_pad(v.x, v.y, p, margin=COINCIDENCE_TOL):
                     supported = True
                     break
         if not supported:
