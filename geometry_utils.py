@@ -93,6 +93,30 @@ def point_to_segment_distance(px: float, py: float,
     return math.sqrt((px - proj_x)**2 + (py - proj_y)**2)
 
 
+def point_to_segment_dist_sq(px: float, py: float,
+                             x1: float, y1: float,
+                             x2: float, y2: float) -> float:
+    """Squared distance from point (px, py) to segment (x1,y1)-(x2,y2).
+
+    The one guarded squared-distance kernel: like point_to_segment_distance but
+    returns the square (skips the sqrt). Degenerate segments are guarded on
+    length_sq < 1e-10 rather than an exact dx==dy==0 test, so a sub-10nm segment
+    can never divide by a denormal-tiny length and blow t up to +/-inf.
+    """
+    dx = x2 - x1
+    dy = y2 - y1
+    length_sq = dx * dx + dy * dy
+
+    if length_sq < 1e-10:
+        # Segment is effectively a point
+        return (px - x1) ** 2 + (py - y1) ** 2
+
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / length_sq))
+    cx = x1 + t * dx
+    cy = y1 + t * dy
+    return (px - cx) ** 2 + (py - cy) ** 2
+
+
 def point_to_segment_distance_seg(px: float, py: float, seg: "Segment") -> float:
     """Convenience wrapper taking a Segment object."""
     return point_to_segment_distance(px, py, seg.start_x, seg.start_y, seg.end_x, seg.end_y)
