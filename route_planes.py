@@ -3053,6 +3053,10 @@ Examples:
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")
     parser.add_argument("output_file", nargs="?", help="Output KiCad PCB file (default: input_routed.kicad_pcb)")
+    # #381 D9: accept --output FILE like route.py / route_diff.py (flag form of the
+    # positional output). Additive: default None, positional still works.
+    parser.add_argument("--output", metavar="FILE",
+                        help="Output KiCad PCB file (flag alternative to the positional output)")
     parser.add_argument("--overwrite", "-O", action="store_true",
                         help="Overwrite input file instead of creating _routed copy")
 
@@ -3092,7 +3096,9 @@ Examples:
                         help="Maximum number of blocker nets to rip up (default: 3)")
     parser.add_argument("--reroute-ripped-nets", action="store_true",
                         help="Automatically re-route ripped nets after via placement")
-    parser.add_argument("--no-bga-zone", action="store_true",
+    # #381 D9: accept the plural --no-bga-zones spelling too (route.py uses the
+    # plural). Same store_true dest -- additive, old spelling kept.
+    parser.add_argument("--no-bga-zone", "--no-bga-zones", action="store_true",
                         help="Disable BGA auto-exclusion zones when re-routing ripped nets "
                              "(issue #88.2). Use when the original signal routing used "
                              "--no-bga-zones, so the reroute uses compatible parameters.")
@@ -3106,7 +3112,10 @@ Examples:
                         help="Radius around other nets' vias to add proximity cost when routing plane connections (mm, default: 3.0)")
     parser.add_argument("--plane-proximity-cost", type=float, default=2.0,
                         help="Maximum proximity cost around other nets' vias when routing plane connections (mm equivalent, default: 2.0)")
-    parser.add_argument("--plane-track-via-clearance", type=float, default=defaults.PLANE_TRACK_VIA_CLEARANCE,
+    # #381 D9: --track-via-clearance is the same constant route_disconnected_planes
+    # spells that way; accept both here (dest stays plane_track_via_clearance).
+    parser.add_argument("--plane-track-via-clearance", "--track-via-clearance",
+                        type=float, default=defaults.PLANE_TRACK_VIA_CLEARANCE,
                         help="Clearance from track center to other nets' via centers when routing MST connections (mm, default: 0.8)")
     parser.add_argument("--voronoi-seed-interval", type=float, default=2.0,
                         help="Sample interval for Voronoi seed points along plane connection routes (mm, default: 2.0)")
@@ -3159,6 +3168,11 @@ Examples:
     for _pname, _pfloor in _pinned_floors.items():
         setattr(args, _pname, _pfloor)
 
+    # #381 D9: --output FILE overrides the positional (matches route.py/route_diff).
+    if getattr(args, 'output', None) is not None:
+        if args.output_file is not None and args.output_file != args.output:
+            parser.error("both a positional output and --output were given and differ")
+        args.output_file = args.output
     # Handle output file: use --overwrite, explicit output, or auto-generate with _routed suffix
     if args.output_file is None:
         if args.overwrite:

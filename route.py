@@ -1716,7 +1716,9 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--direction", "-d", choices=["forward", "backward"],
                         default=None,
                         help="Direction search order for each net route")
-    parser.add_argument("--no-bga-zones", nargs="*", default=None,
+    # #381 D9: accept the singular --no-bga-zone spelling too (the plane/fanout
+    # scripts spell it singular); same nargs='*' dest -- additive, plural kept.
+    parser.add_argument("--no-bga-zones", "--no-bga-zone", nargs="*", default=None,
                         help="Disable BGA exclusion zones. No args = disable all. With component refs (e.g., U1 U3) = disable only those.")
     parser.add_argument("--rip-existing-nets", nargs="+", default=None,
                         metavar="PATTERN",
