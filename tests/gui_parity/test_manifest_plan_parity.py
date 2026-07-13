@@ -142,6 +142,92 @@ def check_pair(argv, step):
 FIXTURE = str(Path(__file__).resolve().parent / "fixtures" / "sample_redo_commands.sh")
 
 
+# --- #381 D5: param -> control resolution gate --------------------------------
+# claude_plan.py imports wx at module level, so we can't import it here (no-wx
+# gate). Extract its resolution tables and the GUI control attribute names by
+# AST instead, then assert every param that MUST reach a control actually does
+# (via same-name control, alias->control, or a _apply_special handler). This is
+# what blocks a new "no control, ignored" fallthrough (the D5 regression class).
+import ast  # noqa: E402
+
+# Params claude_plan resolves through action-specific blocks (not the generic
+# alias/special path): composites / same-name-but-formatted controls. Kept
+# explicit so the gate credits them without re-parsing every action block.
+_ACTION_BLOCK_HANDLED = {
+    'track_width', 'clearance', 'via_size', 'via_drill',
+    'diff_pair_width', 'diff_pair_gap', 'power_nets', 'power_nets_widths',
+    'layer_costs', 'add_gnd_vias', 'gnd_via_distance', 'gnd_via_net',
+    'max_track_width', 'min_track_width',
+}
+
+# Params that MUST resolve to a GUI control (the D5 fallback list + D3 polarity).
+_MUST_RESOLVE = {
+    'rip_existing_nets', 'impedance', 'ordering', 'direction', 'time_matching',
+    'keepout', 'guide_corridor', 'length_match_groups', 'swappable_nets',
+    'polarity_swap_nets',
+}
+
+
+def _claude_plan_tables():
+    """AST-extract _PARAM_CONTROL_ALIASES (dict) and _PARAM_SPECIAL (set) from
+    claude_plan.py without importing it (it imports wx)."""
+    src = (REPO / "kicad_routing_plugin" / "claude_plan.py").read_text()
+    tree = ast.parse(src)
+    aliases, special = {}, set()
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for t in node.targets:
+            if isinstance(t, ast.Name) and t.id == '_PARAM_CONTROL_ALIASES':
+                aliases = ast.literal_eval(node.value)
+            elif isinstance(t, ast.Name) and t.id == '_PARAM_SPECIAL':
+                special = set(ast.literal_eval(node.value))
+    return aliases, special
+
+
+def _gui_control_attrs():
+    """Collect every `self.X = ...` attribute name across the plugin GUI source
+    files -- the universe of control attributes an alias may target."""
+    attrs = set()
+    gui_dir = REPO / "kicad_routing_plugin"
+    for fn in ("swig_gui.py", "differential_gui.py", "fanout_gui.py",
+               "planes_gui.py"):
+        tree = ast.parse((gui_dir / fn).read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            for t in targets:
+                if (isinstance(t, ast.Attribute)
+                        and isinstance(t.value, ast.Name)
+                        and t.value.id == 'self'):
+                    attrs.add(t.attr)
+    return attrs
+
+
+def check_param_resolution():
+    """Return list of (param, reason) for MUST-resolve params that don't."""
+    aliases, special = _claude_plan_tables()
+    controls = _gui_control_attrs()
+    bad = []
+    for p in sorted(_MUST_RESOLVE):
+        if p in special or p in _ACTION_BLOCK_HANDLED:
+            continue
+        if p in controls:
+            continue
+        tgt = aliases.get(p)
+        if tgt is not None and tgt in controls:
+            continue
+        if tgt is not None:
+            bad.append((p, f"alias -> {tgt!r}, but no such GUI control"))
+        else:
+            bad.append((p, "no control, no alias, not special -> would be ignored"))
+    return bad
+
+
 def main():
     # Corpus manifests give broad coverage; the checked-in fixture makes the gate
     # self-contained (runs on a fresh checkout with no corpus). Explicit args win.
@@ -177,7 +263,15 @@ def main():
                 print(f"    {p[0]}: {p[1]}")
             else:
                 print(f"    [{p[0]}] {p[1]}: {p[2]}")
-    return 1 if total_bad else 0
+
+    # #381 D5: param -> control resolution gate.
+    res_bad = check_param_resolution()
+    print(f"\nParam->control resolution: {len(_MUST_RESOLVE)} params checked, "
+          f"{len(res_bad)} unresolved.")
+    for p, why in res_bad:
+        print(f"    {p}: {why}")
+
+    return 1 if (total_bad or res_bad) else 0
 
 
 if __name__ == "__main__":

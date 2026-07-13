@@ -155,6 +155,37 @@ def step_label(index, step):
 
 # --------------------------------------------------------------- application
 
+# --- #381 D5: param -> GUI-control resolution tables (module level so the no-wx
+# parity gate can extract them by AST without importing wx). A plan param whose
+# GUI home is not a same-named control on the step's tab must appear here, or it
+# falls to "no control, ignored" and the reset default silently applies.
+#
+# _PARAM_CONTROL_ALIASES: param name -> the differently-named control attribute
+# that _set_control() targets (resolved on the step's owners in order).
+_PARAM_CONTROL_ALIASES = {
+    'rip_blocker_nets': 'rip_blocker_check',
+    'repair_pads': 'repair_pads',
+    'analysis_grid_step': 'analysis_grid',
+    # #381 D3: route_diff's polarity-swap allowlist.
+    'polarity_swap_nets': 'polarity_swap_nets_text',
+    # #381 D5: route.py options that previously fell to "no control, ignored"
+    # (so a plan-replayed #284-class rip-existing / ordering / keepout chain
+    # silently routed at the reset defaults instead of the recorded values).
+    'rip_existing_nets': 'rip_existing_nets_ctrl',
+    'ordering': 'ordering_strategy',
+    'direction': 'direction_choice',
+    'time_matching': 'time_matching_check',
+    'keepout': 'keepout_check',
+    'guide_corridor': 'guide_corridor_check',
+}
+# _PARAM_SPECIAL: params handled by _apply_special() (composite / inverted /
+# panel-backed controls that a plain SetValue can't fill).
+_PARAM_SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
+                  'power_nets_widths', 'escape_method', 'no_gnd_vias',
+                  # #381 D5:
+                  'impedance', 'length_match_groups', 'swappable_nets'}
+
+
 def apply_step_params(step, dialog):
     """Fill parameter controls from the step (plan time). Returns notes."""
     notes = []
@@ -235,19 +266,10 @@ def apply_step_params(step, dialog):
         except Exception:
             return False
 
-    # Params whose GUI home is not a same-named control.
-    _SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
-                'power_nets_widths', 'escape_method', 'no_gnd_vias'}
-    _ALIASES = {'rip_blocker_nets': 'rip_blocker_check',
-                'repair_pads': 'repair_pads',
-                'analysis_grid_step': 'analysis_grid',
-                # #381 D3: route_diff's --polarity-swap-nets glob list lives on
-                # the diff tab's polarity_swap_nets_text field. Without this a
-                # recorded scoped allowlist fell to "no control, ignored" and the
-                # reset default (now empty=deny) applied -- so a manifest that
-                # named specific pairs silently either widened to '*' (old reset)
-                # or dropped its scope entirely.
-                'polarity_swap_nets': 'polarity_swap_nets_text'}
+    # Param -> GUI-control resolution (module-level tables so the no-wx parity
+    # gate can introspect them; see _PARAM_CONTROL_ALIASES / _PARAM_SPECIAL).
+    _SPECIAL = _PARAM_SPECIAL
+    _ALIASES = _PARAM_CONTROL_ALIASES
 
     def _apply_special(name, value):
         if name == 'layers' and isinstance(value, (list, tuple)):
@@ -307,6 +329,55 @@ def apply_step_params(step, dialog):
                 choice.SetSelection(methods.index(v))
                 return True
             return False
+        if name == 'impedance':
+            # #381 D5: route.py's --impedance drives a checkbox+value pair on the
+            # Basic tab (impedance_check enables impedance-based width). A plain
+            # SetValue on a same-named control doesn't exist, so a route step's
+            # impedance previously fell to "no control, ignored". (route_diff's
+            # impedance is a separate diff_impedance control, handled in the
+            # route_diff action block and skipped from this generic loop.)
+            chk = getattr(dialog, 'impedance_check', None)
+            val = getattr(dialog, 'impedance_value', None)
+            if chk is None or val is None:
+                return False
+            try:
+                val.SetValue(float(value))
+                chk.SetValue(True)
+                return True
+            except (TypeError, ValueError):
+                return False
+        if name == 'length_match_groups':
+            # #381 D5: route.py's --length-match-group lives in a single text
+            # field parsed by _parse_length_match_groups (groups comma-separated,
+            # patterns within a group space-separated). Accept a plain string, a
+            # flat list (one group), or a list-of-groups and format accordingly.
+            ctl = getattr(dialog, 'length_match_groups_ctrl', None)
+            if ctl is None:
+                return False
+            if isinstance(value, str):
+                text = value
+            elif value and isinstance(value[0], (list, tuple)):
+                text = ', '.join(' '.join(str(p) for p in g) for g in value)
+            else:
+                text = ' '.join(str(p) for p in (value or []))
+            ctl.SetValue(text)
+            return True
+        if name == 'swappable_nets':
+            # #381 D5: route.py's --swappable-nets. The GUI expresses swappable
+            # nets as a checkbox panel keyed by REAL net names (not globs), so a
+            # plan carrying explicit net names selects them; glob patterns won't
+            # match panel entries (a known GUI limitation -- the panel has no
+            # pattern field). Best-effort: check the named nets.
+            panel = getattr(dialog, 'swappable_net_panel', None)
+            if panel is None:
+                return False
+            try:
+                panel._checked_nets = {str(v) for v in (value or [])}
+                if hasattr(panel, 'refresh'):
+                    panel.refresh(sync_from_visible=False)
+                return True
+            except Exception:
+                return False
         return False
 
     _skip = _GENERIC_SKIP.get(action, set())
