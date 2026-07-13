@@ -4,17 +4,25 @@
 //! Uses Dubins path length as heuristic for better orientation-aware routing.
 
 use pyo3::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use std::collections::BinaryHeap;
 
 use crate::dubins::DubinsCalculator;
 use crate::obstacle_map::GridObstacleMap;
 use crate::types::{PoseState, PoseOpenEntry, BlockedCellTracker, DIRECTIONS, ORTHO_COST, DIAG_COST};
 
+/// The `closed` flag lives in the top bit of `PoseNodeState.parent` (S1-A):
+/// pose keys are at most 49 bits, so bit 63 can never be part of a real parent
+/// key. Folding the flag into the node record deletes the separate closed
+/// FxHashSet (one hash lookup + insert per expansion).
+const CLOSED_BIT: u64 = 1 << 63;
+const PARENT_MASK: u64 = !CLOSED_BIT;
+
 /// Sentinel `parent` for the source pose (which has no parent), preserving the
 /// old `parents.get -> None` / reconstruct-terminates semantics after the seven
 /// parallel per-pose FxHashMaps were folded into one map keyed once.
-const NO_PARENT: u64 = u64::MAX;
+/// Must fit in PARENT_MASK.
+const NO_PARENT: u64 = u64::MAX & PARENT_MASK;
 
 /// Per-explored-pose A* state. Replaces the seven parallel `FxHashMap<u64, _>`
 /// (g_costs / parents / steps_from_source / straight_steps_remaining /
@@ -69,7 +77,23 @@ impl PoseNodeMap {
     /// old `parents.get(&key).copied()` used by reconstruct_pose_path).
     #[inline]
     fn parent(&self, key: u64) -> Option<u64> {
-        self.m.get(&key).and_then(|n| if n.parent != NO_PARENT { Some(n.parent) } else { None })
+        self.m.get(&key).and_then(|n| {
+            let p = n.parent & PARENT_MASK;
+            if p != NO_PARENT { Some(p) } else { None }
+        })
+    }
+    /// Matches the old `closed.contains(&key)` (S1-A: closed folded into node).
+    #[inline]
+    fn is_closed(&self, key: u64) -> bool {
+        self.m.get(&key).map_or(false, |n| n.parent & CLOSED_BIT != 0)
+    }
+    /// Matches the old `closed.insert(key)`. Only ever called on a popped pose,
+    /// which is always present in the map (every push relaxes/sources it first).
+    #[inline]
+    fn set_closed(&mut self, key: u64) {
+        if let Some(n) = self.m.get_mut(&key) {
+            n.parent |= CLOSED_BIT;
+        }
     }
     /// Source pose: g=0, all constraints 0, no parent (old: g_costs + the five
     /// constraint maps inserted 0; parents NOT inserted).
@@ -179,7 +203,6 @@ impl PoseRouter {
         // One map per pose (g/parent/steps + the four straight/turn constraint
         // counters), keyed and hashed ONCE -- see PoseNodeMap.
         let mut nodes = PoseNodeMap::default();
-        let mut closed: FxHashSet<u64> = FxHashSet::default();
         let mut counter: u32 = 0;
 
         // Initialize with start pose
@@ -206,7 +229,7 @@ impl PoseRouter {
             let current_key = current.as_key();
             let g = current_entry.g_score;
 
-            if closed.contains(&current_key) {
+            if nodes.is_closed(current_key) {
                 continue;
             }
 
@@ -217,7 +240,7 @@ impl PoseRouter {
                 return (Some(path), iterations, gnd_via_dirs);
             }
 
-            closed.insert(current_key);
+            nodes.set_closed(current_key);
 
             // Get current constraint state
             let (current_steps, current_straight_remaining, current_straight_taken, current_turn_1, current_turn_2) = nodes.constraints(current_key);
@@ -232,7 +255,7 @@ impl PoseRouter {
                 let neighbor = PoseState::new(nx, ny, current.theta_idx, current.layer);
                 let neighbor_key = neighbor.as_key();
 
-                if !closed.contains(&neighbor_key) {
+                if !nodes.is_closed(neighbor_key) {
                     let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
                     let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
                         + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
@@ -288,7 +311,7 @@ impl PoseRouter {
                         let neighbor = PoseState::new(nx, ny, new_theta, current.layer);
                         let neighbor_key = neighbor.as_key();
 
-                        if !closed.contains(&neighbor_key) {
+                        if !nodes.is_closed(neighbor_key) {
                             // Cost = movement + turn arc cost
                             let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
                             let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
@@ -418,7 +441,7 @@ impl PoseRouter {
                     let neighbor = PoseState::new(current.gx, current.gy, current.theta_idx, layer);
                     let neighbor_key = neighbor.as_key();
 
-                    if !closed.contains(&neighbor_key) {
+                    if !nodes.is_closed(neighbor_key) {
                         // Multiply via cost by via_proximity_cost in stub/BGA proximity zones
                         let via_cost = if in_proximity_zone {
                             self.via_cost * self.via_proximity_cost
@@ -478,7 +501,6 @@ impl PoseRouter {
         let mut open_set = BinaryHeap::new();
         // One map per pose, keyed and hashed ONCE -- see PoseNodeMap.
         let mut nodes = PoseNodeMap::default();
-        let mut closed: FxHashSet<u64> = FxHashSet::default();
         let mut counter: u32 = 0;
 
         let start_key = start.as_key();
@@ -497,7 +519,7 @@ impl PoseRouter {
             let current_key = current.as_key();
             let g = current_entry.g_score;
 
-            if closed.contains(&current_key) { continue; }
+            if nodes.is_closed(current_key) { continue; }
 
             if current_key == goal_key {
                 let path = self.reconstruct_pose_path(&nodes, current_key);
@@ -505,7 +527,7 @@ impl PoseRouter {
                 return (Some(path), iterations, Vec::new(), gnd_via_dirs);
             }
 
-            closed.insert(current_key);
+            nodes.set_closed(current_key);
 
             let (current_steps, current_straight_remaining, current_straight_taken, current_turn_1, current_turn_2) = nodes.constraints(current_key);
 
@@ -520,7 +542,7 @@ impl PoseRouter {
                 let neighbor = PoseState::new(nx, ny, current.theta_idx, current.layer);
                 let neighbor_key = neighbor.as_key();
 
-                if !closed.contains(&neighbor_key) {
+                if !nodes.is_closed(neighbor_key) {
                     let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
                     let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
                         + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
@@ -567,7 +589,7 @@ impl PoseRouter {
                     let neighbor = PoseState::new(nx, ny, new_theta, current.layer);
                     let neighbor_key = neighbor.as_key();
 
-                    if !closed.contains(&neighbor_key) {
+                    if !nodes.is_closed(neighbor_key) {
                         let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
                         let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
                             + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
@@ -695,7 +717,7 @@ impl PoseRouter {
                     let neighbor = PoseState::new(current.gx, current.gy, current.theta_idx, layer);
                     let neighbor_key = neighbor.as_key();
 
-                    if !closed.contains(&neighbor_key) {
+                    if !nodes.is_closed(neighbor_key) {
                         // Multiply via cost by via_proximity_cost in stub/BGA proximity zones
                         let via_cost = if in_proximity_zone {
                             self.via_cost * self.via_proximity_cost
