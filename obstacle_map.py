@@ -1825,17 +1825,18 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
     bga_prox_radius_grid = coord.to_grid_dist(config.bga_proximity_radius)
     obstacles.set_bga_proximity_radius(bga_prox_radius_grid)
 
+    # #369 A13: set_bga_zone ONLY, exactly like the non-vis twin above -- the
+    # extra hard add_blocked_cell stamp made blocked_cells take precedence
+    # over every allowed-cells window (endpoint windows, the #189 via-in-pad
+    # unblock), so a --visualize run routed a DIFFERENT board than a normal
+    # run and could not reproduce its results. The zone rectangles still go
+    # to the vis data (drawn as zones), just not into hard blocked cells.
     for zone in config.bga_exclusion_zones:
         min_x, min_y, max_x, max_y = zone[:4]
         gmin_x, gmin_y = coord.to_grid(min_x, min_y)
         gmax_x, gmax_y = coord.to_grid(max_x, max_y)
         obstacles.set_bga_zone(gmin_x, gmin_y, gmax_x, gmax_y)
         bga_zones_grid.append((gmin_x, gmin_y, gmax_x, gmax_y))
-        for layer_idx in range(num_layers):
-            for gx in range(gmin_x, gmax_x + 1):
-                for gy in range(gmin_y, gmax_y + 1):
-                    obstacles.add_blocked_cell(gx, gy, layer_idx)
-                    blocked_cells[layer_idx].add((gx, gy))
 
     # Add BGA proximity costs (penalize routing near BGA edges)
     add_bga_proximity_costs(obstacles, config)

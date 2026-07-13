@@ -127,10 +127,18 @@ def get_stub_info(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: float,
             # Chain didn't move from stub, use first pad as fallback
             pad_x, pad_y = net_pads[0].global_x, net_pads[0].global_y
 
-    # Check if pad already has a via (connecting to other layers)
+    # Check if pad already has a via (connecting to other layers). #369 A11:
+    # only a THROUGH via counts -- a blind/micro via at the pad does not span
+    # every layer, and crediting it let a layer switch move the stub to a
+    # layer the via never reaches (floating copper). Empty via.layers means
+    # unknown/through (this tool's own vias). Mirrors the span gate
+    # _reuse_nearby_same_net_via / apply_bare_pad_target_via already use.
     has_pad_via = False
     for via in pcb_data.vias:
         if via.net_id == net_id:
+            lys = via.layers or []
+            if lys and not ('F.Cu' in lys and 'B.Cu' in lys):
+                continue
             dist = math.sqrt((via.x - pad_x) ** 2 + (via.y - pad_y) ** 2)
             if dist < tolerance:
                 has_pad_via = True
@@ -731,7 +739,11 @@ def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
         for pad in plist:
             if not any(l.endswith('.Cu') for l in (pad.layers or [])):
                 continue
-            if abs(pad.global_x - pad_x) > 2.0 or abs(pad.global_y - pad_y) > 2.0:
+            # #369 A15: window by the pad's EDGE, not its center -- a large
+            # exposed pad (QFN/DFN EP, thermal paddle) can have its center
+            # outside a fixed window while its copper reaches the via.
+            _reach = 2.0 + max(pad.size_x or 0, pad.size_y or 0) / 2
+            if abs(pad.global_x - pad_x) > _reach or abs(pad.global_y - pad_y) > _reach:
                 continue
             d = point_to_pad_rect_dist(pad_x, pad_y, pad)
             if d < via_r + config.clearance:
@@ -772,7 +784,12 @@ def stub_clear_of_foreign_pads(segments: List[Segment], dest_layer: str, net_id:
                 layers = pad.layers or []
                 if dest_layer not in layers and '*.Cu' not in layers:
                     continue
-                if not (bminx <= pad.global_x <= bmaxx and bminy <= pad.global_y <= bmaxy):
+                # #369 A15: expand the window by the pad's half-extent so a
+                # large exposed pad with its CENTER outside the bbox but its
+                # copper inside is still distance-checked.
+                _half = max(pad.size_x or 0, pad.size_y or 0) / 2
+                if not (bminx - _half <= pad.global_x <= bmaxx + _half
+                        and bminy - _half <= pad.global_y <= bmaxy + _half):
                     continue
                 # min distance from the (sampled) segment to the pad rectangle
                 best = float('inf')

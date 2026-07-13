@@ -1567,52 +1567,95 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
 
 
 def find_connected_segment_positions(pcb_data: PCBData, start_x: float, start_y: float,
-                                      net_id: int, tolerance: float = 0.1,
+                                      net_id: int, tolerance: float = None,
                                       layer: str = None) -> set:
     """
     Find all segment endpoint positions connected to a starting position for a given net.
 
     Uses BFS to traverse the segment chain from the starting position.
-    Returns a set of (x, y) tuples for all endpoints in the connected stub chain.
+    Returns a set of (x, y) pos_key tuples for all endpoints in the connected chain.
+
+    #369 A10: `tolerance` is now HONORED -- the old BFS joined endpoints by
+    exact pos_key (1um) despite advertising 0.1, so a soft joint (the #320
+    2-10um endpoint-gap class) stopped a polarity/target-swap relabel
+    mid-trace, leaving one physical trace carrying both nets. Endpoints are
+    clustered at `tolerance` (default COINCIDENCE_TOL, the engine's canonical
+    coincidence radius). Cross-layer traversal now also requires a same-net
+    VIA at the junction: with layer=None the old walk chained different-layer
+    copper that merely shared XY, pulling co-located other-layer stubs into
+    the relabel.
 
     Args:
-        layer: Optional layer name to filter segments. When specified, only segments
-               on this layer are considered. This prevents incorrectly connecting
-               stubs that share XY coordinates but are on different layers.
+        layer: Optional layer name to filter segments. When specified, only
+               segments on this layer are considered.
     """
+    if tolerance is None:
+        tolerance = COINCIDENCE_TOL
     # Get all segments for this net (optionally filtered by layer)
     if layer:
         net_segments = [s for s in pcb_data.segments if s.net_id == net_id and s.layer == layer]
     else:
         net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
-
-    # Build adjacency: position -> list of connected positions
-    adjacency = {}
-    for seg in net_segments:
-        start = pos_key(seg.start_x, seg.start_y)
-        end = pos_key(seg.end_x, seg.end_y)
-        if start not in adjacency:
-            adjacency[start] = []
-        if end not in adjacency:
-            adjacency[end] = []
-        adjacency[start].append(end)
-        adjacency[end].append(start)
-
-    # BFS from start position
     start_key = pos_key(start_x, start_y)
-    visited = set()
-    queue = [start_key]
+    if not net_segments:
+        return {start_key}
 
+    # Cluster endpoint positions within tolerance (spatial hash, per-axis gate)
+    cell = max(tolerance, 1e-6)
+    _buckets: dict = {}
+    _reps: list = []
+
+    def _cluster_of(x, y):
+        cx, cy = int(math.floor(x / cell)), int(math.floor(y / cell))
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for ci in _buckets.get((cx + dx, cy + dy), ()):
+                    rx, ry = _reps[ci]
+                    if abs(rx - x) <= tolerance and abs(ry - y) <= tolerance:
+                        return ci
+        _reps.append((x, y))
+        _buckets.setdefault((cx, cy), []).append(len(_reps) - 1)
+        return len(_reps) - 1
+
+    # Nodes are (cluster, layer); segments connect their endpoint nodes.
+    adjacency: dict = {}
+    keys_at: dict = {}
+    for seg in net_segments:
+        a = (_cluster_of(seg.start_x, seg.start_y), seg.layer)
+        b = (_cluster_of(seg.end_x, seg.end_y), seg.layer)
+        adjacency.setdefault(a, []).append(b)
+        adjacency.setdefault(b, []).append(a)
+        keys_at.setdefault(a, set()).add(pos_key(seg.start_x, seg.start_y))
+        keys_at.setdefault(b, set()).add(pos_key(seg.end_x, seg.end_y))
+
+    # Cross-layer bridges only where a same-net via sits at the cluster
+    if layer is None:
+        via_clusters = {_cluster_of(v.x, v.y) for v in pcb_data.vias
+                        if v.net_id == net_id}
+        by_cluster: dict = {}
+        for node in adjacency:
+            by_cluster.setdefault(node[0], []).append(node)
+        for ci, nodes in by_cluster.items():
+            if ci in via_clusters and len(nodes) > 1:
+                for i, na in enumerate(nodes):
+                    for nb in nodes[i + 1:]:
+                        adjacency[na].append(nb)
+                        adjacency[nb].append(na)
+
+    # BFS: seed every layer's node at the start cluster (the start is a pad
+    # position; its own copper joins the stack there)
+    start_ci = _cluster_of(start_x, start_y)
+    queue = [n for n in adjacency if n[0] == start_ci]
+    visited = set(queue)
+    out = {start_key}
     while queue:
-        pos = queue.pop(0)
-        if pos in visited:
-            continue
-        visited.add(pos)
-        for neighbor in adjacency.get(pos, []):
-            if neighbor not in visited:
-                queue.append(neighbor)
-
-    return visited
+        node = queue.pop()
+        out |= keys_at.get(node, set())
+        for nb in adjacency.get(node, []):
+            if nb not in visited:
+                visited.add(nb)
+                queue.append(nb)
+    return out
 
 
 def find_connected_segments(pcb_data: PCBData, start_x: float, start_y: float,

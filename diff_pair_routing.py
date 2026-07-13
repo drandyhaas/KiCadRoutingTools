@@ -3277,6 +3277,12 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
     for v in pair_vias:
         if v.net_id != net_id:
             continue
+        # #369 A11: only a THROUGH via lets the leg start on any layer --
+        # crediting a blind/micro via here opened sources on layers the via
+        # never reaches (empty layers = unknown/through, this tool's own vias).
+        _lys = getattr(v, 'layers', None) or []
+        if _lys and not ('F.Cu' in _lys and 'B.Cu' in _lys):
+            continue
         d = math.hypot(v.x - term[0], v.y - term[1])
         if d <= own_tol and (best is None or d < best[0]):
             best = (d, v.x, v.y, mid_pt[2])
