@@ -175,6 +175,9 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `layer` | str | Layer name |
 | `polygon` | List[Tuple[float, float]] | Outline vertices |
 | `uuid` | str | UUID from the file |
+| `priority` | int | `(priority N)`; higher-priority zones win where outlines overlap (0 when absent) |
+| `island_removal_mode` | int | 0 = always remove isolated islands (KiCad default), 1 = never, 2 = below `island_area_min` |
+| `island_area_min` | float | mm² floor for mode 2 (0.0 when absent) |
 
 ### `BoardInfo`
 

@@ -141,6 +141,10 @@ class Zone:
     layer: str
     polygon: List[Tuple[float, float]]  # List of (x, y) vertices defining the zone outline
     uuid: str = ""
+    priority: int = 0  # (priority N); higher-priority zones win where outlines overlap
+    island_removal_mode: int = 0  # 0 = always remove isolated islands (KiCad default,
+    # token absent from the file), 1 = never remove, 2 = remove below island_area_min
+    island_area_min: float = 0.0  # mm^2 floor for mode 2 (KiCad file units are mm^2)
 
 
 @dataclass
@@ -2446,6 +2450,18 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
         uuid_match = re.search(r'\(uuid\s+"([^"]+)"\)', zone_content)
         uuid = uuid_match.group(1) if uuid_match else ""
 
+        # Fill semantics (#350). All three live before the polygon blocks, so
+        # the header slice covers them: (priority N) is a direct zone child;
+        # island_removal_mode / island_area_min sit inside the (fill ...) block.
+        # Absent tokens mean KiCad defaults: priority 0, mode 0 (always remove
+        # isolated islands).
+        prio_match = re.search(r'\(priority\s+(\d+)\)', zone_header)
+        priority = int(prio_match.group(1)) if prio_match else 0
+        irm_match = re.search(r'\(island_removal_mode\s+(\d+)\)', zone_header)
+        island_removal_mode = int(irm_match.group(1)) if irm_match else 0
+        iam_match = re.search(r'\(island_area_min\s+([\d.]+)\)', zone_header)
+        island_area_min = float(iam_match.group(1)) if iam_match else 0.0
+
         # Extract polygon points - find (pts ...) and extract xy coordinates
         pts_start = zone_content.find('(pts')
         if pts_start < 0:
@@ -2478,7 +2494,10 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
                 net_name=net_name,
                 layer=zl,
                 polygon=polygon,
-                uuid=uuid
+                uuid=uuid,
+                priority=priority,
+                island_removal_mode=island_removal_mode,
+                island_area_min=island_area_min
             ))
 
     return zones
@@ -3512,6 +3531,25 @@ def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
                 pass
             net_id = zone.GetNetCode()
             net_name = zone.GetNetname()
+            # Fill semantics, mirroring the text parser (#350). pcbnew's
+            # ISLAND_REMOVAL_MODE enum matches the file token values
+            # (0 always / 1 never / 2 area); GetMinIslandArea is IU^2 -> mm^2.
+            try:
+                priority = int(zone.GetAssignedPriority())
+            except Exception:
+                try:
+                    priority = int(zone.GetPriority())  # pre-KiCad-7 name
+                except Exception:
+                    priority = 0
+            try:
+                island_removal_mode = int(zone.GetIslandRemovalMode())
+            except Exception:
+                island_removal_mode = 0
+            try:
+                mm_per_iu = float(to_mm(1))
+                island_area_min = float(zone.GetMinIslandArea()) * mm_per_iu * mm_per_iu
+            except Exception:
+                island_area_min = 0.0
             # A zone can span several copper layers; GetLayer() returns
             # UNDEFINED for those. Emit one Zone per copper layer (the text
             # parser does the same for (layers ...) zones).
@@ -3544,7 +3582,10 @@ def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
                     net_id=net_id,
                     net_name=net_name,
                     layer=zl,
-                    polygon=polygon
+                    polygon=polygon,
+                    priority=priority,
+                    island_removal_mode=island_removal_mode,
+                    island_area_min=island_area_min
                 ))
     except Exception:
         pass
@@ -3784,6 +3825,14 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                 diffs.append(f"Zone layer mismatch: board={bz.layer} file={fz.layer}")
             if len(bz.polygon) != len(fz.polygon):
                 diffs.append(f"Zone net={bz.net_id} layer={bz.layer} vertex count: board={len(bz.polygon)} file={len(fz.polygon)}")
+            # Fill semantics (#350): both fronts must agree or the priority-
+            # exact fill-point rejection / island-patch gating diverge CLI vs GUI.
+            if getattr(bz, 'priority', 0) != getattr(fz, 'priority', 0):
+                diffs.append(f"Zone net={bz.net_id} layer={bz.layer} priority: board={bz.priority} file={fz.priority}")
+            if getattr(bz, 'island_removal_mode', 0) != getattr(fz, 'island_removal_mode', 0):
+                diffs.append(f"Zone net={bz.net_id} layer={bz.layer} island_removal_mode: board={bz.island_removal_mode} file={fz.island_removal_mode}")
+            if abs(getattr(bz, 'island_area_min', 0.0) - getattr(fz, 'island_area_min', 0.0)) > 0.01:
+                diffs.append(f"Zone net={bz.net_id} layer={bz.layer} island_area_min: board={bz.island_area_min} file={fz.island_area_min}")
 
     # --- Compare board outline / cutouts (used for edge & cutout obstacles) ---
     bo_b = bi_b.board_outline or []

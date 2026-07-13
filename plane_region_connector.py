@@ -245,6 +245,68 @@ def _build_layer_blocked_set(
     return blocked, net_segment_cells
 
 
+def _island_kept_by_filler(pcb_data, net_id: int, plane_layer: str, patch,
+                           coord, analysis_grid_step: float) -> bool:
+    """Would KiCad's filler KEEP the fill at this modeled orphan patch? (#350)
+
+    island_removal_mode deletes only ISOLATED fragments -- a fragment touching
+    even one same-net pad/via/track is kept (and then DRC-flagged against the
+    rest of the net). The sweep's real-world catch (#217 castor +3.3VA, a
+    mode-0 zone!) is exactly that class: the anchor exists physically but its
+    cells are blocked in the coarse model, so the flood never seeds and the
+    patch LOOKS bare. So: a patch with a same-net item on or near it is
+    joinable under ANY mode; only a truly bare patch follows the zone's
+    removal mode (mode 0, the KiCad default, deletes it -- joining would ship
+    copper to fill that will never be poured; mode 1 keeps it; mode 2 keeps
+    it at or above island_area_min). The owning zone is the highest-priority
+    own-net zone containing the patch; a patch outside every parsed outline
+    keeps the old always-join behavior.
+    """
+    from check_connected import point_in_polygon
+
+    # Same-net item on/near the patch => not an isolated island, always kept.
+    # Anchors sit in cells the model BLOCKS (that is why the flood never saw
+    # them), so probe a 2-cell neighborhood around each item, not membership.
+    def _near_patch(x, y) -> bool:
+        cgx, cgy = coord.to_grid(x, y)
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
+                if (cgx + dx, cgy + dy) in patch:
+                    return True
+        return False
+
+    for v in pcb_data.vias:
+        if v.net_id == net_id and _near_patch(v.x, v.y):
+            return True
+    for p in pcb_data.pads_by_net.get(net_id, []):
+        if (p.drill > 0 or plane_layer in (p.layers or [])
+                or '*.Cu' in (p.layers or [])) and _near_patch(p.global_x, p.global_y):
+            return True
+    for s in pcb_data.segments:
+        if s.net_id == net_id and s.layer == plane_layer and (
+                _near_patch(s.start_x, s.start_y) or _near_patch(s.end_x, s.end_y)):
+            return True
+
+    gx, gy = next(iter(patch))
+    x, y = coord.to_float(gx, gy)
+    owner = None
+    for z in (getattr(pcb_data, 'zones', []) or []):
+        if z.net_id == net_id and z.layer == plane_layer \
+                and getattr(z, 'polygon', None) \
+                and point_in_polygon(x, y, z.polygon):
+            if owner is None or getattr(z, 'priority', 0) > getattr(owner, 'priority', 0):
+                owner = z
+    if owner is None:
+        return True
+    mode = getattr(owner, 'island_removal_mode', 0)
+    if mode == 1:
+        return True
+    if mode == 2:
+        patch_area = len(patch) * analysis_grid_step * analysis_grid_step
+        return patch_area >= getattr(owner, 'island_area_min', 0.0)
+    return False  # mode 0: the filler deletes truly isolated islands
+
+
 def find_disconnected_zone_regions(
     net_id: int,
     plane_layer: str,
@@ -599,7 +661,9 @@ def find_disconnected_zone_regions(
                     plane_visited.add((nx, ny))
                     patch.add((nx, ny))
                     queue.append((nx, ny))
-            if len(patch) >= min_patch_cells:
+            if len(patch) >= min_patch_cells and _island_kept_by_filler(
+                    pcb_data, net_id, plane_layer, patch, coord,
+                    analysis_grid_step):
                 orphan_patches.append(patch)
 
     # Group anchors by their root
@@ -745,20 +809,35 @@ def _subsample_cell_points(cells, coord, max_pts: int = 400, interior_cache=None
 
 def _real_fill_point(pt, net_id, pcb_data, zone_polys, plane_layer,
                      margin: float) -> bool:
-    from check_connected import point_in_polygon
-    # A point inside a FOREIGN zone outline on this layer may be copper owned
-    # by a higher-priority foreign pour (Zone has no parsed priority yet, so
-    # reject conservatively -- the join falls back to real anchors).
-    for z in (getattr(pcb_data, 'zones', []) or []):
-        if z.net_id != net_id and z.layer == plane_layer \
-                and getattr(z, 'polygon', None) \
-                and point_in_polygon(pt[0], pt[1], z.polygon):
-            return False
     """True when a disc of radius `margin` around pt provably sits in REAL
     zone fill: fully inside one outline and at least `margin` clear of every
     foreign copper item on the plane layer (the coarse flood model blurs the
     fill's clearance carving; joins attached to modeled-but-absent fill ship
     floating vias -- kicad-cli 'Via | Zone unconnected')."""
+    from check_connected import point_in_polygon
+    # A point inside a FOREIGN zone outline on this layer may be copper owned
+    # by that pour. Priority-exact (#350): KiCad gives overlap to the HIGHER
+    # priority zone, so reject only when the foreign zone outranks (or ties)
+    # every own-net zone containing the point -- an own island zone poured at
+    # higher priority than a board-wide foreign pour legitimately owns its
+    # copper and must not be starved of pseudo-anchors. Equal priority stays
+    # conservative: KiCad calls equal-priority different-net overlap
+    # undefined/DRC-flagged, so we keep the old rejection there.
+    _own_priority = None  # lazy: only computed when a foreign outline hits
+    for z in (getattr(pcb_data, 'zones', []) or []):
+        if z.net_id != net_id and z.layer == plane_layer \
+                and getattr(z, 'polygon', None) \
+                and point_in_polygon(pt[0], pt[1], z.polygon):
+            if _own_priority is None:
+                _own_priority = max(
+                    (getattr(oz, 'priority', 0)
+                     for oz in (getattr(pcb_data, 'zones', []) or [])
+                     if oz.net_id == net_id and oz.layer == plane_layer
+                     and getattr(oz, 'polygon', None)
+                     and point_in_polygon(pt[0], pt[1], oz.polygon)),
+                    default=0)
+            if getattr(z, 'priority', 0) >= _own_priority:
+                return False
     x, y = pt
     probes = ((x, y), (x + margin, y), (x - margin, y),
               (x, y + margin), (x, y - margin))
