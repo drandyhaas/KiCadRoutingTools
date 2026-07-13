@@ -1475,6 +1475,11 @@ class RoutingDialog(wx.Dialog):
                 'max_iterations': int(self.max_iterations.GetValue()),
                 'max_ripup': int(self.max_ripup.GetValue()),
                 'board_edge_clearance': edge_clearance,
+                # #381 D6: per-layer cost multipliers from the shared Basic-tab
+                # control, so the Planes tab honors --layer-costs like the CLI
+                # (route_planes.py) does; empty/invalid -> [] -> engine uses 1.0
+                # (or its F.Cu/inner default). Previously dropped entirely.
+                'layer_costs': self._selected_layer_costs(),
                 # Share the route tab's No-BGA-Zones intent so plane rip-up
                 # reroutes match signal routing on BGA boards (issue #88).
                 'no_bga_zones_text': self.no_bga_zones_ctrl.GetValue().strip(),
