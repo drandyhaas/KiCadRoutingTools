@@ -3861,7 +3861,12 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                 diffs.append(f"Zone net={bz.net_id} layer={bz.layer} priority: board={bz.priority} file={fz.priority}")
             if getattr(bz, 'island_removal_mode', 0) != getattr(fz, 'island_removal_mode', 0):
                 diffs.append(f"Zone net={bz.net_id} layer={bz.layer} island_removal_mode: board={bz.island_removal_mode} file={fz.island_removal_mode}")
-            if abs(getattr(bz, 'island_area_min', 0.0) - getattr(fz, 'island_area_min', 0.0)) > 0.01:
+            # island_area_min is only meaningful in mode 2: pcbnew's
+            # GetMinIslandArea() reports the C++ default (10mm^2) even when
+            # the file carries no token (mode 0/1 zones), so comparing it
+            # unconditionally manufactured phantom parity diffs (free_dap).
+            if (getattr(bz, 'island_removal_mode', 0) == 2
+                    and abs(getattr(bz, 'island_area_min', 0.0) - getattr(fz, 'island_area_min', 0.0)) > 0.01):
                 diffs.append(f"Zone net={bz.net_id} layer={bz.layer} island_area_min: board={bz.island_area_min} file={fz.island_area_min}")
 
     # --- Compare board outline / cutouts (used for edge & cutout obstacles) ---
