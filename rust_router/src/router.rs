@@ -1042,28 +1042,38 @@ impl GridRouter {
         }
         // For each base direction, compute which directions are within 45°
         // The 8 directions in order: E(1,0), NE(1,-1), N(0,-1), NW(-1,-1), W(-1,0), SW(-1,1), S(0,1), SE(1,1)
-        // Each direction is 45° apart, so "within 45°" means same or adjacent
-        let base_idx = Self::direction_to_index(base_dx, base_dy);
-        let test_idx = Self::direction_to_index(dx, dy);
+        // Each direction is 45° apart, so "within 45°" means same or adjacent.
+        // B5 (issue #386): a zero delta used to silently alias East, turning a
+        // degenerate base direction into a real E/NE/SE constraint. A
+        // degenerate BASE is no constraint at all (allow); a degenerate test
+        // direction can never satisfy a real constraint (reject).
+        let base_idx = match Self::direction_to_index(base_dx, base_dy) {
+            Some(i) => i,
+            None => return true,
+        };
+        let test_idx = match Self::direction_to_index(dx, dy) {
+            Some(i) => i,
+            None => return false,
+        };
 
         // Check if indices are adjacent (with wraparound)
         let diff = (test_idx as i32 - base_idx as i32 + 8) % 8;
         diff == 0 || diff == 1 || diff == 7
     }
 
-    /// Convert direction to index (0-7)
+    /// Convert direction to index (0-7); None for a non-unit delta (B5).
     #[inline]
-    fn direction_to_index(dx: i32, dy: i32) -> usize {
+    fn direction_to_index(dx: i32, dy: i32) -> Option<usize> {
         match (dx, dy) {
-            (1, 0) => 0,    // E
-            (1, -1) => 1,   // NE
-            (0, -1) => 2,   // N
-            (-1, -1) => 3,  // NW
-            (-1, 0) => 4,   // W
-            (-1, 1) => 5,   // SW
-            (0, 1) => 6,    // S
-            (1, 1) => 7,    // SE
-            _ => 0,
+            (1, 0) => Some(0),    // E
+            (1, -1) => Some(1),   // NE
+            (0, -1) => Some(2),   // N
+            (-1, -1) => Some(3),  // NW
+            (-1, 0) => Some(4),   // W
+            (-1, 1) => Some(5),   // SW
+            (0, 1) => Some(6),    // S
+            (1, 1) => Some(7),    // SE
+            _ => None,
         }
     }
 

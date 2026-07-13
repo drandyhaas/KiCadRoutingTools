@@ -212,7 +212,8 @@ pub struct GridObstacleMap {
     pub source_target_cells: Vec<FxHashSet<u64>>,
     /// Cross-layer track positions for vertical alignment attraction
     /// Key: packed (gx, gy), Value: bitmask of layers that have tracks here
-    pub cross_layer_tracks: FxHashMap<u64, u8>,
+    /// (B3, issue #386: u32 -- the old u8 wrapped/panicked on layers >= 8)
+    pub cross_layer_tracks: FxHashMap<u64, u32>,
     /// Endpoint positions exempt from stub proximity costs (source and target)
     pub endpoint_exempt_positions: Vec<(i32, i32)>,
     /// Radius around endpoints to exempt from stub proximity costs
@@ -807,8 +808,9 @@ impl GridObstacleMap {
 
     /// Add a track position for cross-layer attraction lookup
     pub fn add_cross_layer_track(&mut self, gx: i32, gy: i32, layer: usize) {
-        if layer < self.num_layers && layer < 8 {
-            // u8 bitmask supports up to 8 layers
+        if layer < self.num_layers && layer < 32 {
+            // u32 bitmask supports up to 32 layers (B3: the u8 mask silently
+            // wrapped `1 << layer` for layers >= 8 in release builds)
             let key = pack_xy(gx, gy);
             let entry = self.cross_layer_tracks.entry(key).or_insert(0);
             *entry |= 1 << layer;
@@ -857,8 +859,10 @@ impl GridObstacleMap {
 
                 let key = pack_xy(gx + dx, gy + dy);
                 if let Some(&layers_mask) = self.cross_layer_tracks.get(&key) {
-                    // Check if any OTHER layer has a track here
-                    let other_layers = layers_mask & !(1u8 << current_layer);
+                    // Check if any OTHER layer has a track here (B3: guard the
+                    // shift -- current_layer >= 32 has no bit to mask out)
+                    let own_bit = if current_layer < 32 { 1u32 << current_layer } else { 0 };
+                    let other_layers = layers_mask & !own_bit;
                     if other_layers != 0 {
                         // Linear falloff: full bonus at center, zero at radius edge
                         let dist = (dist_sq as f32).sqrt();
