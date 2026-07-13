@@ -2201,7 +2201,12 @@ class RoutingDialog(wx.Dialog):
         self.differential_tab.max_turn_angle.SetValue(defaults.DIFF_PAIR_MAX_TURN_ANGLE)
         self.differential_tab.chamfer_extra.SetValue(defaults.DIFF_PAIR_CHAMFER_EXTRA)
         self.differential_tab.polarity_swap_nets_text.SetValue("*")
-        self.differential_tab.gnd_via_check.SetValue(False)
+        # #381 D2: diff GND return vias default ON, matching tab creation
+        # (differential_gui.py) and the CLI (route_diff.py's negative flag
+        # --no-gnd-vias defaults gnd_via_enabled True). Resetting to False here
+        # meant every plan-replayed diff step routed without GND return vias --
+        # a silent SI regression, since a manifest records nothing when ON.
+        self.differential_tab.gnd_via_check.SetValue(True)
         self.differential_tab.intra_match_check.SetValue(False)
         self.differential_tab.ac_couple_check.SetValue(False)
 
