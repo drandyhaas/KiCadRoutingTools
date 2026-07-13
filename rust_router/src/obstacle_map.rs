@@ -4,7 +4,181 @@ use pyo3::prelude::*;
 use numpy::PyReadonlyArray2;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::types::pack_xy;
+use crate::types::{pack_xy, unpack_xy};
+
+/// Per-layer bitmap of blocked cells (S2, issue #384). A PURE CACHE of
+/// "refcount > 0" for `GridObstacleMap.blocked_cells`: the refcount hashmaps
+/// remain authoritative, and the bitmap is written ONLY at the 0->1 / 1->0
+/// transitions inside the very same functions that touch the refcounts
+/// (add_blocked_cell[s_batch], merge_blocked_from, remove_blocked_cells_batch)
+/// -- never anywhere else, to keep the #208/#309 desync class closed.
+///
+/// The window grows lazily to cover the cells actually blocked (with a margin
+/// so growth amortizes). Cells outside a size-capped window land in a per-layer
+/// overflow hash set, so pathological coordinates degrade performance, never
+/// correctness. `test()` is the is_blocked hot path: one bounds check + one
+/// bit load (the overflow branch is a cheap is_empty() when unused).
+#[derive(Clone)]
+struct BlockedBitmap {
+    min_x: i32,
+    min_y: i32,
+    width: i32,   // 0 = empty (nothing ever set)
+    height: i32,
+    words_per_layer: usize,
+    num_layers: usize,
+    bits: Vec<u64>, // num_layers * words_per_layer, layer-major
+    overflow: Vec<FxHashSet<u64>>, // per-layer cells outside the capped window
+}
+
+/// Window growth margin in cells (amortizes reallocation).
+const BITMAP_GROW_MARGIN: i32 = 128;
+/// Hard cap on window area per layer (cells). 1<<26 cells = 8 MB of bits per
+/// layer; a realistic board at 0.02-0.1 mm grid is a few thousand cells across,
+/// far below this. Beyond the cap, cells go to the overflow sets.
+const BITMAP_MAX_CELLS: i64 = 1 << 26;
+
+impl BlockedBitmap {
+    fn new(num_layers: usize) -> Self {
+        Self {
+            min_x: 0,
+            min_y: 0,
+            width: 0,
+            height: 0,
+            words_per_layer: 0,
+            num_layers,
+            bits: Vec::new(),
+            overflow: (0..num_layers).map(|_| FxHashSet::default()).collect(),
+        }
+    }
+
+    /// Linear cell index within a layer, or None if outside the window.
+    #[inline]
+    fn idx(&self, gx: i32, gy: i32) -> Option<usize> {
+        let dx = gx.wrapping_sub(self.min_x);
+        let dy = gy.wrapping_sub(self.min_y);
+        if (dx as u32) < self.width as u32 && (dy as u32) < self.height as u32 {
+            Some(dy as usize * self.width as usize + dx as usize)
+        } else {
+            None
+        }
+    }
+
+    /// Hot-path test: is the cell's blocked bit set?
+    #[inline]
+    fn test(&self, gx: i32, gy: i32, layer: usize) -> bool {
+        match self.idx(gx, gy) {
+            Some(i) => {
+                let w = self.bits[layer * self.words_per_layer + (i >> 6)];
+                (w >> (i & 63)) & 1 != 0
+            }
+            None => {
+                let ov = &self.overflow[layer];
+                !ov.is_empty() && ov.contains(&pack_xy(gx, gy))
+            }
+        }
+    }
+
+    /// Mark a cell blocked (refcount transitioned 0 -> 1).
+    fn set(&mut self, gx: i32, gy: i32, layer: usize) {
+        if self.idx(gx, gy).is_none() {
+            self.grow_to_include(gx, gy);
+        }
+        match self.idx(gx, gy) {
+            Some(i) => {
+                self.bits[layer * self.words_per_layer + (i >> 6)] |= 1u64 << (i & 63);
+            }
+            None => {
+                self.overflow[layer].insert(pack_xy(gx, gy));
+            }
+        }
+    }
+
+    /// Unmark a cell (refcount transitioned 1 -> 0).
+    fn clear(&mut self, gx: i32, gy: i32, layer: usize) {
+        match self.idx(gx, gy) {
+            Some(i) => {
+                self.bits[layer * self.words_per_layer + (i >> 6)] &= !(1u64 << (i & 63));
+            }
+            None => {
+                self.overflow[layer].remove(&pack_xy(gx, gy));
+            }
+        }
+    }
+
+    /// Grow the window to include (gx, gy) plus margin, remapping existing bits
+    /// and migrating any overflow cells that fall inside the new window (they
+    /// would otherwise be invisible to the in-window test path). Refuses to
+    /// grow past BITMAP_MAX_CELLS; the caller then falls back to overflow.
+    fn grow_to_include(&mut self, gx: i32, gy: i32) {
+        let (new_min_x, new_min_y, new_max_x, new_max_y) = if self.width == 0 {
+            (gx - BITMAP_GROW_MARGIN, gy - BITMAP_GROW_MARGIN,
+             gx + BITMAP_GROW_MARGIN, gy + BITMAP_GROW_MARGIN)
+        } else {
+            (self.min_x.min(gx - BITMAP_GROW_MARGIN),
+             self.min_y.min(gy - BITMAP_GROW_MARGIN),
+             (self.min_x + self.width - 1).max(gx + BITMAP_GROW_MARGIN),
+             (self.min_y + self.height - 1).max(gy + BITMAP_GROW_MARGIN))
+        };
+        let new_w = (new_max_x as i64 - new_min_x as i64 + 1) as i64;
+        let new_h = (new_max_y as i64 - new_min_y as i64 + 1) as i64;
+        if new_w * new_h > BITMAP_MAX_CELLS {
+            return; // caller falls back to the overflow set
+        }
+        let new_w = new_w as i32;
+        let new_h = new_h as i32;
+        let new_words = ((new_w as usize * new_h as usize) + 63) / 64;
+        let mut new_bits = vec![0u64; self.num_layers * new_words];
+
+        // Remap old window bits (word-at-a-time is not worth it: growth is rare
+        // and rows are short; bit-at-a-time keeps this obviously correct).
+        if self.width > 0 {
+            for layer in 0..self.num_layers {
+                let old_base = layer * self.words_per_layer;
+                let new_base = layer * new_words;
+                for dy in 0..self.height {
+                    let ny = (self.min_y + dy) - new_min_y;
+                    for dx in 0..self.width {
+                        let i = dy as usize * self.width as usize + dx as usize;
+                        if (self.bits[old_base + (i >> 6)] >> (i & 63)) & 1 != 0 {
+                            let nx = (self.min_x + dx) - new_min_x;
+                            let ni = ny as usize * new_w as usize + nx as usize;
+                            new_bits[new_base + (ni >> 6)] |= 1u64 << (ni & 63);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.min_x = new_min_x;
+        self.min_y = new_min_y;
+        self.width = new_w;
+        self.height = new_h;
+        self.words_per_layer = new_words;
+        self.bits = new_bits;
+
+        // Migrate overflow cells that now fall inside the window.
+        for layer in 0..self.num_layers {
+            if self.overflow[layer].is_empty() {
+                continue;
+            }
+            let inside: Vec<u64> = self.overflow[layer]
+                .iter()
+                .copied()
+                .filter(|&key| {
+                    let (x, y) = unpack_xy(key);
+                    self.idx(x, y).is_some()
+                })
+                .collect();
+            for key in inside {
+                self.overflow[layer].remove(&key);
+                let (x, y) = unpack_xy(key);
+                if let Some(i) = self.idx(x, y) {
+                    self.bits[layer * self.words_per_layer + (i >> 6)] |= 1u64 << (i & 63);
+                }
+            }
+        }
+    }
+}
 
 /// Grid-based obstacle map with reference counting for incremental updates.
 /// Reference counting allows cells blocked by multiple nets to be correctly
@@ -14,6 +188,9 @@ pub struct GridObstacleMap {
     /// Blocked cells per layer: layer -> map of (gx, gy) packed as u64 -> ref count
     /// A cell is blocked if its ref count > 0
     pub blocked_cells: Vec<FxHashMap<u64, u16>>,
+    /// S2: per-layer bitmap CACHE of "blocked_cells refcount > 0". Written only
+    /// at 0->1 / 1->0 transitions inside the refcount-mutating functions.
+    blocked_bitmap: BlockedBitmap,
     /// Blocked via positions: packed (gx, gy) -> ref count
     pub blocked_vias: FxHashMap<u64, u16>,
     /// Stub proximity costs: (gx, gy) -> cost
@@ -51,6 +228,7 @@ impl GridObstacleMap {
     pub fn new(num_layers: usize) -> Self {
         Self {
             blocked_cells: (0..num_layers).map(|_| FxHashMap::default()).collect(),
+            blocked_bitmap: BlockedBitmap::new(num_layers),
             blocked_vias: FxHashMap::default(),
             stub_proximity: FxHashMap::default(),
             layer_proximity_costs: (0..num_layers).map(|_| FxHashMap::default()).collect(),
@@ -103,6 +281,7 @@ impl GridObstacleMap {
     pub fn py_clone(&self) -> Self {
         Self {
             blocked_cells: self.blocked_cells.clone(),
+            blocked_bitmap: self.blocked_bitmap.clone(),
             blocked_vias: self.blocked_vias.clone(),
             stub_proximity: self.stub_proximity.clone(),
             layer_proximity_costs: self.layer_proximity_costs.clone(),
@@ -125,6 +304,7 @@ impl GridObstacleMap {
     pub fn clone_fresh(&self) -> Self {
         Self {
             blocked_cells: self.blocked_cells.clone(),
+            blocked_bitmap: self.blocked_bitmap.clone(),
             blocked_vias: self.blocked_vias.clone(),
             stub_proximity: self.stub_proximity.clone(),
             layer_proximity_costs: self.layer_proximity_costs.clone(),
@@ -199,7 +379,11 @@ impl GridObstacleMap {
     pub fn add_blocked_cell(&mut self, gx: i32, gy: i32, layer: usize) {
         if layer < self.num_layers {
             let key = pack_xy(gx, gy);
-            *self.blocked_cells[layer].entry(key).or_insert(0) += 1;
+            let cnt = self.blocked_cells[layer].entry(key).or_insert(0);
+            *cnt += 1;
+            if *cnt == 1 {
+                self.blocked_bitmap.set(gx, gy, layer); // S2: 0->1 transition
+            }
         }
     }
 
@@ -218,7 +402,11 @@ impl GridObstacleMap {
             let layer = row[2] as usize;
             if layer < self.num_layers {
                 let key = pack_xy(gx, gy);
-                *self.blocked_cells[layer].entry(key).or_insert(0) += 1;
+                let cnt = self.blocked_cells[layer].entry(key).or_insert(0);
+                *cnt += 1;
+                if *cnt == 1 {
+                    self.blocked_bitmap.set(gx, gy, layer); // S2: 0->1 transition
+                }
             }
         }
     }
@@ -240,7 +428,13 @@ impl GridObstacleMap {
         for (layer, other_cells) in other.blocked_cells.iter().enumerate() {
             if layer < self.num_layers {
                 for (&key, &count) in other_cells.iter() {
-                    *self.blocked_cells[layer].entry(key).or_insert(0) += count;
+                    let cnt = self.blocked_cells[layer].entry(key).or_insert(0);
+                    let was_zero = *cnt == 0;
+                    *cnt += count;
+                    if was_zero && *cnt > 0 {
+                        let (gx, gy) = unpack_xy(key);
+                        self.blocked_bitmap.set(gx, gy, layer); // S2: 0->1 transition
+                    }
                 }
             }
         }
@@ -263,6 +457,7 @@ impl GridObstacleMap {
                         *count -= 1;
                     } else {
                         self.blocked_cells[layer].remove(&key);
+                        self.blocked_bitmap.clear(gx, gy, layer); // S2: 1->0 transition
                     }
                 }
             }
@@ -342,36 +537,29 @@ impl GridObstacleMap {
             return true;
         }
 
-        let key = pack_xy(gx, gy);
+        // Check if cell is in blocked_cells (tracks, stubs, pads from other nets).
+        // S2: the per-layer bitmap caches "refcount > 0" (the refcount hashmaps
+        // stay authoritative; the bitmap is written only at their transitions).
+        if self.blocked_bitmap.test(gx, gy, layer) {
+            // Blocked by other nets' obstacles - check if it's a source/target cell.
+            // source_target_cells can override blocking for exact endpoint positions
+            // only; this takes precedence over BGA zone allowed_cells.
+            return !self.source_target_cells[layer].contains(&pack_xy(gx, gy));
+        }
 
-        // Check if inside any BGA zone
-        let in_bga_zone = self.bga_zones.iter().any(|(min_gx, min_gy, max_gx, max_gy)| {
-            gx >= *min_gx && gx <= *max_gx && gy >= *min_gy && gy <= *max_gy
-        });
-
-        // Check if cell is in blocked_cells (tracks, stubs, pads from other nets)
-        // With ref counting, presence in the map means count > 0 (we remove entries at 0)
-        let in_blocked_cells = self.blocked_cells[layer].contains_key(&key);
-
-        // If cell is blocked by other nets' obstacles, check if it's a source/target cell
-        // source_target_cells can override blocking for exact endpoint positions only
-        if in_blocked_cells {
-            if self.source_target_cells[layer].contains(&key) {
-                return false;
-            }
-            // Blocked by other net's track/stub - this takes precedence over BGA zone allowed_cells
-            return true;
+        // S2 hoist: with no BGA zones nothing else can block - skip the zone scan.
+        if self.bga_zones.is_empty() {
+            return false;
         }
 
         // If in BGA zone: allowed_cells overrides the zone blocking
         // (but NOT blocking from blocked_cells which was already checked above)
+        let in_bga_zone = self.bga_zones.iter().any(|(min_gx, min_gy, max_gx, max_gy)| {
+            gx >= *min_gx && gx <= *max_gx && gy >= *min_gy && gy <= *max_gy
+        });
         if in_bga_zone {
-            if self.allowed_cells.contains(&key) {
-                // Allowed cell inside BGA zone - permit routing here
-                return false;
-            }
-            // Not allowed - block inside BGA zone
-            return true;
+            // Allowed cell inside BGA zone - permit routing here
+            return !self.allowed_cells.contains(&pack_xy(gx, gy));
         }
 
         false

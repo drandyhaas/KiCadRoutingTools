@@ -27,6 +27,12 @@ pub fn pack_xy(gx: i32, gy: i32) -> u64 {
     (x << 32) | y
 }
 
+/// Inverse of pack_xy
+#[inline]
+pub fn unpack_xy(key: u64) -> (i32, i32) {
+    ((key >> 32) as u32 as i32, key as u32 as i32)
+}
+
 /// Grid state: (x, y, layer) packed into a single u64 for fast hashing
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct GridState {
