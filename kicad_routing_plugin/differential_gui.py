@@ -558,7 +558,10 @@ class DifferentialTab(wx.Panel):
         polarity_row = wx.BoxSizer(wx.HORIZONTAL)
         polarity_row.Add(wx.StaticText(self, label="Polarity-swap allowed nets:"),
                          0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
-        self.polarity_swap_nets_text = wx.TextCtrl(self, value="*", size=(180, -1))
+        # #381 D3: default EMPTY (deny all swaps), matching route_diff.py's
+        # --polarity-swap-nets deny-by-default (#279). The historical '*'
+        # (allow all) silently widened polarity swaps vs the CLI.
+        self.polarity_swap_nets_text = wx.TextCtrl(self, value="", size=(180, -1))
         self.polarity_swap_nets_text.SetToolTip(
             "Glob patterns (comma/space-separated) naming the diff pairs ALLOWED to "
             "resolve a P/N polarity mismatch by swapping pad net assignments (board "

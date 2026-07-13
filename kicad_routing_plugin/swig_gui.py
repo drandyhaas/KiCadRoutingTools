@@ -2200,7 +2200,9 @@ class RoutingDialog(wx.Dialog):
         self.differential_tab.max_setback_angle.SetValue(defaults.DIFF_PAIR_MAX_SETBACK_ANGLE)
         self.differential_tab.max_turn_angle.SetValue(defaults.DIFF_PAIR_MAX_TURN_ANGLE)
         self.differential_tab.chamfer_extra.SetValue(defaults.DIFF_PAIR_CHAMFER_EXTRA)
-        self.differential_tab.polarity_swap_nets_text.SetValue("*")
+        # #381 D3: reset to EMPTY (deny all swaps) to match tab creation and the
+        # CLI deny-by-default (#279); '*' here silently widened plan-replay swaps.
+        self.differential_tab.polarity_swap_nets_text.SetValue("")
         # #381 D2: diff GND return vias default ON, matching tab creation
         # (differential_gui.py) and the CLI (route_diff.py's negative flag
         # --no-gnd-vias defaults gnd_via_enabled True). Resetting to False here

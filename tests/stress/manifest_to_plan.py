@@ -58,6 +58,11 @@ LIST_FLAGS = {
     '--power-nets': 'power_nets',
     '--power-nets-widths': 'power_nets_widths',
     '--layer-costs': 'layer_costs',
+    # #381 D3: route_diff's polarity-swap allowlist (nargs='+' globs). Carried
+    # explicitly (not via the generic unknown-flag fallthrough) so a scoped
+    # allowlist survives as a list param that claude_plan's alias routes to the
+    # diff tab's polarity_swap_nets_text field.
+    '--polarity-swap-nets': 'polarity_swap_nets',
     '--nets': None,  # handled per action
     '--pairs': None,
     '--plane-layers': None,
@@ -182,7 +187,7 @@ def parse_command(argv):
         step['kind'] = 'bga' if tool == 'bga_fanout.py' else 'qfn'
         step['nets'] = [str(n) for n in nets] or ['*']
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
-              '--layers'):
+              '--layers', '--polarity-swap-nets'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step

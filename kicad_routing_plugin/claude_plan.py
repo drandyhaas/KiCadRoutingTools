@@ -240,7 +240,14 @@ def apply_step_params(step, dialog):
                 'power_nets_widths', 'escape_method', 'no_gnd_vias'}
     _ALIASES = {'rip_blocker_nets': 'rip_blocker_check',
                 'repair_pads': 'repair_pads',
-                'analysis_grid_step': 'analysis_grid'}
+                'analysis_grid_step': 'analysis_grid',
+                # #381 D3: route_diff's --polarity-swap-nets glob list lives on
+                # the diff tab's polarity_swap_nets_text field. Without this a
+                # recorded scoped allowlist fell to "no control, ignored" and the
+                # reset default (now empty=deny) applied -- so a manifest that
+                # named specific pairs silently either widened to '*' (old reset)
+                # or dropped its scope entirely.
+                'polarity_swap_nets': 'polarity_swap_nets_text'}
 
     def _apply_special(name, value):
         if name == 'layers' and isinstance(value, (list, tuple)):
