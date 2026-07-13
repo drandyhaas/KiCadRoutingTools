@@ -328,6 +328,102 @@ def test_b2_cap_optimizer():
 
 
 # ---------------------------------------------------------------------------
+# B3 -- cap-opt via mover: board edge, rotated pads, connector edge checks
+# ---------------------------------------------------------------------------
+
+class _FakeCap:
+    def __init__(self, rects):
+        self._rects = rects
+        self.x = self.y = self.rot = 0.0
+
+    def pad_rects(self, x=None, y=None, rot=None):
+        return self._rects
+
+
+class _FakeSt:
+    """Minimal stand-in for _Repair: one cap, permanently 'unresolved'."""
+    def __init__(self, cap_rects):
+        self.caps = {'C1': _FakeCap(cap_rects)}
+        self.vias = []
+
+    def graze_penalty(self, ref, cap, x, y, rot):
+        return 1.0
+
+
+def _via_mover_board(**kw):
+    from types import SimpleNamespace
+    pcb = _board(footprints={'C1': SimpleNamespace(layer='F.Cu', pads=[])}, **kw)
+    return pcb
+
+
+def test_b3():
+    print("\nB3: cap-opt via mover -- board edge, rotated pads, connectors")
+    from placement.fanout_clearance import nudge_vias_for_unresolved
+
+    def graze_via():
+        return Via(x=1.0, y=1.4, size=0.5, drill=0.3,
+                   layers=["F.Cu", "B.Cu"], net_id=3)
+
+    HBAR = (0.2, 0.9, 1.8, 1.1, 2)     # horizontal bar: only escape is +y
+    VBAR = (0.5, -1.0, 0.7, 3.0, 2)    # vertical bar: only escape is +x
+
+    # (a) board-edge bbox fallback: the only clearing candidates (y >= 1.45)
+    # all violate the top edge at 1.7 (need via_r 0.25 + clearance 0.1 inset).
+    v = graze_via()
+    pcb = _via_mover_board(vias=[v], bounds=(0.0, 0.0, 2.0, 1.7))
+    moves, segs = nudge_vias_for_unresolved(_FakeSt([HBAR]), pcb, 0.1)
+    check("via not pushed past the board edge (was moved off-board)",
+          moves == [] and (v.x, v.y) == (1.0, 1.4))
+    v = graze_via()
+    pcb = _via_mover_board(vias=[v], bounds=(0.0, 0.0, 2.0, 5.0))
+    moves, _ = nudge_vias_for_unresolved(_FakeSt([HBAR]), pcb, 0.1)
+    check("far edge: via still moved (no over-rejection)", len(moves) == 1)
+
+    # (b) real outline: a cutout sliver between the via and every clearing
+    # candidate. New positions past it are point-legal, but the CONNECTOR back
+    # to the stub start would cross the cutout -> no move.
+    outline = [(0.0, 0.0), (3.0, 0.0), (3.0, 3.0), (0.0, 3.0)]
+    sliver = [(1.05, 0.5), (1.15, 0.5), (1.15, 2.5), (1.05, 2.5)]
+    v = graze_via()
+    stub = Segment(start_x=1.0, start_y=1.6, end_x=1.0, end_y=1.4,
+                   width=0.2, layer="F.Cu", net_id=3)
+    pcb = _via_mover_board(vias=[v], segments=[stub],
+                           bounds=(0.0, 0.0, 3.0, 3.0),
+                           outline=outline, cutouts=[sliver])
+    moves, segs = nudge_vias_for_unresolved(_FakeSt([VBAR]), pcb, 0.1)
+    check("no move across a cutout sliver (connector would cross Edge.Cuts)",
+          moves == [])
+    v = graze_via()
+    stub = Segment(start_x=1.0, start_y=1.6, end_x=1.0, end_y=1.4,
+                   width=0.2, layer="F.Cu", net_id=3)
+    pcb = _via_mover_board(vias=[v], segments=[stub],
+                           bounds=(0.0, 0.0, 3.0, 3.0), outline=outline)
+    moves, segs = nudge_vias_for_unresolved(_FakeSt([VBAR]), pcb, 0.1)
+    check("no cutout: via + connector move fine (no over-rejection)",
+          len(moves) == 1 and len(segs) == 1)
+
+    # (c) rotated foreign pad (#356 class): a 1.2x1.2 pad at 45 degrees. Its
+    # true copper diamond corner reaches (1.05, 1.299); the old axis-aligned
+    # rect test accepted the first ring candidate (1.05, 1.4) only 0.10mm from
+    # real copper. The fix must land the via >= via_r + clearance from the
+    # TRUE outline (and still find a move -- no over-rejection).
+    from check_drc import point_to_pad_distance
+    rot_pad = _mk_pad(1.05, 0.45, net_id=4, size=1.2, pad_type='smd',
+                      layers=['F.Cu'], ref='U9', shape='rect')
+    rot_pad.rect_rotation = 45.0
+    v = graze_via()
+    pcb = _via_mover_board(vias=[v], bounds=(-2.0, -2.0, 5.0, 5.0),
+                           pads_by_net={4: [rot_pad]})
+    moves, _ = nudge_vias_for_unresolved(_FakeSt([VBAR]), pcb, 0.1)
+    check("rotated pad: a move is still found", len(moves) == 1)
+    if moves:
+        nd = moves[0][2]
+        d = point_to_pad_distance(nd['x'], nd['y'], rot_pad)
+        check("moved via clears the pad's TRUE (rotated) copper",
+              d >= 0.25 + 0.1 - 1e-6)
+
+
+# ---------------------------------------------------------------------------
 
 def main():
     test_b1()
@@ -335,6 +431,7 @@ def main():
     test_b2_connector_clear()
     test_b2_soft_joints()
     test_b2_cap_optimizer()
+    test_b3()
     print()
     if FAILS:
         print(f"{len(FAILS)} check(s) FAILED")

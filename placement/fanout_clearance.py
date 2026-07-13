@@ -1017,6 +1017,47 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     if not unresolved:
         return via_moves, new_segments
 
+    # Board edge / outline + NPTH floors (#370 B3): the mover has a 0.6mm
+    # budget but validated candidates against copper only -- a via or its new
+    # connector could be pushed off the board / into a cutout, and connectors
+    # had no NPTH-hole test at all.
+    from check_drc import (board_edge_geometry, _point_on_board,
+                           _point_to_rings_distance, _segment_to_rings_distance,
+                           point_to_pad_distance, _pad_has_no_copper,
+                           segment_to_rect_distance)
+    from kicad_parser import pad_drill_capsule
+    from routing_utils import into_pad_frame_point
+    from single_ended_routing import _seg_foreign_hole_dist
+    edge_rings, edge_outer, edge_cutouts = board_edge_geometry(
+        getattr(pcb_data, 'board_info', None))
+    bounds = getattr(getattr(pcb_data, 'board_info', None), 'board_bounds', None)
+    npth_clr = max(clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
+
+    def edge_ok_point(x, y, r):
+        need = r + clearance
+        if edge_rings:
+            if not _point_on_board(x, y, edge_outer, edge_cutouts):
+                return False
+            return _point_to_rings_distance(x, y, edge_rings) >= need - 1e-6
+        if bounds:
+            return (x - bounds[0] >= need and bounds[2] - x >= need and
+                    y - bounds[1] >= need and bounds[3] - y >= need)
+        return True
+
+    def edge_ok_seg(sx, sy, ex, ey, hw):
+        need = hw + clearance
+        if edge_rings:
+            if not (_point_on_board(sx, sy, edge_outer, edge_cutouts) and
+                    _point_on_board(ex, ey, edge_outer, edge_cutouts)):
+                return False
+            return _segment_to_rings_distance(sx, sy, ex, ey,
+                                              edge_rings) >= need - 1e-6
+        if bounds:
+            return all(x - bounds[0] >= need and bounds[2] - x >= need and
+                       y - bounds[1] >= need and bounds[3] - y >= need
+                       for x, y in ((sx, sy), (ex, ey)))
+        return True
+
     # (rect, net, cap_layer): cap pads exist only on the cap's own copper
     # side -- connector segments on OTHER layers cannot graze them (the
     # missing layer gate rejected every candidate: the connector necessarily
@@ -1031,6 +1072,9 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
 
     def valid_via_pos(v, nx, ny):
         vr = (v.size or 0.5) / 2.0
+        # never off the board / into a cutout / inside the edge margin (#370 B3)
+        if not edge_ok_point(nx, ny, vr):
+            return False
         for (bx0, by0, bx1, by1, net, _cl) in all_cap_rects:
             # via barrel spans all layers: no layer gate here
             if net != v.net_id and _point_to_rect_dist(
@@ -1040,17 +1084,17 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
             for p in pads:
                 if getattr(p, 'component_ref', None) in st.caps:
                     continue  # movable caps handled by final rects above
-                hw, hh = p.size_x / 2.0, p.size_y / 2.0
-                d = _point_to_rect_dist(nx, ny, (p.global_x - hw, p.global_y - hh,
-                                                 p.global_x + hw, p.global_y + hh))
-                if p.net_id != v.net_id and d < vr + clearance:
+                # rotation/shape-aware pad copper distance (#370 B3, #356
+                # class: the axis-aligned size_x/size_y rect under-blocked
+                # rotated pads). NPTH pads carry no copper -- drill-only.
+                if (p.net_id != v.net_id and not _pad_has_no_copper(p)
+                        and point_to_pad_distance(nx, ny, p) < vr + clearance):
                     return False
                 if p.drill and p.drill > 0:
-                    hx = getattr(p, 'hole_x', None)
-                    hy = getattr(p, 'hole_y', None)
-                    cx = hx if hx is not None else p.global_x
-                    cy = hy if hy is not None else p.global_y
-                    if math.hypot(nx - cx, ny - cy) <                             (v.drill or 0.3) / 2.0 + p.drill / 2.0 + H2H_PAD:
+                    # slot/offset-aware drill capsule (net-INDEPENDENT floor)
+                    (c1x, c1y), (c2x, c2y), prad = pad_drill_capsule(p)
+                    if _point_to_seg_dist(nx, ny, c1x, c1y, c2x, c2y) < \
+                            (v.drill or 0.3) / 2.0 + prad + H2H_PAD:
                         return False
         for ov in pcb_data.vias:
             if ov is v:
@@ -1070,6 +1114,14 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
 
     def connector_clear(net_id, layer, width, sx, sy, ex, ey):
         hw = width / 2.0
+        # board edge / cutouts + NPTH drill holes at their floor (#370 B3):
+        # a connector is drawn geometrically, not routed, so it must gate
+        # against Edge.Cuts and copper-less holes itself.
+        if not edge_ok_seg(sx, sy, ex, ey, hw):
+            return False
+        if _seg_foreign_hole_dist(pcb_data, net_id, sx, sy, ex, ey) < \
+                npth_clr + hw - 1e-4:
+            return False
         for (bx0, by0, bx1, by1, net, cl) in all_cap_rects:
             if cl != layer:
                 continue  # cap pads only exist on the cap's own side
@@ -1082,10 +1134,17 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
                     continue
                 if not _pad_on_layer(p, layer):
                     continue
-                phw, phh = p.size_x / 2.0, p.size_y / 2.0
-                if _seg_to_rect_dist(sx, sy, ex, ey,
-                                     (p.global_x - phw, p.global_y - phh,
-                                      p.global_x + phw, p.global_y + phh)) < hw + clearance:
+                if _pad_has_no_copper(p):
+                    continue  # NPTH: no copper; the hole check above covers it
+                # rotation-aware pad rect (#370 B3): rotate the segment into
+                # the pad's frame so a tilted pad is tested against its true
+                # rectangle (distance is rotation-invariant).
+                rx1, ry1 = into_pad_frame_point(sx, sy, p)
+                rx2, ry2 = into_pad_frame_point(ex, ey, p)
+                d, _ = segment_to_rect_distance(
+                    rx1, ry1, rx2, ry2, p.global_x, p.global_y,
+                    p.size_x / 2.0, p.size_y / 2.0)
+                if d < hw + clearance:
                     return False
         for ov in pcb_data.vias:
             if ov.net_id != net_id and _point_to_seg_dist(
