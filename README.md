@@ -826,7 +826,7 @@ The shared option groups — geometry, power-net widths, algorithm/strategy, pro
 ## Limitations
 
 - No push-and-shove (routes around obstacles, doesn't move them)
-- No layer swaps of stubs for multipoint nets (3+ pads)
+- Stub layer swaps for multipoint nets (3+ pads) only handle the all-stubs-to-one-common-layer case; mixed per-cluster layer assignment is not attempted
 - No blind or buried vias
 - No coarse grid assignment before detailed routing to plan overall topology
 - No via cost or other parameter learning/tuning
