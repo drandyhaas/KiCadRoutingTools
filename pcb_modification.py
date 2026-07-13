@@ -984,7 +984,10 @@ def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1
     snap_results = []
     snapped = snap_stub_gaps(snap_results, pcb, scope, SimpleNamespace(clearance=clearance))
     connectors = [s for r in snap_results for s in (r.get('new_segments') or [])]
-    _, _, to_remove = sweep_dead_ends(snap_results, pcb, scope)
+    # prune_original: the re-parsed board's copper on these plane nets is what
+    # the plane tool itself just wrote (this function exists because that
+    # copper misses route.py's in-route cleanup), so it is prunable here.
+    _, _, to_remove = sweep_dead_ends(snap_results, pcb, scope, prune_original=True)
     if not (connectors or to_remove):
         return 0, 0
 
@@ -1005,23 +1008,31 @@ def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1
 
 
 def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
-                    tol: float = 0.05) -> Tuple[int, int, List[Segment]]:
+                    tol: float = 0.05,
+                    prune_original: bool = False) -> Tuple[int, int, List[Segment]]:
     """Final whole-net dead-end sweep, after routing has settled (issue #84).
 
     ``collapse_appendices`` runs per route-commit and only trims short appendices
     anchored to a junction, so dead ends survive on nets that otherwise route
     100% and pass DRC + connectivity: a tap tail superseded by a rip-and-reroute,
-    a spur left when a blocker was ripped, and -- the dominant source -- fanout /
-    escape stubs from earlier pipeline stages that a net routed away from or never
-    completed. This prunes each in-scope net's FULL board copper once via
-    prune_dead_end_segments, so original (input-file) dead copper is reached too,
-    not only this run's new copper.
+    a spur left when a blocker was ripped, a fanout / escape stub this run laid
+    and then routed away from. This prunes each in-scope net once via
+    prune_dead_end_segments.
+
+    By default only copper produced by this run (present in ``results``) is
+    prunable; the input file's own segments anchor junctions / escapes but are
+    never removed. An authored input stub is the user's geometry -- a launch
+    point for a later routing pass, not this run's leftover -- and a router run
+    that did not use it must not delete it. With ``prune_original=True`` the
+    input-file copper is prunable too, for callers sweeping a file whose copper
+    they themselves just wrote (clean_plane_copper).
 
     Removed copper is split by origin:
-      * segments/vias produced by this run (present in ``results``) are dropped
-        from the write-list in place;
-      * original input-file segments are returned so the caller can strip them
-        from the output (the writer otherwise copies the input verbatim).
+      * segments/vias produced by this run are dropped from the write-list in
+        place;
+      * original input-file segments (``prune_original=True`` only) are
+        returned so the caller can strip them from the output (the writer
+        otherwise copies the input verbatim).
 
     ``scope_net_ids`` limits the sweep to the nets this run was asked to route
     (so untouched planes / excluded nets are never altered); None sweeps every net
@@ -1047,9 +1058,15 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
         vias = [v for v in pcb_data.vias if v.net_id == net_id]
         pads = pcb_data.pads_by_net.get(net_id, [])
         zones = [z for z in all_zones if z.net_id == net_id]
-        kept, removed = _safe_prune_net(net_id, net_segs, vias, pads, zones,
+        if prune_original:
+            prunable, anchors = net_segs, []
+        else:
+            prunable = [s for s in net_segs if id(s) in routed_seg_ids]
+            anchors = [s for s in net_segs if id(s) not in routed_seg_ids]
+        kept, removed = _safe_prune_net(net_id, prunable, vias, pads, zones,
+                                        anchor_segments=anchors,
                                         aggressive=True, tol=tol)
-        kept_segs_by_net[net_id] = kept
+        kept_segs_by_net[net_id] = kept + anchors
         for s in removed:
             if id(s) in routed_seg_ids:
                 removed_routed_ids.add(id(s))

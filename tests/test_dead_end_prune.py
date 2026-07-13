@@ -169,6 +169,86 @@ def run_gated():
     return 0
 
 
+def run_sweep():
+    """sweep_dead_ends must never remove the input file's own copper by
+    default: an authored stub is the user's geometry (a launch point for a
+    later routing pass), not this run's leftover, and a run that routed the
+    net without using it must not delete it. This run's own dead copper is
+    still pruned, and prune_original=True restores the input-strip behavior
+    for callers sweeping a file whose copper they themselves wrote
+    (clean_plane_copper)."""
+    from kicad_parser import Pad
+    from pcb_modification import sweep_dead_ends
+
+    def pad(ref, x, y, net=5):
+        return Pad(component_ref=ref, pad_number='1', global_x=x, global_y=y,
+                   local_x=0, local_y=0, size_x=0.5, size_y=0.5, shape='circle',
+                   layers=['F.Cu'], net_id=net, net_name='N')
+
+    def board():
+        # pad A(0,0) with an AUTHORED input stub A -> (0,2) -> (0.05,3) the
+        # route below never uses; this run's copper is a pad-to-pad trunk
+        # A -> B plus its own dead spur off the trunk at (7,0) -> (7,3).
+        pa, pb = pad('A', 0, 0), pad('B', 10, 0)
+        stub1 = _seg(0, 0, 0, 2)
+        stub2 = _seg(0, 2, 0.05, 3)
+        trunk = _seg(0, 0, 10, 0)
+        spur = _seg(7, 0, 7, 3)
+        pcb = SimpleNamespace(segments=[stub1, stub2, trunk, spur], vias=[],
+                              pads_by_net={5: [pa, pb]}, zones=[])
+        results = [{'new_segments': [trunk, spur], 'new_vias': []}]
+        return pcb, results, stub1, stub2, trunk, spur
+
+    fails = []
+
+    def check(name, cond):
+        if not cond:
+            fails.append(name)
+
+    # 1. Default sweep: the routed spur is pruned, the authored stub survives
+    #    and nothing is returned for the writer to strip from the input.
+    pcb, results, stub1, stub2, trunk, spur = board()
+    n_segs, n_vias, to_remove = sweep_dead_ends(results, pcb, {5})
+    check("sweep default strips no input copper", to_remove == [])
+    check("sweep default prunes the routed spur",
+          n_segs == 1 and results[0]['new_segments'] == [trunk])
+    check("sweep default no vias touched", n_vias == 0)
+
+    # 2. prune_original=True: the old behavior for own-output sweeps -- the
+    #    dead input stub chain is returned to strip, the spur still pruned.
+    pcb, results, stub1, stub2, trunk, spur = board()
+    n_segs, n_vias, to_remove = sweep_dead_ends(results, pcb, {5},
+                                                prune_original=True)
+    check("sweep prune_original strips the dead input stub",
+          set(map(id, to_remove)) == {id(stub1), id(stub2)})
+    check("sweep prune_original still prunes the routed spur",
+          results[0]['new_segments'] == [trunk] and n_segs == 3)
+
+    # 3. A routed leg that LAUNCHES from the authored stub's free end is
+    #    anchored by it (input copper still counts for junctions), so a
+    #    stub-launched route is never cut loose from its stub.
+    pa, pb = pad('A', 0, 0), pad('B', 10, 3)
+    stub1 = _seg(0, 0, 0, 2)
+    stub2 = _seg(0, 2, 0.05, 3)
+    launch = _seg(0.05, 3, 10, 3)     # routed: stub free end -> pad B
+    pcb = SimpleNamespace(segments=[stub1, stub2, launch], vias=[],
+                          pads_by_net={5: [pa, pb]}, zones=[])
+    results = [{'new_segments': [launch], 'new_vias': []}]
+    n_segs, _, to_remove = sweep_dead_ends(results, pcb, {5})
+    check("sweep keeps a stub-launched route",
+          n_segs == 0 and to_remove == [] and results[0]['new_segments'] == [launch])
+
+    print("=" * 60)
+    if fails:
+        for f in fails:
+            print("  FAIL ", f)
+        print(f"\n{len(fails)} failure(s)")
+        return 1
+    print("  PASS  final sweep keeps authored input stubs (default), still")
+    print("        prunes this run's dead copper, prune_original=True strips")
+    return 0
+
+
 if __name__ == "__main__":
-    rc = run() or run_gated()
+    rc = run() or run_gated() or run_sweep()
     sys.exit(rc)

@@ -821,14 +821,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(f"Dropped {_phantom_segs} phantom segment(s) and {_phantom_vias} "
               f"phantom via(s) not on the board from the write-list")
 
-    # Final dead-end sweep (issue #84): trim copper that dead-ends -- tap tails
-    # superseded by rip-and-reroute, spurs left when a blocker was ripped, and
-    # fanout/escape stubs a net routed away from or never completed -- which
-    # collapse_appendices' per-commit pass does not reach. Runs after the phantom
-    # drop so it only sees real board copper. Scoped to the nets this run routed
-    # so untouched planes / excluded nets are never altered. Routed dead ends are
-    # dropped from `results`; original input-file dead ends are returned to strip
-    # from the output file.
+    # Final dead-end sweep (issue #84): trim THIS RUN's copper that dead-ends --
+    # tap tails superseded by rip-and-reroute, spurs left when a blocker was
+    # ripped, escape legs a net routed away from -- which collapse_appendices'
+    # per-commit pass does not reach. Runs after the phantom drop so it only
+    # sees real board copper. Scoped to the nets this run routed so untouched
+    # planes / excluded nets are never altered. The input file's own copper
+    # anchors the prune but is never removed (an authored stub is the user's
+    # geometry, not this run's leftover), so dead_end_input_segments stays
+    # empty here; the strip plumbing below remains for callers that sweep
+    # their own output with prune_original=True.
     _de_segs, _de_vias, dead_end_input_segments = sweep_dead_ends(results, pcb_data, sweep_scope_ids)
     if _de_segs or _de_vias:
         print(f"Dead-end sweep: trimmed {_de_segs} dead-end segment(s) and "
@@ -1006,7 +1008,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             'exclusion_zone_lines': exclusion_zone_lines if debug_lines else [],
             'boundary_debug_labels': boundary_debug_labels if debug_lines else [],
             # Original-file dead-end copper the caller (GUI) should delete from the
-            # live board, mirroring the writer's strip (issue #84).
+            # live board, mirroring the writer's strip (issue #84). Empty on this
+            # path: the batch_route sweep never prunes input-file copper.
             'segments_to_remove': dead_end_input_segments,
         }
     else:
