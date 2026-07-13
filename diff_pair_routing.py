@@ -2769,10 +2769,14 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         straight_t = direction_to_theta_idx(_slx, _sly)
 
         def _pose(st, tt, budget):
-            return pr.route_pose_with_frontier(
+            # S4 (#385): this theta-fan never reads the blocked-cell frontier,
+            # so call the non-frontier variant and skip the tracker inserts +
+            # the 10k-cell sort/marshal every failed probe used to pay. Same
+            # search, same path/iterations (both wrap the same Rust core).
+            return pr.route_pose(
                 obstacles, s_gx, s_gy, a_layer, st, t_gx, t_gy, b_layer, tt,
                 budget, diff_pair_via_spacing=via_spacing_grid)
-        path, iters, _b, _g = _pose(straight_t, straight_t, max_iters)
+        path, iters, _g = _pose(straight_t, straight_t, max_iters)
         iters = iters or 0
         if path is None:
             promising = None
@@ -2780,7 +2784,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                 for tt in tgt_thetas:
                     if st == straight_t and tt == straight_t:
                         continue                 # already tried at full budget
-                    p, it, _b, _g = _pose(st, tt, probe_cap)
+                    p, it, _g = _pose(st, tt, probe_cap)
                     iters += it
                     if p:
                         path = p
@@ -2791,7 +2795,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                     break
             if path is None and promising is not None:
                 st, tt = promising
-                p, it, _b, _g = _pose(st, tt, max_iters)
+                p, it, _g = _pose(st, tt, max_iters)
                 iters += it
                 path = p
         obstacles.clear_allowed_cells()
