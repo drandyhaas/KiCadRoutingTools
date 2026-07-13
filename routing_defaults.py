@@ -150,7 +150,12 @@ QFN_CLEARANCE = 0.1  # mm
 QFN_EXTENSION = 0.1  # mm - extension past pad edge before bend
 
 # Differential Pair defaults
-DIFF_PAIR_WIDTH = 0.1  # mm track width for differential pairs
+DIFF_PAIR_WIDTH = 0.3  # mm track width for differential pairs (GUI diff tab
+# default). #381 D4: matches route_diff.py's --track-width CLI default (0.3); the
+# old 0.1 made GUI/plan diff runs 3x narrower than the equivalent CLI command.
+# Consumed ONLY by the GUI diff tab -- the CLI/engine diff width default comes
+# from route_diff.py's argparse and batch_route_diff_pairs' TRACK_WIDTH, so this
+# change is GUI-only and does not move any CLI behavior.
 DIFF_PAIR_GAP = 0.101  # mm gap between P and N traces
 DIFF_PAIR_MIN_TURNING_RADIUS = 0.2  # mm
 DIFF_PAIR_MAX_SETBACK_ANGLE = 45.0  # degrees

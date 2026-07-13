@@ -43,7 +43,6 @@ FLAG_PARAMS = {
     '--via-cost': 'via_cost',
     '--heuristic-weight': 'heuristic_weight',
     '--turn-cost': 'turn_cost',
-    '--diff-pair-width': 'diff_pair_width',
     '--diff-pair-gap': 'diff_pair_gap',
     '--impedance': 'impedance',
     '--gnd-via-distance': 'gnd_via_distance',
@@ -87,6 +86,16 @@ TOOL_FLAG_ALIASES = {
     'bga_fanout.py': {'--width': '--track-width'},
 }
 
+# Per-tool flag -> plan-param overrides (win over the global FLAG_PARAMS).
+# #381 D4: route_diff.py's trace width is --track-width, but its GUI home is the
+# diff tab's diff_pair_width control (NOT the Basic-tab track_width the global
+# FLAG_PARAMS would target). Without this override a recorded route_diff
+# --track-width 0.2 set the Basic-tab width and left the diff tab at its default,
+# so a plan-replayed diff routed at the wrong width.
+TOOL_FLAG_PARAMS = {
+    'route_diff.py': {'--track-width': 'diff_pair_width'},
+}
+
 
 def _num(v):
     try:
@@ -116,6 +125,7 @@ def parse_command(argv):
     i = argv.index([a for a in argv if os.path.basename(a) == tool][0]) + 1
     positional = []
     aliases = TOOL_FLAG_ALIASES.get(tool, {})
+    tool_params = TOOL_FLAG_PARAMS.get(tool, {})
     while i < len(argv):
         a = aliases.get(argv[i], argv[i])
         if a in IGNORE_FLAGS:
@@ -127,8 +137,8 @@ def parse_command(argv):
         elif a in BOOL_FLAGS:
             step['params'][BOOL_FLAGS[a]] = True
             i += 1
-        elif a in FLAG_PARAMS:
-            step['params'][FLAG_PARAMS[a]] = _num(argv[i + 1])
+        elif a in tool_params or a in FLAG_PARAMS:
+            step['params'][tool_params.get(a) or FLAG_PARAMS[a]] = _num(argv[i + 1])
             i += 2
         elif a in LIST_FLAGS:
             vals = []

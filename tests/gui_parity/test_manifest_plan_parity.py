@@ -50,6 +50,12 @@ BOOL_FLAGS = {
     '--no-bga-zones': 'no_bga_zone', '--no-bga-zone': 'no_bga_zone',
     '--no-gnd-vias': 'no_gnd_vias', '--rip-blocker-nets': 'rip_blocker_nets',
 }
+# Per-action overrides of SCALAR_FLAGS. #381 D4: route_diff.py's trace width is
+# --track-width, but its GUI home is the diff tab's diff_pair_width control (not
+# the Basic-tab track_width), so a diff step must carry it there.
+ACTION_SCALAR_OVERRIDES = {
+    'route_diff': {'--track-width': 'diff_pair_width'},
+}
 # Fanout via/clearance/grid live on the fanout tab's shared params too, so
 # fanout steps must carry them like route steps do.
 
@@ -100,14 +106,16 @@ def _plane_layers(argv):
 def check_pair(argv, step):
     """Return list of (flag, reason) mismatches for one command/step pair."""
     params = step.get('params', {})
+    scalar = dict(SCALAR_FLAGS)
+    scalar.update(ACTION_SCALAR_OVERRIDES.get(step.get('action'), {}))
     bad = []
     n = 0
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in SCALAR_FLAGS and i + 1 < len(argv):
+        if a in scalar and i + 1 < len(argv):
             want = _num(argv[i + 1])
-            got = params.get(SCALAR_FLAGS[a])
+            got = params.get(scalar[a])
             n += 1
             if got is None or _num(got) != want:
                 bad.append((a, f"want {want!r} got {got!r}"))
