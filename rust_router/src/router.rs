@@ -7,12 +7,19 @@ use std::collections::BinaryHeap;
 use crate::obstacle_map::GridObstacleMap;
 use crate::types::{GridState, OpenEntry, BlockedCellTracker, RouteStats, DIRECTIONS, ORTHO_COST, DIAG_COST, DEFAULT_TURN_COST};
 
+/// The `closed` flag lives in the top bit of `NodeState.parent` (S1-A): cell
+/// keys are at most 48 bits, so bit 63 can never be part of a real parent key.
+/// Folding the flag into the node record deletes the separate closed FxHashSet
+/// (one hash lookup + one insert per expansion) without growing NodeState.
+const CLOSED_BIT: u64 = 1 << 63;
+const PARENT_MASK: u64 = !CLOSED_BIT;
+
 /// Sentinel `parent` for source states (which have no parent). Distinguishes a
 /// node that is present-with-a-parent from a source, preserving the old
 /// `parents.contains_key` / `parents.get -> None` semantics after the g_costs +
 /// parents + steps_from_source maps were folded into one (memory: 3 copies of
-/// every explored cell's u64 key -> 1).
-const NO_PARENT: u64 = u64::MAX;
+/// every explored cell's u64 key -> 1). Must fit in PARENT_MASK.
+const NO_PARENT: u64 = u64::MAX & PARENT_MASK;
 
 /// Per-explored-cell A* state. Replaces the three parallel
 /// `FxHashMap<u64, _>` (g_costs / parents / steps_from_source) that each stored
@@ -22,16 +29,18 @@ const NO_PARENT: u64 = u64::MAX;
 #[derive(Clone, Copy)]
 struct NodeState {
     g: i32,
-    parent: u64,   // NO_PARENT for source cells
+    parent: u64,   // bit 63 = closed flag; low bits = parent key or NO_PARENT
     steps: i32,
 }
 
-/// Thin wrapper centralizing the g/parent/steps accessors so every call site is
-/// an unambiguous method and the NO_PARENT sentinel handling lives in one place.
-/// All methods are trivial and inline to the same code the parallel maps emitted.
+/// Thin wrapper centralizing the g/parent/steps/closed accessors so every call
+/// site is an unambiguous method and the NO_PARENT / CLOSED_BIT handling lives
+/// in one place. All methods are trivial and inline to the same code the
+/// parallel maps + closed set emitted.
 #[derive(Default)]
 struct NodeMap {
     m: FxHashMap<u64, NodeState>,
+    closed_count: u32,
 }
 
 impl NodeMap {
@@ -47,12 +56,34 @@ impl NodeMap {
     /// old `parents.get(&key).copied()`).
     #[inline]
     fn parent(&self, key: u64) -> Option<u64> {
-        self.m.get(&key).and_then(|n| if n.parent != NO_PARENT { Some(n.parent) } else { None })
+        self.m.get(&key).and_then(|n| {
+            let p = n.parent & PARENT_MASK;
+            if p != NO_PARENT { Some(p) } else { None }
+        })
     }
     /// Matches the old `parents.contains_key(&key)`.
     #[inline]
     fn has_parent(&self, key: u64) -> bool {
-        self.m.get(&key).map_or(false, |n| n.parent != NO_PARENT)
+        self.m.get(&key).map_or(false, |n| n.parent & PARENT_MASK != NO_PARENT)
+    }
+    /// Matches the old `closed.contains(&key)` (S1-A: closed folded into node).
+    #[inline]
+    fn is_closed(&self, key: u64) -> bool {
+        self.m.get(&key).map_or(false, |n| n.parent & CLOSED_BIT != 0)
+    }
+    /// Matches the old `closed.insert(key)`. Only ever called on a popped node,
+    /// which is always present in the map (every push relaxes/sources it first).
+    #[inline]
+    fn set_closed(&mut self, key: u64) {
+        if let Some(n) = self.m.get_mut(&key) {
+            n.parent |= CLOSED_BIT;
+        }
+        self.closed_count += 1;
+    }
+    /// Matches the old `closed.len()` (for RouteStats only).
+    #[inline]
+    fn closed_len(&self) -> u32 {
+        self.closed_count
     }
     /// Source cell: g + steps=0, no parent (old: g_costs+steps inserted, parents NOT).
     #[inline]
@@ -60,6 +91,8 @@ impl NodeMap {
         self.m.insert(key, NodeState { g, parent: NO_PARENT, steps: 0 });
     }
     /// Relaxed cell: g + parent + steps inserted together (old: three inserts).
+    /// Never called on a closed node (call sites check is_closed first), so
+    /// clearing the closed bit here is a no-op by construction.
     #[inline]
     fn relax(&mut self, key: u64, g: i32, parent: u64, steps: i32) {
         self.m.insert(key, NodeState { g, parent, steps });
@@ -236,7 +269,6 @@ impl GridRouter {
         // Initialize open set with all sources
         let mut open_set = BinaryHeap::new();
         let mut nodes = NodeMap::default();
-        let mut closed: FxHashSet<u64> = FxHashSet::default();
         let mut counter: u32 = 0;
 
         // Track via positions for each node's path (only used if via_exclusion_radius > 0)
@@ -341,7 +373,7 @@ impl GridRouter {
             let current_key = current.as_key();
             let g = current_entry.g_score;
 
-            if closed.contains(&current_key) {
+            if nodes.is_closed(current_key) {
                 stats.duplicate_skips += 1;
                 continue;
             }
@@ -381,7 +413,7 @@ impl GridRouter {
                     stats.path_cost = g;
                     stats.final_g = g;
                     stats.open_set_size = open_set.len() as u32;
-                    stats.closed_set_size = closed.len() as u32;
+                    stats.closed_set_size = nodes.closed_len();
                     // Count vias in path
                     for i in 1..path.len() {
                         if path[i].2 != path[i-1].2 {
@@ -395,7 +427,7 @@ impl GridRouter {
                 continue;
             }
 
-            closed.insert(current_key);
+            nodes.set_closed(current_key);
 
             // Check via constraints for diff pair routing (collinear_vias mode):
             // 1. If we just came through a via: must continue in exact same direction as before via
@@ -470,7 +502,7 @@ impl GridRouter {
                 let neighbor = GridState::new(ngx, ngy, current.layer);
                 let neighbor_key = neighbor.as_key();
 
-                if closed.contains(&neighbor_key) {
+                if nodes.is_closed(neighbor_key) {
                     continue;
                 }
 
@@ -610,7 +642,7 @@ impl GridRouter {
                     let neighbor = GridState::new(current.gx, current.gy, layer);
                     let neighbor_key = neighbor.as_key();
 
-                    if closed.contains(&neighbor_key) {
+                    if nodes.is_closed(neighbor_key) {
                         continue;
                     }
 
@@ -661,7 +693,7 @@ impl GridRouter {
 
         // No path found - fill in final stats
         stats.open_set_size = open_set.len() as u32;
-        stats.closed_set_size = closed.len() as u32;
+        stats.closed_set_size = nodes.closed_len();
         let stats_dict = self.stats_to_dict(&stats);
         (None, iterations, stats_dict)
     }
@@ -703,7 +735,6 @@ impl GridRouter {
 
         let mut open_set = BinaryHeap::new();
         let mut nodes = NodeMap::default();
-        let mut closed: FxHashSet<u64> = FxHashSet::default();
         let mut counter: u32 = 0;
         let mut path_vias: FxHashMap<u64, Vec<(i32, i32)>> = FxHashMap::default();
 
@@ -766,7 +797,7 @@ impl GridRouter {
             let current_key = current.as_key();
             let g = current_entry.g_score;
 
-            if closed.contains(&current_key) { continue; }
+            if nodes.is_closed(current_key) { continue; }
 
             if target_set.contains(&current_key) {
                 let arrival_ok = if let Some((end_dx, end_dy)) = norm_end_dir {
@@ -789,7 +820,7 @@ impl GridRouter {
                 continue;
             }
 
-            closed.insert(current_key);
+            nodes.set_closed(current_key);
 
             let (required_direction, allowed_45deg_from) = if collinear_vias {
                 self.get_via_direction_constraints(&nodes, current_key, &current)
@@ -838,7 +869,7 @@ impl GridRouter {
                 let neighbor = GridState::new(ngx, ngy, current.layer);
                 let neighbor_key = neighbor.as_key();
 
-                if closed.contains(&neighbor_key) { continue; }
+                if nodes.is_closed(neighbor_key) { continue; }
 
                 let base_move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
                 // Apply layer cost multiplier (1000 = 1.0x, 1500 = 1.5x, etc.)
@@ -932,7 +963,7 @@ impl GridRouter {
                     let neighbor = GridState::new(current.gx, current.gy, layer);
                     let neighbor_key = neighbor.as_key();
 
-                    if closed.contains(&neighbor_key) { continue; }
+                    if nodes.is_closed(neighbor_key) { continue; }
 
                     // Use zero cost for free via positions (through-hole pads on same net)
                     let is_free = obstacles.is_free_via(current.gx, current.gy);
