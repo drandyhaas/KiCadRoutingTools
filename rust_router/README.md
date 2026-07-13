@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.18.0**
+**Current Version: 0.18.1**
 
 ## Features
 
@@ -306,6 +306,24 @@ src/
 
 ## Version History
 
+- **0.18.1**: **S3-b (#385)** — admissible bounding-box heuristic for large
+  target lists. `heuristic_to_targets` was O(targets) per push (min octile
+  distance over the whole list); a multipoint/tap backward probe passes
+  hundreds of tap points, making the heuristic the hot cost. When the target
+  count exceeds 16, it now computes the heuristic against a precomputed
+  `TargetHint` (target bounding box + a layer bitmask, built once per search):
+  distance to the clamped box point, `via_cost` iff no target shares the
+  node's layer, and min path-steps to the box. Each term is a per-component
+  **lower bound** on the exact min, so the summed heuristic is **admissible**
+  — it never overestimates true cost, so it keeps the FULL goal set and can
+  never make a routable net unreachable (unlike the rejected S3-a Python
+  target cap, which dropped goals and regressed congested multi-drop nets).
+  Behavior-changing (weaker heuristic → different exploration → different
+  paths), gated on corpus A/B, NOT byte-identical. Scoped to the single-ended
+  `GridSearch` (the tap-route probe); the pose/diff-pair router uses a
+  single-goal Dubins heuristic and is untouched. cparti_fpga: failed 43→40,
+  iterations +0.09% (no expansion explosion), ~35% less CPU/net; urchin
+  (all nets ≤16 targets) byte-identical.
 - **0.18.0**: The rust-router-review batch (issues #384/#385/#386/#387). Verified byte-identical vs 0.17.4 on a 3-board identity gate (bitaxe_ultra / urchin / castor_pollux: `total_iterations` + `total_vias` + all JSON_SUMMARY keys EXACT) for everything except the two explicitly behavior-changing items called out below.
   - **S1-A (#384)**: the separate `closed` FxHashSet is gone from all four search loops — the closed flag lives in the top bit of the node's parent field (`NodeMap`, then `NodeStore`; `PoseNodeMap` likewise), saving a hashset lookup + insert per expansion.
   - **S1-B (#384)**: tiled flat-array node store for the grid A* (`NodeStore`): 64x64-cell tiles per layer, per-node record 12B (`g: i32`, `parent: u32` node index carrying the closed bit, `steps: i32`). A node lookup is one small per-TILE hashmap probe + direct indexing; path reconstruction and the collinear-via ancestry walks follow u32 parent indices. The store is per-search, so peak memory scales with explored area at 12B/node (the M1 transient-blowup fix) and is freed on return. (The review's per-tile generation stamps were deliberately dropped: they only pay off with a cross-search tile cache, which would pin explored-union x 12B for a whole batch to save microseconds of tile zeroing. The pose router keeps its `PoseNodeMap` hashmap — pose keys carry theta, so a tile is 8x larger for a much sparser visit pattern.)

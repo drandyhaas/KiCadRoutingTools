@@ -318,6 +318,49 @@ fn check_via_exclusion(nx: i32, ny: i32, current_gx: i32, current_gy: i32,
 /// there is exactly one copy of the expansion logic (the visualizer fork had
 /// drifted -- B1 in #386). step() pops and processes ONE open-set entry;
 /// run-to-completion callers just loop it.
+/// S3-b (#385): O(1) admissible replacement for the O(targets) exact
+/// heuristic when the target list is large. Precomputed once per search from
+/// the target set: the target bounding box, the set of layers any target
+/// lives on (bitmask), and the count. Distance-to-box <= distance-to-any-
+/// target-in-box, min-via over the layer mask, and min-path-steps to the box
+/// are each a lower bound on the corresponding exact-heuristic term, so the
+/// summed bbox heuristic is admissible (never overestimates true cost) --
+/// unlike the S3-a Python target cap it keeps the FULL goal set intact, so it
+/// can never make a routable net unreachable.
+#[derive(Clone)]
+pub(crate) struct TargetHint {
+    min_gx: i32,
+    max_gx: i32,
+    min_gy: i32,
+    max_gy: i32,
+    layer_mask: u32,
+    count: usize,
+}
+
+/// Above this many targets, use the O(1) bbox heuristic; at or below, the
+/// exact O(targets) min is cheap enough and tighter.
+const BBOX_HEURISTIC_MIN_TARGETS: usize = 16;
+
+impl TargetHint {
+    fn from_states(targets: &[GridState]) -> Self {
+        let mut min_gx = i32::MAX;
+        let mut max_gx = i32::MIN;
+        let mut min_gy = i32::MAX;
+        let mut max_gy = i32::MIN;
+        let mut layer_mask: u32 = 0;
+        for t in targets {
+            min_gx = min_gx.min(t.gx);
+            max_gx = max_gx.max(t.gx);
+            min_gy = min_gy.min(t.gy);
+            max_gy = max_gy.max(t.gy);
+            if (t.layer as usize) < 32 {
+                layer_mask |= 1u32 << t.layer;
+            }
+        }
+        TargetHint { min_gx, max_gx, min_gy, max_gy, layer_mask, count: targets.len() }
+    }
+}
+
 pub(crate) struct GridSearch {
     pub(crate) open_set: BinaryHeap<OpenEntry>,
     pub(crate) store: NodeStore,
@@ -327,6 +370,7 @@ pub(crate) struct GridSearch {
     pub(crate) max_iterations: u32,
     target_set: FxHashSet<u64>,
     target_states: Vec<GridState>,
+    target_hint: TargetHint,
     opts: SearchOptions,
     /// Best heuristic over the sources (RouteStats.initial_h).
     pub(crate) initial_h: i32,
@@ -349,6 +393,7 @@ impl GridSearch {
             .iter()
             .map(|(gx, gy, layer)| GridState::new(*gx, *gy, *layer))
             .collect();
+        let target_hint = TargetHint::from_states(&target_states);
 
         let mut open_set = BinaryHeap::new();
         let mut store = NodeStore::new();
@@ -368,7 +413,7 @@ impl GridSearch {
             // Penalize starting on expensive layers
             let layer_cost = router.layer_cost_or_default(layer as usize);
             let initial_g = layer_cost - min_layer_cost;
-            let h = router.heuristic_to_targets(&state, &target_states);
+            let h = router.heuristic_to_targets(&state, &target_states, &target_hint);
             initial_h = initial_h.min(h);
             open_set.push(OpenEntry {
                 f_score: initial_g.saturating_add(h),
@@ -394,6 +439,7 @@ impl GridSearch {
             max_iterations,
             target_set,
             target_states,
+            target_hint,
             opts,
             initial_h,
         }
@@ -586,7 +632,7 @@ impl GridSearch {
                     if self.opts.via_exclusion_radius > 0 {
                         self.path_vias.insert(neighbor_key, current_vias.clone());
                     }
-                    let h = router.heuristic_to_targets(&neighbor, &self.target_states);
+                    let h = router.heuristic_to_targets(&neighbor, &self.target_states, &self.target_hint);
                     self.open_set.push(OpenEntry {
                         f_score: new_g.saturating_add(h), // B4: no i32 wrap on huge h
                         g_score: new_g,
@@ -710,7 +756,7 @@ impl GridSearch {
                             self.path_vias.insert(neighbor_key, new_vias);
                         }
                     }
-                    let h = router.heuristic_to_targets(&neighbor, &self.target_states);
+                    let h = router.heuristic_to_targets(&neighbor, &self.target_states, &self.target_hint);
                     self.open_set.push(OpenEntry {
                         f_score: new_g.saturating_add(h), // B4: no i32 wrap on huge h
                         g_score: new_g,
@@ -1001,7 +1047,8 @@ impl GridRouter {
     /// Octile distance heuristic to nearest target
     /// Uses minimum layer cost to remain admissible (never overestimate)
     #[inline]
-    fn heuristic_to_targets(&self, state: &GridState, targets: &[GridState]) -> i32 {
+    fn heuristic_to_targets(&self, state: &GridState, targets: &[GridState],
+                            hint: &TargetHint) -> i32 {
         // B4: an empty target list used to fall through as i32::MAX, and the
         // f = g + h addition then wrapped in release builds, corrupting the
         // heap order into a silent max-iterations burn. No target -> h = 0.
@@ -1009,6 +1056,36 @@ impl GridRouter {
             return 0;
         }
         let min_layer_cost = self.min_valid_layer_cost();
+
+        // S3-b (#385): O(1) admissible bbox heuristic for large target lists.
+        // The exact loop below is O(targets) per push; a multipoint/tap
+        // backward probe passes hundreds of tap points, making the heuristic
+        // the hot cost. Each bbox term is a per-component lower bound on the
+        // exact min (distance to the clamped box point <= distance to any
+        // target in the box; via_cost=0 iff some target shares this layer;
+        // min path-steps to the box), so the sum is admissible -- weaker
+        // (may expand a few more nodes) but never overestimates, so it can
+        // never make a routable net unreachable (unlike the S3-a target cap).
+        if hint.count > BBOX_HEURISTIC_MIN_TARGETS {
+            let cx = state.gx.clamp(hint.min_gx, hint.max_gx);
+            let cy = state.gy.clamp(hint.min_gy, hint.max_gy);
+            let dx = (state.gx - cx).abs();
+            let dy = (state.gy - cy).abs();
+            let diag = dx.min(dy);
+            let orth = (dx - dy).abs();
+            let base_dist = diag * DIAG_COST + orth * ORTHO_COST;
+            let mut h = (base_dist as i64 * min_layer_cost as i64 / 1000) as i32;
+            // via term: 0 if any target is already on this layer, else via_cost
+            let on_layer = (state.layer as usize) < 32
+                && (hint.layer_mask & (1u32 << state.layer)) != 0;
+            if !on_layer {
+                h += self.via_cost;
+            }
+            if self.proximity_heuristic_cost > 0 {
+                h += (diag + orth) * self.proximity_heuristic_cost;
+            }
+            return (h as f32 * self.h_weight) as i32;
+        }
 
         let mut min_h = i32::MAX;
         for target in targets {
