@@ -68,8 +68,14 @@ pub struct OpenEntry {
 
 impl Ord for OpenEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering for min-heap (lowest f_score first)
+        // Reverse ordering for min-heap (lowest f_score first).
+        // S5 (issue #385): on f-ties prefer the LARGER g (deeper node) --
+        // depth-first among equals reaches the goal with fewer sideways
+        // expansions on open boards; FIFO counter order breaks remaining ties
+        // deterministically as before. BEHAVIOR-CHANGING: path shapes can
+        // differ; gated on a corpus A/B.
         other.f_score.cmp(&self.f_score)
+            .then_with(|| self.g_score.cmp(&other.g_score))
             .then_with(|| other.counter.cmp(&self.counter))
     }
 }
@@ -138,8 +144,11 @@ impl PartialEq for PoseOpenEntry {
 
 impl Ord for PoseOpenEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering for min-heap (lowest f_score first)
+        // Reverse ordering for min-heap (lowest f_score first).
+        // S5 (issue #385): on f-ties prefer the LARGER g, then FIFO -- see
+        // OpenEntry::cmp. BEHAVIOR-CHANGING, corpus-A/B gated.
         other.f_score.cmp(&self.f_score)
+            .then_with(|| self.g_score.cmp(&other.g_score))
             .then_with(|| other.counter.cmp(&self.counter))
     }
 }
