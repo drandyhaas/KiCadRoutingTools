@@ -489,6 +489,55 @@ def test_b4():
 
 
 # ---------------------------------------------------------------------------
+# B7 -- nudge_grazing_vias: offset-hole/slot-aware pad drills
+# ---------------------------------------------------------------------------
+
+def test_b7():
+    print("\nB7: nudge_grazing_vias models pad drills at the real hole")
+    from types import SimpleNamespace
+    from pcb_modification import nudge_grazing_vias
+
+    def scenario(offset_hole):
+        # TH pad whose copper centre is at (4.6, 5.0) but whose DRILL sits
+        # 0.4mm away at (5.0, 5.0) (castellated-style offset). A via 15um
+        # inside the hole-to-hole floor of the REAL hole: the old scalar
+        # circle at the copper centre saw a 0.885mm gap and left it.
+        hx, hy = (5.0, 5.0) if offset_hole else (None, None)
+        px = 4.6 if offset_hole else 5.0
+        # centred case: annular-less pad (size == drill) so the via's copper
+        # gap equals its hole gap and only the hole rule decides.
+        pad = _mk_pad(px, 5.0, net_id=8, drill=0.3,
+                      size=0.5 if offset_hole else 0.3, ref='J1',
+                      hole_x=hx, hole_y=hy)
+        via = Via(x=5.485, y=5.0, size=0.5, drill=0.3,
+                  layers=["F.Cu", "B.Cu"], net_id=3)
+        # anchor the via with a same-net track so connectivity is checkable
+        stub = Segment(start_x=5.485, start_y=5.0, end_x=6.5, end_y=5.0,
+                       width=0.2, layer="F.Cu", net_id=3)
+        pcb = _board(segments=[stub], vias=[via],
+                     pads_by_net={8: [pad]},
+                     footprints={'J1': SimpleNamespace(pads=[pad])})
+        pcb.nets = {}
+        return pcb, via
+
+    pcb, via = scenario(offset_hole=True)
+    moved, nets, moves = nudge_grazing_vias([{'new_vias': [via]}], pcb, {3},
+                                            clearance=0.1, hole_to_hole=0.20,
+                                            max_shift=0.025)
+    real_gap = abs(via.x - 5.0) - 0.15 - 0.15  # edge-to-edge vs REAL hole
+    check("via nudged off the OFFSET hole (old code saw the copper centre)",
+          moved == 1 and real_gap >= 0.20 - 1e-6)
+
+    # no over-rejection / consistency: a centred drill behaves as before
+    pcb, via = scenario(offset_hole=False)
+    moved, nets, moves = nudge_grazing_vias([{'new_vias': [via]}], pcb, {3},
+                                            clearance=0.1, hole_to_hole=0.20,
+                                            max_shift=0.025)
+    check("centred drill: same graze still nudged (unchanged behavior)",
+          moved == 1 and abs(via.x - 5.0) - 0.30 >= 0.20 - 1e-6)
+
+
+# ---------------------------------------------------------------------------
 
 def main():
     test_b1()
@@ -498,6 +547,7 @@ def main():
     test_b2_cap_optimizer()
     test_b3()
     test_b4()
+    test_b7()
     print()
     if FAILS:
         print(f"{len(FAILS)} check(s) FAILED")

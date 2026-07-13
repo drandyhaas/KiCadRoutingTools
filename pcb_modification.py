@@ -2958,12 +2958,21 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
     # Every drill hole on the board (vias + through-hole pads, ANY net --
     # hole-to-hole is a fab rule, not an electrical one).
     import numpy as _np
+    from kicad_parser import pad_drill_circles
     hole_list = [(id(v), v.x, v.y, (getattr(v, 'drill', 0) or 0) / 2.0)
                  for v in pcb_data.vias if (getattr(v, 'drill', 0) or 0) > 0]
     for fp in pcb_data.footprints.values():
         for p in fp.pads:
+            # Offset-hole / slot-aware circles (#370 B7): a pad's drill can
+            # sit away from the copper centre (castellated pads) or be a
+            # milled slot; check_drc measures the real capsule, so validating
+            # against (global_x, global_y, drill/2) judged vias against the
+            # wrong hole. Round centred drills yield the same single circle
+            # as before. (Duplicate id keys for a slot's circles are fine:
+            # hole_idx only ever excludes the moving VIA itself.)
             if (p.drill or 0) > 0:
-                hole_list.append((id(p), p.global_x, p.global_y, p.drill / 2.0))
+                for hx, hy, hd in pad_drill_circles(p):
+                    hole_list.append((id(p), hx, hy, hd / 2.0))
     hole_idx = {hid: i for i, (hid, _, _, _) in enumerate(hole_list)}
     hole_x = _np.asarray([h[1] for h in hole_list], dtype=float)
     hole_y = _np.asarray([h[2] for h in hole_list], dtype=float)
