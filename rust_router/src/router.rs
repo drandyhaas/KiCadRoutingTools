@@ -7,95 +7,165 @@ use std::collections::BinaryHeap;
 use crate::obstacle_map::GridObstacleMap;
 use crate::types::{GridState, OpenEntry, BlockedCellTracker, RouteStats, DIRECTIONS, ORTHO_COST, DIAG_COST, DEFAULT_TURN_COST};
 
-/// The `closed` flag lives in the top bit of `NodeState.parent` (S1-A): cell
-/// keys are at most 48 bits, so bit 63 can never be part of a real parent key.
-/// Folding the flag into the node record deletes the separate closed FxHashSet
-/// (one hash lookup + one insert per expansion) without growing NodeState.
-const CLOSED_BIT: u64 = 1 << 63;
-const PARENT_MASK: u64 = !CLOSED_BIT;
+/// S1-B (issue #384): tiled flat-array node store. Replaces the per-node
+/// FxHashMap<u64, NodeState> (S1-A) with 64x64-cell tiles per layer: a node
+/// lookup is one SMALL hashmap probe per tile plus direct array indexing, and
+/// the per-node record is 12 bytes (g: i32, parent: u32 node index with the
+/// S1-A closed bit folded into bit 31, steps: i32). Node index = tile index *
+/// 4096 + slot, so a u32 addresses ~524k tiles (~2.1G cells) -- far beyond any
+/// search. The store is fresh per search; memory scales with the explored
+/// area (12B/node vs ~40-50B/node hashed) and is dropped when the call ends.
+const TILE_BITS: i32 = 6;
+const TILE_SIZE: i32 = 1 << TILE_BITS; // 64
+const TILE_MASK: i32 = TILE_SIZE - 1;
+const TILE_CELLS: u32 = (TILE_SIZE * TILE_SIZE) as u32; // 4096
 
-/// Sentinel `parent` for source states (which have no parent). Distinguishes a
-/// node that is present-with-a-parent from a source, preserving the old
-/// `parents.contains_key` / `parents.get -> None` semantics after the g_costs +
-/// parents + steps_from_source maps were folded into one (memory: 3 copies of
-/// every explored cell's u64 key -> 1). Must fit in PARENT_MASK.
-const NO_PARENT: u64 = u64::MAX & PARENT_MASK;
+/// Closed flag lives in bit 31 of NodeSlot.parent (S1-A fold, now on the u32).
+const CLOSED_BIT32: u32 = 1 << 31;
+const PARENT_MASK32: u32 = !CLOSED_BIT32;
+/// Sentinel parent for source / unvisited nodes; max value inside PARENT_MASK32.
+const NO_PARENT32: u32 = PARENT_MASK32;
 
-/// Per-explored-cell A* state. Replaces the three parallel
-/// `FxHashMap<u64, _>` (g_costs / parents / steps_from_source) that each stored
-/// the SAME cell key; one map keyed once cuts key duplication + per-map hashing
-/// and improves cache locality. `path_vias` stays a separate (conditional,
-/// heap-Vec) map on purpose.
 #[derive(Clone, Copy)]
-struct NodeState {
-    g: i32,
-    parent: u64,   // bit 63 = closed flag; low bits = parent key or NO_PARENT
+struct NodeSlot {
+    g: i32,      // i32::MAX = unvisited
+    parent: u32, // bit 31 = closed; low 31 bits = parent node index or NO_PARENT32
     steps: i32,
 }
 
-/// Thin wrapper centralizing the g/parent/steps/closed accessors so every call
-/// site is an unambiguous method and the NO_PARENT / CLOSED_BIT handling lives
-/// in one place. All methods are trivial and inline to the same code the
-/// parallel maps + closed set emitted.
-#[derive(Default)]
-struct NodeMap {
-    m: FxHashMap<u64, NodeState>,
+const EMPTY_SLOT: NodeSlot = NodeSlot { g: i32::MAX, parent: NO_PARENT32, steps: 0 };
+
+struct Tile {
+    base_x: i32, // cell coords of slot (0, 0)
+    base_y: i32,
+    layer: u8,
+    slots: Box<[NodeSlot]>, // TILE_CELLS
+}
+
+/// Per-search node store. Semantics identical to the previous NodeMap:
+/// g()==MAX means unvisited, parent()==None means source-or-unvisited, the
+/// closed bit is only ever set on popped nodes and never relaxed away
+/// (call sites gate every relax on !closed).
+struct NodeStore {
+    tiles: Vec<Tile>,
+    index: FxHashMap<u64, u32>, // tile key -> index into tiles
     closed_count: u32,
 }
 
-impl NodeMap {
-    #[inline]
-    fn g(&self, key: u64) -> i32 {
-        self.m.get(&key).map_or(i32::MAX, |n| n.g)
+impl NodeStore {
+    fn new() -> Self {
+        Self { tiles: Vec::new(), index: FxHashMap::default(), closed_count: 0 }
     }
+
+    /// Tile hash key: the tile coordinates reuse GridState's 20/20/8 packing
+    /// (tile coords are cell coords >> 6, so they always fit).
     #[inline]
-    fn steps(&self, key: u64) -> i32 {
-        self.m.get(&key).map_or(i32::MAX, |n| n.steps)
+    fn tile_key(gx: i32, gy: i32, layer: u8) -> u64 {
+        GridState::new(gx >> TILE_BITS, gy >> TILE_BITS, layer).as_key()
     }
-    /// The cell's parent, or None for a source / undiscovered cell (matches the
-    /// old `parents.get(&key).copied()`).
+
+    /// Slot within a tile (arithmetic shift + mask handle negatives: floor
+    /// division semantics match between >> and &).
     #[inline]
-    fn parent(&self, key: u64) -> Option<u64> {
-        self.m.get(&key).and_then(|n| {
-            let p = n.parent & PARENT_MASK;
-            if p != NO_PARENT { Some(p) } else { None }
-        })
+    fn slot_of(gx: i32, gy: i32) -> u32 {
+        (((gy & TILE_MASK) << TILE_BITS) | (gx & TILE_MASK)) as u32
     }
-    /// Matches the old `parents.contains_key(&key)`.
+
+    /// Node index for a position, allocating (and default-filling) its tile on
+    /// first touch.
     #[inline]
-    fn has_parent(&self, key: u64) -> bool {
-        self.m.get(&key).map_or(false, |n| n.parent & PARENT_MASK != NO_PARENT)
+    fn ensure_index(&mut self, gx: i32, gy: i32, layer: u8) -> u32 {
+        let key = Self::tile_key(gx, gy, layer);
+        let tile_idx = match self.index.get(&key) {
+            Some(&t) => t,
+            None => {
+                let t = self.tiles.len() as u32;
+                self.tiles.push(Tile {
+                    base_x: (gx >> TILE_BITS) << TILE_BITS,
+                    base_y: (gy >> TILE_BITS) << TILE_BITS,
+                    layer,
+                    slots: vec![EMPTY_SLOT; TILE_CELLS as usize].into_boxed_slice(),
+                });
+                self.index.insert(key, t);
+                t
+            }
+        };
+        tile_idx * TILE_CELLS + Self::slot_of(gx, gy)
     }
-    /// Matches the old `closed.contains(&key)` (S1-A: closed folded into node).
+
+    /// (g, closed) at a position; (i32::MAX, false) when unvisited. The one
+    /// combined read the neighbor loops need (old: closed.contains + g_costs.get).
     #[inline]
-    fn is_closed(&self, key: u64) -> bool {
-        self.m.get(&key).map_or(false, |n| n.parent & CLOSED_BIT != 0)
-    }
-    /// Matches the old `closed.insert(key)`. Only ever called on a popped node,
-    /// which is always present in the map (every push relaxes/sources it first).
-    #[inline]
-    fn set_closed(&mut self, key: u64) {
-        if let Some(n) = self.m.get_mut(&key) {
-            n.parent |= CLOSED_BIT;
+    fn g_closed_at(&self, gx: i32, gy: i32, layer: u8) -> (i32, bool) {
+        match self.index.get(&Self::tile_key(gx, gy, layer)) {
+            Some(&t) => {
+                let s = &self.tiles[t as usize].slots[Self::slot_of(gx, gy) as usize];
+                (s.g, s.parent & CLOSED_BIT32 != 0)
+            }
+            None => (i32::MAX, false),
         }
+    }
+
+    #[inline]
+    fn slot(&self, idx: u32) -> &NodeSlot {
+        &self.tiles[(idx / TILE_CELLS) as usize].slots[(idx % TILE_CELLS) as usize]
+    }
+
+    #[inline]
+    fn slot_mut(&mut self, idx: u32) -> &mut NodeSlot {
+        &mut self.tiles[(idx / TILE_CELLS) as usize].slots[(idx % TILE_CELLS) as usize]
+    }
+
+    /// Cell coordinates of a node index (path reconstruction / parent walks).
+    #[inline]
+    fn coords(&self, idx: u32) -> (i32, i32, u8) {
+        let tile = &self.tiles[(idx / TILE_CELLS) as usize];
+        let s = (idx % TILE_CELLS) as i32;
+        (tile.base_x + (s & TILE_MASK), tile.base_y + (s >> TILE_BITS), tile.layer)
+    }
+
+    /// The node's parent index, or None for a source / unvisited node.
+    #[inline]
+    fn parent(&self, idx: u32) -> Option<u32> {
+        let p = self.slot(idx).parent & PARENT_MASK32;
+        if p != NO_PARENT32 { Some(p) } else { None }
+    }
+
+    #[inline]
+    fn steps_of(&self, idx: u32) -> i32 {
+        self.slot(idx).steps
+    }
+
+    #[inline]
+    fn is_closed(&self, idx: u32) -> bool {
+        self.slot(idx).parent & CLOSED_BIT32 != 0
+    }
+
+    /// Matches the old `closed.insert(key)`; count kept for RouteStats.
+    #[inline]
+    fn set_closed(&mut self, idx: u32) {
+        self.slot_mut(idx).parent |= CLOSED_BIT32;
         self.closed_count += 1;
     }
-    /// Matches the old `closed.len()` (for RouteStats only).
+
     #[inline]
     fn closed_len(&self) -> u32 {
         self.closed_count
     }
-    /// Source cell: g + steps=0, no parent (old: g_costs+steps inserted, parents NOT).
+
+    /// Source cell: g set, steps=0, no parent.
     #[inline]
-    fn set_source(&mut self, key: u64, g: i32) {
-        self.m.insert(key, NodeState { g, parent: NO_PARENT, steps: 0 });
+    fn set_source(&mut self, gx: i32, gy: i32, layer: u8, g: i32) {
+        let idx = self.ensure_index(gx, gy, layer);
+        *self.slot_mut(idx) = NodeSlot { g, parent: NO_PARENT32, steps: 0 };
     }
-    /// Relaxed cell: g + parent + steps inserted together (old: three inserts).
-    /// Never called on a closed node (call sites check is_closed first), so
-    /// clearing the closed bit here is a no-op by construction.
+
+    /// Relax a node: g + parent + steps written together. Never called on a
+    /// closed node (call sites check the closed flag first).
     #[inline]
-    fn relax(&mut self, key: u64, g: i32, parent: u64, steps: i32) {
-        self.m.insert(key, NodeState { g, parent, steps });
+    fn relax(&mut self, gx: i32, gy: i32, layer: u8, g: i32, parent_idx: u32, steps: i32) {
+        let idx = self.ensure_index(gx, gy, layer);
+        *self.slot_mut(idx) = NodeSlot { g, parent: parent_idx, steps };
     }
 }
 
@@ -268,7 +338,7 @@ impl GridRouter {
 
         // Initialize open set with all sources
         let mut open_set = BinaryHeap::new();
-        let mut nodes = NodeMap::default();
+        let mut store = NodeStore::new();
         let mut counter: u32 = 0;
 
         // Track via positions for each node's path (only used if via_exclusion_radius > 0)
@@ -353,7 +423,7 @@ impl GridRouter {
             });
             counter += 1;
             stats.cells_pushed += 1;
-            nodes.set_source(key, initial_g);
+            store.set_source(gx, gy, layer, initial_g);
             // Source nodes start with no vias on their path
             if via_exclusion_radius > 0 {
                 path_vias.insert(key, Vec::new());
@@ -371,9 +441,10 @@ impl GridRouter {
 
             let current = current_entry.state;
             let current_key = current.as_key();
+            let current_idx = store.ensure_index(current.gx, current.gy, current.layer);
             let g = current_entry.g_score;
 
-            if nodes.is_closed(current_key) {
+            if store.is_closed(current_idx) {
                 stats.duplicate_skips += 1;
                 continue;
             }
@@ -383,8 +454,8 @@ impl GridRouter {
             if target_set.contains(&current_key) {
                 // If end_direction is specified, verify we arrived from a compatible direction
                 let arrival_ok = if let Some((end_dx, end_dy)) = norm_end_dir {
-                    if let Some(parent_key) = nodes.parent(current_key) {
-                        let (px, py, _) = Self::unpack_key(parent_key);
+                    if let Some(parent_idx) = store.parent(current_idx) {
+                        let (px, py, _) = store.coords(parent_idx);
                         let arrive_dx = (current.gx - px) as f64;
                         let arrive_dy = (current.gy - py) as f64;
                         let arrive_len = (arrive_dx * arrive_dx + arrive_dy * arrive_dy).sqrt();
@@ -408,12 +479,12 @@ impl GridRouter {
 
                 if arrival_ok {
                     // Reconstruct path
-                    let path = self.reconstruct_path(&nodes, current_key);
+                    let path = self.reconstruct_path(&store, current_idx);
                     stats.path_length = path.len() as u32;
                     stats.path_cost = g;
                     stats.final_g = g;
                     stats.open_set_size = open_set.len() as u32;
-                    stats.closed_set_size = nodes.closed_len();
+                    stats.closed_set_size = store.closed_len();
                     // Count vias in path
                     for i in 1..path.len() {
                         if path[i].2 != path[i-1].2 {
@@ -427,14 +498,14 @@ impl GridRouter {
                 continue;
             }
 
-            nodes.set_closed(current_key);
+            store.set_closed(current_idx);
 
             // Check via constraints for diff pair routing (collinear_vias mode):
             // 1. If we just came through a via: must continue in exact same direction as before via
             // 2. If we're one step after a via exit: must be within ±45° of the pre-via direction
             // This ensures clean via geometry for differential pairs
             let (required_direction, allowed_45deg_from): (Option<(i32, i32)>, Option<(i32, i32)>) = if collinear_vias {
-                self.get_via_direction_constraints(&nodes, current_key, &current)
+                self.get_via_direction_constraints(&store, current_idx, &current)
             } else {
                 (None, None)
             };
@@ -447,11 +518,11 @@ impl GridRouter {
             };
 
             // Get steps from source for direction constraint
-            let current_steps = nodes.steps(current_key);
+            let current_steps = store.steps_of(current_idx);
 
             // Get previous direction (parent -> current) for turn cost calculation
-            let prev_direction: Option<(i32, i32)> = nodes.parent(current_key).map(|parent_key| {
-                let (px, py, _) = Self::unpack_key(parent_key);
+            let prev_direction: Option<(i32, i32)> = store.parent(current_idx).map(|parent_idx| {
+                let (px, py, _) = store.coords(parent_idx);
                 let pdx = current.gx - px;
                 let pdy = current.gy - py;
                 // Normalize to unit direction (handle multi-step moves like vias)
@@ -502,7 +573,8 @@ impl GridRouter {
                 let neighbor = GridState::new(ngx, ngy, current.layer);
                 let neighbor_key = neighbor.as_key();
 
-                if nodes.is_closed(neighbor_key) {
+                let (existing_g, neighbor_closed) = store.g_closed_at(ngx, ngy, current.layer);
+                if neighbor_closed {
                     continue;
                 }
 
@@ -537,12 +609,11 @@ impl GridRouter {
                 let path_attraction_bonus = self.get_path_attraction_bonus(ngx, ngy, current.layer, dx, dy);
                 let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty - attraction_bonus - path_attraction_bonus;
 
-                let existing_g = nodes.g(neighbor_key);
                 if new_g < existing_g {
                     if existing_g != i32::MAX {
                         stats.cells_revisited += 1;
                     }
-                    nodes.relax(neighbor_key, new_g, current_key, current_steps + 1);
+                    store.relax(ngx, ngy, current.layer, new_g, current_idx, current_steps + 1);
                     // Propagate via list to neighbor (same vias since no layer change)
                     if via_exclusion_radius > 0 {
                         path_vias.insert(neighbor_key, current_vias.clone());
@@ -566,15 +637,15 @@ impl GridRouter {
             // This requires at least 2 steps before via (great-grandparent must exist),
             // and direction into via must be within ±45° of previous direction
             let can_place_via = if collinear_vias {
-                if let Some(parent_key) = nodes.parent(current_key) {
-                    if let Some(grandparent_key) = nodes.parent(parent_key) {
+                if let Some(parent_idx) = store.parent(current_idx) {
+                    if let Some(grandparent_idx) = store.parent(parent_idx) {
                         // Need great-grandparent to ensure 2 full steps before via
-                        if !nodes.has_parent(grandparent_key) {
+                        if store.parent(grandparent_idx).is_none() {
                             false // Only 1 step before via - need at least 2
                         } else {
                             // Have great-grandparent - check that approach direction is within ±45° of previous
-                            let (parent_x, parent_y, _) = Self::unpack_key(parent_key);
-                            let (gp_x, gp_y, _) = Self::unpack_key(grandparent_key);
+                            let (parent_x, parent_y, _) = store.coords(parent_idx);
+                            let (gp_x, gp_y, _) = store.coords(grandparent_idx);
 
                             // Direction from grandparent to parent (previous direction)
                             let prev_dx = parent_x - gp_x;
@@ -642,7 +713,8 @@ impl GridRouter {
                     let neighbor = GridState::new(current.gx, current.gy, layer);
                     let neighbor_key = neighbor.as_key();
 
-                    if nodes.is_closed(neighbor_key) {
+                    let (existing_g, neighbor_closed) = store.g_closed_at(current.gx, current.gy, layer);
+                    if neighbor_closed {
                         continue;
                     }
 
@@ -660,12 +732,11 @@ impl GridRouter {
                     let combined_via_cost = (via_cost + layer_transition_cost).max(0);
                     let new_g = g + combined_via_cost + proximity_cost;
 
-                    let existing_g = nodes.g(neighbor_key);
                     if new_g < existing_g {
                         if existing_g != i32::MAX {
                             stats.cells_revisited += 1;
                         }
-                        nodes.relax(neighbor_key, new_g, current_key, current_steps);
+                        store.relax(current.gx, current.gy, layer, new_g, current_idx, current_steps);
                         // Track via positions (only real vias, not free vias at through-holes)
                         if via_exclusion_radius > 0 {
                             if is_free {
@@ -693,7 +764,7 @@ impl GridRouter {
 
         // No path found - fill in final stats
         stats.open_set_size = open_set.len() as u32;
-        stats.closed_set_size = nodes.closed_len();
+        stats.closed_set_size = store.closed_len();
         let stats_dict = self.stats_to_dict(&stats);
         (None, iterations, stats_dict)
     }
@@ -734,7 +805,7 @@ impl GridRouter {
             .collect();
 
         let mut open_set = BinaryHeap::new();
-        let mut nodes = NodeMap::default();
+        let mut store = NodeStore::new();
         let mut counter: u32 = 0;
         let mut path_vias: FxHashMap<u64, Vec<(i32, i32)>> = FxHashMap::default();
 
@@ -783,7 +854,7 @@ impl GridRouter {
             let h = self.heuristic_to_targets(&state, &target_states);
             open_set.push(OpenEntry { f_score: initial_g + h, g_score: initial_g, state, counter });
             counter += 1;
-            nodes.set_source(key, initial_g);
+            store.set_source(gx, gy, layer, initial_g);
             if via_exclusion_radius > 0 { path_vias.insert(key, Vec::new()); }
         }
 
@@ -795,14 +866,15 @@ impl GridRouter {
 
             let current = current_entry.state;
             let current_key = current.as_key();
+            let current_idx = store.ensure_index(current.gx, current.gy, current.layer);
             let g = current_entry.g_score;
 
-            if nodes.is_closed(current_key) { continue; }
+            if store.is_closed(current_idx) { continue; }
 
             if target_set.contains(&current_key) {
                 let arrival_ok = if let Some((end_dx, end_dy)) = norm_end_dir {
-                    if let Some(parent_key) = nodes.parent(current_key) {
-                        let (px, py, _) = Self::unpack_key(parent_key);
+                    if let Some(parent_idx) = store.parent(current_idx) {
+                        let (px, py, _) = store.coords(parent_idx);
                         let arrive_dx = (current.gx - px) as f64;
                         let arrive_dy = (current.gy - py) as f64;
                         let arrive_len = (arrive_dx * arrive_dx + arrive_dy * arrive_dy).sqrt();
@@ -814,27 +886,27 @@ impl GridRouter {
                 } else { true };
 
                 if arrival_ok {
-                    let path = self.reconstruct_path(&nodes, current_key);
+                    let path = self.reconstruct_path(&store, current_idx);
                     return (Some(path), iterations, Vec::new());
                 }
                 continue;
             }
 
-            nodes.set_closed(current_key);
+            store.set_closed(current_idx);
 
             let (required_direction, allowed_45deg_from) = if collinear_vias {
-                self.get_via_direction_constraints(&nodes, current_key, &current)
+                self.get_via_direction_constraints(&store, current_idx, &current)
             } else { (None, None) };
 
             let current_vias: Vec<(i32, i32)> = if via_exclusion_radius > 0 {
                 path_vias.get(&current_key).cloned().unwrap_or_default()
             } else { Vec::new() };
 
-            let current_steps = nodes.steps(current_key);
+            let current_steps = store.steps_of(current_idx);
 
             // Get previous direction (parent -> current) for turn cost calculation
-            let prev_direction: Option<(i32, i32)> = nodes.parent(current_key).map(|parent_key| {
-                let (px, py, _) = Self::unpack_key(parent_key);
+            let prev_direction: Option<(i32, i32)> = store.parent(current_idx).map(|parent_idx| {
+                let (px, py, _) = store.coords(parent_idx);
                 let pdx = current.gx - px;
                 let pdy = current.gy - py;
                 if pdx == 0 && pdy == 0 { (0, 0) } else { (pdx.signum(), pdy.signum()) }
@@ -869,7 +941,8 @@ impl GridRouter {
                 let neighbor = GridState::new(ngx, ngy, current.layer);
                 let neighbor_key = neighbor.as_key();
 
-                if nodes.is_closed(neighbor_key) { continue; }
+                let (existing_g, neighbor_closed) = store.g_closed_at(ngx, ngy, current.layer);
+                if neighbor_closed { continue; }
 
                 let base_move_cost = if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST };
                 // Apply layer cost multiplier (1000 = 1.0x, 1500 = 1.5x, etc.)
@@ -901,9 +974,8 @@ impl GridRouter {
                 let path_attraction_bonus = self.get_path_attraction_bonus(ngx, ngy, current.layer, dx, dy);
                 let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty - attraction_bonus - path_attraction_bonus;
 
-                let existing_g = nodes.g(neighbor_key);
                 if new_g < existing_g {
-                    nodes.relax(neighbor_key, new_g, current_key, current_steps + 1);
+                    store.relax(ngx, ngy, current.layer, new_g, current_idx, current_steps + 1);
                     if via_exclusion_radius > 0 { path_vias.insert(neighbor_key, current_vias.clone()); }
                     let h = self.heuristic_to_targets(&neighbor, &target_states);
                     open_set.push(OpenEntry { f_score: new_g + h, g_score: new_g, state: neighbor, counter });
@@ -913,12 +985,12 @@ impl GridRouter {
 
             // Via expansion
             let can_place_via = if collinear_vias {
-                if let Some(parent_key) = nodes.parent(current_key) {
-                    if let Some(grandparent_key) = nodes.parent(parent_key) {
-                        if !nodes.has_parent(grandparent_key) { false }
+                if let Some(parent_idx) = store.parent(current_idx) {
+                    if let Some(grandparent_idx) = store.parent(parent_idx) {
+                        if store.parent(grandparent_idx).is_none() { false }
                         else {
-                            let (parent_x, parent_y, _) = Self::unpack_key(parent_key);
-                            let (gp_x, gp_y, _) = Self::unpack_key(grandparent_key);
+                            let (parent_x, parent_y, _) = store.coords(parent_idx);
+                            let (gp_x, gp_y, _) = store.coords(grandparent_idx);
                             let prev_dx = parent_x - gp_x;
                             let prev_dy = parent_y - gp_y;
                             let approach_dx = current.gx - parent_x;
@@ -963,7 +1035,8 @@ impl GridRouter {
                     let neighbor = GridState::new(current.gx, current.gy, layer);
                     let neighbor_key = neighbor.as_key();
 
-                    if nodes.is_closed(neighbor_key) { continue; }
+                    let (existing_g, neighbor_closed) = store.g_closed_at(current.gx, current.gy, layer);
+                    if neighbor_closed { continue; }
 
                     // Use zero cost for free via positions (through-hole pads on same net)
                     let is_free = obstacles.is_free_via(current.gx, current.gy);
@@ -979,9 +1052,8 @@ impl GridRouter {
                     let combined_via_cost = (via_cost + layer_transition_cost).max(0);
                     let new_g = g + combined_via_cost + proximity_cost;
 
-                    let existing_g = nodes.g(neighbor_key);
                     if new_g < existing_g {
-                        nodes.relax(neighbor_key, new_g, current_key, current_steps);
+                        store.relax(current.gx, current.gy, layer, new_g, current_idx, current_steps);
                         // Track via positions (only real vias, not free vias at through-holes)
                         if via_exclusion_radius > 0 {
                             if is_free {
@@ -1055,28 +1127,20 @@ impl GridRouter {
         (min_h as f32 * self.h_weight) as i32
     }
 
-    /// Reconstruct path from the node map (follows parent links to the source).
+    /// Reconstruct path from the node store (follows parent indices back to
+    /// the source, whose parent is NO_PARENT32 -> None -> loop terminates).
     fn reconstruct_path(
         &self,
-        nodes: &NodeMap,
-        goal_key: u64,
+        store: &NodeStore,
+        goal_idx: u32,
     ) -> Vec<(i32, i32, u8)> {
         let mut path = Vec::new();
-        let mut current_key = goal_key;
+        let mut idx = goal_idx;
 
         loop {
-            // Unpack key back to state
-            let layer = (current_key & 0xFF) as u8;
-            let y = ((current_key >> 8) & 0xFFFFF) as i32;
-            let x = ((current_key >> 28) & 0xFFFFF) as i32;
-            // Handle negative coordinates (sign extension)
-            let x = if x & 0x80000 != 0 { x | !0xFFFFF_i32 } else { x };
-            let y = if y & 0x80000 != 0 { y | !0xFFFFF_i32 } else { y };
-
-            path.push((x, y, layer));
-
-            match nodes.parent(current_key) {
-                Some(parent_key) => current_key = parent_key,
+            path.push(store.coords(idx));
+            match store.parent(idx) {
+                Some(parent_idx) => idx = parent_idx,
                 None => break,
             }
         }
@@ -1135,24 +1199,24 @@ impl GridRouter {
     /// Returns (required_exact_direction, allowed_45deg_base_direction)
     fn get_via_direction_constraints(
         &self,
-        nodes: &NodeMap,
-        current_key: u64,
+        store: &NodeStore,
+        current_idx: u32,
         current: &GridState,
     ) -> (Option<(i32, i32)>, Option<(i32, i32)>) {
         // Get parent
-        let parent_key = match nodes.parent(current_key) {
-            Some(k) => k,
+        let parent_idx = match store.parent(current_idx) {
+            Some(i) => i,
             None => return (None, None),
         };
-        let (parent_x, parent_y, parent_layer) = Self::unpack_key(parent_key);
+        let (parent_x, parent_y, parent_layer) = store.coords(parent_idx);
 
         // Check if parent was a via (same position as current, different layer)
         let parent_is_via = parent_x == current.gx && parent_y == current.gy && parent_layer != current.layer;
 
         if parent_is_via {
             // We just came through a via - need exact same direction as before via
-            if let Some(grandparent_key) = nodes.parent(parent_key) {
-                let (gp_x, gp_y, _) = Self::unpack_key(grandparent_key);
+            if let Some(grandparent_idx) = store.parent(parent_idx) {
+                let (gp_x, gp_y, _) = store.coords(grandparent_idx);
                 let dx = parent_x - gp_x;
                 let dy = parent_y - gp_y;
                 if dx != 0 || dy != 0 {
@@ -1166,19 +1230,19 @@ impl GridRouter {
 
         // Check if grandparent was a via (we're one step after via exit)
         // Still require exact same direction for symmetry when path is reversed
-        let grandparent_key = match nodes.parent(parent_key) {
-            Some(k) => k,
+        let grandparent_idx = match store.parent(parent_idx) {
+            Some(i) => i,
             None => return (None, None),
         };
-        let (gp_x, gp_y, gp_layer) = Self::unpack_key(grandparent_key);
+        let (gp_x, gp_y, gp_layer) = store.coords(grandparent_idx);
 
         let grandparent_is_via = gp_x == parent_x && gp_y == parent_y && gp_layer != parent_layer;
 
         if grandparent_is_via {
             // We're one step after via exit - still require exact same direction
             // (This ensures 2 straight steps after via for symmetric geometry when reversed)
-            if let Some(great_grandparent_key) = nodes.parent(grandparent_key) {
-                let (ggp_x, ggp_y, _) = Self::unpack_key(great_grandparent_key);
+            if let Some(great_grandparent_idx) = store.parent(grandparent_idx) {
+                let (ggp_x, ggp_y, _) = store.coords(great_grandparent_idx);
                 let dx = gp_x - ggp_x;
                 let dy = gp_y - ggp_y;
                 if dx != 0 || dy != 0 {
@@ -1191,18 +1255,18 @@ impl GridRouter {
         }
 
         // Check if great-grandparent was a via (we're two steps after via exit)
-        let great_grandparent_key = match nodes.parent(grandparent_key) {
-            Some(k) => k,
+        let great_grandparent_idx = match store.parent(grandparent_idx) {
+            Some(i) => i,
             None => return (None, None),
         };
-        let (ggp_x, ggp_y, ggp_layer) = Self::unpack_key(great_grandparent_key);
+        let (ggp_x, ggp_y, ggp_layer) = store.coords(great_grandparent_idx);
 
         let great_grandparent_is_via = ggp_x == gp_x && ggp_y == gp_y && ggp_layer != gp_layer;
 
         if great_grandparent_is_via {
             // We're two steps after via exit - allow ±45° turn
-            if let Some(gggp_key) = nodes.parent(great_grandparent_key) {
-                let (gggp_x, gggp_y, _) = Self::unpack_key(gggp_key);
+            if let Some(gggp_idx) = store.parent(great_grandparent_idx) {
+                let (gggp_x, gggp_y, _) = store.coords(gggp_idx);
                 let dx = ggp_x - gggp_x;
                 let dy = ggp_y - gggp_y;
                 if dx != 0 || dy != 0 {
