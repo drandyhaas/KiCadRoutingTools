@@ -2974,7 +2974,19 @@ class RoutingDialog(wx.Dialog):
                 # Route each net class group with its own parameters
                 total_successful = 0
                 total_failed = 0
-                all_results = {'results': [], 'all_swap_vias': [], 'all_swap_segments': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': [], 'segments_to_remove': []}
+                # #382 E5: aggregate the FULL results_data key set. The old
+                # init listed only 6 keys and the extend loop below re-added
+                # only those; `vias_to_remove` (populated by rip-existing,
+                # route.py:1539, and consumed by _apply_results_to_board) was
+                # silently dropped, so a per-netclass GUI route with
+                # --rip-existing-nets left the ripped nets' stale vias on the
+                # board (stacked/duplicate vias, #300/#318 class). Seed every
+                # key empty and extend generically so no key can be dropped.
+                all_results = {k: [] for k in (
+                    'results', 'all_swap_vias', 'all_swap_segments',
+                    'exclusion_zone_lines', 'boundary_debug_labels',
+                    'segments_to_remove', 'vias_to_remove', 'pad_swaps',
+                    'single_ended_target_swap_info', 'all_segment_modifications')}
 
                 class_names = list(config['nets_by_class'].keys())
                 total_classes = len(class_names)
@@ -3087,18 +3099,13 @@ class RoutingDialog(wx.Dialog):
                     total_successful += successful
                     total_failed += failed
                     if results_data:
-                        all_results['results'].extend(results_data.get('results', []))
-                        all_results['all_swap_vias'].extend(results_data.get('all_swap_vias', []))
-                        # #340 swap reuse-connector copper (same channel the
-                        # standard path draws) -- omitting it leaves a swapped
-                        # net open in the per-class GUI route.
-                        all_results['all_swap_segments'].extend(results_data.get('all_swap_segments', []))
-                        all_results['exclusion_zone_lines'].extend(results_data.get('exclusion_zone_lines', []))
-                        all_results['boundary_debug_labels'].extend(results_data.get('boundary_debug_labels', []))
-                        # Original-board loop/dead-end segments flagged for removal
-                        # by cycle-prune (#4c1ac33) / dead-end sweep - must carry to
-                        # the apply step or they're never stripped in the per-class path.
-                        all_results['segments_to_remove'].extend(results_data.get('segments_to_remove', []))
+                        # Generic extend of every list-valued key (#382 E5):
+                        # covers all_swap_segments (#340), segments_to_remove
+                        # (dead-end/cycle prune), vias_to_remove (rip-existing),
+                        # and any future key without another manual add.
+                        for _k, _v in results_data.items():
+                            if isinstance(_v, list):
+                                all_results.setdefault(_k, []).extend(_v)
 
                 successful = total_successful
                 failed = total_failed
