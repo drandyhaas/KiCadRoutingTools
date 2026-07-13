@@ -238,6 +238,29 @@ def _dump_engine_config(engine, cfg):
         pass
 
 
+def _empty_results_data() -> dict:
+    """The return_results contract with every field empty (#382 E5).
+
+    batch_route's early-return paths (nothing to route, KWARGS-dump exit) used
+    to emit ad-hoc subsets of these keys, so a GUI caller that iterated a key
+    the full path always provides would KeyError on an early exit. This is the
+    single source for the empty shape; it must carry EXACTLY the keys the full
+    path builds (see the `if return_results:` block), all as empty lists.
+    """
+    return {
+        'results': [],
+        'all_swap_vias': [],
+        'all_swap_segments': [],
+        'pad_swaps': [],
+        'single_ended_target_swap_info': [],
+        'all_segment_modifications': [],
+        'exclusion_zone_lines': [],
+        'boundary_debug_labels': [],
+        'segments_to_remove': [],
+        'vias_to_remove': [],
+    }
+
+
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
@@ -398,7 +421,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'w') as _f:
                 _json.dump(_dump, _f, indent=1, sort_keys=True)
             if return_results:
-                return 0, 0, 0.0, {'results': [], 'segments_to_remove': []}
+                return 0, 0, 0.0, _empty_results_data()
             return 0, 0, 0.0
     visualize = vis_callback is not None
 
@@ -575,7 +598,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if not net_ids:
         print("No valid nets to route!")
         if return_results:
-            return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
+            return 0, 0, 0.0, _empty_results_data()
         _write_passthrough_output(input_file, output_file)
         return 0, 0, 0.0
 
@@ -583,7 +606,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if not net_ids:
         print("All nets are already fully connected - nothing to route!")
         if return_results:
-            return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
+            return 0, 0, 0.0, _empty_results_data()
         _write_passthrough_output(input_file, output_file)
         return 0, 0, 0.0
 
