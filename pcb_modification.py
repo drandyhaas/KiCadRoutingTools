@@ -18,32 +18,6 @@ _COLLAPSE_DEBUG = os.environ.get('KICAD_COLLAPSE_DEBUG')
 _PRUNE_CONN_VERIFY = os.environ.get('PRUNE_CONN_VERIFY')
 
 
-def get_copper_layers_from_segments(segments: List[Segment], existing_segments: List[Segment] = None) -> List[str]:
-    """
-    Build a list of all copper layers from segments.
-
-    For through-hole vias that connect all layers, we need to know all copper layers
-    present in the design. This function extracts them from the segments.
-
-    Args:
-        segments: New segments being processed
-        existing_segments: Optional existing segments to also consider
-
-    Returns:
-        List of copper layer names (always includes F.Cu and B.Cu for through-hole vias)
-    """
-    all_copper_layers = set()
-    for seg in segments:
-        all_copper_layers.add(seg.layer)
-    if existing_segments:
-        for seg in existing_segments:
-            all_copper_layers.add(seg.layer)
-    # Ensure F.Cu and B.Cu are always included for through-hole vias
-    all_copper_layers.add('F.Cu')
-    all_copper_layers.add('B.Cu')
-    return list(all_copper_layers)
-
-
 def _point_anchored(x: float, y: float, layer: str, via_pts, pad_pts,
                     seg_index, cell: float, ignore_seg, tol: float) -> bool:
     """A segment endpoint is anchored if it lands on a same-net via (vias span
@@ -220,7 +194,8 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
 # is deliberately asymmetric (measure reality physically; refuse to ship
 # fragility). See issue #322 (smartknob +5V: mid-chain removals each passed
 # the overlap gate until 5 pads were genuinely disconnected).
-from connectivity import COINCIDENCE_TOL as _STRICT_GATE_WIDTH  # one constant (#320)
+from connectivity import COINCIDENCE_TOL
+_STRICT_GATE_WIDTH = COINCIDENCE_TOL  # one constant (#320): strict twin gate width
 
 
 def _strict_conn_graph(net_id, universe, vias, pads, zones,
@@ -428,7 +403,7 @@ def _nearest_pad_point(px, py, pad):
 
 
 def _duplicate_connector(px: float, py: float, tx: float, ty: float,
-                         segs, tol: float = 0.02) -> bool:
+                         segs, tol: float = COINCIDENCE_TOL) -> bool:
     """True if a same-net segment in ``segs`` already directly joins (px,py) and
     (tx,ty) on this layer.
 
@@ -469,7 +444,8 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
     """
     import math
     from collections import defaultdict
-    from check_drc import _SOFT_JOINT_MIN_GAP, point_to_pad_distance
+    from routing_constants import SOFT_JOINT_MIN_GAP
+    from check_drc import point_to_pad_distance
     from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
                                        _seg_foreign_via_dist, _seg_foreign_hole_dist)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
@@ -498,7 +474,7 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
             if math.hypot(x - vx, y - vy) <= vr + 0.01:
                 return True
         for p in pcb_data.pads_by_net.get(nid, []):
-            if point_to_pad_distance(x, y, p) <= 0.02:
+            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
                 return True
         return False
 
@@ -534,7 +510,7 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 xj, yj, wj = ends[j]
                 gap = math.hypot(xi - xj, yi - yj)
                 cap = (wi + wj) / 2.0
-                if _SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
+                if SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
                     w = min(wi, wj)
                     if not clears(net_id, xi, yi, xj, yj, layer, w):
                         continue
@@ -890,7 +866,7 @@ def _soft_joint_pairs(segs, vias, pads):
             if math.hypot(x - vx, y - vy) <= vr + 0.01:
                 return True
         for p in (pads or []):
-            if point_to_pad_distance(x, y, p) <= 0.02:
+            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
                 return True
         return False
 

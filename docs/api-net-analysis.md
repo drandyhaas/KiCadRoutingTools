@@ -181,10 +181,8 @@ actual routing layer names.
 
 ```python
 find_pad_nearest_to_position(pcb_data, net_id, x, y) -> Optional[Pad]
-find_pad_at_position(pcb_data, x, y, tolerance=0.01) -> Optional[Pad]
 get_chip_pad_positions(pcb_data, net_ids, min_pads=4)
     -> List[Tuple[float, float, str]]     # pseudo-stub positions on chips
-get_source_chip_center(pcb_data, source_pads) -> Optional[Tuple[float, float]]
 find_containing_or_nearest_bga_zone(point, bga_zones) -> Optional[Tuple]
 compute_routing_aware_distance(target_free_end, source_chip_center,
                                bga_zone) -> float   # path length around the BGA
@@ -277,7 +275,6 @@ get_stub_vias(pcb_data, net_id, stub_segments, tolerance=0.05) -> List[Via]
 calculate_stub_length(pcb_data, net_id) -> float
 calculate_stub_via_barrel_length(stub_vias, stub_layer, pcb_data) -> float
 get_stub_endpoints(pcb_data, net_ids) -> List[Tuple[float, float, str]]
-get_net_stub_centroids(pcb_data, net_id) -> List[Tuple[float, float]]
 ```
 
 ### Endpoint selection for routing
@@ -306,14 +303,6 @@ get_multipoint_net_pads(pcb_data, net_id, config) -> Optional[List[Tuple]]
 
 Returns 3+ endpoint tuples if the net needs multi-point (MST) routing, else
 `None`.
-
-```python
-normalize_endpoints_by_component(pcb_data, sources, targets, net_id)
-    -> (sources, targets)
-```
-
-Swaps source/target so the source is always on the alphabetically-first
-component — keeps crossing detection consistent across nets.
 
 ### Connectivity through zones
 
@@ -346,9 +335,6 @@ compute_mst_edges(points, use_manhattan=False)
     -> List[Tuple[int, int, float]]     # (index_a, index_b, length)
 compute_mst_segments(points)
     -> List[Tuple[Tuple, Tuple]]        # ((x1, y1), (x2, y2))
-find_farthest_pad_pair(pads) -> Tuple[int, int]   # Manhattan distance
-find_closest_point_on_segments(segments, target_x, target_y, target_layers)
-    -> (x, y, layer, distance)          # tap point for multi-point routing
 find_connected_segment_positions(pcb_data, start_x, start_y, net_id,
                                  tolerance=0.1, layer=None) -> set
 find_connected_segments(pcb_data, start_x, start_y, net_id) -> List[Segment]

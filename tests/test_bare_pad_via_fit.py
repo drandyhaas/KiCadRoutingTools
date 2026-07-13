@@ -36,8 +36,9 @@ TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT_DIR)
 
-from kicad_parser import PCBData, Via, Pad, Net
+from kicad_parser import Via, Net
 from routing_config import GridRouteConfig
+from synth import make_pad, make_via, make_pcb  # #382 E7: canonical builders
 import layer_swap_optimization as lso
 
 P_NET, N_NET, FOREIGN_NET = 1, 2, 99
@@ -54,23 +55,19 @@ def _cfg():
 
 
 def _via(x, y, net_id, cfg):
-    return Via(x=x, y=y, size=cfg.via_size, drill=cfg.via_drill,
-               layers=['F.Cu', 'B.Cu'], net_id=net_id)
+    return make_via(x, y, net_id=net_id, size=cfg.via_size, drill=cfg.via_drill)
 
 
 def _pad(ref, num, x, y, net_id, net_name):
-    return Pad(component_ref=ref, pad_number=num, global_x=x, global_y=y,
-               local_x=0.0, local_y=0.0, size_x=0.5, size_y=0.5, shape='rect',
-               layers=['F.Cu'], net_id=net_id, net_name=net_name)
+    return make_pad(net_id=net_id, x=x, y=y, ref=ref, num=num,
+                    net_name=net_name, size_x=0.5, size_y=0.5, shape='rect',
+                    layers=('F.Cu',))
 
 
 def _pcb(vias=None, pads_by_net=None):
-    return PCBData(
-        footprints={}, segments=[], vias=list(vias or []),
-        nets={P_NET: Net(P_NET, '/PAIR_P'), N_NET: Net(N_NET, '/PAIR_N'),
-              FOREIGN_NET: Net(FOREIGN_NET, '+2V5')},
-        board_info=None, pads_by_net=pads_by_net or {},
-    )
+    return make_pcb(vias=vias, pads_by_net=pads_by_net,
+                    nets={P_NET: Net(P_NET, '/PAIR_P'), N_NET: Net(N_NET, '/PAIR_N'),
+                          FOREIGN_NET: Net(FOREIGN_NET, '+2V5')})
 
 
 def main():

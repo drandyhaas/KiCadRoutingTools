@@ -1761,25 +1761,6 @@ def remove_pads_via_keepout(obstacles: GridObstacleMap, pads: list,
             obstacles.remove_blocked_vias_batch(np.ascontiguousarray(cells.astype(np.int32)))
 
 
-def build_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
-                       exclude_net_id: int, unrouted_stubs: Optional[List[Tuple[float, float]]] = None) -> GridObstacleMap:
-    """Build Rust obstacle map from PCB data (legacy function for compatibility)."""
-    # Build base map excluding just this net
-    obstacles = build_base_obstacle_map(pcb_data, config, [exclude_net_id])
-
-    # Add stub proximity costs
-    if unrouted_stubs:
-        add_stub_proximity_costs(obstacles, unrouted_stubs, config)
-
-    # Add same-net via clearance blocking (for DRC - vias can't be too close even on same net)
-    add_same_net_via_clearance(obstacles, pcb_data, exclude_net_id, config)
-
-    # Add same-net pad drill hole-to-hole clearance blocking
-    add_same_net_pad_drill_via_clearance(obstacles, pcb_data, exclude_net_id, config)
-
-    return obstacles
-
-
 # ============================================================================
 # Visualization support - captures blocked cell data for rendering
 # ============================================================================

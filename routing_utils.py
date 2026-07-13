@@ -385,18 +385,6 @@ _SQUARE_OFFSETS_CACHE: Dict[int, "np.ndarray"] = {}
 _CIRCLE_OFFSETS_CACHE: Dict[Tuple[int, float], "np.ndarray"] = {}
 
 
-def square_offsets(expansion: int) -> "np.ndarray":
-    """(K, 2) int32 offsets covering the full square [-e, e] x [-e, e],
-    in the same (ex outer, ey inner) order as the legacy loops."""
-    offs = _SQUARE_OFFSETS_CACHE.get(expansion)
-    if offs is None:
-        r = np.arange(-expansion, expansion + 1, dtype=np.int32)
-        exg, eyg = np.meshgrid(r, r, indexing="ij")
-        offs = np.column_stack([exg.ravel(), eyg.ravel()]).astype(np.int32)
-        _SQUARE_OFFSETS_CACHE[expansion] = offs
-    return offs
-
-
 def circle_offsets(block_range: int, effective_sq: float) -> "np.ndarray":
     """(K, 2) int32 offsets with ex^2 + ey^2 <= effective_sq, matching the
     legacy loops' integer-vs-float comparison and iteration order."""

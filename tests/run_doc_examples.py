@@ -12,6 +12,7 @@ Usage:
 
 Exits non-zero if any example fails.
 """
+import ast
 import os
 import re
 import subprocess
@@ -44,9 +45,34 @@ def is_fragment(block):
     return False
 
 
+def gridrouteconfig_undocumented_fields():
+    """#382 E11: every public GridRouteConfig field must appear in
+    docs/api-routing-config.md, so a newly-added routing knob can't ship
+    undocumented. Returns the list of dataclass fields missing from the doc's
+    field tables (empty == parity)."""
+    src = open(os.path.join(REPO_ROOT, 'routing_config.py'), encoding='utf-8').read()
+    fields = [s.target.id
+              for node in ast.walk(ast.parse(src))
+              if isinstance(node, ast.ClassDef) and node.name == 'GridRouteConfig'
+              for s in node.body
+              if isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name)
+              and not s.target.id.startswith('_')]
+    doc = open(os.path.join(REPO_ROOT, 'docs/api-routing-config.md'), encoding='utf-8').read()
+    documented = set(re.findall(r'\|\s*`([a-z_][a-z0-9_]*)`\s*\|', doc))
+    return [f for f in fields if f not in documented]
+
+
 def main():
     failures = []
     ran = skipped = 0
+
+    undoc = gridrouteconfig_undocumented_fields()
+    if undoc:
+        failures.append('GridRouteConfig field parity')
+        print('FAIL GridRouteConfig fields missing from docs/api-routing-config.md: '
+              + ', '.join(undoc))
+    else:
+        print('PASS GridRouteConfig field parity (all documented)')
     for doc in DOCS:
         text = open(os.path.join(REPO_ROOT, doc), encoding='utf-8').read()
         for i, block in enumerate(re.findall(r'```python\n(.*?)```', text, re.DOTALL)):

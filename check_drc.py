@@ -35,7 +35,12 @@ _EXPAND_ROUTING = None
 # Same-net endpoints closer than this are treated as a COINCIDENT (clean) joint;
 # a larger gap that is still within cap-overlap is a fragile soft joint (#soft-joint).
 # ~10um is above grid-quantization noise (~8um) so a snapped junction is not flagged.
-_SOFT_JOINT_MIN_GAP = 0.010
+# Single source of truth lives in routing_constants; kept under the old private
+# name here for internal use.
+from routing_constants import SOFT_JOINT_MIN_GAP as _SOFT_JOINT_MIN_GAP
+
+# The one endpoint-coincidence radius (same value everywhere: 0.02mm / 20um).
+from connectivity import COINCIDENCE_TOL
 
 
 def _expand_cu(pad_layers: List[str], routing_layers: List[str]) -> List[str]:
@@ -311,7 +316,7 @@ def check_segment_overlap(seg1: Segment, seg2: Segment, clearance: float, cleara
     """Check if two segments on the same layer violate clearance.
 
     Args:
-        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.05 = 5%).
                          Violations smaller than clearance * clearance_margin are ignored.
 
     Returns:
@@ -325,7 +330,7 @@ def check_segment_overlap(seg1: Segment, seg2: Segment, clearance: float, cleara
     actual_dist, pt1, pt2 = segment_to_segment_closest_points(seg1, seg2)
     overlap = required_dist - actual_dist
 
-    # Use clearance-based tolerance (10% of clearance by default)
+    # Use clearance-based tolerance (5% of clearance by default)
     tolerance = clearance * clearance_margin
     if overlap > tolerance:
         return True, overlap, pt1, pt2
@@ -336,7 +341,7 @@ def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, clearanc
     """Check if a via overlaps with a segment on any common layer.
 
     Args:
-        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.05 = 5%).
     """
     # Standard through-hole vias go through ALL copper layers, not just the ones listed
     # Only skip non-copper layers
@@ -359,7 +364,7 @@ def check_via_via_overlap(via1: Via, via2: Via, clearance: float, clearance_marg
     """Check if two vias overlap.
 
     Args:
-        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.05 = 5%).
     """
     # All vias are through-hole, so they always potentially conflict
     required_dist = via1.size / 2 + via2.size / 2 + clearance
@@ -779,7 +784,7 @@ def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
         seg: Segment to check against
         clearance: Minimum clearance in mm
         routing_layers: List of routing layer names (for expanding *.Cu wildcards)
-        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.05 = 5%).
 
     Returns:
         (has_violation, overlap_mm, closest_point_on_segment)
@@ -855,7 +860,7 @@ def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
         via: Via to check against
         clearance: Minimum clearance in mm
         routing_layers: List of routing layer names (for expanding *.Cu wildcards)
-        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.05 = 5%).
 
     Returns:
         (has_violation, overlap_mm)
@@ -890,7 +895,7 @@ def check_via_drill_overlap(via1: Via, via2: Via, hole_to_hole_clearance: float,
     Args:
         via1, via2: Via objects with drill attribute
         hole_to_hole_clearance: Minimum clearance between drill hole edges in mm
-        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.05 = 5%).
 
     Returns:
         (has_violation, overlap_mm)
@@ -914,7 +919,7 @@ def check_pad_drill_via_overlap(pad: Pad, via: Via, hole_to_hole_clearance: floa
         pad: Pad object with drill attribute (through-hole pad)
         via: Via to check against
         hole_to_hole_clearance: Minimum clearance between drill hole edges in mm
-        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.05 = 5%).
 
     Returns:
         (has_violation, overlap_mm)
@@ -950,7 +955,7 @@ def check_segment_board_edge(seg: Segment, board_bounds: Tuple[float, float, flo
         seg: Segment to check
         board_bounds: (min_x, min_y, max_x, max_y) of the board
         clearance: Minimum clearance from board edge in mm
-        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.05 = 5%).
 
     Returns:
         (has_violation, overlap_mm, edge_name)
@@ -1004,7 +1009,7 @@ def check_via_board_edge(via: Via, board_bounds: Tuple[float, float, float, floa
         via: Via to check
         board_bounds: (min_x, min_y, max_x, max_y) of the board
         clearance: Minimum clearance from board edge in mm
-        clearance_margin: Fraction of clearance to use as tolerance (default 0.10 = 10%).
+        clearance_margin: Fraction of clearance to use as tolerance (default 0.05 = 5%).
 
     Returns:
         (has_violation, overlap_mm, edge_name)
@@ -1586,7 +1591,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if math.hypot(x - vx, y - vy) <= vr + 0.01:
                 return True
         for p in pcb_data.pads_by_net.get(nid, []):
-            if point_to_pad_distance(x, y, p) <= 0.02:
+            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
                 return True
         return False
     _dangles = _dd(list)  # (net_id, layer) -> [(x, y, width)]

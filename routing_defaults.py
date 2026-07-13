@@ -35,7 +35,7 @@ PLACEMENT_QUANTIZATION_MARGIN = 0.005  # mm
 # at PLACEMENT and let the post-route via-nudge (nudge_grazing_vias) move the
 # residual graze to full clearance instead -- a nudged via stays connected; a
 # stranded pad does not. Matches check_drc's default grading margin.
-UNBLOCK_REFIT_MARGIN = 0.05  # mm
+UNBLOCK_REFIT_MARGIN_MM = 0.05  # mm (absolute; NOT a fraction like check_drc's clearance_margin)
 
 # Cost parameters
 VIA_COST = 50

@@ -12,7 +12,7 @@ from __future__ import annotations
 import sys
 import os
 import argparse
-from typing import List, Optional, Tuple, Dict, Set
+from typing import List, Optional, Tuple, Dict, Set, Union
 from dataclasses import dataclass
 
 # Run startup checks first (validates numpy, scipy, shapely are installed)
@@ -1902,6 +1902,21 @@ def _write_output_and_reroute(
     return True
 
 
+def _empty_plane_results(return_results: bool):
+    """Zero-work create_plane result in the shape the caller expects (#382 E5).
+
+    The GUI (return_results=True) unpacks EXACTLY 8 values; the CLI unpacks 3.
+    Every validation-error early return must go through here so a bad-input exit
+    can't hand the GUI a short (3/6/7) tuple it will ValueError on -- the bug
+    this consolidates. The 8-field shape mirrors the full return_results path:
+    (vias, traces, pads_needing, new_vias, new_segments, new_zones,
+     failed_pads, ripped_net_ids).
+    """
+    if return_results:
+        return (0, 0, 0, [], [], [], 0, [])
+    return (0, 0, 0)
+
+
 def create_plane(
     input_file: str,
     output_file: str,
@@ -1943,7 +1958,8 @@ def create_plane(
     no_bga_zone: bool = False,
     progress_callback=None,
     cancel_check=None,
-) -> Tuple[int, int, int]:
+) -> Union[Tuple[int, int, int],
+           Tuple[int, int, int, list, list, list, int, list]]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
 
@@ -1981,7 +1997,14 @@ def create_plane(
             partial results (the GUI does).
 
     Returns:
-        (total_vias_placed, total_traces_added, total_pads_needing_vias)
+        return_results=False (CLI): the 3-tuple
+            (total_vias_placed, total_traces_added, total_pads_needing_vias).
+        return_results=True (GUI): the 8-tuple
+            (total_vias_placed, total_traces_added, total_pads_needing_vias,
+             new_vias, new_segments, new_zones, total_failed_pads,
+             ripped_net_ids).
+        Every early/error exit returns the caller-appropriate shape via
+        _empty_plane_results (never a short tuple).
     """
     _dump_engine_config('create_plane', dict(locals()))
     if all_layers is None:
@@ -1989,7 +2012,7 @@ def create_plane(
 
     if len(net_names) != len(plane_layers):
         print(f"Error: Number of nets ({len(net_names)}) must match number of layers ({len(plane_layers)})")
-        return (0, 0, 0)
+        return _empty_plane_results(return_results)
 
     # Step 1: Load PCB (or use provided pcb_data)
     if pcb_data is None:
@@ -2002,7 +2025,7 @@ def create_plane(
         net_id = resolve_net_id(pcb_data, net_name)
         if net_id is None:
             print(f"Error: Net '{net_name}' not found in PCB")
-            return (0, 0, 0)
+            return _empty_plane_results(return_results)
         net_ids.append(net_id)
         print(f"Found net '{net_name}' with ID {net_id}")
 
@@ -2053,9 +2076,7 @@ def create_plane(
         )
         if not should_continue:
             print(f"Error: Zone conflict for net '{net_name}' on layer {plane_layer}")
-            if return_results:
-                return (0, 0, 0, [], [], [], 0)
-            return (0, 0, 0)
+            return _empty_plane_results(return_results)
         should_create_zones.append(should_create)
         if zone_to_replace:
             zones_to_replace.append((zone_to_replace.net_id, zone_to_replace.layer))
@@ -2066,9 +2087,7 @@ def create_plane(
         print("Error: Could not determine board bounds "
               "(no Edge.Cuts drawings found, or they have zero extent). "
               "Add an Edge.Cuts outline to the board before creating planes.")
-        if return_results:
-            return (0, 0, 0, [], [], [])
-        return (0, 0, 0)
+        return _empty_plane_results(return_results)
 
     min_x, min_y, max_x, max_y = board_bounds
     print(f"Board bounds: ({min_x:.2f}, {min_y:.2f}) to ({max_x:.2f}, {max_y:.2f})")
@@ -2098,7 +2117,7 @@ def create_plane(
             layer_name = all_layers[i] if i < len(all_layers) else f"layer {i}"
             print(f"ERROR: Layer cost for {layer_name} must be negative (forbidden) or "
                   f"between 1.0 and 1000, got {cost}")
-            return (0, 0, 0)
+            return _empty_plane_results(return_results)
 
     costs_str = ', '.join(f"{all_layers[i]}={layer_costs[i]}x" for i in range(min(len(all_layers), len(layer_costs))))
     print(f"  Layer costs: {costs_str}")

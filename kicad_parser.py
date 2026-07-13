@@ -365,52 +365,6 @@ def _custom_pad_board_extent(pad_text: str, abs_rotation_deg: float,
     return ext_x, ext_y
 
 
-def _custom_pad_local_extent(pad_text: str) -> Tuple[float, float]:
-    """Half-extent (|x|, |y|) of a custom pad's real copper in the pad's local
-    frame, from its (primitives ...) block. A custom pad's (size ...) is only the
-    anchor; gr_poly/gr_circle/gr_line primitives can reach well beyond it (e.g. a
-    resistor pad whose copper extends +0.56mm past the anchor). Modelling only the
-    anchor under-blocks the obstacle map, so tracks graze the real copper (#70
-    dig). Returns (0, 0) if there are no primitives. Coordinates are pad-local
-    (un-rotated); _resolve_pad_rect then orients the enclosing rect like any pad.
-    """
-    pm = re.search(r'\(primitives\b', pad_text)
-    if not pm:
-        return 0.0, 0.0
-    prim = pad_text[pm.start():]
-    xs, ys = [], []
-    for m in re.finditer(r'\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\)', prim):
-        xs.append(float(m.group(1))); ys.append(float(m.group(2)))
-    # A gr_poly outline can be drawn entirely from arc entries (rounded pads,
-    # e.g. thunderscope U11's B0QFN): zero (xy ...) matches, so without this the
-    # extent came back (0,0) and the pad was modelled at its 0.2mm anchor.
-    # Linearize each arc so its bulge is covered, not just its endpoints. The
-    # regex also matches standalone gr_arc PRIMITIVES (comexpress7 H1..H10
-    # thermal-spoke pads draw their ring from ten of them).
-    for m in re.finditer(_PTS_ARC_RE, prim):
-        s = (float(m.group(1)), float(m.group(2)))
-        mid = (float(m.group(3)), float(m.group(4)))
-        e = (float(m.group(5)), float(m.group(6)))
-        for p1, p2 in _arc_to_segments(s, mid, e):
-            xs += [p1[0], p2[0]]; ys += [p1[1], p2[1]]
-    # gr_rect / gr_line reach: their (start)/(end) corners
-    for m in re.finditer(r'\(gr_(?:rect|line)\s+\(start\s+(-?[\d.]+)\s+(-?[\d.]+)\)'
-                         r'\s+\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', prim):
-        xs += [float(m.group(1)), float(m.group(3))]
-        ys += [float(m.group(2)), float(m.group(4))]
-    # gr_circle: (center x y) (end x y) -> radius reaches center +/- r on both axes
-    for m in re.finditer(r'\(gr_circle\s+\(center\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', prim):
-        cx, cy, ex, ey = map(float, m.groups())
-        r = math.hypot(ex - cx, ey - cy)
-        xs += [cx - r, cx + r]; ys += [cy - r, cy + r]
-    if not xs:
-        return 0.0, 0.0
-    # primitive stroke width thickens the copper; add half of the largest.
-    widths = [float(w) for w in re.findall(r'\(width\s+(-?[\d.]+)\)', prim)]
-    hw = (max(widths) / 2.0) if widths else 0.0
-    return max(abs(min(xs)), abs(max(xs))) + hw, max(abs(min(ys)), abs(max(ys))) + hw
-
-
 def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
                                 pad_abs_rotation_deg: float):
     """Real copper outline(s) of a custom pad in GLOBAL board mm (issue #188).
@@ -734,34 +688,6 @@ def find_matching_paren(content: str, open_idx: int) -> int:
                     return i + 1
         i += 1
     return n
-
-
-def parse_s_expression(text: str) -> list:
-    """
-    Simple S-expression parser - returns nested lists.
-    Not used for full file parsing (too slow), but useful for extracting specific elements.
-    """
-    tokens = re.findall(r'"[^"]*"|\(|\)|[^\s()]+', text)
-
-    def parse_tokens(tokens, idx):
-        result = []
-        while idx < len(tokens):
-            token = tokens[idx]
-            if token == '(':
-                sublist, idx = parse_tokens(tokens, idx + 1)
-                result.append(sublist)
-            elif token == ')':
-                return result, idx
-            else:
-                # Remove quotes from strings
-                if token.startswith('"') and token.endswith('"'):
-                    token = token[1:-1]
-                result.append(token)
-            idx += 1
-        return result, idx
-
-    result, _ = parse_tokens(tokens, 0)
-    return result
 
 
 def extract_layers(content: str) -> BoardInfo:
@@ -1726,17 +1652,6 @@ def _classify_contours(contours):
         (cutouts if contained else outers).append(c)
     outers.sort(key=bbox_area, reverse=True)
     return outers, cutouts
-
-
-def extract_board_outline(content: str) -> List[Tuple[float, float]]:
-    """Extract board outline polygon from Edge.Cuts layer.
-
-    Parses gr_line, gr_arc, and gr_rect segments and assembles them into
-    closed polygons. Returns the largest contour as the board outline.
-    Returns an empty list if no outline is found or if it's a simple rectangle.
-    """
-    outers, _ = extract_board_contours(content)
-    return outers[0] if outers else []
 
 
 def extract_board_contours(content: str) -> Tuple[List[List[Tuple[float, float]]], List[List[Tuple[float, float]]]]:

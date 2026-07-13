@@ -12,6 +12,8 @@ from typing import List, Dict, Tuple, Optional
 from kicad_parser import PCBData, parse_kicad_pcb, _unescape_kicad_string
 from kicad_writer import (generate_via_sexpr, generate_segment_sexpr, move_copper_text_to_silkscreen,
                           move_copper_graphics_to_silkscreen, add_teardrops_to_pads)
+# E3: the one guarded squared-distance kernel (length_sq < 1e-10 degenerate guard).
+from geometry_utils import point_to_segment_dist_sq as _pt_seg_dist_sq
 
 
 @dataclass
@@ -352,17 +354,6 @@ def write_plane_output(
         f.write(new_content)
 
     return True
-
-
-def _pt_seg_dist_sq(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
-    """Squared distance from point (px,py) to segment (x1,y1)-(x2,y2)."""
-    dx, dy = x2 - x1, y2 - y1
-    if dx == 0 and dy == 0:
-        return (px - x1) ** 2 + (py - y1) ** 2
-    t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
-    t = max(0.0, min(1.0, t))
-    cx, cy = x1 + t * dx, y1 + t * dy
-    return (px - cx) ** 2 + (py - cy) ** 2
 
 
 def _remove_vias_at_positions(content: str, positions: List[Tuple[float, float]],
