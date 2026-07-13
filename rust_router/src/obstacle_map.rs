@@ -220,6 +220,12 @@ pub struct GridObstacleMap {
     /// Free via positions: positions where layer changes have zero cost
     /// (e.g., through-hole pads on the same net - reuse existing holes instead of adding vias)
     pub free_via_positions: FxHashSet<u64>,
+    /// B2 (issue #386): ledger of blocked_vias increments made by
+    /// add_stub_proximity_costs_batch(block_vias=true), one entry per
+    /// increment. clear_stub_proximity() drains it symmetrically; without
+    /// this, per-net via bans accumulated monotonically across nets under
+    /// --via-proximity-cost 0 (same refcount-leak class as #208/#309).
+    stub_via_block_cells: Vec<u64>,
 }
 
 #[pymethods]
@@ -241,6 +247,7 @@ impl GridObstacleMap {
             endpoint_exempt_positions: Vec::new(),
             endpoint_exempt_radius: 0,
             free_via_positions: FxHashSet::default(),
+            stub_via_block_cells: Vec::new(),
         }
     }
 
@@ -294,6 +301,7 @@ impl GridObstacleMap {
             endpoint_exempt_positions: self.endpoint_exempt_positions.clone(),
             endpoint_exempt_radius: self.endpoint_exempt_radius,
             free_via_positions: self.free_via_positions.clone(),
+            stub_via_block_cells: self.stub_via_block_cells.clone(),
         }
     }
 
@@ -317,6 +325,7 @@ impl GridObstacleMap {
             endpoint_exempt_positions: self.endpoint_exempt_positions.clone(),
             endpoint_exempt_radius: self.endpoint_exempt_radius,
             free_via_positions: self.free_via_positions.clone(),
+            stub_via_block_cells: self.stub_via_block_cells.clone(),
         }
     }
 
@@ -336,9 +345,22 @@ impl GridObstacleMap {
          layer_proximity_count, cross_layer_count, source_target_count, free_vias_count)
     }
 
-    /// Clear stub proximity costs and zone centers (for reuse with different stubs)
+    /// Clear stub proximity costs and zone centers (for reuse with different stubs).
+    /// B2: also symmetrically removes the blocked_vias increments made by
+    /// add_stub_proximity_costs_batch(block_vias=true) -- the per-net
+    /// prepare/restore cycle already calls this, so the via bans now live
+    /// exactly as long as the stub costs they came with.
     pub fn clear_stub_proximity(&mut self) {
         self.stub_proximity.clear();
+        for key in std::mem::take(&mut self.stub_via_block_cells) {
+            if let Some(count) = self.blocked_vias.get_mut(&key) {
+                if *count > 1 {
+                    *count -= 1;
+                } else {
+                    self.blocked_vias.remove(&key);
+                }
+            }
+        }
     }
 
     /// Shrink all internal collections to fit their contents.
@@ -358,6 +380,7 @@ impl GridObstacleMap {
         }
         self.cross_layer_tracks.shrink_to_fit();
         self.free_via_positions.shrink_to_fit();
+        self.stub_via_block_cells.shrink_to_fit();
     }
 
     /// Clear allowed cells (for reuse with different source/target)
@@ -521,8 +544,10 @@ impl GridObstacleMap {
                         }
 
                         if block_vias {
-                            // Increment ref count for blocked vias
+                            // Increment ref count for blocked vias, and record the
+                            // increment so clear_stub_proximity can undo it (B2)
                             *self.blocked_vias.entry(key).or_insert(0) += 1;
+                            self.stub_via_block_cells.push(key);
                         }
                     }
                 }
