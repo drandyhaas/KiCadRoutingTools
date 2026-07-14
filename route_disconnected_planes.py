@@ -880,10 +880,55 @@ def route_planes(
                     print(f"{GREEN}forced via at ({result.via['x']:.2f}, "
                           f"{result.via['y']:.2f}){RESET}")
                 else:
-                    if name not in failed_repair_pads:
-                        failed_repair_pads.append(name)
-                        total_pads_repaired = max(0, total_pads_repaired - 1)
-                    print(f"{RED}STILL FLOATING{RESET}")
+                    # #373 last resort: no via could tie this pad to the plane
+                    # (boxed-in pocket, fine-pitch WLCSP, deep-layer pour). Route
+                    # a plain track from the pad to the nearest same-net copper /
+                    # its own pour on the pad's layer -- the via-or-nothing ladder
+                    # otherwise abandons a pad a short trace would connect. The
+                    # island-join fill test validates the target; re-run the SAME
+                    # fill-aware check and UNDO the track if still floating.
+                    track_res = tap_pad_with_escalation(
+                        pad, pad_layer, net_id, pcb_data,
+                        replace(tap_config, via_size=via_size, via_drill=via_drill),
+                        max_search_radius=max_search_radius,
+                        via_size=via_size, via_drill=via_drill,
+                        verbose=verbose, fine_for_all=True, pour_trace_only=True,
+                        distant_trace_radius=max_search_radius, disable_reuse=True)
+                    connected = False
+                    if track_res.success and track_res.segments:
+                        new_seg_objs = []
+                        for s in track_res.segments:
+                            seg_obj = Segment(
+                                start_x=s['start'][0], start_y=s['start'][1],
+                                end_x=s['end'][0], end_y=s['end'][1],
+                                width=s['width'], layer=s['layer'], net_id=s['net_id'])
+                            new_seg_objs.append(seg_obj)
+                            pcb_data.segments.append(seg_obj)
+                        _t_segs = [s for s in pcb_data.segments if s.net_id == net_id]
+                        _t_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+                        _t_res = check_net_connectivity(net_id, _t_segs, _t_vias, net_pads,
+                                                        zones_by_net.get(net_id, []))
+                        _pad_key = (round(pad.global_x, 3), round(pad.global_y, 3),
+                                    pad.component_ref)
+                        _still = {(round(x, 3), round(y, 3), ref)
+                                  for (x, y, _l, ref) in (_t_res.get('disconnected_pads') or [])}
+                        if _pad_key in _still:
+                            for seg_obj in new_seg_objs:
+                                pcb_data.segments.remove(seg_obj)
+                        else:
+                            connected = True
+                            for s in track_res.segments:
+                                all_new_segments.append(s)
+                            shared_maps.note_pass_copper([], new_seg_objs)
+                            if name in failed_repair_pads:
+                                failed_repair_pads.remove(name)
+                                total_pads_repaired += 1
+                            print(f"{GREEN}connected by track to same-net copper{RESET}")
+                    if not connected:
+                        if name not in failed_repair_pads:
+                            failed_repair_pads.append(name)
+                            total_pads_repaired = max(0, total_pads_repaired - 1)
+                        print(f"{RED}STILL FLOATING{RESET}")
 
     # Drop a redundant plane-repair tap that grazes a foreign pad below clearance,
     # or re-bend a load-bearing one around the pad (#224). A tap that merely bridges

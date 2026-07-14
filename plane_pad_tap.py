@@ -24,6 +24,7 @@ from typing import List, Dict, Optional, Tuple, Set
 from kicad_parser import PCBData, Pad, Via, Segment, pad_is_plated_through
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import point_in_pad_rect
+from geometry_utils import closest_point_on_segment
 from plane_obstacle_builder import (
     build_via_obstacle_map,
     build_routing_obstacle_map,
@@ -712,6 +713,76 @@ def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, co
     return None
 
 
+def _same_net_copper_targets(pad, pad_layer, net_id, local, pcb_data, config,
+                             radius: float) -> List[Tuple[float, float]]:
+    """Target (x, y) points on ``pad_layer`` for a last-resort plane-pad track
+    (issue #373): the nearest point on each same-net SEGMENT within ``radius``,
+    plus points stepping out from the pad that sit on REAL same-net zone FILL --
+    validated by the island-join fill test (``_real_fill_point``) so the track
+    lands on genuine pour copper, not a modelled-but-absent fill gap. Nearest
+    targets first; capped so the single multi-source A* stays cheap."""
+    px, py = pad.global_x, pad.global_y
+    targets: List[Tuple[float, Tuple[float, float]]] = []
+
+    # 1. Same-net segment copper on the pad's own layer.
+    for s in local.segments:
+        if s.net_id != net_id or s.layer != pad_layer:
+            continue
+        cx, cy = closest_point_on_segment(px, py, s.start_x, s.start_y,
+                                          s.end_x, s.end_y)
+        d = math.hypot(cx - px, cy - py)
+        if 1e-6 < d <= radius:
+            targets.append((d, (cx, cy)))
+
+    # 2. Same-net pour on the pad's layer: step outward in rings and keep the
+    #    first ring's points that provably sit on real fill. The pad is boxed
+    #    out of the pour by its clearance cutout; a short track across that gap
+    #    onto the fill connects it (the human plane-pad fix).
+    zone_polys = [z.polygon for z in (getattr(pcb_data, 'zones', None) or [])
+                  if z.net_id == net_id and z.layer == pad_layer
+                  and getattr(z, 'polygon', None)]
+    if zone_polys:
+        from plane_region_connector import _real_fill_point
+        track_half = config.track_width / 2
+        pad_reach = max(pad.size_x, pad.size_y) / 2
+        step = max(config.grid_step, 0.1)
+        r = pad_reach + config.clearance + track_half
+        while r <= radius:
+            ring = []
+            for k in range(16):
+                ang = 2 * math.pi * k / 16
+                tx, ty = px + r * math.cos(ang), py + r * math.sin(ang)
+                if _real_fill_point((tx, ty), net_id, pcb_data, zone_polys,
+                                    pad_layer, track_half, npth_track_half=track_half):
+                    ring.append((math.hypot(tx - px, ty - py), (tx, ty)))
+            if ring:                       # nearest fill ring found -- stop here
+                targets.extend(ring)
+                break
+            r += step
+
+    targets.sort(key=lambda t: t[0])
+    return [pos for _d, pos in targets[:24]]
+
+
+def _try_trace_to_same_net_copper(pad, pad_layer, net_id, local, routing_obs,
+                                  config, route_multi_fn, pcb_data, radius: float):
+    """Last-resort plane-pad connection (issue #373): when no via can tie the
+    pad to the plane, route a plain track from the pad to the nearest same-net
+    copper (segment) or its own pour fill on the pad's layer, using the existing
+    pad-tap multi-source A*. Returns a successful TapResult (via=None) or None."""
+    if not pad_layer or radius <= 0:
+        return None
+    positions = _same_net_copper_targets(pad, pad_layer, net_id, local, pcb_data,
+                                         config, radius)
+    if not positions:
+        return None
+    segs, pos = route_multi_fn(positions, pad, pad_layer, net_id, routing_obs,
+                               config, verbose=False)
+    if segs:
+        return TapResult(success=True, via=None, segments=segs, reused_via_pos=pos)
+    return None
+
+
 def try_tap_pad(
     pad: Pad,
     pad_layer: Optional[str],
@@ -730,6 +801,7 @@ def try_tap_pad(
     distant_trace_radius: float = 0.0,
     disable_reuse: bool = False,
     shared_via_maps: Optional[SharedViaMaps] = None,
+    pour_trace_only: bool = False,
 ) -> TapResult:
     """Attempt to connect one pad to the plane with the given parameters.
 
@@ -819,7 +891,7 @@ def try_tap_pad(
     # built-but-unused -- skip the ~0.5s Rust build entirely (#189 perf; the
     # via-in-pad unblock hits this path). find_via_position tolerates a None
     # routing map (it only does the routability check when one is provided).
-    _needs_trace_map = (not disable_reuse) or distant_trace_radius > 0 or max_search_radius > 0
+    _needs_trace_map = (not disable_reuse) or distant_trace_radius > 0 or max_search_radius > 0 or pour_trace_only
     if pad_layer and _needs_trace_map:
         # Optional half-grid clearance cushion: build_routing_obstacle_map
         # blocks cells by center distance, so routed traces can end up a
@@ -835,6 +907,18 @@ def try_tap_pad(
             skip_pad_blocking=False, verbose=False)
 
     coord = GridCoord(config.grid_step)
+
+    # #373 last resort: the via ladder is exhausted; route a plain track from the
+    # pad to the nearest same-net copper / own pour on the pad's layer, reusing
+    # the multi-source A* and this window's routing map. No via placement.
+    if pour_trace_only:
+        if not (pad_layer and routing_obs is not None):
+            return TapResult(success=False)
+        r = _try_trace_to_same_net_copper(
+            pad, pad_layer, net_id, local, routing_obs, config,
+            route_multi_source_to_pad, pcb_data,
+            distant_trace_radius or max_search_radius)
+        return r if r is not None else TapResult(success=False)
 
     # 1. Try reusing a close same-net via (mirrors route_planes' close-via path)
     close_radius = via_size * 2.5
@@ -953,6 +1037,7 @@ def tap_pad_with_escalation(
     distant_trace_radius: float = 0.0,
     disable_reuse: bool = False,
     shared_via_maps: Optional[SharedViaMaps] = None,
+    pour_trace_only: bool = False,
 ) -> TapResult:
     """Tap a pad, escalating to scoped fine parameters for fine-pitch pads.
 
@@ -973,7 +1058,7 @@ def tap_pad_with_escalation(
             via_size, via_drill, same_net_pad_clearance,
             pending_pads, extra_vias, extra_segments, verbose,
             distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse,
-            shared_via_maps=shared_via_maps)
+            shared_via_maps=shared_via_maps, pour_trace_only=pour_trace_only)
         if result.success:
             result.params_label = 'default'
             result.clearance_used = config.clearance
@@ -1027,7 +1112,7 @@ def tap_pad_with_escalation(
                 pending_pads, extra_vias, extra_segments, verbose,
                 routing_clearance_cushion=True,
                 distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse,
-                shared_via_maps=shared_via_maps)
+                shared_via_maps=shared_via_maps, pour_trace_only=pour_trace_only)
             if result.success:
                 result.params_label = 'fine'
                 result.clearance_used = fine_config.clearance
