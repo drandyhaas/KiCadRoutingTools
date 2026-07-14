@@ -18,6 +18,7 @@ from connectivity import (
 )
 from obstacle_map import check_line_clearance
 from geometry_utils import simplify_path, segments_intersect_tuple
+from net_queries import resolve_gnd_net_id
 # Note: Layer switching is now done upfront in route.py, not during routing
 
 # Import Rust router
@@ -3340,13 +3341,13 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     p_net_id = diff_pair.p_net_id
     n_net_id = diff_pair.n_net_id
 
-    # Find GND net ID for GND via placement (if enabled)
+    # Find GND net ID for GND via placement (if enabled). Robust GND-family
+    # match ('/GND', 'GNDA', 'DGND', ...) so return vias aren't silently
+    # skipped on boards that don't spell the net literally 'GND' (#379). Quiet
+    # here: this runs per-pair; batch_route_diff_pairs warns once if unresolved.
     gnd_net_id = None
     if config.gnd_via_enabled:
-        for net_id, net in pcb_data.nets.items():
-            if net.name.upper() == 'GND':
-                gnd_net_id = net_id
-                break
+        gnd_net_id, _ = resolve_gnd_net_id(pcb_data)
 
     # Find endpoints (or use explicit leg endpoints for multi-point routing)
     if endpoints is not None:

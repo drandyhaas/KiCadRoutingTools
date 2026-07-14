@@ -337,6 +337,63 @@ def identify_power_nets(pcb_data: PCBData,
     return power_net_widths
 
 
+# Ground-net family recognized for GND return-via placement (issue #379). A
+# board's ground is spelled many ways; an exact 'GND' match silently disabled
+# --gnd-vias on '/GND' (KiCad's hierarchical sheet-path form), 'GNDA', 'DGND',
+# 'GND_D', 'GND1', etc. These suffix-style names (A/D/P + GND) do not start with
+# 'GND', so they need an explicit set alongside the 'GND*' prefix test.
+_GND_SUFFIX_NAMES = frozenset({'AGND', 'DGND', 'PGND'})
+
+
+def _gnd_base(name: str) -> str:
+    """Net name normalized for GND matching: hierarchical sheet-path prefix
+    dropped ('/sheet/GND' -> 'GND', '/GND' -> 'GND'), upper-cased."""
+    return name.rsplit('/', 1)[-1].upper()
+
+
+def is_ground_net_name(name: str) -> bool:
+    """True if a net name is in the GND family (GND, /GND, GNDA, AGND, DGND,
+    PGND, GND_D, GND1, ...); the sheet-path prefix is stripped first (#379)."""
+    b = _gnd_base(name)
+    return b.startswith('GND') or b in _GND_SUFFIX_NAMES
+
+
+def resolve_gnd_net_id(pcb_data: PCBData,
+                       preferred_name: Optional[str] = None
+                       ) -> Tuple[Optional[int], Optional[str]]:
+    """Resolve the board's ground net for GND return-via placement (issue #379).
+
+    Returns ``(net_id, net_name)``, or ``(None, None)`` if no ground net is
+    found. Priority: an explicit ``preferred_name`` (e.g. ``--gnd-via-net``,
+    matched ignoring the sheet-path prefix) > an exact 'GND' > the GND family,
+    picking the shortest family name (then lowest net id) so a plain 'GND' beats
+    'GNDA'/'GNDD' deterministically. net 0 (unconnected) is never a ground net.
+    """
+    nets = [(nid, net) for nid, net in pcb_data.nets.items()
+            if nid != 0 and net.name]
+    if preferred_name:
+        want = _gnd_base(preferred_name)
+        for nid, net in nets:
+            if _gnd_base(net.name) == want:
+                return nid, net.name
+    exact = sorted((nid, net) for nid, net in nets if _gnd_base(net.name) == 'GND')
+    if exact:
+        return exact[0][0], exact[0][1].name
+    fam = [(nid, net) for nid, net in nets if is_ground_net_name(net.name)]
+    if fam:
+        fam.sort(key=lambda kv: (len(kv[1].name), kv[0]))
+        return fam[0][0], fam[0][1].name
+    return None, None
+
+
+def gnd_candidate_names(pcb_data: PCBData) -> List[str]:
+    """Ground-ish net names on the board, for a 'no GND net found' diagnostic."""
+    return sorted({net.name for nid, net in pcb_data.nets.items()
+                   if nid != 0 and net.name
+                   and ('GND' in net.name.upper()
+                        or _gnd_base(net.name) in _GND_SUFFIX_NAMES)})
+
+
 def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
     """
     Extract differential pair base name and polarity from net name.

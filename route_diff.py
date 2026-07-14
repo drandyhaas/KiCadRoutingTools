@@ -47,7 +47,8 @@ from connectivity import (
 from net_queries import (
     find_differential_pairs, get_all_unrouted_net_ids, get_chip_pad_positions,
     compute_mps_net_ordering, find_pad_nearest_to_position,
-    expand_net_patterns, matches_diff_pair_patterns
+    expand_net_patterns, matches_diff_pair_patterns,
+    resolve_gnd_net_id, gnd_candidate_names
 )
 from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
 from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
@@ -695,15 +696,20 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         exclusion_zone_lines = draw_exclusion_zones_debug(config, all_proximity_points)
         print(f"Will draw {len(config.bga_exclusion_zones)} BGA zones and {len(all_proximity_points)} stub/pad proximity circles on User.5")
 
-    # Find GND net ID for GND via obstacle tracking (if GND vias enabled)
+    # Find GND net ID for GND via obstacle tracking (if GND vias enabled).
+    # Match the GND family robustly ('/GND', 'GNDA', 'DGND', ... all count),
+    # not a literal 'GND' that silently disabled --gnd-vias on most boards (#379).
     gnd_net_id = None
     if config.gnd_via_enabled:
-        for net_id, net in pcb_data.nets.items():
-            if net.name.upper() == 'GND':
-                gnd_net_id = net_id
-                break
+        gnd_net_id, gnd_net_name = resolve_gnd_net_id(pcb_data)
         if gnd_net_id:
-            print(f"GND net ID: {gnd_net_id} (GND vias will be added as obstacles)")
+            print(f"GND net: '{gnd_net_name}' (id {gnd_net_id}) "
+                  f"(GND vias will be added as obstacles)")
+        else:
+            cands = gnd_candidate_names(pcb_data)
+            hint = f" Candidate nets: {', '.join(cands)}." if cands else ""
+            print(f"WARNING: --gnd-vias is enabled but no GND net was found; "
+                  f"GND return vias will NOT be placed.{hint}")
 
     # Pre-compute net obstacles for caching (speeds up per-route setup)
     print("Pre-computing net obstacle cache...")
