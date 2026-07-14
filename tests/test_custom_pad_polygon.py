@@ -13,6 +13,10 @@ Covers:
      (a round mounting/logo pad becomes its disc at the true offset, not the
      anchor-centred bounding box) -- issue #232.
 
+Since #337 a custom pad's copper is the ANCHOR SHAPE union the primitives, so
+_custom_pad_global_polygons appends one extra polygon (circle of min(size)/2
+by default, rect with ``(options (anchor rect))``) after the primitives.
+
     python3 tests/test_custom_pad_polygon.py
 """
 import os
@@ -72,8 +76,14 @@ def run():
             fails.append(name)
 
     # 1. Parser transform -------------------------------------------------------
+    # Two polygons since #337: the comb gr_poly, then the anchor shape (a
+    # 0.01x0.01 default-circle anchor -> r=0.005 disc at the pad position).
     polys = _comb_polys()
-    check("parser returns one polygon", polys is not None and len(polys) == 1)
+    check("parser returns comb + anchor polygons", polys is not None and len(polys) == 2)
+    anchor_poly = polys[1]
+    check("anchor polygon is a tiny disc at the pad position",
+          all(abs(x - ANCHOR[0]) <= 0.005 + 1e-9 and abs(y - ANCHOR[1]) <= 0.005 + 1e-9
+              for x, y in anchor_poly))
     poly = polys[0]
     xs = [x for x, y in poly]; ys = [y for x, y in poly]
     check("polygon bbox correct",
@@ -145,7 +155,14 @@ def run():
     RING = """(pad "1" smd custom (at 0 0 0) (size 5.8 3.1)
       (primitives (gr_circle (center 1.35 0) (end 2.7 0) (width 0.4) (fill no))))"""
     rpolys = _custom_pad_global_polygons(RING, 100.0, 50.0, 0.0)
-    check("gr_circle: one disc polygon", rpolys is not None and len(rpolys) == 1)
+    # #337: disc primitive + the anchor shape (default circle, r=min(5.8,3.1)/2
+    # = 1.55, centred on the pad position).
+    check("gr_circle: disc + anchor polygons", rpolys is not None and len(rpolys) == 2)
+    if rpolys and len(rpolys) == 2:
+        ap = rpolys[1]
+        import math as _math
+        check("gr_circle: anchor disc r=1.55 at the pad position",
+              all(abs(_math.hypot(x - 100.0, y - 50.0) - 1.55) < 1e-6 for x, y in ap))
     if rpolys:
         rp = rpolys[0]
         rxs = [x for x, y in rp]; rys = [y for x, y in rp]
