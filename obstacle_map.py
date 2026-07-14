@@ -42,9 +42,12 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
 
     Args:
         extra_clearance: Additional clearance to add for routing (e.g., for diff pair centerline routing)
-        net_clearances: Optional dict mapping net_id to clearance (mm). When building obstacles,
-            the effective clearance is max(config.clearance, max(net_clearances.values())).
-            This ensures proper spacing when nets have different net class clearance requirements.
+        net_clearances: Optional dict mapping net_id to that net's net-class clearance (mm).
+            KiCad's pairwise clearance between nets of different classes is max(classA, classB),
+            so each pre-placed obstacle is priced at max(the routing-side clearance floor, the
+            obstacle net's own class clearance). The floor maxes over the ROUTED nets only, so a
+            foreign class cannot inflate it (that would over-block every routed net). An empty/
+            absent map reproduces plain config.clearance behaviour exactly.
     """
     if net_clearances is None:
         net_clearances = {}
@@ -53,10 +56,21 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     layer_map = build_layer_map(config.layers)
     nets_to_route_set = set(nets_to_route)
 
-    # Use the maximum clearance of any net class to ensure proper spacing
-    # between nets with different net class clearance requirements
-    max_net_clearance = max(net_clearances.values()) if net_clearances else config.clearance
+    # Cross-class clearance (KiCad semantics): the required spacing between two nets of
+    # different net classes is max(classA, classB). effective_clearance is the routing-side
+    # (classA) floor: the largest clearance among the nets being routed in THIS call. Obstacles
+    # of OTHER classes must not inflate that floor (it would over-block every routed net), so the
+    # max is taken over the ROUTED nets only; per obstacle we then raise it to that obstacle net's
+    # own class clearance via _obstacle_clearance() below.
+    _routed_clearances = [net_clearances[nid] for nid in nets_to_route_set if nid in net_clearances]
+    max_net_clearance = max(_routed_clearances) if _routed_clearances else config.clearance
     effective_clearance = max(config.clearance, max_net_clearance)
+
+    def _obstacle_clearance(net_id):
+        # KiCad pairwise clearance: max(routing-side floor classA, this obstacle net's own class
+        # clearance classB). A net not in the map falls back to config.clearance, so an EMPTY map
+        # reproduces the prior behaviour exactly (inert until a per-net clearance map is supplied).
+        return max(effective_clearance, net_clearances.get(net_id, config.clearance))
 
     obstacles = GridObstacleMap(num_layers)
 
@@ -92,9 +106,10 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         # Compute expansion: routing track half-width (for this layer) + obstacle half-width + clearance
         layer_track_width = config.get_track_width(seg.layer)
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
-        expansion_mm = layer_track_width / 2 + seg_width / 2 + effective_clearance + extra_clearance
+        seg_clearance = _obstacle_clearance(seg.net_id)
+        expansion_mm = layer_track_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
         # For via blocking by segments: via half-size + segment half-width + clearance
-        via_block_mm = config.via_size / 2 + seg_width / 2 + effective_clearance + extra_clearance
+        via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
         _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm)
 
     # Add vias as obstacles (excluding nets we'll route)
@@ -103,10 +118,15 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
             continue
         # Compute expansion based on actual via size:
         via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
+        # Cross-class: price this obstacle via's keepout at max(routing-side clearance, this via's
+        # own net-class clearance). A pre-placed POWER_HI via (0.25) that a Default net (0.15) is
+        # routed past must keep 0.25, not 0.15, or a new via lands (0.25-0.15) too close (the
+        # via-to-via cross-class clearance under-model).
+        via_clearance = _obstacle_clearance(via.net_id)
         # For track blocking by vias: via half-size + max routing track half-width + clearance
-        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, effective_clearance, extra_clearance)
+        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, via_clearance, extra_clearance)
         # For via-to-via: via size + routing via size + clearance
-        via_via_mm = via_size / 2 + config.via_size / 2 + effective_clearance
+        via_via_mm = via_size / 2 + config.via_size / 2 + via_clearance
         # True via-via clearance radius in cells as a FLOAT (no floor): the disc
         # threshold is radius**2, so this blocks exactly the cells within the real
         # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
@@ -120,13 +140,13 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                           via_via_expansion_grid, diagonal_margin=defaults.DIAGONAL_MARGIN)
 
     # Add pads as obstacles (excluding nets we'll route - their pads added per-net)
-    # Use effective_clearance to ensure proper spacing between nets with different clearance requirements
+    # Priced per obstacle: max(routing-side clearance, the pad net's own class clearance)
     for net_id, pads in pcb_data.pads_by_net.items():
         if net_id in nets_to_route_set:
             continue
         for pad in pads:
             _add_pad_obstacle(obstacles, pad, coord, layer_map, config, extra_clearance,
-                              clearance_override=effective_clearance)
+                              clearance_override=_obstacle_clearance(net_id))
 
     # Add board edge clearance
     add_board_edge_obstacles(obstacles, pcb_data, config, extra_clearance)
@@ -1790,9 +1810,14 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
     layer_map = build_layer_map(config.layers)
     nets_to_route_set = set(nets_to_route)
 
-    # Use the maximum clearance of any net class to ensure proper spacing
-    max_net_clearance = max(net_clearances.values()) if net_clearances else config.clearance
+    # Cross-class clearance floor over the ROUTED nets only (see build_base_obstacle_map); per
+    # obstacle we raise to that obstacle net's own class clearance via _obstacle_clearance().
+    _routed_clearances = [net_clearances[nid] for nid in nets_to_route_set if nid in net_clearances]
+    max_net_clearance = max(_routed_clearances) if _routed_clearances else config.clearance
     effective_clearance = max(config.clearance, max_net_clearance)
+
+    def _obstacle_clearance(net_id):
+        return max(effective_clearance, net_clearances.get(net_id, config.clearance))
 
     obstacles = GridObstacleMap(num_layers)
 
@@ -1833,8 +1858,9 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
         # Compute expansion: layer-specific routing track half-width + obstacle half-width + clearance
         layer_track_width = config.get_track_width(seg.layer)
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
-        expansion_mm = layer_track_width / 2 + seg_width / 2 + effective_clearance + extra_clearance
-        via_block_mm = config.via_size / 2 + seg_width / 2 + effective_clearance + extra_clearance
+        seg_clearance = _obstacle_clearance(seg.net_id)
+        expansion_mm = layer_track_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
+        via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
         _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm,
                               blocked_cells, blocked_vias)
 
@@ -1843,8 +1869,9 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
         if via.net_id in nets_to_route_set:
             continue
         via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
-        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, effective_clearance, extra_clearance)
-        via_via_mm = via_size / 2 + config.via_size / 2 + effective_clearance
+        via_clearance = _obstacle_clearance(via.net_id)
+        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, via_clearance, extra_clearance)
+        via_via_mm = via_size / 2 + config.via_size / 2 + via_clearance
         # True via-via clearance radius in cells as a FLOAT (no floor): the disc
         # threshold is radius**2, so this blocks exactly the cells within the real
         # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
@@ -1855,13 +1882,13 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
                           diagonal_margin=defaults.DIAGONAL_MARGIN, blocked_cells=blocked_cells, blocked_vias=blocked_vias)
 
     # Add pads as obstacles (excluding nets we'll route)
-    # Use effective_clearance to ensure proper spacing between nets with different clearance requirements
+    # Priced per obstacle: max(routing-side clearance, the pad net's own class clearance)
     for net_id, pads in pcb_data.pads_by_net.items():
         if net_id in nets_to_route_set:
             continue
         for pad in pads:
             _add_pad_obstacle(obstacles, pad, coord, layer_map, config, extra_clearance,
-                              blocked_cells, blocked_vias, clearance_override=effective_clearance)
+                              blocked_cells, blocked_vias, clearance_override=_obstacle_clearance(net_id))
 
     # Add board edge clearance
     add_board_edge_obstacles(obstacles, pcb_data, config, extra_clearance)

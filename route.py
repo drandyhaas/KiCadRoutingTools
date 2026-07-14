@@ -23,6 +23,7 @@ run_all_checks()
 
 import time
 import fnmatch
+import json
 from typing import List, Optional, Tuple, Dict, Set
 
 from kicad_parser import parse_kicad_pcb, PCBData, Pad
@@ -1785,6 +1786,14 @@ For differential pair routing, use route_diff.py:
                         help=f"Via outer diameter in mm (default: {defaults.VIA_SIZE})")
     parser.add_argument("--via-drill", type=float, default=defaults.VIA_DRILL,
                         help=f"Via drill size in mm (default: {defaults.VIA_DRILL})")
+    parser.add_argument("--net-clearances", metavar="JSON", default=None,
+                        help="Path to a JSON object mapping net name -> that net's net-class "
+                             "clearance in mm, for ALL nets on the board (routed and pre-placed). "
+                             "Each pre-placed via/pad/segment obstacle is then priced at "
+                             "max(this call's --clearance, that obstacle net's own clearance) so a "
+                             "foreign higher-clearance net (POWER_HI 0.25 while routing a Default "
+                             "0.15 group) is not under-blocked (cross-class via-via/DRC). The GUI "
+                             "derives the same map from the board's live net classes.")
 
     # Power net routing options
     parser.add_argument("--power-nets", nargs="*", default=[],
@@ -2065,6 +2074,21 @@ For differential pair routing, use route_diff.py:
             print("Install pygame with: pip install pygame-ce")
             print("Continuing without visualization...")
 
+    # Cross-class clearance map: resolve {net name -> clearance} to {net_id -> clearance} against
+    # this board's nets so the obstacle-map builders price each pre-placed obstacle at its own
+    # net-class clearance (KiCad's max(classA, classB)). None/absent -> empty map -> prior
+    # behaviour. The GUI front builds the same map from live net classes (swig_gui).
+    _net_clearances_map = None
+    if args.net_clearances:
+        with open(args.net_clearances, encoding="utf-8") as _f:
+            _name_to_clr = json.load(_f)
+        _net_clearances_map = {}
+        for _nid, _net in pcb_data.nets.items():
+            if _net.name in _name_to_clr:
+                _net_clearances_map[_nid] = float(_name_to_clr[_net.name])
+        print(f"Loaded per-net clearances for {len(_net_clearances_map)}/{len(pcb_data.nets)} nets "
+              f"from {args.net_clearances}")
+
     batch_route(args.input_file, args.output_file, net_names,
                 direction_order=args.direction,
                 ordering_strategy=args.ordering,
@@ -2079,6 +2103,7 @@ For differential pair routing, use route_diff.py:
                 neckdown_length=args.neckdown_length,
                 neckdown_taper_length=args.neckdown_taper_length,
                 clearance=args.clearance,
+                net_clearances=_net_clearances_map,
                 via_size=args.via_size,
                 via_drill=args.via_drill,
                 grid_step=args.grid_step,
