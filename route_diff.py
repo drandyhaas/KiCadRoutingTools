@@ -170,6 +170,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 mps_reverse_rounds: bool = False,
                 mps_layer_swap: bool = False,
                 mps_segment_intersection: bool = False,
+                keep_input_copper: bool = False,
                 schematic_dir: Optional[str] = None,
                 add_teardrops: bool = False,
                 return_results: bool = False,
@@ -941,7 +942,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             dp_scope.add(_pair.n_net_id)
     _dp_cleanup = run_post_route_cleanup(
         results, pcb_data, dp_scope, config,
-        label='Diff-pair ', snap=False, phantom=False, neck=False)
+        label='Diff-pair ', snap=False, phantom=False, neck=False,
+        keep_input_copper=keep_input_copper)
     cleanup_input_strip = _dp_cleanup.input_strip_segments
 
     # Build summary data
@@ -1298,6 +1300,9 @@ Examples:
                         help="Enable MPS-aware layer swaps to reduce crossing conflicts")
     parser.add_argument("--mps-segment-intersection", action="store_true",
                         help="Force MPS to use segment intersection for crossing detection")
+    parser.add_argument("--keep-input-copper", action="store_true",
+                        help="Treat the input file's own copper as read-only in the post-route "
+                             "cleanup passes (see route.py --keep-input-copper)")
 
     # Length matching options
     parser.add_argument("--length-match-group", action="append", nargs="+", dest="length_match_groups",
@@ -1500,6 +1505,7 @@ Examples:
                 mps_reverse_rounds=args.mps_reverse_rounds,
                 mps_layer_swap=args.mps_layer_swap,
                 mps_segment_intersection=args.mps_segment_intersection,
+                keep_input_copper=args.keep_input_copper,
                 schematic_dir=args.schematic_dir,
                 add_teardrops=args.add_teardrops)
 

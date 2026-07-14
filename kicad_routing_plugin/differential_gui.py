@@ -989,6 +989,7 @@ class DifferentialTab(wx.Panel):
                                                 defaults.TIME_MATCH_TOLERANCE),
                 mps_reverse_rounds=config.get('mps_reverse_rounds', False),
                 mps_layer_swap=config.get('mps_layer_swap', False),
+                keep_input_copper=config.get('keep_input_copper', False),
                 mps_segment_intersection=config.get('mps_segment_intersection', False),
                 schematic_dir=config.get('schematic_dir'),
                 add_teardrops=config.get('add_teardrops', False),

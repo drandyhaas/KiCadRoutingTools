@@ -1196,6 +1196,13 @@ class RoutingDialog(wx.Dialog):
         self.mps_layer_swap.SetToolTip("Enable MPS-aware layer swaps to reduce crossing conflicts")
         options_inner.Add(self.mps_layer_swap, 0, wx.ALL, 3)
 
+        self.keep_input_copper = wx.CheckBox(options_scroll, label="Keep input copper")
+        self.keep_input_copper.SetToolTip(
+            "Treat the board's pre-existing copper as read-only: the post-route cleanup "
+            "passes never remove or rewrite it (fanout escape stubs, hand-routed nets), "
+            "only this run's new copper is cleaned")
+        options_inner.Add(self.keep_input_copper, 0, wx.ALL, 3)
+
         self.mps_segment_intersection = wx.CheckBox(options_scroll, label="MPS segment intersection")
         self.mps_segment_intersection.SetToolTip("Force MPS to use segment intersection for crossing detection")
         options_inner.Add(self.mps_segment_intersection, 0, wx.ALL, 3)
@@ -2146,6 +2153,7 @@ class RoutingDialog(wx.Dialog):
         # and the engine signature (batch_route defaults all False).
         self.mps_reverse_rounds.SetValue(False)
         self.mps_layer_swap.SetValue(False)
+        self.keep_input_copper.SetValue(False)
         self.mps_segment_intersection.SetValue(False)
         self.bus_enabled.SetValue(False)
         self.bus_detection_radius.SetValue(defaults.BUS_DETECTION_RADIUS)
@@ -2438,6 +2446,7 @@ class RoutingDialog(wx.Dialog):
             # MPS options
             'mps_reverse_rounds': self.mps_reverse_rounds.GetValue(),
             'mps_layer_swap': self.mps_layer_swap.GetValue(),
+            'keep_input_copper': self.keep_input_copper.GetValue(),
             'mps_segment_intersection': self.mps_segment_intersection.GetValue(),
             # Bus routing options
             'bus_enabled': self.bus_enabled.GetValue(),
@@ -2960,6 +2969,7 @@ class RoutingDialog(wx.Dialog):
                     schematic_dir=config.get('schematic_dir'),
                     mps_reverse_rounds=config.get('mps_reverse_rounds', False),
                     mps_layer_swap=config.get('mps_layer_swap', False),
+                    keep_input_copper=config.get('keep_input_copper', False),
                     mps_segment_intersection=config.get('mps_segment_intersection', False),
                     bus_enabled=config.get('bus_enabled', False),
                     bus_detection_radius=config.get('bus_detection_radius', 5.0),
@@ -3087,6 +3097,7 @@ class RoutingDialog(wx.Dialog):
                         schematic_dir=config.get('schematic_dir'),
                         mps_reverse_rounds=config.get('mps_reverse_rounds', False),
                         mps_layer_swap=config.get('mps_layer_swap', False),
+                        keep_input_copper=config.get('keep_input_copper', False),
                         mps_segment_intersection=config.get('mps_segment_intersection', False),
                         bus_enabled=config.get('bus_enabled', False),
                         bus_detection_radius=config.get('bus_detection_radius', 5.0),

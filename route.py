@@ -342,6 +342,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 return_results: bool = False,
                 pcb_data=None,
                 net_clearances: dict = None,
+                keep_input_copper: bool = False,
                 rip_existing_nets: Optional[List[str]] = None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
@@ -1214,7 +1215,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # sweep would strip them from the board while the file keeps them.
         original_segment_ids=original_segment_ids,
         original_via_ids=({id(v) for lst in _orig_via_by_net.values() for v in lst}
-                          | {id(v) for v in all_swap_vias}))
+                          | {id(v) for v in all_swap_vias}),
+        keep_input_copper=keep_input_copper)
     dead_end_input_segments = _cleanup.input_strip_segments
 
     # Issue #220: the output writer copies the INPUT FILE verbatim, then adds the
@@ -1888,6 +1890,15 @@ For differential pair routing, use route_diff.py:
                         help="Enable MPS-aware layer swaps to reduce crossing conflicts")
     parser.add_argument("--mps-segment-intersection", action="store_true",
                         help="Force MPS to use segment intersection for crossing detection (auto-enabled when no BGA chips)")
+    parser.add_argument("--keep-input-copper", action="store_true",
+                        help="Treat the input file's own copper as read-only: the post-route "
+                             "cleanup passes (dead-end sweep, orphan islands, cycle/redundancy "
+                             "prunes, graze re-bends) never remove or rewrite it, only this "
+                             "run's new copper. For chained flows whose earlier stages author "
+                             "copper (fanout escape stubs, hand-routed nets) that later stages "
+                             "or checks must still see verbatim - including stubs of nets this "
+                             "run FAILED to route. Default: off (issue #84 semantics: dead "
+                             "input stubs on in-scope nets are swept).")
 
     # Length matching options
     parser.add_argument("--length-match-group", action="append", nargs="+", dest="length_match_groups",
@@ -2104,6 +2115,7 @@ For differential pair routing, use route_diff.py:
                 neckdown_taper_length=args.neckdown_taper_length,
                 clearance=args.clearance,
                 net_clearances=_net_clearances_map,
+                keep_input_copper=args.keep_input_copper,
                 via_size=args.via_size,
                 via_drill=args.via_drill,
                 grid_step=args.grid_step,
