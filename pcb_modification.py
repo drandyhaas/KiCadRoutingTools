@@ -3616,56 +3616,90 @@ def drop_phantom_copper(results, pcb_data: PCBData,
     return phantom_segs, phantom_vias
 
 
+def _seg_rip_sig(seg):
+    p1 = (round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS))
+    p2 = (round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS))
+    if p1 > p2:
+        p1, p2 = p2, p1
+    return (p1, p2, seg.layer, seg.net_id)
+
+
+def _via_rip_sig(via):
+    return (round(via.x, POSITION_DECIMALS), round(via.y, POSITION_DECIMALS), via.net_id)
+
+
 def remove_route_from_pcb_data(pcb_data: PCBData, result: dict) -> None:
-    """Remove routed segments and vias from PCB data (for rip-up and reroute)."""
+    """Remove routed segments and vias from PCB data (for rip-up and reroute).
+
+    Removal is by OBJECT IDENTITY: a result's ``new_segments``/``new_vias``
+    hold the same objects ``add_route_to_pcb_data`` appended, and removing by
+    geometry signature instead destroyed INPUT-file originals whenever a
+    reroute retraced an existing span exactly (grid twins). Ripping such a net
+    then severed its pre-existing copper for good -- the #134-refused restore
+    never returned it, and the #220 stale strip mirrored the loss into the
+    output (issue #389: neo6502 GPIO5's input branch, leaving its U7 island
+    stranded behind a grazing partial reroute).
+
+    For robustness against callers holding copies, any to-remove object NOT
+    found on the board by identity falls back to a signature match -- bounded
+    to ONE removal per requested object (never every twin) and scanned
+    newest-first, so this-run copper is preferred over an input original.
+    """
     segments_to_remove = result.get('new_segments', [])
     vias_to_remove = result.get('new_vias', [])
 
     if not segments_to_remove and not vias_to_remove:
         return
 
-    # Build sets of segment signatures (start, end, layer, net_id) for fast lookup
-    seg_signatures = set()
-    for seg in segments_to_remove:
-        # Normalize segment direction (smaller point first)
-        p1 = (round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS))
-        p2 = (round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS))
-        if p1 > p2:
-            p1, p2 = p2, p1
-        sig = (p1, p2, seg.layer, seg.net_id)
-        seg_signatures.add(sig)
+    if segments_to_remove:
+        remove_ids = {id(s) for s in segments_to_remove}
+        found_ids = set()
+        kept = []
+        for seg in pcb_data.segments:
+            if id(seg) in remove_ids:
+                found_ids.add(id(seg))
+            else:
+                kept.append(seg)
+        missing = [s for s in segments_to_remove if id(s) not in found_ids]
+        if missing:
+            want = {}
+            for s in missing:
+                sig = _seg_rip_sig(s)
+                want[sig] = want.get(sig, 0) + 1
+            kept_rev = []
+            for seg in reversed(kept):
+                sig = _seg_rip_sig(seg)
+                if want.get(sig, 0) > 0:
+                    want[sig] -= 1
+                else:
+                    kept_rev.append(seg)
+            kept = kept_rev[::-1]
+        pcb_data.segments = kept
 
-    # Build set of via signatures (x, y, net_id) for fast lookup
-    via_signatures = set()
-    for via in vias_to_remove:
-        sig = (round(via.x, POSITION_DECIMALS), round(via.y, POSITION_DECIMALS), via.net_id)
-        via_signatures.add(sig)
-
-    # Remove matching segments
-    new_segments = []
-    removed_seg_count = 0
-    for seg in pcb_data.segments:
-        p1 = (round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS))
-        p2 = (round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS))
-        if p1 > p2:
-            p1, p2 = p2, p1
-        sig = (p1, p2, seg.layer, seg.net_id)
-        if sig in seg_signatures:
-            removed_seg_count += 1
-        else:
-            new_segments.append(seg)
-    pcb_data.segments = new_segments
-
-    # Remove matching vias
-    new_vias = []
-    removed_via_count = 0
-    for via in pcb_data.vias:
-        sig = (round(via.x, POSITION_DECIMALS), round(via.y, POSITION_DECIMALS), via.net_id)
-        if sig in via_signatures:
-            removed_via_count += 1
-        else:
-            new_vias.append(via)
-    pcb_data.vias = new_vias
+    if vias_to_remove:
+        remove_via_ids = {id(v) for v in vias_to_remove}
+        found_via_ids = set()
+        kept_vias = []
+        for via in pcb_data.vias:
+            if id(via) in remove_via_ids:
+                found_via_ids.add(id(via))
+            else:
+                kept_vias.append(via)
+        missing_vias = [v for v in vias_to_remove if id(v) not in found_via_ids]
+        if missing_vias:
+            want_v = {}
+            for v in missing_vias:
+                sig = _via_rip_sig(v)
+                want_v[sig] = want_v.get(sig, 0) + 1
+            kept_rev = []
+            for via in reversed(kept_vias):
+                sig = _via_rip_sig(via)
+                if want_v.get(sig, 0) > 0:
+                    want_v[sig] -= 1
+                else:
+                    kept_rev.append(via)
+            kept_vias = kept_rev[::-1]
+        pcb_data.vias = kept_vias
 
 
 def remove_net_from_pcb_data(pcb_data: PCBData, net_id: int) -> Tuple[List[Segment], List[Via]]:
