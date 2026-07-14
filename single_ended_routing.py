@@ -1046,7 +1046,8 @@ def _probe_route_with_frontier_once(
 def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                               obstacles: GridObstacleMap,
                               attraction_path: Optional[List[Tuple[int, int, int]]] = None,
-                              reverse_direction: bool = False) -> Optional[dict]:
+                              reverse_direction: bool = False,
+                              bounds: Optional[Tuple[int, int, int, int]] = None) -> Optional[dict]:
     """Route a single net using pre-built obstacles (for incremental routing).
 
     Args:
@@ -1058,6 +1059,13 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                         List of (gx, gy, layer) tuples from a previously routed neighbor.
         reverse_direction: If True, swap sources and targets (route from targets to sources).
                           Used for bus routing when the clique was formed by targets.
+        bounds: Optional (gmin_x, gmin_y, gmax_x, gmax_y) grid-cell window the route
+                must stay inside (the scoped net_rescue window, #396). When set,
+                endpoints outside it are dropped (a long trunk segment pulled into a
+                small window contributes a free end OUTSIDE the window bounds, and
+                routing to it drags the A* through the un-modelled exterior), and the
+                source/target overrides below are never stamped outside it -- so the
+                window fence stays SOLID instead of being punched at the exempt cell.
     """
     # Find endpoints (segments or pads)
     sources, targets, error = get_net_endpoints(pcb_data, net_id, config)
@@ -1072,6 +1080,15 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # Swap source/target for bus routing from clustered targets
     if reverse_direction:
         sources, targets = targets, sources
+
+    # Clamp endpoints to the scoped window: nothing outside the fence may be a
+    # source/target, so the A* is never pulled past the fence into un-modelled space.
+    if bounds is not None:
+        bgx0, bgy0, bgx1, bgy1 = bounds
+        sources = [s for s in sources if bgx0 <= s[0] <= bgx1 and bgy0 <= s[1] <= bgy1]
+        targets = [t for t in targets if bgx0 <= t[0] <= bgx1 and bgy0 <= t[1] <= bgy1]
+        if not sources or not targets:
+            return None
 
     coord = GridCoord(config.grid_step)
     layer_names = config.layers
@@ -1092,17 +1109,24 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     # Add source and target positions as allowed cells to override BGA zone blocking
     # This only affects BGA zone blocking, not regular obstacle blocking (tracks, stubs, pads)
+    # When a window `bounds` is given, never exempt a cell in/beyond the fence: the
+    # allowed/source-target overrides are the only thing that can breach the fence, so
+    # keeping them strictly inside the window keeps the fence solid (#396).
+    def _exempt_ok(gx, gy):
+        return bounds is None or (bounds[0] <= gx <= bounds[2] and bounds[1] <= gy <= bounds[3])
     allow_radius = 10
     for gx, gy, _ in sources_grid + targets_grid:
         for dx in range(-allow_radius, allow_radius + 1):
             for dy in range(-allow_radius, allow_radius + 1):
-                obstacles.add_allowed_cell(gx + dx, gy + dy)
+                if _exempt_ok(gx + dx, gy + dy):
+                    obstacles.add_allowed_cell(gx + dx, gy + dy)
 
     # Mark exact source/target cells so routing can start/end there even if blocked by
     # adjacent track expansion (but NOT blocked by BGA zones - use allowed_cells for that)
     # NOTE: Must pass layer to only allow override on the specific layer of the endpoint
     for gx, gy, layer in sources_grid + targets_grid:
-        obstacles.add_source_target_cell(gx, gy, layer)
+        if _exempt_ok(gx, gy):
+            obstacles.add_source_target_cell(gx, gy, layer)
 
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
