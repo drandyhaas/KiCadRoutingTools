@@ -807,13 +807,52 @@ def _subsample_cell_points(cells, coord, max_pts: int = 400, interior_cache=None
     return list(pts)
 
 
+def _npth_holes(pcb_data):
+    """(x, y, drill) of every no-copper hole on the board, cached on pcb_data.
+    Net-tied NPTH mounting holes (#328) are included: no copper ring means the
+    NPTH-to-track floor applies whatever net the hole claims."""
+    holes = getattr(pcb_data, '_npth_holes_cache_390', None)
+    if holes is None:
+        from obstacle_map import _pad_has_copper
+        from kicad_parser import pad_drill_circles
+        holes = []
+        for pads in pcb_data.pads_by_net.values():
+            for p in pads:
+                if p.drill > 0 and not _pad_has_copper(p):
+                    holes.extend(pad_drill_circles(p))
+        pcb_data._npth_holes_cache_390 = holes
+    return holes
+
+
+def npth_floor_ok(x, y, pcb_data, track_half: float) -> bool:
+    """False when track copper of half-width `track_half` centered at (x, y)
+    would violate the NPTH-to-track fab floor of a no-copper drill (#390).
+
+    Route seed/anchor points are stamped source/target cells, which OVERRIDE
+    the obstacle map's (correct) NPTH drill keep-out -- so every fill-derived
+    seed must respect the floor itself. The fill-validity margin ladder must
+    never relax below this: zone fill lawfully sits closer to an NPTH than
+    track copper may (crkbd GNDR strap seeded 0.15 from the rEXSW1 hole edge)."""
+    floor = defaults.NPTH_TO_TRACK_CLEARANCE + track_half
+    for hx, hy, hdia in _npth_holes(pcb_data):
+        if math.hypot(x - hx, y - hy) < hdia / 2.0 + floor:
+            return False
+    return True
+
+
 def _real_fill_point(pt, net_id, pcb_data, zone_polys, plane_layer,
-                     margin: float) -> bool:
+                     margin: float, npth_track_half: float = 0.0) -> bool:
     """True when a disc of radius `margin` around pt provably sits in REAL
     zone fill: fully inside one outline and at least `margin` clear of every
     foreign copper item on the plane layer (the coarse flood model blurs the
     fill's clearance carving; joins attached to modeled-but-absent fill ship
-    floating vias -- kicad-cli 'Via | Zone unconnected')."""
+    floating vias -- kicad-cli 'Via | Zone unconnected').
+
+    `npth_track_half` is the half-width of the track that will terminate at
+    an accepted point: the NPTH-to-track fab floor is enforced at that width
+    and is NOT subject to the caller's margin relaxation (#390)."""
+    if not npth_floor_ok(pt[0], pt[1], pcb_data, npth_track_half):
+        return False
     from check_connected import point_in_polygon
     # A point inside a FOREIGN zone outline on this layer may be copper owned
     # by that pour. Priority-exact (#350): KiCad gives overlap to the HIGHER
@@ -1417,11 +1456,15 @@ def route_disconnected_regions(
 
         def _valid_fill(pt):
             return _real_fill_point(pt, net_id, pcb_data, _zone_polys,
-                                    _plane_layer_name, _margin)
+                                    _plane_layer_name, _margin,
+                                    npth_track_half=min_track_width / 2)
 
         def _valid_fill_relaxed(pt):
+            # Relaxes the fill margin only -- the NPTH fab floor inside
+            # _real_fill_point stays enforced at full track width (#390).
             return _real_fill_point(pt, net_id, pcb_data, _zone_polys,
-                                    _plane_layer_name, zone_clearance)
+                                    _plane_layer_name, zone_clearance,
+                                    npth_track_half=min_track_width / 2)
 
         def _cells_for(region_idx, near_pt):
             cells = region_cells[region_idx] \

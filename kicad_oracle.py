@@ -273,13 +273,25 @@ def _trace_real_island(start, net_id, layer, pcb_data, zone_polys, margin,
 
 
 def _island_seed_points(cells, step, pcb_data, net_id, layer,
-                        routing_layers, start, max_cell_pts=24):
+                        routing_layers, start, max_cell_pts=24,
+                        track_half=0.0):
     """Seeds across the traced island: every existing via and THT pad on it
     (the best join points -- they already bond the fill), SMD pads and track
     ends on the zone layer, a subsample of the fill itself, and the reported
-    point. Multi-source A* then attaches wherever is cheapest."""
+    point. Multi-source A* then attaches wherever is cheapest.
+
+    Seeds are stamped source/target cells and override the obstacle map's
+    NPTH drill keep-out, so bare-fill seeds (and the raw reported point) are
+    filtered to the NPTH-to-track fab floor at `track_half` (#390) -- zone
+    fill lawfully sits closer to a no-copper hole than track copper may.
+    Existing vias/pads/track-ends are kept as-is: they are already copper."""
+    from plane_region_connector import npth_floor_ok
+
     def inside(x, y):
         return (round(x / step), round(y / step)) in cells
+
+    def floor_ok(x, y):
+        return npth_floor_ok(x, y, pcb_data, track_half)
     pts = []
     for v in pcb_data.vias:
         if v.net_id == net_id and inside(v.x, v.y):
@@ -296,12 +308,14 @@ def _island_seed_points(cells, step, pcb_data, net_id, layer,
         if s.net_id == net_id and s.layer == layer \
                 and inside(s.start_x, s.start_y):
             pts.append((s.start_x, s.start_y, layer))
-    cell_pts = [(gx * step, gy * step, layer) for gx, gy in cells]
+    cell_pts = [(gx * step, gy * step, layer) for gx, gy in cells
+                if floor_ok(gx * step, gy * step)]
     if len(cell_pts) > max_cell_pts:
         stride = len(cell_pts) // max_cell_pts + 1
         cell_pts = cell_pts[::stride]
     pts.extend(cell_pts)
-    pts.append((start[0], start[1], layer))
+    if floor_ok(start[0], start[1]):
+        pts.append((start[0], start[1], layer))
     return pts
 
 
@@ -601,7 +615,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                     if not cells:
                         return None
                 return _island_seed_points(cells, 0.25, pcb_data, net_id,
-                                           layer, routing_layers, (x, y))
+                                           layer, routing_layers, (x, y),
+                                           track_half=config.track_width / 2)
 
             if force_raw:
                 # The expanded attempt routed copper KiCad still grades as
@@ -669,7 +684,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                         if _cells:
                             src = _island_seed_points(
                                 _cells, 0.25, pcb_data, net_id, al,
-                                routing_layers, (ax, ay))
+                                routing_layers, (ax, ay),
+                                track_half=config.track_width / 2)
             anchor_layer = layer_map.get(al or bl or routing_layers[0], 0)
             result = None
             used_via_size, used_via_drill = config.via_size, config.via_drill
