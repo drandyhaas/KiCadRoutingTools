@@ -358,6 +358,18 @@ def generate_underpad_escape(footprint: Footprint,
             clamp_stats['escalated'] += 1
         return cs, cd, cs / 2 + track_width / 2 + clearance + margin
 
+    def vkeep_for_pad(p):
+        """Keep-out radius for the (clamped, #202) via that will land in pad p.
+        Pure -- no clamp_stats side effect -- so the bulk reservation loops can
+        reserve each pad's REAL (clamped) via keepout instead of the nominal
+        via_keep, which over-reserves on small/mixed-pitch pads and pre-blocks
+        corridors the smaller via leaves open (issue #378). Never larger than
+        via_keep (the clamp only shrinks), so it can only free space, never
+        under-reserve: any via that lands in a pad too small for the nominal via
+        is itself bounded by that pad's clamped size."""
+        cs = clamp_via_to_pad(via_size, via_drill, p, floors)[0]
+        return cs / 2 + track_width / 2 + clearance + margin
+
     # Static obstacles ---------------------------------------------------------
     # EVERY footprint pad blocks copper - including unconnected (net 0) balls,
     # which still occupy F.Cu. SMD blocks only F.Cu; through-hole blocks all
@@ -367,9 +379,10 @@ def generate_underpad_escape(footprint: Footprint,
             occ.block_all(p.global_x, p.global_y, pad_keep)
         else:
             occ.block_layer(top_idx, p.global_x, p.global_y, pad_keep)
-    # Plane balls tap their plane through a via -> block all layers.
+    # Plane balls tap their plane through a via -> block all layers. Reserve each
+    # ball's own clamped-via keepout (#378), not the nominal via_keep.
     for p in plane_pads:
-        occ.block_all(p.global_x, p.global_y, via_keep)
+        occ.block_all(p.global_x, p.global_y, vkeep_for_pad(p))
     # Existing vias / copper on the board within the region.
     for v in pcb_data.vias:
         if bounds[0] <= v.x <= bounds[2] and bounds[1] <= v.y <= bounds[3]:
@@ -938,10 +951,10 @@ def generate_underpad_escape(footprint: Footprint,
     # escaped via-less on top are NOT reserved, so deeper inner runs stay open
     # beneath them.
     for p in inner_pads:
-        occ.block_all(p.global_x, p.global_y, via_keep)
+        occ.block_all(p.global_x, p.global_y, vkeep_for_pad(p))
     for _base, pp, nn in remaining_pairs:
-        occ.block_all(pp.global_x, pp.global_y, via_keep)
-        occ.block_all(nn.global_x, nn.global_y, via_keep)
+        occ.block_all(pp.global_x, pp.global_y, vkeep_for_pad(pp))
+        occ.block_all(nn.global_x, nn.global_y, vkeep_for_pad(nn))
 
     # Phase C2: escape the remaining pairs coupled on an inner layer (via-in-pad),
     # deepest-first so the interior claims the scarce central space. A pair that
