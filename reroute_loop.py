@@ -21,7 +21,7 @@ from diff_pair_routing import (route_diff_pair_with_obstacles, get_diff_pair_end
                                _route_direct_coupled_middle)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
-from polarity_swap import apply_polarity_swap, get_canonical_net_id
+from polarity_swap import apply_polarity_swap, get_canonical_net_id, rip_combo_already_tried
 from layer_swap_fallback import try_fallback_layer_swap, add_own_stubs_as_obstacles_for_diff_pair
 from routing_context import (
     build_single_ended_obstacles, build_diff_pair_obstacles,
@@ -284,11 +284,12 @@ def run_reroute_loop(
                             if N > len(rippable_blockers):
                                 break
 
-                            blocker_canonicals = frozenset(
-                                get_canonical_net_id(rippable_blockers[i].net_id, diff_pair_by_net_id)
-                                for i in range(N)
-                            )
-                            if (ripped_net_id, blocker_canonicals) in rip_and_retry_history:
+                            # Shared rip-history gate (#376): same log+skip as
+                            # single_ended_loop (was a silent bare continue here).
+                            already_tried, blocker_canonicals = rip_combo_already_tried(
+                                rip_and_retry_history, ripped_net_id, ripped_net_name,
+                                rippable_blockers, N, diff_pair_by_net_id)
+                            if already_tried:
                                 continue
 
                             rip_successful = True
@@ -647,19 +648,13 @@ def run_reroute_loop(
                             if N > len(rippable_blockers):
                                 break
 
-                            blocker_canonicals = frozenset(
-                                get_canonical_net_id(rippable_blockers[i].net_id, diff_pair_by_net_id)
-                                for i in range(N)
-                            )
-                            if (current_canonical, blocker_canonicals) in rip_and_retry_history:
-                                blocker_names = []
-                                for i in range(N):
-                                    b = rippable_blockers[i]
-                                    if b.net_id in diff_pair_by_net_id:
-                                        blocker_names.append(diff_pair_by_net_id[b.net_id][0])
-                                    else:
-                                        blocker_names.append(b.net_name)
-                                print(f"  Skipping rip-up (already tried): {', '.join(blocker_names)}")
+                            # Shared rip-history gate (#376): unify the log+skip
+                            # with single_ended_loop (this site had a divergent
+                            # "Skipping rip-up (already tried)" message -- drift).
+                            already_tried, blocker_canonicals = rip_combo_already_tried(
+                                rip_and_retry_history, current_canonical, ripped_pair_name,
+                                rippable_blockers, N, diff_pair_by_net_id)
+                            if already_tried:
                                 continue
 
                             # Rip up blockers

@@ -80,7 +80,7 @@ from pcb_modification import add_route_to_pcb_data
 from single_ended_routing import route_net_with_obstacles, route_net_with_visualization, route_multipoint_main
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
-from polarity_swap import get_canonical_net_id
+from polarity_swap import get_canonical_net_id, rip_combo_already_tried
 from routing_context import (
     build_single_ended_obstacles, build_incremental_obstacles,
     prepare_obstacles_inplace, restore_obstacles_inplace
@@ -534,24 +534,12 @@ def route_single_ended_nets(
                         if N > len(rippable_blockers):
                             break  # Not enough blockers to rip
 
-                        # Build frozenset of all N blocker canonicals for loop check
-                        blocker_canonicals = frozenset(
-                            get_canonical_net_id(rippable_blockers[i].net_id, diff_pair_by_net_id)
-                            for i in range(N)
-                        )
-                        if (net_id, blocker_canonicals) in rip_and_retry_history:
-                            blocker_names = []
-                            for i in range(N):
-                                b = rippable_blockers[i]
-                                if b.net_id in diff_pair_by_net_id:
-                                    blocker_names.append(diff_pair_by_net_id[b.net_id][0])
-                                else:
-                                    blocker_names.append(b.net_name)
-                            if len(blocker_names) == 1:
-                                blockers_str = blocker_names[0]
-                            else:
-                                blockers_str = "{" + ", ".join(blocker_names) + "}"
-                            print(f"  Skipping N={N}: already tried ripping {blockers_str} for {net_name}")
+                        # Shared rip-history gate (#376): computes the canonical
+                        # blocker set, logs+skips if this combo was already tried.
+                        already_tried, blocker_canonicals = rip_combo_already_tried(
+                            rip_and_retry_history, net_id, net_name,
+                            rippable_blockers, N, diff_pair_by_net_id)
+                        if already_tried:
                             continue
 
                         # Rip up only the new blocker(s) for this N level
