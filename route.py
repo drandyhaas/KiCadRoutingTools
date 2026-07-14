@@ -1031,6 +1031,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"pre-rip route (dropped {dropped} colliding piece(s)); "
                   f"net remains PARTIAL for a later reconnect pass")
 
+    # Issues #331/#371: last-chance scoped fine-parameter rescue for nets the
+    # whole pipeline (main loop, rip-up ladder, reroute loop, Phase 3, #134
+    # recovery) still left failed or partially connected. No rip-up and no
+    # flags - scoped windows at finer grid/track/clearance only (net_rescue).
+    # Runs BEFORE the summary counts so recovered nets grade as routed, and
+    # before the cleanup pipeline so rescue copper is swept like all other
+    # copper. KICAD_NET_RESCUE=0 disables it for A/B debugging.
+    if progress_callback:
+        progress_callback(0, 0, "Rescuing failed nets...")
+    from net_rescue import rescue_failed_nets
+    rescue_summary = rescue_failed_nets(state, single_ended_nets,
+                                        net_clearances=net_clearances)
+
     # Final progress update
     if progress_callback:
         progress_callback(total_routes, total_routes, "Routing complete")
@@ -1519,6 +1532,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # taps below the nominal). Grade/check_drc the board at this floor.
         'min_clearance_used': __import__('clearance_ledger').effective(clearance),
     }
+    if rescue_summary:
+        # #331/#371 rescue pass outcome (key absent when nothing was rescued,
+        # so pre-rescue JSON_SUMMARY consumers/diffs are unaffected).
+        summary['rescue'] = rescue_summary
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
     # Write output file or return results for direct application

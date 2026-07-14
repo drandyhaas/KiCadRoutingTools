@@ -199,6 +199,30 @@ REPAIR_MAX_TRACK_WIDTH = 2.0  # mm - maximum track width for connections
 REPAIR_MIN_TRACK_WIDTH = 0.2  # mm - minimum track width for connections
 REPAIR_ANALYSIS_GRID_STEP = 0.5  # mm - grid step for connectivity analysis
 
+# Per-net fine-parameter rescue (net_rescue.py, issues #331/#371)
+# After the main loop, rip-up ladder, reroute loop and Phase 3 have all had
+# their shot, each still-failed (or partially connected) net gets one scoped
+# last-chance retry: a small obstacle-map WINDOW around the remaining gap at a
+# finer grid, with the track narrowed to the fab floor and the clearance
+# stepped down toward the fab floor (mirrors the plane-tap fine ladder, #226).
+# The limits below bound the compute: the window is sized to the gap (never
+# the board), the grid auto-coarsens until the window fits the cell budget,
+# and gaps longer than RESCUE_MAX_GAP_MM are a re-thread, not a gap - skipped.
+RESCUE_GRID_STEP = 0.025          # mm - fine grid for the scoped rescue retry
+RESCUE_CLEARANCE_STEPS = 4        # clearance rungs from nominal down to the fab floor
+RESCUE_WINDOW_MARGIN = 4.0        # mm of window past the gap bbox on every side
+RESCUE_MIN_WINDOW_HALF = 6.0      # mm - minimum window half-size (detour room)
+RESCUE_MAX_WINDOW_CELLS = 4_000_000  # per-layer cell budget; grid coarsens to fit
+RESCUE_MAX_GAP_MM = 40.0          # mm - skip gaps longer than this
+RESCUE_MAX_EDGES_PER_NET = 8      # max gap-closing attempts per rescued net
+RESCUE_MAX_ITERATIONS = 1_000_000  # per-rung A* backstop. Deliberately generous:
+                                   # hopeless rungs exhaust the small fenced window
+                                   # in far fewer iterations no matter the budget
+                                   # (measured on ottercast: a 200k cap saved zero
+                                   # time and cost 7 recoveries - fine grid needs
+                                   # ~4x the coarse iteration count), so this only
+                                   # guards degenerate --max-iterations values.
+
 
 # GUI-specific ranges (min, max, increment, digits)
 # These define the SpinCtrl ranges for the GUI

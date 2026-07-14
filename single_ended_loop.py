@@ -489,6 +489,33 @@ def route_single_ended_nets(
                         blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id
                     )
 
+                    # #331 item 3: a via-in-pad unblock that DECLINED during
+                    # this net's attempts recorded WHICH net's copper boxes
+                    # the pad (_place_shrunk_via_in_pad). Frontier attribution
+                    # cannot see that copper (the search never reaches under
+                    # the pad), so it blames adjacent bystanders - put the
+                    # named keystone at the FRONT of the rip ladder instead.
+                    _blame = getattr(pcb_data, '_via_unblock_blame', None)
+                    blame_ids = _blame.pop(net_id, None) if _blame else None
+                    if blame_ids:
+                        from blocking_analysis import BlockingInfo
+                        excluded = rip_exclude_set(state, net_id)
+                        for bid in sorted(blame_ids):
+                            if bid not in routed_results or bid in excluded:
+                                continue
+                            canonical = get_canonical_net_id(bid, diff_pair_by_net_id)
+                            if canonical in seen_canonical_ids:
+                                continue
+                            seen_canonical_ids.add(canonical)
+                            bname = pcb_data.nets[bid].name if bid in pcb_data.nets else str(bid)
+                            print(f"  Via-in-pad decline blamed {bname} "
+                                  f"(copper under the boxed pad) - ripping it first")
+                            rippable_blockers.insert(0, BlockingInfo(
+                                net_id=bid, net_name=bname, blocked_count=0,
+                                track_cells=0, via_cells=0, unique_cells=0,
+                                near_target_cells=0, near_source_cells=0,
+                                details="via-in-pad decline blame (#331)"))
+
                     # Progressive rip-up: try N=1, then N=2, etc up to max_rip_up_count
                     ripped_items = []
                     ripped_canonical_ids = set()  # Track which canonicals have been ripped

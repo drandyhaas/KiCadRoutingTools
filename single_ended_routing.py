@@ -1604,6 +1604,21 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
         # copper: once that window closes the pad may be genuinely tappable.
         if not (inflight_vias or inflight_segments):
             cache.add(key)
+            # #331 item 3 (#189): name the committed copper that boxed this
+            # pad. The A* frontier never reaches copper directly under the
+            # pad (the ottercast SDC0_D3 In1 trace), so frontier attribution
+            # blames adjacent bystanders while the decisive blocker stays
+            # invisible. The rip-up ladder consumes this to rip the keystone.
+            from plane_blocker_detection import find_via_position_blocker
+            blocker = find_via_position_blocker(
+                pad_obj.global_x, pad_obj.global_y, pcb_data, config,
+                net_id, protected_net_ids={0}, quiet=True)
+            if blocker is not None:
+                blame = getattr(pcb_data, '_via_unblock_blame', None)
+                if blame is None:
+                    blame = {}
+                    pcb_data._via_unblock_blame = blame
+                blame.setdefault(net_id, set()).add(blocker)
         return None
     v = tap_res.via
     via = Via(x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
