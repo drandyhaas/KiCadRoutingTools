@@ -3089,6 +3089,14 @@ def _route_multipoint_taps_impl(
         # edge (issue #189) -- it connects the inner-layer path end to the pad by
         # copper overlap, no extra trace needed.
         vias = list(vias) + unblock_vias
+        # A tap edge that launches from an off-grid tap point an earlier edge
+        # already bridged re-emits that edge's endpoint connector (path[0]
+        # maps through tap_point_map back to the sampled copper's ORIGINAL
+        # float point, and _path_to_segments_vias bridges original->grid
+        # again). Emit only copper the net does not already have, so no
+        # duplicate coincident segment ships to the output. Runs last, after
+        # the width passes above, since the twin key includes seg.width.
+        segments = _drop_segments_already_present(segments, all_segments)
         all_segments.extend(segments)
         all_vias.extend(vias)
         # Make this edge's vias reusable by later edges of the same net, so a
@@ -3149,6 +3157,32 @@ def _route_multipoint_taps_impl(
     updated_result['failed_edge_blocking'] = failed_edge_blocking
 
     return updated_result
+
+
+def _drop_segments_already_present(segments: List[Segment],
+                                   existing: List[Segment]) -> List[Segment]:
+    """Drop segments that exactly duplicate one already in ``existing``
+    (same endpoints in either orientation, same layer, width and net).
+
+    The Phase-3 tap flow launches from points ON the net's existing copper
+    (get_all_segment_tap_points). When the A* start cell maps back through
+    tap_point_map to an off-grid original point that an earlier edge already
+    bridged to that same grid cell, _path_to_segments_vias re-emits the
+    identical endpoint connector -- a second coincident copy of a tiny
+    (~0.02 mm) segment at the stub tip. A geometric twin adds no copper, so
+    dropping it changes neither connectivity nor DRC.
+    """
+    def _key(s):
+        return ((round(s.start_x, 6), round(s.start_y, 6)),
+                (round(s.end_x, 6), round(s.end_y, 6)),
+                s.layer, round(s.width, 6), s.net_id)
+
+    existing_keys = set()
+    for s in existing:
+        k = _key(s)
+        existing_keys.add(k)
+        existing_keys.add((k[1], k[0]) + k[2:])
+    return [s for s in segments if _key(s) not in existing_keys]
 
 
 def _path_to_segments_vias(
