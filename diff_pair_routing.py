@@ -3091,7 +3091,8 @@ def _collapse_leg_attach_join(leg_segs, attach_xy, config, pcb_data, net_id, par
         from single_ended_routing import _seg_foreign_pad_dist
         fmargin = config.clearance + w / 2.0
         if _seg_foreign_pad_dist(pcb_data, net_id, pen.start_x, pen.start_y,
-                                 ax, ay, pen.layer) < fmargin - 1e-6:
+                                 ax, ay, pen.layer,
+                                 base_clearance=config.clearance) < fmargin - 1e-6:
             return leg_segs  # collapsed segment would graze a foreign pad
     pen.end_x, pen.end_y = ax, ay
     del leg_segs[-1]

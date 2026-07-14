@@ -129,6 +129,16 @@ class GridRouteConfig:
     layer_widths: Dict[str, float] = field(default_factory=dict)  # Per-layer widths for impedance control
     # Power net routing - per-net width overrides
     power_net_widths: Dict[int, float] = field(default_factory=dict)  # net_id -> width in mm
+    # Per-net netclass clearances (issue #326 B5): net_id -> clearance mm,
+    # from the board's netclasses (populated by batch_route's net_clearances
+    # kwarg -- the GUI passes it today). A net's OWN copper is stamped into
+    # the shared map / per-net cache at max(clearance, its class value), so
+    # every same-run sibling keeps the class spacing to it. (A net routing at
+    # a LOWER class can still approach at its own smaller clearance only up to
+    # the stamped halo -- the pair max holds whenever the STAMPED net's class
+    # is the larger one; full per-pair enforcement would need per-net query
+    # margins in the A* itself.)
+    net_clearances: Dict[int, float] = field(default_factory=dict)
     # Layer cost weights - prefer certain layers over others (1.0 = normal, 1.5 = 50% more expensive)
     layer_costs: List[float] = field(default_factory=list)  # Per-layer cost multipliers
     # Debug options
@@ -195,6 +205,13 @@ class GridRouteConfig:
             # Ensure power net width is at least the base track width
             return max(self.power_net_widths[net_id], self.track_width)
         return self.get_track_width(layer)
+
+    def get_net_clearance(self, net_id: int) -> float:
+        """Clearance for stamping THIS net's copper as an obstacle (#326 B5):
+        its netclass clearance when above the global value, else the global
+        clearance. Never smaller than `clearance` (netclasses only widen)."""
+        nc = self.net_clearances.get(net_id, 0.0) if self.net_clearances else 0.0
+        return nc if nc > self.clearance else self.clearance
 
     def get_layer_costs(self) -> List[int]:
         """Get layer cost multipliers for the Rust router.

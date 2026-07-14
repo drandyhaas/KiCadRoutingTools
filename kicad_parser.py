@@ -173,6 +173,12 @@ class Footprint:
     locked: bool = False  # Footprint (locked yes) flag: the user pinned this part,
                           # so placement passes must not move it and routing/fanout
                           # cannot assume a later step will move it out of the way.
+    clearance: float = 0.0  # Footprint-level (clearance ...) override (mm),
+    # inherited by every pad of this footprint that has no override of its own
+    # (KiCad resolution: pad override, else footprint override, else netclass).
+    # The parser RESOLVES the inheritance into each pad's local_clearance at
+    # parse time, so clearance consumers only ever read pad.local_clearance;
+    # this field records the raw footprint value for fidelity (issue #326).
 
 
 @dataclass
@@ -1812,6 +1818,21 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
                 _hdr_end = min(_hdr_end, _i)
         is_locked = bool(re.search(r'\(locked\s+yes\)', fp_text[:_hdr_end]))
 
+        # Footprint-level (clearance ...) override (issue #326). KiCad writes it
+        # in the footprint header, after the properties but before any graphic/
+        # pad/zone child, so bound the search there (a PAD's own (clearance ...)
+        # or a custom pad's (clearance outline) must not match). Negative
+        # overrides (KiCad allows them to SHRINK the netclass clearance) are
+        # clamped to 0: this codebase models overrides only as keep-out floors,
+        # so a shrinking override safely degrades to "no override".
+        _clr_end = len(fp_text)
+        for _tok in ('(pad', '(fp_', '(zone', '(model'):
+            _i = fp_text.find(_tok)
+            if _i != -1:
+                _clr_end = min(_clr_end, _i)
+        fp_clr_match = re.search(r'\(clearance\s+(-?[\d.]+)\)', fp_text[:_clr_end])
+        fp_clearance = max(0.0, float(fp_clr_match.group(1))) if fp_clr_match else 0.0
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -1821,7 +1842,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             layer=fp_layer,
             value=value,
             dnp=is_dnp,
-            locked=is_locked
+            locked=is_locked,
+            clearance=fp_clearance
         )
 
         # Extract pads
@@ -1956,9 +1978,16 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
 
             # Extract per-pad local clearance override, e.g. fiducial keep-clear
             # rings carry (clearance 0.375). The leading "(" avoids matching the
-            # footprint's (pad_to_mask_clearance ...) token. 0 = no override.
-            clr_match = re.search(r'\(clearance\s+([\d.]+)\)', pad_text)
-            local_clearance = float(clr_match.group(1)) if clr_match else 0.0
+            # footprint's (pad_to_mask_clearance ...) token. 0 = no override
+            # (KiCad's explicit "(clearance 0)" also means inherit). A pad with
+            # no override of its own inherits the FOOTPRINT-level override
+            # (issue #326) -- resolved here so every consumer of
+            # pad.local_clearance honors both. Negative (shrinking) overrides
+            # clamp to 0 = no override (see the footprint-level comment).
+            clr_match = re.search(r'\(clearance\s+(-?[\d.]+)\)', pad_text)
+            local_clearance = max(0.0, float(clr_match.group(1))) if clr_match else 0.0
+            if local_clearance == 0.0:
+                local_clearance = fp_clearance
 
             # Calculate global coordinates
             global_x, global_y = local_to_global(fp_x, fp_y, fp_rotation, local_x, local_y)
@@ -2900,6 +2929,16 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         except Exception:
             fp_locked = False
 
+        # Footprint-level clearance override — parity with the text parser
+        # (issue #326). GetLocalClearance() returns IU or an optional/None on
+        # KiCad 8+; falsy = no override. Negative (shrinking) overrides clamp
+        # to 0 like the text parser (overrides act only as keep-out floors).
+        try:
+            _fc = fp.GetLocalClearance()
+            fp_clearance = max(0.0, to_mm(_fc)) if _fc else 0.0
+        except Exception:
+            fp_clearance = 0.0
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -2909,7 +2948,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             layer=fp_layer,
             value=fp_value,
             dnp=fp_dnp,
-            locked=fp_locked
+            locked=fp_locked,
+            clearance=fp_clearance
         )
 
         # Extract pads
@@ -3065,11 +3105,15 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             # Per-pad local clearance override (fiducial keep-clear rings etc.).
             # GetLocalClearance() returns the pad's own override in IU, or a
             # falsy/None when unset depending on KiCad version. 0 = no override.
+            # Pads without an override inherit the footprint-level one, matching
+            # the text parser's resolution (issue #326); negatives clamp to 0.
             try:
                 lc = pad.GetLocalClearance()
-                local_clearance = to_mm(lc) if lc else 0.0
+                local_clearance = max(0.0, to_mm(lc)) if lc else 0.0
             except Exception:
                 local_clearance = 0.0
+            if local_clearance == 0.0:
+                local_clearance = fp_clearance
 
             pad_obj = Pad(
                 component_ref=reference,
@@ -3611,6 +3655,11 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
             diffs.append(f"Footprint {ref} position: board=({bf.x:.3f},{bf.y:.3f}) file=({ff.x:.3f},{ff.y:.3f})")
         if not close(bf.rotation % 360, ff.rotation % 360):
             diffs.append(f"Footprint {ref} rotation: board={bf.rotation:.1f} file={ff.rotation:.1f}")
+        # Footprint-level clearance override (#326): a divergence here shifts
+        # EVERY inheriting pad's resolved local_clearance between the two paths.
+        bfc = getattr(bf, 'clearance', 0.0); ffc = getattr(ff, 'clearance', 0.0)
+        if not close(bfc, ffc):
+            diffs.append(f"Footprint {ref} clearance: board={bfc:.3f} file={ffc:.3f}")
         if len(bf.pads) != len(ff.pads):
             diffs.append(f"Footprint {ref} pad count: board={len(bf.pads)} file={len(ff.pads)}")
         else:

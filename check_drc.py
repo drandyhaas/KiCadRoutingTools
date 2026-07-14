@@ -1350,7 +1350,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             min_via_diameter: Optional[float] = None,
             min_via_drill: Optional[float] = None,
             check_sizes: bool = True, size_margin: float = 0.0,
-            check_pad_edge: bool = False, print_summary: bool = True):
+            check_pad_edge: bool = False, print_summary: bool = True,
+            net_clearances: Optional[Dict[str, float]] = None):
     """Run DRC checks on the PCB file.
 
     Args:
@@ -1373,6 +1374,10 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             undersized copper, so it never trips -- the fab floor is the real limit).
         size_margin: Absolute tolerance in mm for the size checks; a width/diameter
             within this of the floor is not flagged (default 0 = exact floor).
+        net_clearances: Optional {net_name: clearance_mm} from the board's
+            netclasses (issue #326). Pair checks grade at
+            max(clearance, class(net_a), class(net_b), pad overrides) --
+            KiCad's per-pair resolution -- instead of the single global value.
     """
     # Use track clearance for board edge if not specified
     effective_board_edge_clearance = board_edge_clearance if board_edge_clearance > 0 else clearance
@@ -1388,6 +1393,38 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
 
     if not quiet:
         print(f"Found {len(pcb_data.segments)} segments and {len(pcb_data.vias)} vias")
+
+    # Pairwise required clearance, KiCad-style (issue #326): each item's own
+    # clearance is its netclass value (net_clearances, name-keyed -> resolved
+    # to ids here); pads additionally carry their local/footprint override in
+    # pad.local_clearance (the parser resolves footprint inheritance). The
+    # requirement for a pair is the MAX of the two items' values and the
+    # global floor. All zero-cost when the board has neither netclasses nor
+    # overrides: _pair_cl returns the global scalar unchanged.
+    _ncl_by_id: Dict[int, float] = {}
+    if net_clearances:
+        for nid, net in pcb_data.nets.items():
+            c = net_clearances.get(net.name, 0.0)
+            if c > clearance:
+                _ncl_by_id[nid] = c
+
+    def _pair_cl(net_a: int, net_b: int) -> float:
+        if not _ncl_by_id:
+            return clearance
+        return max(clearance,
+                   _ncl_by_id.get(net_a, 0.0), _ncl_by_id.get(net_b, 0.0))
+
+    def _pad_pair_cl(pad, other_net: int) -> float:
+        eff = _pair_cl(pad.net_id, other_net)
+        lc = getattr(pad, 'local_clearance', 0.0) or 0.0
+        return lc if lc > eff else eff
+
+    def _mark_required(v: dict, eff: float) -> dict:
+        # Attribute above-global requirements (local override / netclass) in
+        # the violation record, mirroring KiCad's "pad clearance X mm" wording.
+        if eff > clearance + 1e-9:
+            v['required_mm'] = eff
+        return v
 
     # Resolve the fab-floor minimums for the track-width / via-size checks. Default
     # to the JLC manufacturing floor for the board's copper-layer count (issue #176).
@@ -1496,7 +1533,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 continue
             checked_pairs.add(pair_key)
 
-            has_violation, overlap, pt1, pt2 = check_segment_overlap(seg1, seg2, clearance, clearance_margin)
+            _eff = _pair_cl(net1, net2)
+            has_violation, overlap, pt1, pt2 = check_segment_overlap(seg1, seg2, _eff, clearance_margin)
             if has_violation and _graphic_pair_is_same_net(seg1, seg2, net1, net2):
                 has_violation = False
             if has_violation:
@@ -1504,7 +1542,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 net2_name = pcb_data.nets.get(net2, None)
                 net1_str = net1_name.name if net1_name else f"net_{net1}"
                 net2_str = net2_name.name if net2_name else f"net_{net2}"
-                violations.append({
+                violations.append(_mark_required({
                     'type': 'segment-segment',
                     'net1': net1_str,
                     'net2': net2_str,
@@ -1514,7 +1552,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'loc2': (seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y),
                     'closest_pt1': pt1,
                     'closest_pt2': pt2,
-                })
+                }, _eff))
 
             # Also check for segment crossings (different nets)
             crosses, cross_point = segments_cross(seg1, seg2)
@@ -1642,7 +1680,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 if not via_net_matches and not seg_net_matches:
                     continue
 
-                has_violation, overlap = check_via_segment_overlap(via, seg, clearance, clearance_margin)
+                _eff = _pair_cl(via_net, seg_net)
+                has_violation, overlap = check_via_segment_overlap(via, seg, _eff, clearance_margin)
                 if has_violation and _graphic_pair_is_same_net(seg, None, seg_net, via_net):
                     has_violation = False
                 if has_violation:
@@ -1650,7 +1689,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     seg_net_name = pcb_data.nets.get(seg_net, None)
                     via_net_str = via_net_name.name if via_net_name else f"net_{via_net}"
                     seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg_net}"
-                    violations.append({
+                    violations.append(_mark_required({
                         'type': 'via-segment',
                         'net1': via_net_str,
                         'net2': seg_net_str,
@@ -1658,7 +1697,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'overlap_mm': overlap,
                         'via_loc': (via.x, via.y),
                         'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
-                    })
+                    }, _eff))
 
     # Check via-to-via violations using spatial index
     if not quiet:
@@ -1681,20 +1720,21 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 continue
             via_via_checked.add(pair_key)
 
-            has_violation, overlap = check_via_via_overlap(via1, via2, clearance, clearance_margin)
+            _eff = _pair_cl(net1, net2) if net1 != net2 else clearance
+            has_violation, overlap = check_via_via_overlap(via1, via2, _eff, clearance_margin)
             if has_violation:
                 net1_name = pcb_data.nets.get(net1, None)
                 net2_name = pcb_data.nets.get(net2, None)
                 net1_str = net1_name.name if net1_name else f"net_{net1}"
                 net2_str = net2_name.name if net2_name else f"net_{net2}"
-                violations.append({
+                violations.append(_mark_required({
                     'type': 'via-via' if net1 != net2 else 'via-via-same-net',
                     'net1': net1_str,
                     'net2': net2_str,
                     'overlap_mm': overlap,
                     'loc1': (via1.x, via1.y),
                     'loc2': (via2.x, via2.y),
-                })
+                }, _eff))
 
     # Check pad-to-segment violations using spatial index
     if not quiet:
@@ -1717,8 +1757,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if not seg_net_matches and not pad_net_matches:
                 continue
 
+            _eff = _pad_pair_cl(pad, seg_net)
             has_violation, overlap, closest_pt = check_pad_segment_overlap(
-                pad, seg, clearance, routing_layers, clearance_margin
+                pad, seg, _eff, routing_layers, clearance_margin
             )
             if has_violation and _graphic_pair_is_same_net(seg, None, seg_net, pad_net):
                 has_violation = False
@@ -1727,7 +1768,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 seg_net_name = pcb_data.nets.get(seg_net, None)
                 pad_net_str = pad_net_name.name if pad_net_name else f"net_{pad_net}"
                 seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg_net}"
-                violations.append({
+                violations.append(_mark_required({
                     'type': 'pad-segment',
                     'net1': pad_net_str,
                     'net2': seg_net_str,
@@ -1737,7 +1778,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
                     'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
                     'closest_pt': closest_pt,
-                })
+                }, _eff))
 
     # Check pad-to-via violations using spatial index
     if not quiet:
@@ -1758,15 +1799,16 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 if not via_net_matches and not pad_net_matches:
                     continue
 
+                _eff = _pad_pair_cl(pad, via_net)
                 has_violation, overlap = check_pad_via_overlap(
-                    pad, via, clearance, routing_layers, clearance_margin
+                    pad, via, _eff, routing_layers, clearance_margin
                 )
                 if has_violation:
                     pad_net_name = pcb_data.nets.get(pad_net, None)
                     via_net_name = pcb_data.nets.get(via_net, None)
                     pad_net_str = pad_net_name.name if pad_net_name else f"net_{pad_net}"
                     via_net_str = via_net_name.name if via_net_name else f"net_{via_net}"
-                    violations.append({
+                    violations.append(_mark_required({
                         'type': 'pad-via',
                         'net1': pad_net_str,
                         'net2': via_net_str,
@@ -1774,7 +1816,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'pad_loc': (pad.global_x, pad.global_y),
                         'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
                         'via_loc': (via.x, via.y),
-                    })
+                    }, _eff))
 
     # Check pad-to-pad violations using spatial index (issue #234). Two pads of
     # DIFFERENT nets that overlap (a short) or sit below clearance on a shared
@@ -1815,14 +1857,16 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     if pair_key in pad_pad_checked:
                         continue
                     pad_pad_checked.add(pair_key)
+                    _lc2 = getattr(pad2, 'local_clearance', 0.0) or 0.0
+                    _eff = max(_pad_pair_cl(pad1, pad2_net), _lc2)
                     has_violation, overlap, closest_pt = check_pad_pad_overlap(
-                        pad1, pad2, clearance, routing_layers, clearance_margin)
+                        pad1, pad2, _eff, routing_layers, clearance_margin)
                     if has_violation:
                         n1 = pcb_data.nets.get(pad_net, None)
                         n2 = pcb_data.nets.get(pad2_net, None)
                         n1s = n1.name if n1 else f"net_{pad_net}"
                         n2s = n2.name if n2 else f"net_{pad2_net}"
-                        violations.append({
+                        violations.append(_mark_required({
                             'type': 'pad-pad',
                             'net1': n1s,
                             'net2': n2s,
@@ -1836,7 +1880,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                             'pad_loc': (pad1.global_x, pad1.global_y),
                             'pad_loc2': (pad2.global_x, pad2.global_y),
                             'closest_pt': closest_pt,
-                        })
+                        }, _eff))
 
     # Dummy variables for compatibility with remaining code
     via_net_ids = list(vias_by_net.keys())
@@ -2347,6 +2391,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    Drill: {v['drill']:.4f}mm < min {v['min_drill']:.4f}mm "
                               f"(short {v['shortfall_mm']:.4f}mm)")
                         print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
+                    # #326: attribute above-global requirements (pad/footprint
+                    # local clearance or netclass), mirroring KiCad's wording.
+                    if v.get('required_mm'):
+                        print(f"    Required clearance: {v['required_mm']:.4f}mm "
+                              f"(local/netclass override; global {clearance:.4f}mm)")
 
                 if len(vlist) > limit:
                     print(f"  ... and {len(vlist) - limit} more "
@@ -2442,6 +2491,34 @@ if __name__ == "__main__":
                   f"violations on a fine-pitch board (#295). Generate one with:\n"
                   f"    python3 fix_kicad_drc_settings.py {args.pcb}")
 
+    # Issue #326: per-netclass clearances -- KiCad grades every pair at the
+    # max of the two items' netclass values, so read the board's classes
+    # (explicit assignments + wildcard patterns) and grade the same way.
+    # Issue #338: KiCad grades copper-to-edge at the board's
+    # min_copper_edge_clearance; honor it unless --board-edge-clearance is
+    # explicitly larger.
+    net_clearances = None
+    try:
+        from list_nets import read_design_rules, net_clearance_map
+        _rules = read_design_rules(args.pcb)
+        if _rules.get('classes'):
+            from kicad_parser import extract_nets
+            with open(args.pcb, encoding='utf-8', errors='replace') as _f:
+                _net_objs, _ = extract_nets(_f.read())
+            net_clearances = net_clearance_map(
+                args.pcb, [n.name for n in _net_objs.values()],
+                rules=_rules) or None
+        _pro_edge = float(_rules.get('constraints', {})
+                          .get('min_copper_edge_clearance') or 0.0)
+        if _pro_edge > args.board_edge_clearance:
+            args.board_edge_clearance = _pro_edge
+            if not args.quiet:
+                print(f"Board-edge clearance {_pro_edge:.4g} mm "
+                      f"(from project min_copper_edge_clearance)")
+    except Exception as e:
+        if not args.quiet:
+            print(f"  (netclass/edge rules not read: {e})")
+
     violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet,
                          args.hole_to_hole_clearance, args.board_edge_clearance,
                          args.clearance_margin, max_print=args.max_print,
@@ -2450,5 +2527,6 @@ if __name__ == "__main__":
                          min_via_drill=args.min_via_drill,
                          check_sizes=not args.no_size_checks,
                          size_margin=args.size_margin,
-                         check_pad_edge=args.check_pad_edge)
+                         check_pad_edge=args.check_pad_edge,
+                         net_clearances=net_clearances)
     sys.exit(1 if violations else 0)

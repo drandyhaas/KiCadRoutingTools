@@ -242,6 +242,20 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 return 0, 0, 0.0, {'results': [], 'segments_to_remove': []}
             return 0, 0, 0.0
 
+    # Board-setup copper-to-edge rule (#338): route to at least the sibling
+    # .kicad_pro's min_copper_edge_clearance (engine-side, so the GUI and plan
+    # replays inherit it; see batch_route).
+    if input_file:
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            _eff_edge = effective_board_edge_clearance(input_file, board_edge_clearance)
+            if _eff_edge > (board_edge_clearance or 0.0):
+                print(f"Board edge clearance {_eff_edge}mm "
+                      f"(project min_copper_edge_clearance)")
+                board_edge_clearance = _eff_edge
+        except Exception:
+            pass
+
     # Track memory if debug_memory enabled
     mem_start = get_process_memory_mb() if debug_memory else 0.0
     if debug_memory:

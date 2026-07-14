@@ -2014,6 +2014,20 @@ def create_plane(
         print(f"Error: Number of nets ({len(net_names)}) must match number of layers ({len(plane_layers)})")
         return _empty_plane_results(return_results)
 
+    # Board-setup copper-to-edge rule (#338): zone outlines and tap copper must
+    # honor the sibling .kicad_pro's min_copper_edge_clearance (engine-side so
+    # the GUI planes tab inherits it; see batch_route).
+    if input_file:
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            _eff_edge = effective_board_edge_clearance(input_file, board_edge_clearance)
+            if _eff_edge > (board_edge_clearance or 0.0):
+                print(f"Board edge clearance {_eff_edge}mm "
+                      f"(project min_copper_edge_clearance)")
+                board_edge_clearance = _eff_edge
+        except Exception:
+            pass
+
     # Step 1: Load PCB (or use provided pcb_data)
     if pcb_data is None:
         print(f"Loading PCB from {input_file}...")

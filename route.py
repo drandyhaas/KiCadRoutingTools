@@ -425,6 +425,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             return 0, 0, 0.0
     visualize = vis_callback is not None
 
+    # Board-setup copper-to-edge rule (#338): KiCad enforces the sibling
+    # .kicad_pro's min_copper_edge_clearance, so route to at least it. Done in
+    # the ENGINE (not main()) so the GUI and manifest/plan replays inherit it;
+    # a missing project reads 0.0 (no-op) and an explicit larger
+    # --board-edge-clearance still wins (max).
+    if input_file:
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            _eff_edge = effective_board_edge_clearance(input_file, board_edge_clearance)
+            if _eff_edge > (board_edge_clearance or 0.0):
+                print(f"Board edge clearance {_eff_edge}mm "
+                      f"(project min_copper_edge_clearance)")
+                board_edge_clearance = _eff_edge
+        except Exception:
+            pass
+
     # Track memory if debug_memory enabled
     mem_start = get_process_memory_mb() if debug_memory else 0.0
     if debug_memory:
@@ -549,6 +565,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if config.keepout_enabled and pcb_data.keepout_zones:
         print(f"Keepout: blocking routes from {len(pcb_data.keepout_zones)} "
               f"polygon(s) on {config.keepout_layer}")
+
+    # Per-net netclass clearances (#326 B5): carried on the config so the
+    # per-net obstacle cache and the same-run copper stamps reserve each net's
+    # OWN class clearance (the base map additionally applies the max-flatten
+    # below). net_id-keyed, GUI-fed today; harmless when empty.
+    if net_clearances:
+        config.net_clearances = {nid: c for nid, c in net_clearances.items()
+                                 if c and c > 0}
 
     # Identify power nets and set up per-net widths
     if power_nets and power_nets_widths:

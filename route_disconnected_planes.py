@@ -401,6 +401,18 @@ def route_planes(
     """
     from route import _dump_engine_config
     _dump_engine_config('repair_planes', dict(locals()))
+    # Board-setup copper-to-edge rule (#338): engine-side so the GUI planes
+    # tab and plan replays inherit it; see batch_route.
+    if input_file:
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            _eff_edge = effective_board_edge_clearance(input_file, board_edge_clearance)
+            if _eff_edge > (board_edge_clearance or 0.0):
+                print(f"Board edge clearance {_eff_edge}mm "
+                      f"(project min_copper_edge_clearance)")
+                board_edge_clearance = _eff_edge
+        except Exception:
+            pass
     if pcb_data is None:
         print(f"Loading PCB from {input_file}...")
         pcb_data = parse_kicad_pcb(input_file)

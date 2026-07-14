@@ -96,11 +96,40 @@ def run_kicad_drc(board: str):
     return out, None
 
 
-def run_check_drc(board: str, clearance: float = None):
+def run_check_drc(board: str, clearance: float = None, netclasses: bool = False):
     """Run check_drc.run_drc, return counted violations (post warning-split)
-    as {type, nets:frozenset, pos:(x,y)}."""
+    as {type, nets:frozenset, pos:(x,y)}.
+
+    Parity with the kicad-cli side (#326/#338): pad/footprint local-clearance
+    overrides are graded unconditionally (they live in the .kicad_pcb, which
+    staging never touches); the board's min_copper_edge_clearance is always
+    honored (staging leaves it alone); per-NETCLASS clearances only when
+    `netclasses` is set -- the staged copy clamps every class down to the
+    routed clearance, so grading the original class values here would be
+    stricter than what kicad-cli sees."""
     from check_drc import run_drc
     kw = {"clearance": clearance} if clearance else {}
+    try:
+        from fix_kicad_drc_settings import read_project_edge_clearance
+        edge = read_project_edge_clearance(board)
+        if edge:
+            kw["board_edge_clearance"] = edge
+    except Exception:
+        pass
+    if netclasses:
+        try:
+            from list_nets import read_design_rules, net_clearance_map
+            from kicad_parser import extract_nets
+            rules = read_design_rules(board)
+            if rules.get("classes"):
+                with open(board, encoding="utf-8", errors="replace") as f:
+                    net_objs, _ = extract_nets(f.read())
+                ncl = net_clearance_map(board, [n.name for n in net_objs.values()],
+                                        rules=rules)
+                if ncl:
+                    kw["net_clearances"] = ncl
+        except Exception:
+            pass
     # #383: NO redirect_stdout -- swapping the process-global sys.stdout inside
     # a worker thread stole other concurrent boards' prints (result lines) into
     # this buffer. print_summary=False makes run_drc emit nothing in the success
@@ -228,7 +257,7 @@ def compare_board(board: str, label: str = None, clearance: float = None):
     if err:
         print(f"{label}: SKIP ({err})")
         return None
-    cd = run_check_drc(board, clearance)
+    cd = run_check_drc(board, clearance, netclasses=not bool(clearance))
     matched, kicad_only, cd_only = match(kicad, cd)
     # NET-PAIR agreement: the engines report at different granularities
     # (check_drc: one violation per offending segment; kicad: grouped item
