@@ -623,7 +623,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     single_ended_target_swap_info: List[Dict] = []
     boundary_debug_labels: List[Dict] = []  # Debug labels for boundary positions
     if swappable_net_patterns:
-        from target_swap import apply_single_ended_target_swaps
+        from target_swap import apply_single_ended_target_swaps, summarize_target_swaps
 
         # Find matching single-ended nets
         swappable_se_nets = find_single_ended_nets(
@@ -1461,7 +1461,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if rerouted_pairs:
         print(f"  Rerouted:      {len(rerouted_pairs)} (ripped nets re-routed)")
     if single_ended_target_swaps:
-        swap_pairs = [(k, v) for k, v in single_ended_target_swaps.items() if k < v]
+        from target_swap import summarize_target_swaps
+        swap_pairs = summarize_target_swaps(single_ended_target_swaps)
         print(f"  Target swaps:  {len(swap_pairs)}")
     print(f"  Total vias:    {total_vias}")
     print(f"  Total time:    {total_time:.2f}s")
@@ -1483,6 +1484,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if failed_single_ids:
         print_failed_net_histories(state, failed_single_ids, pcb_data)
 
+    from target_swap import summarize_target_swaps  # cycle-safe swap list (#380)
     summary = {
         'routed_single': routed_single,
         'failed_single': failed_single,
@@ -1503,7 +1505,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         'multipoint_edges_failed': tap_edges_failed,
         'ripup_success_pairs': sorted(ripup_success_pairs),
         'rerouted_pairs': sorted(rerouted_pairs),
-        'single_ended_target_swaps': [{'net1': k, 'net2': v} for k, v in single_ended_target_swaps.items() if k < v],
+        'single_ended_target_swaps': [{'net1': k, 'net2': v} for k, v in summarize_target_swaps(single_ended_target_swaps)],
         'layer_swaps': total_layer_swaps,
         'successful': successful,
         'failed': failed,

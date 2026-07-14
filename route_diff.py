@@ -514,7 +514,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     target_swap_info: List[Dict] = []  # Info needed to apply swaps to output file
     boundary_debug_labels: List[Dict] = []  # Debug labels for boundary positions
     if swappable_net_patterns and diff_pair_ids_to_route_set:
-        from target_swap import apply_target_swaps, generate_debug_boundary_labels
+        from target_swap import apply_target_swaps, generate_debug_boundary_labels, summarize_target_swaps
         from diff_pair_routing import get_diff_pair_endpoints
 
         swappable_diff_pairs = find_differential_pairs(pcb_data, swappable_net_patterns)
@@ -982,7 +982,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
               f"(mismatch found but pair not in --polarity-swap-nets): "
               f"{', '.join(sorted(state.polarity_swap_denied_pairs))}")
     if target_swaps:
-        swap_pairs = [(k, v) for k, v in target_swaps.items() if k < v]
+        swap_pairs = summarize_target_swaps(target_swaps)
         print(f"  Target swaps:  {len(swap_pairs)}")
     if single_ended_diff_pairs:
         print(f"  Single-ended:  {len(single_ended_diff_pairs)} (electrically short - "
@@ -993,6 +993,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     print(f"  Total vias:    {total_vias}")
     print(f"  Total time:    {total_time:.2f}s")
     print(f"  Iterations:    {total_iterations:,}")
+    from target_swap import summarize_target_swaps  # cycle-safe swap list (#380)
     summary = {
         'routed_diff_pairs': routed_diff_pairs,
         'failed_diff_pairs': failed_diff_pairs,
@@ -1003,7 +1004,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         'polarity_swap_denied_pairs': sorted(state.polarity_swap_denied_pairs),
         'single_ended_followup_nets': sorted(state.diff_pair_single_ended_nets.values()),
         'skipped_bad_fanout': sorted(skipped_bad_fanout),
-        'target_swaps': [{'pair1': k, 'pair2': v} for k, v in target_swaps.items() if k < v],
+        'target_swaps': [{'pair1': k, 'pair2': v} for k, v in summarize_target_swaps(target_swaps)],
         'layer_swaps': total_layer_swaps,
         'successful': successful,
         'failed': failed,

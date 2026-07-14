@@ -33,6 +33,54 @@ from chip_boundary import (
 from geometry_utils import segments_intersect_tuple as segments_cross
 
 
+def record_target_swap(target_swaps: Dict[str, str], p1_name: str, p2_name: str) -> None:
+    """Record one applied transposition into the running permutation map (#380).
+
+    ``target_swaps`` maps each pair/net to the pair whose ORIGINAL target it now
+    holds. A transposition of p1 and p2 exchanges the two holders, composed on
+    top of any swaps already applied -- so a multi-round chain that forms a cycle
+    (apply (A,B) then (B,C) -> the 3-cycle A->B->C->A) is represented faithfully
+    as {A:B, B:C, C:A}, not flattened to the corrupt involution {A:B, B:C, C:B}
+    the old symmetric writes produced. Disjoint single-round transpositions each
+    touch a name once, so this still yields the old symmetric involution for them.
+    A name that lands back on itself is dropped (not swapped).
+    """
+    prev1 = target_swaps.get(p1_name, p1_name)
+    prev2 = target_swaps.get(p2_name, p2_name)
+    for name, owner in ((p1_name, prev2), (p2_name, prev1)):
+        if owner == name:
+            target_swaps.pop(name, None)
+        else:
+            target_swaps[name] = owner
+
+
+def summarize_target_swaps(target_swaps: Dict[str, str]) -> List[Tuple[str, str]]:
+    """Cycle-safe, deduplicated list of applied target swaps for the run summary
+    and JSON (#380). A 2-cycle {A:B, B:A} yields a single sorted pair (A, B) --
+    identical to the old ``[(k, v) for k, v in items() if k < v]`` for disjoint
+    transpositions -- while a longer cycle {A:B, B:C, C:A} yields every edge
+    (A,B), (B,C), (C,A) in cycle order, so no member is silently dropped (the old
+    ``k < v`` filter dropped the wrap-around edge and assumed symmetry)."""
+    seen: Set[str] = set()
+    out: List[Tuple[str, str]] = []
+    for start in target_swaps:
+        if start in seen:
+            continue
+        cycle: List[str] = []
+        cur = start
+        while cur in target_swaps and cur not in seen:
+            seen.add(cur)
+            cycle.append(cur)
+            cur = target_swaps[cur]
+        if len(cycle) == 2:
+            a, b = sorted(cycle)
+            out.append((a, b))
+        else:
+            for name in cycle:
+                out.append((name, target_swaps[name]))
+    return out
+
+
 def get_source_centroid(endpoint: Tuple) -> Tuple[float, float]:
     """
     Get centroid (midpoint of P and N) for a source endpoint.
@@ -799,9 +847,9 @@ def apply_single_swap(
     Returns:
         True if swap was applied successfully
     """
-    # Record the swap
-    target_swaps[p1_name] = p2_name
-    target_swaps[p2_name] = p1_name
+    # Record the swap as a composed transposition, so multi-round cycles are
+    # represented faithfully rather than corrupting the symmetric dict (#380).
+    record_target_swap(target_swaps, p1_name, p2_name)
 
     print(f"\nApplying target swap: {p1_name} <-> {p2_name}")
 
@@ -1050,9 +1098,9 @@ def apply_single_ended_swap(
     Returns:
         True if swap was applied successfully
     """
-    # Record the swap
-    target_swaps[n1_name] = n2_name
-    target_swaps[n2_name] = n1_name
+    # Record the swap as a composed transposition, so multi-round cycles are
+    # represented faithfully rather than corrupting the symmetric dict (#380).
+    record_target_swap(target_swaps, n1_name, n2_name)
 
     print(f"\nApplying single-ended target swap: {n1_name} <-> {n2_name}")
 
