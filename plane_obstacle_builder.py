@@ -18,6 +18,7 @@ from routing_utils import iter_pad_blocked_cells, pad_blocked_cells_array, segme
 from obstacle_map import (point_in_polygon, point_to_polygon_edge_distance,
                           add_user_keepout_obstacles, add_rule_area_keepout_obstacles,
                           block_via_cells_near_drills, block_track_cells_near_drills,
+                          block_track_cells_near_override_pad_holes,
                           _pad_has_copper,
                           _rasterize_polygon, _points_inside_polygon,
                           _points_edge_distance, _block_cells_on_layers,
@@ -969,6 +970,14 @@ def build_routing_obstacle_map(
     npth_clr = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
     block_track_cells_near_drills(obstacles, npth_holes, route_track_w,
                                   npth_clr, config.grid_step, [layer_idx])
+    # Holes of pads carrying a clearance OVERRIDE (pad.local_clearance): KiCad's
+    # hole_clearance rule is net-independent and honors the override, so even
+    # own-net (exclude_net_id) copper must keep the override off the hole unless
+    # it lands on the pad copper itself (#326 residual, ghoul: zero-ring switch
+    # NPTHs at 0.3 were stamped only at the 0.20 NPTH floor above).
+    block_track_cells_near_override_pad_holes(
+        obstacles, pcb_data, route_track_w, config.clearance,
+        config.grid_step, [layer_idx])
     if verbose:
         print(f"  NPTH-hole track keep-out: {len(npth_holes)} holes in {time.time() - t0:.2f}s")
 

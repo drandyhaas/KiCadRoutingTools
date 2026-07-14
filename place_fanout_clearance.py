@@ -125,6 +125,21 @@ Examples:
                             new_segments=result.get('new_segments'),
                             pcb_data=pcb_data)
         print(f"Wrote {args.output_file}")
+        # Carry the input board's .kicad_pro to the output (issue #160 chain of
+        # custody). Without this, the next pipeline step finds no sibling
+        # project, seeds a minimal one, and the board's own DRC rules -- notably
+        # min_copper_edge_clearance -- are silently lost for the REST of the
+        # chain (ottercast_audio: the 0.5mm edge rule vanished here, so the
+        # signal-routing step stamped its board-edge band at the 0.1 track-
+        # clearance fallback and shipped 18 board-edge violations). No
+        # edge_clearance is passed: --board-edge-clearance here is a placement
+        # margin, not a routing-enforced floor, and must not tighten the rule.
+        try:
+            from fix_kicad_drc_settings import fix_project_for_output
+            fix_project_for_output(args.output_file, input_pcb=args.input_file,
+                                   clearance=args.clearance)
+        except Exception as e:
+            print(f"  (skipped DRC-settings fix: {e})")
     else:
         print("No caps moved; not writing output.")
 

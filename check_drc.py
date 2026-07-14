@@ -2010,13 +2010,33 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # Each hole is its drill CAPSULE ((x1,y1),(x2,y2),r): a slot drill's real
     # shape. Round drills degenerate to a zero-length capsule (the old circle).
     from kicad_parser import pad_drill_capsule
-    holes = []  # (p1, p2, r, net_id, ref) -- NPTH (no-copper) pad holes only
+    # JLC "NPTH to Track" fab floor (never below the graded clearance).
+    npth_clr = max(clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
+    # Each entry: (p1, p2, r, net_id, ref, required_clr, copper_exempt).
+    # NPTH (no-copper) pad holes graded at the fab floor -- or the pad's own
+    # clearance OVERRIDE when larger (KiCad's hole_clearance honors it; #326
+    # residual, ghoul's zero-ring switch NPTHs carry 0.3). copper_exempt=None.
+    # PLUS plated pad holes whose pad carries an override: KiCad grades those
+    # net-INDEPENDENTLY (same-net included), but exempts copper that actually
+    # touches the pad -- copper_exempt=(cx, cy, copper half-extent) carries
+    # the landing-disc approximation of that connected-copper exemption.
+    holes = []
     for pad_net, pads in pads_by_net.items():
         for pad in pads:
-            if pad.drill > 0 and _pad_has_no_copper(pad):
+            if pad.drill <= 0:
+                continue
+            lc = getattr(pad, 'local_clearance', 0.0) or 0.0
+            if _pad_has_no_copper(pad):
                 hp1, hp2, hr = pad_drill_capsule(pad)
                 holes.append((hp1, hp2, hr, pad_net,
-                              f"{pad.component_ref}.{pad.pad_number}"))
+                              f"{pad.component_ref}.{pad.pad_number}",
+                              max(npth_clr, lc), None))
+            elif lc > 0:
+                hp1, hp2, hr = pad_drill_capsule(pad)
+                holes.append((hp1, hp2, hr, pad_net,
+                              f"{pad.component_ref}.{pad.pad_number}",
+                              lc, (pad.global_x, pad.global_y,
+                                   max(pad.size_x, pad.size_y) / 2.0)))
     segs = list(pcb_data.segments)
     if holes and segs:
         sx1 = np.array([s.start_x for s in segs], dtype=np.float64)
@@ -2029,9 +2049,6 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         dy = sy2 - sy1
         seglen2 = dx * dx + dy * dy
         safe_len2 = np.where(seglen2 > 0, seglen2, 1.0)
-        # JLC "NPTH to Track" fab floor (never below the graded clearance).
-        npth_clr = max(clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
-        tolerance = npth_clr * clearance_margin
         if matching_net_ids is not None:
             seg_match = np.array([n in matching_net_ids for n in snet], dtype=bool)
         def _pts_to_tracks(hx, hy):
@@ -2041,11 +2058,13 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             cyp = sy1 + t * dy
             return np.sqrt((hx - cxp) ** 2 + (hy - cyp) ** 2)
 
-        for (h1x, h1y), (h2x, h2y), hr, hnet, ref in holes:
+        for (h1x, h1y), (h2x, h2y), hr, hnet, ref, req_clr, copper_exempt in holes:
             # Capsule(hole)-to-segment distance, vectorized over all tracks. A
             # drill is a through-hole, so any track layer crossing it conflicts
-            # (no layer filter). The hole's own-net track legitimately connects
-            # to it -> skip. Segment-to-segment distance = min of the four
+            # (no layer filter). An NPTH hole's own-net track legitimately
+            # connects to it -> skip; a plated override hole is graded
+            # net-independently, exempting only copper that touches the pad.
+            # Segment-to-segment distance = min of the four
             # endpoint-to-other-segment distances, or 0 when they intersect.
             dist = np.minimum(_pts_to_tracks(h1x, h1y), _pts_to_tracks(h2x, h2y))
             hdx, hdy = h2x - h1x, h2y - h1y
@@ -2062,8 +2081,19 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 d4 = hdx * (sy2 - h1y) - hdy * (sx2 - h1x)
                 crossing = (d1 * d2 < 0) & (d3 * d4 < 0)
                 dist = np.where(crossing, 0.0, dist)
-            overlap = (hr + sw / 2.0 + npth_clr) - dist
-            viol = (overlap > tolerance) & (snet != hnet)
+            overlap = (hr + sw / 2.0 + req_clr) - dist
+            tolerance = req_clr * clearance_margin
+            viol = overlap > tolerance
+            if copper_exempt is None:
+                # NPTH: no copper to connect to; keep the own-net track skip.
+                viol &= (snet != hnet)
+            else:
+                # Plated override hole: net-independent, but a track whose
+                # copper overlaps the pad copper is CONNECTED -- KiCad's
+                # hole_clearance does not flag it (observed on #326 boards).
+                # Touch test approximates the pad by its bounding disc.
+                ecx, ecy, er = copper_exempt
+                viol &= _pts_to_tracks(ecx, ecy) > (er + sw / 2.0)
             if matching_net_ids is not None:
                 viol &= seg_match | (hnet in matching_net_ids)
             for k in np.nonzero(viol)[0].tolist():
@@ -2072,7 +2102,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 seg_net_name = pcb_data.nets.get(seg.net_id, None)
                 hole_net_str = hole_net_name.name if hole_net_name else f"net_{hnet}"
                 seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg.net_id}"
-                violations.append({
+                v = {
                     'type': 'track-hole',
                     'net1': hole_net_str,        # the drill's net (0 = NPTH)
                     'net2': seg_net_str,         # the crossing track's net
@@ -2081,7 +2111,12 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'overlap_mm': float(overlap[k]),
                     'hole_loc': ((h1x + h2x) / 2.0, (h1y + h2y) / 2.0),
                     'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
-                })
+                }
+                # Attribute an above-default requirement (pad clearance
+                # override), mirroring _mark_required / KiCad's wording.
+                if req_clr > (npth_clr if copper_exempt is None else clearance) + 1e-9:
+                    v['required_mm'] = req_clr
+                violations.append(v)
 
     # Check board edge clearances. Measure to the real Edge.Cuts outline (outer
     # ring + interior cutouts) when the parser found one, so copper routed into a

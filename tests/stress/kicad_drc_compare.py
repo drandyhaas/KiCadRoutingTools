@@ -242,21 +242,41 @@ def _pro_clearance(board: str):
     return None
 
 
-def compare_board(board: str, label: str = None, clearance: float = None):
-    label = label or os.path.basename(board)
-    if clearance is None:
-        clearance = _pro_clearance(board)
+def kicad_items_for(board: str, clearance: float = None):
+    """kicad-cli copper items for a board, staged the same way compare_board
+    stages (netclasses clamped to the routed clearance when known). Returns
+    (items, err)."""
     if clearance:
         _tmpd, board_k = _staged_copy(board, clearance)
     else:
         _tmpd, board_k = None, board
-    kicad, err = run_kicad_drc(board_k)
-    if _tmpd:
-        import shutil
-        shutil.rmtree(_tmpd, ignore_errors=True)
+    try:
+        return run_kicad_drc(board_k)
+    finally:
+        if _tmpd:
+            import shutil
+            shutil.rmtree(_tmpd, ignore_errors=True)
+
+
+def compare_board(board: str, label: str = None, clearance: float = None,
+                  baseline: str = None):
+    """`baseline` = the UNROUTED input board (#326/#338 accounting): its kicad
+    items -- pre-existing design conditions like edge-connector pads inside
+    the board's own copper_edge rule -- are matched against the final's and
+    reported separately, so `kicad_only` reflects ROUTER-introduced items."""
+    label = label or os.path.basename(board)
+    if clearance is None:
+        clearance = _pro_clearance(board)
+    kicad, err = kicad_items_for(board, clearance)
     if err:
         print(f"{label}: SKIP ({err})")
         return None
+    pre = 0
+    if baseline and os.path.exists(baseline):
+        base_items, berr = kicad_items_for(baseline, clearance)
+        if not berr and base_items:
+            matched_pre, _, kicad = match(base_items, kicad)
+            pre = len(matched_pre)
     cd = run_check_drc(board, clearance, netclasses=not bool(clearance))
     matched, kicad_only, cd_only = match(kicad, cd)
     # NET-PAIR agreement: the engines report at different granularities
@@ -268,7 +288,8 @@ def compare_board(board: str, label: str = None, clearance: float = None):
     pk_only, pc_only = kpairs - cpairs, cpairs - kpairs
     verdict = ("CONSISTENT" if not kicad_only and not cd_only else
                "PAIR-CONSISTENT" if not pk_only and not pc_only else "DIVERGED")
-    print(f"{label}: kicad={len(kicad)} check_drc={len(cd)} matched={len(matched)} "
+    pre_note = f" (+{pre} pre-existing on input, subtracted)" if pre else ""
+    print(f"{label}: kicad={len(kicad)}{pre_note} check_drc={len(cd)} matched={len(matched)} "
           f"kicad_only={len(kicad_only)} checkdrc_only={len(cd_only)} | "
           f"net-pairs: both={len(kpairs & cpairs)} kicad_only={len(pk_only)} "
           f"checkdrc_only={len(pc_only)}  {verdict}")
@@ -276,7 +297,8 @@ def compare_board(board: str, label: str = None, clearance: float = None):
         print(f"    KICAD-ONLY  {kv['type']:16s} {sorted(kv['nets'])} @ {kv['pos']}  {kv['desc'][:60]}")
     for cv in cd_only:
         print(f"    CHECKDRC-ONLY {cv['type']:16s} {sorted(cv['nets'])} @ {cv['pos']}")
-    return {"board": label, "kicad": len(kicad), "check_drc": len(cd),
+    return {"board": label, "kicad": len(kicad), "kicad_preexisting": pre,
+            "check_drc": len(cd),
             "matched": len(matched), "kicad_only": len(kicad_only),
             "checkdrc_only": len(cd_only),
             "pairs_kicad_only": len(pk_only), "pairs_checkdrc_only": len(pc_only)}
@@ -287,6 +309,12 @@ def main():
     ap.add_argument("boards", nargs="*")
     ap.add_argument("--wave", action="append", default=[],
                     help="wave dir with summary.json; compares every final board")
+    ap.add_argument("--baseline", default=None,
+                    help="UNROUTED input board: its kicad items (pre-existing "
+                         "design conditions, e.g. edge-connector pads inside "
+                         "the board's own edge rule) are subtracted so "
+                         "kicad_only reflects router-introduced items "
+                         "(single-board mode only)")
     args = ap.parse_args()
     boards = list(args.boards)
     jobs = [(b, None) for b in boards]
@@ -298,7 +326,8 @@ def main():
                     clr = e.get("clearance")
                     jobs.append((p, float(clr) if clr else None))
     rows = [r for b, clr in jobs
-            if (r := compare_board(b, label=None, clearance=clr))]
+            if (r := compare_board(b, label=None, clearance=clr,
+                                   baseline=args.baseline))]
     div = [r for r in rows if r["kicad_only"] or r["checkdrc_only"]]
     print(f"\n{len(rows)} boards compared: {len(rows) - len(div)} consistent, "
           f"{len(div)} diverged "

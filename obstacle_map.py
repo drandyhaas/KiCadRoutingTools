@@ -830,6 +830,92 @@ def block_track_cells_near_drills(obstacles: GridObstacleMap, drill_holes,
         obstacles.add_blocked_cells_batch(np.hstack([arr, layer_col]))
 
 
+def override_pad_hole_track_cells(pcb_data: PCBData, track_width: float,
+                                  base_clearance: float, grid_step: float,
+                                  extra_clearance: float = 0.0,
+                                  include_plated: bool = True) -> np.ndarray:
+    """Grid cells a routed TRACK must stay out of around the drill holes of
+    pads carrying a per-pad clearance OVERRIDE (``pad.local_clearance``) --
+    the #326 residual hole_clearance class (ghoul).
+
+    KiCad's hole-clearance rule is NET-INDEPENDENT and honors the pad's
+    clearance override, so copper of ANY net -- including the pad's own --
+    must stay ``local_clearance`` off the hole wall unless it actually lands
+    on (connects to) the pad's copper. Two classes need cells beyond the
+    normal keep-outs:
+
+    * NPTH pads (no copper): the standard NPTH keep-out enforces only the
+      fab floor (NPTH_TO_TRACK_CLEARANCE, 0.20); an override above that
+      (ghoul's zero-ring switch holes carry 0.3) widens the required disc.
+    * PTH pads (``include_plated``): own-net pads are skipped by the
+      copper-pad blockers entirely (exclude_net_id), so nothing keeps a
+      same-net track off the hole of a zero-annular-ring pad. Stamp the
+      override radius, but leave cells whose center lies inside the pad
+      copper (bounding-disc approximation, ``max(size)/2``) free so a
+      direct landing on the pad stays routable -- KiCad exempts copper
+      that touches the pad.
+
+    Pads without an override (or whose override is already covered by the
+    existing keep-outs) contribute nothing, so behavior for normal pads is
+    unchanged. Returns an (N, 2) int32 array of (gx, gy) cells; callers
+    stamp them on every routing layer -- a drill goes through the board.
+    """
+    coord = GridCoord(grid_step)
+    npth_floor = max(base_clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
+    cells = []
+    for pads in pcb_data.pads_by_net.values():
+        for pad in pads:
+            if pad.drill <= 0:
+                continue
+            lc = getattr(pad, 'local_clearance', 0.0) or 0.0
+            has_copper = _pad_has_copper(pad)
+            # Below this, the existing keep-outs (NPTH floor stamp / the
+            # copper-pad blocker, whose disc always reaches past the hole
+            # since size >= drill) already cover the requirement.
+            already_covered = base_clearance if has_copper else npth_floor
+            if lc <= already_covered:
+                continue
+            if has_copper and not include_plated:
+                continue
+            exempt_r_sq = None
+            if has_copper:
+                exempt_r = max(pad.size_x, pad.size_y) / 2.0
+                exempt_r_sq = exempt_r * exempt_r
+            for hx, hy, drill_dia in pad_drill_circles(pad):
+                required = drill_dia / 2.0 + track_width / 2.0 + lc + extra_clearance
+                req_sq = required * required
+                gx, gy = coord.to_grid(hx, hy)
+                expand = coord.to_grid_dist_safe(required) + 1
+                for ex in range(-expand, expand + 1):
+                    cx = (gx + ex) * grid_step
+                    for ey in range(-expand, expand + 1):
+                        cy = (gy + ey) * grid_step
+                        if (cx - hx) ** 2 + (cy - hy) ** 2 >= req_sq:
+                            continue
+                        if exempt_r_sq is not None and \
+                           (cx - pad.global_x) ** 2 + (cy - pad.global_y) ** 2 < exempt_r_sq:
+                            continue
+                        cells.append((gx + ex, gy + ey))
+    if not cells:
+        return np.zeros((0, 2), dtype=np.int32)
+    return np.array(cells, dtype=np.int32)
+
+
+def block_track_cells_near_override_pad_holes(obstacles: GridObstacleMap,
+                                              pcb_data: PCBData, track_width: float,
+                                              base_clearance: float, grid_step: float,
+                                              layer_idxs, extra_clearance: float = 0.0,
+                                              include_plated: bool = True):
+    """Stamp override_pad_hole_track_cells on each layer in ``layer_idxs``."""
+    arr = override_pad_hole_track_cells(pcb_data, track_width, base_clearance,
+                                        grid_step, extra_clearance, include_plated)
+    if arr.shape[0] == 0 or not layer_idxs:
+        return
+    for li in layer_idxs:
+        layer_col = np.full((arr.shape[0], 1), li, dtype=np.int32)
+        obstacles.add_blocked_cells_batch(np.hstack([arr, layer_col]))
+
+
 def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                               config: GridRouteConfig, nets_to_route_set: set,
                               extra_clearance: float = 0.0):
@@ -893,6 +979,15 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         block_track_cells_near_drills(obstacles, npth_holes, config.track_width,
                                       npth_clr, config.grid_step,
                                       list(range(len(config.layers))))
+
+    # NPTH holes whose pad carries a clearance OVERRIDE above the fab floor
+    # (KiCad's hole_clearance honors it, #326 residual). Plated pads are left
+    # to the copper-pad blockers here: stamping their hole annulus would make
+    # zero-annular-ring pads unreachable for their own signal net.
+    block_track_cells_near_override_pad_holes(
+        obstacles, pcb_data, config.track_width, config.clearance,
+        config.grid_step, list(range(len(config.layers))),
+        extra_clearance=extra_clearance, include_plated=False)
 
     # Via keep-out (hole-to-hole drill minimum) near every drill.
     if config.hole_to_hole_clearance > 0 and drill_holes:

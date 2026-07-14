@@ -440,6 +440,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 board_edge_clearance = _eff_edge
         except Exception:
             pass
+        # Carry the RESOLVED value into the end-of-run reconciliation kwargs:
+        # the snapshot above was taken before this resolution, and the
+        # reconciliation self-invocation reads the OUTPUT file, whose sibling
+        # .kicad_pro does not exist yet (main() writes it after batch_route
+        # returns) -- so the sub-run re-resolved 0.0 and stamped its board-edge
+        # band at the track-clearance fallback (ottercast_audio BT_PCM_DIN/
+        # BT_PCM_SYNC: 16 board-edge violations laid by the reconciliation's
+        # phase-1/phase-3 routes inside the 0.5mm project edge band).
+        _reconcile_kwargs['board_edge_clearance'] = board_edge_clearance
 
     # Track memory if debug_memory enabled
     mem_start = get_process_memory_mb() if debug_memory else 0.0

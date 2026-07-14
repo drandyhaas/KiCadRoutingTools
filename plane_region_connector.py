@@ -22,7 +22,8 @@ from bresenham_utils import walk_line
 from obstacle_map import (add_board_edge_obstacles, add_user_keepout_obstacles,
                           add_rule_area_keepout_obstacles,
                           _batch_cells_one_layer, _batch_vias,
-                          block_track_cells_near_drills, _pad_has_copper)
+                          block_track_cells_near_drills,
+                          block_track_cells_near_override_pad_holes, _pad_has_copper)
 from plane_obstacle_builder import (
     _precompute_circle_offsets,
     _batch_block_circles_via, _batch_block_circles_cell
@@ -1917,6 +1918,15 @@ def build_base_obstacles(
         block_track_cells_near_drills(obstacles, npth_holes, track_width,
                                       npth_clr, config.grid_step,
                                       list(range(num_layers)))
+
+    # Holes of pads carrying a clearance OVERRIDE (pad.local_clearance): KiCad's
+    # hole_clearance rule is net-independent and honors the override, so even
+    # the plane net's own repair copper must keep the override off the hole
+    # unless it lands on the pad copper itself (#326 residual, ghoul: zero-ring
+    # switch NPTHs at 0.3 were stamped only at the 0.20 NPTH floor above).
+    block_track_cells_near_override_pad_holes(
+        obstacles, pcb_data, track_width, config.clearance,
+        config.grid_step, list(range(num_layers)))
 
     # Block areas outside the board outline (supports non-rectangular boards)
     add_board_edge_obstacles(obstacles, pcb_data, config, 0.0, layers=routing_layers)
