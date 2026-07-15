@@ -126,6 +126,40 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | `routing_clearance_margin` | `1.0` | Multiplier on track-to-via clearance (1.0 = exact DRC minimum) |
 | `hole_to_hole_clearance` | `0.25` | Drill-to-drill clearance, edge to edge |
 | `board_edge_clearance` | `0.0` | Clearance from board edge (0 = use `clearance`) |
+| `net_clearances` | `{}` | `{net_id: class_clearance_mm}` — per-net **net-class** clearance for KiCad's cross-class rule (see below) |
+| `net_clearance_floor` | `None` | Routing-side floor (max class clearance among the nets being routed this call); set by `set_net_clearances()` |
+
+#### Cross-class clearance (KiCad `max(classA, classB)`)
+
+KiCad's required spacing between two nets of **different** net classes is
+`max(classA, classB)`. The router honors this: every foreign obstacle — pre-placed
+copper **and** copper routed earlier in the same call (in-run) — is priced at
+`max(routing-side floor, that obstacle net's own class clearance)`. `config.clearance`
+remains the Default/routing-side clearance; `net_clearances` carries the non-Default
+classes. An **empty** map reproduces plain `config.clearance` behaviour exactly
+(byte-identical — the feature is inert until a map is supplied).
+
+```python
+from routing_config import GridRouteConfig
+config = GridRouteConfig(track_width=0.15, clearance=0.15)
+power_hi_net_id, sig_a, sig_b, some_default_net = 1, 2, 3, 4
+config.set_net_clearances({power_hi_net_id: 0.25}, routed_net_ids=[sig_a, sig_b])
+assert config.obstacle_clearance(power_hi_net_id) == 0.25   # max(floor 0.15, class 0.25)
+assert config.obstacle_clearance(some_default_net) == 0.15  # not in the map -> config.clearance
+```
+
+- `set_net_clearances(net_clearances, routed_net_ids)` installs the map and computes
+  `net_clearance_floor` (over the routed nets only, so a foreign class cannot inflate
+  the floor and over-block every routed net). `batch_route` / `batch_route_diff_pairs`
+  call it once per run.
+- `obstacle_clearance(net_id)` is the single accessor the base-map builder **and** every
+  incremental obstacle stamper read, so ADD and REMOVE derive an identical per-obstacle
+  clearance (ref-count symmetry).
+- The map is **auto-read** from the sibling `.kicad_pro` netclasses by `route.py` /
+  `route_diff.py` (and inside `batch_route` for any other caller, e.g. the plane
+  routers). Only non-Default classes appear, so an all-Default board yields `{}`.
+  Supply `--net-clearances <json>` (net name → mm) to override. The GUI derives the
+  same map from the live board.
 
 ### Strategies and recovery
 
