@@ -1167,6 +1167,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     return successful, failed, total_time
 
 if __name__ == "__main__":
+    from console_encoding import enable_utf8_console
+    enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
     import argparse
     from redo_record import record_invocation
     record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set

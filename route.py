@@ -1747,15 +1747,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
 if __name__ == "__main__":
     import argparse
-    import sys as _sys
     # Windows consoles default to cp1252, which can't encode the non-ASCII glyphs
-    # some log lines use (e.g. arrows in bus order, Ω in impedance); reconfigure
-    # stdout/stderr to UTF-8 so a print never crashes the run (issue #152).
-    for _stream in (_sys.stdout, _sys.stderr):
-        try:
-            _stream.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+    # some log lines use (arrows in bus order, Ohm in impedance, the fab-floor
+    # warning sign); reconfigure stdout/stderr to UTF-8 so a print never crashes
+    # the run (issue #152).
+    from console_encoding import enable_utf8_console
+    enable_utf8_console()
     from redo_record import record_invocation
     record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
 
