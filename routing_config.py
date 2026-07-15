@@ -151,6 +151,45 @@ class GridRouteConfig:
     # Keepout zone - keep routed tracks out of a user-drawn polygon (issue #27)
     keepout_enabled: bool = False  # Block routed tracks from a drawn keepout polygon
     keepout_layer: str = "User.2"  # User layer the keepout polygon is drawn on
+    # Cross-class clearance (KiCad semantics, issue: PR392). Each entry maps a
+    # net_id to that net's own net-class clearance (mm). KiCad's required spacing
+    # between two nets of different classes is max(classA, classB); the obstacle
+    # maps price every foreign/in-run obstacle at obstacle_clearance() below.
+    # Auto-read from the .kicad_pro netclasses by route.py/route_diff.py (or
+    # supplied via --net-clearances); the GUI derives it from the live board.
+    # net_clearance_floor is the routing-side floor (max clearance among the nets
+    # being routed in THIS call, >= config.clearance); set at run start. An empty
+    # map + None floor reproduces plain config.clearance behaviour exactly.
+    net_clearances: Dict[int, float] = field(default_factory=dict)
+    net_clearance_floor: Optional[float] = None
+
+    def obstacle_clearance(self, net_id: int) -> float:
+        """KiCad cross-class clearance for an obstacle belonging to `net_id`.
+
+        Returns max(routing-side floor, that obstacle net's own class clearance).
+        The floor (net_clearance_floor) defaults to config.clearance, and an
+        absent net falls back to config.clearance, so an empty net_clearances map
+        yields exactly config.clearance -- byte-identical to pre-PR392 behaviour.
+        Consumers (base map builder + every incremental obstacle stamper) MUST
+        route their foreign-copper clearance through this one method so the ADD
+        and REMOVE paths derive an identical per-obstacle value (ref-count
+        symmetry, issue #208/#309)."""
+        floor = self.net_clearance_floor if self.net_clearance_floor is not None else self.clearance
+        return max(floor, self.net_clearances.get(net_id, self.clearance))
+
+    def set_net_clearances(self, net_clearances, routed_net_ids) -> None:
+        """Install the cross-class clearance map and compute the routing-side
+        floor over the nets being routed in this call. Inert (floor == clearance)
+        when the map is empty. Restricting the floor to the ROUTED nets keeps a
+        foreign class from inflating it (which would over-block every routed
+        net)."""
+        self.net_clearances = dict(net_clearances) if net_clearances else {}
+        if self.net_clearances and routed_net_ids:
+            routed = [self.net_clearances[nid] for nid in routed_net_ids
+                      if nid in self.net_clearances]
+            self.net_clearance_floor = max([self.clearance] + routed)
+        else:
+            self.net_clearance_floor = self.clearance
 
     def get_track_width(self, layer: str) -> float:
         """Get track width for a specific layer (impedance-aware).

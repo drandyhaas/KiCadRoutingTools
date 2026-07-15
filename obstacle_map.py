@@ -1094,9 +1094,13 @@ def add_net_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
 
+    # Cross-class clearance (PR392): price this net's pads at its own KiCad
+    # pairwise clearance so a foreign routed net keeps max(classA, classB).
+    obs_clearance = config.obstacle_clearance(net_id)
     pads = pcb_data.pads_by_net.get(net_id, [])
     for pad in pads:
-        _add_pad_obstacle(obstacles, pad, coord, layer_map, config, extra_clearance)
+        _add_pad_obstacle(obstacles, pad, coord, layer_map, config, extra_clearance,
+                          clearance_override=obs_clearance)
 
 
 def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -1112,13 +1116,17 @@ def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
 
+    # Cross-class clearance (PR392): price this net's vias at its own KiCad
+    # pairwise clearance so a foreign routed net/via keeps max(classA, classB).
+    obs_clearance = config.obstacle_clearance(net_id)
+
     # Add vias - use actual via size and max track width (vias span all layers)
     for via in pcb_data.vias:
         if via.net_id != net_id:
             continue
         via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
-        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, config.clearance, extra_clearance)
-        via_via_mm = via_size / 2 + config.via_size / 2 + config.clearance
+        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, obs_clearance, extra_clearance)
+        via_via_mm = via_size / 2 + config.via_size / 2 + obs_clearance
         # True via-via clearance radius in cells as a FLOAT (no floor): the disc
         # threshold is radius**2, so this blocks exactly the cells within the real
         # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
@@ -1167,11 +1175,15 @@ def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
     num_layers = len(config.layers)
     _pre = _ledger_bracket(obstacles)
 
-    # Add vias - use actual via size and max track width (vias span all layers)
+    # Add vias - use actual via size and max track width (vias span all layers).
+    # Cross-class clearance (PR392): price each via at ITS OWN net's KiCad pairwise
+    # clearance (max(routing-side floor, that via net's class)); the REMOVE twin
+    # derives the same per-via value from via.net_id so the ref-counts stay in sync.
     for via in vias:
         via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
-        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, config.clearance, extra_clearance)
-        via_via_mm = via_size / 2 + config.via_size / 2 + config.clearance
+        via_clearance = config.obstacle_clearance(getattr(via, 'net_id', 0))
+        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, via_clearance, extra_clearance)
+        via_via_mm = via_size / 2 + config.via_size / 2 + via_clearance
         # True via-via clearance radius in cells as a FLOAT (no floor): the disc
         # threshold is radius**2, so this blocks exactly the cells within the real
         # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
@@ -1199,15 +1211,18 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
     layer_map = build_layer_map(config.layers)
     _pre = _ledger_bracket(obstacles)
 
-    # Add segments - use actual segment width and layer-specific routing track width
+    # Add segments - use actual segment width and layer-specific routing track width.
+    # Cross-class clearance (PR392): price each segment at ITS OWN net's KiCad
+    # pairwise clearance; the REMOVE twin recomputes the same value from seg.net_id.
     for seg in segments:
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is not None:
             # Use layer-specific track width for routing track portion
             layer_track_width = config.get_track_width(seg.layer)
             seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
-            expansion_mm = layer_track_width / 2 + seg_width / 2 + config.clearance + extra_clearance
-            via_block_mm = config.via_size / 2 + seg_width / 2 + config.clearance
+            seg_clearance = config.obstacle_clearance(getattr(seg, 'net_id', 0))
+            expansion_mm = layer_track_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
+            via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance
             _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm)
     _ledger_close(obstacles, _pre, "add_segments_list")
 
@@ -1241,11 +1256,13 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
             continue
 
         # Must match the ADD shape exactly (same capsule from the true float
-        # segment) or the Rust ref-counts desync on rip-up.
+        # segment, same per-net cross-class clearance) or the Rust ref-counts
+        # desync on rip-up.
         layer_track_width = config.get_track_width(seg.layer)
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
-        expansion_mm = layer_track_width / 2 + seg_width / 2 + config.clearance + extra_clearance
-        via_block_mm = config.via_size / 2 + seg_width / 2 + config.clearance
+        seg_clearance = config.obstacle_clearance(getattr(seg, 'net_id', 0))
+        expansion_mm = layer_track_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
+        via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance
 
         for cgx, cgy in segment_blocked_cells_array(
                 seg.start_x, seg.start_y, seg.end_x, seg.end_y, expansion_mm, coord.grid_step):
@@ -1292,8 +1309,11 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
         gx, gy = coord.to_grid(via.x, via.y)
         via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
 
-        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, config.clearance, extra_clearance)
-        via_via_mm = via_size / 2 + config.via_size / 2 + config.clearance
+        # Mirror add_vias_list_as_obstacles EXACTLY: same per-via cross-class
+        # clearance from via.net_id, or rip-up over/under-decrements the ref-counts.
+        via_clearance = config.obstacle_clearance(getattr(via, 'net_id', 0))
+        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, via_clearance, extra_clearance)
+        via_via_mm = via_size / 2 + config.via_size / 2 + via_clearance
         # True via-via clearance radius in cells as a FLOAT (no floor): the disc
         # threshold is radius**2, so this blocks exactly the cells within the real
         # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
@@ -1736,7 +1756,10 @@ def _pad_via_keepout_cells(pad, coord: GridCoord, config: GridRouteConfig,
     off_y = pad.global_y - gy * coord.grid_step
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
-    clearance = config.clearance
+    # Cross-class clearance (PR392): price the keep-out at this pad net's KiCad
+    # pairwise clearance. add/remove call this helper identically, so the derived
+    # value is the same on both sides -> ref-counts stay balanced.
+    clearance = config.obstacle_clearance(getattr(pad, 'net_id', 0))
     lc = getattr(pad, 'local_clearance', 0.0) or 0.0
     if lc > clearance:
         clearance = lc
