@@ -35,7 +35,6 @@ from typing import Callable, List, Optional
 from pcb_modification import (
     snap_stub_gaps,
     drop_phantom_copper,
-    chord_short_jogs,
     prune_grazing_segments,
     nudge_grazing_octolinear,
     nudge_grazing_microshift,
@@ -313,17 +312,6 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         if _necked:
             print(f"{label}Width neck: narrowed {_necked} wide segment(s) "
                   f"grazing a foreign pad")
-
-    # Additive tail: chord short 135-deg jogs so a jog cap's exact tangency to
-    # adjacent same-net copper (routine grid arithmetic) cannot read as a
-    # micro-void that KiCad's connection_width checker flags float-dust-
-    # dependently. After every subtractive pass (the jog set is final), before
-    # close_soft_joints (both are additive; neither removes).
-    _jc = chord_short_jogs(results, pcb_data, scope_net_ids)
-    counts['jog_chords_added'] = _jc
-    _trace('jog_chord')
-    if _jc:
-        print(f"{label}Chorded {_jc} short jog(s) (connection-width fill)")
 
     # FINAL copper step (#319 ordering): nothing below may remove copper.
     # KICAD_NO_SOFT_JOINT_BRIDGE=1 is an A/B ablation knob (like
