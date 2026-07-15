@@ -244,6 +244,20 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 return 0, 0, 0.0, {'results': [], 'segments_to_remove': []}
             return 0, 0, 0.0
 
+    # Board-setup copper-to-edge rule (#338): route to at least the sibling
+    # .kicad_pro's min_copper_edge_clearance (engine-side, so the GUI and plan
+    # replays inherit it; see batch_route).
+    if input_file:
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            _eff_edge = effective_board_edge_clearance(input_file, board_edge_clearance)
+            if _eff_edge > (board_edge_clearance or 0.0):
+                print(f"Board edge clearance {_eff_edge}mm "
+                      f"(project min_copper_edge_clearance)")
+                board_edge_clearance = _eff_edge
+        except Exception:
+            pass
+
     # Track memory if debug_memory enabled
     mem_start = get_process_memory_mb() if debug_memory else 0.0
     if debug_memory:
@@ -262,8 +276,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # does not re-read. All-Default boards -> empty map -> inert.
     if net_clearances is None and input_file and os.path.isfile(input_file):
         try:
-            from list_nets import net_clearance_map
-            net_clearances = net_clearance_map(
+            from list_nets import net_clearance_map_by_id
+            net_clearances = net_clearance_map_by_id(
                 input_file, {nid: n.name for nid, n in pcb_data.nets.items()})
             if net_clearances:
                 print(f"Auto-read netclass clearances for {len(net_clearances)} net(s) "
@@ -1182,6 +1196,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     return successful, failed, total_time
 
 if __name__ == "__main__":
+    from console_encoding import enable_utf8_console
+    enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
     import argparse
     from redo_record import record_invocation
     record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
@@ -1487,8 +1503,8 @@ Examples:
         print(f"Loaded per-net clearances for {len(_net_clearances_map)}/{len(pcb_data.nets)} nets "
               f"from {args.net_clearances}")
     else:
-        from list_nets import net_clearance_map
-        _net_clearances_map = net_clearance_map(
+        from list_nets import net_clearance_map_by_id
+        _net_clearances_map = net_clearance_map_by_id(
             args.input_file, {_nid: _net.name for _nid, _net in pcb_data.nets.items()})
         if _net_clearances_map:
             _classes = sorted({round(v, 4) for v in _net_clearances_map.values()})

@@ -23,7 +23,7 @@ import argparse
 import json
 import os
 import re
-from fnmatch import fnmatch
+from fnmatch import fnmatch, fnmatchcase
 from kicad_parser import parse_kicad_pcb, find_components_by_type
 
 
@@ -45,7 +45,8 @@ _NETCLASS_FIELDS = [
 # the net-class nominal (down to these) and the board still passes DRC. (#111/#115)
 _CONSTRAINT_FIELDS = ('min_clearance', 'min_track_width', 'min_via_diameter',
                       'min_via_annular_width', 'min_hole_to_hole',
-                      'min_through_hole_diameter')
+                      'min_through_hole_diameter', 'min_hole_clearance',
+                      'min_copper_edge_clearance')
 
 # JLCPCB manufacturing floors are modelled as selectable cost TIERS (issue #237)
 # in fab_tiers.py. Re-exported here so existing `from list_nets import fab_floors`
@@ -154,18 +155,26 @@ def read_design_rules(pcb_path):
             # non-Default) so downstream consumers see {net: classname}.
             na = ns.get('netclass_assignments') or {}
             if isinstance(na, dict):
+                # KiCad 9 values can be a LIST of class names (a net may belong to
+                # several classes); normalize to a single class name (prefer the
+                # first non-Default) so downstream consumers see {net: classname}.
                 for _net, _cls in na.items():
                     if isinstance(_cls, list):
                         _nd = [c for c in _cls if c and c != 'Default']
                         assignments[_net] = _nd[0] if _nd else (_cls[0] if _cls else 'Default')
                     elif _cls:
                         assignments[_net] = _cls
-            # net-name -> class glob patterns (KiCad 8/9 net_settings.netclass_patterns);
-            # the primary membership mechanism on many boards (explicit assignments
-            # are often empty). Kept as (pattern, class) pairs, in file order.
-            for _p in ns.get('netclass_patterns') or []:
-                if isinstance(_p, dict) and _p.get('netclass'):
-                    patterns.append((_p.get('pattern', ''), _p['netclass']))
+            # Wildcard assignments / net-name -> class glob patterns (KiCad 8+
+            # net_settings.netclass_patterns): the primary membership mechanism on
+            # many boards (explicit assignments are often empty). Consumers fnmatch
+            # net names against it; explicit assignment wins. Kept as (pattern,
+            # class) pairs, in file order.
+            for pe in ns.get('netclass_patterns') or []:
+                try:
+                    if pe.get('netclass'):
+                        patterns.append((pe.get('pattern', ''), pe['netclass']))
+                except (KeyError, TypeError, AttributeError):
+                    continue
             # DRC-enforced Board Constraints (what humans actually route against).
             rules = ((pro.get('board', {}) or {}).get('design_settings', {}) or {}).get('rules', {}) or {}
             constraints = {k: rules[k] for k in _CONSTRAINT_FIELDS if k in rules}
@@ -214,7 +223,7 @@ def read_design_rules(pcb_path):
             'source': source}
 
 
-def net_clearance_map(pcb_path, nets, design_rules=None):
+def net_clearance_map_by_id(pcb_path, nets, design_rules=None):
     """Resolve each net to its net-class clearance (mm) from the sibling
     .kicad_pro netclasses, for the routing CLIs' cross-class clearance map.
 
@@ -273,6 +282,42 @@ def net_clearance_map(pcb_path, nets, design_rules=None):
         if default_clr is not None and eff <= default_clr + 1e-9:
             continue
         out[nid] = eff
+    return out
+
+
+def resolve_net_class(net_name, rules):
+    """Class name for a net under `rules` (a read_design_rules() result):
+    explicit assignment wins, else the first matching wildcard pattern
+    (KiCad 8+ netclass_patterns), else 'Default'."""
+    cls = rules.get('assignments', {}).get(net_name)
+    if cls:
+        return cls
+    for pattern, pcls in rules.get('patterns', []):
+        if fnmatchcase(net_name, pattern):
+            return pcls
+    return 'Default'
+
+
+def net_clearance_map(pcb_path, net_names, rules=None):
+    """Per-net netclass clearance for #326 grading/routing parity.
+
+    Returns {net_name: clearance_mm} for every net in `net_names` whose
+    resolved class defines a clearance -- including Default, so the caller
+    can max() it with its own global value. Empty dict when the board has
+    no netclass data. Pass a read_design_rules() result via `rules` to
+    avoid re-reading."""
+    if rules is None:
+        rules = read_design_rules(pcb_path)
+    classes = rules.get('classes', {})
+    if not classes:
+        return {}
+    out = {}
+    for name in net_names:
+        if not name:
+            continue
+        cl = classes.get(resolve_net_class(name, rules), {}).get('clearance')
+        if cl:
+            out[name] = float(cl)
     return out
 
 
@@ -618,4 +663,6 @@ def main():
 
 
 if __name__ == '__main__':
+    from console_encoding import enable_utf8_console
+    enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
     exit(main())

@@ -427,6 +427,31 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             return 0, 0, 0.0
     visualize = vis_callback is not None
 
+    # Board-setup copper-to-edge rule (#338): KiCad enforces the sibling
+    # .kicad_pro's min_copper_edge_clearance, so route to at least it. Done in
+    # the ENGINE (not main()) so the GUI and manifest/plan replays inherit it;
+    # a missing project reads 0.0 (no-op) and an explicit larger
+    # --board-edge-clearance still wins (max).
+    if input_file:
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            _eff_edge = effective_board_edge_clearance(input_file, board_edge_clearance)
+            if _eff_edge > (board_edge_clearance or 0.0):
+                print(f"Board edge clearance {_eff_edge}mm "
+                      f"(project min_copper_edge_clearance)")
+                board_edge_clearance = _eff_edge
+        except Exception:
+            pass
+        # Carry the RESOLVED value into the end-of-run reconciliation kwargs:
+        # the snapshot above was taken before this resolution, and the
+        # reconciliation self-invocation reads the OUTPUT file, whose sibling
+        # .kicad_pro does not exist yet (main() writes it after batch_route
+        # returns) -- so the sub-run re-resolved 0.0 and stamped its board-edge
+        # band at the track-clearance fallback (ottercast_audio BT_PCM_DIN/
+        # BT_PCM_SYNC: 16 board-edge violations laid by the reconciliation's
+        # phase-1/phase-3 routes inside the 0.5mm project edge band).
+        _reconcile_kwargs['board_edge_clearance'] = board_edge_clearance
+
     # Track memory if debug_memory enabled
     mem_start = get_process_memory_mb() if debug_memory else 0.0
     if debug_memory:
@@ -447,8 +472,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # empty) so this does not re-read. All-Default boards -> empty map -> inert.
     if net_clearances is None and input_file and os.path.isfile(input_file):
         try:
-            from list_nets import net_clearance_map
-            net_clearances = net_clearance_map(
+            from list_nets import net_clearance_map_by_id
+            net_clearances = net_clearance_map_by_id(
                 input_file, {nid: n.name for nid, n in pcb_data.nets.items()})
             if net_clearances:
                 print(f"Auto-read netclass clearances for {len(net_clearances)} net(s) "
@@ -571,6 +596,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if config.keepout_enabled and pcb_data.keepout_zones:
         print(f"Keepout: blocking routes from {len(pcb_data.keepout_zones)} "
               f"polygon(s) on {config.keepout_layer}")
+
+    # Per-net netclass clearances (#326 B5): carried on the config so the
+    # per-net obstacle cache and the same-run copper stamps reserve each net's
+    # OWN class clearance (the base map additionally applies the max-flatten
+    # below). net_id-keyed, GUI-fed today; harmless when empty.
+    if net_clearances:
+        config.net_clearances = {nid: c for nid, c in net_clearances.items()
+                                 if c and c > 0}
 
     # Identify power nets and set up per-net widths
     if power_nets and power_nets_widths:
@@ -1743,15 +1776,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
 if __name__ == "__main__":
     import argparse
-    import sys as _sys
     # Windows consoles default to cp1252, which can't encode the non-ASCII glyphs
-    # some log lines use (e.g. arrows in bus order, Ω in impedance); reconfigure
-    # stdout/stderr to UTF-8 so a print never crashes the run (issue #152).
-    for _stream in (_sys.stdout, _sys.stderr):
-        try:
-            _stream.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+    # some log lines use (arrows in bus order, Ohm in impedance, the fab-floor
+    # warning sign); reconfigure stdout/stderr to UTF-8 so a print never crashes
+    # the run (issue #152).
+    from console_encoding import enable_utf8_console
+    enable_utf8_console()
     from redo_record import record_invocation
     record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
 
@@ -2131,8 +2161,8 @@ For differential pair routing, use route_diff.py:
         # Auto-read the board's netclasses from the sibling .kicad_pro so headless
         # routing honors non-Default class clearances (KiCad max(classA, classB))
         # without a hand-written JSON. All-Default boards -> empty map -> inert.
-        from list_nets import net_clearance_map
-        _net_clearances_map = net_clearance_map(
+        from list_nets import net_clearance_map_by_id
+        _net_clearances_map = net_clearance_map_by_id(
             args.input_file, {_nid: _net.name for _nid, _net in pcb_data.nets.items()})
         if _net_clearances_map:
             _classes = sorted({round(v, 4) for v in _net_clearances_map.values()})

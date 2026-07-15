@@ -83,6 +83,7 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | `impedance_target` | `None` | Target Z0 in Ω; when set, per-layer widths come from `layer_widths` |
 | `layer_widths` | `{}` | Layer name → width (filled by `impedance.calculate_layer_widths_for_impedance`) |
 | `power_net_widths` | `{}` | net_id → width override for power nets (never below `track_width`) |
+| `net_clearances` | `{}` | net_id → netclass clearance (mm, #326): each net's own copper is stamped as an obstacle at `max(clearance, its value)` so same-run nets keep the class spacing to it; `get_net_clearance(net_id)` resolves it (never below `clearance`) |
 
 ### Differential pairs
 

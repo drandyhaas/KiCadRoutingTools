@@ -160,6 +160,9 @@ class GridRouteConfig:
     # net_clearance_floor is the routing-side floor (max clearance among the nets
     # being routed in THIS call, >= config.clearance); set at run start. An empty
     # map + None floor reproduces plain config.clearance behaviour exactly.
+    # This also subsumes #326 B5: a net's OWN copper is stamped at
+    # obstacle_clearance() = max(floor, its class), so every same-run sibling keeps
+    # at least the class spacing to it (get_net_clearance() is the #326-only view).
     net_clearances: Dict[int, float] = field(default_factory=dict)
     net_clearance_floor: Optional[float] = None
 
@@ -234,6 +237,13 @@ class GridRouteConfig:
             # Ensure power net width is at least the base track width
             return max(self.power_net_widths[net_id], self.track_width)
         return self.get_track_width(layer)
+
+    def get_net_clearance(self, net_id: int) -> float:
+        """Clearance for stamping THIS net's copper as an obstacle (#326 B5):
+        its netclass clearance when above the global value, else the global
+        clearance. Never smaller than `clearance` (netclasses only widen)."""
+        nc = self.net_clearances.get(net_id, 0.0) if self.net_clearances else 0.0
+        return nc if nc > self.clearance else self.clearance
 
     def get_layer_costs(self) -> List[int]:
         """Get layer cost multipliers for the Rust router.

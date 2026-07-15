@@ -61,6 +61,7 @@ from plane_pad_tap import (
     pad_is_fine_pitch,
     tap_pad_with_escalation,
     fab_floor_clearance_track,
+    clamp_tap_via_to_edge,
     FINE_TAP_GRID_STEP,
 )
 from terminal_colors import GREEN, RED, RESET
@@ -2014,6 +2015,20 @@ def create_plane(
         print(f"Error: Number of nets ({len(net_names)}) must match number of layers ({len(plane_layers)})")
         return _empty_plane_results(return_results)
 
+    # Board-setup copper-to-edge rule (#338): zone outlines and tap copper must
+    # honor the sibling .kicad_pro's min_copper_edge_clearance (engine-side so
+    # the GUI planes tab inherits it; see batch_route).
+    if input_file:
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            _eff_edge = effective_board_edge_clearance(input_file, board_edge_clearance)
+            if _eff_edge > (board_edge_clearance or 0.0):
+                print(f"Board edge clearance {_eff_edge}mm "
+                      f"(project min_copper_edge_clearance)")
+                board_edge_clearance = _eff_edge
+        except Exception:
+            pass
+
     # Step 1: Load PCB (or use provided pcb_data)
     if pcb_data is None:
         print(f"Loading PCB from {input_file}...")
@@ -2474,6 +2489,14 @@ def create_plane(
                                 break
 
             if via_in_pad:
+                # Board-edge clamp: the pad-centre / in-pad via site is placed at
+                # its true (off-grid) coordinate, which can sit sub-grid closer to
+                # the edge than the obstacle map's grid keep-out blocks. Pull it
+                # interior to honor min_copper_edge_clearance while staying inside
+                # the pad copper (inert without an edge rule / when it already
+                # clears). See plane_pad_tap.clamp_tap_via_to_edge.
+                via_in_pad, _ = clamp_tap_via_to_edge(
+                    via_in_pad, pad, pcb_data, config, via_size)
                 # Found position within pad - place via there (no trace needed)
                 # KiCad vias only specify start/end layers, not intermediate
                 new_vias.append({
@@ -2548,14 +2571,28 @@ def create_plane(
                 router=via_pad_router
             )
 
+            # Board-edge clamp: an in-pad via placed at the pad's true (off-grid)
+            # centre can sit sub-grid closer to the edge than the obstacle map's
+            # grid keep-out blocks; pull it interior to honor
+            # min_copper_edge_clearance (inert without an edge rule / when it
+            # already clears). See plane_pad_tap.clamp_tap_via_to_edge.
+            edge_moved = False
+            if via_pos:
+                via_pos, edge_moved = clamp_tap_via_to_edge(
+                    via_pos, pad, pcb_data, config, via_size)
+
             placement_success = False
             trace_segments = None
             via_blocked = via_pos is None
             blocked_cells = []
 
             if via_pos:
+                # An edge-clamped via stays inside the pad copper, so it still
+                # connects by overlap (via-in-pad, no trace) even though it is no
+                # longer at the exact centre.
                 via_at_pad_center = (abs(via_pos[0] - pad.global_x) < 0.001 and
-                                     abs(via_pos[1] - pad.global_y) < 0.001)
+                                     abs(via_pos[1] - pad.global_y) < 0.001) or \
+                    (edge_moved and point_in_pad_rect(via_pos[0], via_pos[1], pad, 1e-6))
 
                 if via_at_pad_center:
                     placement_success = True
@@ -3376,11 +3413,18 @@ Examples:
                 print(f"  Min clearance used: {eff_clearance:.4g} mm "
                       f"(below nominal {args.clearance:.4g}; fine-pitch taps) - "
                       f"grading at this floor")
-            from fix_kicad_drc_settings import fix_project_for_output, drc_fix_kwargs
+            from fix_kicad_drc_settings import (fix_project_for_output, drc_fix_kwargs,
+                                                read_project_edge_clearance)
+            # #338: record the PROJECT's copper-to-edge rule, never this
+            # tool's --board-edge-clearance -- that is the plane-zone INSET
+            # (default 0.5), not an enforced DRC floor; writing it into a
+            # project with no edge key manufactured a stricter-than-design
+            # rule (openstint: design 0.3, recorded 0.5).
             fix_project_for_output(
                 args.output_file, input_pcb=args.input_file,
                 clearance=eff_clearance, hole_to_hole=args.hole_to_hole_clearance,
-                edge_clearance=args.board_edge_clearance, track_width=args.track_width,
+                edge_clearance=read_project_edge_clearance(args.input_file),
+                track_width=args.track_width,
                 via_diameter=args.via_size, via_drill=args.via_drill,
                 **drc_fix_kwargs(args))
         except Exception as e:
@@ -3395,4 +3439,6 @@ Examples:
 
 
 if __name__ == "__main__":
+    from console_encoding import enable_utf8_console
+    enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
     main()

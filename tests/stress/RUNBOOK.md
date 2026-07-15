@@ -169,6 +169,18 @@ harmless.
    `--output` (e.g. `... final_board.kicad_pcb`); record the final board's
    name in the results JSON. Every tool step's input must be a previous tool
    step's output (or the original seed input), chained by name.
+1a''. PROJECT CUSTODY: if you stage/rename the pristine board into the run
+   dir at all (e.g. `board0.kicad_pcb` -- prefer NOT to, per 1a'), the
+   sibling `.kicad_pro` MUST be copied to the SAME STEM (`board0.kicad_pro`).
+   A pro left under the original board name is invisible to every tool step,
+   so the design's real DRC rules (min_copper_edge_clearance above all)
+   silently vanish for the whole chain and a later step invents defaults --
+   the openstint lesson (#338/#404: design 0.3 edge rule lost, 0.5 recorded,
+   phantom kicad floods). Best practice: route directly FROM
+   `boards_unrouted_setN/<board>.kicad_pcb` as the first step's input; its
+   sibling pro then travels automatically (`fix_project_for_output` copies
+   input-sibling projects at every step, and the replay seeder now carries
+   `<board>.kicad_pro` for legacy stem-mismatched manifests).
 1b. PARSER-PARITY VALIDATION (per board, start AND end): run
    `python3 /Users/andy/Documents/KiCadRoutingTools/validate_pcb_data.py <board>`
    on the input board before any routing step, and again on the final board.
@@ -517,5 +529,17 @@ grade stricter or you manufacture phantom grazes.
   flagged boards' `kicad_*` to `--out-dir`. Much faster than the full chain; use it
   when the change only touches fanout / diff-pair routing.
 
+- **Whole set, from a mid-chain step (reuse a prior wave's upstream boards):**
+  `python3 tests/stress/partial_replay_from_planes.py --set runs_setN --seed
+  <prior_wave>/setN --out <fresh_wave>/setN [--only b1,b2] [--from-script route_planes.py]`.
+  Cuts each board's manifest over at the first `--from-script` command (default the
+  first `route_planes.py`), stages the boards that step reads from upstream out of
+  `--seed` (with their `.kicad_pro` DRC floors), and replays only the tail via
+  `redo_stress_test`. Use it when a change only touches the later stages (plane
+  routing, reconnect, grading) so the expensive fanout/diff/`route.py` signal
+  routing is skipped. Grade the finals yourself (`ab_replay_grade.py --regrade` or
+  `kicad_drc_compare.py`).
+
 Rule of thumb: full-chain regressions → `ab_replay_grade.py`; diff-pair
-regressions → `redo_diff_stage.py`.
+regressions → `redo_diff_stage.py`; plane/reconnect/grading-only changes →
+`partial_replay_from_planes.py` (reuses a prior wave's upstream boards).

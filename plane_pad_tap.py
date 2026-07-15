@@ -88,6 +88,100 @@ def note_clearance_used(pcb_data: PCBData, clearance: float) -> None:
     clearance_ledger.record(clearance)
 
 
+def _cap_move_within_pad(x0: float, y0: float, x1: float, y1: float,
+                         pad: Pad) -> Tuple[float, float]:
+    """Farthest point on the segment (x0,y0)->(x1,y1) still inside the pad
+    copper. (x0,y0) is assumed in-pad; returns (x1,y1) when it too is in-pad,
+    otherwise the in-pad boundary point (binary search)."""
+    if point_in_pad_rect(x1, y1, pad, 1e-6):
+        return x1, y1
+    lo, hi = 0.0, 1.0
+    for _ in range(24):
+        mid = (lo + hi) / 2.0
+        mx, my = x0 + (x1 - x0) * mid, y0 + (y1 - y0) * mid
+        if point_in_pad_rect(mx, my, pad, 1e-6):
+            lo = mid
+        else:
+            hi = mid
+    return x0 + (x1 - x0) * lo, y0 + (y1 - y0) * lo
+
+
+def clamp_tap_via_to_edge(via_pos: Tuple[float, float], pad: Pad,
+                          pcb_data: PCBData, config: GridRouteConfig,
+                          via_size: float) -> Tuple[Tuple[float, float], bool]:
+    """Nudge an in-pad tap via toward the board interior so its copper clears
+    the project's min_copper_edge_clearance (``config.board_edge_clearance``),
+    capped to stay inside the pad copper so the via-in-pad connection holds.
+
+    The grid-resolution board-edge keep-out in the via obstacle map blocks via
+    CELLS, but a via-in-pad is placed at the pad's true (off-grid) centre, which
+    can sit a fraction of a grid step closer to the edge than the blocked band
+    and slip a #338-style copper_edge_clearance violation past the map. This
+    float-exact clamp closes that gap, measuring against the REAL Edge.Cuts
+    outline (the same geometry check_drc / the KiCad oracle use).
+
+    Returns ``(new_pos, moved)``. Inert (returns ``via_pos, False``) when the
+    project records no edge rule (``board_edge_clearance<=0``), when the via is
+    not inside the pad (grid-aligned via sites already clear at the map's
+    resolution), or when the via already clears the edge. For a pad whose OWN
+    copper is inside the band (the board's own design, mirroring the #338
+    in-band-pad reach exemption) it moves the via as far interior as the pad
+    allows -- best effort -- and never fails the tap.
+    """
+    edge_clr = config.board_edge_clearance
+    if not edge_clr or edge_clr <= 0:
+        return via_pos, False
+    # Only in-pad vias reach here off-grid; grid-aligned via sites clear the
+    # map's edge band by construction, so leave them untouched.
+    if not point_in_pad_rect(via_pos[0], via_pos[1], pad, 1e-6):
+        return via_pos, False
+
+    from check_drc import (board_edge_geometry, _point_to_rings_distance,
+                           _point_on_board)
+    bi = pcb_data.board_info
+    required = edge_clr + via_size / 2.0
+    rings, outer, cutouts = board_edge_geometry(bi)
+    bb = getattr(bi, 'board_bounds', None)
+
+    def edist(x: float, y: float) -> float:
+        """Signed distance to the board edge: + inside, - off-board/in-cutout."""
+        if rings:
+            d = _point_to_rings_distance(x, y, rings)
+            return d if _point_on_board(x, y, outer, cutouts) else -d
+        if bb:
+            return min(x - bb[0], bb[2] - x, y - bb[1], bb[3] - y)
+        return float('inf')
+
+    vx, vy = via_pos
+    if edist(vx, vy) >= required:
+        return via_pos, False
+
+    # Walk along the gradient of the edge-distance field (toward the interior),
+    # capping each step to stay inside the pad. Numeric gradient handles
+    # rectangular and polygonal outlines uniformly; iterate so a corner (two
+    # nearby edges) converges.
+    h = 1e-3
+    for _ in range(6):
+        d0 = edist(vx, vy)
+        if d0 >= required:
+            break
+        gx = (edist(vx + h, vy) - edist(vx - h, vy)) / (2.0 * h)
+        gy = (edist(vx, vy + h) - edist(vx, vy - h)) / (2.0 * h)
+        glen = math.hypot(gx, gy)
+        if glen < 1e-9:
+            break
+        step = required - d0
+        cx = vx + gx / glen * step
+        cy = vy + gy / glen * step
+        cx, cy = _cap_move_within_pad(vx, vy, cx, cy, pad)
+        if abs(cx - vx) < 1e-9 and abs(cy - vy) < 1e-9:
+            break  # pad boundary reached -- in-band pad, best effort
+        vx, vy = cx, cy
+
+    moved = abs(vx - via_pos[0]) > 1e-9 or abs(vy - via_pos[1]) > 1e-9
+    return (vx, vy), moved
+
+
 def _clearance_ladder(nominal: float, fab_floor: float, n_steps: int) -> List[float]:
     """Descending clearances from just below ``nominal`` down to ``fab_floor``
     (inclusive) in ``n_steps`` even steps. If ``nominal`` is already at/below the
@@ -988,6 +1082,14 @@ def try_tap_pad(
                 return r
         # No via site anywhere in the search radius - via placement is blocked.
         return TapResult(success=False, via_blocked=True)
+
+    # Board-edge clamp: a via-in-pad placed at the pad's true (off-grid) centre
+    # can sit sub-grid closer to the edge than the obstacle map's grid keep-out
+    # blocks; pull it interior to honor min_copper_edge_clearance (inert when
+    # the project sets no edge rule / the via already clears). See
+    # clamp_tap_via_to_edge.
+    via_pos, _edge_moved = clamp_tap_via_to_edge(
+        via_pos, pad, pcb_data, config, via_size)
 
     segments: List[Dict] = []
     # A via landing inside the pad's own copper connects it directly (via-in-pad)

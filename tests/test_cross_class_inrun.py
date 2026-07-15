@@ -148,7 +148,7 @@ _PCB_STUB = """(kicad_pcb (version 20221018) (generator test)
 
 def test_autoread_net_clearance_map():
     print("(iii) auto-read net_clearance_map from .kicad_pro netclasses:")
-    from list_nets import net_clearance_map
+    from list_nets import net_clearance_map_by_id
     d = tempfile.mkdtemp(prefix="xclr_")
     pcb = os.path.join(d, "b.kicad_pcb")
     pro = os.path.join(d, "b.kicad_pro")
@@ -167,7 +167,7 @@ def test_autoread_net_clearance_map():
     with open(pro, "w") as f:
         json.dump(proj, f)
     nets = {1: "/HS_D0", 2: "/SIG"}
-    m = net_clearance_map(pcb, nets)
+    m = net_clearance_map_by_id(pcb, nets)
     check("HighSpeed net -> 0.25", m.get(1), 0.25)
     check("Default/unassigned net omitted (inert)", 2 in m, False)
 
@@ -177,7 +177,7 @@ def test_autoread_net_clearance_map():
                               "netclass_assignments": {}}}
     with open(pro, "w") as f:
         json.dump(proj2, f)
-    check("all-Default board -> empty map", net_clearance_map(pcb, nets), {})
+    check("all-Default board -> empty map", net_clearance_map_by_id(pcb, nets), {})
 
 
 # ---------------------------------------------------------------------------

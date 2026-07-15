@@ -187,6 +187,7 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances):
     or (None, None). Routes through free space only - no rip-up."""
     from obstacle_map import build_base_obstacle_map
     from plane_pad_tap import make_local_window
+    from routing_config import GridCoord
     from single_ended_routing import route_net_with_obstacles
 
     d, ax, ay, bx, by = gap
@@ -214,7 +215,17 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances):
             window, cfg, [net_id],
             net_clearances=rung_clearances)
         _fence_window(obstacles, window, cfg)
-        result = route_net_with_obstacles(window, net_id, cfg, obstacles)
+        # Constrain the route to the window: drop endpoints outside it and keep the
+        # source/target overrides from punching the fence, so the A* can never leave
+        # the stamped region and cross foreign copper the window never modelled (#396).
+        bounds = None
+        if window.board_info.board_bounds:
+            wcoord = GridCoord(cfg.grid_step)
+            _wx0, _wy0, _wx1, _wy1 = window.board_info.board_bounds
+            _g0 = wcoord.to_grid(_wx0, _wy0)
+            _g1 = wcoord.to_grid(_wx1, _wy1)
+            bounds = (_g0[0], _g0[1], _g1[0], _g1[1])
+        result = route_net_with_obstacles(window, net_id, cfg, obstacles, bounds=bounds)
         if result and not result.get('failed'):
             return result, cfg
     return None, None

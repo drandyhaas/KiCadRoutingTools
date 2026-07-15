@@ -490,7 +490,8 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
             dangles[(s.net_id, s.layer)].append((x, y, s.width))
 
     def clears(nid, x1, y1, x2, y2, layer, w):
-        d = min(_seg_foreign_pad_dist(pcb_data, nid, x1, y1, x2, y2, layer),
+        d = min(_seg_foreign_pad_dist(pcb_data, nid, x1, y1, x2, y2, layer,
+                                      base_clearance=clr),
                 _seg_foreign_seg_dist(pcb_data, nid, x1, y1, x2, y2, layer),
                 _seg_foreign_via_dist(pcb_data, nid, x1, y1, x2, y2, layer))
         hd = _seg_foreign_hole_dist(pcb_data, nid, x1, y1, x2, y2)
@@ -2083,7 +2084,8 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
     def grazes(s):
         thr = clearance + s.width / 2.0 - 1e-4
         if (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                  s.end_x, s.end_y, s.layer) < thr or
+                                  s.end_x, s.end_y, s.layer,
+                                  base_clearance=clearance) < thr or
                 _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                       s.end_x, s.end_y, s.layer) < thr):
             return True
@@ -2212,7 +2214,8 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                                                   _seg_foreign_via_dist as _fvd,
                                                   _fab_track_floor)
                 d = min(_fpd(pcb_data, s.net_id, s.start_x, s.start_y,
-                             s.end_x, s.end_y, s.layer),
+                             s.end_x, s.end_y, s.layer,
+                             base_clearance=clearance),
                         _fvd(pcb_data, s.net_id, s.start_x, s.start_y,
                              s.end_x, s.end_y, s.layer))
                 if check_foreign_segments:
@@ -2347,7 +2350,8 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     def grazes(s):
         thr = clearance + s.width / 2.0 - 1e-4
         return (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                      s.end_x, s.end_y, s.layer) < thr or
+                                      s.end_x, s.end_y, s.layer,
+                                      base_clearance=clearance) < thr or
                 _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                       s.end_x, s.end_y, s.layer) < thr)
 
@@ -2378,7 +2382,8 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
         # Foreign VIAS must be checked too: grazes() fires on via proximity, so
         # omitting them here let a re-bend that fixed a pad graze land within
         # clearance of (or onto) a foreign via (#254 neo6502 /GPIO1 vs /GPIO2).
-        d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
+        d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                      base_clearance=clearance),
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer))
         # NPTH drill holes at the higher NPTH-to-track floor (#370 B2): the
@@ -2552,14 +2557,20 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
         if best is None or sf > best[0]:
             best = (sf, float(ts[i]), float(qx), float(qy))
 
-    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey = _foreign_pad_arrays(pcb_data, s.layer)
+    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc = _foreign_pad_arrays(pcb_data, s.layer)
     if cx.size:
-        near = ((cx + ex >= sx.min() - R) & (cx - ex <= sx.max() + R) &
-                (cy + ey >= sy.min() - R) & (cy - ey <= sy.max() + R) &
+        # Per-pad local/footprint clearance overrides (#326): widen the window
+        # by the largest excess and subtract each pad's excess from its
+        # distance ("effective distance"), so the shortfall ranking and the
+        # computed shift honor the pad's own required clearance.
+        Rp = R + max(0.0, float(plc.max()) - clearance) if plc.size else R
+        near = ((cx + ex >= sx.min() - Rp) & (cx - ex <= sx.max() + Rp) &
+                (cy + ey >= sy.min() - Rp) & (cy - ey <= sy.max() + Rp) &
                 (nids != net_id))
         if near.any():
             fcx, fcy, fhx, fhy, fcr = cx[near], cy[near], hx[near], hy[near], cr[near]
             frc, frs = rc[near], rs[near]
+            fexc = np.maximum(plc[near] - clearance, 0.0)
             # Work in each pad's LOCAL frame (query offsets rotated by R(-rot),
             # identity for axis-aligned pads) so tilted pads use their true
             # outline (#356). Closest point on the pad's rounded-rect boundary:
@@ -2581,7 +2592,7 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
             # Boundary point back to board axes: c + R(rot) . (qlx, qly)
             qx = fcx[None, :] + qlx * frc[None, :] - qly * frs[None, :]
             qy = fcy[None, :] + qlx * frs[None, :] + qly * frc[None, :]
-            d = vlen - fcr[None, :]
+            d = vlen - fcr[None, :] - fexc[None, :]
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, qx[i, j], qy[i, j])
 
@@ -2712,7 +2723,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         return True
 
     def clears(x1, y1, x2, y2, layer, net_id, w):
-        d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
+        d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                      base_clearance=clearance),
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer))
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
@@ -2752,7 +2764,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         # only on the handful that fail this.
         thr = clearance + s.width / 2.0 - 1e-4
         if min(_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                     s.end_x, s.end_y, s.layer),
+                                     s.end_x, s.end_y, s.layer,
+                                     base_clearance=clearance),
                _seg_foreign_seg_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                      s.end_x, s.end_y, s.layer),
                _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
@@ -3025,7 +3038,7 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
                                      lyr) < thr:
                 return True
             if _seg_foreign_pad_dist(pcb_data, v.net_id, v.x, v.y, v.x, v.y,
-                                     lyr) < thr:
+                                     lyr, base_clearance=clearance) < thr:
                 return True
         return False
 

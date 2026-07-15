@@ -239,11 +239,13 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
               (float(via_size) - float(via_drill)) / 2
               if via_size and via_drill else None, min_ann)
         lower('m_HoleToHoleMin', hole_to_hole)
-        # CLI parity: route.py always passes board_edge_clearance (default
-        # 0.0), so CLI-fixed projects never flag pre-existing near-edge
-        # mounting holes; mirror that unless a step chose a real value.
-        lower('m_CopperEdgeClearance',
-              edge_clearance if edge_clearance is not None else 0.0)
+        # CLI parity (#338): 0.0 edge clearance means "not enforced this
+        # step", NOT "lower the rule to zero" -- writing 0 erased the board's
+        # own min_copper_edge_clearance (compute_targets now skips it the
+        # same way). A real enforced value is >= the board rule (the engines
+        # route to max(flag, board rule)), so only-lower keeps the design
+        # value.
+        lower('m_CopperEdgeClearance', edge_clearance or None)
         try:
             for _name, _nc in board.GetNetClasses().items():
                 if _name != 'Default':

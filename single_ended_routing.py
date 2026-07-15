@@ -104,7 +104,7 @@ def _foreign_pad_arrays(pcb_data, layer):
     arr = cache.get(layer)
     if arr is None:
         nids, cx, cy, hx, hy, cr = [], [], [], [], [], []
-        rc, rs, ex, ey = [], [], [], []
+        rc, rs, ex, ey, lc = [], [], [], [], []
         for nid, pads in pcb_data.pads_by_net.items():
             for pad in pads:
                 if layer in pad.layers or '*.Cu' in pad.layers:
@@ -122,20 +122,29 @@ def _foreign_pad_arrays(pcb_data, layer):
                     else:
                         rc.append(1.0); rs.append(0.0)
                         ex.append(half_x); ey.append(half_y)
+                    lc.append(getattr(pad, 'local_clearance', 0.0) or 0.0)
         arr = (np.asarray(nids, dtype=np.int64), np.asarray(cx), np.asarray(cy),
                np.asarray(hx), np.asarray(hy), np.asarray(cr),
-               np.asarray(rc), np.asarray(rs), np.asarray(ex), np.asarray(ey))
+               np.asarray(rc), np.asarray(rs), np.asarray(ex), np.asarray(ey),
+               np.asarray(lc))
         cache[layer] = arr
     return arr
 
 
-def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer):
+def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None):
     """Min edge distance from point (x,y) on `layer` to any pad of a DIFFERENT net.
     The pad is modelled as a rounded rect (accurate for circle/oval/roundrect,
     exact rect at corner_r=0), so a round BGA ball is not over-approximated by its
     bounding-box corner. Vectorized + windowed (see _FOREIGN_PAD_WINDOW); exact
-    for any distance within the window, which is all the callers ever look at."""
-    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey = _foreign_pad_arrays(pcb_data, layer)
+    for any distance within the window, which is all the callers ever look at.
+
+    `base_clearance` (#326 B6): the clearance the CALLER will compare against
+    (its config.clearance). When given, each pad's local/footprint clearance
+    override above that base is SUBTRACTED from its distance, so the caller's
+    unchanged `dist >= base + X` threshold enforces the pad's own requirement
+    (an "effective distance"). Overrides are bounded well below the 5mm
+    window, so windowing stays exact."""
+    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc = _foreign_pad_arrays(pcb_data, layer)
     if cx.size == 0:
         return 1e9
     R = _FOREIGN_PAD_WINDOW
@@ -155,16 +164,22 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer):
     ly = np.abs(-ddx * frs + ddy * frc)
     dx = np.maximum(lx - (hx[near] - fcr), 0.0)
     dy = np.maximum(ly - (hy[near] - fcr), 0.0)
-    return float(np.min(np.hypot(dx, dy) - fcr))
+    d = np.hypot(dx, dy) - fcr
+    if base_clearance is not None:
+        d = d - np.maximum(plc[near] - base_clearance, 0.0)
+    return float(np.min(d))
 
 
-def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
+def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                          base_clearance=None):
     """Min foreign-pad edge distance sampled along a (short, terminal) segment.
     Pads are modelled as rounded rects (corner_r), so round/oval/roundrect pads --
     e.g. BGA balls -- use their true outline, not the bounding-box corner that
     manufactures phantom grazes (#315). Vectorized: windows pads to the segment's
-    bbox + margin, then evaluates ALL sample points against them in one matrix op."""
-    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey = _foreign_pad_arrays(pcb_data, layer)
+    bbox + margin, then evaluates ALL sample points against them in one matrix op.
+    `base_clearance` (#326 B6): see _pt_foreign_pad_dist -- subtracts each pad's
+    local-clearance excess so unchanged caller thresholds honor overrides."""
+    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc = _foreign_pad_arrays(pcb_data, layer)
     if cx.size == 0:
         return 1e9
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
@@ -191,7 +206,10 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
     ly = np.abs(-ddx * frs[None, :] + ddy * frc[None, :])
     dx = np.maximum(lx - (fhx[None, :] - fcr[None, :]), 0.0)
     dy = np.maximum(ly - (fhy[None, :] - fcr[None, :]), 0.0)
-    return float(np.min(np.hypot(dx, dy) - fcr[None, :]))
+    d = np.hypot(dx, dy) - fcr[None, :]
+    if base_clearance is not None:
+        d = d - np.maximum(plc[near] - base_clearance, 0.0)[None, :]
+    return float(np.min(d))
 
 
 def _foreign_seg_arrays(pcb_data, layer):
@@ -420,7 +438,8 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
             if _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y, layer) < need:
                 ok = False
                 break
-            if _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer) < need:
+            if _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer,
+                                    base_clearance=clearance) < need:
                 ok = False
                 break
         if ok and _seg_foreign_via_dist(pcb_data, net_id, x, y, x, y, layers[0] if layers else 'F.Cu') < need:
@@ -502,8 +521,12 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
     for s in segments:
         if not touches(s):
             continue
-        # Nearest foreign EDGE on this layer -- pad or track/via, whichever is closer.
-        d = min(_seg_foreign_pad_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer),
+        # Nearest foreign EDGE on this layer -- pad or track/via, whichever is
+        # closer. Pad distances are override-adjusted (#326): a pad's local/
+        # footprint clearance above config.clearance is subtracted, so the
+        # allowed_half below necks to the pad's OWN required clearance.
+        d = min(_seg_foreign_pad_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer,
+                                      base_clearance=config.clearance),
                 _seg_foreign_seg_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer))
         allowed_half = d - config.clearance - 1e-4  # 1e-4: stay just inside the rule
         if allowed_half < s.width / 2.0 - 1e-9:
@@ -553,9 +576,11 @@ def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
     if abs(ox - fx) < 1e-9 and abs(oy - fy) < 1e-9:
         return False  # exact endpoint already is the grid cell
     margin = config.clearance + config.get_net_track_width(net_id, ol) / 2.0
-    if _pt_foreign_pad_dist(pcb_data, net_id, fx, fy, ol) >= margin:
+    if _pt_foreign_pad_dist(pcb_data, net_id, fx, fy, ol,
+                            base_clearance=config.clearance) >= margin:
         return False  # grid cell already clear -> nothing to fix
-    if _pt_foreign_pad_dist(pcb_data, net_id, ox, oy, ol) < margin:
+    if _pt_foreign_pad_dist(pcb_data, net_id, ox, oy, ol,
+                            base_clearance=config.clearance) < margin:
         return False  # exact endpoint also too close (placement) -> can't fix here
     nx, ny = pts[neighbor_idx]
     # Only relocate the endpoint of a SHORT terminal segment. simplify_path (caller,
@@ -566,7 +591,8 @@ def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
     # caller's short connecting stub run out to the exact point instead.
     if math.hypot(nx - fx, ny - fy) > 1.5 * config.grid_step:
         return False  # long terminal segment -> keep grid end + short stub
-    if _seg_foreign_pad_dist(pcb_data, net_id, ox, oy, nx, ny, ol) < margin - 1e-6:
+    if _seg_foreign_pad_dist(pcb_data, net_id, ox, oy, nx, ny, ol,
+                             base_clearance=config.clearance) < margin - 1e-6:
         return False  # merged terminal segment would graze -> keep grid + stub
     pts[term_idx] = (ox, oy)
     return True
@@ -1046,7 +1072,8 @@ def _probe_route_with_frontier_once(
 def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                               obstacles: GridObstacleMap,
                               attraction_path: Optional[List[Tuple[int, int, int]]] = None,
-                              reverse_direction: bool = False) -> Optional[dict]:
+                              reverse_direction: bool = False,
+                              bounds: Optional[Tuple[int, int, int, int]] = None) -> Optional[dict]:
     """Route a single net using pre-built obstacles (for incremental routing).
 
     Args:
@@ -1058,6 +1085,13 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                         List of (gx, gy, layer) tuples from a previously routed neighbor.
         reverse_direction: If True, swap sources and targets (route from targets to sources).
                           Used for bus routing when the clique was formed by targets.
+        bounds: Optional (gmin_x, gmin_y, gmax_x, gmax_y) grid-cell window the route
+                must stay inside (the scoped net_rescue window, #396). When set,
+                endpoints outside it are dropped (a long trunk segment pulled into a
+                small window contributes a free end OUTSIDE the window bounds, and
+                routing to it drags the A* through the un-modelled exterior), and the
+                source/target overrides below are never stamped outside it -- so the
+                window fence stays SOLID instead of being punched at the exempt cell.
     """
     # Find endpoints (segments or pads)
     sources, targets, error = get_net_endpoints(pcb_data, net_id, config)
@@ -1072,6 +1106,15 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # Swap source/target for bus routing from clustered targets
     if reverse_direction:
         sources, targets = targets, sources
+
+    # Clamp endpoints to the scoped window: nothing outside the fence may be a
+    # source/target, so the A* is never pulled past the fence into un-modelled space.
+    if bounds is not None:
+        bgx0, bgy0, bgx1, bgy1 = bounds
+        sources = [s for s in sources if bgx0 <= s[0] <= bgx1 and bgy0 <= s[1] <= bgy1]
+        targets = [t for t in targets if bgx0 <= t[0] <= bgx1 and bgy0 <= t[1] <= bgy1]
+        if not sources or not targets:
+            return None
 
     coord = GridCoord(config.grid_step)
     layer_names = config.layers
@@ -1092,17 +1135,24 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     # Add source and target positions as allowed cells to override BGA zone blocking
     # This only affects BGA zone blocking, not regular obstacle blocking (tracks, stubs, pads)
+    # When a window `bounds` is given, never exempt a cell in/beyond the fence: the
+    # allowed/source-target overrides are the only thing that can breach the fence, so
+    # keeping them strictly inside the window keeps the fence solid (#396).
+    def _exempt_ok(gx, gy):
+        return bounds is None or (bounds[0] <= gx <= bounds[2] and bounds[1] <= gy <= bounds[3])
     allow_radius = 10
     for gx, gy, _ in sources_grid + targets_grid:
         for dx in range(-allow_radius, allow_radius + 1):
             for dy in range(-allow_radius, allow_radius + 1):
-                obstacles.add_allowed_cell(gx + dx, gy + dy)
+                if _exempt_ok(gx + dx, gy + dy):
+                    obstacles.add_allowed_cell(gx + dx, gy + dy)
 
     # Mark exact source/target cells so routing can start/end there even if blocked by
     # adjacent track expansion (but NOT blocked by BGA zones - use allowed_cells for that)
     # NOTE: Must pass layer to only allow override on the specific layer of the endpoint
     for gx, gy, layer in sources_grid + targets_grid:
-        obstacles.add_source_target_cell(gx, gy, layer)
+        if _exempt_ok(gx, gy):
+            obstacles.add_source_target_cell(gx, gy, layer)
 
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0

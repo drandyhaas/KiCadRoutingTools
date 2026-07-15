@@ -138,35 +138,72 @@ def _diff_pair_stats(log_text):
             "diff_coupled_pct": round(100.0 * coupled / total, 1) if total else None}
 
 
-def _kicad_grade(pcb, clearance):
+def manifest_baseline(txt, *search_dirs):
+    """Resolve the pristine UNROUTED input board = first .kicad_pcb token of the
+    first real command. Manifests reference it either by ABSOLUTE path or by a
+    bare relative name (e.g. `board0.kicad_pcb`); a relative/missing token is
+    resolved against the board's source/output dirs so the #405 symmetric
+    baseline subtraction actually fires. Without this, a relative baseline token
+    silently fails os.path.exists() and kicad_preexisting stays 0, phantom-
+    counting pre-existing edge/hole conditions as router-introduced (openstint:
+    6 pre-existing edge items surfaced as kicad_only). Returns the resolved path
+    (or the raw token, which grade() treats as an absent baseline)."""
+    tok = None
+    for line in txt.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        toks = [t.strip("'\"") for t in line.split()
+                if t.strip("'\"").endswith(".kicad_pcb")]
+        if toks:
+            tok = toks[0]
+            break
+    if not tok:
+        return None
+    if os.path.exists(tok):
+        return tok
+    for d in search_dirs:
+        cand = os.path.join(str(d), os.path.basename(tok))
+        if os.path.exists(cand):
+            return cand
+    return tok
+
+
+def _kicad_grade(pcb, clearance, baseline=None):
     """KiCad's own DRC verdict on the final board (#316): copper-class
     violation count + the two-sided diff vs check_drc, graded with the
-    netclass clearance equalized to the routed clearance (kicad_drc_compare's
-    staging). Returns Nones when kicad-cli is unavailable so replay grading
-    still works everywhere."""
+    netclass clearance equalized to the routed clearance. Returns Nones when
+    kicad-cli is unavailable so replay grading still works everywhere.
+
+    This is a THIN adapter over kicad_drc_compare.compare_board_data -- the
+    SHARED per-board grading core the `kicad_drc_compare` CLI also uses, so the
+    two tools produce identical numbers by construction (they no longer
+    reimplement baseline subtraction or matching). The core does symmetric
+    baseline subtraction (#405) on BOTH engines' items and the board-edge
+    anchor reconciliation.
+
+    `baseline` = the UNROUTED input board (#326/#338): its items are pre-existing
+    design conditions (e.g. edge-connector pads inside the board's own
+    copper_edge rule) that no routing can fix -- subtracted from both engines so
+    kicad_drc/kicad_only reflect ROUTER-introduced items; the subtracted count
+    is reported as kicad_preexisting."""
+    _none = {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None}
     try:
         sys.path.insert(0, str(REPO / "tests" / "stress"))
-        from kicad_drc_compare import (KICAD_CLI, _staged_copy, run_kicad_drc,
-                                       run_check_drc, match)
+        from kicad_drc_compare import KICAD_CLI, compare_board_data
         if not os.path.exists(KICAD_CLI):
-            return {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None}
-        tmpd, staged = _staged_copy(pcb, float(clearance))
-        try:
-            kicad, err = run_kicad_drc(staged)
-        finally:
-            import shutil
-            shutil.rmtree(tmpd, ignore_errors=True)
-        if err:
-            return {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None}
-        cd = run_check_drc(pcb, float(clearance))
-        _, kicad_only, cd_only = match(kicad, cd)
-        return {"kicad_drc": len(kicad), "kicad_only": len(kicad_only),
-                "checkdrc_only": len(cd_only)}
+            return _none
+        data = compare_board_data(pcb, clearance=float(clearance), baseline=baseline)
+        if data is None or "skip" in data:
+            return _none
+        return {"kicad_drc": data["kicad"], "kicad_preexisting": data["kicad_preexisting"],
+                "kicad_only": data["kicad_only"], "checkdrc_only": data["checkdrc_only"],
+                "kicad_matched": data["matched"]}
     except Exception:
-        return {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None}
+        return _none
 
 
-def grade(pcb, clearance):
+def grade(pcb, clearance, baseline=None):
     # Grade at the board's OWN recorded floors when the sibling .kicad_pro
     # exists (check_drc auto-grades from it -- the Stage-C clearance ledger
     # writes the true minimum every step used, including legitimate fine-tap
@@ -204,7 +241,7 @@ def grade(pcb, clearance):
     total, incomplete, pct = _completion(ctext)
     out = {"drc": _drc_count(drc.stdout + drc.stderr), "conn": _conn_count(ctext),
            "nets_total": total, "nets_incomplete": incomplete, "completion_pct": pct}
-    out.update(_kicad_grade(pcb, clearance))
+    out.update(_kicad_grade(pcb, clearance, baseline=baseline))
     return out
 
 
@@ -251,7 +288,14 @@ def do_board(set_dir, out_dir, label, board):
            "time_by_tool": time_by_tool, "peak_by_tool": peak_by_tool, "steps": steps,
            **dp}
     if done:
-        res.update(grade(final, clr))
+        # Unrouted-input baseline (#326/#338): the manifest's first command's
+        # first .kicad_pcb argument is the pristine input board; its kicad
+        # items are pre-existing design conditions subtracted from the
+        # final's kicad grade (kicad_preexisting) so kicad_drc reflects
+        # router-introduced items. Resolve a relative token against the board's
+        # dest/src dirs (board0.kicad_pcb lives there after the remap).
+        baseline = manifest_baseline(txt, dst, src)
+        res.update(grade(final, clr, baseline=baseline))
     dps = f"{res['diff_pairs_coupled']}/{res['diff_pairs_total']}" if res['diff_pairs_total'] else "-"
     print(f"[{label}] {board}: chain={'ok' if done else 'BROKEN'} "
           f"drc={res['drc']} kdrc={res.get('kicad_drc')} conn={res['conn']} compl={res['completion_pct']}% "
@@ -326,7 +370,11 @@ def regrade(out_dir, set_dir):
                "drc": None, "conn": None, "nets_total": None, "nets_incomplete": None,
                "completion_pct": None, **dp}  # regrade re-runs no commands, so no timing
         if done:
-            res.update(grade(str(final), clr))
+            # Resolve the unrouted-input baseline against the wave board dir and
+            # the manifest's set dir (a relative board0.kicad_pcb token lives in
+            # both) so #405 symmetric subtraction fires (see manifest_baseline).
+            baseline = manifest_baseline(txt, bdir, set_dir / b)
+            res.update(grade(str(final), clr, baseline=baseline))
         print(f"[regrade] {b}: chain={'ok' if done else 'BROKEN'} drc={res['drc']} "
               f"conn={res['conn']} compl={res['completion_pct']}%")
         results.append(res)

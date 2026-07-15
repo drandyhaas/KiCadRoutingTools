@@ -1372,12 +1372,24 @@ class PlanesTab(wx.Panel):
             if not nets:
                 return
             from routing_config import GridRouteConfig
+            # #338 (CLI parity with route_disconnected_planes main): the temp
+            # save below has no sibling .kicad_pro, so oracle_reconnect cannot
+            # resolve the board's copper-to-edge rule itself -- read it from
+            # the live board's design settings (nm -> mm). NOT the plane-zone
+            # inset cfg 'board_edge_clearance': that is a pour aesthetic, not
+            # an enforced routing floor.
+            try:
+                _edge_mm = (board.GetDesignSettings().m_CopperEdgeClearance
+                            or 0) / 1e6
+            except Exception:
+                _edge_mm = 0.0
             ocfg = GridRouteConfig(
                 clearance=cfg_src.get('clearance', defaults.CLEARANCE),
                 track_width=cfg_src.get('track_width', defaults.TRACK_WIDTH),
                 via_size=cfg_src.get('via_size', defaults.VIA_SIZE),
                 via_drill=cfg_src.get('via_drill', defaults.VIA_DRILL),
-                grid_step=cfg_src.get('grid_step', defaults.GRID_STEP))
+                grid_step=cfg_src.get('grid_step', defaults.GRID_STEP),
+                board_edge_clearance=_edge_mm)
             with tempfile.NamedTemporaryFile(suffix='.kicad_pcb',
                                              delete=False) as f:
                 tmp = f.name

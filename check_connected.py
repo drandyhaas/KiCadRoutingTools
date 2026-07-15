@@ -1180,6 +1180,8 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
 
 
 if __name__ == "__main__":
+    from console_encoding import enable_utf8_console
+    enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
     parser = argparse.ArgumentParser(description='Check PCB for track connectivity (disconnected routes)')
     parser.add_argument('pcb', help='Input PCB file')
     parser.add_argument('--nets', '-n', nargs='+', default=None,

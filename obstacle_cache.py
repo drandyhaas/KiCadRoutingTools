@@ -461,7 +461,18 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     off_y = pad.global_y - gy * coord.grid_step
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
-    margin = config.track_width / 2 + obs_clearance + extra_clearance
+    # Cross-class clearance (PR392): obs_clearance already carries this pad net's
+    # KiCad pairwise clearance (max(routing-side floor, its class)). Per-pad
+    # local/footprint clearance override (#326 B6): this per-net CACHE is what the
+    # routing loop actually consults for same-run nets' pads, so it must honor
+    # pad.local_clearance exactly like _add_pad_obstacle does -- otherwise a
+    # to-be-routed net's fiducial/keep-clear pad is stamped at the bare clearance
+    # and every sibling net may route inside its ring.
+    clearance = obs_clearance
+    lc = getattr(pad, 'local_clearance', 0.0) or 0.0
+    if lc > clearance:
+        clearance = lc
+    margin = config.track_width / 2 + clearance + extra_clearance
 
     # Custom comb/finger pads: rasterize the real copper polygon(s), leaving the
     # finger channels open, instead of the bounding box (issue #188). This is the
@@ -474,7 +485,7 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
         layer_idxs = [layer_map.get(l) for l in expanded_layers]
         layer_idxs = [li for li in layer_idxs if li is not None]
         on_copper = any(l.endswith('.Cu') for l in expanded_layers)
-        via_margin = config.via_size / 2 + obs_clearance + config.grid_step / 2
+        via_margin = config.via_size / 2 + clearance + config.grid_step / 2
         for poly in pad_polys:
             gxf, gyf, inside, edist = _rasterize_polygon(poly, coord, margin)
             if gxf is not None:
@@ -521,7 +532,7 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     # Via blocking around pads
     if any(layer.endswith('.Cu') for layer in expanded_layers):
         # Add half grid step buffer to account for grid quantization errors
-        via_margin = config.via_size / 2 + obs_clearance + config.grid_step / 2
+        via_margin = config.via_size / 2 + clearance + config.grid_step / 2
         blocked_vias.append(pad_blocked_cells_array(gx, gy, half_width, half_height,
                                                     via_margin, config.grid_step, corner_radius,
                                                     off_x=off_x, off_y=off_y,

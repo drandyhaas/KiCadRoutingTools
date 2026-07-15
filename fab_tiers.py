@@ -202,7 +202,7 @@ def enforce_fab_floors(copper_layer_count, tier=None, overrides=None, **params):
     viols = check_param_floors(copper_layer_count, tier, overrides, **params)
     pinned = {}
     for name, val, floor in viols:
-        print(f"  ⚠ --{name.replace('_', '-')} {val} is below the fab floor {floor} "
+        print(f"  WARNING: --{name.replace('_', '-')} {val} is below the fab floor {floor} "
               f"for the selected --fab-tier; pinning up to {floor} (the fab can't "
               f"make it smaller). Pass --fab-overrides to declare a smaller fab "
               f"capability, or raise the value to silence this.")
@@ -229,7 +229,7 @@ def warn_fab_escalation(context):
     if not context or context in _escalation_warned:
         return
     _escalation_warned.add(context)
-    print(f"  ⚠ {context}: escalated standard→advanced fab floor "
+    print(f"  WARNING: {context}: escalated standard->advanced fab floor "
           f"(0.25/0.15 via etc., more costly to fab); pass --fab-tier advanced to "
           f"silence, or --fab-overrides to pin your own floor (forbids escalation)")
 
