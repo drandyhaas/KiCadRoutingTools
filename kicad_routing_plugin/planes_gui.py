@@ -1699,7 +1699,7 @@ class PlanesTab(wx.Panel):
                     via_drill=cfg.get('via_drill'))
                 if apply_targets_to_board(
                         board, targets, severity_plan(keep_thermal=cfg.get('keep_thermal', False)),
-                        clamp_nondefault_netclasses=not cfg.get('no_clamp_netclasses', False)):
+                        clamp_nondefault_netclasses=not cfg.get('no_clamp_netclasses', True)):
                     board.SetModified()
                     print("DRC settings: loosened Board Setup floors to the plane routing values")
             except Exception as e:

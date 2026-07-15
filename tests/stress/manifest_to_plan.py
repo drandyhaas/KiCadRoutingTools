@@ -77,8 +77,11 @@ BOOL_FLAGS = {
 }
 
 # Flags whose values are file paths / bookkeeping -- consumed, never params.
-# --output still feeds the chain-pruning file list.
-IGNORE_FLAGS = {'--output', '--summary-json', '--schematic-dir', '--report'}
+# --output still feeds the chain-pruning file list. --net-clearances is a
+# board-specific JSON path; the GUI derives the same map from the board's live
+# net classes, so a replayed plan carries no param for it.
+IGNORE_FLAGS = {'--output', '--summary-json', '--schematic-dir', '--report',
+                '--net-clearances'}
 
 # Per-tool flag renames: bga_fanout calls the trace width --width (routed to the
 # Basic-tab track_width, which BGA fanout reads). qfn_fanout also uses --width

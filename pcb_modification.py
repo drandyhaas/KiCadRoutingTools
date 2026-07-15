@@ -945,7 +945,8 @@ def _restore_soft_joint_bridges(kept, removed, vias, pads):
 
 
 def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
-                    tol: float = None) -> Tuple[int, int, List[Segment]]:
+                    tol: float = None,
+                    keep_input_copper: bool = False) -> Tuple[int, int, List[Segment]]:
     """Final whole-net dead-end sweep, after routing has settled (issue #84).
 
     the per-commit self-intersection clean (removed #159) used to fix
@@ -966,7 +967,11 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
 
     ``scope_net_ids`` limits the sweep to the nets this run was asked to route
     (so untouched planes / excluded nets are never altered); None sweeps every net
-    with copper. Returns ``(segments_removed, vias_removed, original_segments_to_remove)``.
+    with copper. ``keep_input_copper`` makes original input-file copper read-only:
+    it still anchors degree / T-junction / connectivity decisions (as
+    ``anchor_segments``) but is never a removal candidate — for chained flows
+    whose earlier stages author escape stubs that a later run must still see.
+    Returns ``(segments_removed, vias_removed, original_segments_to_remove)``.
     """
     from collections import defaultdict
 
@@ -996,11 +1001,19 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
         if zones:
             from check_connected import make_real_fill_validator
             _zcv = make_real_fill_validator(pcb_data, net_id)
+        anchor = []
+        if keep_input_copper:
+            # Input copper is read-only: anchor it (counts for degree/T-junction/
+            # connectivity in the pruner) instead of offering it as a candidate.
+            anchor = [s for s in net_segs if id(s) not in routed_seg_ids]
+            net_segs = [s for s in net_segs if id(s) in routed_seg_ids]
         kept, removed = _safe_prune_net(net_id, net_segs, vias, pads, zones,
+                                        anchor_segments=anchor or None,
                                         zone_credit_validator=_zcv,
                                         aggressive=True, tol=tol)
         # #319: never delete a coincident bridge and leave a soft joint.
-        kept, removed = _restore_soft_joint_bridges(kept, removed, vias, pads)
+        kept, removed = _restore_soft_joint_bridges(list(kept) + anchor, removed,
+                                                    vias, pads)
         # Copper graphics (#337) participate in the connectivity ANALYSIS above
         # (a routed stub may genuinely continue through one) but are immutable
         # input art: force-keep any the pruner selected (the writer has no
@@ -1120,7 +1133,8 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
     return segs_removed, len(removed_via_ids), original_to_remove
 
 
-def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None
+def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None,
+                              keep_input_copper: bool = False
                               ) -> Tuple[int, List[Segment]]:
     """Remove segments that are redundant under the STRICT width-clamped
     connectivity graph (#217 removable-segment classes 1-2): superseded
@@ -1247,6 +1261,8 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None
                 s = net_segs[i]
                 if getattr(s, 'graphic', False):
                     continue
+                if keep_input_copper and id(s) not in seg_owner:
+                    continue  # input copper is read-only; it still shapes both graphs
                 if _buried(s.start_x, s.start_y) and _buried(s.end_x, s.end_y):
                     continue  # in-pad/in-via wiggle: kept by choice
                 excl = tuple(accepted) + (i,)
@@ -1296,7 +1312,8 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None
     return len(removed_ids), originals
 
 
-def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None
+def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
+                          keep_input_copper: bool = False
                           ) -> Tuple[int, int, List[Segment]]:
     """Remove same-net track-copper components that reach NO pad of the net
     (#217 orphan-island class): dead copper stranded by rip/reroute churn
@@ -1365,6 +1382,13 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None
                 continue
             if any(getattr(s, 'graphic', False) for s in segs):
                 continue  # immutable input art anchors the island
+            if keep_input_copper and (
+                    any(id(s) not in seg_owner for s in segs)
+                    or any(via_reprs.get(j) is not None
+                           and uf.find(via_reprs[j]) == root
+                           and id(v) not in via_owner
+                           for j, v in enumerate(net_vias))):
+                continue  # island contains read-only input copper: keep it whole
             islands_removed += 1
             for s in segs:
                 removed_ids.add(id(s))
@@ -1398,7 +1422,8 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None
 
 
 def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None,
-                                  tol: float = None) -> Tuple[int, List[Segment]]:
+                                  tol: float = None,
+                                  keep_input_copper: bool = False) -> Tuple[int, List[Segment]]:
     """Shorten a dead-end segment back to the LAST same-net anchor on its BODY
     (#347, core1106 CLK1P tail).
 
@@ -1445,8 +1470,11 @@ def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None
     for net_id, all_net_segs in segs_by_net.items():
         # Graphics copper (#337) is immutable but CONDUCTS: it participates in
         # the degree map, the tee-anchor scan and the connectivity gate; only
-        # non-graphic segments are trim candidates.
-        net_segs = [s for s in all_net_segs if not getattr(s, 'graphic', False)]
+        # non-graphic segments are trim candidates. Under keep_input_copper,
+        # input segments are read-only too: they anchor (all_net_segs feeds
+        # every model) but are never split-trimmed.
+        net_segs = [s for s in all_net_segs if not getattr(s, 'graphic', False)
+                    and not (keep_input_copper and id(s) not in routed_seg_ids)]
         if not net_segs:
             continue
         vias = [v for v in pcb_data.vias if v.net_id == net_id]
@@ -1656,7 +1684,8 @@ def neck_wide_segments_grazing_pads(results, pcb_data, config) -> int:
 
 
 def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
-                      fgrid, fcell: float, fmax_rad: float, clearance: float):
+                      fgrid, fcell: float, fmax_rad: float, clearance: float,
+                      protected_ids=None):
     """Reduce one net's routed copper to a spanning tree (forest if split).
 
     Builds a spanning tree by union-find over the segments, so every segment that
@@ -1844,6 +1873,8 @@ def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
     safe_removed = []
     for s in sorted(removed, key=lambda s: (not grazes(s),
                     -math.hypot(s.end_x - s.start_x, s.end_y - s.start_y))):
+        if protected_ids and id(s) in protected_ids:
+            continue  # read-only input copper: a loop through it stays closed
         trial = [x for x in cur if x is not s]
         t = check_net_connectivity(net_id, trial, net_vias, net_pads)
         if not (t.get('connected') and (t.get('num_components') or 1) <= base_comps
@@ -1863,7 +1894,8 @@ def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
 
 
 def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
-                           clearance: float = 0.1) -> Tuple[int, int, List[Segment]]:
+                           clearance: float = 0.1,
+                           keep_input_copper: bool = False) -> Tuple[int, int, List[Segment]]:
     """Enforce the per-net TREE invariant: remove redundant cycle edges (the cycle
     analog of sweep_dead_ends).
 
@@ -1932,8 +1964,11 @@ def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
             continue
         net_pads = pcb_data.pads_by_net.get(net_id, [])
         net_vias = vias_by_net.get(net_id, [])
+        _protected = ({id(s) for s in net_segs if id(s) not in routed_seg_ids}
+                      if keep_input_copper else None)
         kept, removed = _prune_net_cycles(net_id, net_segs, net_vias,
-                                          net_pads, fgrid, _FCELL, fmax_rad, clearance)
+                                          net_pads, fgrid, _FCELL, fmax_rad, clearance,
+                                          protected_ids=_protected)
         # #319: never break a "loop" whose alternate path is only a soft joint.
         kept, removed = _restore_soft_joint_bridges(kept, removed, net_vias, net_pads)
         if not removed:
@@ -1987,7 +2022,8 @@ def _seg_seg_min_dist(ax, ay, bx, by, cx, cy, dx, dy) -> float:
 
 def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                            clearance: float = 0.1,
-                           check_foreign_segments: bool = False) -> Tuple[int, int, List[Segment]]:
+                           check_foreign_segments: bool = False,
+                           keep_input_copper: bool = False) -> Tuple[int, int, List[Segment]]:
     """Drop a segment that grazes a FOREIGN pad/via below clearance when the net
     stays fully connected without it (issue #224).
 
@@ -2103,7 +2139,9 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
     original_to_remove = []
     nets_pruned = 0
     for net_id, net_segs in segs_by_net.items():
-        grazing = [s for s in net_segs if grazes(s)]
+        grazing = [s for s in net_segs
+                   if (not keep_input_copper or id(s) in routed_seg_ids)
+                   and grazes(s)]
         if not grazing:
             continue
         net_pads = pcb_data.pads_by_net.get(net_id, [])
@@ -2277,7 +2315,8 @@ def _octolinear_bends(A, B):
 
 
 def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
-                             clearance: float = 0.1) -> Tuple[int, int, List[Segment]]:
+                             clearance: float = 0.1,
+                             keep_input_copper: bool = False) -> Tuple[int, int, List[Segment]]:
     """Re-bend a foreign-pad-grazing octolinear jog so it clears the pad (issue #224).
 
     The complement to prune_grazing_segments: when a grazing segment is LOAD-BEARING
@@ -2386,7 +2425,9 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     # their grazing taps (e.g. a GND tap pinched against a connector pad) get
     # re-bent too. The connectivity check is run WITH the net's pour.
     for net_id, net_segs in segs_by_net.items():
-        grazing = [s for s in net_segs if grazes(s)]
+        grazing = [s for s in net_segs
+                   if (not keep_input_copper or id(s) in routed_seg_result)
+                   and grazes(s)]
         if not grazing:
             continue
         net_pads = pcb_data.pads_by_net.get(net_id, [])
@@ -2616,7 +2657,8 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
 
 def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                              clearance: float = 0.1,
-                             max_shift: float = 0.025) -> Tuple[int, int, List[Segment], List[Segment]]:
+                             max_shift: float = 0.025,
+                             keep_input_copper: bool = False) -> Tuple[int, int, List[Segment], List[Segment]]:
     """Micro-shift copper that still grazes after prune / re-bend / neck (#276).
 
     Complements nudge_grazing_octolinear, which keeps a jog's anchor endpoints
@@ -2748,7 +2790,10 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         # can expose the second-worst on the same segment); foreign copper is
         # static during the pass.
         for _round in range(MAX_ROUNDS):
-            grazing = [s for s in net_segs if grazes(s)]
+            grazing = [s for s in net_segs
+                       if (not keep_input_copper or id(s) in routed_seg_result
+                           or id(s) in added_ids)
+                       and grazes(s)]
             offenders = [(s, _seg_worst_offender(pcb_data, net_id, s, clearance))
                          for s in grazing]
             offenders = [(s, o) for s, o in offenders if o is not None]
@@ -2774,6 +2819,11 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                                 or vk(g.end_x, g.end_y) == vk(px, py)]
                     if any(g.layer != s.layer for g in incident):
                         return  # cross-layer joint without a recorded via: leave it
+                    if keep_input_copper and any(
+                            id(g) not in routed_seg_result and id(g) not in added_ids
+                            for g in incident):
+                        return  # a vertex move rewrites every incident segment;
+                                # read-only input copper pins this joint in place
                     for m in (1.0, 1.8, 3.0):
                         d = (shortfall + MARGIN) * m
                         if d > max_shift:

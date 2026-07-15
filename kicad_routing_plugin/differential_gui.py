@@ -989,6 +989,7 @@ class DifferentialTab(wx.Panel):
                                                 defaults.TIME_MATCH_TOLERANCE),
                 mps_reverse_rounds=config.get('mps_reverse_rounds', False),
                 mps_layer_swap=config.get('mps_layer_swap', False),
+                keep_input_copper=config.get('keep_input_copper', False),
                 mps_segment_intersection=config.get('mps_segment_intersection', False),
                 schematic_dir=config.get('schematic_dir'),
                 add_teardrops=config.get('add_teardrops', False),
@@ -1224,7 +1225,7 @@ class DifferentialTab(wx.Panel):
                         board, targets, severity_plan(keep_thermal=cfg.get('keep_thermal', False)),
                         diff_pair_gap=cfg.get('diff_pair_gap'),
                         diff_pair_width=cfg.get('track_width'),
-                        clamp_nondefault_netclasses=not cfg.get('no_clamp_netclasses', False)):
+                        clamp_nondefault_netclasses=not cfg.get('no_clamp_netclasses', True)):
                     board.SetModified()
                     print("DRC settings: loosened Board Setup floors to the diff-pair routing values (save to persist)")
             except Exception as e:

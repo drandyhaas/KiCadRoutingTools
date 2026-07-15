@@ -1170,15 +1170,16 @@ class RoutingDialog(wx.Dialog):
 
         self.no_clamp_netclasses_check = wx.CheckBox(
             options_scroll, label="Keep net-class clearances")
-        self.no_clamp_netclasses_check.SetValue(False)
+        # PR392: default ON (keep classes). Routing now RESPECTS non-Default
+        # netclass clearances (pairwise max(classA, classB)), so the output keeps
+        # each class's original clearance instead of clamping it down.
+        self.no_clamp_netclasses_check.SetValue(True)
         self.no_clamp_netclasses_check.SetToolTip(
-            "When 'Fix DRC settings after routing' runs, by default it clamps every "
-            "NON-Default net class's clearance/track/via floors down to the routed "
-            "values, so KiCad's per-net-class DRC does not flag copper routed at the "
-            "smaller run clearance (affects any non-Default class -- impedance, "
-            "power, etc.). Check this to leave the net-class spec untouched for a "
-            "FINAL board whose class rules must survive (matches the CLI's "
-            "--no-clamp-netclasses). Off by default.")
+            "Keep the board's NON-Default net-class clearance/track/via floors in the "
+            "output (ON by default since routing now RESPECTS those classes). Uncheck "
+            "to clamp them DOWN to the routed values -- only needed for a routing path "
+            "that does not honor classes and would otherwise storm KiCad's per-net-"
+            "class DRC (matches the CLI's --clamp-netclasses when unchecked).")
         options_inner.Add(self.no_clamp_netclasses_check, 0, wx.ALL, 3)
 
         options_inner.AddSpacer(10)
@@ -1195,6 +1196,13 @@ class RoutingDialog(wx.Dialog):
         self.mps_layer_swap = wx.CheckBox(options_scroll, label="MPS layer swap")
         self.mps_layer_swap.SetToolTip("Enable MPS-aware layer swaps to reduce crossing conflicts")
         options_inner.Add(self.mps_layer_swap, 0, wx.ALL, 3)
+
+        self.keep_input_copper = wx.CheckBox(options_scroll, label="Keep input copper")
+        self.keep_input_copper.SetToolTip(
+            "Treat the board's pre-existing copper as read-only: the post-route cleanup "
+            "passes never remove or rewrite it (fanout escape stubs, hand-routed nets), "
+            "only this run's new copper is cleaned")
+        options_inner.Add(self.keep_input_copper, 0, wx.ALL, 3)
 
         self.mps_segment_intersection = wx.CheckBox(options_scroll, label="MPS segment intersection")
         self.mps_segment_intersection.SetToolTip("Force MPS to use segment intersection for crossing detection")
@@ -2146,6 +2154,7 @@ class RoutingDialog(wx.Dialog):
         # and the engine signature (batch_route defaults all False).
         self.mps_reverse_rounds.SetValue(False)
         self.mps_layer_swap.SetValue(False)
+        self.keep_input_copper.SetValue(False)
         self.mps_segment_intersection.SetValue(False)
         self.bus_enabled.SetValue(False)
         self.bus_detection_radius.SetValue(defaults.BUS_DETECTION_RADIUS)
@@ -2438,6 +2447,7 @@ class RoutingDialog(wx.Dialog):
             # MPS options
             'mps_reverse_rounds': self.mps_reverse_rounds.GetValue(),
             'mps_layer_swap': self.mps_layer_swap.GetValue(),
+            'keep_input_copper': self.keep_input_copper.GetValue(),
             'mps_segment_intersection': self.mps_segment_intersection.GetValue(),
             # Bus routing options
             'bus_enabled': self.bus_enabled.GetValue(),
@@ -2960,6 +2970,7 @@ class RoutingDialog(wx.Dialog):
                     schematic_dir=config.get('schematic_dir'),
                     mps_reverse_rounds=config.get('mps_reverse_rounds', False),
                     mps_layer_swap=config.get('mps_layer_swap', False),
+                    keep_input_copper=config.get('keep_input_copper', False),
                     mps_segment_intersection=config.get('mps_segment_intersection', False),
                     bus_enabled=config.get('bus_enabled', False),
                     bus_detection_radius=config.get('bus_detection_radius', 5.0),
@@ -3087,6 +3098,7 @@ class RoutingDialog(wx.Dialog):
                         schematic_dir=config.get('schematic_dir'),
                         mps_reverse_rounds=config.get('mps_reverse_rounds', False),
                         mps_layer_swap=config.get('mps_layer_swap', False),
+                        keep_input_copper=config.get('keep_input_copper', False),
                         mps_segment_intersection=config.get('mps_segment_intersection', False),
                         bus_enabled=config.get('bus_enabled', False),
                         bus_detection_radius=config.get('bus_detection_radius', 5.0),
@@ -3401,7 +3413,7 @@ class RoutingDialog(wx.Dialog):
                     via_drill=config.get('via_drill'))
                 drc_changes = apply_targets_to_board(
                     board, targets, severity_plan(keep_thermal=config.get('keep_thermal', False)),
-                    clamp_nondefault_netclasses=not config.get('no_clamp_netclasses', False))
+                    clamp_nondefault_netclasses=not config.get('no_clamp_netclasses', True))
                 if drc_changes:
                     board.SetModified()
                     print(f"DRC settings: loosened {len(drc_changes)} Board Setup "

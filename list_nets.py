@@ -133,7 +133,7 @@ def read_design_rules(pcb_path):
     """
     classes = {}
     assignments = {}
-    patterns = []
+    patterns = []       # list of (glob_pattern, class_name) from netclass_patterns
     constraints = {}
     source = None
 
@@ -149,18 +149,31 @@ def read_design_rules(pcb_path):
                                  ('clearance', 'track_width', 'via_diameter',
                                   'via_drill', 'diff_pair_gap', 'diff_pair_width')
                                  if k in c}
-            # net -> class assignment (dict in newer files; list of pairs in some)
+            # net -> class assignment (dict in newer files; list of pairs in some).
+            # KiCad 9 values can be a LIST of class names (a net may belong to
+            # several classes); normalize to a single class name (prefer the first
+            # non-Default) so downstream consumers see {net: classname}.
             na = ns.get('netclass_assignments') or {}
             if isinstance(na, dict):
-                assignments = dict(na)
-            # Wildcard assignments (KiCad 8+ netclass_patterns): resolve each
-            # net whose name matches the pattern into the class, UNLESS an
-            # explicit assignment already claims it (explicit wins in KiCad).
-            # Kept as an ordered list; consumers fnmatch net names against it.
+                # KiCad 9 values can be a LIST of class names (a net may belong to
+                # several classes); normalize to a single class name (prefer the
+                # first non-Default) so downstream consumers see {net: classname}.
+                for _net, _cls in na.items():
+                    if isinstance(_cls, list):
+                        _nd = [c for c in _cls if c and c != 'Default']
+                        assignments[_net] = _nd[0] if _nd else (_cls[0] if _cls else 'Default')
+                    elif _cls:
+                        assignments[_net] = _cls
+            # Wildcard assignments / net-name -> class glob patterns (KiCad 8+
+            # net_settings.netclass_patterns): the primary membership mechanism on
+            # many boards (explicit assignments are often empty). Consumers fnmatch
+            # net names against it; explicit assignment wins. Kept as (pattern,
+            # class) pairs, in file order.
             for pe in ns.get('netclass_patterns') or []:
                 try:
-                    patterns.append((pe['pattern'], pe['netclass']))
-                except (KeyError, TypeError):
+                    if pe.get('netclass'):
+                        patterns.append((pe.get('pattern', ''), pe['netclass']))
+                except (KeyError, TypeError, AttributeError):
                     continue
             # DRC-enforced Board Constraints (what humans actually route against).
             rules = ((pro.get('board', {}) or {}).get('design_settings', {}) or {}).get('rules', {}) or {}
@@ -204,11 +217,72 @@ def read_design_rules(pcb_path):
     except OSError:
         pass
 
-    return {'classes': classes, 'assignments': assignments,
-            'patterns': patterns,
+    return {'classes': classes, 'assignments': assignments, 'patterns': patterns,
             'constraints': constraints, 'copper_layers': copper_layers,
             'effective': effective_floors(constraints, copper_layers),
             'source': source}
+
+
+def net_clearance_map_by_id(pcb_path, nets, design_rules=None):
+    """Resolve each net to its net-class clearance (mm) from the sibling
+    .kicad_pro netclasses, for the routing CLIs' cross-class clearance map.
+
+    KiCad's required spacing between two nets of different classes is
+    max(classA, classB). The router carries a {net_id: class_clearance} map and
+    prices every foreign/in-run obstacle at max(routing-side floor, that net's
+    class clearance). This helper builds that map so route.py / route_diff.py can
+    auto-honor the board's netclasses without a hand-written --net-clearances JSON.
+
+    `nets` is {net_id: net_name} (e.g. {nid: n.name for nid, n in pcb.nets.items()}).
+    A net's classes come from BOTH the explicit ``netclass_assignments`` and every
+    matching ``netclass_patterns`` glob (KiCad merges memberships); its effective
+    clearance is the MAX over those classes' clearances (KiCad enforces the strictest).
+    Only nets whose effective clearance EXCEEDS the Default class clearance are
+    returned, because the router's config.clearance IS the Default/routing clearance
+    -- so an all-Default board (or nets that resolve only to Default) yields an EMPTY
+    map, behaviour identical to not passing a map at all. Returns {net_id: clearance_mm}.
+
+    Pattern matching is glob-style (KiCad ``*``/``?`` wildcards). Exotic patterns that
+    do not translate to a glob simply fail to match -> that net falls back to
+    config.clearance (the safe/inert direction), never over-blocked.
+    """
+    import fnmatch
+    dr = design_rules if design_rules is not None else read_design_rules(pcb_path)
+    classes = dr.get('classes') or {}
+    assignments = dr.get('assignments') or {}
+    patterns = dr.get('patterns') or []
+    default_clr = (classes.get('Default') or {}).get('clearance')
+
+    def _class_clr(cname):
+        c = classes.get(cname) or {}
+        v = c.get('clearance')
+        return float(v) if isinstance(v, (int, float)) else None
+
+    out = {}
+    for nid, name in nets.items():
+        if not name:
+            continue
+        cand = set()
+        a = assignments.get(name)
+        if a:
+            cand.add(a)
+        for pat, cname in patterns:
+            if not pat:
+                continue  # empty pattern = the Default catch-all; skipped below anyway
+            try:
+                if fnmatch.fnmatchcase(name, pat):
+                    cand.add(cname)
+            except Exception:
+                pass
+        clrs = [c for c in (_class_clr(cn) for cn in cand) if c is not None]
+        if not clrs:
+            continue
+        eff = max(clrs)
+        # Skip nets that resolve only to (or below) the Default/routing clearance.
+        if default_clr is not None and eff <= default_clr + 1e-9:
+            continue
+        out[nid] = eff
+    return out
 
 
 def resolve_net_class(net_name, rules):

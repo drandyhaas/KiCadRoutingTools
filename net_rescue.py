@@ -199,13 +199,21 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances):
 
     for cfg in _rescue_rungs(config, fine_grid, pcb_data, net_id):
         # Rung 0 keeps the run's exact clearance semantics (incl. per-netclass
-        # spacing); the neck-down rungs drop net_clearances - their whole point
-        # is spacing below the batch maximum, and the builder applies
-        # max(config.clearance, max(net_clearances)) globally.
+        # spacing). The neck-down rungs' whole point is spacing below nominal
+        # FOR THE RESCUED NET, so its own map entry is dropped (the builder's
+        # routing-side floor maxes over the routed nets, and the rescued net's
+        # nominal class value would snap the necked cfg.clearance back up).
+        # Foreign obstacles KEEP their per-net class clearance: the builder
+        # prices each obstacle at max(cfg.clearance, its own class), so a
+        # POWER_HI via stays 0.25-priced even while the rescued net necks down
+        # (dropping the whole map under-blocked exactly that cross-class pair).
         at_nominal = cfg.clearance >= config.clearance - 1e-9
+        rung_clearances = net_clearances
+        if not at_nominal and net_clearances:
+            rung_clearances = {k: v for k, v in net_clearances.items() if k != net_id}
         obstacles = build_base_obstacle_map(
             window, cfg, [net_id],
-            net_clearances=net_clearances if at_nominal else None)
+            net_clearances=rung_clearances)
         _fence_window(obstacles, window, cfg)
         # Constrain the route to the window: drop endpoints outside it and keep the
         # source/target overrides from punching the fence, so the A* can never leave

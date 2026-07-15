@@ -417,7 +417,7 @@ def severity_plan(keep_courtyards=False, keep_mask=False, keep_footprint=False,
 def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
                              ignore_current_warnings=False,
                              diff_pair_gap=None, diff_pair_width=None,
-                             clamp_nondefault_netclasses=True):
+                             clamp_nondefault_netclasses=False):
     """Apply the floors + severity plan to a parsed ``.kicad_pro`` dict, only
     ever loosening (lowering a constraint / lowering a severity rank), never
     tightening. Returns a list of human-readable change strings.
@@ -430,14 +430,19 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
     minimum -- they are draw defaults -- so lowering them cannot create a new
     violation, consistent with the only-loosen guarantee.
 
-    ``clamp_nondefault_netclasses`` (default True, #295 addendum) clamps the
-    NON-Default net classes' clearance/track/via floors down to the routed values
-    too. Disable it (CLI ``--no-clamp-netclasses``) for a FINAL impedance-
-    controlled board, where the impedance classes' 0.125 mm clearance and wide
-    track/via ARE the spec and must survive -- clamping them would erase the
-    impedance intent (and silence genuine impedance-clearance shortfalls). Leave
-    it ON for mid-chain / mixed-clearance boards so KiCad's per-net-class DRC does
-    not storm the copper legitimately routed at the smaller run clearance."""
+    ``clamp_nondefault_netclasses`` (default False since PR392) would clamp the
+    NON-Default net classes' clearance/track/via floors DOWN to the routed values.
+    It now defaults OFF because the router RESPECTS non-Default netclass clearances
+    end-to-end (KiCad pairwise max(classA, classB), auto-read from the .kicad_pro):
+    copper of a non-Default class is genuinely routed to that class's clearance, so
+    the output must KEEP the class's ORIGINAL clearance rather than erase it. This
+    was a HACK from when routing IGNORED classes and had to clamp them down to avoid
+    a DRC storm. Re-enable it (CLI ``--clamp-netclasses``) only for a path that does
+    NOT yet respect classes and would otherwise storm. The Default-class /
+    rules.min_clearance write below is UNRELATED to this flag and stays: it records
+    the actual ROUTING clearance (the router's config.clearance, which it genuinely
+    honors for the routing side), only-lowering so a board routed tighter than its
+    stock Default class does not storm."""
     EPS = 1e-9
     ds = proj.setdefault("board", {}).setdefault("design_settings", {})
     rules = ds.setdefault("rules", {})
@@ -481,17 +486,14 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
             if cur is None or cur > target + EPS:
                 changes.append(f"net_class[Default].{field}: {cur} -> {target} mm")
                 default_cls[field] = target
-    # NON-Default classes too (#295 follow-up): the original design's classes
-    # (e.g. kuchen's HDMI/USB at 0.125mm) survive into the routed board's
-    # project, and KiCad enforces THEIR clearance on their nets -- copper we
-    # legitimately routed at the (smaller) run clearance then storms with
-    # netclass-clearance violations the moment the user opens the board. The
-    # router does not read per-class clearances from the project, so after
-    # routing the class floors must be clamped down to what was actually
-    # routed (only-lower, same guarantee as everything else here). Via sizes /
-    # diff-pair geometry are draw defaults, clamped for planner consistency.
-    # Skipped when clamp_nondefault_netclasses is False (--no-clamp-netclasses):
-    # a final impedance board keeps its impedance classes as the enforced spec.
+    # NON-Default classes (#295 follow-up, now OFF by default -- PR392): historically
+    # the router IGNORED per-class clearances, so copper routed at the smaller run
+    # clearance would storm KiCad's per-net-class DRC, and the class floors were
+    # clamped DOWN to the routed values to hide it. The router now RESPECTS non-
+    # Default classes (auto-read from the .kicad_pro, priced pairwise max(A,B)), so
+    # that copper genuinely meets its class clearance and the ORIGINAL class rules
+    # must survive into the output. Only re-enabled (--clamp-netclasses) for a path
+    # that still routes without honoring classes and would otherwise storm.
     if clamp_nondefault_netclasses:
         for cls in classes:
             if cls is default_cls or not isinstance(cls, dict):
@@ -540,12 +542,17 @@ def add_drc_fix_args(parser, *, include_no_fix=True):
     g.add_argument("--keep-thermal", action="store_true",
                    help="When fixing DRC settings, leave thermal-relief severity (starved_thermal) "
                         "untouched instead of demoting it to a warning.")
+    g.add_argument("--clamp-netclasses", action="store_true",
+                   help="Clamp NON-Default net classes' clearance/track/via floors DOWN to the "
+                        "routed values in the output .kicad_pro. OFF by default since PR392: the "
+                        "router now RESPECTS non-Default netclass clearances (auto-read from the "
+                        ".kicad_pro, priced pairwise max(classA, classB)), so the output KEEPS each "
+                        "class's original clearance. Pass this only for a routing path that does NOT "
+                        "honor classes and would otherwise storm KiCad's per-net-class DRC.")
+    # Backward-compat: --no-clamp-netclasses is now the default (no-op); kept so
+    # older command lines / recorded manifests still parse.
     g.add_argument("--no-clamp-netclasses", action="store_true",
-                   help="Do not clamp NON-Default net classes' clearance/track/via floors down to "
-                        "the routed values (issue #295). By default every non-Default class "
-                        "(impedance, power, etc.) IS clamped so KiCad's per-net-class DRC does not "
-                        "flag copper routed at the smaller run clearance. Pass this for a FINAL "
-                        "board whose net-class rules ARE the spec and must survive.")
+                   help=argparse.SUPPRESS)
     g.add_argument("--enable-used-layers", action="store_true",
                    help="Add any layer the board uses but that is missing from its (layers) table "
                         "back into the .kicad_pcb, so KiCad shows it as selectable and stops "
@@ -558,8 +565,12 @@ def drc_fix_kwargs(args):
     """Map args parsed via :func:`add_drc_fix_args` to :func:`fix_project_for_output`
     keyword arguments (the shared DRC-fix flags only -- per-script routing floors
     like clearance/track/via are passed separately by each caller)."""
+    # PR392: clamping non-Default netclasses is now OPT-IN (--clamp-netclasses),
+    # since routing respects those classes. --no-clamp-netclasses is a legacy no-op
+    # (already the default) but still forces no-clamp if combined.
+    clamp = bool(getattr(args, "clamp_netclasses", False)) and not getattr(args, "no_clamp_netclasses", False)
     return dict(keep_thermal=args.keep_thermal, enable_layers=args.enable_used_layers,
-                clamp_nondefault_netclasses=not args.no_clamp_netclasses)
+                clamp_nondefault_netclasses=clamp)
 
 
 def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
@@ -568,7 +579,7 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
                            diff_pair_gap=None, diff_pair_width=None,
                            keep_courtyards=False, keep_mask=False, keep_footprint=False,
                            keep_thermal=False, enable_layers=False,
-                           clamp_nondefault_netclasses=True,
+                           clamp_nondefault_netclasses=False,
                            extra_ignore=(), verbose=True):
     """Make the DRC settings of a freshly written board consistent with the
     routing floors (issue #160 auto-invoke). Ensures ``output_pcb`` has a sibling
@@ -630,18 +641,19 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
 
 def apply_targets_to_board(board, targets: dict, sev_plan: dict,
                            diff_pair_gap=None, diff_pair_width=None,
-                           clamp_nondefault_netclasses=True):
+                           clamp_nondefault_netclasses=False):
     """GUI path: apply the same floors + severity plan to a live pcbnew BOARD
     via BOARD_DESIGN_SETTINGS (issue #160). Best-effort and defensive -- the
     pcbnew API field/severity names vary across KiCad versions, so each step is
     guarded. Returns a list of change strings. Caller should mark the board
     modified so the user's next save persists the change.
 
-    ``clamp_nondefault_netclasses`` (default True, #295 parity with
-    apply_targets_to_project) also clamps the NON-Default net classes' floors down
-    to the routed values; disable it (GUI "Keep impedance net-class clearances" /
-    CLI ``--no-clamp-netclasses``) for a final impedance board whose class spec
-    must survive."""
+    ``clamp_nondefault_netclasses`` (default False since PR392, parity with
+    apply_targets_to_project) would clamp the NON-Default net classes' floors down
+    to the routed values; it is OFF because routing now RESPECTS those classes, so
+    the output keeps their original clearances. Re-enable (GUI "Clamp non-Default
+    netclasses" / CLI ``--clamp-netclasses``) only for a path that does not honor
+    classes and would otherwise storm."""
     import pcbnew
     MM = 1e6  # mm -> internal nm
     EPS = 1.0  # nm

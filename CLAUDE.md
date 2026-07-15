@@ -48,6 +48,18 @@ Validate routed boards against the *real* spec, with the right checker — most
 - **Routers can report false success.** A router's own "routed" tally may come from
   a local/heuristic proxy while pads stay disconnected; re-verify with the
   authoritative, zone/fill-aware `check_net_connectivity` before trusting it.
+- **Cross-class clearance is RESPECTED, not clamped (PR392).** The router honors
+  KiCad's pairwise `max(classA, classB)` between nets of different net classes —
+  including copper routed earlier in the SAME call (in-run) — pricing each foreign
+  obstacle at `config.obstacle_clearance(net_id)` (see `docs/api-routing-config.md`).
+  `route.py` / `route_diff.py` **auto-read** the non-Default netclass clearances from
+  the sibling `.kicad_pro` (override with `--net-clearances <json>`; all-Default
+  boards are inert). Because routing now respects the classes, the output `.kicad_pro`
+  **no longer clamps** non-Default netclasses down to the routed clearance — the
+  original class clearances survive. `--clamp-netclasses` re-enables the old clamp
+  only for a path that still routes without honoring classes (would otherwise storm).
+  Grade multi-class boards at the ORIGINAL netclasses (`kicad_drc_compare._staged_copy`
+  equalizes only the Default class now).
 
 ## Stress testing & A/B replay
 
