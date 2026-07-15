@@ -68,8 +68,14 @@ REGISTRY = {
 POSTPASS_MODULES = ['kicad_oracle', 'fix_kicad_drc_settings', 'check_drc']
 
 # Symbols intentionally exempt from discovery (helpers/args, not passes).
+# read_project_edge_clearance (#338): a pure READER (project edge rule ->
+# float) feeding the fix_project_for_output edge argument and the oracle
+# config; the GUI reads the same rule live from pcbnew
+# (m_CopperEdgeClearance in gui_utils/planes_gui), so parity holds at the
+# VALUE level, not the call level.
 DISCOVERY_EXEMPT = {'add_drc_fix_args', 'drc_fix_kwargs', 'find_kicad_cli',
-                    'compute_targets', 'severity_plan'}
+                    'compute_targets', 'severity_plan',
+                    'read_project_edge_clearance'}
 
 # #381 D8: post-engine passes that are CLI-only BY DESIGN -- report/audit ONLY,
 # they do NOT mutate the output board, so the GUI producing an identical board

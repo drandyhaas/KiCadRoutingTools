@@ -1587,10 +1587,22 @@ Examples:
     if not args.dry_run and not args.no_kicad_recheck and args.output_file:
         from kicad_oracle import oracle_reconnect
         from routing_config import GridRouteConfig
+        # #338: the oracle pass runs on OUTPUT_FILE, whose sibling .kicad_pro
+        # is written only below (fix_project_for_output) -- so oracle_reconnect's
+        # own project read finds nothing mid-chain. Resolve the board edge rule
+        # from the ORIGINAL input's project here (the plane-zone inset
+        # args.board_edge_clearance is NOT an enforced routing floor; see the
+        # ripped-net reconnect above).
+        try:
+            from fix_kicad_drc_settings import read_project_edge_clearance
+            _oracle_edge = read_project_edge_clearance(args.input_file)
+        except Exception:
+            _oracle_edge = 0.0
         _ocfg = GridRouteConfig(
             clearance=args.clearance, track_width=args.track_width,
             via_size=args.via_size, via_drill=args.via_drill,
-            grid_step=args.grid_step)
+            grid_step=args.grid_step,
+            board_edge_clearance=_oracle_edge)
         _orc = oracle_reconnect(args.output_file, net_names, _ocfg,
                                 track_via_clearance=args.track_via_clearance,
                                 hole_to_hole_clearance=args.hole_to_hole_clearance,

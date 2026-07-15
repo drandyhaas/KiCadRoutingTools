@@ -454,6 +454,26 @@ def oracle_reconnect(board_file: str, net_names, config,
         return {'available': False, 'rounds': 0, 'links_routed': 0,
                 'links_failed': 0, 'remaining': -1}
 
+    # Board-setup copper-to-edge rule (#338): the oracle links route through
+    # build_base_obstacles, whose edge band comes from config.board_edge_clearance
+    # (0.0 default -> track-clearance fallback). Callers that construct a bare
+    # GridRouteConfig shipped oracle copper deep inside the board's edge band
+    # (rp2350_dev: 30mm of GND strap 0.375mm from a 0.5mm-rule edge). Resolve
+    # from the board's sibling .kicad_pro when present (final boards; a temp
+    # save without a project reads 0.0 = no-op, and the explicit config value
+    # still wins via max). In-band pads stay reachable through the #338 spoke
+    # exemption in obstacle_map.add_board_edge_obstacles.
+    try:
+        from fix_kicad_drc_settings import effective_board_edge_clearance
+        _eff_edge = effective_board_edge_clearance(
+            board_file, config.board_edge_clearance)
+        if _eff_edge > (config.board_edge_clearance or 0.0):
+            print(f"  KiCad-oracle recheck: board edge clearance {_eff_edge}mm "
+                  f"(project min_copper_edge_clearance)")
+            config = replace(config, board_edge_clearance=_eff_edge)
+    except Exception:
+        pass
+
     names = set(net_names)
     routed = failed = rounds = 0
     remaining = -1
