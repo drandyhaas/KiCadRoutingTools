@@ -213,6 +213,14 @@ def _staged_copy(board: str, clearance: float):
     mhc = _f(rules.get("min_hole_clearance"), None)
     if mhc and mhc > clearance:
         rules["min_hole_clearance"] = clearance
+    # Edge (#338/#295 class): when the project records NO copper-to-edge rule,
+    # kicad-cli falls back to its built-in 0.5mm default while check_drc falls
+    # back to the routed clearance -- a pure config artifact (openstint: chain
+    # lost the project, kicad's default manufactured 11 phantom items). Pin
+    # the absent key to the routed clearance so both engines grade alike. A
+    # RECORDED rule is left untouched (it is a real design constraint).
+    if "min_copper_edge_clearance" not in rules:
+        rules["min_copper_edge_clearance"] = clearance
     # Silk checks are OUT OF SCOPE (results are filtered to copper classes)
     # but DRC_TEST_PROVIDER_SILK_CLEARANCE dominates wall time on art-heavy
     # boards -- lily58's keyboard legends made kicad-cli spin >10 MINUTES at

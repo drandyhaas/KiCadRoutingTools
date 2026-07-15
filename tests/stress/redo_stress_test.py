@@ -393,6 +393,19 @@ def seed_input_boards(manifest, cmds, dest_dir):
             import shutil
             shutil.copy2(src, dst)
             seeded.append(base)
+            # Carry the sibling .kicad_pro too (same custody rule as
+            # mirror_project_sibling): the seed board's project holds the
+            # design's real DRC rules -- min_copper_edge_clearance above all
+            # (#338: ecp5_mini's 0.01 edge rule lost at seed -> planes step
+            # wrote its 0.5 zone-pullback default as the constraint -> 82
+            # phantom kicad edge items; rp2350_dev's 0.5 rule lost -> route
+            # steps never honored the band). Floors applied downstream are
+            # lower-only, so carrying the project is always safe.
+            src_pro = src[:-len(".kicad_pcb")] + ".kicad_pro"
+            dst_pro = dst[:-len(".kicad_pcb")] + ".kicad_pro"
+            if os.path.exists(src_pro) and not os.path.exists(dst_pro):
+                shutil.copy2(src_pro, dst_pro)
+                seeded.append(os.path.basename(src_pro))
     return seeded
 
 

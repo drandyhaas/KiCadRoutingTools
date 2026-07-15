@@ -3390,11 +3390,18 @@ Examples:
                 print(f"  Min clearance used: {eff_clearance:.4g} mm "
                       f"(below nominal {args.clearance:.4g}; fine-pitch taps) - "
                       f"grading at this floor")
-            from fix_kicad_drc_settings import fix_project_for_output, drc_fix_kwargs
+            from fix_kicad_drc_settings import (fix_project_for_output, drc_fix_kwargs,
+                                                read_project_edge_clearance)
+            # #338: record the PROJECT's copper-to-edge rule, never this
+            # tool's --board-edge-clearance -- that is the plane-zone INSET
+            # (default 0.5), not an enforced DRC floor; writing it into a
+            # project with no edge key manufactured a stricter-than-design
+            # rule (openstint: design 0.3, recorded 0.5).
             fix_project_for_output(
                 args.output_file, input_pcb=args.input_file,
                 clearance=eff_clearance, hole_to_hole=args.hole_to_hole_clearance,
-                edge_clearance=args.board_edge_clearance, track_width=args.track_width,
+                edge_clearance=read_project_edge_clearance(args.input_file),
+                track_width=args.track_width,
                 via_diameter=args.via_size, via_drill=args.via_drill,
                 **drc_fix_kwargs(args))
         except Exception as e:
