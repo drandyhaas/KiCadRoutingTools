@@ -622,16 +622,62 @@ def _edge_band_pad_exemption(pcb_data, coord: GridCoord, edge_clearance: float,
         in_band = d - halves < edge_clearance
     if not in_band.any():
         return None
-    keys = []
+
+    # Exempt a perpendicular SPOKE per pad (pad copper + a track-wide path
+    # straight inward), NOT a disk: connector rows' overlapping disks chained
+    # into a corridor ALONG the edge that routes exploited as a highway
+    # (core1106_cam: 58 avoidable in-band items running parallel to the edge).
+    def _nearest_edge_dir(px_, py_):
+        best = None
+        seg_sets = []
+        if rings:
+            seg_sets.append((x1, y1, x2, y2))
+        for cut in (pcb_data.board_info.board_cutouts or []):
+            if len(cut) >= 3:
+                arr = np.array(cut, dtype=np.float64)
+                seg_sets.append((arr[:, 0], arr[:, 1],
+                                 np.roll(arr[:, 0], -1), np.roll(arr[:, 1], -1)))
+        if not seg_sets:
+            min_x, min_y, max_x, max_y = bounds
+            cands = [(px_ - min_x, (1, 0)), (max_x - px_, (-1, 0)),
+                     (py_ - min_y, (0, 1)), (max_y - py_, (0, -1))]
+            return min(cands)[1]
+        for (ex1, ey1, ex2, ey2) in seg_sets:
+            dx, dy = ex2 - ex1, ey2 - ey1
+            ln2 = dx * dx + dy * dy
+            t = np.clip(((px_ - ex1) * dx + (py_ - ey1) * dy) / np.where(ln2 > 0, ln2, 1), 0, 1)
+            nx_, ny_ = ex1 + t * dx, ey1 + t * dy
+            dd = np.hypot(px_ - nx_, py_ - ny_)
+            j = int(np.argmin(dd))
+            if best is None or dd[j] < best[0]:
+                best = (float(dd[j]), float(nx_[j]), float(ny_[j]))
+        _, nx0, ny0 = best
+        vx, vy = px_ - nx0, py_ - ny0
+        n = math.hypot(vx, vy)
+        return (vx / n, vy / n) if n > 1e-9 else (0.0, 1.0)
+
+    keys = set()
+    band_depth = track_edge_clearance
     for i in np.where(in_band)[0]:
-        r = halves[i] + track_edge_clearance
-        rg = int(math.ceil(r / coord.grid_step))
-        cgx, cgy = coord.to_grid(pxs[i], pys[i])
-        for ex in range(-rg, rg + 1):
-            for ey in range(-rg, rg + 1):
-                if (ex * ex + ey * ey) * coord.grid_step ** 2 <= r * r:
-                    keys.append(((cgx + ex) << 32) + ((cgy + ey) & 0xFFFFFFFF))
-    return np.unique(np.array(keys, dtype=np.int64)) if keys else None
+        cx_, cy_ = pxs[i], pys[i]
+        # (a) the pad's own copper + a track landing margin
+        r = halves[i] + coord.grid_step
+        # (b) spoke: from the pad center straight inward past the band
+        ux, uy = _nearest_edge_dir(cx_, cy_)
+        L = band_depth + halves[i] + coord.grid_step
+        half_w = max(coord.grid_step, 0.15)  # one track wide
+        n_steps = int(math.ceil(L / coord.grid_step))
+        pts = [(cx_, cy_, r)] + [
+            (cx_ + ux * (k * coord.grid_step), cy_ + uy * (k * coord.grid_step), half_w)
+            for k in range(1, n_steps + 1)]
+        for (qx, qy, qr) in pts:
+            rg = int(math.ceil(qr / coord.grid_step))
+            cgx, cgy = coord.to_grid(qx, qy)
+            for ex in range(-rg, rg + 1):
+                for ey in range(-rg, rg + 1):
+                    if (ex * ex + ey * ey) * coord.grid_step ** 2 <= qr * qr:
+                        keys.add(((cgx + ex) << 32) + ((cgy + ey) & 0xFFFFFFFF))
+    return np.array(sorted(keys), dtype=np.int64) if keys else None
 
 
 def _filter_exempt_xy(gx, gy, exempt_keys):
