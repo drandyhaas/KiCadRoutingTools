@@ -303,6 +303,34 @@ def compare_board(board: str, label: str = None, clearance: float = None,
                     still.append(kv)
             kicad = still
     cd = run_check_drc(board, clearance, netclasses=not bool(clearance))
+    # Symmetric baseline subtraction (#405): the kicad side above drops
+    # pre-existing (unrouted-input) conditions, but check_drc's items were left
+    # un-subtracted -- so a pre-existing condition check_drc grades but kicad
+    # does not (e.g. vfo_ctrl's 23 FG chassis-ground segments already <edge on
+    # the bare board) surfaced as phantom checkdrc_only. Subtract the input's
+    # own check_drc items too, mirroring the kicad two-pass (positional match +
+    # type/net twin), so both engines are graded on router-attributable copper.
+    cd_pre = 0
+    if baseline and os.path.exists(baseline):
+        try:
+            cd_base = run_check_drc(baseline, clearance, netclasses=not bool(clearance))
+        except Exception:  # noqa: BLE001 -- best-effort, tolerate a bad input
+            cd_base = None
+        if cd_base:
+            m_pre, cd_base_rest, cd = match(cd_base, cd)   # positional (identical template copper => dist 0)
+            cd_pre = len(m_pre)
+            cpool = {}
+            for bv in cd_base_rest:
+                cpool[(bv["type"], bv["nets"])] = cpool.get((bv["type"], bv["nets"]), 0) + 1
+            keep = []
+            for cv in cd:
+                key = (cv["type"], cv["nets"])
+                if cpool.get(key):
+                    cpool[key] -= 1
+                    cd_pre += 1
+                else:
+                    keep.append(cv)
+            cd = keep
     matched, kicad_only, cd_only = match(kicad, cd)
     # NET-PAIR agreement: the engines report at different granularities
     # (check_drc: one violation per offending segment; kicad: grouped item
@@ -314,7 +342,8 @@ def compare_board(board: str, label: str = None, clearance: float = None,
     verdict = ("CONSISTENT" if not kicad_only and not cd_only else
                "PAIR-CONSISTENT" if not pk_only and not pc_only else "DIVERGED")
     pre_note = f" (+{pre} pre-existing on input, subtracted)" if pre else ""
-    print(f"{label}: kicad={len(kicad)}{pre_note} check_drc={len(cd)} matched={len(matched)} "
+    cd_pre_note = f" (+{cd_pre} pre-existing, subtracted)" if cd_pre else ""
+    print(f"{label}: kicad={len(kicad)}{pre_note} check_drc={len(cd)}{cd_pre_note} matched={len(matched)} "
           f"kicad_only={len(kicad_only)} checkdrc_only={len(cd_only)} | "
           f"net-pairs: both={len(kpairs & cpairs)} kicad_only={len(pk_only)} "
           f"checkdrc_only={len(pc_only)}  {verdict}")
