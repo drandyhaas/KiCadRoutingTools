@@ -2923,6 +2923,23 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
         except Exception:
             fp_locked = False
 
+        # Footprint-level clearance override (#326) — IPC parity with the text
+        # parser and the SWIG builder's fp.GetLocalClearance(). kipy exposes it
+        # on FootprintInstance.proto.overrides.copper_clearance (a Distance in
+        # nm); unset = no override. Negative (shrinking) overrides clamp to 0
+        # like the text parser (overrides act only as keep-out floors). The
+        # parser RESOLVES the inheritance into each pad's local_clearance below,
+        # so clearance consumers only ever read pad.local_clearance.
+        fp_clearance = 0.0
+        try:
+            _fpp = getattr(fp, "proto", None)
+            if (_fpp is not None and _fpp.HasField("overrides")
+                    and _fpp.overrides.HasField("copper_clearance")):
+                fp_clearance = max(
+                    0.0, _nm_to_mm(_fpp.overrides.copper_clearance.value_nm))
+        except Exception:
+            fp_clearance = 0.0
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -2932,13 +2949,15 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
             layer=fp_layer,
             value=fp_value,
             dnp=fp_dnp,
-            locked=fp_locked
+            locked=fp_locked,
+            clearance=fp_clearance
         )
 
         for pad in _fp_pads(fp):
             pad_obj = _build_pad_from_kipy(pad, reference, fp_x, fp_y, fp_rotation,
                                             get_layer_name, resolve_net,
-                                            copper_layers)
+                                            copper_layers,
+                                            fp_clearance=fp_clearance)
             if pad_obj is None:
                 continue
             footprint.pads.append(pad_obj)
@@ -3279,7 +3298,8 @@ def _fp_pads(fp):
 def _build_pad_from_kipy(pad, reference: str, fp_x: float, fp_y: float,
                          fp_rotation: float, get_layer_name,
                          resolve_net,
-                         board_copper_layer_names: List[str]) -> Optional[Pad]:
+                         board_copper_layer_names: List[str],
+                         fp_clearance: float = 0.0) -> Optional[Pad]:
     """Translate a kipy pad into the project's Pad dataclass.
 
     board_copper_layer_names is the list of enabled copper layer names on
@@ -3435,14 +3455,20 @@ def _build_pad_from_kipy(pad, reference: str, fp_x: float, fp_y: float,
         # Per-pad local clearance override (fiducial keep-clear rings etc.):
         # kipy exposes it as Pad.copper_clearance_override (a Distance) on the
         # proto; unset/0 means no override. Mirrors the text parser's local
-        # clearance read (issue: no-net fiducial keepout).
+        # clearance read (issue #326). Negative (shrinking) overrides clamp to
+        # 0. A pad with no own override INHERITS the footprint-level override
+        # (fp_clearance), exactly like the text parser and SWIG builder, so
+        # clearance consumers only ever read the resolved pad.local_clearance.
         local_clearance = 0.0
         try:
             proto = getattr(pad, "proto", None)
             if proto is not None and proto.HasField("copper_clearance_override"):
-                local_clearance = _nm_to_mm(proto.copper_clearance_override.value_nm)
+                local_clearance = max(
+                    0.0, _nm_to_mm(proto.copper_clearance_override.value_nm))
         except Exception:
             local_clearance = 0.0
+        if local_clearance == 0.0:
+            local_clearance = fp_clearance
 
         return Pad(
             component_ref=reference,
