@@ -22,7 +22,8 @@ from bresenham_utils import walk_line
 from obstacle_map import (add_board_edge_obstacles, add_user_keepout_obstacles,
                           add_rule_area_keepout_obstacles,
                           _batch_cells_one_layer, _batch_vias,
-                          block_track_cells_near_drills, _pad_has_copper)
+                          block_track_cells_near_drills,
+                          block_track_cells_near_override_pad_holes, _pad_has_copper)
 from plane_obstacle_builder import (
     _precompute_circle_offsets,
     _batch_block_circles_via, _batch_block_circles_cell
@@ -243,6 +244,68 @@ def _build_layer_blocked_set(
         _add_segment_cells(net_segment_cells, seg, coord)
 
     return blocked, net_segment_cells
+
+
+def _island_kept_by_filler(pcb_data, net_id: int, plane_layer: str, patch,
+                           coord, analysis_grid_step: float) -> bool:
+    """Would KiCad's filler KEEP the fill at this modeled orphan patch? (#350)
+
+    island_removal_mode deletes only ISOLATED fragments -- a fragment touching
+    even one same-net pad/via/track is kept (and then DRC-flagged against the
+    rest of the net). The sweep's real-world catch (#217 castor +3.3VA, a
+    mode-0 zone!) is exactly that class: the anchor exists physically but its
+    cells are blocked in the coarse model, so the flood never seeds and the
+    patch LOOKS bare. So: a patch with a same-net item on or near it is
+    joinable under ANY mode; only a truly bare patch follows the zone's
+    removal mode (mode 0, the KiCad default, deletes it -- joining would ship
+    copper to fill that will never be poured; mode 1 keeps it; mode 2 keeps
+    it at or above island_area_min). The owning zone is the highest-priority
+    own-net zone containing the patch; a patch outside every parsed outline
+    keeps the old always-join behavior.
+    """
+    from check_connected import point_in_polygon
+
+    # Same-net item on/near the patch => not an isolated island, always kept.
+    # Anchors sit in cells the model BLOCKS (that is why the flood never saw
+    # them), so probe a 2-cell neighborhood around each item, not membership.
+    def _near_patch(x, y) -> bool:
+        cgx, cgy = coord.to_grid(x, y)
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
+                if (cgx + dx, cgy + dy) in patch:
+                    return True
+        return False
+
+    for v in pcb_data.vias:
+        if v.net_id == net_id and _near_patch(v.x, v.y):
+            return True
+    for p in pcb_data.pads_by_net.get(net_id, []):
+        if (p.drill > 0 or plane_layer in (p.layers or [])
+                or '*.Cu' in (p.layers or [])) and _near_patch(p.global_x, p.global_y):
+            return True
+    for s in pcb_data.segments:
+        if s.net_id == net_id and s.layer == plane_layer and (
+                _near_patch(s.start_x, s.start_y) or _near_patch(s.end_x, s.end_y)):
+            return True
+
+    gx, gy = next(iter(patch))
+    x, y = coord.to_float(gx, gy)
+    owner = None
+    for z in (getattr(pcb_data, 'zones', []) or []):
+        if z.net_id == net_id and z.layer == plane_layer \
+                and getattr(z, 'polygon', None) \
+                and point_in_polygon(x, y, z.polygon):
+            if owner is None or getattr(z, 'priority', 0) > getattr(owner, 'priority', 0):
+                owner = z
+    if owner is None:
+        return True
+    mode = getattr(owner, 'island_removal_mode', 0)
+    if mode == 1:
+        return True
+    if mode == 2:
+        patch_area = len(patch) * analysis_grid_step * analysis_grid_step
+        return patch_area >= getattr(owner, 'island_area_min', 0.0)
+    return False  # mode 0: the filler deletes truly isolated islands
 
 
 def find_disconnected_zone_regions(
@@ -599,7 +662,9 @@ def find_disconnected_zone_regions(
                     plane_visited.add((nx, ny))
                     patch.add((nx, ny))
                     queue.append((nx, ny))
-            if len(patch) >= min_patch_cells:
+            if len(patch) >= min_patch_cells and _island_kept_by_filler(
+                    pcb_data, net_id, plane_layer, patch, coord,
+                    analysis_grid_step):
                 orphan_patches.append(patch)
 
     # Group anchors by their root
@@ -743,22 +808,76 @@ def _subsample_cell_points(cells, coord, max_pts: int = 400, interior_cache=None
     return list(pts)
 
 
-def _real_fill_point(pt, net_id, pcb_data, zone_polys, plane_layer,
-                     margin: float) -> bool:
-    from check_connected import point_in_polygon
-    # A point inside a FOREIGN zone outline on this layer may be copper owned
-    # by a higher-priority foreign pour (Zone has no parsed priority yet, so
-    # reject conservatively -- the join falls back to real anchors).
-    for z in (getattr(pcb_data, 'zones', []) or []):
-        if z.net_id != net_id and z.layer == plane_layer \
-                and getattr(z, 'polygon', None) \
-                and point_in_polygon(pt[0], pt[1], z.polygon):
+def _npth_holes(pcb_data):
+    """(x, y, drill) of every no-copper hole on the board, cached on pcb_data.
+    Net-tied NPTH mounting holes (#328) are included: no copper ring means the
+    NPTH-to-track floor applies whatever net the hole claims."""
+    holes = getattr(pcb_data, '_npth_holes_cache_390', None)
+    if holes is None:
+        from obstacle_map import _pad_has_copper
+        from kicad_parser import pad_drill_circles
+        holes = []
+        for pads in pcb_data.pads_by_net.values():
+            for p in pads:
+                if p.drill > 0 and not _pad_has_copper(p):
+                    holes.extend(pad_drill_circles(p))
+        pcb_data._npth_holes_cache_390 = holes
+    return holes
+
+
+def npth_floor_ok(x, y, pcb_data, track_half: float) -> bool:
+    """False when track copper of half-width `track_half` centered at (x, y)
+    would violate the NPTH-to-track fab floor of a no-copper drill (#390).
+
+    Route seed/anchor points are stamped source/target cells, which OVERRIDE
+    the obstacle map's (correct) NPTH drill keep-out -- so every fill-derived
+    seed must respect the floor itself. The fill-validity margin ladder must
+    never relax below this: zone fill lawfully sits closer to an NPTH than
+    track copper may (crkbd GNDR strap seeded 0.15 from the rEXSW1 hole edge)."""
+    floor = defaults.NPTH_TO_TRACK_CLEARANCE + track_half
+    for hx, hy, hdia in _npth_holes(pcb_data):
+        if math.hypot(x - hx, y - hy) < hdia / 2.0 + floor:
             return False
+    return True
+
+
+def _real_fill_point(pt, net_id, pcb_data, zone_polys, plane_layer,
+                     margin: float, npth_track_half: float = 0.0) -> bool:
     """True when a disc of radius `margin` around pt provably sits in REAL
     zone fill: fully inside one outline and at least `margin` clear of every
     foreign copper item on the plane layer (the coarse flood model blurs the
     fill's clearance carving; joins attached to modeled-but-absent fill ship
-    floating vias -- kicad-cli 'Via | Zone unconnected')."""
+    floating vias -- kicad-cli 'Via | Zone unconnected').
+
+    `npth_track_half` is the half-width of the track that will terminate at
+    an accepted point: the NPTH-to-track fab floor is enforced at that width
+    and is NOT subject to the caller's margin relaxation (#390)."""
+    if not npth_floor_ok(pt[0], pt[1], pcb_data, npth_track_half):
+        return False
+    from check_connected import point_in_polygon
+    # A point inside a FOREIGN zone outline on this layer may be copper owned
+    # by that pour. Priority-exact (#350): KiCad gives overlap to the HIGHER
+    # priority zone, so reject only when the foreign zone outranks (or ties)
+    # every own-net zone containing the point -- an own island zone poured at
+    # higher priority than a board-wide foreign pour legitimately owns its
+    # copper and must not be starved of pseudo-anchors. Equal priority stays
+    # conservative: KiCad calls equal-priority different-net overlap
+    # undefined/DRC-flagged, so we keep the old rejection there.
+    _own_priority = None  # lazy: only computed when a foreign outline hits
+    for z in (getattr(pcb_data, 'zones', []) or []):
+        if z.net_id != net_id and z.layer == plane_layer \
+                and getattr(z, 'polygon', None) \
+                and point_in_polygon(pt[0], pt[1], z.polygon):
+            if _own_priority is None:
+                _own_priority = max(
+                    (getattr(oz, 'priority', 0)
+                     for oz in (getattr(pcb_data, 'zones', []) or [])
+                     if oz.net_id == net_id and oz.layer == plane_layer
+                     and getattr(oz, 'polygon', None)
+                     and point_in_polygon(pt[0], pt[1], oz.polygon)),
+                    default=0)
+            if getattr(z, 'priority', 0) >= _own_priority:
+                return False
     x, y = pt
     probes = ((x, y), (x + margin, y), (x - margin, y),
               (x, y + margin), (x, y - margin))
@@ -1338,11 +1457,15 @@ def route_disconnected_regions(
 
         def _valid_fill(pt):
             return _real_fill_point(pt, net_id, pcb_data, _zone_polys,
-                                    _plane_layer_name, _margin)
+                                    _plane_layer_name, _margin,
+                                    npth_track_half=min_track_width / 2)
 
         def _valid_fill_relaxed(pt):
+            # Relaxes the fill margin only -- the NPTH fab floor inside
+            # _real_fill_point stays enforced at full track width (#390).
             return _real_fill_point(pt, net_id, pcb_data, _zone_polys,
-                                    _plane_layer_name, zone_clearance)
+                                    _plane_layer_name, zone_clearance,
+                                    npth_track_half=min_track_width / 2)
 
         def _cells_for(region_idx, near_pt):
             cells = region_cells[region_idx] \
@@ -1795,6 +1918,15 @@ def build_base_obstacles(
         block_track_cells_near_drills(obstacles, npth_holes, track_width,
                                       npth_clr, config.grid_step,
                                       list(range(num_layers)))
+
+    # Holes of pads carrying a clearance OVERRIDE (pad.local_clearance): KiCad's
+    # hole_clearance rule is net-independent and honors the override, so even
+    # the plane net's own repair copper must keep the override off the hole
+    # unless it lands on the pad copper itself (#326 residual, ghoul: zero-ring
+    # switch NPTHs at 0.3 were stamped only at the 0.20 NPTH floor above).
+    block_track_cells_near_override_pad_holes(
+        obstacles, pcb_data, track_width, config.clearance,
+        config.grid_step, list(range(num_layers)))
 
     # Block areas outside the board outline (supports non-rectangular boards)
     add_board_edge_obstacles(obstacles, pcb_data, config, 0.0, layers=routing_layers)

@@ -28,6 +28,36 @@ def redo_final_and_clearance(txt):
     return final, (min(clrs) if clrs else 0.1)
 
 
+# Flag -> fix_project_for_output kwarg. The SMALLEST value any step used is the
+# floor the whole board must grade at (a step routing at 0.09 leaves 0.09 copper
+# everywhere it ran), so the shipped .kicad_pro must record the chain minimum.
+_FLOOR_FLAGS = {
+    'clearance': 'clearance',
+    'hole-to-hole-clearance': 'hole_to_hole', 'hole-to-hole': 'hole_to_hole',
+    'board-edge-clearance': 'edge_clearance', 'edge-clearance': 'edge_clearance',
+    'track-width': 'track_width', 'via-size': 'via_diameter', 'via-drill': 'via_drill',
+}
+
+
+def redo_floors(txt):
+    """Smallest value each DRC-floor flag took across the recorded chain, so the
+    shipped board's .kicad_pro can be graded at the tightest clearance actually
+    routed (not a step's looser nominal). A bare `cp <step> <final>` strands the
+    sibling .kicad_pro, so the final can otherwise carry a step's higher default
+    and manufacture phantom violations in KiCad (#403/#326)."""
+    floors = {}
+    for l in txt.splitlines():
+        l = l.strip()
+        if not l or l.startswith('#') or 'check_' in l:
+            continue
+        for flag, kw in _FLOOR_FLAGS.items():
+            for m in re.findall(r'--%s\s+([0-9.]+)' % re.escape(flag), l):
+                v = float(m)
+                if v > 0 and (kw not in floors or v < floors[kw]):
+                    floors[kw] = v
+    return floors
+
+
 def newest(rundir, pred):
     cands = [f for f in os.listdir(rundir) if f.endswith('.kicad_pcb') and pred(f)]
     return max(cands, key=lambda f: os.path.getmtime(os.path.join(rundir, f))) if cands else None
@@ -57,6 +87,25 @@ def main():
         grade["error"] = "no final board found"
         json.dump(grade, open(os.path.join(rundir, "authoritative_grade.json"), "w"), indent=1)
         print("[grade_final] no final board found"); return
+
+    # Carry the chain's tightest DRC floors onto the shipped board's .kicad_pro.
+    # Each routing step records its floors in the OUTPUT's sibling .kicad_pro and
+    # the next step inherits them (fix_project_for_output copies the input project
+    # + min-merges), but a bare `cp <step> <final>` strands that file -- so the
+    # delivered final can carry a later step's looser clearance and a KiCad DRC
+    # reads phantom violations on legitimately fine copper. grade_final grades at
+    # -c chain-min regardless, but a user opening the board would still see the
+    # phantoms; write the floors so the shipped .kicad_pro matches the grade.
+    # fix_project_for_output min-merges and clamps to the board's own minima, so
+    # this never loosens a correct project or tightens below the real copper.
+    try:
+        sys.path.insert(0, REPO)
+        from fix_kicad_drc_settings import fix_project_for_output
+        floors = redo_floors(open(man).read()) if os.path.exists(man) else {}
+        floors.setdefault('clearance', clr)
+        fix_project_for_output(fp, input_pcb=fp, **floors)
+    except Exception as e:
+        grade["floor_writeback_err"] = str(e)[:120]
 
     try:
         o = subprocess.run(["python3", "-X", "utf8", f"{REPO}/check_drc.py", fp, "-c", str(clr)],

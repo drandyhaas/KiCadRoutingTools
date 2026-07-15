@@ -9,6 +9,8 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from kicad_parser import PCBData
+# E3: the one guarded squared-distance kernel (length_sq < 1e-10 degenerate guard).
+from geometry_utils import point_to_segment_dist_sq as _pt_seg_dist_sq
 from routing_config import GridRouteConfig, DiffPairNet
 from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from obstacle_costs import compute_track_proximity_for_net, compute_ripped_route_costs
@@ -63,14 +65,23 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
 
     saved_result = routed_results[net_id]
     ripped_net_ids = []
-    was_in_results = saved_result in results
+    # #369 A2: a multi-leg multipoint diff pair registers a MERGED dict in
+    # routed_results while the write-list carries its per-LEG dicts -- the
+    # old value-equality test (`saved_result in results`) never matched, so
+    # the legs stayed in the write-list after the rip and their copper
+    # shipped alongside the reroute's. Match by IDENTITY over the merged
+    # dict AND its legs (identity also stops equality from removing a
+    # different net's identical-valued dict).
+    _members = list(saved_result.get('leg_results') or []) + [saved_result]
+    _member_ids = {id(r) for r in _members}
+    was_in_results = any(id(r) in _member_ids for r in results)
 
     # Remove from pcb_data
     remove_route_from_pcb_data(pcb_data, saved_result)
 
     # Remove from results list if present
     if was_in_results:
-        results.remove(saved_result)
+        results[:] = [r for r in results if id(r) not in _member_ids]
 
     # Update tracking structures
     if net_id in diff_pair_by_net_id:
@@ -129,21 +140,6 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
                 ripped_route_via_positions[rid] = via_positions
 
     return saved_result, ripped_net_ids, was_in_results
-
-
-def _pt_seg_dist_sq(px: float, py: float,
-                    ax: float, ay: float, bx: float, by: float) -> float:
-    """Squared distance from point (px,py) to segment (ax,ay)-(bx,by)."""
-    dx, dy = bx - ax, by - ay
-    if dx == 0.0 and dy == 0.0:
-        return (px - ax) ** 2 + (py - ay) ** 2
-    t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)
-    if t < 0.0:
-        t = 0.0
-    elif t > 1.0:
-        t = 1.0
-    cx, cy = ax + t * dx, ay + t * dy
-    return (px - cx) ** 2 + (py - cy) ** 2
 
 
 def _segs_cross(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1) -> bool:
@@ -310,9 +306,15 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
     # Add back to pcb_data
     add_route_to_pcb_data(pcb_data, saved_result, debug_lines=config.debug_lines)
 
-    # Add back to results list if it was there (and not already present)
-    if was_in_results and saved_result not in results:
-        results.append(saved_result)
+    # Add back to results list if it was there (and not already present).
+    # #369 A2: restore the per-LEG dicts for a multi-leg multipoint pair --
+    # they are what the write-list carried (the merged dict duplicates their
+    # copper); identity membership, mirroring rip_up_net.
+    if was_in_results:
+        _members = list(saved_result.get('leg_results') or []) or [saved_result]
+        for _r in _members:
+            if not any(_r is _x for _x in results):
+                results.append(_r)
 
     # Restore tracking structures
     if net_id in diff_pair_by_net_id:

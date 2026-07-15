@@ -35,7 +35,7 @@ PLACEMENT_QUANTIZATION_MARGIN = 0.005  # mm
 # at PLACEMENT and let the post-route via-nudge (nudge_grazing_vias) move the
 # residual graze to full clearance instead -- a nudged via stays connected; a
 # stranded pad does not. Matches check_drc's default grading margin.
-UNBLOCK_REFIT_MARGIN = 0.05  # mm
+UNBLOCK_REFIT_MARGIN_MM = 0.05  # mm (absolute; NOT a fraction like check_drc's clearance_margin)
 
 # Cost parameters
 VIA_COST = 50
@@ -152,7 +152,12 @@ QFN_CLEARANCE = 0.1  # mm
 QFN_EXTENSION = 0.1  # mm - extension past pad edge before bend
 
 # Differential Pair defaults
-DIFF_PAIR_WIDTH = 0.1  # mm track width for differential pairs
+DIFF_PAIR_WIDTH = 0.3  # mm track width for differential pairs (GUI diff tab
+# default). #381 D4: matches route_diff.py's --track-width CLI default (0.3); the
+# old 0.1 made GUI/plan diff runs 3x narrower than the equivalent CLI command.
+# Consumed ONLY by the GUI diff tab -- the CLI/engine diff width default comes
+# from route_diff.py's argparse and batch_route_diff_pairs' TRACK_WIDTH, so this
+# change is GUI-only and does not move any CLI behavior.
 DIFF_PAIR_GAP = 0.101  # mm gap between P and N traces
 DIFF_PAIR_MIN_TURNING_RADIUS = 0.2  # mm
 DIFF_PAIR_MAX_SETBACK_ANGLE = 45.0  # degrees
@@ -195,6 +200,30 @@ FINE_TAP_SEARCH_RADIUS = 3.0     # mm - cap on NEW-via search during the fine re
 REPAIR_MAX_TRACK_WIDTH = 2.0  # mm - maximum track width for connections
 REPAIR_MIN_TRACK_WIDTH = 0.2  # mm - minimum track width for connections
 REPAIR_ANALYSIS_GRID_STEP = 0.5  # mm - grid step for connectivity analysis
+
+# Per-net fine-parameter rescue (net_rescue.py, issues #331/#371)
+# After the main loop, rip-up ladder, reroute loop and Phase 3 have all had
+# their shot, each still-failed (or partially connected) net gets one scoped
+# last-chance retry: a small obstacle-map WINDOW around the remaining gap at a
+# finer grid, with the track narrowed to the fab floor and the clearance
+# stepped down toward the fab floor (mirrors the plane-tap fine ladder, #226).
+# The limits below bound the compute: the window is sized to the gap (never
+# the board), the grid auto-coarsens until the window fits the cell budget,
+# and gaps longer than RESCUE_MAX_GAP_MM are a re-thread, not a gap - skipped.
+RESCUE_GRID_STEP = 0.025          # mm - fine grid for the scoped rescue retry
+RESCUE_CLEARANCE_STEPS = 4        # clearance rungs from nominal down to the fab floor
+RESCUE_WINDOW_MARGIN = 4.0        # mm of window past the gap bbox on every side
+RESCUE_MIN_WINDOW_HALF = 6.0      # mm - minimum window half-size (detour room)
+RESCUE_MAX_WINDOW_CELLS = 4_000_000  # per-layer cell budget; grid coarsens to fit
+RESCUE_MAX_GAP_MM = 40.0          # mm - skip gaps longer than this
+RESCUE_MAX_EDGES_PER_NET = 8      # max gap-closing attempts per rescued net
+RESCUE_MAX_ITERATIONS = 1_000_000  # per-rung A* backstop. Deliberately generous:
+                                   # hopeless rungs exhaust the small fenced window
+                                   # in far fewer iterations no matter the budget
+                                   # (measured on ottercast: a 200k cap saved zero
+                                   # time and cost 7 recoveries - fine grid needs
+                                   # ~4x the coarse iteration count), so this only
+                                   # guards degenerate --max-iterations values.
 
 
 # GUI-specific ranges (min, max, increment, digits)

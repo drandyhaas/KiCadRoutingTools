@@ -68,24 +68,6 @@ def _re_add_pad_obstacles_for_net(
                 obstacles.add_blocked_cell(cell_gx, cell_gy, 0)  # layer_idx=0 for single-layer maps
 
 
-def _point_to_segment_dist_sq(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
-    """Calculate squared distance from point (px, py) to line segment (x1,y1)-(x2,y2)."""
-    dx = x2 - x1
-    dy = y2 - y1
-    length_sq = dx * dx + dy * dy
-
-    if length_sq < 1e-10:
-        # Degenerate segment (point)
-        return (px - x1) ** 2 + (py - y1) ** 2
-
-    # Project point onto line, clamped to segment
-    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / length_sq))
-    proj_x = x1 + t * dx
-    proj_y = y1 + t * dy
-
-    return (px - proj_x) ** 2 + (py - proj_y) ** 2
-
-
 def find_via_position_blocker(
     via_x: float,
     via_y: float,

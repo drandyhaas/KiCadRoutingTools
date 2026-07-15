@@ -264,6 +264,39 @@ def project_copper_clearance(proj: dict):
     return mc if mc else None
 
 
+def project_edge_clearance(proj: dict):
+    """The board's copper-to-Edge.Cuts constraint (Board Setup ->
+    min_copper_edge_clearance). KiCad grades copper_edge_clearance from this
+    value; the router and check_drc must honor it too (issue #338). Returns
+    None if unset or 0."""
+    ec = (proj.get("board", {}).get("design_settings", {}) or {}) \
+        .get("rules", {}).get("min_copper_edge_clearance")
+    return ec if ec else None
+
+
+def read_project_edge_clearance(pcb_path: str):
+    """min_copper_edge_clearance from a board's sibling .kicad_pro, or 0.0
+    (missing project / unset value). Convenience wrapper used by the routing
+    CLIs and check_drc so both route and grade at the same effective edge
+    clearance (issue #338)."""
+    try:
+        pro = find_project(pcb_path)
+        if os.path.isfile(pro):
+            with open(pro) as f:
+                return project_edge_clearance(json.load(f)) or 0.0
+    except Exception:
+        pass
+    return 0.0
+
+
+def effective_board_edge_clearance(pcb_path: str, cli_value: float) -> float:
+    """The copper-to-Edge.Cuts clearance a route/grade step must honor
+    (issue #338): the LARGER of the board's own min_copper_edge_clearance
+    (KiCad enforces it) and the explicit --board-edge-clearance. 0.0 = neither
+    set (callers keep their track-clearance fallback)."""
+    return max(cli_value or 0.0, read_project_edge_clearance(pcb_path))
+
+
 def scan_board_minima(pcb_path: str):
     """Smallest track width / via diameter / via drill / via annular ring / hole
     diameter actually present on the board. These are floors KiCad's min-size
@@ -327,7 +360,13 @@ def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
         targets["min_hole_clearance"] = hole_clr
     if hole_to_hole is not None:
         targets["min_hole_to_hole"] = hole_to_hole
-    if edge_clearance is not None:
+    # Edge: 0.0 means "no edge clearance was enforced" (the CLI default), NOT
+    # "lower the rule to zero" -- writing 0.0 erased the board's own
+    # min_copper_edge_clearance so neither KiCad nor check_drc could grade the
+    # rule the design demands (issue #338, core1106_cam's 0.5 -> 0.0 clobber).
+    # The routers now route to max(--board-edge-clearance, the board rule), so
+    # a real enforced value is always >= the rule and only-lower keeps it.
+    if edge_clearance:
         targets["min_copper_edge_clearance"] = edge_clearance
 
     # Size minima: take the SMALLER of the routing param and the smallest such

@@ -113,6 +113,7 @@ section. Used for accurate length/time matching.
 | `pad_type` | str | Pad kind: `'smd'`, `'thru_hole'`, `'np_thru_hole'`, `'connect'`. NPTH pads carry **no copper** (their size is just the mask opening, even when `layers` lists `*.Cu`), so copper-clearance checks skip them; only their drill hole matters. |
 | `roundrect_rratio` | float | Corner radius ratio for roundrect pads (0–0.5) |
 | `rect_rotation` | float | Residual rectangle tilt in the global frame, in (-90, 90]. `0` for axis-aligned pads (the common case); non-zero only for pads on non-orthogonal angles. |
+| `local_clearance` | float | The pad's **resolved** clearance override in mm (issue #326): its own `(clearance …)` token, else the footprint-level override, else `0` (= use the global/netclass clearance). KiCad enforces `max(the two items' clearances)` per pair; the router's obstacle stamps and `check_drc` honor this the same way. Negative (shrinking) overrides clamp to `0`. |
 
 Pad dimensions are resolved into board space using the pad's **absolute** angle
 (the KiCad `(at … angle)` already includes the footprint rotation; applying the
@@ -166,6 +167,7 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `layer` | str | `'F.Cu'` or `'B.Cu'` |
 | `pads` | List[Pad] | The footprint's pads |
 | `value` | str | Component value (`'100nF'`, `'MCF5213'`) |
+| `clearance` | float | Footprint-level `(clearance …)` override in mm (0 = none). Already **resolved into** each pad's `local_clearance` at parse time — read that field for clearance decisions; this records the raw footprint value (issue #326). |
 
 ### `Zone`
 
@@ -175,6 +177,9 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `layer` | str | Layer name |
 | `polygon` | List[Tuple[float, float]] | Outline vertices |
 | `uuid` | str | UUID from the file |
+| `priority` | int | `(priority N)`; higher-priority zones win where outlines overlap (0 when absent) |
+| `island_removal_mode` | int | 0 = always remove isolated islands (KiCad default), 1 = never, 2 = below `island_area_min` |
+| `island_area_min` | float | mm² floor for mode 2 (0.0 when absent) |
 
 ### `BoardInfo`
 
@@ -373,13 +378,9 @@ large file:
 | `extract_vias(content, name_to_id=None)` | `List[Via]` |
 | `extract_zones(content, name_to_id=None)` | `List[Zone]` |
 | `extract_keepouts(content)` | `List[dict]` (keepout rule areas) |
-| `extract_board_outline(content)` | Outline polygon vertices |
 | `extract_board_contours(content)` | `(outline, cutouts)` |
 | `parse_guide_paths(content, layer)` | `List[GuidePath]` from a user layer |
 | `parse_keepout_zones(content, layer)` | `List[GuidePath]` (closed only) |
-
-There is also `parse_s_expression(text)`, a small recursive S-expression
-parser returning nested lists, for ad-hoc digging.
 
 ## Gotchas
 

@@ -346,7 +346,7 @@ These options are only available in `route_diff.py`. All nets passed to route_di
 
 ### Layer Optimization Options
 
-These options control stub layer switching, which moves stubs to different layers before routing to avoid vias. Works for both differential pairs and single-ended nets.
+These options control stub layer switching, which moves stubs to different layers before routing to avoid vias. Works for differential pairs, single-ended nets, and multi-point nets (3+ endpoints).
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -365,6 +365,11 @@ These options control stub layer switching, which moves stubs to different layer
   layer, so an inner-layer pair can land on the pad via the via instead of fighting
   through the congested surface channel
 - Multiple swap options are tried: src/src, tgt/tgt, src/tgt, tgt/src
+- For **multi-point nets** (3+ endpoints, #265), all movable stubs are collapsed onto one
+  common layer when every endpoint allows it (through-hole and via-in-pad pads reach any
+  layer; bare SMD pads fix their copper layers; already-connected pad-to-pad copper never
+  moves), picking the destination layer that needs the fewest new pad vias. Nets with no
+  feasible common layer are left unchanged
 
 ### Length Matching Options
 

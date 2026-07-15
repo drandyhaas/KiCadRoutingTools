@@ -391,8 +391,12 @@ State tracking in `routing_state.py`:
 
 ### Limitations
 
-- **Layer swaps not supported** - Multi-point nets are skipped during layer swap optimization (warning printed)
-- Layer swaps would need to handle all pads consistently, which is complex when pads may be on different layers
+- **Layer swaps: common-layer collapse only** (#265) - When a multi-point net's endpoints span
+  several layers, the upfront optimization tries to move ALL movable stubs onto one common layer
+  (through-hole/via'd pads count as any-layer, bare SMD pads as fixed, committed pad-to-pad copper
+  as immovable), choosing the destination needing the fewest new pad vias. Nets with no feasible
+  common layer (e.g. bare SMD pads on both faces) are left as-is with a note.
+- Mixed assignments (different layers per endpoint cluster, MST-aware) are not attempted
 
 ## Post-Processing
 

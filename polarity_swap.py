@@ -155,3 +155,40 @@ def get_canonical_net_id(net_id: int, diff_pair_by_net_id: Dict[int, Tuple[str, 
         _, pair = diff_pair_by_net_id[net_id]
         return pair.p_net_id
     return net_id
+
+
+def rip_combo_already_tried(rip_and_retry_history, history_net_id, net_name,
+                            rippable_blockers, n, diff_pair_by_net_id,
+                            log=True):
+    """Shared rip-up history gate for the progressive rip-and-reroute ladders
+    (single_ended_loop and reroute_loop), so their skip decision AND its log
+    stay identical instead of drifting (issue #376; the reroute twin previously
+    did a bare, silent ``continue`` -- a #315-class forked-check divergence).
+
+    Computes the canonical blocker frozenset for ripping the first ``n``
+    blockers, and returns ``(already_tried, blocker_canonicals)``:
+      - ``already_tried`` is True when ``(history_net_id, blocker_canonicals)``
+        is in ``rip_and_retry_history`` (the caller should skip this N level);
+        the reason is printed (the ripped-net names) unless ``log=False``.
+      - ``blocker_canonicals`` is returned so the caller reuses the SAME
+        frozenset when it later records the attempt in the history, keeping the
+        check key and the add key in lockstep.
+    """
+    blocker_canonicals = frozenset(
+        get_canonical_net_id(rippable_blockers[i].net_id, diff_pair_by_net_id)
+        for i in range(n)
+    )
+    if (history_net_id, blocker_canonicals) not in rip_and_retry_history:
+        return False, blocker_canonicals
+    if log:
+        blocker_names = []
+        for i in range(n):
+            b = rippable_blockers[i]
+            if b.net_id in diff_pair_by_net_id:
+                blocker_names.append(diff_pair_by_net_id[b.net_id][0])
+            else:
+                blocker_names.append(b.net_name)
+        blockers_str = (blocker_names[0] if len(blocker_names) == 1
+                        else "{" + ", ".join(blocker_names) + "}")
+        print(f"  Skipping N={n}: already tried ripping {blockers_str} for {net_name}")
+    return True, blocker_canonicals

@@ -205,6 +205,12 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   bare `pad.drill > 0` (a net-tied NPTH mounting hole is not a connection, #328)
 - `pad.component_ref` - Parent component reference
 - `pad.pinfunction`, `pad.pintype` - Pin metadata
+- `pad.local_clearance` - RESOLVED per-pad clearance override in mm (#326): the
+  pad's own `(clearance ...)`, else the footprint-level override (recorded raw
+  in `footprint.clearance`), else 0 (= global/netclass clearance applies).
+  KiCad enforces max(the two items' clearances) per pair; the obstacle stamps
+  and check_drc honor it the same way. Clearance consumers should read this
+  field, never re-derive footprint inheritance.
 
 ### Through-Hole vs SMD Pads
 

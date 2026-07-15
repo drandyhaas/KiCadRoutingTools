@@ -18,6 +18,7 @@ from connectivity import (
 )
 from obstacle_map import check_line_clearance
 from geometry_utils import simplify_path, segments_intersect_tuple
+from net_queries import resolve_gnd_net_id
 # Note: Layer switching is now done upfront in route.py, not during routing
 
 # Import Rust router
@@ -1411,120 +1412,6 @@ def get_diff_pair_endpoints(pcb_data: PCBData, p_net_id: int, n_net_id: int,
     return paired_sources, paired_targets, None
 
 
-def create_parallel_path_float(centerline_path, coord, sign, spacing_mm=0.1, start_dir=None, end_dir=None):
-    """
-    Create a path parallel to centerline using floating-point perpendicular offsets.
-
-    Uses bisector-based offsets at corners for smooth parallel paths.
-
-    Args:
-        centerline_path: List of (gx, gy, layer) grid coordinates
-        coord: GridCoord converter for grid<->float
-        sign: +1 for one track, -1 for the other
-        spacing_mm: Distance from centerline in mm
-        start_dir: Optional (dx, dy) direction to use at start point for perpendicular calc
-        end_dir: Optional (dx, dy) direction to use at end point for perpendicular calc
-
-    Returns:
-        List of (x, y, layer) floating-point coordinates
-    """
-    if len(centerline_path) < 2:
-        return [(coord.to_float(p[0], p[1])[0], coord.to_float(p[0], p[1])[1], p[2])
-                for p in centerline_path]
-
-    result = []
-
-    for i in range(len(centerline_path)):
-        gx, gy, layer = centerline_path[i]
-        x, y = coord.to_float(gx, gy)
-
-        use_corner_scale = True  # Only apply corner scaling for bisector calculations
-        if i == 0:
-            # First point: bisector between start_dir (if provided) and first segment
-            next_x, next_y = coord.to_float(centerline_path[1][0], centerline_path[1][1])
-            seg_dx, seg_dy = next_x - x, next_y - y
-            seg_len = math.sqrt(seg_dx*seg_dx + seg_dy*seg_dy) or 1
-            seg_dx, seg_dy = seg_dx/seg_len, seg_dy/seg_len
-
-            if start_dir is not None:
-                # Normalize start_dir
-                dir_len = math.sqrt(start_dir[0]**2 + start_dir[1]**2) or 1
-                norm_start_dx = start_dir[0] / dir_len
-                norm_start_dy = start_dir[1] / dir_len
-                # Bisector between start_dir and first segment direction
-                dx = norm_start_dx + seg_dx
-                dy = norm_start_dy + seg_dy
-                use_corner_scale = True  # Apply corner scaling at junction
-            else:
-                dx, dy = seg_dx, seg_dy
-                use_corner_scale = False  # Single segment, no corner scaling
-        elif i == len(centerline_path) - 1:
-            # Last point: bisector between last segment and end_dir (if provided)
-            prev_x, prev_y = coord.to_float(centerline_path[i-1][0], centerline_path[i-1][1])
-            seg_dx, seg_dy = x - prev_x, y - prev_y
-            seg_len = math.sqrt(seg_dx*seg_dx + seg_dy*seg_dy) or 1
-            seg_dx, seg_dy = seg_dx/seg_len, seg_dy/seg_len
-
-            if end_dir is not None:
-                # Normalize end_dir
-                dir_len = math.sqrt(end_dir[0]**2 + end_dir[1]**2) or 1
-                norm_end_dx = end_dir[0] / dir_len
-                norm_end_dy = end_dir[1] / dir_len
-                # Bisector between last segment direction and end_dir
-                dx = seg_dx + norm_end_dx
-                dy = seg_dy + norm_end_dy
-                use_corner_scale = True  # Apply corner scaling at junction
-            else:
-                dx, dy = seg_dx, seg_dy
-                use_corner_scale = False  # Single segment, no corner scaling
-        else:
-            # Corner: use bisector of incoming and outgoing directions
-            prev = centerline_path[i-1]
-            next_pt = centerline_path[i+1]
-
-            if prev[2] != layer or next_pt[2] != layer:
-                # Layer change - use incoming direction
-                prev_x, prev_y = coord.to_float(prev[0], prev[1])
-                dx, dy = x - prev_x, y - prev_y
-            else:
-                prev_x, prev_y = coord.to_float(prev[0], prev[1])
-                next_x, next_y = coord.to_float(next_pt[0], next_pt[1])
-
-                dx_in, dy_in = x - prev_x, y - prev_y
-                dx_out, dy_out = next_x - x, next_y - y
-
-                len_in = math.sqrt(dx_in*dx_in + dy_in*dy_in) or 1
-                len_out = math.sqrt(dx_out*dx_out + dy_out*dy_out) or 1
-
-                # Bisector direction (sum of unit vectors)
-                dx = dx_in/len_in + dx_out/len_out
-                dy = dy_in/len_in + dy_out/len_out
-
-                if abs(dx) < 0.01 and abs(dy) < 0.01:
-                    dx, dy = dx_in, dy_in
-
-        # Normalize and compute perpendicular offset
-        length = math.sqrt(dx*dx + dy*dy) or 1
-        ndx, ndy = dx/length, dy/length
-
-        # Corner compensation: scale offset by 2/length to maintain perpendicular distance
-        # When summing two unit vectors, length = 2*cos(theta/2) where theta is angle between them
-        # To maintain spacing_mm perpendicular to each segment, multiply by 2/length
-        # Cap the scaling to avoid extreme miter extensions at very sharp corners (>135 deg turn)
-        # Only apply at actual corners (bisector calculations), not at endpoints
-        if use_corner_scale:
-            corner_scale = min(2.0 / length, 3.0) if length > 0.1 else 1.0
-        else:
-            corner_scale = 1.0
-
-        perp_x = -ndy * sign * spacing_mm * corner_scale
-        perp_y = ndx * sign * spacing_mm * corner_scale
-
-        result.append((x + perp_x, y + perp_y, layer))
-
-    return result
-
-
 def create_parallel_path_from_float(centerline_path, sign, spacing_mm=0.1, start_dir=None, end_dir=None):
     """
     Create a path parallel to centerline from float coordinates (no grid conversion).
@@ -2769,10 +2656,14 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         straight_t = direction_to_theta_idx(_slx, _sly)
 
         def _pose(st, tt, budget):
-            return pr.route_pose_with_frontier(
+            # S4 (#385): this theta-fan never reads the blocked-cell frontier,
+            # so call the non-frontier variant and skip the tracker inserts +
+            # the 10k-cell sort/marshal every failed probe used to pay. Same
+            # search, same path/iterations (both wrap the same Rust core).
+            return pr.route_pose(
                 obstacles, s_gx, s_gy, a_layer, st, t_gx, t_gy, b_layer, tt,
                 budget, diff_pair_via_spacing=via_spacing_grid)
-        path, iters, _b, _g = _pose(straight_t, straight_t, max_iters)
+        path, iters, _g = _pose(straight_t, straight_t, max_iters)
         iters = iters or 0
         if path is None:
             promising = None
@@ -2780,7 +2671,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                 for tt in tgt_thetas:
                     if st == straight_t and tt == straight_t:
                         continue                 # already tried at full budget
-                    p, it, _b, _g = _pose(st, tt, probe_cap)
+                    p, it, _g = _pose(st, tt, probe_cap)
                     iters += it
                     if p:
                         path = p
@@ -2791,7 +2682,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                     break
             if path is None and promising is not None:
                 st, tt = promising
-                p, it, _b, _g = _pose(st, tt, max_iters)
+                p, it, _g = _pose(st, tt, max_iters)
                 iters += it
                 path = p
         obstacles.clear_allowed_cells()
@@ -3200,7 +3091,8 @@ def _collapse_leg_attach_join(leg_segs, attach_xy, config, pcb_data, net_id, par
         from single_ended_routing import _seg_foreign_pad_dist
         fmargin = config.clearance + w / 2.0
         if _seg_foreign_pad_dist(pcb_data, net_id, pen.start_x, pen.start_y,
-                                 ax, ay, pen.layer) < fmargin - 1e-6:
+                                 ax, ay, pen.layer,
+                                 base_clearance=config.clearance) < fmargin - 1e-6:
             return leg_segs  # collapsed segment would graze a foreign pad
     pen.end_x, pen.end_y = ax, ay
     del leg_segs[-1]
@@ -3276,6 +3168,12 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
     best = None
     for v in pair_vias:
         if v.net_id != net_id:
+            continue
+        # #369 A11: only a THROUGH via lets the leg start on any layer --
+        # crediting a blind/micro via here opened sources on layers the via
+        # never reaches (empty layers = unknown/through, this tool's own vias).
+        _lys = getattr(v, 'layers', None) or []
+        if _lys and not ('F.Cu' in _lys and 'B.Cu' in _lys):
             continue
         d = math.hypot(v.x - term[0], v.y - term[1])
         if d <= own_tol and (best is None or d < best[0]):
@@ -3444,13 +3342,13 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     p_net_id = diff_pair.p_net_id
     n_net_id = diff_pair.n_net_id
 
-    # Find GND net ID for GND via placement (if enabled)
+    # Find GND net ID for GND via placement (if enabled). Robust GND-family
+    # match ('/GND', 'GNDA', 'DGND', ...) so return vias aren't silently
+    # skipped on boards that don't spell the net literally 'GND' (#379). Quiet
+    # here: this runs per-pair; batch_route_diff_pairs warns once if unresolved.
     gnd_net_id = None
     if config.gnd_via_enabled:
-        for net_id, net in pcb_data.nets.items():
-            if net.name.upper() == 'GND':
-                gnd_net_id = net_id
-                break
+        gnd_net_id, _ = resolve_gnd_net_id(pcb_data)
 
     # Find endpoints (or use explicit leg endpoints for multi-point routing)
     if endpoints is not None:

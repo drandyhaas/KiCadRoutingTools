@@ -20,15 +20,15 @@ TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT_DIR)
 
-from kicad_parser import Pad, PCBData, Net, pad_is_plated_through
+from kicad_parser import PCBData, Net, pad_is_plated_through
 from routing_config import GridRouteConfig
+from synth import make_pad  # #382 E7: canonical builder
 
 
 def _pad(drill, pad_type, layers=('*.Cu', '*.Mask'), x=5.0, y=5.0, net=7):
-    return Pad(component_ref='H1', pad_number='1', global_x=x, global_y=y,
-               local_x=0.0, local_y=0.0, size_x=3.0, size_y=3.0, shape='circle',
-               layers=list(layers), net_id=net, net_name='GND',
-               drill=drill, pad_type=pad_type)
+    return make_pad(net_id=net, x=x, y=y, ref='H1', num='1', net_name='GND',
+                    size_x=3.0, size_y=3.0, shape='circle', layers=layers,
+                    drill=drill, pad_type=pad_type)
 
 
 def main():

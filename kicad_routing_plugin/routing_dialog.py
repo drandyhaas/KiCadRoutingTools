@@ -1564,6 +1564,11 @@ class RoutingDialog(wx.Dialog):
                 'max_iterations': int(self.max_iterations.GetValue()),
                 'max_ripup': int(self.max_ripup.GetValue()),
                 'board_edge_clearance': edge_clearance,
+                # #381 D6: per-layer cost multipliers from the shared Basic-tab
+                # control, so the Planes tab honors --layer-costs like the CLI
+                # (route_planes.py) does; empty/invalid -> [] -> engine uses 1.0
+                # (or its F.Cu/inner default). Previously dropped entirely.
+                'layer_costs': self._selected_layer_costs(),
                 # Share the route tab's No-BGA-Zones intent so plane rip-up
                 # reroutes match signal routing on BGA boards (issue #88).
                 'no_bga_zones_text': self.no_bga_zones_ctrl.GetValue().strip(),
@@ -2157,6 +2162,19 @@ class RoutingDialog(wx.Dialog):
                         _ctl.SetSelection(0)
                     except Exception:
                         pass
+            # #381 D7: QFN width/clearance controls live on qfn_options; reset
+            # them to the QFN-tuned defaults so a plan step doesn't inherit a
+            # prior step's value (the plan executor resets through here).
+            _qo = getattr(_ft, 'qfn_options', None)
+            if _qo is not None:
+                for _n, _v in (('qfn_track_width', defaults.QFN_TRACK_WIDTH),
+                               ('qfn_clearance', defaults.QFN_CLEARANCE)):
+                    _ctl = getattr(_qo, _n, None)
+                    if _ctl is not None:
+                        try:
+                            _ctl.SetValue(_v)
+                        except Exception:
+                            pass
         except Exception:
             pass
         try:
@@ -2301,8 +2319,15 @@ class RoutingDialog(wx.Dialog):
         self.differential_tab.max_setback_angle.SetValue(defaults.DIFF_PAIR_MAX_SETBACK_ANGLE)
         self.differential_tab.max_turn_angle.SetValue(defaults.DIFF_PAIR_MAX_TURN_ANGLE)
         self.differential_tab.chamfer_extra.SetValue(defaults.DIFF_PAIR_CHAMFER_EXTRA)
-        self.differential_tab.polarity_swap_nets_text.SetValue("*")
-        self.differential_tab.gnd_via_check.SetValue(False)
+        # #381 D3: reset to EMPTY (deny all swaps) to match tab creation and the
+        # CLI deny-by-default (#279); '*' here silently widened plan-replay swaps.
+        self.differential_tab.polarity_swap_nets_text.SetValue("")
+        # #381 D2: diff GND return vias default ON, matching tab creation
+        # (differential_gui.py) and the CLI (route_diff.py's negative flag
+        # --no-gnd-vias defaults gnd_via_enabled True). Resetting to False here
+        # meant every plan-replayed diff step routed without GND return vias --
+        # a silent SI regression, since a manifest records nothing when ON.
+        self.differential_tab.gnd_via_check.SetValue(True)
         self.differential_tab.intra_match_check.SetValue(False)
         self.differential_tab.ac_couple_check.SetValue(False)
 
@@ -3074,7 +3099,19 @@ class RoutingDialog(wx.Dialog):
                 # Route each net class group with its own parameters
                 total_successful = 0
                 total_failed = 0
-                all_results = {'results': [], 'all_swap_vias': [], 'all_swap_segments': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': [], 'segments_to_remove': []}
+                # #382 E5: aggregate the FULL results_data key set. The old
+                # init listed only 6 keys and the extend loop below re-added
+                # only those; `vias_to_remove` (populated by rip-existing,
+                # route.py:1539, and consumed by _apply_results_to_board) was
+                # silently dropped, so a per-netclass GUI route with
+                # --rip-existing-nets left the ripped nets' stale vias on the
+                # board (stacked/duplicate vias, #300/#318 class). Seed every
+                # key empty and extend generically so no key can be dropped.
+                all_results = {k: [] for k in (
+                    'results', 'all_swap_vias', 'all_swap_segments',
+                    'exclusion_zone_lines', 'boundary_debug_labels',
+                    'segments_to_remove', 'vias_to_remove', 'pad_swaps',
+                    'single_ended_target_swap_info', 'all_segment_modifications')}
 
                 class_names = list(config['nets_by_class'].keys())
                 total_classes = len(class_names)
@@ -3187,18 +3224,13 @@ class RoutingDialog(wx.Dialog):
                     total_successful += successful
                     total_failed += failed
                     if results_data:
-                        all_results['results'].extend(results_data.get('results', []))
-                        all_results['all_swap_vias'].extend(results_data.get('all_swap_vias', []))
-                        # #340 swap reuse-connector copper (same channel the
-                        # standard path draws) -- omitting it leaves a swapped
-                        # net open in the per-class GUI route.
-                        all_results['all_swap_segments'].extend(results_data.get('all_swap_segments', []))
-                        all_results['exclusion_zone_lines'].extend(results_data.get('exclusion_zone_lines', []))
-                        all_results['boundary_debug_labels'].extend(results_data.get('boundary_debug_labels', []))
-                        # Original-board loop/dead-end segments flagged for removal
-                        # by cycle-prune (#4c1ac33) / dead-end sweep - must carry to
-                        # the apply step or they're never stripped in the per-class path.
-                        all_results['segments_to_remove'].extend(results_data.get('segments_to_remove', []))
+                        # Generic extend of every list-valued key (#382 E5):
+                        # covers all_swap_segments (#340), segments_to_remove
+                        # (dead-end/cycle prune), vias_to_remove (rip-existing),
+                        # and any future key without another manual add.
+                        for _k, _v in results_data.items():
+                            if isinstance(_v, list):
+                                all_results.setdefault(_k, []).extend(_v)
 
                 successful = total_successful
                 failed = total_failed

@@ -111,3 +111,41 @@ netted.
 
 For the internals of the router itself (obstacle maps, A*, rip-up), see
 [Routing Architecture](routing-architecture.md).
+
+## Routing-engine internals (brief)
+
+These modules are not part of the parse → modify → write user API above, but
+they are heavily imported across the engine and both front-ends, so they are
+documented here for orientation. See [Routing Architecture](routing-architecture.md)
+for how they fit together.
+
+- **`obstacle_map`** — builds the per-net obstacle/cost grid the Rust A* routes
+  on. `build_base_obstacle_map(pcb_data, config, exclude_net_ids)` is the entry
+  point; the many `add_*`/`block_*` helpers layer on keepouts, board-edge and
+  drill clearances, stub/pad/diff-pair blocking, and stub-proximity soft costs.
+  Consumes `GridRouteConfig` clearances and emits a Rust `GridObstacleMap`.
+
+- **`obstacle_cache`** — per-net incremental obstacle caching so a rip-up/retry
+  doesn't rebuild the whole map. `precompute_net_obstacles` /
+  `precompute_all_net_obstacles` build `NetObstacleData`;
+  `add_net_obstacles_from_cache` / `remove_net_obstacles_from_cache` /
+  `update_net_obstacles_after_routing` keep a working map in sync cell-for-cell
+  (ref-counted). `precompute_via_placement_obstacles` does the same for via
+  placement. `KICAD_OBSTACLE_LEDGER=1` audits add/remove balance via
+  `run_obstacle_audit` / `obstacle_ledger_report`.
+
+- **`fab_tiers`** — JLCPCB fab-capability floors as selectable cost tiers
+  (issue #237). `fab_floor_ladder` / `fab_floors` / `fab_floor_for_param` give
+  the minimum manufacturable value per parameter for a tier;
+  `enforce_fab_floors` / `check_param_floors` clamp or reject below-floor
+  params; `add_fab_tier_args` + `fab_tier_from_args` /
+  `set_fab_tier_from_config` thread the tier through the CLI and GUI;
+  `parse_fab_overrides` reads a `--fab-overrides` file.
+
+- **`clearance_ledger`** — process-scoped bridge for the smallest copper
+  clearance any step actually used, so a board routed with a deep sub-nominal
+  step is graded (and its `.kicad_pro` DRC floor set) at that clearance rather
+  than the nominal one. `record(clearance)` at sub-nominal sites; `get_min()` /
+  `effective(nominal)` read once in each `main()`; `reset()` (or the
+  `fresh_run()` context manager) starts a clean operation in a long-lived
+  process like the GUI plugin.

@@ -21,7 +21,7 @@ from connectivity import (
     get_copper_connected_terminal_groups,
     compute_component_mst_edges,
 )
-from obstacle_map import build_obstacle_map, get_same_net_through_hole_positions
+from obstacle_map import get_same_net_through_hole_positions
 from bresenham_utils import walk_line
 from geometry_utils import simplify_path
 
@@ -38,7 +38,14 @@ except ImportError:
     VisualRouter = None
 
 # Read once at import: checked inside per-via-record emit paths (hot).
-_UNBLOCK_DEBUG = bool(os.environ.get('KICAD_UNBLOCK_DEBUG'))
+def _unblock_debug() -> bool:
+    """KICAD_UNBLOCK_DEBUG, read PER CALL (#382 E10).
+
+    Was a module-level constant frozen at import, so a GUI process that set the
+    env var after the module loaded (or unset it) saw the stale import-time
+    value. Reading os.environ each call matches every other KICAD_* debug flag.
+    """
+    return bool(os.environ.get('KICAD_UNBLOCK_DEBUG'))
 
 
 # Pads farther than this from a query point can't change a neck/merge decision:
@@ -97,7 +104,7 @@ def _foreign_pad_arrays(pcb_data, layer):
     arr = cache.get(layer)
     if arr is None:
         nids, cx, cy, hx, hy, cr = [], [], [], [], [], []
-        rc, rs, ex, ey = [], [], [], []
+        rc, rs, ex, ey, lc = [], [], [], [], []
         for nid, pads in pcb_data.pads_by_net.items():
             for pad in pads:
                 if layer in pad.layers or '*.Cu' in pad.layers:
@@ -115,20 +122,29 @@ def _foreign_pad_arrays(pcb_data, layer):
                     else:
                         rc.append(1.0); rs.append(0.0)
                         ex.append(half_x); ey.append(half_y)
+                    lc.append(getattr(pad, 'local_clearance', 0.0) or 0.0)
         arr = (np.asarray(nids, dtype=np.int64), np.asarray(cx), np.asarray(cy),
                np.asarray(hx), np.asarray(hy), np.asarray(cr),
-               np.asarray(rc), np.asarray(rs), np.asarray(ex), np.asarray(ey))
+               np.asarray(rc), np.asarray(rs), np.asarray(ex), np.asarray(ey),
+               np.asarray(lc))
         cache[layer] = arr
     return arr
 
 
-def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer):
+def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None):
     """Min edge distance from point (x,y) on `layer` to any pad of a DIFFERENT net.
     The pad is modelled as a rounded rect (accurate for circle/oval/roundrect,
     exact rect at corner_r=0), so a round BGA ball is not over-approximated by its
     bounding-box corner. Vectorized + windowed (see _FOREIGN_PAD_WINDOW); exact
-    for any distance within the window, which is all the callers ever look at."""
-    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey = _foreign_pad_arrays(pcb_data, layer)
+    for any distance within the window, which is all the callers ever look at.
+
+    `base_clearance` (#326 B6): the clearance the CALLER will compare against
+    (its config.clearance). When given, each pad's local/footprint clearance
+    override above that base is SUBTRACTED from its distance, so the caller's
+    unchanged `dist >= base + X` threshold enforces the pad's own requirement
+    (an "effective distance"). Overrides are bounded well below the 5mm
+    window, so windowing stays exact."""
+    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc = _foreign_pad_arrays(pcb_data, layer)
     if cx.size == 0:
         return 1e9
     R = _FOREIGN_PAD_WINDOW
@@ -148,16 +164,22 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer):
     ly = np.abs(-ddx * frs + ddy * frc)
     dx = np.maximum(lx - (hx[near] - fcr), 0.0)
     dy = np.maximum(ly - (hy[near] - fcr), 0.0)
-    return float(np.min(np.hypot(dx, dy) - fcr))
+    d = np.hypot(dx, dy) - fcr
+    if base_clearance is not None:
+        d = d - np.maximum(plc[near] - base_clearance, 0.0)
+    return float(np.min(d))
 
 
-def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
+def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                          base_clearance=None):
     """Min foreign-pad edge distance sampled along a (short, terminal) segment.
     Pads are modelled as rounded rects (corner_r), so round/oval/roundrect pads --
     e.g. BGA balls -- use their true outline, not the bounding-box corner that
     manufactures phantom grazes (#315). Vectorized: windows pads to the segment's
-    bbox + margin, then evaluates ALL sample points against them in one matrix op."""
-    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey = _foreign_pad_arrays(pcb_data, layer)
+    bbox + margin, then evaluates ALL sample points against them in one matrix op.
+    `base_clearance` (#326 B6): see _pt_foreign_pad_dist -- subtracts each pad's
+    local-clearance excess so unchanged caller thresholds honor overrides."""
+    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc = _foreign_pad_arrays(pcb_data, layer)
     if cx.size == 0:
         return 1e9
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
@@ -184,7 +206,10 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
     ly = np.abs(-ddx * frs[None, :] + ddy * frc[None, :])
     dx = np.maximum(lx - (fhx[None, :] - fcr[None, :]), 0.0)
     dy = np.maximum(ly - (fhy[None, :] - fcr[None, :]), 0.0)
-    return float(np.min(np.hypot(dx, dy) - fcr[None, :]))
+    d = np.hypot(dx, dy) - fcr[None, :]
+    if base_clearance is not None:
+        d = d - np.maximum(plc[near] - base_clearance, 0.0)[None, :]
+    return float(np.min(d))
 
 
 def _foreign_seg_arrays(pcb_data, layer):
@@ -325,7 +350,7 @@ def _foreign_hole_capsules(pcb_data):
         nid, ax, ay, bx, by, r = [], [], [], [], [], []
         for pad_net, pads in pcb_data.pads_by_net.items():
             for pad in pads:
-                if pad.drill > 0 and _pad_has_no_copper(pad):
+                if (getattr(pad, 'drill', 0) or 0) > 0 and _pad_has_no_copper(pad):
                     (p1x, p1y), (p2x, p2y), hr = pad_drill_capsule(pad)
                     nid.append(pad_net)
                     ax.append(p1x); ay.append(p1y); bx.append(p2x); by.append(p2y)
@@ -398,7 +423,7 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
     from fab_tiers import fab_floor_ladder
     import routing_defaults as defaults
     clearance = config.clearance
-    eps = defaults.UNBLOCK_REFIT_MARGIN
+    eps = defaults.UNBLOCK_REFIT_MARGIN_MM
     layers = [l for l in (pcb_data.board_info.copper_layers or []) if l.endswith('.Cu')]
     ncu = len(layers) or 2
     cands = [rec]
@@ -413,7 +438,8 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
             if _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y, layer) < need:
                 ok = False
                 break
-            if _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer) < need:
+            if _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer,
+                                    base_clearance=clearance) < need:
                 ok = False
                 break
         if ok and _seg_foreign_via_dist(pcb_data, net_id, x, y, x, y, layers[0] if layers else 'F.Cu') < need:
@@ -444,7 +470,7 @@ def _emit_via_size(pcb_data, gx, gy, config, net_id=None, x=None, y=None):
     # first candidate fits). If even the smallest grazes, ship rec -- honest.
     if net_id is not None and x is not None and y is not None:
         refit = _unblock_via_refit(pcb_data, net_id, x, y, rec, config)
-        if _UNBLOCK_DEBUG:
+        if _unblock_debug():
             print(f"      EMIT-REFIT: cell=({gx},{gy}) {rec} -> {refit} net={net_id} at ({x},{y})")
         if refit is not None:
             return refit
@@ -495,8 +521,12 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
     for s in segments:
         if not touches(s):
             continue
-        # Nearest foreign EDGE on this layer -- pad or track/via, whichever is closer.
-        d = min(_seg_foreign_pad_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer),
+        # Nearest foreign EDGE on this layer -- pad or track/via, whichever is
+        # closer. Pad distances are override-adjusted (#326): a pad's local/
+        # footprint clearance above config.clearance is subtracted, so the
+        # allowed_half below necks to the pad's OWN required clearance.
+        d = min(_seg_foreign_pad_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer,
+                                      base_clearance=config.clearance),
                 _seg_foreign_seg_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer))
         allowed_half = d - config.clearance - 1e-4  # 1e-4: stay just inside the rule
         if allowed_half < s.width / 2.0 - 1e-9:
@@ -546,9 +576,11 @@ def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
     if abs(ox - fx) < 1e-9 and abs(oy - fy) < 1e-9:
         return False  # exact endpoint already is the grid cell
     margin = config.clearance + config.get_net_track_width(net_id, ol) / 2.0
-    if _pt_foreign_pad_dist(pcb_data, net_id, fx, fy, ol) >= margin:
+    if _pt_foreign_pad_dist(pcb_data, net_id, fx, fy, ol,
+                            base_clearance=config.clearance) >= margin:
         return False  # grid cell already clear -> nothing to fix
-    if _pt_foreign_pad_dist(pcb_data, net_id, ox, oy, ol) < margin:
+    if _pt_foreign_pad_dist(pcb_data, net_id, ox, oy, ol,
+                            base_clearance=config.clearance) < margin:
         return False  # exact endpoint also too close (placement) -> can't fix here
     nx, ny = pts[neighbor_idx]
     # Only relocate the endpoint of a SHORT terminal segment. simplify_path (caller,
@@ -559,7 +591,8 @@ def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
     # caller's short connecting stub run out to the exact point instead.
     if math.hypot(nx - fx, ny - fy) > 1.5 * config.grid_step:
         return False  # long terminal segment -> keep grid end + short stub
-    if _seg_foreign_pad_dist(pcb_data, net_id, ox, oy, nx, ny, ol) < margin - 1e-6:
+    if _seg_foreign_pad_dist(pcb_data, net_id, ox, oy, nx, ny, ol,
+                             base_clearance=config.clearance) < margin - 1e-6:
         return False  # merged terminal segment would graze -> keep grid + stub
     pts[term_idx] = (ox, oy)
     return True
@@ -1039,7 +1072,8 @@ def _probe_route_with_frontier_once(
 def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                               obstacles: GridObstacleMap,
                               attraction_path: Optional[List[Tuple[int, int, int]]] = None,
-                              reverse_direction: bool = False) -> Optional[dict]:
+                              reverse_direction: bool = False,
+                              bounds: Optional[Tuple[int, int, int, int]] = None) -> Optional[dict]:
     """Route a single net using pre-built obstacles (for incremental routing).
 
     Args:
@@ -1051,6 +1085,13 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                         List of (gx, gy, layer) tuples from a previously routed neighbor.
         reverse_direction: If True, swap sources and targets (route from targets to sources).
                           Used for bus routing when the clique was formed by targets.
+        bounds: Optional (gmin_x, gmin_y, gmax_x, gmax_y) grid-cell window the route
+                must stay inside (the scoped net_rescue window, #396). When set,
+                endpoints outside it are dropped (a long trunk segment pulled into a
+                small window contributes a free end OUTSIDE the window bounds, and
+                routing to it drags the A* through the un-modelled exterior), and the
+                source/target overrides below are never stamped outside it -- so the
+                window fence stays SOLID instead of being punched at the exempt cell.
     """
     # Find endpoints (segments or pads)
     sources, targets, error = get_net_endpoints(pcb_data, net_id, config)
@@ -1065,6 +1106,15 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # Swap source/target for bus routing from clustered targets
     if reverse_direction:
         sources, targets = targets, sources
+
+    # Clamp endpoints to the scoped window: nothing outside the fence may be a
+    # source/target, so the A* is never pulled past the fence into un-modelled space.
+    if bounds is not None:
+        bgx0, bgy0, bgx1, bgy1 = bounds
+        sources = [s for s in sources if bgx0 <= s[0] <= bgx1 and bgy0 <= s[1] <= bgy1]
+        targets = [t for t in targets if bgx0 <= t[0] <= bgx1 and bgy0 <= t[1] <= bgy1]
+        if not sources or not targets:
+            return None
 
     coord = GridCoord(config.grid_step)
     layer_names = config.layers
@@ -1085,17 +1135,24 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     # Add source and target positions as allowed cells to override BGA zone blocking
     # This only affects BGA zone blocking, not regular obstacle blocking (tracks, stubs, pads)
+    # When a window `bounds` is given, never exempt a cell in/beyond the fence: the
+    # allowed/source-target overrides are the only thing that can breach the fence, so
+    # keeping them strictly inside the window keeps the fence solid (#396).
+    def _exempt_ok(gx, gy):
+        return bounds is None or (bounds[0] <= gx <= bounds[2] and bounds[1] <= gy <= bounds[3])
     allow_radius = 10
     for gx, gy, _ in sources_grid + targets_grid:
         for dx in range(-allow_radius, allow_radius + 1):
             for dy in range(-allow_radius, allow_radius + 1):
-                obstacles.add_allowed_cell(gx + dx, gy + dy)
+                if _exempt_ok(gx + dx, gy + dy):
+                    obstacles.add_allowed_cell(gx + dx, gy + dy)
 
     # Mark exact source/target cells so routing can start/end there even if blocked by
     # adjacent track expansion (but NOT blocked by BGA zones - use allowed_cells for that)
     # NOTE: Must pass layer to only allow override on the specific layer of the endpoint
     for gx, gy, layer in sources_grid + targets_grid:
-        obstacles.add_source_target_cell(gx, gy, layer)
+        if _exempt_ok(gx, gy):
+            obstacles.add_source_target_cell(gx, gy, layer)
 
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
@@ -1597,6 +1654,21 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
         # copper: once that window closes the pad may be genuinely tappable.
         if not (inflight_vias or inflight_segments):
             cache.add(key)
+            # #331 item 3 (#189): name the committed copper that boxed this
+            # pad. The A* frontier never reaches copper directly under the
+            # pad (the ottercast SDC0_D3 In1 trace), so frontier attribution
+            # blames adjacent bystanders while the decisive blocker stays
+            # invisible. The rip-up ladder consumes this to rip the keystone.
+            from plane_blocker_detection import find_via_position_blocker
+            blocker = find_via_position_blocker(
+                pad_obj.global_x, pad_obj.global_y, pcb_data, config,
+                net_id, protected_net_ids={0}, quiet=True)
+            if blocker is not None:
+                blame = getattr(pcb_data, '_via_unblock_blame', None)
+                if blame is None:
+                    blame = {}
+                    pcb_data._via_unblock_blame = blame
+                blame.setdefault(net_id, set()).add(blocker)
         return None
     v = tap_res.via
     via = Via(x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
@@ -1686,7 +1758,7 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
     lim = config.max_probe_iterations
     coord = GridCoord(config.grid_step)
 
-    _dbg = _UNBLOCK_DEBUG
+    _dbg = _unblock_debug()
     placed = []  # (via, vgx, vgy, pad_layer_idx)
     new_sources, new_targets = sources, targets
     # backward probe (from targets) exhausted -> the TARGET pad is boxed
@@ -3082,6 +3154,14 @@ def _route_multipoint_taps_impl(
         # edge (issue #189) -- it connects the inner-layer path end to the pad by
         # copper overlap, no extra trace needed.
         vias = list(vias) + unblock_vias
+        # A tap edge that launches from an off-grid tap point an earlier edge
+        # already bridged re-emits that edge's endpoint connector (path[0]
+        # maps through tap_point_map back to the sampled copper's ORIGINAL
+        # float point, and _path_to_segments_vias bridges original->grid
+        # again). Emit only copper the net does not already have, so no
+        # duplicate coincident segment ships to the output. Runs last, after
+        # the width passes above, since the twin key includes seg.width.
+        segments = _drop_segments_already_present(segments, all_segments)
         all_segments.extend(segments)
         all_vias.extend(vias)
         # Make this edge's vias reusable by later edges of the same net, so a
@@ -3142,6 +3222,32 @@ def _route_multipoint_taps_impl(
     updated_result['failed_edge_blocking'] = failed_edge_blocking
 
     return updated_result
+
+
+def _drop_segments_already_present(segments: List[Segment],
+                                   existing: List[Segment]) -> List[Segment]:
+    """Drop segments that exactly duplicate one already in ``existing``
+    (same endpoints in either orientation, same layer, width and net).
+
+    The Phase-3 tap flow launches from points ON the net's existing copper
+    (get_all_segment_tap_points). When the A* start cell maps back through
+    tap_point_map to an off-grid original point that an earlier edge already
+    bridged to that same grid cell, _path_to_segments_vias re-emits the
+    identical endpoint connector -- a second coincident copy of a tiny
+    (~0.02 mm) segment at the stub tip. A geometric twin adds no copper, so
+    dropping it changes neither connectivity nor DRC.
+    """
+    def _key(s):
+        return ((round(s.start_x, 6), round(s.start_y, 6)),
+                (round(s.end_x, 6), round(s.end_y, 6)),
+                s.layer, round(s.width, 6), s.net_id)
+
+    existing_keys = set()
+    for s in existing:
+        k = _key(s)
+        existing_keys.add(k)
+        existing_keys.add((k[1], k[0]) + k[2:])
+    return [s for s in segments if _key(s) not in existing_keys]
 
 
 def _path_to_segments_vias(

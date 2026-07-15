@@ -34,6 +34,7 @@ from kicad_parser import Footprint, PCBData
 from bga_fanout.types import BGAGrid
 from bga_fanout.geometry import clamp_via_to_pad
 from list_nets import fab_floors, fab_floor_ladder, fab_floor_min, warn_fab_escalation
+from routing_defaults import HOLE_TO_HOLE_CLEARANCE
 
 
 # Cardinal + diagonal steps; straight moves are cheaper so routes stay straight.
@@ -358,6 +359,45 @@ def generate_underpad_escape(footprint: Footprint,
             clamp_stats['escalated'] += 1
         return cs, cd, cs / 2 + track_width / 2 + clearance + margin
 
+    def vkeep_for_pad(p):
+        """Keep-out radius for the (clamped, #202) via that will land in pad p.
+        Pure -- no clamp_stats side effect -- so the bulk reservation loops can
+        reserve each pad's REAL (clamped) via keepout instead of the nominal
+        via_keep, which over-reserves on small/mixed-pitch pads and pre-blocks
+        corridors the smaller via leaves open (issue #378). Never larger than
+        via_keep (the clamp only shrinks), so it can only free space, never
+        under-reserve: any via that lands in a pad too small for the nominal via
+        is itself bounded by that pad's clamped size."""
+        cs = clamp_via_to_pad(via_size, via_drill, p, floors)[0]
+        return cs / 2 + track_width / 2 + clearance + margin
+
+    # Exact foreign-copper registry (issue #393) -------------------------------
+    # The occupancy grid cannot say WHOSE stamp blocked a cell, and two of its
+    # relaxations leak real conflicts between siblings of the SAME run:
+    #   * astar may drop a ball's via OFF-CENTRE anywhere in its own home disk,
+    #     gated only by the via's single centre cell on the destination layer --
+    #     the ring/drill extent vs foreign copper is never tested;
+    #   * the home exemption ignores blocked cells across the whole home disk,
+    #     and adjacent balls' home disks overlap (home radius > half pitch), so
+    #     copper committed in that lens by an earlier ball is invisible to a
+    #     later ball's route (orangecrab U3: EXT_PLL+/- off-centre vias vs the
+    #     IO_MOSI/IO_1 escapes -- a shipped short).
+    # Both are answered with exact, net-aware geometry: off-centre via sites
+    # are validated by _via_site_conflict, and home cells carrying a foreign
+    # stamp lose their exemption via _carve_foreign. The lists below mirror
+    # exactly what gets stamped into occ (plus per-item radii and net ids).
+    home_r = max(pad_keep, via_keep)
+    _EMPTY = frozenset()
+    layer_idx = {name: i for i, name in enumerate(layers)}
+    exact_vias: List[Tuple] = []      # (x, y, ring_r, drill_r, net_id) - real vias
+    exact_segs: List[Tuple] = []      # (x1, y1, x2, y2, half_w, net_id, layer) - real tracks
+    reserved_sites: List[Tuple] = []  # (x, y, ring_r, drill_r, net_id) - pending via-in-pads
+    carve_disks: List[Tuple] = []     # (x, y, keep_r, layer_idx_or_None, net_id) - stamps
+    exact_pads = [(p2.global_x, p2.global_y, max(p2.size_x, p2.size_y) / 2.0,
+                   (p2.drill or 0.0) / 2.0, p2.net_id,
+                   p2.pad_type != 'np_thru_hole')
+                  for p2 in footprint.pads]
+
     # Static obstacles ---------------------------------------------------------
     # EVERY footprint pad blocks copper - including unconnected (net 0) balls,
     # which still occupy F.Cu. SMD blocks only F.Cu; through-hole blocks all
@@ -365,15 +405,25 @@ def generate_underpad_escape(footprint: Footprint,
     for p in footprint.pads:
         if p.drill and p.drill > 0:
             occ.block_all(p.global_x, p.global_y, pad_keep)
+            carve_disks.append((p.global_x, p.global_y, pad_keep, None, p.net_id))
         else:
             occ.block_layer(top_idx, p.global_x, p.global_y, pad_keep)
-    # Plane balls tap their plane through a via -> block all layers.
+            carve_disks.append((p.global_x, p.global_y, pad_keep, top_idx, p.net_id))
+    # Plane balls tap their plane through a via -> block all layers. Reserve each
+    # ball's own clamped-via keepout (#378), not the nominal via_keep.
     for p in plane_pads:
-        occ.block_all(p.global_x, p.global_y, via_keep)
+        occ.block_all(p.global_x, p.global_y, vkeep_for_pad(p))
+        cs, cd = clamp_via_to_pad(via_size, via_drill, p, floors)[:2]
+        reserved_sites.append((p.global_x, p.global_y, cs / 2.0, cd / 2.0, p.net_id))
+        carve_disks.append((p.global_x, p.global_y, vkeep_for_pad(p), None, p.net_id))
     # Existing vias / copper on the board within the region.
     for v in pcb_data.vias:
         if bounds[0] <= v.x <= bounds[2] and bounds[1] <= v.y <= bounds[3]:
-            occ.block_all(v.x, v.y, v.size / 2 + track_width / 2 + clearance)
+            vkeep_v = v.size / 2 + track_width / 2 + clearance
+            occ.block_all(v.x, v.y, vkeep_v)
+            exact_vias.append((v.x, v.y, v.size / 2.0,
+                               (getattr(v, 'drill', 0) or 0.0) / 2.0, v.net_id))
+            carve_disks.append((v.x, v.y, vkeep_v, None, v.net_id))
     layer_set = set(layers)
     route_net_ids = {p.net_id for p in signal_pads}
     for s in pcb_data.segments:
@@ -391,6 +441,8 @@ def generate_underpad_escape(footprint: Footprint,
         li = layers.index(s.layer)
         occ.block_segment(li, (s.start_x, s.start_y), (s.end_x, s.end_y),
                           s.width / 2 + track_width / 2 + clearance)
+        exact_segs.append((s.start_x, s.start_y, s.end_x, s.end_y,
+                           (s.width or 0.0) / 2.0, s.net_id, li))
 
     # IMMOVABLE foreign components' pads in the region (locked parts,
     # connectors, test points -- anything place_fanout_clearance will not
@@ -412,15 +464,23 @@ def generate_underpad_escape(footprint: Footprint,
         p_keep = p_half + track_width / 2 + clearance + margin
         if p.drill and p.drill > 0:
             occ.block_all(p.global_x, p.global_y, p_keep)
+            carve_disks.append((p.global_x, p.global_y, p_keep, None, p.net_id))
+            # TH/NPTH copper + drill for the exact via-site check (#393); the
+            # locked-SMD copper stays with via_site_ok's exact rect test.
+            exact_pads.append((p.global_x, p.global_y, p_half, p.drill / 2.0,
+                               p.net_id, p.pad_type != 'np_thru_hole'))
             continue
         pad_layer_names = p.layers or []
         if '*.Cu' in pad_layer_names:
             occ.block_all(p.global_x, p.global_y, p_keep)
+            carve_disks.append((p.global_x, p.global_y, p_keep, None, p.net_id))
         else:
             for lname in pad_layer_names:
                 if lname in layer_set:
                     occ.block_layer(layers.index(lname),
                                     p.global_x, p.global_y, p_keep)
+                    carve_disks.append((p.global_x, p.global_y, p_keep,
+                                        layers.index(lname), p.net_id))
         locked_smd_pads.append(p)
 
     def via_site_ok(x, y, v_half):
@@ -462,6 +522,169 @@ def generate_underpad_escape(footprint: Footprint,
                                             p.global_x, p.global_y, p_keep,
                                             p.net_id)
 
+    # Issue #393 helpers -------------------------------------------------------
+    def _carve_foreign(anchors, home, net_ids):
+        """Home cells whose occupancy stamp came from FOREIGN copper.
+
+        The home exemption exists so a route can break out of its OWN pad/via
+        keep-out ring; it must not also hide a neighbour's committed via/track
+        or pad stamp that reaches into the home disk (adjacent balls' home
+        disks overlap). Returns (all_layers_cells, {layer_idx: cells}); cells
+        listed stay blocked despite being in `home`. Same-net stamps are NOT
+        carved (crossing own-net copper is not a DRC conflict), so an escape-
+        priority extras pass can still exit over its net's pass-1 copper.
+        """
+        c_all: set = set()
+        c_lay: dict = {}
+        if not home:
+            return c_all, c_lay
+
+        def near_pt(x, y, reach):
+            return any((x - ax) ** 2 + (y - ay) ** 2 < reach * reach
+                       for ax, ay in anchors)
+
+        def add(cells, li):
+            cells &= home
+            if not cells:
+                return
+            if li is None:
+                c_all.update(cells)
+            else:
+                c_lay.setdefault(li, set()).update(cells)
+
+        for (x, y, keep, li, nid) in carve_disks:
+            if nid in net_ids or not near_pt(x, y, home_r + keep):
+                continue
+            add(set(occ._disk(x, y, keep)), li)
+        for v in vias_to_add:
+            keep = v['size'] / 2.0 + track_width / 2 + clearance + margin
+            if v['net_id'] in net_ids or not near_pt(v['x'], v['y'], home_r + keep):
+                continue
+            add(set(occ._disk(v['x'], v['y'], keep)), None)
+
+        def add_seg(x1, y1, x2, y2, keep, li):
+            dx, dy = x2 - x1, y2 - y1
+            slen = math.hypot(dx, dy)
+            n = int(slen / res) + 1
+            reach = (home_r + keep + res) / max(slen, 1e-9)
+            idxs = set()
+            for ax, ay in anchors:
+                t = (((ax - x1) * dx + (ay - y1) * dy) / (slen * slen)
+                     if slen > 0 else 0.0)
+                k0 = max(0, int((t - reach) * n))
+                k1 = min(n, int((t + reach) * n) + 1)
+                idxs.update(range(k0, k1 + 1))
+            cells = set()
+            for i in idxs:
+                t = i / n
+                cells |= set(occ._disk(x1 + dx * t, y1 + dy * t, keep))
+            add(cells, li)
+
+        def seg_near(x1, y1, x2, y2, reach):
+            dx, dy = x2 - x1, y2 - y1
+            L2 = dx * dx + dy * dy
+            for ax, ay in anchors:
+                if L2 > 0:
+                    t = max(0.0, min(1.0, ((ax - x1) * dx + (ay - y1) * dy) / L2))
+                    d2 = (ax - (x1 + t * dx)) ** 2 + (ay - (y1 + t * dy)) ** 2
+                else:
+                    d2 = (ax - x1) ** 2 + (ay - y1) ** 2
+                if d2 < reach * reach:
+                    return True
+            return False
+
+        for (x1, y1, x2, y2, half_w, nid, li) in exact_segs:
+            keep = half_w + track_width / 2 + clearance
+            if nid in net_ids or not seg_near(x1, y1, x2, y2, home_r + keep):
+                continue
+            add_seg(x1, y1, x2, y2, keep, li)
+        for tr in tracks:
+            if tr['net_id'] in net_ids:
+                continue
+            (x1, y1), (x2, y2) = tr['start'], tr['end']
+            if not seg_near(x1, y1, x2, y2, home_r + trk_keep):
+                continue
+            add_seg(x1, y1, x2, y2, trk_keep, layer_idx[tr['layer']])
+        return c_all, c_lay
+
+    def _eff_exempt(home, carve, li):
+        """The home exemption set effective on layer li (home minus carve)."""
+        if carve is None:
+            return home
+        c_all, c_lay = carve
+        if not c_all and not c_lay:
+            return home
+        return home - c_all - c_lay.get(li, _EMPTY)
+
+    def _via_ctx(net_id, cx, cy):
+        """Gather the geometry near (cx, cy) that an off-centre via must clear
+        (one scan per ball; the per-cell check then touches only these)."""
+        W = home_r + via_size + 2.0
+
+        def close(x, y):
+            return abs(x - cx) <= W and abs(y - cy) <= W
+
+        vias = [t for t in exact_vias if close(t[0], t[1])]
+        vias += [(v['x'], v['y'], v['size'] / 2.0, (v['drill'] or 0.0) / 2.0,
+                  v['net_id']) for v in vias_to_add if close(v['x'], v['y'])]
+        resv = [t for t in reserved_sites if t[4] != net_id and close(t[0], t[1])]
+        pads = [t for t in exact_pads if close(t[0], t[1])]
+        segs = [t[:6] for t in exact_segs
+                if t[5] != net_id
+                and min(t[0], t[2]) - W <= cx <= max(t[0], t[2]) + W
+                and min(t[1], t[3]) - W <= cy <= max(t[1], t[3]) + W]
+        for tr in tracks:
+            if tr['net_id'] == net_id:
+                continue
+            (x1, y1), (x2, y2) = tr['start'], tr['end']
+            if (min(x1, x2) - W <= cx <= max(x1, x2) + W
+                    and min(y1, y2) - W <= cy <= max(y1, y2) + W):
+                segs.append((x1, y1, x2, y2, tr['width'] / 2.0, tr['net_id']))
+        return {'vias': vias, 'resv': resv, 'pads': pads, 'segs': segs}
+
+    def _via_site_conflict(x, y, net_id, ctx):
+        """Reason a full-size OFF-CENTRE via cannot sit at (x, y), or None.
+
+        Mirrors the channel engine's via_in_pad_conflict (#370 B4) but also
+        against THIS run's committed tracks/vias and the reserved (pending)
+        via-in-pad sites: an off-centre via escapes the mutual centre-
+        reservation contract, so its ring and drill must prove themselves
+        against exact geometry (#393). Drill hole-to-hole is net-INDEPENDENT
+        (same-net drill overlap is still a fab violation, #282); copper checks
+        skip same-net items.
+        """
+        vr = via_size / 2.0
+        vdr = (via_drill or 0.0) / 2.0
+        for (ox, oy, orr, odr, onid) in ctx['vias']:
+            d = math.hypot(ox - x, oy - y)
+            if d < vdr + odr + HOLE_TO_HOLE_CLEARANCE - 1e-6:
+                return "drill hole-to-hole vs a via"
+            if onid != net_id and d < vr + orr + clearance - 1e-6:
+                return "via ring vs a foreign via"
+        for (ox, oy, orr, odr, onid) in ctx['resv']:   # foreign-only by build
+            d = math.hypot(ox - x, oy - y)
+            if d < vdr + odr + HOLE_TO_HOLE_CLEARANCE - 1e-6:
+                return "drill hole-to-hole vs a reserved via-in-pad"
+            if d < vr + orr + clearance - 1e-6:
+                return "via ring vs a reserved via-in-pad"
+        for (px, py, half, pdr, pnid, has_cu) in ctx['pads']:
+            d = math.hypot(px - x, py - y)
+            if pdr and d < vdr + pdr + HOLE_TO_HOLE_CLEARANCE - 1e-6:
+                return "drill hole-to-hole vs a pad drill"
+            if has_cu and pnid != net_id and d < vr + half + clearance - 1e-6:
+                return "via ring vs a foreign pad"
+        for (x1, y1, x2, y2, half_w, snid) in ctx['segs']:
+            dx, dy = x2 - x1, y2 - y1
+            L2 = dx * dx + dy * dy
+            if L2 > 0:
+                t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / L2))
+                d = math.hypot(x - (x1 + t * dx), y - (y1 + t * dy))
+            else:
+                d = math.hypot(x - x1, y - y1)
+            if d < vr + half_w + clearance - 1e-6:
+                return "via ring vs a foreign track"
+        return None
+
     # Geometry helpers ---------------------------------------------------------
     bx0, by0 = occ.cell(grid.min_x, grid.min_y)
     bx1, by1 = occ.cell(grid.max_x, grid.max_y)
@@ -476,7 +699,8 @@ def generate_underpad_escape(footprint: Footprint,
         return min(p.global_x - grid.min_x, grid.max_x - p.global_x,
                    p.global_y - grid.min_y, grid.max_y - p.global_y)
 
-    def astar(sx, sy, home, route_layers, allow_via, via_ok=None, net_id=0):
+    def astar(sx, sy, home, route_layers, allow_via, via_ok=None, net_id=0,
+              carve=None):
         """Route from the pad to any boundary cell.
 
         `route_layers` = the set of layer indices the track may run on. The pad
@@ -484,7 +708,22 @@ def generate_underpad_escape(footprint: Footprint,
         route_layers the route must drop a via in its own pad (the ONLY via
         allowed - mid-field vias don't fit in a dense array) and run on another
         layer. Straight moves are cheapest so escapes stay radial.
+
+        `carve` = optional (all_layers_cells, {layer: cells}) from
+        _carve_foreign: home cells that carry a FOREIGN stamp and therefore
+        keep blocking despite the home exemption (#393).
         """
+        cv_all, cv_lay = carve if carve is not None else (_EMPTY, None)
+
+        def exempt(L, c):
+            if c not in home or c in cv_all:
+                return False
+            if cv_lay:
+                s = cv_lay.get(L)
+                if s and c in s:
+                    return False
+            return True
+
         start = (sx, sy, top_idx)
         g = {start: 0.0}
         pq = [(heur(sx, sy), start)]
@@ -505,14 +744,15 @@ def generate_underpad_escape(footprint: Footprint,
                     nx, ny = cx + dx, cy + dy
                     if not occ.inside(nx, ny):
                         continue
-                    if in_bbox(nx, ny) and occ.blocked(L, nx, ny) and (nx, ny) not in home:
+                    if in_bbox(nx, ny) and occ.blocked(L, nx, ny) \
+                            and not exempt(L, (nx, ny)):
                         continue
                     # No corner-cutting: a diagonal step past a blocked orthogonal
                     # neighbour clips that obstacle's clearance (the diagonal line
                     # passes nearer the via/pad than either cell). Forbid it.
                     if dx != 0 and dy != 0:
-                        if (occ.blocked(L, cx + dx, cy) and (cx + dx, cy) not in home) or \
-                           (occ.blocked(L, cx, cy + dy) and (cx, cy + dy) not in home):
+                        if (occ.blocked(L, cx + dx, cy) and not exempt(L, (cx + dx, cy))) or \
+                           (occ.blocked(L, cx, cy + dy) and not exempt(L, (cx, cy + dy))):
                             continue
                     step = 1.0 if (dx == 0 or dy == 0) else 1.6   # discourage zig-zag
                     # Soft keep-out (#278): stepping through a movable
@@ -633,7 +873,7 @@ def generate_underpad_escape(footprint: Footprint,
         elif _ok((ax, ay), (gx, gy)):
             pts[-1] = (gx, gy)
 
-    def commit(p, path):
+    def commit(p, path, carve=None):
         """Emit tracks + the via-in-pad for a found path and mark occupancy."""
         nonlocal nvia
         sx, sy = occ.cell(p.global_x, p.global_y)
@@ -660,7 +900,8 @@ def generate_underpad_escape(footprint: Footprint,
             if ri == 0 and pts:
                 pts[0] = (p.global_x, p.global_y)  # start exactly at the pad
             if ri == len(runs) - 1:
-                snap_exit_end(pts, li, exempt=home, net_id_for_snap=net_id)
+                snap_exit_end(pts, li, exempt=_eff_exempt(home, carve, li),
+                              net_id_for_snap=net_id)
             runs_pts.append(pts)
         for ri, (li, cells) in enumerate(runs):
             for (ix, iy) in cells:
@@ -751,6 +992,19 @@ def generate_underpad_escape(footprint: Footprint,
         # Two escape directions perpendicular to the axis; nearer boundary first.
         cand_e = sorted([(-ay, ax), (ay, -ax)], key=lambda e: boundary_dist(mx, my, e))
         homes = home_of(pp) | home_of(nn)
+        # Foreign copper in the pair's home lens keeps blocking (#393). The
+        # partner's OWN pad/reservation is not carved (both pair nets exempt):
+        # partner-vs-partner spacing is the coupled template's own contract.
+        carve = _carve_foreign([(pp.global_x, pp.global_y),
+                                (nn.global_x, nn.global_y)],
+                               homes, {pp.net_id, nn.net_id})
+        eff_cache = {}
+
+        def eff(L):
+            s = eff_cache.get(L)
+            if s is None:
+                s = eff_cache[L] = _eff_exempt(homes, carve, L)
+            return s
         # Two passes (#278): first demand corridors whose runs stay clear of
         # every foreign movable-cap pad (soft keep-out); only if no such
         # corridor exists anywhere accept a grazing one.
@@ -774,13 +1028,13 @@ def generate_underpad_escape(footprint: Footprint,
                           my + Lc * ey + side * half_sp * ay)
                     pe = (mx + De * ex + side * half_sp * ax,
                           my + De * ey + side * half_sp * ay)
-                    if not (occ.seg_clear(L, p0, pc, exempt=homes)
-                            and occ.seg_clear(L, pc, pe, exempt=homes)):
+                    if not (occ.seg_clear(L, p0, pc, exempt=eff(L))
+                            and occ.seg_clear(L, pc, pe, exempt=eff(L))):
                         ok = False
                         break
                     if strict and (
-                            occ.seg_soft_hits(L, p0, pc, pad.net_id, exempt=homes)
-                            or occ.seg_soft_hits(L, pc, pe, pad.net_id, exempt=homes)):
+                            occ.seg_soft_hits(L, p0, pc, pad.net_id, exempt=eff(L))
+                            or occ.seg_soft_hits(L, pc, pe, pad.net_id, exempt=eff(L))):
                         ok = False
                         break
                     segs.append((pad, p0, pc, pe))
@@ -830,6 +1084,12 @@ def generate_underpad_escape(footprint: Footprint,
         ax, ay = ax / al, ay / al
         half_axis = al / 2.0
         run = max(0.3, 2.0 * half_sp)            # length of the clean parallel tail
+        # Foreign copper in either ball's home lens keeps blocking (#393);
+        # the partner's own pad/reservation stays exempt (template contract).
+        _nets = {pp.net_id, nn.net_id}
+        hp, hn = home_of(pp), home_of(nn)
+        cvp = _carve_foreign([(pp.global_x, pp.global_y)], hp, _nets)
+        cvn = _carve_foreign([(nn.global_x, nn.global_y)], hn, _nets)
         # Same soft keep-out preference as try_coupled (#278): soft-free first.
         for strict in ((True, False) if occ.has_soft else (False,)):
           for sgn in (1.0, -1.0):                # escape direction along the axis
@@ -843,9 +1103,9 @@ def generate_underpad_escape(footprint: Footprint,
             # (only the ball's own home is exempt), so the trail must really clear
             # the lead's via.
             if ex * (pp.global_x - mx) + ey * (pp.global_y - my) > 0:
-                lead, trail, lh, th = pp, nn, home_of(pp), home_of(nn)
+                lead, trail, lh, th, lcv, tcv = pp, nn, hp, hn, cvp, cvn
             else:
-                lead, trail, lh, th = nn, pp, home_of(nn), home_of(pp)
+                lead, trail, lh, th, lcv, tcv = nn, pp, hn, hp, cvn, cvp
 
             def pt(along, off):
                 return (mx + along * ex + off * px, my + along * ey + off * py)
@@ -864,13 +1124,15 @@ def generate_underpad_escape(footprint: Footprint,
                     trail_segs = [((trail.global_x, trail.global_y), W),
                                   (W, pt(De - run, tside * half_sp)),
                                   (pt(De - run, tside * half_sp), pt(De, tside * half_sp))]
-                    if not (all(occ.seg_clear(L, a, b, exempt=lh) for a, b in lead_segs)
-                            and all(occ.seg_clear(L, a, b, exempt=th) for a, b in trail_segs)):
+                    exl = _eff_exempt(lh, lcv, L)
+                    ext = _eff_exempt(th, tcv, L)
+                    if not (all(occ.seg_clear(L, a, b, exempt=exl) for a, b in lead_segs)
+                            and all(occ.seg_clear(L, a, b, exempt=ext) for a, b in trail_segs)):
                         continue
                     if strict and (
-                            any(occ.seg_soft_hits(L, a, b, lead.net_id, exempt=lh)
+                            any(occ.seg_soft_hits(L, a, b, lead.net_id, exempt=exl)
                                 for a, b in lead_segs)
-                            or any(occ.seg_soft_hits(L, a, b, trail.net_id, exempt=th)
+                            or any(occ.seg_soft_hits(L, a, b, trail.net_id, exempt=ext)
                                    for a, b in trail_segs)):
                         continue
                     for segs, pad in ((lead_segs, lead), (trail_segs, trail)):
@@ -903,10 +1165,12 @@ def generate_underpad_escape(footprint: Footprint,
                 inner_pads.append(p)
                 continue
             sx, sy = occ.cell(p.global_x, p.global_y)
-            path = astar(sx, sy, home_of(p), {top_idx}, allow_via=False,
-                         net_id=p.net_id)
+            home = home_of(p)
+            carve = _carve_foreign([(p.global_x, p.global_y)], home, {p.net_id})
+            path = astar(sx, sy, home, {top_idx}, allow_via=False,
+                         net_id=p.net_id, carve=carve)
             if path is not None:
-                commit(p, path)
+                commit(p, path, carve)
                 n_fcu += 1
             else:
                 inner_pads.append(p)
@@ -937,11 +1201,19 @@ def generate_underpad_escape(footprint: Footprint,
     # P's via) and P's later via collide (via-segment short). Pairs that already
     # escaped via-less on top are NOT reserved, so deeper inner runs stay open
     # beneath them.
+    def _reserve_via_site(p):
+        vk = vkeep_for_pad(p)
+        occ.block_all(p.global_x, p.global_y, vk)
+        cs, cd = clamp_via_to_pad(via_size, via_drill, p, floors)[:2]
+        reserved_sites.append((p.global_x, p.global_y, cs / 2.0, cd / 2.0,
+                               p.net_id))
+        carve_disks.append((p.global_x, p.global_y, vk, None, p.net_id))
+
     for p in inner_pads:
-        occ.block_all(p.global_x, p.global_y, via_keep)
+        _reserve_via_site(p)
     for _base, pp, nn in remaining_pairs:
-        occ.block_all(pp.global_x, pp.global_y, via_keep)
-        occ.block_all(nn.global_x, nn.global_y, via_keep)
+        _reserve_via_site(pp)
+        _reserve_via_site(nn)
 
     # Phase C2: escape the remaining pairs coupled on an inner layer (via-in-pad),
     # deepest-first so the interior claims the scarce central space. A pair that
@@ -962,20 +1234,36 @@ def generate_underpad_escape(footprint: Footprint,
     inner_pads.sort(key=depth, reverse=True)
     for p in inner_pads:
         sx, sy = occ.cell(p.global_x, p.global_y)
-        _via_ok = None
-        if locked_smd_pads:
-            _cs = clamp_via_to_pad(via_size, via_drill, p, floors)[0]
-            _via_ok = (lambda x, y, at_center, cs=_cs, vs=via_size:
-                       via_site_ok(x, y, (cs if at_center else vs) / 2.0))
-        path = astar(sx, sy, home_of(p), inner_layers, allow_via=True,
-                     via_ok=_via_ok, net_id=p.net_id)
+        home = home_of(p)
+        carve = _carve_foreign([(p.global_x, p.global_y)], home, {p.net_id})
+        _cs = clamp_via_to_pad(via_size, via_drill, p, floors)[0]
+        _ctx = _via_ctx(p.net_id, p.global_x, p.global_y)
+        _memo = {}
+
+        def _via_ok(x, y, at_center, _cs=_cs, _nid=p.net_id, _c=_ctx, _m=_memo):
+            if locked_smd_pads and not via_site_ok(
+                    x, y, (_cs if at_center else via_size) / 2.0):
+                return False
+            if at_center:
+                # centre via-in-pads keep their mutual-reservation contract
+                # (Phase B keep-outs) -- clamped inside the pad by commit().
+                return True
+            key = (round(x, 6), round(y, 6))
+            ok = _m.get(key)
+            if ok is None:
+                ok = _via_site_conflict(x, y, _nid, _c) is None
+                _m[key] = ok
+            return ok
+
+        path = astar(sx, sy, home, inner_layers, allow_via=True,
+                     via_ok=_via_ok, net_id=p.net_id, carve=carve)
         if path is None and nl > 1:
-            path = astar(sx, sy, home_of(p), set(range(nl)), allow_via=True,
-                         via_ok=_via_ok, net_id=p.net_id)
+            path = astar(sx, sy, home, set(range(nl)), allow_via=True,
+                         via_ok=_via_ok, net_id=p.net_id, carve=carve)
         if path is None:
             failed.append(p.net_name)
             continue
-        commit(p, path)
+        commit(p, path, carve)
 
     if verbose:
         already = f", {len(fanned_net_ids)} already-fanned skipped" if fanned_net_ids else ""

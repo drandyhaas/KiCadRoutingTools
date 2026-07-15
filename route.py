@@ -238,6 +238,29 @@ def _dump_engine_config(engine, cfg):
         pass
 
 
+def _empty_results_data() -> dict:
+    """The return_results contract with every field empty (#382 E5).
+
+    batch_route's early-return paths (nothing to route, KWARGS-dump exit) used
+    to emit ad-hoc subsets of these keys, so a GUI caller that iterated a key
+    the full path always provides would KeyError on an early exit. This is the
+    single source for the empty shape; it must carry EXACTLY the keys the full
+    path builds (see the `if return_results:` block), all as empty lists.
+    """
+    return {
+        'results': [],
+        'all_swap_vias': [],
+        'all_swap_segments': [],
+        'pad_swaps': [],
+        'single_ended_target_swap_info': [],
+        'all_segment_modifications': [],
+        'exclusion_zone_lines': [],
+        'boundary_debug_labels': [],
+        'segments_to_remove': [],
+        'vias_to_remove': [],
+    }
+
+
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
@@ -398,9 +421,34 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'w') as _f:
                 _json.dump(_dump, _f, indent=1, sort_keys=True)
             if return_results:
-                return 0, 0, 0.0, {'results': [], 'segments_to_remove': []}
+                return 0, 0, 0.0, _empty_results_data()
             return 0, 0, 0.0
     visualize = vis_callback is not None
+
+    # Board-setup copper-to-edge rule (#338): KiCad enforces the sibling
+    # .kicad_pro's min_copper_edge_clearance, so route to at least it. Done in
+    # the ENGINE (not main()) so the GUI and manifest/plan replays inherit it;
+    # a missing project reads 0.0 (no-op) and an explicit larger
+    # --board-edge-clearance still wins (max).
+    if input_file:
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            _eff_edge = effective_board_edge_clearance(input_file, board_edge_clearance)
+            if _eff_edge > (board_edge_clearance or 0.0):
+                print(f"Board edge clearance {_eff_edge}mm "
+                      f"(project min_copper_edge_clearance)")
+                board_edge_clearance = _eff_edge
+        except Exception:
+            pass
+        # Carry the RESOLVED value into the end-of-run reconciliation kwargs:
+        # the snapshot above was taken before this resolution, and the
+        # reconciliation self-invocation reads the OUTPUT file, whose sibling
+        # .kicad_pro does not exist yet (main() writes it after batch_route
+        # returns) -- so the sub-run re-resolved 0.0 and stamped its board-edge
+        # band at the track-clearance fallback (ottercast_audio BT_PCM_DIN/
+        # BT_PCM_SYNC: 16 board-edge violations laid by the reconciliation's
+        # phase-1/phase-3 routes inside the 0.5mm project edge band).
+        _reconcile_kwargs['board_edge_clearance'] = board_edge_clearance
 
     # Track memory if debug_memory enabled
     mem_start = get_process_memory_mb() if debug_memory else 0.0
@@ -527,6 +575,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(f"Keepout: blocking routes from {len(pcb_data.keepout_zones)} "
               f"polygon(s) on {config.keepout_layer}")
 
+    # Per-net netclass clearances (#326 B5): carried on the config so the
+    # per-net obstacle cache and the same-run copper stamps reserve each net's
+    # OWN class clearance (the base map additionally applies the max-flatten
+    # below). net_id-keyed, GUI-fed today; harmless when empty.
+    if net_clearances:
+        config.net_clearances = {nid: c for nid, c in net_clearances.items()
+                                 if c and c > 0}
+
     # Identify power nets and set up per-net widths
     if power_nets and power_nets_widths:
         if len(power_nets) != len(power_nets_widths):
@@ -562,12 +618,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # already-connected, or failed nets -- while still excluding nets the user
     # left out (GND / power planes routed in a later stage). Issue #84.
     _scope_names = set(net_names or [])
-    sweep_scope_ids = {nid for nid, net in pcb_data.nets.items()
-                       if net.name in _scope_names} or set(net_ids)
+    # #369 A16: resolve_net_ids returns (name, id) TUPLES -- the old
+    # `or set(net_ids)` fallback filled the scope with tuples that can never
+    # equal an int net_id, silently no-op'ing the dead-end sweep and the
+    # stale-copper strips whenever the name scope came up empty. Union the
+    # resolved ids in directly (as ints): pad-only nets, present in
+    # pads_by_net but absent from pcb.nets, match no pcb.nets name and fell
+    # out of scope entirely.
+    sweep_scope_ids = ({nid for nid, net in pcb_data.nets.items()
+                        if net.name in _scope_names}
+                       | {nid for _name, nid in net_ids})
     if not net_ids:
         print("No valid nets to route!")
         if return_results:
-            return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
+            return 0, 0, 0.0, _empty_results_data()
         _write_passthrough_output(input_file, output_file)
         return 0, 0, 0.0
 
@@ -575,7 +639,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if not net_ids:
         print("All nets are already fully connected - nothing to route!")
         if return_results:
-            return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
+            return 0, 0, 0.0, _empty_results_data()
         _write_passthrough_output(input_file, output_file)
         return 0, 0, 0.0
 
@@ -592,7 +656,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     single_ended_target_swap_info: List[Dict] = []
     boundary_debug_labels: List[Dict] = []  # Debug labels for boundary positions
     if swappable_net_patterns:
-        from target_swap import apply_single_ended_target_swaps
+        from target_swap import apply_single_ended_target_swaps, summarize_target_swaps
 
         # Find matching single-ended nets
         swappable_se_nets = find_single_ended_nets(
@@ -999,6 +1063,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"{len(keep_segs)} segment(s) + {len(keep_vias)} via(s) of its "
                   f"pre-rip route (dropped {dropped} colliding piece(s)); "
                   f"net remains PARTIAL for a later reconnect pass")
+
+    # Issues #331/#371: last-chance scoped fine-parameter rescue for nets the
+    # whole pipeline (main loop, rip-up ladder, reroute loop, Phase 3, #134
+    # recovery) still left failed or partially connected. No rip-up and no
+    # flags - scoped windows at finer grid/track/clearance only (net_rescue).
+    # Runs BEFORE the summary counts so recovered nets grade as routed, and
+    # before the cleanup pipeline so rescue copper is swept like all other
+    # copper. KICAD_NET_RESCUE=0 disables it for A/B debugging.
+    if progress_callback:
+        progress_callback(0, 0, "Rescuing failed nets...")
+    from net_rescue import rescue_failed_nets
+    rescue_summary = rescue_failed_nets(state, single_ended_nets,
+                                        net_clearances=net_clearances)
 
     # Final progress update
     if progress_callback:
@@ -1430,7 +1507,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if rerouted_pairs:
         print(f"  Rerouted:      {len(rerouted_pairs)} (ripped nets re-routed)")
     if single_ended_target_swaps:
-        swap_pairs = [(k, v) for k, v in single_ended_target_swaps.items() if k < v]
+        from target_swap import summarize_target_swaps
+        swap_pairs = summarize_target_swaps(single_ended_target_swaps)
         print(f"  Target swaps:  {len(swap_pairs)}")
     print(f"  Total vias:    {total_vias}")
     print(f"  Total time:    {total_time:.2f}s")
@@ -1452,6 +1530,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if failed_single_ids:
         print_failed_net_histories(state, failed_single_ids, pcb_data)
 
+    from target_swap import summarize_target_swaps  # cycle-safe swap list (#380)
     summary = {
         'routed_single': routed_single,
         'failed_single': failed_single,
@@ -1472,7 +1551,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         'multipoint_edges_failed': tap_edges_failed,
         'ripup_success_pairs': sorted(ripup_success_pairs),
         'rerouted_pairs': sorted(rerouted_pairs),
-        'single_ended_target_swaps': [{'net1': k, 'net2': v} for k, v in single_ended_target_swaps.items() if k < v],
+        'single_ended_target_swaps': [{'net1': k, 'net2': v} for k, v in summarize_target_swaps(single_ended_target_swaps)],
         'layer_swaps': total_layer_swaps,
         'successful': successful,
         'failed': failed,
@@ -1486,6 +1565,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # taps below the nominal). Grade/check_drc the board at this floor.
         'min_clearance_used': __import__('clearance_ledger').effective(clearance),
     }
+    if rescue_summary:
+        # #331/#371 rescue pass outcome (key absent when nothing was rescued,
+        # so pre-rescue JSON_SUMMARY consumers/diffs are unaffected).
+        summary['rescue'] = rescue_summary
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
     # Write output file or return results for direct application
@@ -1708,7 +1791,9 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--direction", "-d", choices=["forward", "backward"],
                         default=None,
                         help="Direction search order for each net route")
-    parser.add_argument("--no-bga-zones", nargs="*", default=None,
+    # #381 D9: accept the singular --no-bga-zone spelling too (the plane/fanout
+    # scripts spell it singular); same nargs='*' dest -- additive, plural kept.
+    parser.add_argument("--no-bga-zones", "--no-bga-zone", nargs="*", default=None,
                         help="Disable BGA exclusion zones. No args = disable all. With component refs (e.g., U1 U3) = disable only those.")
     parser.add_argument("--rip-existing-nets", nargs="+", default=None,
                         metavar="PATTERN",

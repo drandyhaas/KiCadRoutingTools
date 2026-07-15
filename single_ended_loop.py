@@ -80,7 +80,7 @@ from pcb_modification import add_route_to_pcb_data
 from single_ended_routing import route_net_with_obstacles, route_net_with_visualization, route_multipoint_main
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
-from polarity_swap import get_canonical_net_id
+from polarity_swap import get_canonical_net_id, rip_combo_already_tried
 from routing_context import (
     build_single_ended_obstacles, build_incremental_obstacles,
     prepare_obstacles_inplace, restore_obstacles_inplace
@@ -489,6 +489,33 @@ def route_single_ended_nets(
                         blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id
                     )
 
+                    # #331 item 3: a via-in-pad unblock that DECLINED during
+                    # this net's attempts recorded WHICH net's copper boxes
+                    # the pad (_place_shrunk_via_in_pad). Frontier attribution
+                    # cannot see that copper (the search never reaches under
+                    # the pad), so it blames adjacent bystanders - put the
+                    # named keystone at the FRONT of the rip ladder instead.
+                    _blame = getattr(pcb_data, '_via_unblock_blame', None)
+                    blame_ids = _blame.pop(net_id, None) if _blame else None
+                    if blame_ids:
+                        from blocking_analysis import BlockingInfo
+                        excluded = rip_exclude_set(state, net_id)
+                        for bid in sorted(blame_ids):
+                            if bid not in routed_results or bid in excluded:
+                                continue
+                            canonical = get_canonical_net_id(bid, diff_pair_by_net_id)
+                            if canonical in seen_canonical_ids:
+                                continue
+                            seen_canonical_ids.add(canonical)
+                            bname = pcb_data.nets[bid].name if bid in pcb_data.nets else str(bid)
+                            print(f"  Via-in-pad decline blamed {bname} "
+                                  f"(copper under the boxed pad) - ripping it first")
+                            rippable_blockers.insert(0, BlockingInfo(
+                                net_id=bid, net_name=bname, blocked_count=0,
+                                track_cells=0, via_cells=0, unique_cells=0,
+                                near_target_cells=0, near_source_cells=0,
+                                details="via-in-pad decline blame (#331)"))
+
                     # Progressive rip-up: try N=1, then N=2, etc up to max_rip_up_count
                     ripped_items = []
                     ripped_canonical_ids = set()  # Track which canonicals have been ripped
@@ -534,24 +561,12 @@ def route_single_ended_nets(
                         if N > len(rippable_blockers):
                             break  # Not enough blockers to rip
 
-                        # Build frozenset of all N blocker canonicals for loop check
-                        blocker_canonicals = frozenset(
-                            get_canonical_net_id(rippable_blockers[i].net_id, diff_pair_by_net_id)
-                            for i in range(N)
-                        )
-                        if (net_id, blocker_canonicals) in rip_and_retry_history:
-                            blocker_names = []
-                            for i in range(N):
-                                b = rippable_blockers[i]
-                                if b.net_id in diff_pair_by_net_id:
-                                    blocker_names.append(diff_pair_by_net_id[b.net_id][0])
-                                else:
-                                    blocker_names.append(b.net_name)
-                            if len(blocker_names) == 1:
-                                blockers_str = blocker_names[0]
-                            else:
-                                blockers_str = "{" + ", ".join(blocker_names) + "}"
-                            print(f"  Skipping N={N}: already tried ripping {blockers_str} for {net_name}")
+                        # Shared rip-history gate (#376): computes the canonical
+                        # blocker set, logs+skips if this combo was already tried.
+                        already_tried, blocker_canonicals = rip_combo_already_tried(
+                            rip_and_retry_history, net_id, net_name,
+                            rippable_blockers, N, diff_pair_by_net_id)
+                        if already_tried:
                             continue
 
                         # Rip up only the new blocker(s) for this N level

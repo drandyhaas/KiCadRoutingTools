@@ -87,15 +87,6 @@ the routing pipeline applies both so the model and the output file agree.
 
 ### Cleanup helpers (advanced)
 
-The cleanup stages are callable directly when you need them outside
-`add_route_to_pcb_data`:
-
-```python
-get_copper_layers_from_segments(segments, existing_segments=None) -> List[str]
-```
-
-Returns a new list (input is not mutated).
-
 > **Removed:** `collapse_appendices` and `fix_self_intersections` were deleted
 > (issue #159). `fix_self_intersections` resolved a same-net self-crossing by
 > *extending* a segment to a far off-grid endpoint, which created long
@@ -154,13 +145,6 @@ Disjoint-set with path compression and union by rank; keys are any hashable
 values. This is what connectivity grouping is built on.
 
 ### Other helpers
-
-```python
-point_key(x, y, layer, tolerance=0.02) -> Tuple[int, int, str]
-```
-
-Quantizes a point to a hashable key (default 20 µm buckets) — for building
-position dictionaries that tolerate float noise.
 
 ```python
 simplify_path(path: List[Tuple[int, int, str]]) -> List[...]

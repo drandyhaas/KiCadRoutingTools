@@ -33,6 +33,54 @@ from chip_boundary import (
 from geometry_utils import segments_intersect_tuple as segments_cross
 
 
+def record_target_swap(target_swaps: Dict[str, str], p1_name: str, p2_name: str) -> None:
+    """Record one applied transposition into the running permutation map (#380).
+
+    ``target_swaps`` maps each pair/net to the pair whose ORIGINAL target it now
+    holds. A transposition of p1 and p2 exchanges the two holders, composed on
+    top of any swaps already applied -- so a multi-round chain that forms a cycle
+    (apply (A,B) then (B,C) -> the 3-cycle A->B->C->A) is represented faithfully
+    as {A:B, B:C, C:A}, not flattened to the corrupt involution {A:B, B:C, C:B}
+    the old symmetric writes produced. Disjoint single-round transpositions each
+    touch a name once, so this still yields the old symmetric involution for them.
+    A name that lands back on itself is dropped (not swapped).
+    """
+    prev1 = target_swaps.get(p1_name, p1_name)
+    prev2 = target_swaps.get(p2_name, p2_name)
+    for name, owner in ((p1_name, prev2), (p2_name, prev1)):
+        if owner == name:
+            target_swaps.pop(name, None)
+        else:
+            target_swaps[name] = owner
+
+
+def summarize_target_swaps(target_swaps: Dict[str, str]) -> List[Tuple[str, str]]:
+    """Cycle-safe, deduplicated list of applied target swaps for the run summary
+    and JSON (#380). A 2-cycle {A:B, B:A} yields a single sorted pair (A, B) --
+    identical to the old ``[(k, v) for k, v in items() if k < v]`` for disjoint
+    transpositions -- while a longer cycle {A:B, B:C, C:A} yields every edge
+    (A,B), (B,C), (C,A) in cycle order, so no member is silently dropped (the old
+    ``k < v`` filter dropped the wrap-around edge and assumed symmetry)."""
+    seen: Set[str] = set()
+    out: List[Tuple[str, str]] = []
+    for start in target_swaps:
+        if start in seen:
+            continue
+        cycle: List[str] = []
+        cur = start
+        while cur in target_swaps and cur not in seen:
+            seen.add(cur)
+            cycle.append(cur)
+            cur = target_swaps[cur]
+        if len(cycle) == 2:
+            a, b = sorted(cycle)
+            out.append((a, b))
+        else:
+            for name in cycle:
+                out.append((name, target_swaps[name]))
+    return out
+
+
 def get_source_centroid(endpoint: Tuple) -> Tuple[float, float]:
     """
     Get centroid (midpoint of P and N) for a source endpoint.
@@ -799,9 +847,9 @@ def apply_single_swap(
     Returns:
         True if swap was applied successfully
     """
-    # Record the swap
-    target_swaps[p1_name] = p2_name
-    target_swaps[p2_name] = p1_name
+    # Record the swap as a composed transposition, so multi-round cycles are
+    # represented faithfully rather than corrupting the symmetric dict (#380).
+    record_target_swap(target_swaps, p1_name, p2_name)
 
     print(f"\nApplying target swap: {p1_name} <-> {p2_name}")
 
@@ -813,16 +861,20 @@ def apply_single_swap(
     p2_p_pos = (p2_tgt[5], p2_tgt[6])  # P target position for pair 2
     p2_n_pos = (p2_tgt[7], p2_tgt[8])  # N target position for pair 2
 
-    # Get layer names for filtering (when stubs share XY positions on different layers)
-    p1_layer = config.layers[p1_tgt[4]] if config else None
-    p2_layer = config.layers[p2_tgt[4]] if config else None
+    # #369 A3: walk the WHOLE connected component (layer=None) instead of the
+    # stub tip's layer only. The layer-filtered walk collected e.g. only the
+    # In1 stub of a pad(F.Cu)->jog(F.Cu)->via->stub(In1) target; the via and
+    # pad were then relabeled by proximity while the F.Cu jog kept the old
+    # net -- physically connected mixed-net copper (a short). The walk itself
+    # is safe layer-blind now: it joins layers only through a same-net via
+    # (A10), so co-located other-layer stubs are not pulled in.
+    p1_layer = None
+    p2_layer = None
 
-    # Find all segment positions connected to each target stub
-    # Pass layer to prevent mixing stubs that share XY coords on different layers
-    p1_p_positions = find_connected_segment_positions(pcb_data, p1_p_pos[0], p1_p_pos[1], p1_pair.p_net_id, layer=p1_layer)
-    p1_n_positions = find_connected_segment_positions(pcb_data, p1_n_pos[0], p1_n_pos[1], p1_pair.n_net_id, layer=p1_layer)
-    p2_p_positions = find_connected_segment_positions(pcb_data, p2_p_pos[0], p2_p_pos[1], p2_pair.p_net_id, layer=p2_layer)
-    p2_n_positions = find_connected_segment_positions(pcb_data, p2_n_pos[0], p2_n_pos[1], p2_pair.n_net_id, layer=p2_layer)
+    p1_p_positions = find_connected_segment_positions(pcb_data, p1_p_pos[0], p1_p_pos[1], p1_pair.p_net_id)
+    p1_n_positions = find_connected_segment_positions(pcb_data, p1_n_pos[0], p1_n_pos[1], p1_pair.n_net_id)
+    p2_p_positions = find_connected_segment_positions(pcb_data, p2_p_pos[0], p2_p_pos[1], p2_pair.p_net_id)
+    p2_n_positions = find_connected_segment_positions(pcb_data, p2_n_pos[0], p2_n_pos[1], p2_pair.n_net_id)
 
     # Swap net IDs in pcb_data segments at target positions
     # Also filter by layer when layers are known (prevents mixing stubs sharing XY on different layers)
@@ -834,24 +886,20 @@ def apply_single_swap(
     for seg in pcb_data.segments:
         seg_positions = {pos_key(seg.start_x, seg.start_y),
                         pos_key(seg.end_x, seg.end_y)}
-        # p1 target: p1_pair.p_net_id -> p2_pair.p_net_id (must be on p1_layer)
+        # Membership is component-scoped (the walk above), so no layer gate:
+        # gating stranded the F.Cu jog of a cross-layer target (#369 A3).
         if seg.net_id == p1_pair.p_net_id and seg_positions & p1_p_positions:
-            if p1_layer is None or seg.layer == p1_layer:
-                seg.net_id = p2_pair.p_net_id
-                p1_p_seg_count += 1
+            seg.net_id = p2_pair.p_net_id
+            p1_p_seg_count += 1
         elif seg.net_id == p1_pair.n_net_id and seg_positions & p1_n_positions:
-            if p1_layer is None or seg.layer == p1_layer:
-                seg.net_id = p2_pair.n_net_id
-                p1_n_seg_count += 1
-        # p2 target: p2_pair.p_net_id -> p1_pair.p_net_id (must be on p2_layer)
+            seg.net_id = p2_pair.n_net_id
+            p1_n_seg_count += 1
         elif seg.net_id == p2_pair.p_net_id and seg_positions & p2_p_positions:
-            if p2_layer is None or seg.layer == p2_layer:
-                seg.net_id = p1_pair.p_net_id
-                p2_p_seg_count += 1
+            seg.net_id = p1_pair.p_net_id
+            p2_p_seg_count += 1
         elif seg.net_id == p2_pair.n_net_id and seg_positions & p2_n_positions:
-            if p2_layer is None or seg.layer == p2_layer:
-                seg.net_id = p1_pair.n_net_id
-                p2_n_seg_count += 1
+            seg.net_id = p1_pair.n_net_id
+            p2_n_seg_count += 1
 
     print(f"  Swapped segments: {p1_name} target: {p1_p_seg_count}P+{p1_n_seg_count}N, {p2_name} target: {p2_p_seg_count}P+{p2_n_seg_count}N")
 
@@ -900,36 +948,32 @@ def apply_single_swap(
         p1_n_pad.net_name, p2_n_pad.net_name = p2_n_pad.net_name, p1_n_pad.net_name
         print(f"  Swapped N pads: {p1_n_pad.component_ref}:{p1_n_pad.pad_number} <-> {p2_n_pad.component_ref}:{p2_n_pad.pad_number}")
 
-    # Update pads_by_net dictionary
-    if p1_p_pad:
+    # Update pads_by_net dictionary. #369 A3: gate on BOTH pads, exactly like
+    # the net_id swap above -- re-filing one side alone put a pad whose
+    # net_id was NEVER swapped into the other net's pad list, and every
+    # pads_by_net consumer (endpoint discovery, own-pad unblock,
+    # reconciliation) then treated a net-A pad as net B's own.
+    if p1_p_pad and p2_p_pad:
         if p1_pair.p_net_id in pcb_data.pads_by_net:
-            pcb_data.pads_by_net[p1_pair.p_net_id] = [p for p in pcb_data.pads_by_net[p1_pair.p_net_id] if p != p1_p_pad]
+            pcb_data.pads_by_net[p1_pair.p_net_id] = [p for p in pcb_data.pads_by_net[p1_pair.p_net_id] if p is not p1_p_pad]
         pcb_data.pads_by_net.setdefault(p2_pair.p_net_id, []).append(p1_p_pad)
-    if p2_p_pad:
         if p2_pair.p_net_id in pcb_data.pads_by_net:
-            pcb_data.pads_by_net[p2_pair.p_net_id] = [p for p in pcb_data.pads_by_net[p2_pair.p_net_id] if p != p2_p_pad]
+            pcb_data.pads_by_net[p2_pair.p_net_id] = [p for p in pcb_data.pads_by_net[p2_pair.p_net_id] if p is not p2_p_pad]
         pcb_data.pads_by_net.setdefault(p1_pair.p_net_id, []).append(p2_p_pad)
-    if p1_n_pad:
+    if p1_n_pad and p2_n_pad:
         if p1_pair.n_net_id in pcb_data.pads_by_net:
-            pcb_data.pads_by_net[p1_pair.n_net_id] = [p for p in pcb_data.pads_by_net[p1_pair.n_net_id] if p != p1_n_pad]
+            pcb_data.pads_by_net[p1_pair.n_net_id] = [p for p in pcb_data.pads_by_net[p1_pair.n_net_id] if p is not p1_n_pad]
         pcb_data.pads_by_net.setdefault(p2_pair.n_net_id, []).append(p1_n_pad)
-    if p2_n_pad:
         if p2_pair.n_net_id in pcb_data.pads_by_net:
-            pcb_data.pads_by_net[p2_pair.n_net_id] = [p for p in pcb_data.pads_by_net[p2_pair.n_net_id] if p != p2_n_pad]
+            pcb_data.pads_by_net[p2_pair.n_net_id] = [p for p in pcb_data.pads_by_net[p2_pair.n_net_id] if p is not p2_n_pad]
         pcb_data.pads_by_net.setdefault(p1_pair.n_net_id, []).append(p2_n_pad)
 
-    # Store swap info for output file writing
-    # NOTE: Previously we excluded overlapping positions from p2 to prevent double-swapping.
-    # With layer filtering in swap_segment_nets_at_positions, this is no longer needed when
-    # p1 and p2 are on different layers (segments at same XY but different layers won't double-swap).
-    # We only exclude overlaps when BOTH stubs are on the same layer.
-    if p1_layer == p2_layer:
-        p2_p_positions_no_overlap = p2_p_positions - p1_p_positions
-        p2_n_positions_no_overlap = p2_n_positions - p1_n_positions
-    else:
-        # Different layers - no overlap issue since layer filtering prevents double-swapping
-        p2_p_positions_no_overlap = p2_p_positions
-        p2_n_positions_no_overlap = p2_n_positions
+    # Store swap info for output file writing. Positions are now whole-
+    # component (no layer filter in the writer either), so ALWAYS exclude
+    # overlapping positions from p2 -- pass 1 relabels p1->p2 and pass 2
+    # p2->p1; a shared position would flip pass 1's output straight back.
+    p2_p_positions_no_overlap = p2_p_positions - p1_p_positions
+    p2_n_positions_no_overlap = p2_n_positions - p1_n_positions
 
     target_swap_info.append({
         'p1_name': p1_name,
@@ -1054,9 +1098,9 @@ def apply_single_ended_swap(
     Returns:
         True if swap was applied successfully
     """
-    # Record the swap
-    target_swaps[n1_name] = n2_name
-    target_swaps[n2_name] = n1_name
+    # Record the swap as a composed transposition, so multi-round cycles are
+    # represented faithfully rather than corrupting the symmetric dict (#380).
+    record_target_swap(target_swaps, n1_name, n2_name)
 
     print(f"\nApplying single-ended target swap: {n1_name} <-> {n2_name}")
 

@@ -47,7 +47,8 @@ from connectivity import (
 from net_queries import (
     find_differential_pairs, get_all_unrouted_net_ids, get_chip_pad_positions,
     compute_mps_net_ordering, find_pad_nearest_to_position,
-    expand_net_patterns, matches_diff_pair_patterns
+    expand_net_patterns, matches_diff_pair_patterns,
+    resolve_gnd_net_id, gnd_candidate_names
 )
 from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
 from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
@@ -205,6 +206,56 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         If return_results=False: (successful_count, failed_count, total_time)
         If return_results=True: (successful_count, failed_count, total_time, results_data)
     """
+    # --- #381 D1: parameter-parity probe for the DIFF path, mirroring
+    # batch_route's dump so the GUI/plan diff front can be diffed key-by-key
+    # against `route_diff.py` on identical inputs (this is what would have caught
+    # D1/D2 automatically -- previously only batch_route was instrumented).
+    # Default: overwrite the file and RETURN without routing (single-call A/B).
+    # CONTINUE mode (KICAD_DUMP_BATCH_KWARGS_CONTINUE=1): APPEND one JSONL line
+    # per call and keep routing, so a whole multi-step GUI plan is captured.
+    if os.environ.get('KICAD_DUMP_BATCH_KWARGS'):
+        import json as _json
+        _snap = dict(locals())
+        for _k in ('input_file', 'output_file', 'net_names', 'pcb_data',
+                   'mem_start'):
+            _snap.pop(_k, None)
+        _dump = {}
+        for _k, _v in sorted(_snap.items()):
+            if callable(_v) or _k in ('vis_callback', 'cancel_check',
+                                      'progress_callback'):
+                continue
+            try:
+                _json.dumps(_v)
+                _dump[_k] = _v
+            except (TypeError, ValueError):
+                _dump[_k] = repr(_v)
+        _dump['net_names'] = net_names
+        _dump['_engine'] = 'batch_route_diff_pairs'
+        if os.environ.get('KICAD_DUMP_BATCH_KWARGS_CONTINUE') == '1':
+            with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'a') as _f:
+                _f.write(_json.dumps(_dump, sort_keys=True) + '\n')
+            # fall through -- route normally
+        else:
+            with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'w') as _f:
+                _json.dump(_dump, _f, indent=1, sort_keys=True)
+            if return_results:
+                return 0, 0, 0.0, {'results': [], 'segments_to_remove': []}
+            return 0, 0, 0.0
+
+    # Board-setup copper-to-edge rule (#338): route to at least the sibling
+    # .kicad_pro's min_copper_edge_clearance (engine-side, so the GUI and plan
+    # replays inherit it; see batch_route).
+    if input_file:
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            _eff_edge = effective_board_edge_clearance(input_file, board_edge_clearance)
+            if _eff_edge > (board_edge_clearance or 0.0):
+                print(f"Board edge clearance {_eff_edge}mm "
+                      f"(project min_copper_edge_clearance)")
+                board_edge_clearance = _eff_edge
+        except Exception:
+            pass
+
     # Track memory if debug_memory enabled
     mem_start = get_process_memory_mb() if debug_memory else 0.0
     if debug_memory:
@@ -477,7 +528,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     target_swap_info: List[Dict] = []  # Info needed to apply swaps to output file
     boundary_debug_labels: List[Dict] = []  # Debug labels for boundary positions
     if swappable_net_patterns and diff_pair_ids_to_route_set:
-        from target_swap import apply_target_swaps, generate_debug_boundary_labels
+        from target_swap import apply_target_swaps, generate_debug_boundary_labels, summarize_target_swaps
         from diff_pair_routing import get_diff_pair_endpoints
 
         swappable_diff_pairs = find_differential_pairs(pcb_data, swappable_net_patterns)
@@ -659,15 +710,20 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         exclusion_zone_lines = draw_exclusion_zones_debug(config, all_proximity_points)
         print(f"Will draw {len(config.bga_exclusion_zones)} BGA zones and {len(all_proximity_points)} stub/pad proximity circles on User.5")
 
-    # Find GND net ID for GND via obstacle tracking (if GND vias enabled)
+    # Find GND net ID for GND via obstacle tracking (if GND vias enabled).
+    # Match the GND family robustly ('/GND', 'GNDA', 'DGND', ... all count),
+    # not a literal 'GND' that silently disabled --gnd-vias on most boards (#379).
     gnd_net_id = None
     if config.gnd_via_enabled:
-        for net_id, net in pcb_data.nets.items():
-            if net.name.upper() == 'GND':
-                gnd_net_id = net_id
-                break
+        gnd_net_id, gnd_net_name = resolve_gnd_net_id(pcb_data)
         if gnd_net_id:
-            print(f"GND net ID: {gnd_net_id} (GND vias will be added as obstacles)")
+            print(f"GND net: '{gnd_net_name}' (id {gnd_net_id}) "
+                  f"(GND vias will be added as obstacles)")
+        else:
+            cands = gnd_candidate_names(pcb_data)
+            hint = f" Candidate nets: {', '.join(cands)}." if cands else ""
+            print(f"WARNING: --gnd-vias is enabled but no GND net was found; "
+                  f"GND return vias will NOT be placed.{hint}")
 
     # Pre-compute net obstacles for caching (speeds up per-route setup)
     print("Pre-computing net obstacle cache...")
@@ -940,7 +996,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
               f"(mismatch found but pair not in --polarity-swap-nets): "
               f"{', '.join(sorted(state.polarity_swap_denied_pairs))}")
     if target_swaps:
-        swap_pairs = [(k, v) for k, v in target_swaps.items() if k < v]
+        swap_pairs = summarize_target_swaps(target_swaps)
         print(f"  Target swaps:  {len(swap_pairs)}")
     if single_ended_diff_pairs:
         print(f"  Single-ended:  {len(single_ended_diff_pairs)} (electrically short - "
@@ -951,6 +1007,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     print(f"  Total vias:    {total_vias}")
     print(f"  Total time:    {total_time:.2f}s")
     print(f"  Iterations:    {total_iterations:,}")
+    from target_swap import summarize_target_swaps  # cycle-safe swap list (#380)
     summary = {
         'routed_diff_pairs': routed_diff_pairs,
         'failed_diff_pairs': failed_diff_pairs,
@@ -961,7 +1018,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         'polarity_swap_denied_pairs': sorted(state.polarity_swap_denied_pairs),
         'single_ended_followup_nets': sorted(state.diff_pair_single_ended_nets.values()),
         'skipped_bad_fanout': sorted(skipped_bad_fanout),
-        'target_swaps': [{'pair1': k, 'pair2': v} for k, v in target_swaps.items() if k < v],
+        'target_swaps': [{'pair1': k, 'pair2': v} for k, v in summarize_target_swaps(target_swaps)],
         'layer_swaps': total_layer_swaps,
         'successful': successful,
         'failed': failed,

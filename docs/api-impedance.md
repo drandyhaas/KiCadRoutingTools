@@ -20,7 +20,6 @@ Pure functions of geometry and dielectric — usable standalone:
 
 ```python
 microstrip_z0(w, h, t, er) -> float            # outer layer, IPC-2141
-microstrip_z0_hammerstad(w, h, t, er) -> float # alternative, wider w/h validity
 stripline_z0(w, h, t, er) -> float             # symmetric inner layer
 stripline_z0_asymmetric(w, h1, h2, t, er) -> float
 differential_microstrip_z0(w, s, h, t, er) -> (zdiff, zodd)

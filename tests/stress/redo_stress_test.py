@@ -30,6 +30,7 @@ import argparse
 import os
 import json
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -141,6 +142,42 @@ def apply_remaps(argv, remaps):
 
 def is_check_cmd(argv):
     return any(os.path.basename(a).startswith("check_") for a in argv)
+
+
+def mirror_project_sibling(argv, cwd):
+    """After a `cp`/`mv` of a .kicad_pcb, carry its sibling .kicad_pro too.
+
+    Routing steps record the run's true DRC floor (the smallest clearance / via /
+    hole-to-hole actually used, incl. fine-tap escalations below nominal) in the
+    output board's sibling `.kicad_pro`; `check_drc` and the KiCad grader read it
+    back so legitimately-tight copper is graded at the floor it was routed to, not
+    the board's looser design netclass. A bare `cp step.kicad_pcb final.kicad_pcb`
+    (the de-hole rename, #334/#345) copies only the .kicad_pcb, stranding
+    `final.kicad_pcb` with NO .kicad_pro -- so grading silently falls back to the
+    board's default netclass and manufactures phantom clearance/hole violations on
+    fine-tapped copper (core1106_cam: clean at the routed 0.09, but graded at the
+    0.2 default; #403/#326). Mirror the .kicad_pro so the recorded floor travels
+    with the board it describes."""
+    if not argv or argv[0] not in ("cp", "mv"):
+        return
+    pcbs = [a for a in argv[1:] if a.endswith(".kicad_pcb")]
+    if len(pcbs) != 2:  # only a plain <src> <dst> rename/copy
+        return
+    def _resolve(p):
+        return p if os.path.isabs(p) else os.path.join(cwd or ".", p)
+    src_pro = _resolve(pcbs[0])[:-len(".kicad_pcb")] + ".kicad_pro"
+    dst_pro = _resolve(pcbs[1])[:-len(".kicad_pcb")] + ".kicad_pro"
+    if (not os.path.isfile(src_pro)
+            or os.path.abspath(src_pro) == os.path.abspath(dst_pro)):
+        return
+    try:
+        if argv[0] == "mv":
+            shutil.move(src_pro, dst_pro)
+        else:
+            shutil.copy2(src_pro, dst_pro)
+        print(f"    mirrored DRC floor -> {os.path.basename(dst_pro)}")
+    except OSError as e:
+        print(f"    (could not mirror .kicad_pro: {e})")
 
 
 def board_io(argv):
@@ -356,6 +393,34 @@ def seed_input_boards(manifest, cmds, dest_dir):
             import shutil
             shutil.copy2(src, dst)
             seeded.append(base)
+            # Carry the sibling .kicad_pro too (same custody rule as
+            # mirror_project_sibling): the seed board's project holds the
+            # design's real DRC rules -- min_copper_edge_clearance above all
+            # (#338: ecp5_mini's 0.01 edge rule lost at seed -> planes step
+            # wrote its 0.5 zone-pullback default as the constraint -> 82
+            # phantom kicad edge items; rp2350_dev's 0.5 rule lost -> route
+            # steps never honored the band). Floors applied downstream are
+            # lower-only, so carrying the project is always safe.
+            src_pro = src[:-len(".kicad_pcb")] + ".kicad_pro"
+            dst_pro = dst[:-len(".kicad_pcb")] + ".kicad_pro"
+            # Stem-mismatch fallback (the openstint gap): stress workers
+            # RENAMED the pristine board into the run dir (board0.kicad_pcb)
+            # but left the project under the ORIGINAL board name
+            # (<run_dir_name>.kicad_pro), so no same-stem sibling exists and
+            # the design's DRC rules (0.3 edge on openstint) silently vanish
+            # for the whole chain. The run dir is named after the board, so
+            # that pro is the pristine project -- carry it under the seeded
+            # stem.
+            if not os.path.exists(src_pro):
+                board_named = os.path.join(src_dir,
+                                           os.path.basename(os.path.normpath(src_dir)) + ".kicad_pro")
+                if os.path.exists(board_named):
+                    print(f"    (seed {base}: no same-stem .kicad_pro; carrying "
+                          f"{os.path.basename(board_named)} as {os.path.basename(dst_pro)})")
+                    src_pro = board_named
+            if os.path.exists(src_pro) and not os.path.exists(dst_pro):
+                shutil.copy2(src_pro, dst_pro)
+                seeded.append(os.path.basename(src_pro))
     return seeded
 
 
@@ -488,6 +553,10 @@ def main():
         cmd_t0 = time.time()
         timeout = args.timeout if args.timeout and args.timeout > 0 else None
         rc, peak_kb, timed_out = run_with_peak_rss(argv, cwd, timeout=timeout)
+        if rc == 0 and not timed_out:
+            # A `cp`/`mv` of a board must carry its .kicad_pro (the recorded DRC
+            # floor) or the renamed board grades at the looser design default.
+            mirror_project_sibling(argv, cwd)
         dt = time.time() - cmd_t0
         timings.append({"index": i, "seconds": round(dt, 3), "returncode": rc,
                         "peak_rss_mb": round(peak_kb / 1024, 1),

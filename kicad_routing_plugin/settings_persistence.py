@@ -186,6 +186,9 @@ def get_dialog_settings(dialog):
         'fanout_bga_cap_prefix': dialog.fanout_tab.bga_options.cap_prefix.GetValue(),
         'fanout_bga_cap_allow_rotation': dialog.fanout_tab.bga_options.cap_allow_rotation.GetValue(),
         'fanout_qfn_extension': dialog.fanout_tab.qfn_options.extension.GetValue(),
+        # #381 D7: QFN-specific track width / clearance (default 0.1/0.1).
+        'fanout_qfn_track_width': dialog.fanout_tab.qfn_options.qfn_track_width.GetValue(),
+        'fanout_qfn_clearance': dialog.fanout_tab.qfn_options.qfn_clearance.GetValue(),
         'fanout_qfn_underpad': dialog.fanout_tab.qfn_options.underpad_escape.GetValue(),
         'fanout_qfn_allow_via_in_pad': dialog.fanout_tab.qfn_options.allow_via_in_pad.GetValue(),
 
@@ -586,6 +589,10 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.cap_allow_rotation.SetValue(settings['fanout_bga_cap_allow_rotation'])
     if 'fanout_qfn_extension' in settings:
         dialog.fanout_tab.qfn_options.extension.SetValue(settings['fanout_qfn_extension'])
+    if 'fanout_qfn_track_width' in settings:
+        dialog.fanout_tab.qfn_options.qfn_track_width.SetValue(settings['fanout_qfn_track_width'])
+    if 'fanout_qfn_clearance' in settings:
+        dialog.fanout_tab.qfn_options.qfn_clearance.SetValue(settings['fanout_qfn_clearance'])
     if 'fanout_qfn_underpad' in settings:
         dialog.fanout_tab.qfn_options.underpad_escape.SetValue(settings['fanout_qfn_underpad'])
     if 'fanout_qfn_allow_via_in_pad' in settings:

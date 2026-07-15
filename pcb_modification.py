@@ -18,32 +18,6 @@ _COLLAPSE_DEBUG = os.environ.get('KICAD_COLLAPSE_DEBUG')
 _PRUNE_CONN_VERIFY = os.environ.get('PRUNE_CONN_VERIFY')
 
 
-def get_copper_layers_from_segments(segments: List[Segment], existing_segments: List[Segment] = None) -> List[str]:
-    """
-    Build a list of all copper layers from segments.
-
-    For through-hole vias that connect all layers, we need to know all copper layers
-    present in the design. This function extracts them from the segments.
-
-    Args:
-        segments: New segments being processed
-        existing_segments: Optional existing segments to also consider
-
-    Returns:
-        List of copper layer names (always includes F.Cu and B.Cu for through-hole vias)
-    """
-    all_copper_layers = set()
-    for seg in segments:
-        all_copper_layers.add(seg.layer)
-    if existing_segments:
-        for seg in existing_segments:
-            all_copper_layers.add(seg.layer)
-    # Ensure F.Cu and B.Cu are always included for through-hole vias
-    all_copper_layers.add('F.Cu')
-    all_copper_layers.add('B.Cu')
-    return list(all_copper_layers)
-
-
 def _point_anchored(x: float, y: float, layer: str, via_pts, pad_pts,
                     seg_index, cell: float, ignore_seg, tol: float) -> bool:
     """A segment endpoint is anchored if it lands on a same-net via (vias span
@@ -220,7 +194,8 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
 # is deliberately asymmetric (measure reality physically; refuse to ship
 # fragility). See issue #322 (smartknob +5V: mid-chain removals each passed
 # the overlap gate until 5 pads were genuinely disconnected).
-from connectivity import COINCIDENCE_TOL as _STRICT_GATE_WIDTH  # one constant (#320)
+from connectivity import COINCIDENCE_TOL
+_STRICT_GATE_WIDTH = COINCIDENCE_TOL  # one constant (#320): strict twin gate width
 
 
 def _strict_conn_graph(net_id, universe, vias, pads, zones,
@@ -428,7 +403,7 @@ def _nearest_pad_point(px, py, pad):
 
 
 def _duplicate_connector(px: float, py: float, tx: float, ty: float,
-                         segs, tol: float = 0.02) -> bool:
+                         segs, tol: float = COINCIDENCE_TOL) -> bool:
     """True if a same-net segment in ``segs`` already directly joins (px,py) and
     (tx,ty) on this layer.
 
@@ -469,10 +444,15 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
     """
     import math
     from collections import defaultdict
-    from check_drc import _SOFT_JOINT_MIN_GAP, point_to_pad_distance
+    from routing_constants import SOFT_JOINT_MIN_GAP
+    from check_drc import point_to_pad_distance
     from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
                                        _seg_foreign_via_dist, _seg_foreign_hole_dist)
+    from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     clr = config.clearance if clearance is None else clearance
+    # NPTH holes are graded at the higher NPTH-to-track fab floor, not the
+    # routing clearance (#370 B2; mirrors the microshift's #308 term).
+    npth_clr = max(clr, NPTH_TO_TRACK_CLEARANCE)
 
     def rk(x, y):
         return (round(x, 3), round(y, 3))
@@ -494,7 +474,7 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
             if math.hypot(x - vx, y - vy) <= vr + 0.01:
                 return True
         for p in pcb_data.pads_by_net.get(nid, []):
-            if point_to_pad_distance(x, y, p) <= 0.02:
+            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
                 return True
         return False
 
@@ -510,11 +490,13 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
             dangles[(s.net_id, s.layer)].append((x, y, s.width))
 
     def clears(nid, x1, y1, x2, y2, layer, w):
-        d = min(_seg_foreign_pad_dist(pcb_data, nid, x1, y1, x2, y2, layer),
+        d = min(_seg_foreign_pad_dist(pcb_data, nid, x1, y1, x2, y2, layer,
+                                      base_clearance=clr),
                 _seg_foreign_seg_dist(pcb_data, nid, x1, y1, x2, y2, layer),
-                _seg_foreign_via_dist(pcb_data, nid, x1, y1, x2, y2, layer),
-                _seg_foreign_hole_dist(pcb_data, nid, x1, y1, x2, y2))
-        return d >= clr + w / 2.0 - 1e-4
+                _seg_foreign_via_dist(pcb_data, nid, x1, y1, x2, y2, layer))
+        hd = _seg_foreign_hole_dist(pcb_data, nid, x1, y1, x2, y2)
+        return (d >= clr + w / 2.0 - 1e-4 and
+                hd >= npth_clr + w / 2.0 - 1e-4)
 
     new_conns = []
     for (net_id, layer), ends in dangles.items():
@@ -529,7 +511,7 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 xj, yj, wj = ends[j]
                 gap = math.hypot(xi - xj, yi - yj)
                 cap = (wi + wj) / 2.0
-                if _SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
+                if SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
                     w = min(wi, wj)
                     if not clears(net_id, xi, yi, xj, yj, layer, w):
                         continue
@@ -700,10 +682,20 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
 
 def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
     """True if a candidate connector segment keeps `clearance` from all OTHER
-    nets' copper (segments on its layer, vias on any layer, pads on its layer)."""
+    nets' copper (segments on its layer, vias on any layer, pads on its layer)
+    and the higher NPTH-to-track floor from copper-less drill holes."""
     from geometry_utils import segment_to_segment_distance, point_to_segment_distance
     from check_drc import segment_to_rect_distance
+    from single_ended_routing import _seg_foreign_hole_dist
+    from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     half = width / 2
+    # NPTH (no-copper) drill holes (#370 B2): the pad/via/segment loops below
+    # all measure to COPPER, so a connector drawn straight across a mounting
+    # hole passed every check. Slot/offset drills handled by the capsule.
+    npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
+    if _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2) \
+            < npth_clr + half - 1e-4:
+        return False
     for s in pcb_data.segments:
         if s.net_id == net_id or s.layer != layer:
             continue
@@ -875,7 +867,7 @@ def _soft_joint_pairs(segs, vias, pads):
             if math.hypot(x - vx, y - vy) <= vr + 0.01:
                 return True
         for p in (pads or []):
-            if point_to_pad_distance(x, y, p) <= 0.02:
+            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
                 return True
         return False
 
@@ -2056,7 +2048,8 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
     def grazes(s):
         thr = clearance + s.width / 2.0 - 1e-4
         if (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                  s.end_x, s.end_y, s.layer) < thr or
+                                  s.end_x, s.end_y, s.layer,
+                                  base_clearance=clearance) < thr or
                 _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                       s.end_x, s.end_y, s.layer) < thr):
             return True
@@ -2183,7 +2176,8 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                                                   _seg_foreign_via_dist as _fvd,
                                                   _fab_track_floor)
                 d = min(_fpd(pcb_data, s.net_id, s.start_x, s.start_y,
-                             s.end_x, s.end_y, s.layer),
+                             s.end_x, s.end_y, s.layer,
+                             base_clearance=clearance),
                         _fvd(pcb_data, s.net_id, s.start_x, s.start_y,
                              s.end_x, s.end_y, s.layer))
                 if check_foreign_segments:
@@ -2300,7 +2294,14 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     Returns (segments_changed, nets_changed, original_segments_to_remove)."""
     from collections import defaultdict
     from check_connected import check_net_connectivity
-    from single_ended_routing import _seg_foreign_pad_dist, _seg_foreign_seg_dist, _seg_foreign_via_dist
+    from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
+                                      _seg_foreign_via_dist, _seg_foreign_hole_dist)
+    from routing_defaults import NPTH_TO_TRACK_CLEARANCE
+
+    # NPTH (no-copper) drill holes are graded at the higher NPTH-to-track floor,
+    # and the copper distance terms don't see them (#370 B2; the microshift
+    # sibling gained this term for #308, this re-bend path never did).
+    npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
 
     routed_seg_result = {}
     for r in results:
@@ -2310,7 +2311,8 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     def grazes(s):
         thr = clearance + s.width / 2.0 - 1e-4
         return (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                      s.end_x, s.end_y, s.layer) < thr or
+                                      s.end_x, s.end_y, s.layer,
+                                      base_clearance=clearance) < thr or
                 _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                       s.end_x, s.end_y, s.layer) < thr)
 
@@ -2341,10 +2343,17 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
         # Foreign VIAS must be checked too: grazes() fires on via proximity, so
         # omitting them here let a re-bend that fixed a pad graze land within
         # clearance of (or onto) a foreign via (#254 neo6502 /GPIO1 vs /GPIO2).
-        d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
+        d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                      base_clearance=clearance),
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer))
-        return d >= clearance + w / 2.0 - 1e-4 and edge_clears(x1, y1, x2, y2, w)
+        # NPTH drill holes at the higher NPTH-to-track floor (#370 B2): the
+        # copper terms above never see a copper-less hole, so a re-bend could
+        # land the jog across a mounting hole.
+        hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
+        return (d >= clearance + w / 2.0 - 1e-4 and
+                hd >= npth_clr + w / 2.0 - 1e-4 and
+                edge_clears(x1, y1, x2, y2, w))
 
     def vk(x, y):
         return (round(x, 3), round(y, 3))
@@ -2507,14 +2516,20 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
         if best is None or sf > best[0]:
             best = (sf, float(ts[i]), float(qx), float(qy))
 
-    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey = _foreign_pad_arrays(pcb_data, s.layer)
+    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc = _foreign_pad_arrays(pcb_data, s.layer)
     if cx.size:
-        near = ((cx + ex >= sx.min() - R) & (cx - ex <= sx.max() + R) &
-                (cy + ey >= sy.min() - R) & (cy - ey <= sy.max() + R) &
+        # Per-pad local/footprint clearance overrides (#326): widen the window
+        # by the largest excess and subtract each pad's excess from its
+        # distance ("effective distance"), so the shortfall ranking and the
+        # computed shift honor the pad's own required clearance.
+        Rp = R + max(0.0, float(plc.max()) - clearance) if plc.size else R
+        near = ((cx + ex >= sx.min() - Rp) & (cx - ex <= sx.max() + Rp) &
+                (cy + ey >= sy.min() - Rp) & (cy - ey <= sy.max() + Rp) &
                 (nids != net_id))
         if near.any():
             fcx, fcy, fhx, fhy, fcr = cx[near], cy[near], hx[near], hy[near], cr[near]
             frc, frs = rc[near], rs[near]
+            fexc = np.maximum(plc[near] - clearance, 0.0)
             # Work in each pad's LOCAL frame (query offsets rotated by R(-rot),
             # identity for axis-aligned pads) so tilted pads use their true
             # outline (#356). Closest point on the pad's rounded-rect boundary:
@@ -2536,7 +2551,7 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
             # Boundary point back to board axes: c + R(rot) . (qlx, qly)
             qx = fcx[None, :] + qlx * frc[None, :] - qly * frs[None, :]
             qy = fcy[None, :] + qlx * frs[None, :] + qly * frc[None, :]
-            d = vlen - fcr[None, :]
+            d = vlen - fcr[None, :] - fexc[None, :]
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, qx[i, j], qy[i, j])
 
@@ -2666,7 +2681,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         return True
 
     def clears(x1, y1, x2, y2, layer, net_id, w):
-        d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
+        d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                      base_clearance=clearance),
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer))
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
@@ -2706,7 +2722,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         # only on the handful that fail this.
         thr = clearance + s.width / 2.0 - 1e-4
         if min(_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                     s.end_x, s.end_y, s.layer),
+                                     s.end_x, s.end_y, s.layer,
+                                     base_clearance=clearance),
                _seg_foreign_seg_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                      s.end_x, s.end_y, s.layer),
                _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
@@ -2930,12 +2947,21 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
     # Every drill hole on the board (vias + through-hole pads, ANY net --
     # hole-to-hole is a fab rule, not an electrical one).
     import numpy as _np
+    from kicad_parser import pad_drill_circles
     hole_list = [(id(v), v.x, v.y, (getattr(v, 'drill', 0) or 0) / 2.0)
                  for v in pcb_data.vias if (getattr(v, 'drill', 0) or 0) > 0]
     for fp in pcb_data.footprints.values():
         for p in fp.pads:
+            # Offset-hole / slot-aware circles (#370 B7): a pad's drill can
+            # sit away from the copper centre (castellated pads) or be a
+            # milled slot; check_drc measures the real capsule, so validating
+            # against (global_x, global_y, drill/2) judged vias against the
+            # wrong hole. Round centred drills yield the same single circle
+            # as before. (Duplicate id keys for a slot's circles are fine:
+            # hole_idx only ever excludes the moving VIA itself.)
             if (p.drill or 0) > 0:
-                hole_list.append((id(p), p.global_x, p.global_y, p.drill / 2.0))
+                for hx, hy, hd in pad_drill_circles(p):
+                    hole_list.append((id(p), hx, hy, hd / 2.0))
     hole_idx = {hid: i for i, (hid, _, _, _) in enumerate(hole_list)}
     hole_x = _np.asarray([h[1] for h in hole_list], dtype=float)
     hole_y = _np.asarray([h[2] for h in hole_list], dtype=float)
@@ -2962,7 +2988,7 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
                                      lyr) < thr:
                 return True
             if _seg_foreign_pad_dist(pcb_data, v.net_id, v.x, v.y, v.x, v.y,
-                                     lyr) < thr:
+                                     lyr, base_clearance=clearance) < thr:
                 return True
         return False
 
@@ -3603,56 +3629,90 @@ def drop_phantom_copper(results, pcb_data: PCBData,
     return phantom_segs, phantom_vias
 
 
+def _seg_rip_sig(seg):
+    p1 = (round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS))
+    p2 = (round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS))
+    if p1 > p2:
+        p1, p2 = p2, p1
+    return (p1, p2, seg.layer, seg.net_id)
+
+
+def _via_rip_sig(via):
+    return (round(via.x, POSITION_DECIMALS), round(via.y, POSITION_DECIMALS), via.net_id)
+
+
 def remove_route_from_pcb_data(pcb_data: PCBData, result: dict) -> None:
-    """Remove routed segments and vias from PCB data (for rip-up and reroute)."""
+    """Remove routed segments and vias from PCB data (for rip-up and reroute).
+
+    Removal is by OBJECT IDENTITY: a result's ``new_segments``/``new_vias``
+    hold the same objects ``add_route_to_pcb_data`` appended, and removing by
+    geometry signature instead destroyed INPUT-file originals whenever a
+    reroute retraced an existing span exactly (grid twins). Ripping such a net
+    then severed its pre-existing copper for good -- the #134-refused restore
+    never returned it, and the #220 stale strip mirrored the loss into the
+    output (issue #389: neo6502 GPIO5's input branch, leaving its U7 island
+    stranded behind a grazing partial reroute).
+
+    For robustness against callers holding copies, any to-remove object NOT
+    found on the board by identity falls back to a signature match -- bounded
+    to ONE removal per requested object (never every twin) and scanned
+    newest-first, so this-run copper is preferred over an input original.
+    """
     segments_to_remove = result.get('new_segments', [])
     vias_to_remove = result.get('new_vias', [])
 
     if not segments_to_remove and not vias_to_remove:
         return
 
-    # Build sets of segment signatures (start, end, layer, net_id) for fast lookup
-    seg_signatures = set()
-    for seg in segments_to_remove:
-        # Normalize segment direction (smaller point first)
-        p1 = (round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS))
-        p2 = (round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS))
-        if p1 > p2:
-            p1, p2 = p2, p1
-        sig = (p1, p2, seg.layer, seg.net_id)
-        seg_signatures.add(sig)
+    if segments_to_remove:
+        remove_ids = {id(s) for s in segments_to_remove}
+        found_ids = set()
+        kept = []
+        for seg in pcb_data.segments:
+            if id(seg) in remove_ids:
+                found_ids.add(id(seg))
+            else:
+                kept.append(seg)
+        missing = [s for s in segments_to_remove if id(s) not in found_ids]
+        if missing:
+            want = {}
+            for s in missing:
+                sig = _seg_rip_sig(s)
+                want[sig] = want.get(sig, 0) + 1
+            kept_rev = []
+            for seg in reversed(kept):
+                sig = _seg_rip_sig(seg)
+                if want.get(sig, 0) > 0:
+                    want[sig] -= 1
+                else:
+                    kept_rev.append(seg)
+            kept = kept_rev[::-1]
+        pcb_data.segments = kept
 
-    # Build set of via signatures (x, y, net_id) for fast lookup
-    via_signatures = set()
-    for via in vias_to_remove:
-        sig = (round(via.x, POSITION_DECIMALS), round(via.y, POSITION_DECIMALS), via.net_id)
-        via_signatures.add(sig)
-
-    # Remove matching segments
-    new_segments = []
-    removed_seg_count = 0
-    for seg in pcb_data.segments:
-        p1 = (round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS))
-        p2 = (round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS))
-        if p1 > p2:
-            p1, p2 = p2, p1
-        sig = (p1, p2, seg.layer, seg.net_id)
-        if sig in seg_signatures:
-            removed_seg_count += 1
-        else:
-            new_segments.append(seg)
-    pcb_data.segments = new_segments
-
-    # Remove matching vias
-    new_vias = []
-    removed_via_count = 0
-    for via in pcb_data.vias:
-        sig = (round(via.x, POSITION_DECIMALS), round(via.y, POSITION_DECIMALS), via.net_id)
-        if sig in via_signatures:
-            removed_via_count += 1
-        else:
-            new_vias.append(via)
-    pcb_data.vias = new_vias
+    if vias_to_remove:
+        remove_via_ids = {id(v) for v in vias_to_remove}
+        found_via_ids = set()
+        kept_vias = []
+        for via in pcb_data.vias:
+            if id(via) in remove_via_ids:
+                found_via_ids.add(id(via))
+            else:
+                kept_vias.append(via)
+        missing_vias = [v for v in vias_to_remove if id(v) not in found_via_ids]
+        if missing_vias:
+            want_v = {}
+            for v in missing_vias:
+                sig = _via_rip_sig(v)
+                want_v[sig] = want_v.get(sig, 0) + 1
+            kept_rev = []
+            for via in reversed(kept_vias):
+                sig = _via_rip_sig(via)
+                if want_v.get(sig, 0) > 0:
+                    want_v[sig] -= 1
+                else:
+                    kept_rev.append(via)
+            kept_vias = kept_rev[::-1]
+        pcb_data.vias = kept_vias
 
 
 def remove_net_from_pcb_data(pcb_data: PCBData, net_id: int) -> Tuple[List[Segment], List[Via]]:

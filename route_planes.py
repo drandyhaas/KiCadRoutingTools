@@ -12,7 +12,7 @@ from __future__ import annotations
 import sys
 import os
 import argparse
-from typing import List, Optional, Tuple, Dict, Set
+from typing import List, Optional, Tuple, Dict, Set, Union
 from dataclasses import dataclass
 
 # Run startup checks first (validates numpy, scipy, shapely are installed)
@@ -1902,6 +1902,21 @@ def _write_output_and_reroute(
     return True
 
 
+def _empty_plane_results(return_results: bool):
+    """Zero-work create_plane result in the shape the caller expects (#382 E5).
+
+    The GUI (return_results=True) unpacks EXACTLY 8 values; the CLI unpacks 3.
+    Every validation-error early return must go through here so a bad-input exit
+    can't hand the GUI a short (3/6/7) tuple it will ValueError on -- the bug
+    this consolidates. The 8-field shape mirrors the full return_results path:
+    (vias, traces, pads_needing, new_vias, new_segments, new_zones,
+     failed_pads, ripped_net_ids).
+    """
+    if return_results:
+        return (0, 0, 0, [], [], [], 0, [])
+    return (0, 0, 0)
+
+
 def create_plane(
     input_file: str,
     output_file: str,
@@ -1943,7 +1958,8 @@ def create_plane(
     no_bga_zone: bool = False,
     progress_callback=None,
     cancel_check=None,
-) -> Tuple[int, int, int]:
+) -> Union[Tuple[int, int, int],
+           Tuple[int, int, int, list, list, list, int, list]]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
 
@@ -1981,7 +1997,14 @@ def create_plane(
             partial results (the GUI does).
 
     Returns:
-        (total_vias_placed, total_traces_added, total_pads_needing_vias)
+        return_results=False (CLI): the 3-tuple
+            (total_vias_placed, total_traces_added, total_pads_needing_vias).
+        return_results=True (GUI): the 8-tuple
+            (total_vias_placed, total_traces_added, total_pads_needing_vias,
+             new_vias, new_segments, new_zones, total_failed_pads,
+             ripped_net_ids).
+        Every early/error exit returns the caller-appropriate shape via
+        _empty_plane_results (never a short tuple).
     """
     _dump_engine_config('create_plane', dict(locals()))
     if all_layers is None:
@@ -1989,7 +2012,21 @@ def create_plane(
 
     if len(net_names) != len(plane_layers):
         print(f"Error: Number of nets ({len(net_names)}) must match number of layers ({len(plane_layers)})")
-        return (0, 0, 0)
+        return _empty_plane_results(return_results)
+
+    # Board-setup copper-to-edge rule (#338): zone outlines and tap copper must
+    # honor the sibling .kicad_pro's min_copper_edge_clearance (engine-side so
+    # the GUI planes tab inherits it; see batch_route).
+    if input_file:
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            _eff_edge = effective_board_edge_clearance(input_file, board_edge_clearance)
+            if _eff_edge > (board_edge_clearance or 0.0):
+                print(f"Board edge clearance {_eff_edge}mm "
+                      f"(project min_copper_edge_clearance)")
+                board_edge_clearance = _eff_edge
+        except Exception:
+            pass
 
     # Step 1: Load PCB (or use provided pcb_data)
     if pcb_data is None:
@@ -2002,7 +2039,7 @@ def create_plane(
         net_id = resolve_net_id(pcb_data, net_name)
         if net_id is None:
             print(f"Error: Net '{net_name}' not found in PCB")
-            return (0, 0, 0)
+            return _empty_plane_results(return_results)
         net_ids.append(net_id)
         print(f"Found net '{net_name}' with ID {net_id}")
 
@@ -2053,9 +2090,7 @@ def create_plane(
         )
         if not should_continue:
             print(f"Error: Zone conflict for net '{net_name}' on layer {plane_layer}")
-            if return_results:
-                return (0, 0, 0, [], [], [], 0)
-            return (0, 0, 0)
+            return _empty_plane_results(return_results)
         should_create_zones.append(should_create)
         if zone_to_replace:
             zones_to_replace.append((zone_to_replace.net_id, zone_to_replace.layer))
@@ -2066,9 +2101,7 @@ def create_plane(
         print("Error: Could not determine board bounds "
               "(no Edge.Cuts drawings found, or they have zero extent). "
               "Add an Edge.Cuts outline to the board before creating planes.")
-        if return_results:
-            return (0, 0, 0, [], [], [])
-        return (0, 0, 0)
+        return _empty_plane_results(return_results)
 
     min_x, min_y, max_x, max_y = board_bounds
     print(f"Board bounds: ({min_x:.2f}, {min_y:.2f}) to ({max_x:.2f}, {max_y:.2f})")
@@ -2098,7 +2131,7 @@ def create_plane(
             layer_name = all_layers[i] if i < len(all_layers) else f"layer {i}"
             print(f"ERROR: Layer cost for {layer_name} must be negative (forbidden) or "
                   f"between 1.0 and 1000, got {cost}")
-            return (0, 0, 0)
+            return _empty_plane_results(return_results)
 
     costs_str = ', '.join(f"{all_layers[i]}={layer_costs[i]}x" for i in range(min(len(all_layers), len(layer_costs))))
     print(f"  Layer costs: {costs_str}")
@@ -3053,6 +3086,10 @@ Examples:
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")
     parser.add_argument("output_file", nargs="?", help="Output KiCad PCB file (default: input_routed.kicad_pcb)")
+    # #381 D9: accept --output FILE like route.py / route_diff.py (flag form of the
+    # positional output). Additive: default None, positional still works.
+    parser.add_argument("--output", metavar="FILE",
+                        help="Output KiCad PCB file (flag alternative to the positional output)")
     parser.add_argument("--overwrite", "-O", action="store_true",
                         help="Overwrite input file instead of creating _routed copy")
 
@@ -3092,7 +3129,9 @@ Examples:
                         help="Maximum number of blocker nets to rip up (default: 3)")
     parser.add_argument("--reroute-ripped-nets", action="store_true",
                         help="Automatically re-route ripped nets after via placement")
-    parser.add_argument("--no-bga-zone", action="store_true",
+    # #381 D9: accept the plural --no-bga-zones spelling too (route.py uses the
+    # plural). Same store_true dest -- additive, old spelling kept.
+    parser.add_argument("--no-bga-zone", "--no-bga-zones", action="store_true",
                         help="Disable BGA auto-exclusion zones when re-routing ripped nets "
                              "(issue #88.2). Use when the original signal routing used "
                              "--no-bga-zones, so the reroute uses compatible parameters.")
@@ -3106,7 +3145,10 @@ Examples:
                         help="Radius around other nets' vias to add proximity cost when routing plane connections (mm, default: 3.0)")
     parser.add_argument("--plane-proximity-cost", type=float, default=2.0,
                         help="Maximum proximity cost around other nets' vias when routing plane connections (mm equivalent, default: 2.0)")
-    parser.add_argument("--plane-track-via-clearance", type=float, default=defaults.PLANE_TRACK_VIA_CLEARANCE,
+    # #381 D9: --track-via-clearance is the same constant route_disconnected_planes
+    # spells that way; accept both here (dest stays plane_track_via_clearance).
+    parser.add_argument("--plane-track-via-clearance", "--track-via-clearance",
+                        type=float, default=defaults.PLANE_TRACK_VIA_CLEARANCE,
                         help="Clearance from track center to other nets' via centers when routing MST connections (mm, default: 0.8)")
     parser.add_argument("--voronoi-seed-interval", type=float, default=2.0,
                         help="Sample interval for Voronoi seed points along plane connection routes (mm, default: 2.0)")
@@ -3159,6 +3201,11 @@ Examples:
     for _pname, _pfloor in _pinned_floors.items():
         setattr(args, _pname, _pfloor)
 
+    # #381 D9: --output FILE overrides the positional (matches route.py/route_diff).
+    if getattr(args, 'output', None) is not None:
+        if args.output_file is not None and args.output_file != args.output:
+            parser.error("both a positional output and --output were given and differ")
+        args.output_file = args.output
     # Handle output file: use --overwrite, explicit output, or auto-generate with _routed suffix
     if args.output_file is None:
         if args.overwrite:
@@ -3343,11 +3390,18 @@ Examples:
                 print(f"  Min clearance used: {eff_clearance:.4g} mm "
                       f"(below nominal {args.clearance:.4g}; fine-pitch taps) - "
                       f"grading at this floor")
-            from fix_kicad_drc_settings import fix_project_for_output, drc_fix_kwargs
+            from fix_kicad_drc_settings import (fix_project_for_output, drc_fix_kwargs,
+                                                read_project_edge_clearance)
+            # #338: record the PROJECT's copper-to-edge rule, never this
+            # tool's --board-edge-clearance -- that is the plane-zone INSET
+            # (default 0.5), not an enforced DRC floor; writing it into a
+            # project with no edge key manufactured a stricter-than-design
+            # rule (openstint: design 0.3, recorded 0.5).
             fix_project_for_output(
                 args.output_file, input_pcb=args.input_file,
                 clearance=eff_clearance, hole_to_hole=args.hole_to_hole_clearance,
-                edge_clearance=args.board_edge_clearance, track_width=args.track_width,
+                edge_clearance=read_project_edge_clearance(args.input_file),
+                track_width=args.track_width,
                 via_diameter=args.via_size, via_drill=args.via_drill,
                 **drc_fix_kwargs(args))
         except Exception as e:

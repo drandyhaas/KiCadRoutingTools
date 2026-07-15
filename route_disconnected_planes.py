@@ -401,6 +401,18 @@ def route_planes(
     """
     from route import _dump_engine_config
     _dump_engine_config('repair_planes', dict(locals()))
+    # Board-setup copper-to-edge rule (#338): engine-side so the GUI planes
+    # tab and plan replays inherit it; see batch_route.
+    if input_file:
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            _eff_edge = effective_board_edge_clearance(input_file, board_edge_clearance)
+            if _eff_edge > (board_edge_clearance or 0.0):
+                print(f"Board edge clearance {_eff_edge}mm "
+                      f"(project min_copper_edge_clearance)")
+                board_edge_clearance = _eff_edge
+        except Exception:
+            pass
     if pcb_data is None:
         print(f"Loading PCB from {input_file}...")
         pcb_data = parse_kicad_pcb(input_file)
@@ -880,10 +892,55 @@ def route_planes(
                     print(f"{GREEN}forced via at ({result.via['x']:.2f}, "
                           f"{result.via['y']:.2f}){RESET}")
                 else:
-                    if name not in failed_repair_pads:
-                        failed_repair_pads.append(name)
-                        total_pads_repaired = max(0, total_pads_repaired - 1)
-                    print(f"{RED}STILL FLOATING{RESET}")
+                    # #373 last resort: no via could tie this pad to the plane
+                    # (boxed-in pocket, fine-pitch WLCSP, deep-layer pour). Route
+                    # a plain track from the pad to the nearest same-net copper /
+                    # its own pour on the pad's layer -- the via-or-nothing ladder
+                    # otherwise abandons a pad a short trace would connect. The
+                    # island-join fill test validates the target; re-run the SAME
+                    # fill-aware check and UNDO the track if still floating.
+                    track_res = tap_pad_with_escalation(
+                        pad, pad_layer, net_id, pcb_data,
+                        replace(tap_config, via_size=via_size, via_drill=via_drill),
+                        max_search_radius=max_search_radius,
+                        via_size=via_size, via_drill=via_drill,
+                        verbose=verbose, fine_for_all=True, pour_trace_only=True,
+                        distant_trace_radius=max_search_radius, disable_reuse=True)
+                    connected = False
+                    if track_res.success and track_res.segments:
+                        new_seg_objs = []
+                        for s in track_res.segments:
+                            seg_obj = Segment(
+                                start_x=s['start'][0], start_y=s['start'][1],
+                                end_x=s['end'][0], end_y=s['end'][1],
+                                width=s['width'], layer=s['layer'], net_id=s['net_id'])
+                            new_seg_objs.append(seg_obj)
+                            pcb_data.segments.append(seg_obj)
+                        _t_segs = [s for s in pcb_data.segments if s.net_id == net_id]
+                        _t_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+                        _t_res = check_net_connectivity(net_id, _t_segs, _t_vias, net_pads,
+                                                        zones_by_net.get(net_id, []))
+                        _pad_key = (round(pad.global_x, 3), round(pad.global_y, 3),
+                                    pad.component_ref)
+                        _still = {(round(x, 3), round(y, 3), ref)
+                                  for (x, y, _l, ref) in (_t_res.get('disconnected_pads') or [])}
+                        if _pad_key in _still:
+                            for seg_obj in new_seg_objs:
+                                pcb_data.segments.remove(seg_obj)
+                        else:
+                            connected = True
+                            for s in track_res.segments:
+                                all_new_segments.append(s)
+                            shared_maps.note_pass_copper([], new_seg_objs)
+                            if name in failed_repair_pads:
+                                failed_repair_pads.remove(name)
+                                total_pads_repaired += 1
+                            print(f"{GREEN}connected by track to same-net copper{RESET}")
+                    if not connected:
+                        if name not in failed_repair_pads:
+                            failed_repair_pads.append(name)
+                            total_pads_repaired = max(0, total_pads_repaired - 1)
+                        print(f"{RED}STILL FLOATING{RESET}")
 
     # Drop a redundant plane-repair tap that grazes a foreign pad below clearance,
     # or re-bend a load-bearing one around the pad (#224). A tap that merely bridges
@@ -1196,6 +1253,19 @@ def route_planes(
                 progress_callback(0, 0, f"Reconnecting {len(_cnames)} ripped net(s)...")
             try:
                 from route import batch_route
+                # #338: this self-invocation routes from OUTPUT_FILE, whose
+                # sibling .kicad_pro does not exist yet, so batch_route's own
+                # edge resolution reads nothing and the reconnect stamps its
+                # edge band at the track-clearance fallback (openstint /A-
+                # shipped 0.4mm from a 0.5mm rule). Resolve from the ORIGINAL
+                # input's project here. Do NOT forward this function's
+                # board_edge_clearance -- that is the plane-zone inset, not an
+                # enforced routing floor.
+                try:
+                    from fix_kicad_drc_settings import read_project_edge_clearance
+                    _edge = read_project_edge_clearance(input_file)
+                except Exception:
+                    _edge = 0.0
                 _ok, _fail, _t = batch_route(
                     output_file, output_file, _cnames,
                     layers=routing_layers,
@@ -1203,6 +1273,7 @@ def route_planes(
                     via_size=via_size, via_drill=via_drill,
                     grid_step=grid_step, max_iterations=max_iterations,
                     power_nets=power_nets, power_nets_widths=power_nets_widths,
+                    board_edge_clearance=_edge,
                     disable_bga_zones=([] if no_bga_zone else None))
                 LAST_RIPPED_RECONNECT = {'nets': _cnames,
                                          'successful': _ok, 'failed': _fail}
@@ -1306,6 +1377,9 @@ Examples:
 
     parser.add_argument("input_file", help="Input KiCad PCB file")
     parser.add_argument("output_file", nargs="?", help="Output KiCad PCB file (default: input_routed.kicad_pcb)")
+    # #381 D9: accept --output FILE like route.py / route_diff.py.
+    parser.add_argument("--output", metavar="FILE",
+                        help="Output KiCad PCB file (flag alternative to the positional output)")
     parser.add_argument("--overwrite", "-O", action="store_true",
                         help="Overwrite input file instead of creating _routed copy")
 
@@ -1330,7 +1404,10 @@ Examples:
                         help="Trace-to-trace clearance in mm (default: 0.25)")
     parser.add_argument("--zone-clearance", type=float, default=defaults.PLANE_ZONE_CLEARANCE,
                         help="Zone fill clearance around obstacles in mm (default: 0.2)")
-    parser.add_argument("--track-via-clearance", type=float, default=defaults.PLANE_TRACK_VIA_CLEARANCE,
+    # #381 D9: accept route_planes.py's --plane-track-via-clearance spelling too
+    # (same constant; dest stays track_via_clearance).
+    parser.add_argument("--track-via-clearance", "--plane-track-via-clearance",
+                        type=float, default=defaults.PLANE_TRACK_VIA_CLEARANCE,
                         help="Clearance from tracks to other nets' vias in mm (default: 0.8)")
     parser.add_argument("--board-edge-clearance", type=float, default=defaults.PLANE_EDGE_CLEARANCE,
                         help="Clearance from board edge in mm (default: 0.5)")
@@ -1384,7 +1461,8 @@ Examples:
                         help="Power net names that need wider tracks when re-routing ripped nets.")
     parser.add_argument("--power-nets-widths", nargs="+", type=float, default=None,
                         help="Track width (mm) per --power-nets entry, used when re-routing ripped nets.")
-    parser.add_argument("--no-bga-zone", action="store_true",
+    # #381 D9: accept the plural --no-bga-zones spelling too (route.py uses it).
+    parser.add_argument("--no-bga-zone", "--no-bga-zones", action="store_true",
                         help="Disable BGA auto-exclusion zones when re-routing ripped nets "
                              "(match the original signal run's --no-bga-zone).")
 
@@ -1414,6 +1492,11 @@ Examples:
     for _pname, _pfloor in _pinned_floors.items():
         setattr(args, _pname, _pfloor)
 
+    # #381 D9: --output FILE overrides the positional (matches route.py/route_diff).
+    if getattr(args, 'output', None) is not None:
+        if args.output_file is not None and args.output_file != args.output:
+            parser.error("both a positional output and --output were given and differ")
+        args.output_file = args.output
     # Handle output file: use --overwrite, explicit output, or auto-generate with _routed suffix
     if args.output_file is None:
         if args.overwrite:
@@ -1504,10 +1587,22 @@ Examples:
     if not args.dry_run and not args.no_kicad_recheck and args.output_file:
         from kicad_oracle import oracle_reconnect
         from routing_config import GridRouteConfig
+        # #338: the oracle pass runs on OUTPUT_FILE, whose sibling .kicad_pro
+        # is written only below (fix_project_for_output) -- so oracle_reconnect's
+        # own project read finds nothing mid-chain. Resolve the board edge rule
+        # from the ORIGINAL input's project here (the plane-zone inset
+        # args.board_edge_clearance is NOT an enforced routing floor; see the
+        # ripped-net reconnect above).
+        try:
+            from fix_kicad_drc_settings import read_project_edge_clearance
+            _oracle_edge = read_project_edge_clearance(args.input_file)
+        except Exception:
+            _oracle_edge = 0.0
         _ocfg = GridRouteConfig(
             clearance=args.clearance, track_width=args.track_width,
             via_size=args.via_size, via_drill=args.via_drill,
-            grid_step=args.grid_step)
+            grid_step=args.grid_step,
+            board_edge_clearance=_oracle_edge)
         _orc = oracle_reconnect(args.output_file, net_names, _ocfg,
                                 track_via_clearance=args.track_via_clearance,
                                 hole_to_hole_clearance=args.hole_to_hole_clearance,
@@ -1536,11 +1631,15 @@ Examples:
                 print(f"  Min clearance used: {eff_clearance:.4g} mm "
                       f"(below nominal {args.clearance:.4g}; fine-pitch taps) - "
                       f"grading at this floor")
-            from fix_kicad_drc_settings import fix_project_for_output, drc_fix_kwargs
+            from fix_kicad_drc_settings import (fix_project_for_output, drc_fix_kwargs,
+                                                read_project_edge_clearance)
+            # #338: record the PROJECT's edge rule, not the plane-zone inset
+            # (see route_planes.py -- openstint 0.3-design/0.5-recorded).
             fix_project_for_output(
                 args.output_file, input_pcb=args.input_file,
                 clearance=eff_clearance, hole_to_hole=args.hole_to_hole_clearance,
-                edge_clearance=args.board_edge_clearance, track_width=args.track_width,
+                edge_clearance=read_project_edge_clearance(args.input_file),
+                track_width=args.track_width,
                 via_diameter=args.via_size, via_drill=args.via_drill,
                 **drc_fix_kwargs(args))
         except Exception as e:

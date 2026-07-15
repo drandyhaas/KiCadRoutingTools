@@ -277,6 +277,9 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     # Precompute per-layer expansion values for impedance-controlled and power net routing
     # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
+    # Per-net netclass clearance (#326 B5): this net's copper reserves its OWN
+    # class spacing, so same-run siblings keep the class distance to it.
+    net_cl = config.get_net_clearance(net_id)
     expansion_mm_by_layer = {}
     via_block_mm_by_layer = {}
     layer_widths = []  # per-layer future-routing-track width (impedance / power)
@@ -284,12 +287,12 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         # Use per-net width for power nets, otherwise layer width (impedance) or default
         layer_width = config.get_net_track_width(net_id, layer_name)
         layer_widths.append(layer_width)
-        expansion_mm = layer_width / 2 + config.clearance + config.track_width / 2 + extra_clearance
+        expansion_mm = layer_width / 2 + net_cl + config.track_width / 2 + extra_clearance
         # Float keep-out half-width for the capsule segment stamp (no floor): the
         # true perpendicular clearance, so off-grid / diagonal tracks are covered.
         expansion_mm_by_layer[layer_name] = max(coord.grid_step, expansion_mm)
         # Segment via-block: future ROUTE via (config.via_size) near this net's copper.
-        via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
+        via_block_mm = config.via_size / 2 + layer_width / 2 + net_cl + extra_clearance
         via_block_mm_by_layer[layer_name] = via_block_mm
 
     # Process segments. Keep-out from the segment's ACTUAL width, not just the
@@ -313,8 +316,8 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             via_block_mm = via_block_mm_by_layer.get(seg.layer)
         else:
             expansion_mm = max(coord.grid_step,
-                               own_half + config.clearance + config.track_width / 2 + extra_clearance)
-            via_block_mm = config.via_size / 2 + own_half + config.clearance + extra_clearance
+                               own_half + net_cl + config.track_width / 2 + extra_clearance)
+            via_block_mm = config.via_size / 2 + own_half + net_cl + extra_clearance
         _collect_segment_obstacles(seg, coord, layer_idx, expansion_mm,
                                    blocked_cells_set, blocked_vias_set, via_block_mm)
 
@@ -329,10 +332,10 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             continue
         vs = via.size if (getattr(via, 'size', 0) and via.size > 0) else config.via_size
         via_track_list = [max(1, coord.to_grid_dist_safe(
-            vs / 2 + lw / 2 + config.clearance + extra_clearance)) for lw in layer_widths]
+            vs / 2 + lw / 2 + net_cl + extra_clearance)) for lw in layer_widths]
         # Via-via: this via (actual size) vs a future ROUTE via (config.via_size).
         # Float radius (no floor) so the disc threshold blocks the true clearance.
-        via_via_radius = max(1.0, (vs / 2 + config.via_size / 2 + config.clearance) * coord.inv_step)
+        via_via_radius = max(1.0, (vs / 2 + config.via_size / 2 + net_cl) * coord.inv_step)
         _collect_via_obstacles(via, coord, num_layers, via_track_list,
                                 via_via_radius, diagonal_margin,
                                 blocked_cells_set, blocked_vias_set)
@@ -446,7 +449,17 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     off_y = pad.global_y - gy * coord.grid_step
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
-    margin = config.track_width / 2 + config.clearance + extra_clearance
+    # Per-pad local/footprint clearance override (#326 B6): this per-net CACHE
+    # is what the routing loop actually consults for same-run nets' pads, so it
+    # must honor pad.local_clearance exactly like _add_pad_obstacle does --
+    # otherwise a to-be-routed net's fiducial/keep-clear pad is stamped at the
+    # bare global clearance and every sibling net may route inside its ring.
+    # The pad's netclass clearance (B5) participates the same way.
+    clearance = config.get_net_clearance(getattr(pad, 'net_id', 0))
+    lc = getattr(pad, 'local_clearance', 0.0) or 0.0
+    if lc > clearance:
+        clearance = lc
+    margin = config.track_width / 2 + clearance + extra_clearance
 
     # Custom comb/finger pads: rasterize the real copper polygon(s), leaving the
     # finger channels open, instead of the bounding box (issue #188). This is the
@@ -459,7 +472,7 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
         layer_idxs = [layer_map.get(l) for l in expanded_layers]
         layer_idxs = [li for li in layer_idxs if li is not None]
         on_copper = any(l.endswith('.Cu') for l in expanded_layers)
-        via_margin = config.via_size / 2 + config.clearance + config.grid_step / 2
+        via_margin = config.via_size / 2 + clearance + config.grid_step / 2
         for poly in pad_polys:
             gxf, gyf, inside, edist = _rasterize_polygon(poly, coord, margin)
             if gxf is not None:
@@ -506,7 +519,7 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     # Via blocking around pads
     if any(layer.endswith('.Cu') for layer in expanded_layers):
         # Add half grid step buffer to account for grid quantization errors
-        via_margin = config.via_size / 2 + config.clearance + config.grid_step / 2
+        via_margin = config.via_size / 2 + clearance + config.grid_step / 2
         blocked_vias.append(pad_blocked_cells_array(gx, gy, half_width, half_height,
                                                     via_margin, config.grid_step, corner_radius,
                                                     off_x=off_x, off_y=off_y,
@@ -635,40 +648,6 @@ class ViaPlacementObstacleData:
     blocked_vias: np.ndarray
     # Blocked routing cells per layer as dict: layer_name -> numpy array of shape (M, 2) [gx, gy]
     blocked_cells_by_layer: Dict[str, np.ndarray]
-
-
-def _bresenham_line_points(gx1: int, gy1: int, gx2: int, gy2: int) -> "np.ndarray":
-    """Grid cells along the Bresenham line (both endpoints inclusive) as an (L, 2)
-    int32 array. Reproduces precompute_via_placement_obstacles' original integer
-    midpoint walk (err = d // 2) cell-for-cell so the broadcast circle stamps land
-    on exactly the same line as the old scalar loops."""
-    dx = abs(gx2 - gx1)
-    dy = abs(gy2 - gy1)
-    sx = 1 if gx1 < gx2 else -1
-    sy = 1 if gy1 < gy2 else -1
-
-    pts = []
-    x, y = gx1, gy1
-    if dx > dy:
-        err = dx // 2
-        while x != gx2:
-            pts.append((x, y))
-            err -= dy
-            if err < 0:
-                y += sy
-                err += dx
-            x += sx
-    else:
-        err = dy // 2
-        while y != gy2:
-            pts.append((x, y))
-            err -= dx
-            if err < 0:
-                x += sx
-                err += dy
-            y += sy
-    pts.append((x, y))  # final point
-    return np.array(pts, dtype=np.int32)
 
 
 def precompute_via_placement_obstacles(

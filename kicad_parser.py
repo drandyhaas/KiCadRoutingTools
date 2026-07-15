@@ -63,7 +63,9 @@ class Pad:
     layers: List[str]
     net_id: int
     net_name: str
-    rotation: float = 0.0  # Total rotation in degrees (pad + footprint)
+    rotation: float = 0.0  # Pad's ABSOLUTE board angle in degrees. The file's
+    # (at ... angle) / pcbnew GetOrientation already include the footprint's
+    # rotation -- do NOT add it again (#369 A4; slot-drill capsules orient by this)
     pinfunction: str = ""
     drill: float = 0.0  # Drill size for through-hole pads (0 for SMD). For an
                          # oval/slot drill this is max(w, h) (back-compat: the
@@ -142,6 +144,10 @@ class Zone:
     layer: str
     polygon: List[Tuple[float, float]]  # List of (x, y) vertices defining the zone outline
     uuid: str = ""
+    priority: int = 0  # (priority N); higher-priority zones win where outlines overlap
+    island_removal_mode: int = 0  # 0 = always remove isolated islands (KiCad default,
+    # token absent from the file), 1 = never remove, 2 = remove below island_area_min
+    island_area_min: float = 0.0  # mm^2 floor for mode 2 (KiCad file units are mm^2)
 
 
 @dataclass
@@ -168,6 +174,12 @@ class Footprint:
     locked: bool = False  # Footprint (locked yes) flag: the user pinned this part,
                           # so placement passes must not move it and routing/fanout
                           # cannot assume a later step will move it out of the way.
+    clearance: float = 0.0  # Footprint-level (clearance ...) override (mm),
+    # inherited by every pad of this footprint that has no override of its own
+    # (KiCad resolution: pad override, else footprint override, else netclass).
+    # The parser RESOLVES the inheritance into each pad's local_clearance at
+    # parse time, so clearance consumers only ever read pad.local_clearance;
+    # this field records the raw footprint value for fidelity (issue #326).
 
 
 @dataclass
@@ -364,52 +376,6 @@ def _custom_pad_board_extent(pad_text: str, abs_rotation_deg: float,
             ext_x = max(ext_x, abs(bx) + hw)
             ext_y = max(ext_y, abs(by) + hw)
     return ext_x, ext_y
-
-
-def _custom_pad_local_extent(pad_text: str) -> Tuple[float, float]:
-    """Half-extent (|x|, |y|) of a custom pad's real copper in the pad's local
-    frame, from its (primitives ...) block. A custom pad's (size ...) is only the
-    anchor; gr_poly/gr_circle/gr_line primitives can reach well beyond it (e.g. a
-    resistor pad whose copper extends +0.56mm past the anchor). Modelling only the
-    anchor under-blocks the obstacle map, so tracks graze the real copper (#70
-    dig). Returns (0, 0) if there are no primitives. Coordinates are pad-local
-    (un-rotated); _resolve_pad_rect then orients the enclosing rect like any pad.
-    """
-    pm = re.search(r'\(primitives\b', pad_text)
-    if not pm:
-        return 0.0, 0.0
-    prim = pad_text[pm.start():]
-    xs, ys = [], []
-    for m in re.finditer(r'\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\)', prim):
-        xs.append(float(m.group(1))); ys.append(float(m.group(2)))
-    # A gr_poly outline can be drawn entirely from arc entries (rounded pads,
-    # e.g. thunderscope U11's B0QFN): zero (xy ...) matches, so without this the
-    # extent came back (0,0) and the pad was modelled at its 0.2mm anchor.
-    # Linearize each arc so its bulge is covered, not just its endpoints. The
-    # regex also matches standalone gr_arc PRIMITIVES (comexpress7 H1..H10
-    # thermal-spoke pads draw their ring from ten of them).
-    for m in re.finditer(_PTS_ARC_RE, prim):
-        s = (float(m.group(1)), float(m.group(2)))
-        mid = (float(m.group(3)), float(m.group(4)))
-        e = (float(m.group(5)), float(m.group(6)))
-        for p1, p2 in _arc_to_segments(s, mid, e):
-            xs += [p1[0], p2[0]]; ys += [p1[1], p2[1]]
-    # gr_rect / gr_line reach: their (start)/(end) corners
-    for m in re.finditer(r'\(gr_(?:rect|line)\s+\(start\s+(-?[\d.]+)\s+(-?[\d.]+)\)'
-                         r'\s+\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', prim):
-        xs += [float(m.group(1)), float(m.group(3))]
-        ys += [float(m.group(2)), float(m.group(4))]
-    # gr_circle: (center x y) (end x y) -> radius reaches center +/- r on both axes
-    for m in re.finditer(r'\(gr_circle\s+\(center\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', prim):
-        cx, cy, ex, ey = map(float, m.groups())
-        r = math.hypot(ex - cx, ey - cy)
-        xs += [cx - r, cx + r]; ys += [cy - r, cy + r]
-    if not xs:
-        return 0.0, 0.0
-    # primitive stroke width thickens the copper; add half of the largest.
-    widths = [float(w) for w in re.findall(r'\(width\s+(-?[\d.]+)\)', prim)]
-    hw = (max(widths) / 2.0) if widths else 0.0
-    return max(abs(min(xs)), abs(max(xs))) + hw, max(abs(min(ys)), abs(max(ys))) + hw
 
 
 def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
@@ -735,34 +701,6 @@ def find_matching_paren(content: str, open_idx: int) -> int:
                     return i + 1
         i += 1
     return n
-
-
-def parse_s_expression(text: str) -> list:
-    """
-    Simple S-expression parser - returns nested lists.
-    Not used for full file parsing (too slow), but useful for extracting specific elements.
-    """
-    tokens = re.findall(r'"[^"]*"|\(|\)|[^\s()]+', text)
-
-    def parse_tokens(tokens, idx):
-        result = []
-        while idx < len(tokens):
-            token = tokens[idx]
-            if token == '(':
-                sublist, idx = parse_tokens(tokens, idx + 1)
-                result.append(sublist)
-            elif token == ')':
-                return result, idx
-            else:
-                # Remove quotes from strings
-                if token.startswith('"') and token.endswith('"'):
-                    token = token[1:-1]
-                result.append(token)
-            idx += 1
-        return result, idx
-
-    result, _ = parse_tokens(tokens, 0)
-    return result
 
 
 def extract_layers(content: str) -> BoardInfo:
@@ -1631,17 +1569,6 @@ def _classify_contours(contours):
     return outers, cutouts
 
 
-def extract_board_outline(content: str) -> List[Tuple[float, float]]:
-    """Extract board outline polygon from Edge.Cuts layer.
-
-    Parses gr_line, gr_arc, and gr_rect segments and assembles them into
-    closed polygons. Returns the largest contour as the board outline.
-    Returns an empty list if no outline is found or if it's a simple rectangle.
-    """
-    outers, _ = extract_board_contours(content)
-    return outers[0] if outers else []
-
-
 def extract_board_contours(content: str) -> Tuple[List[List[Tuple[float, float]]], List[List[Tuple[float, float]]]]:
     """Extract board outline and cutout polygons from Edge.Cuts layer.
 
@@ -1800,6 +1727,21 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
                 _hdr_end = min(_hdr_end, _i)
         is_locked = bool(re.search(r'\(locked\s+yes\)', fp_text[:_hdr_end]))
 
+        # Footprint-level (clearance ...) override (issue #326). KiCad writes it
+        # in the footprint header, after the properties but before any graphic/
+        # pad/zone child, so bound the search there (a PAD's own (clearance ...)
+        # or a custom pad's (clearance outline) must not match). Negative
+        # overrides (KiCad allows them to SHRINK the netclass clearance) are
+        # clamped to 0: this codebase models overrides only as keep-out floors,
+        # so a shrinking override safely degrades to "no override".
+        _clr_end = len(fp_text)
+        for _tok in ('(pad', '(fp_', '(zone', '(model'):
+            _i = fp_text.find(_tok)
+            if _i != -1:
+                _clr_end = min(_clr_end, _i)
+        fp_clr_match = re.search(r'\(clearance\s+(-?[\d.]+)\)', fp_text[:_clr_end])
+        fp_clearance = max(0.0, float(fp_clr_match.group(1))) if fp_clr_match else 0.0
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -1809,7 +1751,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             layer=fp_layer,
             value=value,
             dnp=is_dnp,
-            locked=is_locked
+            locked=is_locked,
+            clearance=fp_clearance
         )
 
         # Extract pads
@@ -1838,8 +1781,12 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             local_y = float(pad_at_match.group(2))
             pad_rotation = float(pad_at_match.group(3)) if pad_at_match.group(3) else 0.0
 
-            # Total rotation = pad rotation + footprint rotation
-            total_rotation = (pad_rotation + fp_rotation) % 360
+            # #369 A4: the file's (at ... angle) is the pad's ABSOLUTE board
+            # angle (3d197c0, verified physically) -- adding fp_rotation
+            # double-counted it, so Pad.rotation was wrong on every rotated
+            # footprint and pad_drill_capsule oriented slot drills 90° off
+            # (size resolution below was already fixed to the absolute angle).
+            total_rotation = pad_rotation % 360
 
             # Extract size
             size_match = re.search(r'\(size\s+([\d.-]+)\s+([\d.-]+)\)', pad_text)
@@ -1871,14 +1818,12 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
                     custom_resolved = True
 
             # Resolve the pad rectangle into board space. size_x/size_y are in
-            # the pad's own frame; its absolute board orientation is
-            # total_rotation (pad + footprint), NOT pad_rotation alone — keying
-            # the swap on pad_rotation misses pads whose footprint supplies the
-            # 90° (e.g. a -135° footprint with a 225° pad lands at total 90° and
-            # was left un-swapped, modelled 90° off its real shape). For the
-            # common orthogonal cases bake the rotation into the dimensions so
-            # all downstream axis-aligned geometry stays exact; genuine diagonal
-            # pads keep a residual rect_rotation the obstacle/DRC geometry applies.
+            # the pad's own frame; its absolute board orientation is the file's
+            # pad_rotation (the (at ...) angle already includes the footprint's
+            # rotation -- 3d197c0). For the common orthogonal cases bake the
+            # rotation into the dimensions so all downstream axis-aligned
+            # geometry stays exact; genuine diagonal pads keep a residual
+            # rect_rotation the obstacle/DRC geometry applies.
             if not custom_resolved:
                 size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
 
@@ -1942,9 +1887,16 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
 
             # Extract per-pad local clearance override, e.g. fiducial keep-clear
             # rings carry (clearance 0.375). The leading "(" avoids matching the
-            # footprint's (pad_to_mask_clearance ...) token. 0 = no override.
-            clr_match = re.search(r'\(clearance\s+([\d.]+)\)', pad_text)
-            local_clearance = float(clr_match.group(1)) if clr_match else 0.0
+            # footprint's (pad_to_mask_clearance ...) token. 0 = no override
+            # (KiCad's explicit "(clearance 0)" also means inherit). A pad with
+            # no override of its own inherits the FOOTPRINT-level override
+            # (issue #326) -- resolved here so every consumer of
+            # pad.local_clearance honors both. Negative (shrinking) overrides
+            # clamp to 0 = no override (see the footprint-level comment).
+            clr_match = re.search(r'\(clearance\s+(-?[\d.]+)\)', pad_text)
+            local_clearance = max(0.0, float(clr_match.group(1))) if clr_match else 0.0
+            if local_clearance == 0.0:
+                local_clearance = fp_clearance
 
             # Calculate global coordinates
             global_x, global_y = local_to_global(fp_x, fp_y, fp_rotation, local_x, local_y)
@@ -2138,10 +2090,14 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
     # Linearize each arc into straight Segments via the existing helper so the
     # copper graph is complete. (The router never emits arcs, so its own output
     # is unaffected; this only matters when ingesting hand-routed boards.)
+    # (locked yes) is optional at the same two spots the segment patterns
+    # allow it (#150 / #369 A7) -- without it a LOCKED arc parses to nothing,
+    # never becomes an obstacle, and the router routes straight through it.
     arc_fields = (r'\(arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+'
                   r'\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+'
                   r'\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+'
-                  r'\(width\s+([\d.-]+)\)\s+\(layer\s+"([^"]+)"\)\s+\(net\s+')
+                  r'\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?'
+                  r'\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+')
 
     def _append_arc(sx, sy, mx, my, ex, ey, width, layer, net_id, uuid):
         for (p0, p1) in _arc_to_segments((sx, sy), (mx, my), (ex, ey)):
@@ -2274,16 +2230,21 @@ def _iter_zone_blocks(content: str):
     content between the opening ``(zone`` line and its matching closing paren.
     Shared by :func:`extract_zones` and :func:`extract_keepouts`.
     """
-    zone_start_pattern = r'\r?\n\t\(zone\s*\r?\n'
+    # #369 A5: match the zone header token itself, not "(zone" + NEWLINE --
+    # KiCad v5/v6 write zones single-line ("(zone (net 0) (layer F.Cu) ...")
+    # and the newline-anchored pattern parsed ZERO zones/keepouts from those
+    # files (every pour and rule area silently dropped).
+    zone_start_pattern = r'\r?\n\t\(zone(?=[\s(])'
     for start_match in re.finditer(zone_start_pattern, content):
         # Find the matching closing paren (string-aware, so a lone paren inside
         # a quoted token cannot run the scan past the zone end — see issue #113).
         # start_match begins at the newline before "(zone"; locate that "(".
         open_idx = content.index('(', start_match.start())
         zone_end = find_matching_paren(content, open_idx) - 1
-        if zone_end <= open_idx:
+        body_start = open_idx + len('(zone')
+        if zone_end <= body_start:
             continue
-        yield content[start_match.end():zone_end]
+        yield content[body_start:zone_end]
 
 
 def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]:
@@ -2295,32 +2256,40 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
     zones = []
 
     for zone_content in _iter_zone_blocks(content):
+        # Rule areas are routing restrictions, not copper -- skip regardless
+        # of net clause. v5/v6 keepouts DO carry (net 0), so the old skip
+        # (inside the no-numeric-net branch only) would have modeled them as
+        # phantom net-0 pours once single-line zones parse (#369 A5).
+        if '(keepout' in zone_content:
+            continue
         # Extract net id - try KiCad 9 format first, then KiCad 10
         net_match = re.search(r'\(net\s+(\d+)\)', zone_content)
         net_match_v10 = None
         if net_match:
             net_id = int(net_match.group(1))
         else:
-            # KiCad 10: (net "name") - first net reference in zone
+            # KiCad 10: (net "name") - first net reference in zone. Unescape
+            # before the lookup: name_to_id is keyed by UNESCAPED Net.name
+            # (#369 A12 -- escaped zone names resolved to net 0).
             if name_to_id:
-                net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', zone_content)
+                net_match_v10 = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"\)', zone_content)
             if net_match_v10:
-                net_name_v10 = net_match_v10.group(1)
+                net_name_v10 = _unescape_kicad_string(net_match_v10.group(1))
                 net_id = name_to_id.get(net_name_v10, 0)
-            elif '(keepout' in zone_content:
-                continue  # rule area, not copper (the builder skips them too)
             else:
                 # No net clause at all: a NO-NET copper pour (net 0). It still
                 # pours real copper (nitrokey/vfo_ctrl decorative fills), and
                 # pcbnew keeps it -- dropping it under-modelled the board.
                 net_id = 0
 
-        # Extract net name
-        net_name_match = re.search(r'\(net_name\s+"([^"]*)"\)', zone_content)
+        # Extract net name. Unescaped like every other net_name in the model
+        # (#369 A12: zones kept the RAW file text, so backslash/quote-named
+        # plane nets evaded --nets filters and zone dedup keys).
+        net_name_match = re.search(r'\(net_name\s+"((?:[^"\\]|\\.)*)"\)', zone_content)
         if net_name_match:
-            net_name = net_name_match.group(1)
+            net_name = _unescape_kicad_string(net_name_match.group(1))
         elif net_match_v10 is not None:
-            # KiCad 10: net name was already captured above
+            # KiCad 10: net name was already captured (and unescaped) above
             net_name = net_name_v10
         else:
             net_name = ""
@@ -2338,14 +2307,18 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
             if _i != -1:
                 _hdr_end = min(_hdr_end, _i)
         zone_header = zone_content[:_hdr_end]
-        layer_match = re.search(r'\(layer\s+"([^"]+)"\)', zone_header)
+        # Layer tokens are UNQUOTED in v5/v6 files ((layer F.Cu)) -- accept
+        # both spellings (#369 A5).
+        layer_match = re.search(r'\(layer\s+"?([^")\s]+)"?\)', zone_header)
         if layer_match:
             zone_layers = [layer_match.group(1)]
         else:
-            layers_match = re.search(r'\(layers\s+((?:"[^"]+"\s*)+)\)', zone_header)
+            layers_match = re.search(r'\(layers\s+([^)]+)\)', zone_header)
             if not layers_match:
                 continue
-            zone_layers = [l for l in re.findall(r'"([^"]+)"', layers_match.group(1))
+            _toks = [t.strip('"') for t in
+                     re.findall(r'"[^"]+"|\S+', layers_match.group(1))]
+            zone_layers = [l for l in _toks
                            if l.endswith('.Cu') or l == '*.Cu']
             if not zone_layers:
                 continue
@@ -2354,6 +2327,18 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
         # Extract UUID
         uuid_match = re.search(r'\(uuid\s+"([^"]+)"\)', zone_content)
         uuid = uuid_match.group(1) if uuid_match else ""
+
+        # Fill semantics (#350). All three live before the polygon blocks, so
+        # the header slice covers them: (priority N) is a direct zone child;
+        # island_removal_mode / island_area_min sit inside the (fill ...) block.
+        # Absent tokens mean KiCad defaults: priority 0, mode 0 (always remove
+        # isolated islands).
+        prio_match = re.search(r'\(priority\s+(\d+)\)', zone_header)
+        priority = int(prio_match.group(1)) if prio_match else 0
+        irm_match = re.search(r'\(island_removal_mode\s+(\d+)\)', zone_header)
+        island_removal_mode = int(irm_match.group(1)) if irm_match else 0
+        iam_match = re.search(r'\(island_area_min\s+([\d.]+)\)', zone_header)
+        island_area_min = float(iam_match.group(1)) if iam_match else 0.0
 
         # Extract polygon points - find (pts ...) and extract xy coordinates
         pts_start = zone_content.find('(pts')
@@ -2387,7 +2372,10 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
                 net_name=net_name,
                 layer=zl,
                 polygon=polygon,
-                uuid=uuid
+                uuid=uuid,
+                priority=priority,
+                island_removal_mode=island_removal_mode,
+                island_area_min=island_area_min
             ))
 
     return zones
@@ -2423,9 +2411,11 @@ def extract_keepouts(content: str) -> List[dict]:
         tracks_allowed = 'tracks not_allowed' not in ko_body
         vias_allowed = 'vias not_allowed' not in ko_body
 
-        # Layers: (layers "F.Cu" "In1.Cu" ...) or single (layer "F.Cu")
-        lm = re.search(r'\(layers\s+([^)]+)\)', zc) or re.search(r'\(layer\s+("[^"]+")\)', zc)
-        layers = set(re.findall(r'"([^"]+)"', lm.group(1))) if lm else set()
+        # Layers: (layers "F.Cu" "In1.Cu" ...) or single (layer "F.Cu").
+        # v5/v6 write tokens UNQUOTED ((layers F&B.Cu)) -- accept both (#369 A5).
+        lm = re.search(r'\(layers\s+([^)]+)\)', zc) or re.search(r'\(layer\s+("?[^")\s]+"?)\)', zc)
+        layers = ({t.strip('"') for t in re.findall(r'"[^"]+"|\S+', lm.group(1))}
+                  if lm else set())
 
         # Outline polygons. A rule area can have several (polygon (pts ...))
         # blocks: the first is the outer outline, any further ones are HOLES
@@ -3937,6 +3927,11 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
             diffs.append(f"Footprint {ref} position: board=({bf.x:.3f},{bf.y:.3f}) file=({ff.x:.3f},{ff.y:.3f})")
         if not close(bf.rotation % 360, ff.rotation % 360):
             diffs.append(f"Footprint {ref} rotation: board={bf.rotation:.1f} file={ff.rotation:.1f}")
+        # Footprint-level clearance override (#326): a divergence here shifts
+        # EVERY inheriting pad's resolved local_clearance between the two paths.
+        bfc = getattr(bf, 'clearance', 0.0); ffc = getattr(ff, 'clearance', 0.0)
+        if not close(bfc, ffc):
+            diffs.append(f"Footprint {ref} clearance: board={bfc:.3f} file={ffc:.3f}")
         if len(bf.pads) != len(ff.pads):
             diffs.append(f"Footprint {ref} pad count: board={len(bf.pads)} file={len(ff.pads)}")
         else:
@@ -4096,6 +4091,19 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                 diffs.append(f"Zone layer mismatch: board={bz.layer} file={fz.layer}")
             if len(bz.polygon) != len(fz.polygon):
                 diffs.append(f"Zone net={bz.net_id} layer={bz.layer} vertex count: board={len(bz.polygon)} file={len(fz.polygon)}")
+            # Fill semantics (#350): both fronts must agree or the priority-
+            # exact fill-point rejection / island-patch gating diverge CLI vs GUI.
+            if getattr(bz, 'priority', 0) != getattr(fz, 'priority', 0):
+                diffs.append(f"Zone net={bz.net_id} layer={bz.layer} priority: board={bz.priority} file={fz.priority}")
+            if getattr(bz, 'island_removal_mode', 0) != getattr(fz, 'island_removal_mode', 0):
+                diffs.append(f"Zone net={bz.net_id} layer={bz.layer} island_removal_mode: board={bz.island_removal_mode} file={fz.island_removal_mode}")
+            # island_area_min is only meaningful in mode 2: pcbnew's
+            # GetMinIslandArea() reports the C++ default (10mm^2) even when
+            # the file carries no token (mode 0/1 zones), so comparing it
+            # unconditionally manufactured phantom parity diffs (free_dap).
+            if (getattr(bz, 'island_removal_mode', 0) == 2
+                    and abs(getattr(bz, 'island_area_min', 0.0) - getattr(fz, 'island_area_min', 0.0)) > 0.01):
+                diffs.append(f"Zone net={bz.net_id} layer={bz.layer} island_area_min: board={bz.island_area_min} file={fz.island_area_min}")
 
     # --- Compare board outline / cutouts (used for edge & cutout obstacles) ---
     bo_b = bi_b.board_outline or []

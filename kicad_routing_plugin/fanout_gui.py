@@ -955,7 +955,7 @@ class QFNOptionsPanel(wx.ScrolledWindow):
         main_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Info text - QFN uses component's layer automatically
-        info_text = wx.StaticText(self, label="QFN fanout routes on the component's layer.\nTrack width comes from Basic tab.")
+        info_text = wx.StaticText(self, label="QFN fanout routes on the component's layer.")
         info_text.Wrap(350)
         main_sizer.Add(info_text, 0, wx.ALL, 10)
 
@@ -965,6 +965,28 @@ class QFNOptionsPanel(wx.ScrolledWindow):
 
         grid = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
         grid.AddGrowableCol(1)
+
+        # #381 D7: QFN-specific track width & clearance, defaulting to the CLI's
+        # QFN-tuned 0.1/0.1 (qfn_fanout.py --width/--clearance) instead of
+        # inheriting the Basic-tab 0.3/0.25. Fine-pitch QFN/QFP fanouts fail at
+        # 0.3 where they succeed at 0.1. Own controls so QFN doesn't inherit the
+        # BGA/route width and a plan can still set them (claude_plan routes a QFN
+        # fanout step's width/clearance here).
+        rw = defaults.PARAM_RANGES['track_width']
+        grid.Add(wx.StaticText(self, label="Track width (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.qfn_track_width = wx.SpinCtrlDouble(self, min=rw['min'], max=rw['max'],
+                                                 initial=defaults.QFN_TRACK_WIDTH, inc=rw['inc'])
+        self.qfn_track_width.SetDigits(rw['digits'])
+        self.qfn_track_width.SetToolTip("QFN fanout track width (CLI qfn_fanout --width, default 0.1)")
+        grid.Add(self.qfn_track_width, 0, wx.EXPAND)
+
+        rc = defaults.PARAM_RANGES['clearance']
+        grid.Add(wx.StaticText(self, label="Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.qfn_clearance = wx.SpinCtrlDouble(self, min=rc['min'], max=rc['max'],
+                                               initial=defaults.QFN_CLEARANCE, inc=rc['inc'])
+        self.qfn_clearance.SetDigits(rc['digits'])
+        self.qfn_clearance.SetToolTip("QFN fanout clearance (CLI qfn_fanout --clearance, default 0.1)")
+        grid.Add(self.qfn_clearance, 0, wx.EXPAND)
 
         # Extension parameter
         r = defaults.PARAM_RANGES['qfn_extension']
@@ -1001,6 +1023,10 @@ class QFNOptionsPanel(wx.ScrolledWindow):
     def get_config(self):
         """Get the configuration values (QFN-specific only, shared params come from Basic tab)."""
         return {
+            # #381 D7: QFN-tuned width/clearance (own controls, default 0.1/0.1)
+            # override the Basic-tab shared values in _run_qfn_fanout.
+            'track_width': self.qfn_track_width.GetValue(),
+            'clearance': self.qfn_clearance.GetValue(),
             'extension': self.extension.GetValue(),
             'escape_method': 'underpad' if self.underpad_escape.GetValue() else 'stub',
             'allow_via_in_pad': self.allow_via_in_pad.GetValue(),
@@ -1293,8 +1319,11 @@ class FanoutTab(wx.Panel):
         shared = self.get_shared_params() if self.get_shared_params else {}
         from fab_tiers import set_fab_tier_from_config
         set_fab_tier_from_config(shared)
-        track_width = shared.get('track_width', defaults.QFN_TRACK_WIDTH)
-        clearance = shared.get('clearance', defaults.BGA_CLEARANCE)
+        # #381 D7: QFN width/clearance come from the QFN panel's own controls
+        # (default 0.1/0.1 = qfn_fanout.py's CLI defaults), NOT the Basic-tab
+        # 0.3/0.25 that BGA/route use. `config` is the QFN options config.
+        track_width = config.get('track_width', defaults.QFN_TRACK_WIDTH)
+        clearance = config.get('clearance', defaults.QFN_CLEARANCE)
 
         # Get extension from config (QFN-specific parameter)
         extension = config.get('extension', defaults.QFN_EXTENSION)

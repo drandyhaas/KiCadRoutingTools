@@ -63,10 +63,13 @@ def main():
         classes = proj["net_settings"]["classes"]
         default = next((c for c in classes if c.get("name") == "Default"), None)
 
-        # Loosened toward the routed floor.
+        # Loosened toward the routed floor. Edge (#338): --edge-clearance 0.0
+        # means "not enforced this step", NOT "lower the rule to zero" -- the
+        # board's own min_copper_edge_clearance must SURVIVE (KiCad grades
+        # copper_edge_clearance from it and the routers now route to it).
         expect_rules = {"min_clearance": 0.15, "min_via_diameter": 0.4,
                         "min_hole_clearance": 0.15, "min_through_hole_diameter": 0.3,
-                        "min_hole_to_hole": 0.2, "min_copper_edge_clearance": 0.0}
+                        "min_hole_to_hole": 0.2, "min_copper_edge_clearance": 0.5}
         for k, v in expect_rules.items():
             if abs(rules.get(k, -1) - v) > 1e-9:
                 fails.append(f"rules.{k} = {rules.get(k)}, expected {v}")

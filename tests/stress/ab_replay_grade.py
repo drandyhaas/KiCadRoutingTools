@@ -138,35 +138,43 @@ def _diff_pair_stats(log_text):
             "diff_coupled_pct": round(100.0 * coupled / total, 1) if total else None}
 
 
-def _kicad_grade(pcb, clearance):
+def _kicad_grade(pcb, clearance, baseline=None):
     """KiCad's own DRC verdict on the final board (#316): copper-class
     violation count + the two-sided diff vs check_drc, graded with the
     netclass clearance equalized to the routed clearance (kicad_drc_compare's
     staging). Returns Nones when kicad-cli is unavailable so replay grading
-    still works everywhere."""
+    still works everywhere.
+
+    `baseline` = the UNROUTED input board (#326/#338): its kicad items are
+    pre-existing design conditions (e.g. edge-connector pads inside the
+    board's own copper_edge rule) that no routing can fix -- they are matched
+    and subtracted so kicad_drc/kicad_only reflect ROUTER-introduced items;
+    the subtracted count is reported as kicad_preexisting."""
     try:
         sys.path.insert(0, str(REPO / "tests" / "stress"))
-        from kicad_drc_compare import (KICAD_CLI, _staged_copy, run_kicad_drc,
+        from kicad_drc_compare import (KICAD_CLI, kicad_items_for,
                                        run_check_drc, match)
         if not os.path.exists(KICAD_CLI):
             return {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None}
-        tmpd, staged = _staged_copy(pcb, float(clearance))
-        try:
-            kicad, err = run_kicad_drc(staged)
-        finally:
-            import shutil
-            shutil.rmtree(tmpd, ignore_errors=True)
+        kicad, err = kicad_items_for(pcb, float(clearance))
         if err:
             return {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None}
+        pre = 0
+        if baseline and os.path.exists(baseline):
+            base_items, berr = kicad_items_for(baseline, float(clearance))
+            if not berr and base_items:
+                matched_pre, _, kicad = match(base_items, kicad)
+                pre = len(matched_pre)
         cd = run_check_drc(pcb, float(clearance))
         _, kicad_only, cd_only = match(kicad, cd)
-        return {"kicad_drc": len(kicad), "kicad_only": len(kicad_only),
+        return {"kicad_drc": len(kicad), "kicad_preexisting": pre,
+                "kicad_only": len(kicad_only),
                 "checkdrc_only": len(cd_only)}
     except Exception:
         return {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None}
 
 
-def grade(pcb, clearance):
+def grade(pcb, clearance, baseline=None):
     # Grade at the board's OWN recorded floors when the sibling .kicad_pro
     # exists (check_drc auto-grades from it -- the Stage-C clearance ledger
     # writes the true minimum every step used, including legitimate fine-tap
@@ -204,7 +212,7 @@ def grade(pcb, clearance):
     total, incomplete, pct = _completion(ctext)
     out = {"drc": _drc_count(drc.stdout + drc.stderr), "conn": _conn_count(ctext),
            "nets_total": total, "nets_incomplete": incomplete, "completion_pct": pct}
-    out.update(_kicad_grade(pcb, clearance))
+    out.update(_kicad_grade(pcb, clearance, baseline=baseline))
     return out
 
 
@@ -251,7 +259,21 @@ def do_board(set_dir, out_dir, label, board):
            "time_by_tool": time_by_tool, "peak_by_tool": peak_by_tool, "steps": steps,
            **dp}
     if done:
-        res.update(grade(final, clr))
+        # Unrouted-input baseline (#326/#338): the manifest's first command's
+        # first .kicad_pcb argument is the pristine input board; its kicad
+        # items are pre-existing design conditions subtracted from the
+        # final's kicad grade (kicad_preexisting) so kicad_drc reflects
+        # router-introduced items.
+        baseline = None
+        for line in txt.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            toks = [t for t in line.split() if t.endswith(".kicad_pcb")]
+            if toks:
+                baseline = toks[0]
+                break
+        res.update(grade(final, clr, baseline=baseline))
     dps = f"{res['diff_pairs_coupled']}/{res['diff_pairs_total']}" if res['diff_pairs_total'] else "-"
     print(f"[{label}] {board}: chain={'ok' if done else 'BROKEN'} "
           f"drc={res['drc']} kdrc={res.get('kicad_drc')} conn={res['conn']} compl={res['completion_pct']}% "
@@ -271,13 +293,34 @@ def run_wave(set_dir, out_dir, label, jobs):
     print(f"[{label}] code under test: {format_version(ver)}  (commit {ver.get('commit')})")
     print(f"[{label}] replaying {len(boards)} boards from {set_dir} -> {out_dir} ({jobs} parallel)")
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
-        futs = [ex.submit(do_board, set_dir, out_dir, label, b) for b in boards]
-        for f in concurrent.futures.as_completed(futs):  # report as boards finish
-            results.append(f.result())
-    results.sort(key=lambda r: r["board"])
     summary = out_dir / "summary.json"
-    summary.write_text(json.dumps(results, indent=2))
+
+    def _flush():
+        # #383: stream partial results to disk as boards finish, so a mid-run
+        # death still leaves the completed boards' grades on disk (the wave
+        # driver used to write summary.json only at the very end).
+        summary.write_text(json.dumps(sorted(results, key=lambda r: r["board"]), indent=2))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
+        fut_board = {ex.submit(do_board, set_dir, out_dir, label, b): b for b in boards}
+        for f in concurrent.futures.as_completed(fut_board):  # report as boards finish
+            b = fut_board[f]
+            try:
+                results.append(f.result())
+            except BaseException as e:  # noqa: BLE001 -- one board must never kill the wave
+                # #383: a worker raising SystemExit/KeyboardInterrupt (a bare
+                # sys.exit() deep in a grading helper) used to propagate through
+                # f.result() and out of main(), leaving NO summary and no error
+                # line. Degrade that board to a NORESULT row and keep going.
+                print(f"[{label}] {b}: NORESULT ({type(e).__name__}: {e})", flush=True)
+                results.append({"board": b, "clearance": None, "replay_rc": None,
+                                "final": None, "chain_complete": False,
+                                "drc": None, "conn": None, "nets_total": None,
+                                "nets_incomplete": None, "completion_pct": None,
+                                "error": f"{type(e).__name__}: {e}"})
+            _flush()
+    results.sort(key=lambda r: r["board"])
+    _flush()
     complete = sum(1 for r in results if r["chain_complete"])
     print(f"[{label}] wrote {summary}: {complete}/{len(results)} chains complete")
     return results
@@ -305,7 +348,16 @@ def regrade(out_dir, set_dir):
                "drc": None, "conn": None, "nets_total": None, "nets_incomplete": None,
                "completion_pct": None, **dp}  # regrade re-runs no commands, so no timing
         if done:
-            res.update(grade(str(final), clr))
+            baseline = None
+            for line in txt.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                toks = [t for t in line.split() if t.endswith(".kicad_pcb")]
+                if toks:
+                    baseline = toks[0]
+                    break
+            res.update(grade(str(final), clr, baseline=baseline))
         print(f"[regrade] {b}: chain={'ok' if done else 'BROKEN'} drc={res['drc']} "
               f"conn={res['conn']} compl={res['completion_pct']}%")
         results.append(res)

@@ -43,7 +43,6 @@ FLAG_PARAMS = {
     '--via-cost': 'via_cost',
     '--heuristic-weight': 'heuristic_weight',
     '--turn-cost': 'turn_cost',
-    '--diff-pair-width': 'diff_pair_width',
     '--diff-pair-gap': 'diff_pair_gap',
     '--impedance': 'impedance',
     '--gnd-via-distance': 'gnd_via_distance',
@@ -58,6 +57,11 @@ LIST_FLAGS = {
     '--power-nets': 'power_nets',
     '--power-nets-widths': 'power_nets_widths',
     '--layer-costs': 'layer_costs',
+    # #381 D3: route_diff's polarity-swap allowlist (nargs='+' globs). Carried
+    # explicitly (not via the generic unknown-flag fallthrough) so a scoped
+    # allowlist survives as a list param that claude_plan's alias routes to the
+    # diff tab's polarity_swap_nets_text field.
+    '--polarity-swap-nets': 'polarity_swap_nets',
     '--nets': None,  # handled per action
     '--pairs': None,
     '--plane-layers': None,
@@ -76,10 +80,25 @@ BOOL_FLAGS = {
 # --output still feeds the chain-pruning file list.
 IGNORE_FLAGS = {'--output', '--summary-json', '--schematic-dir', '--report'}
 
-# Per-tool flag renames: qfn/bga_fanout call the trace width --width.
+# Per-tool flag renames: bga_fanout calls the trace width --width (routed to the
+# Basic-tab track_width, which BGA fanout reads). qfn_fanout also uses --width
+# but its GUI home is the QFN panel's own control (see TOOL_FLAG_PARAMS, #381 D7).
 TOOL_FLAG_ALIASES = {
-    'qfn_fanout.py': {'--width': '--track-width'},
     'bga_fanout.py': {'--width': '--track-width'},
+}
+
+# Per-tool flag -> plan-param overrides (win over the global FLAG_PARAMS).
+# #381 D4: route_diff.py's trace width is --track-width, but its GUI home is the
+# diff tab's diff_pair_width control (NOT the Basic-tab track_width the global
+# FLAG_PARAMS would target). Without this override a recorded route_diff
+# --track-width 0.2 set the Basic-tab width and left the diff tab at its default,
+# so a plan-replayed diff routed at the wrong width.
+# #381 D7: qfn_fanout.py's --width/--clearance map to the QFN panel's own
+# controls (default 0.1/0.1), not the Basic-tab track_width/clearance that
+# BGA/route use, so a plan-replayed QFN fanout keeps its fine-pitch width.
+TOOL_FLAG_PARAMS = {
+    'route_diff.py': {'--track-width': 'diff_pair_width'},
+    'qfn_fanout.py': {'--width': 'qfn_track_width', '--clearance': 'qfn_clearance'},
 }
 
 
@@ -111,6 +130,7 @@ def parse_command(argv):
     i = argv.index([a for a in argv if os.path.basename(a) == tool][0]) + 1
     positional = []
     aliases = TOOL_FLAG_ALIASES.get(tool, {})
+    tool_params = TOOL_FLAG_PARAMS.get(tool, {})
     while i < len(argv):
         a = aliases.get(argv[i], argv[i])
         if a in IGNORE_FLAGS:
@@ -122,8 +142,8 @@ def parse_command(argv):
         elif a in BOOL_FLAGS:
             step['params'][BOOL_FLAGS[a]] = True
             i += 1
-        elif a in FLAG_PARAMS:
-            step['params'][FLAG_PARAMS[a]] = _num(argv[i + 1])
+        elif a in tool_params or a in FLAG_PARAMS:
+            step['params'][tool_params.get(a) or FLAG_PARAMS[a]] = _num(argv[i + 1])
             i += 2
         elif a in LIST_FLAGS:
             vals = []
@@ -182,7 +202,7 @@ def parse_command(argv):
         step['kind'] = 'bga' if tool == 'bga_fanout.py' else 'qfn'
         step['nets'] = [str(n) for n in nets] or ['*']
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
-              '--layers'):
+              '--layers', '--polarity-swap-nets'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step

@@ -50,6 +50,12 @@ BOOL_FLAGS = {
     '--no-bga-zones': 'no_bga_zone', '--no-bga-zone': 'no_bga_zone',
     '--no-gnd-vias': 'no_gnd_vias', '--rip-blocker-nets': 'rip_blocker_nets',
 }
+# Per-action overrides of SCALAR_FLAGS. #381 D4: route_diff.py's trace width is
+# --track-width, but its GUI home is the diff tab's diff_pair_width control (not
+# the Basic-tab track_width), so a diff step must carry it there.
+ACTION_SCALAR_OVERRIDES = {
+    'route_diff': {'--track-width': 'diff_pair_width'},
+}
 # Fanout via/clearance/grid live on the fanout tab's shared params too, so
 # fanout steps must carry them like route steps do.
 
@@ -100,14 +106,21 @@ def _plane_layers(argv):
 def check_pair(argv, step):
     """Return list of (flag, reason) mismatches for one command/step pair."""
     params = step.get('params', {})
+    scalar = dict(SCALAR_FLAGS)
+    scalar.update(ACTION_SCALAR_OVERRIDES.get(step.get('action'), {}))
+    # #381 D7: a QFN fanout step's --width/--clearance land on the QFN panel's
+    # own controls (qfn_track_width/qfn_clearance), not the Basic-tab ones.
+    if step.get('action') == 'fanout' and step.get('kind') == 'qfn':
+        scalar['--width'] = 'qfn_track_width'
+        scalar['--clearance'] = 'qfn_clearance'
     bad = []
     n = 0
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in SCALAR_FLAGS and i + 1 < len(argv):
+        if a in scalar and i + 1 < len(argv):
             want = _num(argv[i + 1])
-            got = params.get(SCALAR_FLAGS[a])
+            got = params.get(scalar[a])
             n += 1
             if got is None or _num(got) != want:
                 bad.append((a, f"want {want!r} got {got!r}"))
@@ -132,6 +145,93 @@ def check_pair(argv, step):
 
 
 FIXTURE = str(Path(__file__).resolve().parent / "fixtures" / "sample_redo_commands.sh")
+
+
+# --- #381 D5: param -> control resolution gate --------------------------------
+# claude_plan.py imports wx at module level, so we can't import it here (no-wx
+# gate). Extract its resolution tables and the GUI control attribute names by
+# AST instead, then assert every param that MUST reach a control actually does
+# (via same-name control, alias->control, or a _apply_special handler). This is
+# what blocks a new "no control, ignored" fallthrough (the D5 regression class).
+import ast  # noqa: E402
+
+# Params claude_plan resolves through action-specific blocks (not the generic
+# alias/special path): composites / same-name-but-formatted controls. Kept
+# explicit so the gate credits them without re-parsing every action block.
+_ACTION_BLOCK_HANDLED = {
+    'track_width', 'clearance', 'via_size', 'via_drill',
+    'diff_pair_width', 'diff_pair_gap', 'power_nets', 'power_nets_widths',
+    'layer_costs', 'add_gnd_vias', 'gnd_via_distance', 'gnd_via_net',
+    'max_track_width', 'min_track_width',
+}
+
+# Params that MUST resolve to a GUI control (the D5 fallback list + D3 polarity
+# + D7 QFN width/clearance).
+_MUST_RESOLVE = {
+    'rip_existing_nets', 'impedance', 'ordering', 'direction', 'time_matching',
+    'keepout', 'guide_corridor', 'length_match_groups', 'swappable_nets',
+    'polarity_swap_nets', 'qfn_track_width', 'qfn_clearance',
+}
+
+
+def _claude_plan_tables():
+    """AST-extract _PARAM_CONTROL_ALIASES (dict) and _PARAM_SPECIAL (set) from
+    claude_plan.py without importing it (it imports wx)."""
+    src = (REPO / "kicad_routing_plugin" / "claude_plan.py").read_text()
+    tree = ast.parse(src)
+    aliases, special = {}, set()
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for t in node.targets:
+            if isinstance(t, ast.Name) and t.id == '_PARAM_CONTROL_ALIASES':
+                aliases = ast.literal_eval(node.value)
+            elif isinstance(t, ast.Name) and t.id == '_PARAM_SPECIAL':
+                special = set(ast.literal_eval(node.value))
+    return aliases, special
+
+
+def _gui_control_attrs():
+    """Collect every `self.X = ...` attribute name across the plugin GUI source
+    files -- the universe of control attributes an alias may target."""
+    attrs = set()
+    gui_dir = REPO / "kicad_routing_plugin"
+    for fn in ("swig_gui.py", "differential_gui.py", "fanout_gui.py",
+               "planes_gui.py"):
+        tree = ast.parse((gui_dir / fn).read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            for t in targets:
+                if (isinstance(t, ast.Attribute)
+                        and isinstance(t.value, ast.Name)
+                        and t.value.id == 'self'):
+                    attrs.add(t.attr)
+    return attrs
+
+
+def check_param_resolution():
+    """Return list of (param, reason) for MUST-resolve params that don't."""
+    aliases, special = _claude_plan_tables()
+    controls = _gui_control_attrs()
+    bad = []
+    for p in sorted(_MUST_RESOLVE):
+        if p in special or p in _ACTION_BLOCK_HANDLED:
+            continue
+        if p in controls:
+            continue
+        tgt = aliases.get(p)
+        if tgt is not None and tgt in controls:
+            continue
+        if tgt is not None:
+            bad.append((p, f"alias -> {tgt!r}, but no such GUI control"))
+        else:
+            bad.append((p, "no control, no alias, not special -> would be ignored"))
+    return bad
 
 
 def main():
@@ -169,7 +269,15 @@ def main():
                 print(f"    {p[0]}: {p[1]}")
             else:
                 print(f"    [{p[0]}] {p[1]}: {p[2]}")
-    return 1 if total_bad else 0
+
+    # #381 D5: param -> control resolution gate.
+    res_bad = check_param_resolution()
+    print(f"\nParam->control resolution: {len(_MUST_RESOLVE)} params checked, "
+          f"{len(res_bad)} unresolved.")
+    for p, why in res_bad:
+        print(f"    {p}: {why}")
+
+    return 1 if (total_bad or res_bad) else 0
 
 
 if __name__ == "__main__":
