@@ -1170,15 +1170,16 @@ class RoutingDialog(wx.Dialog):
 
         self.no_clamp_netclasses_check = wx.CheckBox(
             options_scroll, label="Keep net-class clearances")
-        self.no_clamp_netclasses_check.SetValue(False)
+        # PR392: default ON (keep classes). Routing now RESPECTS non-Default
+        # netclass clearances (pairwise max(classA, classB)), so the output keeps
+        # each class's original clearance instead of clamping it down.
+        self.no_clamp_netclasses_check.SetValue(True)
         self.no_clamp_netclasses_check.SetToolTip(
-            "When 'Fix DRC settings after routing' runs, by default it clamps every "
-            "NON-Default net class's clearance/track/via floors down to the routed "
-            "values, so KiCad's per-net-class DRC does not flag copper routed at the "
-            "smaller run clearance (affects any non-Default class -- impedance, "
-            "power, etc.). Check this to leave the net-class spec untouched for a "
-            "FINAL board whose class rules must survive (matches the CLI's "
-            "--no-clamp-netclasses). Off by default.")
+            "Keep the board's NON-Default net-class clearance/track/via floors in the "
+            "output (ON by default since routing now RESPECTS those classes). Uncheck "
+            "to clamp them DOWN to the routed values -- only needed for a routing path "
+            "that does not honor classes and would otherwise storm KiCad's per-net-"
+            "class DRC (matches the CLI's --clamp-netclasses when unchecked).")
         options_inner.Add(self.no_clamp_netclasses_check, 0, wx.ALL, 3)
 
         options_inner.AddSpacer(10)
@@ -3412,7 +3413,7 @@ class RoutingDialog(wx.Dialog):
                     via_drill=config.get('via_drill'))
                 drc_changes = apply_targets_to_board(
                     board, targets, severity_plan(keep_thermal=config.get('keep_thermal', False)),
-                    clamp_nondefault_netclasses=not config.get('no_clamp_netclasses', False))
+                    clamp_nondefault_netclasses=not config.get('no_clamp_netclasses', True))
                 if drc_changes:
                     board.SetModified()
                     print(f"DRC settings: loosened {len(drc_changes)} Board Setup "

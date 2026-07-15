@@ -175,6 +175,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 add_teardrops: bool = False,
                 return_results: bool = False,
                 pcb_data=None,
+                net_clearances: dict = None,
                 cancel_check=None,
                 progress_callback=None) -> Tuple[int, int, float]:
     """
@@ -254,6 +255,22 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         pcb_data = parse_kicad_pcb(input_file, keepout_layer=keepout_layer)
     else:
         print("Using provided PCB data...")
+
+    # Cross-class clearance: auto-read non-Default netclasses from the sibling
+    # .kicad_pro when no map was passed (KiCad pairwise max(classA, classB)). A
+    # caller that resolved the map (route_diff main, the GUI) passes a dict so this
+    # does not re-read. All-Default boards -> empty map -> inert.
+    if net_clearances is None and input_file and os.path.isfile(input_file):
+        try:
+            from list_nets import net_clearance_map
+            net_clearances = net_clearance_map(
+                input_file, {nid: n.name for nid, n in pcb_data.nets.items()})
+            if net_clearances:
+                print(f"Auto-read netclass clearances for {len(net_clearances)} net(s) "
+                      f"(cross-class max(A,B) respected during diff-pair routing).")
+        except Exception as _e:
+            print(f"Warning: could not auto-read netclass clearances ({_e}).")
+            net_clearances = None
 
     # Layers must be specified - we can't auto-detect which are ground planes
     if layers is None:
@@ -547,6 +564,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             lambda pair: get_diff_pair_endpoints(pcb_data, pair.p_net_id, pair.n_net_id, config)
         )
 
+    # Cross-class clearance (PR392): install the per-net class map + routing-side
+    # floor on config so BOTH the base obstacle maps and every incremental in-run
+    # stamper (partner-leg segs/vias, phase-3 taps) price foreign copper at KiCad's
+    # pairwise max(classA, classB). Floor is over the ROUTED nets. Inert when empty.
+    config.set_net_clearances(net_clearances, [nid for _, nid in net_ids])
+
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
     # BEFORE MPS ordering, so ordering sees correct segment layers
     all_stubs_by_layer = {}
@@ -558,7 +581,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # pad wall, while the inner layers right there were empty).
         _swap_probe_clearance = (config.track_width + config.diff_pair_gap) / 2
         swap_probe_obstacles = build_base_obstacle_map(
-            pcb_data, config, [nid for _, nid in net_ids], _swap_probe_clearance)
+            pcb_data, config, [nid for _, nid in net_ids], _swap_probe_clearance,
+            net_clearances=net_clearances)
         total_layer_swaps, all_stubs_by_layer, stub_endpoints_by_layer = apply_diff_pair_layer_swaps(
             pcb_data, config, diff_pair_ids_to_route_set, diff_pairs,
             can_swap_to_top_layer, all_segment_modifications, all_swap_vias,
@@ -635,7 +659,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     all_net_ids_to_route = [nid for _, nid in net_ids]
     print("Building base obstacle map...")
     base_start = time.time()
-    base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route)
+    base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route,
+                                             net_clearances=net_clearances)
     base_elapsed = time.time() - base_start
     print(f"Base obstacle map built in {base_elapsed:.2f}s")
     if debug_memory:
@@ -657,7 +682,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     diff_pair_extra_clearance = (config.track_width + config.diff_pair_gap) / 2
     print(f"Building diff pair obstacle map (extra clearance: {diff_pair_extra_clearance:.3f}mm)...")
     dp_base_start = time.time()
-    diff_pair_base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route, diff_pair_extra_clearance)
+    diff_pair_base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route,
+                                                       diff_pair_extra_clearance,
+                                                       net_clearances=net_clearances)
     dp_base_elapsed = time.time() - dp_base_start
     print(f"Diff pair obstacle map built in {dp_base_elapsed:.2f}s")
     if debug_memory:
@@ -1210,6 +1237,14 @@ Examples:
                         help="Target differential impedance in ohms (e.g., 100). Calculates track width per layer from board stackup using --diff-pair-gap as spacing.")
     parser.add_argument("--clearance", type=float, default=0.25,
                         help="Clearance between tracks in mm (default: 0.25)")
+    parser.add_argument("--net-clearances", metavar="JSON", default=None,
+                        help="Explicit override for the cross-class clearance map: a JSON object "
+                             "mapping net name -> that net's net-class clearance in mm. When OMITTED, "
+                             "the map is AUTO-READ from the sibling .kicad_pro's non-Default "
+                             "netclasses (all-Default boards -> empty -> inert). Every pre-placed AND "
+                             "in-run obstacle of a different class is priced at max(routing floor, "
+                             "that obstacle net's own clearance) = KiCad's cross-class max(A,B). The "
+                             "GUI derives the same map from the board's live net classes.")
     parser.add_argument("--via-size", type=float, default=0.5,
                         help="Via outer diameter in mm (default: 0.5)")
     parser.add_argument("--via-drill", type=float, default=0.3,
@@ -1437,7 +1472,33 @@ Examples:
 
     print(f"Routing {len(net_names)} nets as differential pairs: {net_names[:5]}{'...' if len(net_names) > 5 else ''}")
 
+    # Cross-class clearance map (KiCad max(classA, classB)): explicit --net-clearances
+    # JSON overrides; otherwise auto-read the board's non-Default netclasses from the
+    # sibling .kicad_pro. All-Default boards -> empty map -> inert (byte-identical).
+    _net_clearances_map = None
+    if args.net_clearances:
+        import json as _jc
+        with open(args.net_clearances, encoding="utf-8") as _f:
+            _name_to_clr = _jc.load(_f)
+        _net_clearances_map = {}
+        for _nid, _net in pcb_data.nets.items():
+            if _net.name in _name_to_clr:
+                _net_clearances_map[_nid] = float(_name_to_clr[_net.name])
+        print(f"Loaded per-net clearances for {len(_net_clearances_map)}/{len(pcb_data.nets)} nets "
+              f"from {args.net_clearances}")
+    else:
+        from list_nets import net_clearance_map
+        _net_clearances_map = net_clearance_map(
+            args.input_file, {_nid: _net.name for _nid, _net in pcb_data.nets.items()})
+        if _net_clearances_map:
+            _classes = sorted({round(v, 4) for v in _net_clearances_map.values()})
+            print(f"Auto-read netclass clearances for {len(_net_clearances_map)} net(s) "
+                  f"from the board's .kicad_pro (non-Default class clearances mm: {_classes}); "
+                  f"diff-pair routing respects KiCad cross-class max(A,B). "
+                  f"Override with --net-clearances.")
+
     batch_route_diff_pairs(args.input_file, args.output_file, net_names,
+                net_clearances=_net_clearances_map,
                 direction_order=args.direction,
                 ordering_strategy=args.ordering,
                 disable_bga_zones=args.no_bga_zones,

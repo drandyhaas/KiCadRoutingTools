@@ -439,6 +439,26 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     else:
         print("Using provided PCB data...")
 
+    # Cross-class clearance: when no map was passed (net_clearances is None -- e.g.
+    # the plane routers reroute ripped nets by calling batch_route directly), AUTO-
+    # READ the board's non-Default netclasses from the sibling .kicad_pro so this
+    # routing also respects KiCad's pairwise max(classA, classB). A caller that
+    # already resolved the map (route.py main, the GUI) passes a dict (possibly
+    # empty) so this does not re-read. All-Default boards -> empty map -> inert.
+    if net_clearances is None and input_file and os.path.isfile(input_file):
+        try:
+            from list_nets import net_clearance_map
+            net_clearances = net_clearance_map(
+                input_file, {nid: n.name for nid, n in pcb_data.nets.items()})
+            if net_clearances:
+                print(f"Auto-read netclass clearances for {len(net_clearances)} net(s) "
+                      f"from {os.path.basename(os.path.splitext(input_file)[0])}.kicad_pro "
+                      f"(cross-class max(A,B) respected during routing).")
+        except Exception as _e:
+            print(f"Warning: could not auto-read netclass clearances ({_e}); "
+                  f"routing at the uniform clearance.")
+            net_clearances = None
+
     # Issue #8: snapshot the input board's copper per net BEFORE any routing.
     # The final connectivity reconciliation reports against the copper that will
     # be WRITTEN (this original copper + the write-list's new copper), not against
@@ -765,6 +785,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Use visualization-aware building if callback is provided
     base_vis_data = None
     base_map_exclusions = all_net_ids_to_route + existing_rippable
+    # Cross-class clearance: install the per-net class map + routing-side floor on
+    # config so BOTH the base map and every incremental in-run obstacle stamper
+    # price foreign copper at KiCad's pairwise max(classA, classB). The floor is
+    # computed over the ROUTED nets (== base map's nets_to_route) so the base map
+    # and the incremental stampers agree. Inert when net_clearances is empty.
+    config.set_net_clearances(net_clearances, base_map_exclusions)
     if visualize:
         base_obstacles, base_vis_data = build_base_obstacle_map_with_vis(
             pcb_data, config, base_map_exclusions,
@@ -1789,10 +1815,12 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--via-drill", type=float, default=defaults.VIA_DRILL,
                         help=f"Via drill size in mm (default: {defaults.VIA_DRILL})")
     parser.add_argument("--net-clearances", metavar="JSON", default=None,
-                        help="Path to a JSON object mapping net name -> that net's net-class "
-                             "clearance in mm, for ALL nets on the board (routed and pre-placed). "
-                             "Each pre-placed via/pad/segment obstacle is then priced at "
-                             "max(this call's --clearance, that obstacle net's own clearance) so a "
+                        help="Explicit override for the cross-class clearance map: a JSON object "
+                             "mapping net name -> that net's net-class clearance in mm. When OMITTED, "
+                             "the map is AUTO-READ from the sibling .kicad_pro's non-Default "
+                             "netclasses (all-Default boards -> empty -> inert). Every pre-placed AND "
+                             "in-run via/pad/segment obstacle of a different class is priced at "
+                             "max(this call's routing floor, that obstacle net's own clearance) so a "
                              "foreign higher-clearance net (POWER_HI 0.25 while routing a Default "
                              "0.15 group) is not under-blocked (cross-class via-via/DRC). The GUI "
                              "derives the same map from the board's live net classes.")
@@ -2099,6 +2127,18 @@ For differential pair routing, use route_diff.py:
                 _net_clearances_map[_nid] = float(_name_to_clr[_net.name])
         print(f"Loaded per-net clearances for {len(_net_clearances_map)}/{len(pcb_data.nets)} nets "
               f"from {args.net_clearances}")
+    else:
+        # Auto-read the board's netclasses from the sibling .kicad_pro so headless
+        # routing honors non-Default class clearances (KiCad max(classA, classB))
+        # without a hand-written JSON. All-Default boards -> empty map -> inert.
+        from list_nets import net_clearance_map
+        _net_clearances_map = net_clearance_map(
+            args.input_file, {_nid: _net.name for _nid, _net in pcb_data.nets.items()})
+        if _net_clearances_map:
+            _classes = sorted({round(v, 4) for v in _net_clearances_map.values()})
+            print(f"Auto-read netclass clearances for {len(_net_clearances_map)} net(s) "
+                  f"from the board's .kicad_pro (non-Default class clearances mm: {_classes}); "
+                  f"routing respects KiCad cross-class max(A,B). Override with --net-clearances.")
 
     batch_route(args.input_file, args.output_file, net_names,
                 direction_order=args.direction,

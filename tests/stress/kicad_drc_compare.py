@@ -151,11 +151,18 @@ def match(kicad_items, cd_items):
 
 def _staged_copy(board: str, clearance: float):
     clearance = float(clearance)
-    """Copy board + sibling .kicad_pro into a temp dir with the Default
+    """Copy board + sibling .kicad_pro into a temp dir with the DEFAULT
     net-class clearance forced to `clearance`, so KiCad grades at the SAME
     constraint check_drc uses (the routed clearance) instead of the board's
     original design netclass -- grading stricter manufactures phantom
-    clearance items and drowns the real signal."""
+    clearance items and drowns the real signal.
+
+    PR392: only the DEFAULT class (the routing side, routed at the run clearance)
+    is equalized. NON-Default classes keep their ORIGINAL clearance because the
+    router now RESPECTS them (pairwise max(classA, classB)); KiCad then grades each
+    cross-class pair at its true max(A,B) from the real classes. Clamping non-Default
+    classes down (the old behaviour) would grade that copper LOOSER than it was
+    routed and hide genuine class-clearance shortfalls."""
     import shutil
     d = tempfile.mkdtemp(prefix="kdrc_")
     b2 = os.path.join(d, os.path.basename(board))
@@ -172,7 +179,9 @@ def _staged_copy(board: str, clearance: float):
         except (TypeError, ValueError):
             return dflt
     for c in cfg.setdefault("net_settings", {}).setdefault("classes", []) or []:
-        if "clearance" in c:
+        # Only the Default class is equalized to the routed clearance; non-Default
+        # classes keep their original clearance (routing respects them -- PR392).
+        if c.get("name", "Default") == "Default" and "clearance" in c:
             c["clearance"] = min(_f(c.get("clearance"), clearance), clearance)
     rules = cfg.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rules", {})
     rules["min_clearance"] = min(_f(rules.get("min_clearance"), clearance) or clearance, clearance)
