@@ -169,6 +169,18 @@ harmless.
    `--output` (e.g. `... final_board.kicad_pcb`); record the final board's
    name in the results JSON. Every tool step's input must be a previous tool
    step's output (or the original seed input), chained by name.
+1a''. PROJECT CUSTODY: if you stage/rename the pristine board into the run
+   dir at all (e.g. `board0.kicad_pcb` -- prefer NOT to, per 1a'), the
+   sibling `.kicad_pro` MUST be copied to the SAME STEM (`board0.kicad_pro`).
+   A pro left under the original board name is invisible to every tool step,
+   so the design's real DRC rules (min_copper_edge_clearance above all)
+   silently vanish for the whole chain and a later step invents defaults --
+   the openstint lesson (#338/#404: design 0.3 edge rule lost, 0.5 recorded,
+   phantom kicad floods). Best practice: route directly FROM
+   `boards_unrouted_setN/<board>.kicad_pcb` as the first step's input; its
+   sibling pro then travels automatically (`fix_project_for_output` copies
+   input-sibling projects at every step, and the replay seeder now carries
+   `<board>.kicad_pro` for legacy stem-mismatched manifests).
 1b. PARSER-PARITY VALIDATION (per board, start AND end): run
    `python3 /Users/andy/Documents/KiCadRoutingTools/validate_pcb_data.py <board>`
    on the input board before any routing step, and again on the final board.

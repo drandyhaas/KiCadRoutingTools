@@ -403,6 +403,21 @@ def seed_input_boards(manifest, cmds, dest_dir):
             # lower-only, so carrying the project is always safe.
             src_pro = src[:-len(".kicad_pcb")] + ".kicad_pro"
             dst_pro = dst[:-len(".kicad_pcb")] + ".kicad_pro"
+            # Stem-mismatch fallback (the openstint gap): stress workers
+            # RENAMED the pristine board into the run dir (board0.kicad_pcb)
+            # but left the project under the ORIGINAL board name
+            # (<run_dir_name>.kicad_pro), so no same-stem sibling exists and
+            # the design's DRC rules (0.3 edge on openstint) silently vanish
+            # for the whole chain. The run dir is named after the board, so
+            # that pro is the pristine project -- carry it under the seeded
+            # stem.
+            if not os.path.exists(src_pro):
+                board_named = os.path.join(src_dir,
+                                           os.path.basename(os.path.normpath(src_dir)) + ".kicad_pro")
+                if os.path.exists(board_named):
+                    print(f"    (seed {base}: no same-stem .kicad_pro; carrying "
+                          f"{os.path.basename(board_named)} as {os.path.basename(dst_pro)})")
+                    src_pro = board_named
             if os.path.exists(src_pro) and not os.path.exists(dst_pro):
                 shutil.copy2(src_pro, dst_pro)
                 seeded.append(os.path.basename(src_pro))
