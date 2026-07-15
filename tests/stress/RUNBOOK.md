@@ -529,5 +529,17 @@ grade stricter or you manufacture phantom grazes.
   flagged boards' `kicad_*` to `--out-dir`. Much faster than the full chain; use it
   when the change only touches fanout / diff-pair routing.
 
+- **Whole set, from a mid-chain step (reuse a prior wave's upstream boards):**
+  `python3 tests/stress/partial_replay_from_planes.py --set runs_setN --seed
+  <prior_wave>/setN --out <fresh_wave>/setN [--only b1,b2] [--from-script route_planes.py]`.
+  Cuts each board's manifest over at the first `--from-script` command (default the
+  first `route_planes.py`), stages the boards that step reads from upstream out of
+  `--seed` (with their `.kicad_pro` DRC floors), and replays only the tail via
+  `redo_stress_test`. Use it when a change only touches the later stages (plane
+  routing, reconnect, grading) so the expensive fanout/diff/`route.py` signal
+  routing is skipped. Grade the finals yourself (`ab_replay_grade.py --regrade` or
+  `kicad_drc_compare.py`).
+
 Rule of thumb: full-chain regressions → `ab_replay_grade.py`; diff-pair
-regressions → `redo_diff_stage.py`.
+regressions → `redo_diff_stage.py`; plane/reconnect/grading-only changes →
+`partial_replay_from_planes.py` (reuses a prior wave's upstream boards).
