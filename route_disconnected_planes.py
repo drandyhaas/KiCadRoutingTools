@@ -1253,6 +1253,19 @@ def route_planes(
                 progress_callback(0, 0, f"Reconnecting {len(_cnames)} ripped net(s)...")
             try:
                 from route import batch_route
+                # #338: this self-invocation routes from OUTPUT_FILE, whose
+                # sibling .kicad_pro does not exist yet, so batch_route's own
+                # edge resolution reads nothing and the reconnect stamps its
+                # edge band at the track-clearance fallback (openstint /A-
+                # shipped 0.4mm from a 0.5mm rule). Resolve from the ORIGINAL
+                # input's project here. Do NOT forward this function's
+                # board_edge_clearance -- that is the plane-zone inset, not an
+                # enforced routing floor.
+                try:
+                    from fix_kicad_drc_settings import read_project_edge_clearance
+                    _edge = read_project_edge_clearance(input_file)
+                except Exception:
+                    _edge = 0.0
                 _ok, _fail, _t = batch_route(
                     output_file, output_file, _cnames,
                     layers=routing_layers,
@@ -1260,6 +1273,7 @@ def route_planes(
                     via_size=via_size, via_drill=via_drill,
                     grid_step=grid_step, max_iterations=max_iterations,
                     power_nets=power_nets, power_nets_widths=power_nets_widths,
+                    board_edge_clearance=_edge,
                     disable_bga_zones=([] if no_bga_zone else None))
                 LAST_RIPPED_RECONNECT = {'nets': _cnames,
                                          'successful': _ok, 'failed': _fail}

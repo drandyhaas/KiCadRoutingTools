@@ -275,8 +275,25 @@ def compare_board(board: str, label: str = None, clearance: float = None,
     if baseline and os.path.exists(baseline):
         base_items, berr = kicad_items_for(baseline, clearance)
         if not berr and base_items:
-            matched_pre, _, kicad = match(base_items, kicad)
+            matched_pre, base_rest, kicad = match(base_items, kicad)
             pre = len(matched_pre)
+            # Second pass, positional-drift tolerant: kicad anchors the same
+            # design condition at different instance positions run-to-run
+            # (openstint's pre-routed /A- input copper matched 6 of 8). An
+            # unmatched final item whose (type, nets) still has an unmatched
+            # BASELINE twin is the same pre-existing condition.
+            pool = {}
+            for bv in base_rest:
+                pool[(bv["type"], bv["nets"])] = pool.get((bv["type"], bv["nets"]), 0) + 1
+            still = []
+            for kv in kicad:
+                key = (kv["type"], kv["nets"])
+                if pool.get(key):
+                    pool[key] -= 1
+                    pre += 1
+                else:
+                    still.append(kv)
+            kicad = still
     cd = run_check_drc(board, clearance, netclasses=not bool(clearance))
     matched, kicad_only, cd_only = match(kicad, cd)
     # NET-PAIR agreement: the engines report at different granularities
