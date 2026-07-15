@@ -1,65 +1,51 @@
-6e09425 2026-07-14 parity sweep 066fc7d..6e09425 (#326/#338/#331/#371/#373/#379/#380/#389/#390/#393/#396/#405). No wiring gaps; one documented asymmetry (net_clearances).
+6e88568 2026-07-15 parity sweep 6e09425..6e88568 (pr392 cross-class merge + plane-edge/grader/cp1252/partial-replay). No wiring gaps; the previously-open net_clearances asymmetry is now RESOLVED by pr392 Task 1b.
 
-Pure AUDIT (no parity fix needed this pass): every engine change since the
-previous marker landed in SHARED modules or was already threaded through both
-fronts. 24 commits swept; no new CLI argparse flag, no new CLI-only post-pass.
+AUDIT: 17 commits swept. The only new engine surface is pr392's two flags
+(--net-clearances, --keep-input-copper); both are threaded through BOTH fronts
+plus the manifest converter and parity map. Everything else (plane-edge tap
+clamp, grader unify, cp1252 console, partial_replay tool) is shared-engine /
+grader-only / tooling with no GUI surface.
+
+RESOLVED THIS PASS (was the standing OPEN ASYMMETRY in the prior marker):
+  * net_clearances CLI/GUI divergence is CLOSED. pr392 Task 1b (e73d9ed) makes
+    the CLI auto-read the non-Default netclass clearances from the board's
+    sibling .kicad_pro and build net_clearances (route.py: "Auto-read netclass
+    clearances ... from the board's .kicad_pro"), AND stops clamping the
+    netclasses DOWN in the output (fix_kicad_drc_settings: clamp removed /
+    gated). This is exactly the CLI auto-build 5b4c191 aspired to. Both fronts
+    now reserve each net's OWN class clearance as an obstacle (KiCad cross-class
+    max(A,B)); neither rewrites the netclasses to hide violations. CLI and GUI
+    are behaviorally aligned on multi-class boards. Task 1a (ae2453b) also
+    honors cross-class clearance for IN-RUN mixed-class copper in the shared
+    engine -> both fronts free.
 
 WHAT WAS CHECKED (all parity-clean):
-  * #326 pad/footprint clearance overrides -> pad.local_clearance is resolved in
-    BOTH parse_kicad_pcb (route.py:1988) AND build_pcb_data_from_board
-    (kicad_parser.py:3112-3140, incl. fp.GetLocalClearance inheritance), and the
-    two are diffed by the parser-parity validator (kicad_parser.py:3659/3726).
-  * #338 board-edge rule reader (effective_board_edge_clearance /
-    read_project_edge_clearance) is used CLI-side (route/route_diff/route_planes/
-    route_disconnected_planes/kicad_oracle) AND GUI-side
-    (swig_gui._effective_board_edge_clearance in 4 config builds; every tab's
-    board_edge_clearance kwarg; settings_persistence). Oracle-reconnect edge
-    threading (175bac1) present in both route_disconnected_planes and the GUI
-    planes path.
-  * #331/#371/#396 net_rescue: rescue_failed_nets runs INSIDE batch_route
-    (route.py:1077), so the GUI's batch_route call gets it free. Always-on, no
-    flag.
-  * #373 plane-pad plain-track fallback: _try_trace_to_same_net_copper lives in
-    the shared plane_pad_tap.py (called at :775/:917), reached by both fronts via
-    route_disconnected_planes.route_planes (GUI: planes_gui.py:1125).
-  * #379 GND-net match, #380 target-swap permutation, #389/#390 rip-by-identity /
-    NPTH seed floor, #393 underpad off-centre-via/home-lens: all in shared engine
-    modules (single_ended_routing, target_swap, obstacle_map, plane_pad_tap) ->
-    both fronts free.
-  * #405 kicad_drc_compare symmetric baseline subtraction: grader-only, no
-    routing surface.
+  * --net-clearances: CLI argparse (route.py) + engine (routing_config
+    set_net_clearances / obstacle_clearance) + GUI builds it from the live
+    board's netclasses (swig_gui.py, settings_persistence.py) + manifest_to_plan
+    special-cases it (tests/stress/manifest_to_plan.py:84) + test_gui_engine_
+    parity config map. Auto-read from .kicad_pro is in the SHARED engine path, so
+    both fronts get it.
+  * --keep-input-copper: CLI flag (route.py:1951, action=store_true default
+    False) -> batch_route kwarg -> cleanup_pipeline (shared) -> GUI reaches it
+    via the same cleanup call. route_diff carries the mirrored --keep-input-copper.
+  * plane-edge tap clamp (2448070): clamp_tap_via_to_edge lives in shared
+    plane_pad_tap.py / route_planes, reached by both fronts (planes_gui path).
+  * grader unify (61e1d63), cp1252 console (be5f126), partial_replay (1c6b99d):
+    grader / entry-point / test-tooling only, no routing-engine or GUI surface.
 
 GATES RUN GREEN:
   * test_manifest_plan_parity.py: 6201 flag-checks / 157 manifests, 0 mismatch;
     param->control resolution 12/12.
   * test_cli_postpass_coverage.py: 4 registered, 8 in active use, 0 failures
     (bga/qfn run_drc remains the one acknowledged CLI-only report-only pass).
-  * test_gui_engine_parity.py (KiCad python, pcbnew 10.0.0, default power board):
-    VERDICT PARITY -- CLI & GUI both conn_full=True, drc=0, kicad_unconnected=0.
-    Copper sets DIFFER (~264 cli-only / ~293 gui-only of ~1250 segs) -- larger
-    than the pure A*-tie-break/UUID class, consistent with the net_clearances
-    asymmetry below firing on this board's power net classes.
+  * test_gui_engine_parity.py (KiCad python) NOT re-run this pass (no wx/pcbnew in
+    this session); the no-wx gates + the shared-engine placement of both new flags
+    cover the wiring. Next audit should re-run it on a multi-class board now that
+    the CLI auto-builds net_clearances, to confirm the copper sets converge (the
+    prior marker's ~264/293 copper delta was attributed to this asymmetry, now
+    resolved -> expect the delta to shrink toward the A*-tie-break/UUID floor).
 
-OPEN ASYMMETRY (documented design state from 5b4c191, NOT fixed here -- fixing
-is a CLI behavioral change needing a full corpus A/B, out of scope for a marker
-update):
-  * net_clearances (#326 B5, GridRouteConfig): the GUI BUILDS it from the live
-    board's netclasses and passes it to batch_route (swig_gui.py:2854/2994/3121),
-    so the GUI router reserves each net's OWN class clearance as an obstacle. The
-    CLI main() does NOT build it (route.py:578 comment: "GUI-fed today; harmless
-    when empty") -- the CLI instead routes at the flat run clearance and clamps
-    the non-Default netclasses DOWN in the output .kicad_pro
-    (apply_targets_to_project clamp_nondefault_netclasses). Net effect: on a
-    MULTI-NETCLASS board with larger non-Default clearances the two fronts
-    produce DIFFERENT copper (GUI more conservative), though both stay
-    functionally parity-clean (0 DRC / 0 unconnected). 5b4c191's message aspired
-    to a CLI auto-build "from the sibling .kicad_pro"; that was not implemented.
-    RESOLVE next: decide whether the CLI should auto-build net_clearances (then
-    A/B the corpus) or whether the route-flat-then-clamp approach is the intended
-    CLI contract; file an issue either way. Empty/all-Default boards are already
-    identical.
-
-STILL NOT DIRECTLY GUI-ENGINE-TESTED (structurally covered by the no-wx gates;
-the KiCad-python test only ran a single-ended+power board): a diff route through
-the GUI engine (D1 ordering/rip-up/costs) and a QFN GUI fanout at the D7
-defaults. Next audit picks up from this marker.
+STILL NOT DIRECTLY GUI-ENGINE-TESTED (structurally covered by the no-wx gates):
+a diff route through the GUI engine and a QFN GUI fanout; plus the multi-class
+net_clearances convergence check noted above. Next audit picks up from this marker.
