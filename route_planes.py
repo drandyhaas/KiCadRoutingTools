@@ -61,6 +61,7 @@ from plane_pad_tap import (
     pad_is_fine_pitch,
     tap_pad_with_escalation,
     fab_floor_clearance_track,
+    clamp_tap_via_to_edge,
     FINE_TAP_GRID_STEP,
 )
 from terminal_colors import GREEN, RED, RESET
@@ -2488,6 +2489,14 @@ def create_plane(
                                 break
 
             if via_in_pad:
+                # Board-edge clamp: the pad-centre / in-pad via site is placed at
+                # its true (off-grid) coordinate, which can sit sub-grid closer to
+                # the edge than the obstacle map's grid keep-out blocks. Pull it
+                # interior to honor min_copper_edge_clearance while staying inside
+                # the pad copper (inert without an edge rule / when it already
+                # clears). See plane_pad_tap.clamp_tap_via_to_edge.
+                via_in_pad, _ = clamp_tap_via_to_edge(
+                    via_in_pad, pad, pcb_data, config, via_size)
                 # Found position within pad - place via there (no trace needed)
                 # KiCad vias only specify start/end layers, not intermediate
                 new_vias.append({
@@ -2562,14 +2571,28 @@ def create_plane(
                 router=via_pad_router
             )
 
+            # Board-edge clamp: an in-pad via placed at the pad's true (off-grid)
+            # centre can sit sub-grid closer to the edge than the obstacle map's
+            # grid keep-out blocks; pull it interior to honor
+            # min_copper_edge_clearance (inert without an edge rule / when it
+            # already clears). See plane_pad_tap.clamp_tap_via_to_edge.
+            edge_moved = False
+            if via_pos:
+                via_pos, edge_moved = clamp_tap_via_to_edge(
+                    via_pos, pad, pcb_data, config, via_size)
+
             placement_success = False
             trace_segments = None
             via_blocked = via_pos is None
             blocked_cells = []
 
             if via_pos:
+                # An edge-clamped via stays inside the pad copper, so it still
+                # connects by overlap (via-in-pad, no trace) even though it is no
+                # longer at the exact centre.
                 via_at_pad_center = (abs(via_pos[0] - pad.global_x) < 0.001 and
-                                     abs(via_pos[1] - pad.global_y) < 0.001)
+                                     abs(via_pos[1] - pad.global_y) < 0.001) or \
+                    (edge_moved and point_in_pad_rect(via_pos[0], via_pos[1], pad, 1e-6))
 
                 if via_at_pad_center:
                     placement_success = True
