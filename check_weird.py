@@ -363,7 +363,17 @@ def _check_removable(net_id, name, net_segs, net_vias, net_pads, net_zones,
         c = _copy.copy(s)
         c.width = min(c.width, _STRICT_W)
         clamped.append(c)
-    r = check_net_connectivity(net_id, clamped, net_vias, net_pads,
+    # Clamp via SIZES too: the checker's via->pad and via->endpoint credits
+    # scale with the via radius (barrel-overlap semantics, KiCad-true for
+    # GRADING), but the strict graph must keep its tight coincidence gate --
+    # an off-centre via-in-pad grazing the pad outline is a connection KiCad
+    # accepts, not one a removal pass may lean on (0708d lesson).
+    clamped_vias = []
+    for v in net_vias:
+        cv = _copy.copy(v)
+        cv.size = min(cv.size, _STRICT_W)
+        clamped_vias.append(cv)
+    r = check_net_connectivity(net_id, clamped, clamped_vias, net_pads,
                                net_zones, return_graph=True)
     graph = r.get('graph')
     if not graph or not graph['pad_ids']:

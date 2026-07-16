@@ -597,21 +597,33 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     # a 0.6×1.95 mm plane pad sits >0.15 mm from the centre, so the tight
     # centre-to-centre proximity test above misses it and the pad reads as
     # unconnected despite a physical via in it (issue #89 via-in-pad subcase).
-    # Union a via to a pad whenever the via centre lies within the pad outline
-    # and they share a copper layer.
+    # Union a via to a pad whenever the via COPPER overlaps the pad outline
+    # and they share a copper layer. Center-containment is not enough: a
+    # via-in-pad placed off-centre on a small circular pad can have its
+    # centre just outside the outline while the barrel overlaps the pad
+    # copper by >0.1mm -- KiCad grades that connected (kuchen /PWR1V2
+    # U1: via centre 0.283mm from a 0.42 circle pad centre, 0.137mm real
+    # copper overlap, kicad-cli reports 0 unconnected; the old rule made it
+    # a phantom incomplete net). Same overlap-credit semantics as the #285
+    # endpoint-cap rule below: margin = via radius (less epsilon), so the
+    # strict width-clamped twin keeps its tight gate automatically.
     if via_repr_id and pad_repr_id:
         via_pos_index = SpatialIndex(cell_size=1.0)
+        max_via_r = 0.0
         for via_idx in via_repr_id:
             v = vias[via_idx]
-            via_pos_index.add(v.x, v.y, '_via', via_idx, getattr(v, 'size', 0.6))
+            vsize = getattr(v, 'size', 0.6)
+            max_via_r = max(max_via_r, vsize / 2)
+            via_pos_index.add(v.x, v.y, '_via', via_idx, vsize)
         for pad_idx in pad_repr_id:
             pad = pads[pad_idx]
-            reach = max(pad.size_x, pad.size_y) / 2 + tolerance
-            for vx, vy, via_idx, _ in via_pos_index.query_nearby(
+            reach = max(pad.size_x, pad.size_y) / 2 + tolerance + max_via_r
+            for vx, vy, via_idx, vsize in via_pos_index.query_nearby(
                     pad.global_x, pad.global_y, '_via', reach):
                 if not (via_copper_layers[via_idx] & pad_copper_layers[pad_idx]):
                     continue
-                if _point_in_pad(vx, vy, pad, margin=tolerance):
+                _m = max(vsize / 2 - 1e-6, tolerance)
+                if _point_in_pad(vx, vy, pad, margin=_m):
                     _union(pad_repr_id[pad_idx], via_repr_id[via_idx])
 
     # A track that *ends inside* a pad's copper outline connects that pad even
