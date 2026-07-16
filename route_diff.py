@@ -296,6 +296,18 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # --layer-costs is given; unlike route.py there is no 2-layer F.Cu/B.Cu default.
     if not layer_costs:
         layer_costs = [1.0] * len(layers)
+    # Full-stack normalization (mirrors batch_route): append board copper
+    # layers the caller did not request as FORBIDDEN (-1) so vias always
+    # respect copper on every layer (the butterstick DQ11 class -- a via
+    # spans the whole stack whatever subset the run routes on).
+    _board_cu = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
+    _missing_cu = [l for l in _board_cu if l not in layers]
+    if _missing_cu:
+        from routing_constants import FORBIDDEN_LAYER_COST
+        layers = list(layers) + _missing_cu
+        layer_costs = list(layer_costs) + [FORBIDDEN_LAYER_COST] * len(_missing_cu)
+        print(f"  Full-stack: appended {len(_missing_cu)} unrequested copper layer(s) "
+              f"as FORBIDDEN obstacles: {', '.join(_missing_cu)}")
     for i, cost in enumerate(layer_costs):
         if cost >= 0 and (cost < 1.0 or cost > 1000):
             from routing_exceptions import ConfigurationError

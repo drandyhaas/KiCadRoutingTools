@@ -511,6 +511,27 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         else:
             layer_costs = [1.0 if layer == 'F.Cu' else 3.0 for layer in layers]
 
+    # Full-stack normalization: the config must ALWAYS carry every board
+    # copper layer -- copper on a layer absent from config.layers is invisible
+    # to the obstacle maps, yet a via spans the whole stack, so a run invoked
+    # with a layer subset on a 6/8-layer board could drop vias straight onto
+    # unseen inner copper (butterstick DQ11: a rescue via on In3 +3V3 copper,
+    # a real kicad clearance violation). Board layers the caller did not
+    # request are APPENDED with FORBIDDEN cost (-1): no routed copper, but
+    # their copper blocks vias and through-vias may span them (the documented
+    # --layer-costs -1 semantics). Requested layers keep their order and
+    # costs, so index-derived behavior (H/V direction preferences) is
+    # unchanged for them.
+    _board_cu = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
+    _missing_cu = [l for l in _board_cu if l not in layers]
+    if _missing_cu:
+        from routing_constants import FORBIDDEN_LAYER_COST
+        layers = list(layers) + _missing_cu
+        layer_costs = list(layer_costs) + [FORBIDDEN_LAYER_COST] * len(_missing_cu)
+        print(f"  Full-stack: appended {len(_missing_cu)} unrequested copper layer(s) "
+              f"as FORBIDDEN obstacles (no routing, vias respect their copper): "
+              f"{', '.join(_missing_cu)}")
+
     # Validate layer costs: any negative = forbidden (no copper placed; still an
     # obstacle), otherwise a multiplier in [1.0, 1000].
     for i, cost in enumerate(layer_costs):

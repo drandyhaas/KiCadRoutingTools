@@ -462,6 +462,11 @@ def route_planes(
         routing_layers = pcb_data.board_info.copper_layers
         if not routing_layers:
             routing_layers = ['F.Cu', 'B.Cu']  # Fallback
+    # NOTE: unlike batch_route, routing_layers here directly selects layers
+    # region joins may PLACE copper on (not cost-driven), so no full-stack
+    # append -- the default above is already the whole board, and the
+    # off-layer via guard in build_base_obstacle_map/obstacle_cache covers
+    # the explicit-subset case for via placement.
     print(f"Routing layers: {', '.join(routing_layers)}")
 
     # Issue #293 guard: snapshot every multi-pad SIGNAL net's connectivity so a

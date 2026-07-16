@@ -2157,6 +2157,20 @@ def create_plane(
         else:
             layer_costs = [1.0 if layer == 'F.Cu' else 3.0 for layer in all_layers]
 
+    # Full-stack normalization (mirrors batch_route): append board copper
+    # layers the caller did not request as FORBIDDEN (-1) so tap/strap via
+    # placement always respects copper on every layer (a via spans the whole
+    # stack; the CLI's default --layers F.Cu B.Cu on a 6/8-layer board must
+    # not blind the maps to inner copper -- butterstick DQ11 class).
+    _board_cu = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
+    _missing_cu = [l for l in _board_cu if l not in all_layers]
+    if _missing_cu:
+        from routing_constants import FORBIDDEN_LAYER_COST
+        all_layers = list(all_layers) + _missing_cu
+        layer_costs = list(layer_costs) + [FORBIDDEN_LAYER_COST] * len(_missing_cu)
+        print(f"  Full-stack: appended {len(_missing_cu)} unrequested copper layer(s) "
+              f"as FORBIDDEN obstacles: {', '.join(_missing_cu)}")
+
     # Validate layer costs: any negative = forbidden (no copper placed; still an
     # obstacle), otherwise a multiplier in [1.0, 1000].
     for i, cost in enumerate(layer_costs):
