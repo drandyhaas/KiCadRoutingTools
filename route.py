@@ -263,6 +263,283 @@ def _empty_results_data() -> dict:
     }
 
 
+def _run_routing_core(pcb_data, config, base_obstacles, single_ended_nets,
+                      all_net_ids_to_route, existing_rippable,
+                      minimal_obstacle_cache, total_routes,
+                      enable_layer_switch, debug_lines,
+                      single_ended_target_swaps, single_ended_target_swap_info,
+                      all_segment_modifications, all_swap_vias,
+                      total_layer_swaps, original_segment_ids,
+                      length_match_groups, debug_memory, mem_start,
+                      visualize=False, vis_callback=None, base_vis_data=None,
+                      cancel_check=None, progress_callback=None):
+    """One complete single-ended routing pass: net obstacle cache, working
+    obstacle map, a fresh RoutingState, the single-ended routing loop, the
+    unified reroute (rip-up) loop, length matching, Phase 3 tap routing and
+    the #134 collision-refusal recovery.
+
+    Pure code motion out of batch_route (flag-off behavior is unchanged) so
+    the failed-first restart (--failed-first-restart) can run the IDENTICAL
+    pass a second time with a reordered net list. Every board mutation the
+    pass makes goes through pcb_data / the shared accumulator lists passed
+    in, which the restart's custody snapshots in batch_route cover.
+
+    Returns a namespace with the pass's state, write-list, per-net results
+    and counters.
+    """
+    from types import SimpleNamespace
+    successful = 0
+    failed = 0
+    total_time = 0
+    total_iterations = 0
+
+    # Get unrouted nets for stub proximity costs
+    # Use sorted list for deterministic iteration order
+    if minimal_obstacle_cache:
+        # Only consider nets we're routing (faster for re-routing a few nets)
+        all_unrouted_net_ids = sorted(all_net_ids_to_route)
+        print(f"Using minimal obstacle cache for {len(all_unrouted_net_ids)} nets being routed")
+    else:
+        # All unrouted nets in the PCB (full analysis for stub proximity)
+        all_unrouted_net_ids = sorted(set(get_all_unrouted_net_ids(pcb_data)))
+        print(f"Found {len(all_unrouted_net_ids)} unrouted nets in PCB for stub proximity")
+
+    # Get exclusion zone lines for User.5 if debug_lines is enabled
+    exclusion_zone_lines = []
+    if debug_lines:
+        all_unrouted_stubs = get_stub_endpoints(pcb_data, list(all_unrouted_net_ids))
+        all_chip_pads = get_chip_pad_positions(pcb_data, list(all_unrouted_net_ids))
+        all_proximity_points = all_unrouted_stubs + all_chip_pads
+        exclusion_zone_lines = draw_exclusion_zones_debug(config, all_proximity_points)
+        print(f"Will draw {len(config.bga_exclusion_zones)} BGA zones and {len(all_proximity_points)} stub/pad proximity circles on User.5")
+
+    # Pre-compute net obstacles for caching (speeds up per-route setup)
+    if progress_callback:
+        progress_callback(0, 0, "Pre-computing net obstacle cache...")
+    print("Pre-computing net obstacle cache...")
+    cache_start = time.time()
+    net_obstacles_cache = precompute_all_net_obstacles(
+        pcb_data, list(all_unrouted_net_ids), config,
+        extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN
+    )
+    # Rippable pre-existing nets need cache entries too: the working obstacle
+    # map is base + cache, and their copper was excluded from base (issue #103).
+    if existing_rippable:
+        from obstacle_cache import precompute_net_obstacles
+        for nid in existing_rippable:
+            net_obstacles_cache[nid] = precompute_net_obstacles(
+                pcb_data, nid, config, extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN)
+
+    cache_time = time.time() - cache_start
+    print(f"Net obstacle cache built in {cache_time:.2f}s ({len(net_obstacles_cache)} nets)")
+    if debug_memory:
+        mem_after_cache = get_process_memory_mb()
+        cache_size = estimate_net_obstacles_cache_mb(net_obstacles_cache)
+        print(format_memory_stats("After net obstacles cache", mem_after_cache, mem_after_cache - mem_start))
+        print(f"[MEMORY]   Cache estimated size: {cache_size:.1f} MB for {len(net_obstacles_cache)} nets")
+
+    # Build working obstacle map (base + all nets) for incremental updates
+    # Uses reference counting in Rust to correctly handle cells blocked by multiple nets
+    if progress_callback:
+        progress_callback(0, 0, "Building working obstacle map...")
+    working_obstacles = build_working_obstacle_map(base_obstacles, net_obstacles_cache)
+    # Shrink internal allocations to reduce memory footprint
+    working_obstacles.shrink_to_fit()
+    if debug_memory:
+        mem_after_working = get_process_memory_mb()
+        print(format_memory_stats("After working obstacle map", mem_after_working, mem_after_working - mem_start))
+
+    # Create routing state object to hold all shared state
+    state = create_routing_state(
+        pcb_data=pcb_data,
+        config=config,
+        all_net_ids_to_route=all_net_ids_to_route,
+        base_obstacles=base_obstacles,
+        diff_pair_base_obstacles=None,  # Not used for single-ended
+        diff_pair_extra_clearance=0.0,
+        gnd_net_id=None,  # Not used for single-ended
+        all_unrouted_net_ids=all_unrouted_net_ids,
+        total_routes=total_routes,
+        enable_layer_switch=enable_layer_switch,
+        debug_lines=debug_lines,
+        target_swaps={},  # Diff pair swaps not used
+        target_swap_info=[],
+        single_ended_target_swaps=single_ended_target_swaps,
+        single_ended_target_swap_info=single_ended_target_swap_info,
+        all_segment_modifications=all_segment_modifications,
+        all_swap_vias=all_swap_vias,
+        total_layer_swaps=total_layer_swaps,
+        net_obstacles_cache=net_obstacles_cache,
+        working_obstacles=working_obstacles,
+    )
+
+    # Create local aliases for frequently-used state fields
+    routed_net_ids = state.routed_net_ids
+    routed_net_paths = state.routed_net_paths
+    routed_results = state.routed_results
+    track_proximity_cache = state.track_proximity_cache
+    layer_map = state.layer_map
+
+    # Register rippable pre-existing nets as already-routed (issue #103):
+    # blocking analysis iterates routed_net_paths (cells are recomputed from
+    # pcb_data, so an empty path is fine), filter_rippable_blockers requires
+    # routed_results membership, and rip_up_net removes exactly the
+    # 'new_segments'/'new_vias' listed - the net's own file copper here.
+    for nid in existing_rippable:
+        state.routed_net_ids.append(nid)
+        state.routed_net_paths[nid] = []
+        state.routed_results[nid] = {
+            'net_id': nid,
+            'new_segments': [s for s in pcb_data.segments if s.net_id == nid],
+            'new_vias': [v for v in pcb_data.vias if v.net_id == nid],
+            'iterations': 0,
+            'is_existing_route': True,
+        }
+    ripup_success_pairs = state.ripup_success_pairs
+    rerouted_pairs = state.rerouted_pairs
+    remaining_net_ids = state.remaining_net_ids
+    results = state.results
+
+    # Counters (kept as locals, not aliased from state)
+    route_index = 0
+
+    # Route single-ended nets
+    se_successful, se_failed, se_time, se_iterations, route_index, user_quit = route_single_ended_nets(
+        state, single_ended_nets,
+        visualize=visualize, vis_callback=vis_callback, base_vis_data=base_vis_data,
+        route_index_start=route_index,
+        cancel_check=cancel_check, progress_callback=progress_callback
+    )
+    successful += se_successful
+    failed += se_failed
+    total_time += se_time
+    total_iterations += se_iterations
+
+    # Run reroute loop for nets that were ripped during diff pair or single-ended routing
+    rq_successful, rq_failed, rq_time, rq_iterations, route_index = run_reroute_loop(
+        state, route_index_start=route_index,
+        cancel_check=cancel_check, progress_callback=progress_callback,
+        failed_so_far=failed
+    )
+    successful += rq_successful
+    failed += rq_failed
+    total_time += rq_time
+    total_iterations += rq_iterations
+
+    # Apply length matching if configured
+    if length_match_groups:
+        run_length_matching(routed_results, length_match_groups, config, pcb_data)
+
+    # Sync pcb_data with length-matched segments before Phase 3
+    # This ensures tap routes see meanders from other nets as obstacles
+    if progress_callback:
+        progress_callback(0, 0, "Syncing pcb_data...")
+    sync_pcb_data_segments(pcb_data, routed_results, original_segment_ids, state, config)
+
+    # Phase 3: Complete multi-point routing (tap connections)
+    # This happens AFTER length matching so tap routes connect to meandered main routes
+    num_multipoint_nets = len(state.pending_multipoint_nets) if state.pending_multipoint_nets else 0
+
+    # Create phase 3 progress callback
+    def phase3_progress_callback(current, total, net_name):
+        if progress_callback:
+            progress_callback(current, num_multipoint_nets, f"Multi-point: {net_name}")
+
+    run_phase3_tap_routing(
+        state=state,
+        pcb_data=pcb_data,
+        config=config,
+        base_obstacles=base_obstacles,
+        gnd_net_id=None,  # Not used for single-ended
+        all_unrouted_net_ids=all_unrouted_net_ids,
+        routed_net_ids=routed_net_ids,
+        remaining_net_ids=remaining_net_ids,
+        routed_net_paths=routed_net_paths,
+        routed_results=routed_results,
+        diff_pair_by_net_id=state.diff_pair_by_net_id,  # Empty for single-ended
+        results=results,
+        track_proximity_cache=track_proximity_cache,
+        layer_map=layer_map,
+        progress_callback=phase3_progress_callback,
+        cancel_check=cancel_check,
+    )
+
+    # Issue #134: nets whose stale copper would have shorted another net on
+    # restore were left ripped instead of re-added (collision-safe restore).
+    # Now that the board is stable, give them one clean reroute pass so the fix
+    # does not cost completion. Only runs when a refusal actually happened, so
+    # boards without the collision are unaffected.
+    if state.collision_refused_net_ids:
+        recover = []
+        for nid in sorted(state.collision_refused_net_ids):
+            if nid in routed_results or nid not in pcb_data.nets:
+                continue
+            if len(pcb_data.pads_by_net.get(nid, [])) < 2:
+                continue
+            if nid in state.diff_pair_by_net_id:
+                pair_name, pair = state.diff_pair_by_net_id[nid]
+                if (pair.p_net_id in state.queued_net_ids
+                        or pair.n_net_id in state.queued_net_ids):
+                    continue
+                state.reroute_queue.append(('diff_pair', pair_name, pair))
+                state.queued_net_ids.add(pair.p_net_id)
+                state.queued_net_ids.add(pair.n_net_id)
+                recover.append(pair_name)
+            else:
+                if nid in state.queued_net_ids:
+                    continue
+                state.reroute_queue.append(('single', pcb_data.nets[nid].name, nid))
+                state.queued_net_ids.add(nid)
+                recover.append(pcb_data.nets[nid].name)
+        if recover:
+            print(f"Issue #134 recovery: re-routing {len(recover)} net(s) left ripped "
+                  f"to avoid a short: {', '.join(recover)}")
+            run_reroute_loop(state, route_index_start=route_index,
+                             cancel_check=cancel_check)
+        # Last resort (parity with the plane tools' piece-level settle,
+        # 72ca5f9): a refused net whose clean reroute ALSO failed ships at
+        # zero copper -- restore the saved route's non-colliding pieces
+        # instead, leaving a small gap for a later pass rather than a
+        # destroyed net. Piece-wise _saved_route_collides against the settled
+        # board, so nothing restored can short copper routed meanwhile.
+        _stash_134 = getattr(pcb_data, '_refused_saved_134', {}) or {}
+        for nid in sorted(state.collision_refused_net_ids):
+            if nid in routed_results or nid not in _stash_134:
+                continue
+            saved = _stash_134[nid]
+            from rip_up_reroute import _saved_route_collides
+            from routing_context import add_route_to_pcb_data
+            keep_segs = [sg for sg in (saved.get('new_segments') or [])
+                         if not _saved_route_collides(
+                             {'new_segments': [sg], 'new_vias': []},
+                             pcb_data, [nid], config.clearance)]
+            keep_vias = [v for v in (saved.get('new_vias') or [])
+                         if not _saved_route_collides(
+                             {'new_segments': [], 'new_vias': [v]},
+                             pcb_data, [nid], config.clearance)]
+            if not keep_segs and not keep_vias:
+                continue
+            dropped = (len(saved.get('new_segments') or []) - len(keep_segs)
+                       + len(saved.get('new_vias') or []) - len(keep_vias))
+            pruned = dict(saved)
+            pruned['new_segments'] = keep_segs
+            pruned['new_vias'] = keep_vias
+            pruned['partial_restore_134'] = True
+            add_route_to_pcb_data(pcb_data, pruned, debug_lines=config.debug_lines)
+            results.append(pruned)
+            nm = pcb_data.nets[nid].name if nid in pcb_data.nets else nid
+            print(f"Issue #134 last resort: {nm} reroute failed; restored "
+                  f"{len(keep_segs)} segment(s) + {len(keep_vias)} via(s) of its "
+                  f"pre-rip route (dropped {dropped} colliding piece(s)); "
+                  f"net remains PARTIAL for a later reconnect pass")
+
+    return SimpleNamespace(
+        state=state, results=results, routed_results=routed_results,
+        successful=successful, failed=failed, total_time=total_time,
+        total_iterations=total_iterations,
+        exclusion_zone_lines=exclusion_zone_lines)
+
+
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
@@ -344,7 +621,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 pcb_data=None,
                 net_clearances: dict = None,
                 keep_input_copper: bool = False,
-                rip_existing_nets: Optional[List[str]] = None) -> Tuple[int, int, float]:
+                rip_existing_nets: Optional[List[str]] = None,
+                failed_first_restart: bool = False) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -874,245 +1152,200 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if visualize:
         vis_callback.on_routing_start(total_routes, layers, grid_step)
 
-    # Get unrouted nets for stub proximity costs
-    # Use sorted list for deterministic iteration order
-    if minimal_obstacle_cache:
-        # Only consider nets we're routing (faster for re-routing a few nets)
-        all_unrouted_net_ids = sorted(all_net_ids_to_route)
-        print(f"Using minimal obstacle cache for {len(all_unrouted_net_ids)} nets being routed")
-    else:
-        # All unrouted nets in the PCB (full analysis for stub proximity)
-        all_unrouted_net_ids = sorted(set(get_all_unrouted_net_ids(pcb_data)))
-        print(f"Found {len(all_unrouted_net_ids)} unrouted nets in PCB for stub proximity")
-
-    # Get exclusion zone lines for User.5 if debug_lines is enabled
-    exclusion_zone_lines = []
-    if debug_lines:
-        all_unrouted_stubs = get_stub_endpoints(pcb_data, list(all_unrouted_net_ids))
-        all_chip_pads = get_chip_pad_positions(pcb_data, list(all_unrouted_net_ids))
-        all_proximity_points = all_unrouted_stubs + all_chip_pads
-        exclusion_zone_lines = draw_exclusion_zones_debug(config, all_proximity_points)
-        print(f"Will draw {len(config.bga_exclusion_zones)} BGA zones and {len(all_proximity_points)} stub/pad proximity circles on User.5")
-
-    # Pre-compute net obstacles for caching (speeds up per-route setup)
-    if progress_callback:
-        progress_callback(0, 0, "Pre-computing net obstacle cache...")
-    print("Pre-computing net obstacle cache...")
-    cache_start = time.time()
-    net_obstacles_cache = precompute_all_net_obstacles(
-        pcb_data, list(all_unrouted_net_ids), config,
-        extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN
-    )
-    # Rippable pre-existing nets need cache entries too: the working obstacle
-    # map is base + cache, and their copper was excluded from base (issue #103).
-    if existing_rippable:
-        from obstacle_cache import precompute_net_obstacles
-        for nid in existing_rippable:
-            net_obstacles_cache[nid] = precompute_net_obstacles(
-                pcb_data, nid, config, extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN)
-
-    cache_time = time.time() - cache_start
-    print(f"Net obstacle cache built in {cache_time:.2f}s ({len(net_obstacles_cache)} nets)")
-    if debug_memory:
-        mem_after_cache = get_process_memory_mb()
-        cache_size = estimate_net_obstacles_cache_mb(net_obstacles_cache)
-        print(format_memory_stats("After net obstacles cache", mem_after_cache, mem_after_cache - mem_start))
-        print(f"[MEMORY]   Cache estimated size: {cache_size:.1f} MB for {len(net_obstacles_cache)} nets")
-
-    # Build working obstacle map (base + all nets) for incremental updates
-    # Uses reference counting in Rust to correctly handle cells blocked by multiple nets
-    if progress_callback:
-        progress_callback(0, 0, "Building working obstacle map...")
-    working_obstacles = build_working_obstacle_map(base_obstacles, net_obstacles_cache)
-    # Shrink internal allocations to reduce memory footprint
-    working_obstacles.shrink_to_fit()
-    if debug_memory:
-        mem_after_working = get_process_memory_mb()
-        print(format_memory_stats("After working obstacle map", mem_after_working, mem_after_working - mem_start))
-
-    # Create routing state object to hold all shared state
-    state = create_routing_state(
-        pcb_data=pcb_data,
-        config=config,
+    # The routing core (loop + rip-up ladder + length matching + Phase 3 +
+    # #134 recovery) is extracted to _run_routing_core so the failed-first
+    # restart below can run the identical pass a second time. _core_kwargs is
+    # shared by both calls so the passes can never diverge in configuration.
+    _core_kwargs = dict(
+        pcb_data=pcb_data, config=config, base_obstacles=base_obstacles,
         all_net_ids_to_route=all_net_ids_to_route,
-        base_obstacles=base_obstacles,
-        diff_pair_base_obstacles=None,  # Not used for single-ended
-        diff_pair_extra_clearance=0.0,
-        gnd_net_id=None,  # Not used for single-ended
-        all_unrouted_net_ids=all_unrouted_net_ids,
-        total_routes=total_routes,
-        enable_layer_switch=enable_layer_switch,
+        existing_rippable=existing_rippable,
+        minimal_obstacle_cache=minimal_obstacle_cache,
+        total_routes=total_routes, enable_layer_switch=enable_layer_switch,
         debug_lines=debug_lines,
-        target_swaps={},  # Diff pair swaps not used
-        target_swap_info=[],
         single_ended_target_swaps=single_ended_target_swaps,
         single_ended_target_swap_info=single_ended_target_swap_info,
         all_segment_modifications=all_segment_modifications,
-        all_swap_vias=all_swap_vias,
-        total_layer_swaps=total_layer_swaps,
-        net_obstacles_cache=net_obstacles_cache,
-        working_obstacles=working_obstacles,
-    )
+        all_swap_vias=all_swap_vias, total_layer_swaps=total_layer_swaps,
+        original_segment_ids=original_segment_ids,
+        length_match_groups=length_match_groups,
+        debug_memory=debug_memory, mem_start=mem_start,
+        visualize=visualize, vis_callback=vis_callback,
+        base_vis_data=base_vis_data,
+        cancel_check=cancel_check, progress_callback=progress_callback)
+    _ffr_clock0 = time.time()
+    if failed_first_restart:
+        # Failed-first restart custody: snapshot the loop-start board state
+        # (copper lists + the sanctioned in-place mutation, segment layer
+        # swaps) and the shared setup accumulators the routing loops may
+        # append to, so the restart can start from a clean slate and the
+        # first pass can be restored EXACTLY. Cheap reference copies; taken
+        # only when the flag is on so the default path is untouched.
+        _ls_segments = list(pcb_data.segments)
+        _ls_vias = list(pcb_data.vias)
+        _ls_seg_layers = [(s, s.layer) for s in _ls_segments]
+        _ls_mods = list(all_segment_modifications)
+        _ls_swap_vias = list(all_swap_vias)
+        _ls_swap_segments = list(all_swap_segments)
+        _ls_swaps = dict(single_ended_target_swaps)
 
-    # Create local aliases for frequently-used state fields
-    routed_net_ids = state.routed_net_ids
-    routed_net_paths = state.routed_net_paths
-    routed_results = state.routed_results
-    track_proximity_cache = state.track_proximity_cache
-    layer_map = state.layer_map
-
-    # Register rippable pre-existing nets as already-routed (issue #103):
-    # blocking analysis iterates routed_net_paths (cells are recomputed from
-    # pcb_data, so an empty path is fine), filter_rippable_blockers requires
-    # routed_results membership, and rip_up_net removes exactly the
-    # 'new_segments'/'new_vias' listed - the net's own file copper here.
-    for nid in existing_rippable:
-        state.routed_net_ids.append(nid)
-        state.routed_net_paths[nid] = []
-        state.routed_results[nid] = {
-            'net_id': nid,
-            'new_segments': [s for s in pcb_data.segments if s.net_id == nid],
-            'new_vias': [v for v in pcb_data.vias if v.net_id == nid],
-            'iterations': 0,
-            'is_existing_route': True,
-        }
+    _core = _run_routing_core(single_ended_nets=single_ended_nets,
+                              **_core_kwargs)
+    state = _core.state
+    results = _core.results
+    routed_results = _core.routed_results
     ripup_success_pairs = state.ripup_success_pairs
     rerouted_pairs = state.rerouted_pairs
-    remaining_net_ids = state.remaining_net_ids
-    results = state.results
+    exclusion_zone_lines = _core.exclusion_zone_lines
+    successful += _core.successful
+    failed += _core.failed
+    total_time += _core.total_time
+    total_iterations += _core.total_iterations
 
-    # Counters (kept as locals, not aliased from state)
-    route_index = 0
-
-    # Route single-ended nets
-    se_successful, se_failed, se_time, se_iterations, route_index, user_quit = route_single_ended_nets(
-        state, single_ended_nets,
-        visualize=visualize, vis_callback=vis_callback, base_vis_data=base_vis_data,
-        route_index_start=route_index,
-        cancel_check=cancel_check, progress_callback=progress_callback
-    )
-    successful += se_successful
-    failed += se_failed
-    total_time += se_time
-    total_iterations += se_iterations
-
-    # Run reroute loop for nets that were ripped during diff pair or single-ended routing
-    rq_successful, rq_failed, rq_time, rq_iterations, route_index = run_reroute_loop(
-        state, route_index_start=route_index,
-        cancel_check=cancel_check, progress_callback=progress_callback,
-        failed_so_far=failed
-    )
-    successful += rq_successful
-    failed += rq_failed
-    total_time += rq_time
-    total_iterations += rq_iterations
-
-    # Apply length matching if configured
-    if length_match_groups:
-        run_length_matching(routed_results, length_match_groups, config, pcb_data)
-
-    # Sync pcb_data with length-matched segments before Phase 3
-    # This ensures tap routes see meanders from other nets as obstacles
-    if progress_callback:
-        progress_callback(0, 0, "Syncing pcb_data...")
-    sync_pcb_data_segments(pcb_data, routed_results, original_segment_ids, state, config)
-
-    # Phase 3: Complete multi-point routing (tap connections)
-    # This happens AFTER length matching so tap routes connect to meandered main routes
-    num_multipoint_nets = len(state.pending_multipoint_nets) if state.pending_multipoint_nets else 0
-
-    # Create phase 3 progress callback
-    def phase3_progress_callback(current, total, net_name):
-        if progress_callback:
-            progress_callback(current, num_multipoint_nets, f"Multi-point: {net_name}")
-
-    run_phase3_tap_routing(
-        state=state,
-        pcb_data=pcb_data,
-        config=config,
-        base_obstacles=base_obstacles,
-        gnd_net_id=None,  # Not used for single-ended
-        all_unrouted_net_ids=all_unrouted_net_ids,
-        routed_net_ids=routed_net_ids,
-        remaining_net_ids=remaining_net_ids,
-        routed_net_paths=routed_net_paths,
-        routed_results=routed_results,
-        diff_pair_by_net_id=state.diff_pair_by_net_id,  # Empty for single-ended
-        results=results,
-        track_proximity_cache=track_proximity_cache,
-        layer_map=layer_map,
-        progress_callback=phase3_progress_callback,
-        cancel_check=cancel_check,
-    )
-
-    # Issue #134: nets whose stale copper would have shorted another net on
-    # restore were left ripped instead of re-added (collision-safe restore).
-    # Now that the board is stable, give them one clean reroute pass so the fix
-    # does not cost completion. Only runs when a refusal actually happened, so
-    # boards without the collision are unaffected.
-    if state.collision_refused_net_ids:
-        recover = []
-        for nid in sorted(state.collision_refused_net_ids):
-            if nid in routed_results or nid not in pcb_data.nets:
-                continue
-            if len(pcb_data.pads_by_net.get(nid, [])) < 2:
-                continue
-            if nid in state.diff_pair_by_net_id:
-                pair_name, pair = state.diff_pair_by_net_id[nid]
-                if (pair.p_net_id in state.queued_net_ids
-                        or pair.n_net_id in state.queued_net_ids):
+    # ---- Failed-first restart (default OFF; --failed-first-restart) ----
+    # Ordering-sensitivity lever (PathFinder-style): nets often fail only
+    # because earlier-routed nets consumed their corridors. When the finished
+    # pass left nets failed and stayed inside the time budget, run the SAME
+    # pass once more on a clean slate with the previously-failed nets routed
+    # FIRST (then the previously-successful ones, both keeping first-pass
+    # relative order -- a pure function of first-pass outcomes, so
+    # deterministic). Keep whichever pass connects strictly more (nets, then
+    # pads); otherwise restore the first pass exactly, so the flag can never
+    # make a board worse. Runs BEFORE net_rescue and the end-of-run
+    # reconciliation so those operate on the winning pass only.
+    ffr_record = None
+    if failed_first_restart and not skip_routing:
+        def _ffr_grade(_grade_results):
+            # Authoritative write-model connectivity, the same basis as the
+            # end-of-run reconcile below: original input copper + the pass's
+            # write-list + stub layer-swap vias. Returns (connected nets,
+            # connected pads, failed net ids in first-pass order).
+            from check_connected import check_net_connectivity as _cnc_ffr
+            _sbn = {nid: list(lst) for nid, lst in _orig_seg_by_net.items()}
+            _vbn = {nid: list(lst) for nid, lst in _orig_via_by_net.items()}
+            for _r in _grade_results:
+                for _s in _r.get('new_segments') or []:
+                    _sbn.setdefault(_s.net_id, []).append(_s)
+                for _v in _r.get('new_vias') or []:
+                    _vbn.setdefault(_v.net_id, []).append(_v)
+            for _v in all_swap_vias:
+                _vbn.setdefault(_v.net_id, []).append(_v)
+            _zbn = {}
+            for _z in getattr(pcb_data, 'zones', []) or []:
+                _zbn.setdefault(_z.net_id, []).append(_z)
+            _nets_ok = 0
+            _pads_ok = 0
+            _failed_ids = []
+            for _nm, _nid in single_ended_nets:
+                _pads = pcb_data.pads_by_net.get(_nid, [])
+                if len(_pads) < 2:
                     continue
-                state.reroute_queue.append(('diff_pair', pair_name, pair))
-                state.queued_net_ids.add(pair.p_net_id)
-                state.queued_net_ids.add(pair.n_net_id)
-                recover.append(pair_name)
+                _r = _cnc_ffr(_nid, _sbn.get(_nid, []), _vbn.get(_nid, []),
+                              _pads, _zbn.get(_nid, []), tolerance=0.02)
+                _disc = len(_r.get('disconnected_pads') or [])
+                _pads_ok += len(_pads) - _disc
+                if _r.get('connected'):
+                    _nets_ok += 1
+                else:
+                    _failed_ids.append(_nid)
+            return _nets_ok, _pads_ok, _failed_ids
+
+        _ffr_first_time = time.time() - _ffr_clock0
+        _nets1, _pads1, _failed1 = _ffr_grade(results)
+        ffr_record = {'ran': False, 'first_pass_failed': len(_failed1),
+                      'restart_failed': len(_failed1), 'kept': 'first',
+                      'time': 0.0}
+        _FFR_BUDGET_S = 600.0
+        if not _failed1:
+            print("\nFailed-first restart: first pass left no failed nets; "
+                  "skipping.")
+        elif _ffr_first_time >= _FFR_BUDGET_S:
+            print(f"\nFailed-first restart: first pass took "
+                  f"{_ffr_first_time:.0f}s >= {_FFR_BUDGET_S:.0f}s budget; "
+                  f"skipping.")
+        elif single_ended_target_swaps != _ls_swaps:
+            # In-run target swaps moved pad net assignments mid-pass; the
+            # loop-start snapshots cannot undo those, so a clean slate is not
+            # reconstructible. Keep the first pass (never-worse semantics).
+            print("\nFailed-first restart: in-run target swaps changed pad "
+                  "assignments; skipping (clean slate not reconstructible).")
+        else:
+            _ffr_t0 = time.time()
+            _failed_set = set(_failed1)
+            _names1 = [nm for nm, nid in single_ended_nets
+                       if nid in _failed_set]
+            print("\n" + "=" * 60)
+            print(f"Failed-first restart: first pass left {len(_failed1)} "
+                  f"net(s) incomplete; re-routing on a clean slate with them "
+                  f"FIRST: {', '.join(_names1[:8])}"
+                  f"{'...' if len(_names1) > 8 else ''}")
+            print("=" * 60)
+            # Snapshot the FIRST pass (board + shared accumulators + the #134
+            # stash) so it can be restored exactly if the restart loses.
+            _p1_segments = list(pcb_data.segments)
+            _p1_vias = list(pcb_data.vias)
+            _p1_seg_layers = [(s, s.layer) for s in _ls_segments]
+            _p1_mods = list(all_segment_modifications)
+            _p1_swap_vias = list(all_swap_vias)
+            _p1_swap_segments = list(all_swap_segments)
+            _p1_refused = getattr(pcb_data, '_refused_saved_134', None)
+            # Clean slate: reset the board and the shared accumulators to the
+            # loop-start state. Everything the first pass ADDED is this run's
+            # copper (input-copper custody: originals ripped mid-pass come
+            # back with the loop-start lists; setup-era copper -- stub
+            # layer-swap vias, swap connectors -- is IN those lists).
+            pcb_data.segments = list(_ls_segments)
+            pcb_data.vias = list(_ls_vias)
+            for _s, _lay in _ls_seg_layers:
+                _s.layer = _lay
+            all_segment_modifications[:] = _ls_mods
+            all_swap_vias[:] = _ls_swap_vias
+            all_swap_segments[:] = _ls_swap_segments
+            if _p1_refused is not None:
+                pcb_data._refused_saved_134 = {}
+            _restart_nets = (
+                [t for t in single_ended_nets if t[1] in _failed_set]
+                + [t for t in single_ended_nets if t[1] not in _failed_set])
+            _core2 = _run_routing_core(single_ended_nets=_restart_nets,
+                                       **_core_kwargs)
+            _nets2, _pads2, _failed2 = _ffr_grade(_core2.results)
+            _better = (_nets2, _pads2) > (_nets1, _pads1)
+            print(f"\nFailed-first restart: first pass connected {_nets1} "
+                  f"net(s) / {_pads1} pad(s); restart {_nets2} / {_pads2} "
+                  f"-> keeping the {'RESTART' if _better else 'FIRST'} pass")
+            if _better:
+                _core = _core2
+                state = _core.state
+                results = _core.results
+                routed_results = _core.routed_results
+                ripup_success_pairs = state.ripup_success_pairs
+                rerouted_pairs = state.rerouted_pairs
+                exclusion_zone_lines = _core.exclusion_zone_lines
+                successful = _core.successful
+                failed = _core.failed
+                total_time += _core.total_time
+                total_iterations += _core.total_iterations
+                ffr_record['kept'] = 'restart'
             else:
-                if nid in state.queued_net_ids:
-                    continue
-                state.reroute_queue.append(('single', pcb_data.nets[nid].name, nid))
-                state.queued_net_ids.add(nid)
-                recover.append(pcb_data.nets[nid].name)
-        if recover:
-            print(f"Issue #134 recovery: re-routing {len(recover)} net(s) left ripped "
-                  f"to avoid a short: {', '.join(recover)}")
-            run_reroute_loop(state, route_index_start=route_index,
-                             cancel_check=cancel_check)
-        # Last resort (parity with the plane tools' piece-level settle,
-        # 72ca5f9): a refused net whose clean reroute ALSO failed ships at
-        # zero copper -- restore the saved route's non-colliding pieces
-        # instead, leaving a small gap for a later pass rather than a
-        # destroyed net. Piece-wise _saved_route_collides against the settled
-        # board, so nothing restored can short copper routed meanwhile.
-        _stash_134 = getattr(pcb_data, '_refused_saved_134', {}) or {}
-        for nid in sorted(state.collision_refused_net_ids):
-            if nid in routed_results or nid not in _stash_134:
-                continue
-            saved = _stash_134[nid]
-            from rip_up_reroute import _saved_route_collides
-            from routing_context import add_route_to_pcb_data
-            keep_segs = [sg for sg in (saved.get('new_segments') or [])
-                         if not _saved_route_collides(
-                             {'new_segments': [sg], 'new_vias': []},
-                             pcb_data, [nid], config.clearance)]
-            keep_vias = [v for v in (saved.get('new_vias') or [])
-                         if not _saved_route_collides(
-                             {'new_segments': [], 'new_vias': [v]},
-                             pcb_data, [nid], config.clearance)]
-            if not keep_segs and not keep_vias:
-                continue
-            dropped = (len(saved.get('new_segments') or []) - len(keep_segs)
-                       + len(saved.get('new_vias') or []) - len(keep_vias))
-            pruned = dict(saved)
-            pruned['new_segments'] = keep_segs
-            pruned['new_vias'] = keep_vias
-            pruned['partial_restore_134'] = True
-            add_route_to_pcb_data(pcb_data, pruned, debug_lines=config.debug_lines)
-            results.append(pruned)
-            nm = pcb_data.nets[nid].name if nid in pcb_data.nets else nid
-            print(f"Issue #134 last resort: {nm} reroute failed; restored "
-                  f"{len(keep_segs)} segment(s) + {len(keep_vias)} via(s) of its "
-                  f"pre-rip route (dropped {dropped} colliding piece(s)); "
-                  f"net remains PARTIAL for a later reconnect pass")
+                # Restore the first pass EXACTLY: board copper lists, the
+                # in-place segment layer mutations, the shared accumulators
+                # and the #134 stash. The first pass's state/results were
+                # never touched by the restart (it built its own state,
+                # working map and caches), so they are still authoritative.
+                pcb_data.segments = _p1_segments
+                pcb_data.vias = _p1_vias
+                for _s, _lay in _p1_seg_layers:
+                    _s.layer = _lay
+                all_segment_modifications[:] = _p1_mods
+                all_swap_vias[:] = _p1_swap_vias
+                all_swap_segments[:] = _p1_swap_segments
+                if _p1_refused is not None:
+                    pcb_data._refused_saved_134 = _p1_refused
+                elif hasattr(pcb_data, '_refused_saved_134'):
+                    del pcb_data._refused_saved_134
+            ffr_record['ran'] = True
+            ffr_record['restart_failed'] = len(_failed2)
+            ffr_record['time'] = round(time.time() - _ffr_t0, 2)
 
     # T5 zero-copper custody: casualties-only final reconciliation (route.py
     # front; parity with batch_route_diff_pairs' 43e6d10). A net RIPPED during
@@ -1699,6 +1932,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # T5 coverage gate: disturbed out-of-scope nets shipping broken
         # (additive; also present as failed_multipoint entries above).
         summary['coverage_gate_nets'] = coverage_gate_nets
+    if ffr_record is not None:
+        # Failed-first restart outcome (key present only when the flag was
+        # requested; additive -- no existing key changes).
+        summary['failed_first_restart'] = ffr_record
     # #408: report-only list of NET NAMES the router intentionally routed into
     # the board-edge clearance band because a pad on the net sits inside it (edge
     # connectors, edge-mounted parts). Lets the grader accept-by-design every
@@ -1833,7 +2070,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
               f"net(s) against the finished board: {', '.join(_rec_names)}")
         try:
             _rk = dict(_reconcile_kwargs)
-            _rk.update(final_reconcile=False, skip_routing=False)
+            _rk.update(final_reconcile=False, skip_routing=False,
+                       # The restart lever ran (or was gated) on the main
+                       # pass; the scoped reconciliation retry stays single.
+                       failed_first_restart=False)
             # Rip-authority escalation (#103 self-applied): nets that died with
             # 'no rippable blockers found' were boxed by PRE-EXISTING copper
             # this run may not touch, and the router itself printed the
@@ -1968,6 +2208,13 @@ For differential pair routing, use route_diff.py:
                              "(e.g. on a board routed by a previous run). Use '*' to allow "
                              "any non-plane net. Without this flag, committed tracks are "
                              "never ripped.")
+    parser.add_argument("--failed-first-restart", action="store_true",
+                        help="After the main routing pass, if nets failed and the pass "
+                             "took under 10 minutes, re-run the whole pass once on a "
+                             "clean slate with the failed nets routed FIRST (ordering-"
+                             "sensitivity restart). Keeps whichever pass connects more "
+                             "nets/pads; the first pass is restored exactly otherwise, "
+                             "so results can never get worse.")
     parser.add_argument("--layers", "-l", nargs="+",
                         default=None,
                         help="Routing layers to use (default: all of the board's "
@@ -2315,6 +2562,7 @@ For differential pair routing, use route_diff.py:
                 ordering_strategy=args.ordering,
                 disable_bga_zones=args.no_bga_zones,
                 rip_existing_nets=args.rip_existing_nets,
+                failed_first_restart=args.failed_first_restart,
                 layers=args.layers,
                 track_width=args.track_width,
                 impedance=args.impedance,

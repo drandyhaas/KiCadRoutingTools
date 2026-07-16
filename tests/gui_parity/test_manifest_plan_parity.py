@@ -50,6 +50,7 @@ BOOL_FLAGS = {
     '--no-bga-zones': 'no_bga_zone', '--no-bga-zone': 'no_bga_zone',
     '--no-gnd-vias': 'no_gnd_vias', '--rip-blocker-nets': 'rip_blocker_nets',
     '--keep-input-copper': 'keep_input_copper',
+    '--failed-first-restart': 'failed_first_restart',
 }
 # Per-action overrides of SCALAR_FLAGS. #381 D4: route_diff.py's trace width is
 # --track-width, but its GUI home is the diff tab's diff_pair_width control (not

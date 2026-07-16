@@ -1056,6 +1056,18 @@ class RoutingDialog(wx.Dialog):
             "only this run's new copper is cleaned")
         options_inner.Add(self.keep_input_copper, 0, wx.ALL, 3)
 
+        # Failed-first restart (--failed-first-restart): ordering-sensitivity
+        # lever. Control named exactly after the batch_route param so the
+        # Claude plan executor can set it (claude_plan applies snake_case
+        # params by control name).
+        self.failed_first_restart = wx.CheckBox(
+            options_scroll, label="Failed-first restart")
+        self.failed_first_restart.SetToolTip(
+            "If nets failed and the routing pass took under 10 minutes, re-run the "
+            "whole pass once on a clean slate with the failed nets routed FIRST, "
+            "keeping whichever pass connects more nets/pads (never worse)")
+        options_inner.Add(self.failed_first_restart, 0, wx.ALL, 3)
+
         # Layer costs
         layer_sizer = wx.BoxSizer(wx.HORIZONTAL)
         layer_sizer.Add(wx.StaticText(options_scroll, label="Layer Costs:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
@@ -2160,6 +2172,7 @@ class RoutingDialog(wx.Dialog):
         self.mps_reverse_rounds.SetValue(False)
         self.mps_layer_swap.SetValue(False)
         self.keep_input_copper.SetValue(False)
+        self.failed_first_restart.SetValue(False)
         self.mps_segment_intersection.SetValue(False)
         self.bus_enabled.SetValue(False)
         self.bus_detection_radius.SetValue(defaults.BUS_DETECTION_RADIUS)
@@ -2453,6 +2466,7 @@ class RoutingDialog(wx.Dialog):
             'mps_reverse_rounds': self.mps_reverse_rounds.GetValue(),
             'mps_layer_swap': self.mps_layer_swap.GetValue(),
             'keep_input_copper': self.keep_input_copper.GetValue(),
+            'failed_first_restart': self.failed_first_restart.GetValue(),
             'mps_segment_intersection': self.mps_segment_intersection.GetValue(),
             # Bus routing options
             'bus_enabled': self.bus_enabled.GetValue(),
@@ -2979,6 +2993,7 @@ class RoutingDialog(wx.Dialog):
                     mps_reverse_rounds=config.get('mps_reverse_rounds', False),
                     mps_layer_swap=config.get('mps_layer_swap', False),
                     keep_input_copper=config.get('keep_input_copper', False),
+                    failed_first_restart=config.get('failed_first_restart', False),
                     mps_segment_intersection=config.get('mps_segment_intersection', False),
                     bus_enabled=config.get('bus_enabled', False),
                     bus_detection_radius=config.get('bus_detection_radius', 5.0),
@@ -3107,6 +3122,7 @@ class RoutingDialog(wx.Dialog):
                         mps_reverse_rounds=config.get('mps_reverse_rounds', False),
                         mps_layer_swap=config.get('mps_layer_swap', False),
                         keep_input_copper=config.get('keep_input_copper', False),
+                        failed_first_restart=config.get('failed_first_restart', False),
                         mps_segment_intersection=config.get('mps_segment_intersection', False),
                         bus_enabled=config.get('bus_enabled', False),
                         bus_detection_radius=config.get('bus_detection_radius', 5.0),
