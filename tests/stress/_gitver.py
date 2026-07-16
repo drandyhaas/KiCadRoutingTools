@@ -8,8 +8,23 @@ results/wave dir self-documents the code that created it.
 """
 import datetime
 import json
+import os
 import subprocess
 from pathlib import Path
+
+# A/B ablation knobs that change engine behavior without changing the
+# checkout (KICAD_NO_SOFT_JOINT_BRIDGE, KICAD_NO_JOG_CHORD, ...). A wave run
+# with one of these set is a DIFFERENT experiment than the same commit without
+# it, so provenance must record them -- otherwise the off/on attribution of an
+# A/B table rests on operator memory. KICAD_* catches the whole family
+# (future knobs included); the explicit extras are the non-prefixed ones.
+_KNOB_EXTRAS = ("PRUNE_CONN_VERIFY",)
+
+
+def env_knobs():
+    """The engine-behavior env knobs set right now, as {name: value}."""
+    return {k: v for k, v in sorted(os.environ.items())
+            if k.startswith("KICAD_") or k in _KNOB_EXTRAS}
 
 
 def git_version(repo):
@@ -33,6 +48,7 @@ def git_version(repo):
         "dirty": bool(g("status", "--porcelain")),
         "subject": g("log", "-1", "--pretty=%s"),
         "committed_at": g("log", "-1", "--date=iso", "--pretty=%cd"),
+        "knobs": env_knobs(),
     }
 
 
@@ -55,6 +71,7 @@ def write_git_version(out_dir, repo, label=None):
         f"subject:   {ver['subject']}",
         f"committed: {ver['committed_at']}",
         f"captured:  {ver['captured_at']}",
+        f"knobs:     {ver.get('knobs') or '(none)'}",
     ]
     out.joinpath("git_version.txt").write_text("\n".join(lines) + "\n")
     return ver
@@ -75,7 +92,13 @@ def load_git_version(near_path):
 
 
 def format_version(ver):
-    """One-line summary for logs / compare headers ('label=v0.17.3-5-gabc1234')."""
+    """One-line summary for logs / compare headers ('label=v0.17.3-5-gabc1234
+    [KICAD_NO_JOG_CHORD=1]'). Knobs are part of the experiment's identity, so
+    the compare header must show them."""
     if not ver or not ver.get("describe"):
         return "unknown"
-    return f"{ver['label']}={ver['describe']}" if ver.get("label") else ver["describe"]
+    s = f"{ver['label']}={ver['describe']}" if ver.get("label") else ver["describe"]
+    knobs = ver.get("knobs")
+    if knobs:
+        s += " [" + " ".join(f"{k}={v}" for k, v in sorted(knobs.items())) + "]"
+    return s

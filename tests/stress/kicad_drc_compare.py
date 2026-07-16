@@ -376,7 +376,6 @@ def _web_min_connection(cfg: dict):
 
 
 def _staged_copy(board: str, clearance: float):
-    clearance = float(clearance)
     """Copy board + sibling .kicad_pro into a temp dir with the DEFAULT
     net-class clearance forced to `clearance`, so KiCad grades at the SAME
     constraint check_drc uses (the routed clearance) instead of the board's
@@ -390,6 +389,7 @@ def _staged_copy(board: str, clearance: float):
     classes down (the old behaviour) would grade that copper LOOSER than it was
     routed and hide genuine class-clearance shortfalls."""
     import shutil
+    clearance = float(clearance)
     d = tempfile.mkdtemp(prefix="kdrc_")
     b2 = os.path.join(d, os.path.basename(board))
     shutil.copy(board, b2)
