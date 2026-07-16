@@ -35,6 +35,7 @@ from plane_region_connector import route_disconnected_regions, build_base_obstac
 import plane_pad_tap
 from plane_pad_tap import (find_unconnected_plane_pads, tap_pad_with_escalation,
                            SharedViaMaps)
+from plane_component_oracle import PlaneComponentOracle
 from plane_blocker_detection import find_route_blocker_from_frontier, find_via_position_blocker
 from terminal_colors import GREEN, RED, RESET
 import routing_defaults as defaults
@@ -98,7 +99,7 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
                         max_search_radius, via_size, via_drill, max_rip_nets,
                         protected_net_ids, first_failure, ripped_net_ids, verbose,
                         distant_trace_radius=0.0, shared_via_maps=None,
-                        partial_restores=None):
+                        partial_restores=None, plane_oracle=None):
     """A plane-net pad too small to drop a via in needs a trace to the plane (or
     to an adjacent same-net pad); if signal nets block that trace, rip them (up
     to max_rip_nets), retry the tap. Identifies the blocker from the failed
@@ -156,7 +157,7 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
             pad, pad_layer, net_id, pcb_data, tap_config,
             max_search_radius=max_search_radius, via_size=via_size, via_drill=via_drill,
             verbose=verbose, fine_for_all=True, distant_trace_radius=distant_trace_radius,
-            shared_via_maps=shared_via_maps)
+            shared_via_maps=shared_via_maps, plane_oracle=plane_oracle)
         if result.success:
             # Collision-checked restore on SUCCESS too (#329): give back every
             # ripped net whose copper does not conflict with the NEW tap
@@ -602,6 +603,15 @@ def route_planes(
                 )
                 # Cross-pad via-obstacle-map reuse for this net's repair pass (#263).
                 shared_maps = SharedViaMaps(pcb_data, net_id)
+                # T6 mutual-floating-strap guard: components of this net's
+                # copper, built ONCE (same union-find as check_connected) and
+                # updated incrementally as taps commit. Tap targets not in the
+                # MAIN plane component are rejected, so two pads can no longer
+                # strap to each other's floating island and both report success.
+                plane_oracle = PlaneComponentOracle(pcb_data, net_id)
+                if plane_oracle.n_floating_items:
+                    print(f"    (plane oracle: {plane_oracle.n_floating_items} "
+                          f"floating same-net item(s) excluded as tap targets)")
                 for _pr_idx, (pad, pad_layer) in enumerate(unconnected):
                     if cancel_check and cancel_check():
                         print("    (cancelled)")
@@ -620,7 +630,8 @@ def route_planes(
                         verbose=verbose,
                         fine_for_all=True,  # last-resort repair: escalate every failed pad
                         distant_trace_radius=distant_radius,
-                        shared_via_maps=shared_maps
+                        shared_via_maps=shared_maps,
+                        plane_oracle=plane_oracle
                     )
                     if not result.success and rip_blocker_nets:
                         # Rip the signal net(s) blocking this pad's trace and retry
@@ -631,7 +642,8 @@ def route_planes(
                             plane_net_ids, result, ripped_net_ids, verbose,
                             distant_trace_radius=distant_radius,
                             shared_via_maps=shared_maps,
-                            partial_restores=partial_restores)
+                            partial_restores=partial_restores,
+                            plane_oracle=plane_oracle)
                         if rr is not None:
                             result = rr
                     if result.success:
@@ -662,6 +674,11 @@ def route_planes(
                             new_seg_objs.append(seg_obj)
                             pcb_data.segments.append(seg_obj)
                         shared_maps.note_pass_copper(new_via_objs, new_seg_objs)
+                        # T6: this tap was oracle-verified to reach the main
+                        # plane; credit its pad + copper so later pads may
+                        # strap to them (transitive, no graph rebuild).
+                        plane_oracle.note_tap_committed(pad, new_via_objs,
+                                                        new_seg_objs)
                         print(f"{GREEN}{where}, {len(result.segments)} trace segment(s){params_note}{RESET}")
                     else:
                         failed_repair_pads.append(f"{pad.component_ref}.{pad.pad_number} ({net_name})")
@@ -811,6 +828,10 @@ def route_planes(
             # fresh instance (not the repair pass's): region-connect copper was
             # added since, and this pass's edge-relaxed config keys differ anyway.
             shared_maps = SharedViaMaps(pcb_data, net_id)
+            # Fresh T6 oracle for the same reason (copper changed since the
+            # repair pass): forces the last-resort via into a MAIN zone outline
+            # and keeps the #373 track fallback off floating same-net copper.
+            sweep_oracle = PlaneComponentOracle(pcb_data, net_id)
             reported = False
             for (fx, fy, _flayer, fref) in res.get('disconnected_pads', []):
                 pp = pad_by_key.get((round(fx, 3), round(fy, 3), fref))
@@ -843,7 +864,7 @@ def route_planes(
                         max_search_radius=max_search_radius, via_size=vtry,
                         via_drill=dtry, verbose=verbose, fine_for_all=True,
                         distant_trace_radius=0.0, disable_reuse=True,
-                        shared_via_maps=shared_maps)
+                        shared_via_maps=shared_maps, plane_oracle=sweep_oracle)
                     if result.success and result.via is not None:
                         if (vtry, dtry) in _escalated_pairs:
                             warn_fab_escalation(f"last-resort plane via for net "
@@ -891,6 +912,7 @@ def route_planes(
                     for s in result.segments:
                         all_new_segments.append(s)
                     shared_maps.note_pass_copper([new_via_obj], new_seg_objs)
+                    sweep_oracle.note_tap_committed(pad, [new_via_obj], new_seg_objs)
                     if name in failed_repair_pads:
                         failed_repair_pads.remove(name)
                         total_pads_repaired += 1
@@ -910,7 +932,8 @@ def route_planes(
                         max_search_radius=max_search_radius,
                         via_size=via_size, via_drill=via_drill,
                         verbose=verbose, fine_for_all=True, pour_trace_only=True,
-                        distant_trace_radius=max_search_radius, disable_reuse=True)
+                        distant_trace_radius=max_search_radius, disable_reuse=True,
+                        plane_oracle=sweep_oracle)
                     connected = False
                     if track_res.success and track_res.segments:
                         new_seg_objs = []
@@ -937,6 +960,7 @@ def route_planes(
                             for s in track_res.segments:
                                 all_new_segments.append(s)
                             shared_maps.note_pass_copper([], new_seg_objs)
+                            sweep_oracle.note_tap_committed(pad, [], new_seg_objs)
                             if name in failed_repair_pads:
                                 failed_repair_pads.remove(name)
                                 total_pads_repaired += 1

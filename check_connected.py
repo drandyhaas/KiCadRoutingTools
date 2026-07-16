@@ -509,7 +509,8 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
 
     # Connect points through zones (power planes)
     # All points on the same layer that are inside the same zone are connected
-    for zone in zones:
+    zone_repr_id = {}  # zone_idx -> a representative point id credited to the zone
+    for zone_idx, zone in enumerate(zones):
         zone_layer = zone.layer
         # Find all points on this zone's layer
         points_on_layer = [(x, y, layer, pid, size) for x, y, layer, pid, size in all_points
@@ -532,6 +533,11 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         if len(points_in_zone) > 1:
             for pid in points_in_zone[1:]:
                 _union(points_in_zone[0], pid)
+        if points_in_zone:
+            # Representative point for this zone's copper component, so a graph
+            # consumer (plane_component_oracle) can tell which component IS the
+            # plane vs. a floating same-net island.
+            zone_repr_id[zone_idx] = points_in_zone[0]
 
     # Connect all points that are within tolerance on the same layer
     # Use spatial index for O(n) average instead of O(n²).
@@ -720,6 +726,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
               'pad_locations': list(pad_locations), 'edges': edges,
               'pad_index_repr': dict(pad_repr_id),
               'via_index_repr': dict(via_repr_id),
+              'zone_index_repr': dict(zone_repr_id),
               'num_segments': len(segments)}
              if return_graph else None)
 
