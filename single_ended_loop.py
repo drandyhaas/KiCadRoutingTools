@@ -80,6 +80,7 @@ from pcb_modification import add_route_to_pcb_data
 from single_ended_routing import route_net_with_obstacles, route_net_with_visualization, route_multipoint_main
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
+from diff_pair_custody import record_casualty
 from polarity_swap import get_canonical_net_id, rip_combo_already_tried
 from routing_context import (
     build_single_ended_obstacles, build_incremental_obstacles,
@@ -717,6 +718,13 @@ def route_single_ended_nets(
                             rip_and_retry_history.add((net_id, blocker_canonicals))
 
                             for rid, saved_result, ripped_ids, was_in_results in ripped_items:
+                                # Committed rip: custody of the pre-rip copper so
+                                # the end-of-run casualties-only reconcile can
+                                # restore it if the queued reroute never lands
+                                # (T5 zero-copper custody; route.py parity with
+                                # the diff front's 43e6d10).
+                                record_casualty(state, rid, saved_result,
+                                                ripped_ids, was_in_results)
                                 if was_in_results:
                                     successful -= 1
                                 if rid in diff_pair_by_net_id:

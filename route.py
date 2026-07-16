@@ -1113,6 +1113,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"pre-rip route (dropped {dropped} colliding piece(s)); "
                   f"net remains PARTIAL for a later reconnect pass")
 
+    # T5 zero-copper custody: casualties-only final reconciliation (route.py
+    # front; parity with batch_route_diff_pairs' 43e6d10). A net RIPPED during
+    # this run whose queued reroute never landed used to ship at ZERO copper
+    # with no custody -- the #134 recovery above only covers nets whose RESTORE
+    # was refused, not nets that were never restored at all (the ulx3s
+    # GN8/GP2/GN22 class: pre-existing rippable nets ripped by the rip-up
+    # ladder, reroute failed, stale-strip then removed their input copper from
+    # the output). Restore-first semantics, collision-aware (never leaves
+    # restored copper colliding with newly routed copper); honest 'unrecovered'
+    # when nothing safe can be re-instated. Engine-side, so the GUI inherits.
+    from diff_pair_custody import run_casualty_reconcile
+    casualty_summary = run_casualty_reconcile(state)
+
     # Issues #331/#371: last-chance scoped fine-parameter rescue for nets the
     # whole pipeline (main loop, rip-up ladder, reroute loop, Phase 3, #134
     # recovery) still left failed or partially connected. No rip-up and no
@@ -1437,10 +1450,23 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # pad-group split wrongly splits genuinely-connected power/bus nets.
     from check_connected import check_net_connectivity
     # Per-net copper as it will be WRITTEN: the input board's original copper
-    # plus the write-list's new copper. NOT pcb_data, which also holds orphan
-    # copper from rip/reroute that never reaches the write-list (issue #8).
-    _segs_by_net: Dict[int, list] = {nid: list(lst) for nid, lst in _orig_seg_by_net.items()}
-    _vias_by_net: Dict[int, list] = {nid: list(lst) for nid, lst in _orig_via_by_net.items()}
+    # MINUS everything the writer strips (cleanup strip lists + the #220/#284
+    # stale strips of ripped/re-routed nets) plus the write-list's new copper.
+    # NOT pcb_data, which also holds orphan copper from rip/reroute that never
+    # reaches the write-list (issue #8). Counting STRIPPED originals here (the
+    # pre-fix behavior) graded ripped-and-stripped nets on ghost copper the
+    # output file will not contain -- a rip victim whose reroute landed only
+    # partially "passed" this sweep on its stripped pre-rip copper and shipped
+    # broken with no failure record (T5 zero-copper custody, ulx3s GN12 class).
+    _sweep_strip_seg_ids = ({id(s) for s in dead_end_input_segments}
+                            | {id(s) for s in _stale_input_segs})
+    _sweep_strip_via_ids = {id(v) for v in stale_input_vias}
+    _segs_by_net: Dict[int, list] = {
+        nid: [s for s in lst if id(s) not in _sweep_strip_seg_ids]
+        for nid, lst in _orig_seg_by_net.items()}
+    _vias_by_net: Dict[int, list] = {
+        nid: [v for v in lst if id(v) not in _sweep_strip_via_ids]
+        for nid, lst in _orig_via_by_net.items()}
     for _r0 in results:
         for _s in _r0.get('new_segments', []):
             _segs_by_net.setdefault(_s.net_id, []).append(_s)
@@ -1511,6 +1537,51 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 'net_id': net_id,
                 'failed_pads': failed_pads_info
             })
+
+    # ---- COVERAGE GATE (T5 zero-copper custody) ----------------------------
+    # Invariant: a net this run DISTURBED must not ship broken and unreported.
+    # The sweep above only covers routed_results; a net OUTSIDE it -- skipped as
+    # "already fully connected", or a pre-existing rippable net -- can still be
+    # broken by this run (ripped by the rip-up ladder and never restored, its
+    # restore refused, or its input copper stale-stripped). Those nets are in no
+    # failure list, so the final reconciliation never retried them and they
+    # shipped at ZERO copper with no owner (ulx3s GN8/GP2/GN22). Check every
+    # disturbed, unclassified, multi-pad net against the WRITTEN copper and
+    # report the broken ones as failed_multipoint entries -- which both surfaces
+    # them honestly in the summary/JSON and feeds them to the end-of-run
+    # reconciliation retry below.
+    coverage_gate_nets = []
+    _cov_disturbed = (set(getattr(state, 'casualty_custody', {}) or {})
+                      | set(state.collision_refused_net_ids or set())
+                      | {s.net_id for s in _stale_input_segs}
+                      | {v.net_id for v in stale_input_vias})
+    _cov_classified = {nid for _, nid in single_ended_nets} | set(routed_results)
+    for _nid in sorted((_cov_disturbed & sweep_scope_ids) - _cov_classified):
+        _pads = pcb_data.pads_by_net.get(_nid, [])
+        if len(_pads) < 2:
+            continue
+        _r = check_net_connectivity(
+            _nid, _segs_by_net.get(_nid, []), _vias_by_net.get(_nid, []),
+            _pads, _zones_by_net.get(_nid, []), tolerance=0.02)
+        _dp = _r.get('disconnected_pads') or []
+        if not _dp:
+            continue
+        _net_name = pcb_data.nets[_nid].name if _nid in pcb_data.nets else f"Net {_nid}"
+        print(f"{RED}COVERAGE GATE: {_net_name} was disturbed by this run "
+              f"(ripped/stripped) and ships with {len(_dp)} disconnected "
+              f"pad(s) -- reporting as failed and queuing for the final "
+              f"reconciliation{RESET}")
+        coverage_gate_nets.append(_net_name)
+        failed_multipoint.append({
+            'net_name': _net_name,
+            'net_id': _nid,
+            'failed_pads': [
+                {'x': _p[0], 'y': _p[1],
+                 'component_ref': _p[3] if len(_p) > 3 else '?',
+                 'pad_number': '?'}
+                for _p in _dp],
+        })
+
     # Derive final counts set-based from this run's scope rather than the loop
     # counters (issue #87): a net with unconnected pads is not fully routed, and
     # a net ripped during Phase 3 whose re-route failed never reaches the failure
@@ -1619,6 +1690,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # #331/#371 rescue pass outcome (key absent when nothing was rescued,
         # so pre-rescue JSON_SUMMARY consumers/diffs are unaffected).
         summary['rescue'] = rescue_summary
+    if casualty_summary.get('attempted'):
+        # T5 custody: casualties-only reconcile tally (additive; key absent
+        # when no rip casualty occurred -- the common case).
+        summary['casualty_reconcile'] = casualty_summary
+    if coverage_gate_nets:
+        # T5 coverage gate: disturbed out-of-scope nets shipping broken
+        # (additive; also present as failed_multipoint entries above).
+        summary['coverage_gate_nets'] = coverage_gate_nets
     # #408: report-only list of NET NAMES the router intentionally routed into
     # the board-edge clearance band because a pad on the net sits inside it (edge
     # connectors, edge-mounted parts). Lets the grader accept-by-design every
