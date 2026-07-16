@@ -374,7 +374,16 @@ def _custom_pad_primitive_points(pad_text: str):
         if cm and m2.group(1) == 'circle':
             cx, cy, ex, ey = map(float, cm.groups())
             r = math.hypot(ex - cx, ey - cy)
-            pts += [(cx - r, cy), (cx + r, cy), (cx, cy - r), (cx, cy + r)]
+            # A circle is rotation-invariant about its centre: represent it as
+            # the centre point with the OUTER radius (centreline radius + half
+            # the stroke -- KiCad strokes the outline of both filled and
+            # unfilled circles) folded into the half-stroke term. The extent
+            # consumer then computes |rotated centre| + r + w/2 exactly at ANY
+            # pad angle. Sampling the four axis extremes under-covered rotated
+            # pads (#418, ottercast MK1: a 315deg unfilled ring lost ~0.4mm of
+            # copper per side vs pcbnew).
+            out.append(([(cx, cy)], r + hw))
+            continue
         elif m2.group(1) in ('rect', 'line'):
             sm = re.search(r'\(start\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block)
             if sm:
@@ -383,6 +392,44 @@ def _custom_pad_primitive_points(pad_text: str):
                        [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
         if pts:
             out.append((pts, hw))
+    return out
+
+
+def _offset_polygon_outward(pts, hw):
+    """Offset a closed polygon outward by ``hw`` (mitered per-vertex normals,
+    miter capped at 4x for very sharp corners). Winding is derived from the
+    shoelace sum, so either vertex order works. Approximate at reflex
+    (concave) vertices -- the notch is offset too, mildly over-covering it --
+    which is conservative for clearance to external copper."""
+    n = len(pts)
+    if n < 3 or hw <= 0:
+        return pts
+    area2 = sum(pts[i][0] * pts[(i + 1) % n][1] - pts[(i + 1) % n][0] * pts[i][1]
+                for i in range(n))
+    sign = 1.0 if area2 > 0 else -1.0
+    normals = []
+    for i in range(n):
+        dx = pts[(i + 1) % n][0] - pts[i][0]
+        dy = pts[(i + 1) % n][1] - pts[i][1]
+        length = math.hypot(dx, dy)
+        normals.append((sign * dy / length, -sign * dx / length)
+                       if length > 1e-12 else None)
+    out = []
+    for i in range(n):
+        adj = [v for v in (normals[i - 1], normals[i]) if v is not None]
+        if not adj:
+            out.append(pts[i])
+            continue
+        ax = sum(v[0] for v in adj)
+        ay = sum(v[1] for v in adj)
+        length = math.hypot(ax, ay)
+        if length < 1e-12:
+            out.append(pts[i])
+            continue
+        bx, by = ax / length, ay / length
+        cos_half = max(0.25, bx * adj[0][0] + by * adj[0][1])
+        out.append((pts[i][0] + bx * hw / cos_half,
+                    pts[i][1] + by * hw / cos_half))
     return out
 
 
@@ -514,6 +561,16 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
                     for _p1, p2 in segs:
                         pts.append(p2)
             local = pts if len(pts) >= 3 else None
+            if local:
+                # KiCad strokes the gr_poly OUTLINE with its (width ...) --
+                # for filled and unfilled polys alike -- so copper reaches
+                # width/2 beyond the outline (#418). Offset the outline
+                # outward by that half-stroke. An unfilled poly's interior
+                # is not really copper, but the filled-outline model is kept
+                # (conservative, and exact for clearance to external copper).
+                hw = _width(block) / 2.0
+                if hw > 0:
+                    local = _offset_polygon_outward(local, hw)
         elif kind == 'circle':
             c = _field(block, 'center', 2)
             e = _field(block, 'end', 2)
