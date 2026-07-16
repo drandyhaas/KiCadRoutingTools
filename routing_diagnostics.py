@@ -352,7 +352,8 @@ def format_suggestions_for_dialog(suggestions: List[str]) -> str:
 
 
 def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
-                              routed_net_ids=(), rip_existing_names=None) -> str:
+                              routed_net_ids=(), rip_existing_names=None,
+                              return_names=False):
     """Name the PRE-EXISTING nets whose copper blocks a failed route (#301).
 
     Copper committed by an earlier run/step lives in the BASE obstacle map, so
@@ -363,8 +364,10 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
     them, and --rip-existing-nets (#103) is the existing, connectivity-safe way
     to let this run rip + re-route them. Returns '' when nothing attributable.
     """
+    def _ret(text, names):
+        return (text, names) if return_names else text
     if not blocked_cells or pcb_data is None:
-        return ""
+        return _ret("", [])
     import io
     import math
     from contextlib import redirect_stdout
@@ -439,15 +442,15 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
     if rip_existing_names:
         names = [n for n in names if n not in rip_existing_names]
     if not names:
-        return ""
+        return _ret("", [])
     quoted = " ".join(f"'{n}'" for n in names)
-    return (f"Hint: the blocking copper belongs to pre-existing net(s) {quoted} "
+    return _ret(f"Hint: the blocking copper belongs to pre-existing net(s) {quoted} "
             f"(committed by an earlier run/step), which this run is not allowed "
             f"to rip. Retry with --rip-existing-nets {quoted} to rip and "
             f"re-route them in this run (issue #103) -- the decisive blocker "
             f"may be any of them, so start with the full set (each ripped net "
             f"is re-routed and the run reports honestly if one cannot be), "
-            f"then bisect if you want a minimal rip.")
+            f"then bisect if you want a minimal rip.", names)
 
 
 def static_boxin_hint(result, config, pcb_data=None) -> str:

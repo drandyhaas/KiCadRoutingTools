@@ -1733,6 +1733,33 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         try:
             _rk = dict(_reconcile_kwargs)
             _rk.update(final_reconcile=False, skip_routing=False)
+            # Rip-authority escalation (#103 self-applied): nets that died with
+            # 'no rippable blockers found' were boxed by PRE-EXISTING copper
+            # this run may not touch, and the router itself printed the
+            # --rip-existing-nets retry it wanted. Take that advice in-run:
+            # grant the reconciliation rip authority over exactly the
+            # frontier-attributed blocker names recorded in the failed nets'
+            # histories (capped; rip authority is permission, not compulsion
+            # -- the rip-up ladder only fires where a route is actually
+            # blocked, and ripped pre-existing nets go through the standard
+            # reroute-or-restore custody). Existing patterns are kept.
+            _rec_ids = {nid for nid, net in pcb_data.nets.items()
+                        if net.name in set(_rec_names)}
+            _hinted = []
+            for _nid in _rec_ids:
+                for _ev in (state.net_history.get(_nid) or []):
+                    if _ev.get('event') == 'preexisting_blockers':
+                        for _bn in (_ev.get('details') or {}).get('blockers') or []:
+                            if _bn not in _hinted:
+                                _hinted.append(_bn)
+            _RIP_ESCALATION_CAP = 12
+            if _hinted and '*' not in (rip_existing_nets or []):
+                _hinted = _hinted[:_RIP_ESCALATION_CAP]
+                _rk['rip_existing_nets'] = list(dict.fromkeys(
+                    (rip_existing_nets or []) + _hinted))
+                print(f"  Reconciliation rip authority (#103): "
+                      f"--rip-existing-nets over hinted blockers "
+                      f"{', '.join(_hinted)}")
             if return_results:
                 # GUI-parity reconciliation (gap-closure): re-invoke against
                 # the SAME in-memory board (the copper this run just

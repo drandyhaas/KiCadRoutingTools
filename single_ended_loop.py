@@ -795,13 +795,13 @@ def route_single_ended_nets(
                                  (result.get('blocked_cells_backward') or []))
                 if not _cells301:
                     _cells301 = list(locals().get('blocked_cells') or [])
-                hint301 = preexisting_blocker_hint(
+                hint301, blockers301 = preexisting_blocker_hint(
                     _cells301, config, pcb_data, net_id,
-                    routed_net_ids=state.routed_net_ids)
+                    routed_net_ids=state.routed_net_ids, return_names=True)
                 if hint301:
                     print(f"  {hint301}")
                     record_net_event(state, net_id, "preexisting_blockers", {
-                        "hint": hint301})
+                        "hint": hint301, "blockers": blockers301})
                 failed += 1
 
     return successful, failed, total_time, total_iterations, route_index, user_quit
