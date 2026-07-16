@@ -347,6 +347,12 @@ def make_local_window(pcb_data: PCBData, cx: float, cy: float,
 
     board_info = copy.copy(pcb_data.board_info)
     board_info.board_bounds = (min_x, min_y, max_x, max_y)
+    # Real board bounds, so the edge-band pad exemption (#338) can tell a pad
+    # at the TRUE board edge from one merely straddling the synthetic window
+    # boundary (the latter must not punch reach holes in the window fence).
+    board_info.parent_board_bounds = (getattr(pcb_data.board_info,
+                                              'parent_board_bounds', None)
+                                      or bb)
     # A rectangular board's outline is no longer rectangular W.R.T. the window's
     # clamped bounds, so the edge-blocking rectangularity test would send the
     # WINDOW build down the polygon path while the whole-board map uses the

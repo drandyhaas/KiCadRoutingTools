@@ -251,10 +251,54 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances):
             _g0 = wcoord.to_grid(_wx0, _wy0)
             _g1 = wcoord.to_grid(_wx1, _wy1)
             bounds = (_g0[0], _g0[1], _g1[0], _g1[1])
+        if os.environ.get('KICAD_RESCUE_DEBUG_VIA'):
+            # Debug probe: report the window box and whether a named via cell
+            # is blocked in THIS rung's map (KICAD_RESCUE_DEBUG_VIA="x,y").
+            try:
+                from routing_config import GridCoord as _GC
+                _dx, _dy = (float(t) for t in
+                            os.environ['KICAD_RESCUE_DEBUG_VIA'].split(','))
+                _c = _GC(cfg.grid_step)
+                _g = _c.to_grid(_dx, _dy)
+                print(f"    RESCUE-DEBUG net={net_id} window="
+                      f"{window.board_info.board_bounds} via_size={cfg.via_size} "
+                      f"probe=({_dx},{_dy}) blocked={obstacles.is_via_blocked(_g[0], _g[1])} "
+                      f"segs_in_window={len(window.segments)}")
+            except Exception as _e:
+                print(f"    RESCUE-DEBUG failed: {_e}")
         result = route_net_with_obstacles(window, net_id, cfg, obstacles, bounds=bounds)
         if result and not result.get('failed'):
+            if _result_escapes_window(result, window, cfg):
+                print(f"    rescue rung rejected: route escaped the window "
+                      f"bounds (fence leak) net={net_id}")
+                continue
             return result, cfg
     return None, None
+
+
+def _result_escapes_window(result, window, cfg):
+    """True when any NEW copper lands outside the rescue window (+1 grid step).
+
+    Belt-and-braces behind the #396 fence: the window obstacle map models
+    nothing beyond its bounds, so copper placed out there was routed blind
+    (butterstick DQ11: a #338 exemption hole let the A* slip past the fence
+    and drop a via on unseen +3V3 copper). Any escape = the rung failed."""
+    bb = window.board_info.board_bounds
+    if not bb:
+        return False
+    tol = cfg.grid_step + 1e-6
+    x0, y0, x1, y1 = bb[0] - tol, bb[1] - tol, bb[2] + tol, bb[3] + tol
+
+    def _out(x, y):
+        return not (x0 <= x <= x1 and y0 <= y <= y1)
+
+    for s in result.get('new_segments', []) or []:
+        if _out(s.start_x, s.start_y) or _out(s.end_x, s.end_y):
+            return True
+    for v in result.get('new_vias', []) or []:
+        if _out(v.x, v.y):
+            return True
+    return False
 
 
 def _unconnected_pads_info(comp_pads):

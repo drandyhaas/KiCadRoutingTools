@@ -118,6 +118,20 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
             continue
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
+            # Copper on a layer OUTSIDE config.layers (a 6/8-layer board routed
+            # with a subset): tracks cannot go there, but a VIA spans the whole
+            # stack and must still respect it -- without this, a rescue/retry
+            # via lands straight on the unseen copper (butterstick DQ11: via on
+            # In3 +3V3 tap copper, a real kicad clearance violation). Stamp the
+            # via keep-out only.
+            if seg.layer.endswith('.Cu'):
+                seg_width = seg.width if getattr(seg, 'width', 0) > 0 else config.track_width
+                seg_clearance = _obstacle_clearance(seg.net_id)
+                via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
+                vias_arr = segment_blocked_cells_array(
+                    seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+                    via_block_mm, coord.grid_step)
+                _batch_vias(obstacles, vias_arr)
             continue
         # Compute expansion: routing track half-width (for this layer) + obstacle half-width + clearance
         layer_track_width = config.get_track_width(seg.layer)
@@ -730,6 +744,19 @@ def _edge_band_pad_exemption(pcb_data, coord: GridCoord, edge_clearance: float,
     pads, pxs, pys, halves, d_signed, rings, ring_edges = geom
     bounds = pcb_data.board_info.board_bounds
     in_band = (d_signed - halves) < edge_clearance
+    # Synthetic window fence (make_local_window installs window bounds as
+    # board_bounds and stashes the REAL board's bounds): a pad qualifies for
+    # the reach exemption only if it is in-band w.r.t. the PARENT board's edge
+    # too. A pad that merely straddles the synthetic window boundary must NOT
+    # punch a hole in the fence -- the rescue A* escapes through it into
+    # unstamped space beyond the window and lands copper on obstacles the
+    # window map never saw (butterstick DQ11).
+    parent_bb = getattr(pcb_data.board_info, 'parent_board_bounds', None)
+    if parent_bb is not None and not rings and in_band.any():
+        pminx, pminy, pmaxx, pmaxy = parent_bb
+        d_parent = np.minimum.reduce([pxs - pminx, pmaxx - pxs,
+                                      pys - pminy, pmaxy - pys])
+        in_band &= (d_parent - halves) < edge_clearance
     if not in_band.any():
         return None
     if ring_edges is not None:

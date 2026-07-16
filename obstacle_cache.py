@@ -312,6 +312,19 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             continue
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
+            # Copper on a layer OUTSIDE config.layers: tracks cannot go there,
+            # but a VIA spans the whole stack and must respect it (butterstick
+            # DQ11 class -- see build_base_obstacle_map). Via keep-out only.
+            if seg.layer.endswith('.Cu'):
+                seg_w = seg.width if (getattr(seg, 'width', 0) and seg.width > 0) \
+                    else config.track_width
+                via_block_mm = (config.via_size / 2 + seg_w / 2 + obs_clearance
+                                + extra_clearance)
+                cells = segment_blocked_cells_array(
+                    seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+                    via_block_mm, coord.grid_step)
+                if len(cells):
+                    blocked_vias_set.append(np.asarray(cells, dtype=np.int32))
             continue
         layer_w = config.get_net_track_width(net_id, seg.layer)
         seg_w = seg.width if (getattr(seg, 'width', 0) and seg.width > 0) else layer_w
