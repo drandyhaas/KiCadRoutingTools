@@ -914,6 +914,16 @@ insufficient routing channels. Options:
 - Accept partial fanout; router will complete remaining connections
 - Skip fanout entirely; direct routing often works for through-hole PGA
 
+**Dense 2-layer boards: treat B.Cu as a real routing layer, not a plane.**
+Reserving B.Cu for a GND plane (and/or pricing it 3×) turns a congested
+2-layer board into single-layer routing — neo6502's human original carries
+47% of its routed length on B.Cu and pours GND *around* the routes on both
+sides afterwards; our plane-first chain left 25 nets open. On a dense 2-layer
+board: route signals on BOTH layers at cost 1.0 (long-haul nets cross on the
+back), then pour GND last (`route_planes.py` after the signal steps — the pour
+flows around existing copper). Only plane-first on 2-layer boards with light
+signal content.
+
 **Important:** If you skip fanout for a BGA/PGA component but still need to connect its
 internal pads, use `--no-bga-zone <component>` to disable the automatic exclusion zone
 and allow the router to enter the dense pin area:
@@ -930,9 +940,27 @@ leave internal pads unconnected if they weren't fanned out.
 
 ### Multi-Layer Boards (4+ layers)
 
-- Use inner layers for planes (In1.Cu for GND, In2.Cu for VCC). **Roughly half
-  the copper layers should be planes** — on a 4-layer board that's In1+In2 as
-  planes, F.Cu+B.Cu for signals.
+- Use inner layers for planes (In1.Cu for GND, In2.Cu for VCC). On a board with
+  light-to-moderate routing density, **roughly half the copper layers as
+  planes** works — on a 4-layer board that's In1+In2 as planes, F.Cu+B.Cu for
+  signals.
+- **EXCEPTION — dense boards (any BGA ≥ ~100 balls, DDR/SDRAM buses, or a
+  signal step that already failed >5 nets): never plane ALL inner layers.**
+  Corpus triage of the worst-connectivity boards (ulx3s, butterstick,
+  orangecrab, zynq_ad9364) found this the single most damaging planning error:
+  solid planes on both inner layers + 3× inner costs leaves a 2-layer board
+  around the BGA, and 20–50 nets ship open while the human-routed originals
+  route their long-haul nets *through* inner layers (1–2 vias each, the
+  "cross-under highway"). On these boards: GND plane on ONE inner layer, and
+  either keep the other inner layer a plain routing layer, or make it a SPLIT
+  power plane (region pours per rail — `/recommend-plane-mappings` Step 3b) and
+  keep its layer cost low (≤1.5) so signals can still cross in the gaps. On 6+
+  layers, plane the middle layers and keep the layers at the BGA escape depth
+  routable (human butterstick: planes In3/In4, DDR3 on In2/In5).
+- **Check where the BGA fanout escapes landed before finalizing the plane
+  layers** — a plane on a layer full of escape stubs forces `--rip-blocker-nets`
+  to shred those escapes during tap placement (each rip risks a permanent
+  casualty). Pick plane layers the escapes avoid.
 - More fanout options available.
 
 **Derive `--layer-costs` from the plane plan — penalize the plane-reserved
@@ -947,9 +975,14 @@ signal layers and leave the inner layers clean for the pour:
 # GND plane on In1.Cu, power plane on In2.Cu -> penalize In1/In2 for signals:
 route.py ... --layers F.Cu In1.Cu In2.Cu B.Cu --layer-costs 1.0 3.0 3.0 1.0
 ```
-- **~3× is the sweet spot.** Any value ≥2× keeps signals off the planes and
-  doesn't hurt completion; ≥5× just adds vias/copper for negligible further gain.
-  Order matches `--layers`; keep the real signal layers (F.Cu/B.Cu) at 1.0.
+- **~3× is the sweet spot on boards where F/B alone can carry the signals.**
+  Any value ≥2× keeps signals off the planes and doesn't hurt completion; ≥5×
+  just adds vias/copper for negligible further gain. Order matches `--layers`;
+  keep the real signal layers (F.Cu/B.Cu) at 1.0. **On dense boards (BGA ≥
+  ~100 balls / DDR buses) where an inner layer was deliberately left
+  signal-routable (see the dense-board exception above), keep that layer at
+  1.0–1.5** — 3× on the only spare layer starves the long-haul nets that need
+  it (ulx3s failed 72 nets at 3×; its retry at 1.5 was the correct call).
 - **Why it matters — it's a cascade, not just tidiness.** Signals crossing a
   plane layer fragment the pour into islands; `route_disconnected_planes` then
   carpets the layer with island-stitching tracks. Keep signals off the plane
@@ -1033,6 +1066,17 @@ python3 route.py board.kicad_pcb \
 ```
 
 First matching pattern determines width. Useful when not using planes.
+
+**Size power widths for the destination pitch, not just the current.** A
+0.3–0.5 mm trunk physically cannot reach interior balls of a ≤0.8 mm-pitch
+BGA (at 0.5 mm pitch only one ~0.09 mm track fits between balls; at 0.8 mm a
+0.25 mm trace + 0.09 clearance is a knife-edge). The power step's automatic
+tap neck-down helps at the pad, but if a rail feeds MANY interior balls
+(core rails like +1V1/P1.35V/VCC_1V8), a fat-track tree through the ball
+field fails outright — the human originals feed such rails with zones on
+every layer plus 0.09–0.2 mm necks. For those rails prefer a plane/region
+(`/recommend-plane-mappings`), or set the rail's width to what the ball
+field admits (e.g. 0.15–0.2) rather than the open-field ideal.
 
 ### Target Swap Optimization (Memory Routing)
 

@@ -54,6 +54,47 @@ python3 -X utf8 list_nets.py path/to/file.kicad_pcb --power
   carrying fast signals comes first, rail convenience second.
 - Mention existing zones that already cover a recommendation instead of repeating them.
 
+## Step 3b: Routability Budget (do this BEFORE finalizing layers)
+
+Planes compete with signal routing for the same layers. The corpus triage of the
+worst-connectivity boards (ulx3s, butterstick, orangecrab, zynq_ad9364,
+ottercast) found the single most damaging planning error was **giving every
+inner layer to solid planes** while the signal steps also priced inner layers
+3x — the router is left a 2-layer board around dense BGAs and 20-50 nets ship
+open. The human-routed originals of those same boards all keep inner layers
+partially signal-routable. Rules:
+
+- **On a 4-layer board with any BGA >= ~100 balls, never plane BOTH inner
+  layers.** One inner layer = GND plane; the other stays a routing layer or
+  becomes a SPLIT power plane (rails as region pours, signals may still cross
+  in the gaps). The human ulx3s puts GND pours on F/B + In2 and a split power
+  plane on In1, leaving In2 the long-haul signal highway; the human zynq routes
+  a 20-net LVDS bundle *through* its In1 GND plane.
+- **Check the fanout escape layers first.** If BGA fanout has already run
+  (escape stubs + vias exist), list which layers the escape stubs land on —
+  `python3 -c "...count segments per layer under the BGA courtyard..."` or eye
+  the board. A plane assigned to a layer carrying escape stubs will rip or
+  strand those escapes (route_planes rips blockers; every rip risks a
+  casualty). Prefer plane layers the escapes do NOT use.
+- **On 6+ layer boards, put split power on a middle layer (In3/In4-style) and
+  keep the layers adjacent to the BGA escape depth signal-routable** — the
+  human butterstick planes In3/In4 and routes DDR3 on In2/In5; our failed run
+  planed In2 (the DDR layer) instead.
+- **2-layer boards: pour AFTER routing, never plane-first.** A B.Cu plane +
+  3x layer cost turns the board into single-layer routing (neo6502: humans put
+  47% of routed length on B.Cu and pour GND around the routes afterward).
+  Recommend: route signals on both layers, then B.Cu/F.Cu GND pours + stitching
+  (`route_planes.py` after `route.py`, or zones poured around existing copper).
+- **Say which layer costs the signal steps should use.** When one inner layer
+  is planed and one is free, recommend `--layer-costs` ~1.0-1.5 for the free
+  inner layer (3.0 starves it and pushes everything onto F/B).
+- **Power rails at fine-pitch BGAs (<= 0.8 mm) cannot arrive as 0.3-0.5 mm
+  trunks** — at 0.5 mm pitch only one ~0.09 mm track fits between balls. If a
+  rail feeds interior balls, either give it a plane/region (vias reach it
+  vertically) or note that the power step must neck the trunk down near the
+  courtyard (`--power-nets-widths` sized for the LAST reachable segment, not
+  the whole run).
+
 ## Step 4: Report and Machine-Readable Result
 
 Present the recommended mappings as a table (net(s), layer, rationale), note any
