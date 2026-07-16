@@ -86,10 +86,18 @@ def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tu
 
 
 def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig):
-    """Add BGA proximity costs around zone edges (outside the zones).
+    """Add BGA proximity costs around zone edges AND across zone interiors.
 
     Penalizes routing near BGA edges with linear falloff from max cost at edge
-    to zero at bga_proximity_radius distance.
+    to zero at bga_proximity_radius distance. Zone-INTERIOR cells get the full
+    edge-tier cost: the interior is mostly hard-blocked (set_bga_zone), but
+    allowed_cells windows (endpoint windows, #189 via-in-pad unblocks) punch
+    routable holes in it — without an interior stamp those holes carried ZERO
+    proximity cost, so the router preferred dropping vias inside the escape
+    window under the BGA (where escape capacity is most precious) over paying
+    the ring cost just outside it. The cost is a preference, not a block:
+    blocked cells ignore it, and a via that can only go in the window still
+    goes there.
     """
     if config.bga_proximity_radius <= 0:
         return  # Feature disabled
@@ -103,13 +111,13 @@ def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig)
         gmin_x, gmin_y = coord.to_grid(min_x, min_y)
         gmax_x, gmax_y = coord.to_grid(max_x, max_y)
 
-        # Iterate over cells within radius of BGA zone edges (outside the zone)
+        # Iterate over cells within radius of BGA zone edges, INCLUDING the
+        # zone interior (interior cells clamp to dist=0 -> full edge-tier
+        # cost). The interior was historically skipped as "already blocked",
+        # which became a free-via hole once allowed_cells windows could
+        # unblock cells inside the zone.
         for gx in range(gmin_x - radius_grid, gmax_x + radius_grid + 1):
             for gy in range(gmin_y - radius_grid, gmax_y + radius_grid + 1):
-                # Skip if inside BGA zone (already blocked)
-                if gmin_x <= gx <= gmax_x and gmin_y <= gy <= gmax_y:
-                    continue
-
                 # Calculate distance to nearest edge of rectangle
                 # Clamp point to rect, then calculate distance from original to clamped
                 cx = max(gmin_x, min(gx, gmax_x))
