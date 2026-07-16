@@ -774,6 +774,75 @@ def check_pad_pad_overlap(pad1: Pad, pad2: Pad, clearance: float,
     return False, 0.0, None
 
 
+def _net_tie_span_waived(pcb_data, seg, seg_net: int, partner_pad, clearance: float) -> bool:
+    """True when a tie-net segment's collision with its net-tie PARTNER pad is
+    the KiCad-legal local contact: every sample of the segment whose copper
+    reaches the partner keeps that copper within the tied net's OWN pad of the
+    same footprint group (KiCad DRC_ENGINE::IsNetTieExclusion -- the collision
+    point must lie on the own pad)."""
+    fp = pcb_data.footprints.get(getattr(partner_pad, 'component_ref', None))
+    if fp is None or not getattr(fp, 'net_tie_groups', None):
+        return False
+    by_num = {}
+    for p in fp.pads:
+        by_num.setdefault(p.pad_number, []).append(p)
+    own_pads = []
+    for group in fp.net_tie_groups:
+        members = [p for num in group for p in by_num.get(num, [])]
+        if any(p is partner_pad for p in members):
+            own_pads.extend(p for p in members if p.net_id == seg_net)
+    if not own_pads:
+        return False
+    # The collision positions are where the track's COPPER meets the partner
+    # pad -- approximated per sample by the closest point ON the partner (the
+    # sample itself when inside). KiCad waives when the contact lies on the
+    # own pad; near-clearance spans whose contact projection stays on the own
+    # pad are accepted (the human cynthion escape), while a track ploughing
+    # through the partner's heart has interior contact points far from the
+    # own pad and stays flagged.
+    def _cp_on_partner(px, py):
+        rot = getattr(partner_pad, 'rect_rotation', 0.0) or 0.0
+        dx, dy = px - partner_pad.global_x, py - partner_pad.global_y
+        if rot:
+            r = math.radians(rot)
+            c, s = math.cos(r), math.sin(r)
+            lx, ly = dx * c + dy * s, -dx * s + dy * c
+        else:
+            lx, ly = dx, dy
+        hx, hy = partner_pad.size_x / 2, partner_pad.size_y / 2
+        qx, qy = max(-hx, min(hx, lx)), max(-hy, min(hy, ly))
+        if rot:
+            r = math.radians(rot)
+            c, s = math.cos(r), math.sin(r)
+            return (partner_pad.global_x + qx * c - qy * s,
+                    partner_pad.global_y + qx * s + qy * c)
+        return (partner_pad.global_x + qx, partner_pad.global_y + qy)
+
+    half_w = seg.width / 2
+    n = max(2, int(math.hypot(seg.end_x - seg.start_x, seg.end_y - seg.start_y) / 0.01) + 1)
+    eps = 0.011  # one sample step + KiCad's collision epsilon headroom
+    contacts = []
+    best_d, best_pt = 1e9, None
+    for i in range(n + 1):
+        t = i / n
+        px = seg.start_x + (seg.end_x - seg.start_x) * t
+        py = seg.start_y + (seg.end_y - seg.start_y) * t
+        d = point_to_pad_distance(px, py, partner_pad)
+        if d < half_w:  # copper genuinely reaches the partner here
+            contacts.append(_cp_on_partner(px, py))
+        if d < best_d:
+            best_d, best_pt = d, (px, py)
+    if not contacts:
+        # Pure clearance graze, no copper contact: test the deepest sample's
+        # projection onto the partner.
+        if best_pt is None:
+            return False
+        contacts = [_cp_on_partner(best_pt[0], best_pt[1])]
+    return all(
+        any(point_to_pad_distance(cx, cy, own) <= eps for own in own_pads)
+        for cx, cy in contacts)
+
+
 def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
                                routing_layers: List[str],
                                clearance_margin: float = 0.05) -> Tuple[bool, float, Optional[Tuple[float, float]]]:
@@ -1752,6 +1821,17 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 continue  # Same net
             if _pad_has_no_copper(pad):
                 continue  # NPTH hole: covered by the copper-to-hole check
+            # Net-tie exemption (footprint net_tie_pad_groups): KiCad permits
+            # the tied net's copper to contact the partner pad where the
+            # collision point lies ON the tied net's own pad
+            # (DRC_ENGINE::IsNetTieExclusion) -- a Kelvin sense track exits
+            # dead-centre through its own tab. The waiver mirrors that
+            # locality: every point of the segment's violating span must keep
+            # its copper within reach of the own tie pad.
+            if hasattr(pcb_data, 'net_tie_exempt_pad_ids') and \
+                    id(pad) in pcb_data.net_tie_exempt_pad_ids(seg_net) and \
+                    _net_tie_span_waived(pcb_data, seg, seg_net, pad, clearance):
+                continue
 
             pad_net_matches = matching_net_ids is None or pad_net in matching_net_ids
             if not seg_net_matches and not pad_net_matches:

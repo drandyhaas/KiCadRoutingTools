@@ -446,6 +446,21 @@ def prepare_obstacles_inplace(
     if net_id in net_obstacles_cache:
         remove_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[net_id])
 
+    # Net-tie corridor lift (footprint net_tie_pad_groups): remove exactly
+    # the PARTNER copper's recorded stamp rows inside this net's corridor
+    # (KiCad's IsNetTieExclusion locality -- see _compute_net_tie_corridors).
+    # Only the tie copper's own contributions are removed, so blocking from
+    # sibling routes and third nets stays intact; pads are never ripped and
+    # the partner trunk's base stamps are only mutated by this balanced
+    # remove / restore re-add pair. Via blocking is not recorded, not lifted.
+    _tie_lift = getattr(pcb_data, '_net_tie_lift', None)
+    if _tie_lift:
+        _lifted = [a for a in _tie_lift.get(net_id, []) if len(a)]
+        if _lifted:
+            for _arr in _lifted:
+                working_obstacles.remove_blocked_cells_batch(_arr)
+            _TIE_LIFTED[(id(working_obstacles), net_id)] = _lifted
+
     # Add stub proximity costs (includes chip pads as pseudo-stubs)
     stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
                                if nid != net_id and nid not in routed_net_ids]
@@ -527,6 +542,13 @@ def prepare_obstacles_inplace(
     return all_stubs, same_net_via_arr
 
 
+# Net-tie corridor stamps lifted by prepare_obstacles_inplace, re-added by
+# restore_obstacles_inplace. Keyed by (map id, net id): prepare/restore are
+# strictly paired per net route on one thread, so entries live only across
+# that window; keying by map id keeps cloned maps independent.
+_TIE_LIFTED: Dict[tuple, list] = {}
+
+
 def restore_obstacles_inplace(
     working_obstacles,
     net_id: int,
@@ -554,6 +576,12 @@ def restore_obstacles_inplace(
     # Remove same-net via clearance cells
     if len(same_net_via_cells) > 0:
         working_obstacles.remove_blocked_vias_batch(same_net_via_cells)
+
+    # Re-add the net-tie corridor stamps lifted by prepare (see there).
+    _lifted = _TIE_LIFTED.pop((id(working_obstacles), net_id), None)
+    if _lifted:
+        for _arr in _lifted:
+            working_obstacles.add_blocked_cells_batch(_arr)
 
     # Restore current net's obstacles (from cache - original stubs)
     # Note: If routing succeeded, caller should update cache first with new route data

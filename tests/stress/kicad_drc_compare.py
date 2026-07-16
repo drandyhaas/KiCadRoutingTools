@@ -329,6 +329,65 @@ def _drop_intentional_edge(items, edge_types, intentional_nets):
     return kept, dropped
 
 
+def _net_tie_accepted_pairs(board: str):
+    """[(frozenset({netA, netB}), (x, y))] -- net pairs a footprint's
+    net_tie_pad_groups deliberately shorts, with the footprint position.
+
+    KiCad reports the Kelvin-shunt escape contact as shorting_items/clearance
+    even on the HUMAN-routed originals (cynthion ships 4 such items, one per
+    shunt) -- an enclosed sense tab cannot be exited without touching its
+    partner pad, and the designer accepts it. Grading treats tie-pair items AT
+    the tie footprint as accepted-by-design (the #408 pattern); the positional
+    gate keeps genuine track-track shorts between the same nets elsewhere on
+    the board flagged."""
+    try:
+        from kicad_parser import parse_kicad_pcb
+        pcb = parse_kicad_pcb(board)
+    except Exception:
+        return []
+    pairs = []
+    for fp in pcb.footprints.values():
+        if not getattr(fp, 'net_tie_groups', None):
+            continue
+        by_num = {}
+        for p in fp.pads:
+            by_num.setdefault(p.pad_number, []).append(p)
+        for group in fp.net_tie_groups:
+            members = [p for num in group for p in by_num.get(num, [])]
+            names = {p.net_name for p in members if p.net_id != 0 and p.net_name}
+            if len(names) >= 2:
+                for a in names:
+                    for b in names:
+                        if a < b:
+                            pairs.append((frozenset((a, b)), (fp.x, fp.y)))
+    return pairs
+
+
+_NET_TIE_ACCEPT_RADIUS_MM = 3.0
+
+
+def _drop_net_tie_accepted(items, tie_pairs):
+    """Drop accepted net-tie contact items: type shorting_items / clearance /
+    pad-segment whose net pair is a tie pair and whose anchor lies within
+    _NET_TIE_ACCEPT_RADIUS_MM of the tie footprint. Returns (kept, dropped)."""
+    if not tie_pairs:
+        return items, 0
+    kept, dropped = [], 0
+    for v in items:
+        hit = False
+        if len(v.get("nets") or ()) == 2:
+            for pair, (fx, fy) in tie_pairs:
+                if v["nets"] == pair and \
+                        math.hypot(v["pos"][0] - fx, v["pos"][1] - fy) <= _NET_TIE_ACCEPT_RADIUS_MM:
+                    hit = True
+                    break
+        if hit:
+            dropped += 1
+        else:
+            kept.append(v)
+    return kept, dropped
+
+
 def _staged_copy(board: str, clearance: float):
     clearance = float(clearance)
     """Copy board + sibling .kicad_pro into a temp dir with the DEFAULT
@@ -512,6 +571,16 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     if inets:
         kicad, kicad_intentional = _drop_intentional_edge(kicad, EDGE_KICAD_TYPES, inets)
         cd, checkdrc_intentional = _drop_intentional_edge(cd, EDGE_CD_TYPES, inets)
+    # Net-tie accepted contact (Kelvin shunts): tie-pair shorting/clearance
+    # items AT the tie footprint are accepted-by-design on human-routed
+    # originals too -- drop from BOTH engines before matching (board-derived,
+    # no router emission needed).
+    tie_pairs = _net_tie_accepted_pairs(board)
+    if tie_pairs:
+        kicad, k_tie = _drop_net_tie_accepted(kicad, tie_pairs)
+        cd, c_tie = _drop_net_tie_accepted(cd, tie_pairs)
+        kicad_intentional += k_tie
+        checkdrc_intentional += c_tie
     matched, kicad_only, cd_only = match(kicad, cd)
     # Part B: collapse the board-edge anchor double-count (same edge violation
     # anchored differently by each engine). One-sided edge divergence survives.

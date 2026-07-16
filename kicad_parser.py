@@ -179,6 +179,14 @@ class Footprint:
     # The parser RESOLVES the inheritance into each pad's local_clearance at
     # parse time, so clearance consumers only ever read pad.local_clearance;
     # this field records the raw footprint value for fidelity (issue #326).
+    net_tie_groups: List[List[str]] = field(default_factory=list)
+    # KiCad (net_tie_pad_groups "1,2" ...): pad-number groups this footprint
+    # DELIBERATELY shorts (Kelvin shunts, net-tie parts). KiCad exempts copper
+    # of the grouped pads' nets from mutual clearance at the footprint, so a
+    # sense pad enclosed by its partner's ring is still routable (cynthion
+    # R42: the AUX_SENSE- tab sits inside AUX_VBUS_IN's pad -- treating the
+    # partner as a hard obstacle seals the net forever). Obstacle builders and
+    # check_drc consume this via PCBData.net_tie_exempt_pad_ids().
 
 
 @dataclass
@@ -238,6 +246,39 @@ class PCBData:
     net_id_to_name: Dict[int, str] = field(default_factory=dict)  # Synthetic ID -> net name (for KiCad 10 output)
     guide_paths: List[GuidePath] = field(default_factory=list)  # User-drawn guide corridors (issue #7)
     keepout_zones: List[GuidePath] = field(default_factory=list)  # User-drawn keepout polygons (issue #27)
+
+    def net_tie_exempt_pad_ids(self, net_id: int):
+        """id()s of pads whose keep-out copper of `net_id` may IGNORE.
+
+        For every footprint net-tie group (net_tie_pad_groups) that contains a
+        pad on `net_id`, the OTHER pads of that group are deliberate shorts at
+        the footprint -- KiCad exempts their mutual clearance, and the partner
+        pad often physically encloses the tied pad (Kelvin shunts: cynthion
+        R42's AUX_SENSE- tab sits inside AUX_VBUS_IN's pad). Obstacle builders
+        skip stamping these pads when routing `net_id`; check_drc skips the
+        corresponding pairs. Cached per net; identity keying is safe because
+        the pad objects live in this PCBData for its whole lifetime.
+        """
+        cache = getattr(self, '_net_tie_exempt_cache', None)
+        if cache is None:
+            cache = {}
+            self._net_tie_exempt_cache = cache
+        got = cache.get(net_id)
+        if got is not None:
+            return got
+        exempt = set()
+        for fp in self.footprints.values():
+            if not fp.net_tie_groups:
+                continue
+            by_num = {}
+            for p in fp.pads:
+                by_num.setdefault(p.pad_number, []).append(p)
+            for group in fp.net_tie_groups:
+                members = [p for num in group for p in by_num.get(num, [])]
+                if any(p.net_id == net_id for p in members):
+                    exempt.update(id(p) for p in members if p.net_id != net_id)
+        cache[net_id] = exempt
+        return exempt
 
     def get_via_barrel_length(self, layer1: str, layer2: str) -> float:
         """Calculate the via barrel length between two copper layers.
@@ -1833,6 +1874,18 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
         fp_clr_match = re.search(r'\(clearance\s+(-?[\d.]+)\)', fp_text[:_clr_end])
         fp_clearance = max(0.0, float(fp_clr_match.group(1))) if fp_clr_match else 0.0
 
+        # Net-tie pad groups: (net_tie_pad_groups "1, 2" "3, 4") -- each quoted
+        # string is one comma-separated group of pad numbers this footprint
+        # deliberately shorts (Kelvin shunt / net-tie). Whitespace around the
+        # numbers varies by KiCad version; strip it.
+        net_tie_groups: List[List[str]] = []
+        ntpg_match = re.search(r'\(net_tie_pad_groups\b([^)]*)\)', fp_text)
+        if ntpg_match:
+            for grp in re.findall(r'"([^"]*)"', ntpg_match.group(1)):
+                pads_in_group = [p.strip() for p in grp.split(',') if p.strip()]
+                if len(pads_in_group) >= 2:
+                    net_tie_groups.append(pads_in_group)
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -1843,7 +1896,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             value=value,
             dnp=is_dnp,
             locked=is_locked,
-            clearance=fp_clearance
+            clearance=fp_clearance,
+            net_tie_groups=net_tie_groups
         )
 
         # Extract pads
@@ -2939,6 +2993,18 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         except Exception:
             fp_clearance = 0.0
 
+        # Net-tie pad groups — parity with the text parser (Kelvin shunts /
+        # net-tie parts; KiCad exempts the grouped pads' mutual clearance).
+        # GetNetTiePadGroups() returns a vector of "1, 2"-style strings.
+        try:
+            fp_net_tie = []
+            for _grp in fp.GetNetTiePadGroups():
+                _nums = [p.strip() for p in str(_grp).split(',') if p.strip()]
+                if len(_nums) >= 2:
+                    fp_net_tie.append(_nums)
+        except Exception:
+            fp_net_tie = []
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -2949,7 +3015,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             value=fp_value,
             dnp=fp_dnp,
             locked=fp_locked,
-            clearance=fp_clearance
+            clearance=fp_clearance,
+            net_tie_groups=fp_net_tie
         )
 
         # Extract pads

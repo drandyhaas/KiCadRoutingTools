@@ -95,6 +95,22 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # Add BGA proximity costs (penalize routing near BGA edges)
     add_bga_proximity_costs(obstacles, config)
 
+    # Net-tie corridors (Kelvin shunts / net-tie parts, see
+    # _compute_net_tie_corridors): per tied net, the cells where the tied
+    # net's copper may pass its PARTNER PAD. Only the partner PAD's stamp is
+    # recorded and lifted -- the partner NET's trunk tracks are never exempt
+    # (kicad-cli flags track-track contact between tied nets), and blocking
+    # from sibling routes / third nets stays intact, which a query-time
+    # overlay cannot express (measured: an overlay let two sense routes
+    # short each other). An enclosed sense tab cannot be exited without pad
+    # contact -- the human-routed originals carry the same one-per-shunt
+    # kicad shorting_items, which grading treats as the accepted net-tie
+    # class (like #408's edge-band items).
+    _tie_corridors = _compute_net_tie_corridors(pcb_data, config, coord)
+    _tie_partner_pad_ids = {pid for c in _tie_corridors.values()
+                            for pid in c['partner_pad_ids']}
+    _tie_recorded: List[tuple] = []  # ('pad', pad_id, cells array)
+
     # Add segments as obstacles (excluding nets we'll route - their stubs added per-net)
     # Use actual segment width for obstacle, and layer-specific width for routing track
     for seg in pcb_data.segments:
@@ -145,8 +161,28 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         if net_id in nets_to_route_set:
             continue
         for pad in pads:
+            if id(pad) in _tie_partner_pad_ids:
+                _rec = _RecordingObstacles(obstacles)
+                _add_pad_obstacle(_rec, pad, coord, layer_map, config, extra_clearance,
+                                  clearance_override=_obstacle_clearance(net_id))
+                if _rec.cell_batches:
+                    _tie_recorded.append(('pad', id(pad), _rec.merged_cells()))
+                continue
             _add_pad_obstacle(obstacles, pad, coord, layer_map, config, extra_clearance,
                               clearance_override=_obstacle_clearance(net_id))
+
+    # Intersect each tied net's corridor with the recorded tie-copper stamps:
+    # the per-net lift arrays are EXACT subsets of what the base build added
+    # for that copper, so prepare/restore's balanced remove/re-add can never
+    # desync a refcount (pads are never ripped; partner trunk copper is
+    # pre-existing and excluded from rip candidates while its stamps are
+    # lifted only during the tied net's own route).
+    pcb_data._net_tie_lift = _assemble_net_tie_lifts(
+        _tie_corridors, _tie_recorded, layer_map)
+    if len(nets_to_route_set) == 1:
+        for _arr in pcb_data._net_tie_lift.get(next(iter(nets_to_route_set)), []):
+            if len(_arr):
+                obstacles.remove_blocked_cells_batch(_arr)
 
     # Add board edge clearance
     add_board_edge_obstacles(obstacles, pcb_data, config, extra_clearance)
@@ -1925,6 +1961,149 @@ def _add_via_obstacle(obstacles: GridObstacleMap, via, coord: GridCoord,
     via_radius = via_via_expansion_grid + off_cells
     via_offs = circle_offsets(int(math.ceil(via_radius)), via_radius * via_radius)
     _batch_vias(obstacles, center + via_offs, blocked_vias)
+
+
+class _RecordingObstacles:
+    """Forwarding proxy that records the exact TRACK-cell batches a stamp
+    adds to the map (via blocking passes through unrecorded). The recorded
+    arrays are the precise multiset for a later balanced remove/re-add
+    (net-tie corridor lift)."""
+
+    def __init__(self, real):
+        self._real = real
+        self.cell_batches = []
+
+    def add_blocked_cells_batch(self, cells):
+        self.cell_batches.append(np.array(cells, copy=True))
+        self._real.add_blocked_cells_batch(cells)
+
+    def add_blocked_cell(self, gx, gy, layer):
+        self.cell_batches.append(np.array([[gx, gy, layer]], dtype=np.int32))
+        self._real.add_blocked_cell(gx, gy, layer)
+
+    def merged_cells(self):
+        if not self.cell_batches:
+            return np.empty((0, 3), dtype=np.int32)
+        return np.vstack(self.cell_batches).astype(np.int32)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _compute_net_tie_corridors(pcb_data, config, coord):
+    """Per tied net: the (gx, gy) cells where KiCad's net-tie exemption lets
+    that net's copper pass its PARTNER copper, plus the partner pad/net ids
+    whose stamps the corridor may lift.
+
+    KiCad (DRC_ENGINE::IsNetTieExclusion) waives a (track, partner) pair when
+    the pair's deepest contact lies on the track's OWN pad of the group --
+    shallower grazes of the same pair are then not re-flagged (the human
+    cynthion escape leaves the sense tab with an 11um graze past the
+    partner's edge, accepted by kicad-cli). Cell-level equivalent: a
+    centerline cell is corridor-legal iff its copper disc cannot touch
+    partner copper OUTSIDE the own pad --
+
+        dist(cell, partner_minus_own_pad) >= track_half_width
+
+    -- full overlap inside the own pad, graze-only passage beyond it, hard
+    block anywhere the copper would reach partner copper off the own pad.
+    The partner-minus-own region is sampled at 0.01mm (guard = one step).
+
+    Returns {tied_net_id: {'cells': set[(gx,gy)], 'partner_pad_ids': set,
+    'partner_net_ids': set}}.
+    """
+    corridors: Dict[int, dict] = {}
+    fine = 0.01
+    try:
+        from check_drc import point_to_pad_distance
+    except Exception:
+        return corridors
+    for fp in pcb_data.footprints.values():
+        if not getattr(fp, 'net_tie_groups', None):
+            continue
+        by_num = {}
+        for p in fp.pads:
+            by_num.setdefault(p.pad_number, []).append(p)
+        for group in fp.net_tie_groups:
+            members = [p for num in group for p in by_num.get(num, [])]
+            for own in members:
+                if own.net_id == 0:
+                    continue
+                partners = [p for p in members if p.net_id not in (0, own.net_id)]
+                if not partners:
+                    continue
+                half_w = (config.get_net_track_width(own.net_id, config.layers[0]) / 2
+                          if hasattr(config, 'get_net_track_width')
+                          else config.track_width / 2)
+                entry = corridors.setdefault(
+                    own.net_id, {'cells': set(), 'partner_pad_ids': set(),
+                                 'partner_net_ids': set()})
+                for partner in partners:
+                    pex = partner.size_x / 2 + partner.size_y / 2
+                    x0, x1 = partner.global_x - pex, partner.global_x + pex
+                    y0, y1 = partner.global_y - pex, partner.global_y + pex
+                    sx = np.arange(x0, x1 + fine, fine)
+                    sy = np.arange(y0, y1 + fine, fine)
+                    SX, SY = np.meshgrid(sx, sy)
+                    SXf, SYf = SX.ravel(), SY.ravel()
+                    in_p = np.fromiter(
+                        (point_to_pad_distance(float(a), float(b), partner) <= 1e-9
+                         for a, b in zip(SXf, SYf)), dtype=bool, count=SXf.size)
+                    if not in_p.any():
+                        continue
+                    px, py = SXf[in_p], SYf[in_p]
+                    out_o = np.fromiter(
+                        (point_to_pad_distance(float(a), float(b), own) > 1e-9
+                         for a, b in zip(px, py)), dtype=bool, count=px.size)
+                    bad_x, bad_y = px[out_o], py[out_o]
+                    # Candidate cells: everything a stamp of this partner's
+                    # copper could have blocked (bbox + keep-out reach + 1).
+                    reach = half_w + config.clearance + coord.grid_step
+                    gx0, gy0 = coord.to_grid(x0 - reach, y0 - reach)
+                    gx1, gy1 = coord.to_grid(x1 + reach, y1 + reach)
+                    xs = np.arange(gx0, gx1 + 1, dtype=np.int32)
+                    ys = np.arange(gy0, gy1 + 1, dtype=np.int32)
+                    GX, GY = np.meshgrid(xs, ys)
+                    cxm = GX.ravel() * coord.grid_step
+                    cym = GY.ravel() * coord.grid_step
+                    if bad_x.size:
+                        d2 = ((cxm[:, None] - bad_x[None, :]) ** 2 +
+                              (cym[:, None] - bad_y[None, :]) ** 2).min(axis=1)
+                        ok = d2 >= (half_w + fine) ** 2
+                    else:
+                        ok = np.ones(cxm.shape, dtype=bool)
+                    if not ok.any():
+                        continue
+                    entry['cells'].update(
+                        zip(GX.ravel()[ok].tolist(), GY.ravel()[ok].tolist()))
+                    entry['partner_pad_ids'].add(id(partner))
+                    entry['partner_net_ids'].add(partner.net_id)
+    return {n: e for n, e in corridors.items() if e['cells']}
+
+
+def _assemble_net_tie_lifts(corridors, recorded, layer_map):
+    """{tied_net_id: [cell arrays]} -- for each tied net, the rows of the
+    RECORDED tie-copper stamps (partner pads + partner nets' trunk copper)
+    that fall inside that net's corridor. Exact subsets of what the base
+    build added, so remove/re-add stays refcount-balanced."""
+    lifts: Dict[int, List["np.ndarray"]] = {}
+    if not corridors or not recorded:
+        return lifts
+    for net_id, entry in corridors.items():
+        cells = entry['cells']
+        for kind, key, arr in recorded:
+            if kind == 'pad' and key not in entry['partner_pad_ids']:
+                continue
+            if kind == 'net' and key not in entry['partner_net_ids']:
+                continue
+            if not len(arr):
+                continue
+            mask = np.fromiter(
+                ((int(r[0]), int(r[1])) in cells for r in arr),
+                dtype=bool, count=len(arr))
+            if mask.any():
+                lifts.setdefault(net_id, []).append(arr[mask])
+    return lifts
 
 
 def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,

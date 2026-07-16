@@ -188,6 +188,12 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `footprint.x`, `footprint.y` - Footprint position
 - `footprint.rotation` - Rotation in degrees
 - `footprint.layer` - Layer (e.g., 'F.Cu')
+- `footprint.net_tie_groups` - List[List[str]] of pad-number groups the
+  footprint deliberately shorts (`(net_tie_pad_groups "1, 2")`, Kelvin shunts /
+  net-ties). KiCad's clearance exemption between the grouped pads is LOCAL:
+  the tied net's copper may contact the partner pad only where the contact
+  lies on its own pad. Consumers: `PCBData.net_tie_exempt_pad_ids(net_id)`,
+  the obstacle builders (own-pad-sliver lift), and check_drc's waiver.
 
 ### Pad Attributes
 
