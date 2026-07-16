@@ -1657,6 +1657,20 @@ Examples:
     }
     if LAST_RIPPED_RECONNECT is not None:
         _summary["ripped_reconnect"] = LAST_RIPPED_RECONNECT
+    # #408: plane-tap reconnects also route into the edge band to reach in-band
+    # pads; emit those NET NAMES for the grader. Use the PROJECT's copper-to-edge
+    # rule, not the plane-zone inset (--board-edge-clearance). Key omitted if empty.
+    if not args.dry_run and args.output_file and os.path.isfile(args.output_file):
+        try:
+            from obstacle_map import compute_intentional_edge_band_nets
+            from fix_kicad_drc_settings import read_project_edge_clearance
+            from kicad_parser import parse_kicad_pcb as _parse
+            _edge_rule = read_project_edge_clearance(args.input_file) or args.clearance
+            _eb = compute_intentional_edge_band_nets(_parse(args.output_file), _edge_rule)
+            if _eb:
+                _summary["intentional_edge_band_nets"] = _eb
+        except Exception:
+            pass
     print("JSON_SUMMARY: " + _json.dumps(_summary))
 
 

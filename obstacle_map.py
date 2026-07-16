@@ -594,14 +594,17 @@ def _cell_keys(gx, gy):
     return (np.asarray(gx, dtype=np.int64) << 32) + (np.asarray(gy, dtype=np.int64) & 0xFFFFFFFF)
 
 
-def _edge_band_pad_exemption(pcb_data, coord: GridCoord, edge_clearance: float,
-                             track_edge_clearance: float):
-    """int64 cell keys exempt from the edge band: disks around copper pads
-    whose own copper intrudes into the band (pad edge closer than
-    edge_clearance to the outline, or pad center off-board). Disk radius =
-    pad_half + track_edge_clearance, which both lets a track land on the pad
-    and bridges the band depth to the interior. Returns None when no pad
-    qualifies (the common case -- boards that honor their own edge rule)."""
+def _edge_band_in_band_pads(pcb_data, edge_clearance: float):
+    """Shared in-band pad detection, backing both the #338 reach exemption
+    (_edge_band_pad_exemption) and the #408 intentional-edge-band report
+    (compute_intentional_edge_band_nets). Returns
+        (pads, pxs, pys, halves, d_signed, rings, ring_edges)
+    where ``d_signed`` is the SIGNED distance from each pad CENTER to the nearest
+    board edge / cutout (positive inside the board, negative off-board),
+    ``halves`` the pad's copper half-extent, and ``ring_edges`` the concatenated
+    outline segment arrays ``(x1, y1, x2, y2)`` for polygon boards or ``None``
+    for rectangular boards. A pad is in-band iff ``d_signed - halves <
+    edge_clearance``. Returns ``None`` when the board carries no pads/bounds."""
     rings = [o for o in (getattr(pcb_data.board_info, 'board_outlines', None) or [])
              if len(o) >= 3]
     if not rings:
@@ -616,6 +619,7 @@ def _edge_band_pad_exemption(pcb_data, coord: GridCoord, edge_clearance: float,
     pxs = np.array([p.global_x for p in pads])
     pys = np.array([p.global_y for p in pads])
     halves = np.array([max(p.size_x, p.size_y) / 2.0 for p in pads])
+    ring_edges = None
     if rings:
         edges = []
         inside = None
@@ -627,6 +631,7 @@ def _edge_band_pad_exemption(pcb_data, coord: GridCoord, edge_clearance: float,
             ins = _points_inside_polygon(pxs, pys, rx1, ry1, rx2, ry2)
             inside = ins if inside is None else (inside | ins)
         x1, y1, x2, y2 = (np.concatenate([e[i] for e in edges]) for i in range(4))
+        ring_edges = (x1, y1, x2, y2)
         d = _points_edge_distance(pxs, pys, x1, y1, x2, y2)
         # Cutouts count as edges too (camera-module openings).
         for cut in (pcb_data.board_info.board_cutouts or []):
@@ -635,13 +640,64 @@ def _edge_band_pad_exemption(pcb_data, coord: GridCoord, edge_clearance: float,
                 cx1, cy1 = arr[:, 0], arr[:, 1]
                 cx2, cy2 = np.roll(cx1, -1), np.roll(cy1, -1)
                 d = np.minimum(d, _points_edge_distance(pxs, pys, cx1, cy1, cx2, cy2))
-        in_band = (~inside) | (d - halves < edge_clearance)
+        # Signed: off-board pads (center outside every outer ring) route into the
+        # band from outside, so treat their center distance as negative -- keeps
+        # ``d_signed - halves < edge_clearance`` equivalent to the old
+        # ``(~inside) | (d - halves < edge_clearance)`` test.
+        d_signed = np.where(inside, d, -d)
     else:
         min_x, min_y, max_x, max_y = bounds
-        d = np.minimum.reduce([pxs - min_x, max_x - pxs, pys - min_y, max_y - pys])
-        in_band = d - halves < edge_clearance
+        d_signed = np.minimum.reduce([pxs - min_x, max_x - pxs, pys - min_y, max_y - pys])
+    return pads, pxs, pys, halves, d_signed, rings, ring_edges
+
+
+def compute_intentional_edge_band_nets(pcb_data, edge_clearance: float):
+    """Report-only (#408): the NET NAMES the router must route into the board-
+    edge clearance band because a pad on that net sits inside the band (card-edge
+    connectors, edge-mounted USB-C, mounting pads -- routing to them must ride the
+    band). Mirrors the #338 reach exemption. Emitted in JSON_SUMMARY so a grader
+    can accept-by-design every ``copper_edge_clearance`` violation on these nets
+    (net-scoped: a signal net only reaches the edge at its connector, so its whole
+    edge class is accepted).
+
+    Returns a sorted list of unique net-name strings; empty when the board honors
+    its own edge rule (the common case). Purely advisory: no routing depends on it."""
+    if edge_clearance <= 0 or getattr(pcb_data, 'board_info', None) is None \
+            or not pcb_data.board_info.board_bounds:
+        return []
+    geom = _edge_band_in_band_pads(pcb_data, edge_clearance)
+    if geom is None:
+        return []
+    pads, _pxs, _pys, halves, d_signed, _rings, _ring_edges = geom
+    in_band = (d_signed - halves) < edge_clearance
+    nets = set()
+    for i in np.where(in_band)[0]:
+        p = pads[i]
+        # Only NET-BEARING pads: an unconnected in-band pad carries no routed
+        # copper, so there is no edge-clearance violation to attribute to it.
+        if getattr(p, 'net_id', 0) and p.net_name:
+            nets.add(p.net_name)
+    return sorted(nets)
+
+
+def _edge_band_pad_exemption(pcb_data, coord: GridCoord, edge_clearance: float,
+                             track_edge_clearance: float):
+    """int64 cell keys exempt from the edge band: disks around copper pads
+    whose own copper intrudes into the band (pad edge closer than
+    edge_clearance to the outline, or pad center off-board). Disk radius =
+    pad_half + track_edge_clearance, which both lets a track land on the pad
+    and bridges the band depth to the interior. Returns None when no pad
+    qualifies (the common case -- boards that honor their own edge rule)."""
+    geom = _edge_band_in_band_pads(pcb_data, edge_clearance)
+    if geom is None:
+        return None
+    pads, pxs, pys, halves, d_signed, rings, ring_edges = geom
+    bounds = pcb_data.board_info.board_bounds
+    in_band = (d_signed - halves) < edge_clearance
     if not in_band.any():
         return None
+    if ring_edges is not None:
+        x1, y1, x2, y2 = ring_edges
 
     # Exempt a perpendicular SPOKE per pad (pad copper + a track-wide path
     # straight inward), NOT a disk: connector rows' overlapping disks chained
