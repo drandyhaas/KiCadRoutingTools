@@ -357,6 +357,16 @@ harmless.
    copper_edge_clearance on edge-connector fingers is design intent, not a
    routing defect. The no-LLM replay grader (ab_replay_grade.py) now records
    the same fields automatically.
+   CONNECTION_WIDTH (#406): the cross-check also grades KiCad's min-copper-web
+   class, SEPARATELY from the copper classes (check_drc has no counterpart --
+   the artifact lives in KiCad's own float-borderline web measurement, so web
+   items never count as KICAD-ONLY). KiCad ships the checker OFF
+   (min_connection 0, warning severity); the staged copy turns it on at the
+   author's min_connection when set, else the project's min_track_width (the
+   post-route ledger floors it at the smallest object on the board). Recorded
+   as `kicad_connection_width` (None = not graded: no recorded floor) +
+   `connection_width_min`; ab_replay_grade compares the count per board (connw
+   column) and gates the A/B verdict on its delta.
 8. OOM REGRESSION CHECK (issue #81, fixed): the obstacle-map polygon pass is
    now chunked; DEFAULT grids should stay well under the 4 GB cap on every
    board. Use the default --grid-step unless component pitch demands finer.
