@@ -144,8 +144,14 @@ def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
     for pair_name, pair in diff_pair_ids_to_route:
         diag = state.pair_diagnostics.get(pair_name, {})
         aud = member_audit.get(pair_name, {})
-        coupled = (pair.p_net_id in routed_results
-                   and pair.n_net_id in routed_results)
+        # A member routed by the single-ended fallback is NOT a coupled route:
+        # without this exclusion a deferred/failed pair whose members were both
+        # connected single-ended would misreport outcome 'coupled'.
+        _rr_p = routed_results.get(pair.p_net_id)
+        _rr_n = routed_results.get(pair.n_net_id)
+        coupled = (_rr_p is not None and _rr_n is not None
+                   and not (_rr_p.get('se_member_fallback')
+                            or _rr_n.get('se_member_fallback')))
         deferred = pair.p_net_id in sing or pair.n_net_id in sing
         if coupled:
             outcome = 'partial' if deferred else 'coupled'
@@ -175,6 +181,10 @@ def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
             rep['blocking_nets'] = diag['blocking_nets']
         if diag.get('casualty'):
             rep['casualty'] = diag['casualty']
+        if diag.get('se_fallback'):
+            # Per-member single-ended fallback outcome (additive):
+            # {'p': 'routed'|'partial'|'failed'|'already-connected', 'n': ...}
+            rep['se_fallback'] = diag['se_fallback']
         reports.append(rep)
     for name, p_name, n_name in skipped_fanout:
         reports.append({
@@ -185,6 +195,136 @@ def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
             'member_audit_mismatch': False,
         })
     return sorted(reports, key=lambda r: r['pair'])
+
+
+# --------------------------------------------------------------------------
+# Part 1b: single-ended member fallback (Class 2 - BOTH members attempted)
+# --------------------------------------------------------------------------
+
+def _member_connected(pcb_data, nid: int) -> bool:
+    """Authoritative connectivity of one pair member on the CURRENT board."""
+    from check_connected import check_net_connectivity
+    pads = pcb_data.pads_by_net.get(nid, [])
+    if len(pads) < 2:
+        return True
+    segs = [s for s in pcb_data.segments if s.net_id == nid]
+    vias = [v for v in pcb_data.vias if v.net_id == nid]
+    zones = [z for z in (getattr(pcb_data, 'zones', []) or [])
+             if z.net_id == nid]
+    r = check_net_connectivity(nid, segs, vias, pads, zones, tolerance=0.02)
+    return bool(r.get('connected'))
+
+
+def run_single_ended_member_fallback(state, diff_pairs_list) -> Dict:
+    """Single-ended completion pass for non-coupled diff pairs: attempt BOTH
+    members (P->P and N->N), engine-side.
+
+    A pair that fails or defers coupled routing is handed to "the single-ended
+    follow-up" -- but batch_route_diff_pairs itself never attempted the
+    members. A chain (or GUI diff tab) with no downstream single-ended pass
+    shipped them unrouted, and downstream churn could route ONE member while
+    the other was silently dropped (ulx3s FPDI_D1: FPDI_D1- routed, FPDI_D1+
+    shipped at zero copper). This pass gives EVERY disconnected member of
+    every pair with NO coupled result one plain single-ended attempt
+    (multipoint-aware, no rip-up), records the per-member outcome into the
+    pair diagnostics (pair_reports[..]['se_fallback']), and reports honestly.
+
+    Members that fail here keep their copper unchanged and stay listed for the
+    downstream single-ended pass (which has the full rip-up arsenal); members
+    routed here become already-connected no-ops downstream. DRC-safe: each
+    member routes against the standard single-ended obstacle map (all other
+    nets' copper priced as obstacles), exactly like the casualty reconcile's
+    depth-1 reroute.
+
+    Returns a JSON-ready summary dict ('attempted'/'routed'/'partial'/'failed'
+    lists of member net names).
+    """
+    from routing_context import (build_single_ended_obstacles,
+                                 record_single_ended_success)
+    from single_ended_routing import (route_net_with_obstacles,
+                                      route_multipoint_main,
+                                      route_multipoint_taps)
+    from connectivity import get_multipoint_net_pads
+
+    summary = {'attempted': [], 'routed': [], 'partial': [], 'failed': []}
+    pcb_data, config = state.pcb_data, state.config
+
+    todo = []
+    for pair_name, pair in diff_pairs_list:
+        if (pair.p_net_id in state.routed_results
+                or pair.n_net_id in state.routed_results):
+            # A coupled / hybrid / reroute result exists (fully-coupled or
+            # 'partial' peeled pairs): the member audit covers those; the
+            # fallback owns only pairs with NO coupled copper at all.
+            continue
+        members = [('p', pair.p_net_id, pair.p_net_name),
+                   ('n', pair.n_net_id, pair.n_net_name)]
+        if all(_member_connected(pcb_data, nid) for _, nid, _ in members):
+            continue
+        todo.append((pair_name, pair, members))
+    if not todo:
+        return summary
+
+    print("\n" + "=" * 60)
+    print(f"Single-ended member fallback: {len(todo)} non-coupled pair(s) - "
+          f"attempting BOTH members P->P / N->N (no rip-up)")
+    print("=" * 60)
+
+    for pair_name, pair, members in todo:
+        outcomes = {}
+        for tag, nid, nm in members:
+            if _member_connected(pcb_data, nid):
+                outcomes[tag] = 'already-connected'
+                continue
+            summary['attempted'].append(nm)
+            obstacles, _ = build_single_ended_obstacles(
+                state.base_obstacles, pcb_data, config, state.routed_net_ids,
+                state.remaining_net_ids, state.all_unrouted_net_ids, nid,
+                state.gnd_net_id, state.track_proximity_cache, state.layer_map,
+                ripped_route_layer_costs=state.ripped_route_layer_costs,
+                ripped_route_via_positions=state.ripped_route_via_positions)
+            mp_pads = get_multipoint_net_pads(pcb_data, nid, config)
+            if mp_pads:
+                res = route_multipoint_main(pcb_data, nid, config, obstacles,
+                                            mp_pads)
+                if res and not res.get('failed') and res.get('is_multipoint'):
+                    tap = route_multipoint_taps(pcb_data, nid, config,
+                                                obstacles, res)
+                    if tap:
+                        res = tap
+            else:
+                res = route_net_with_obstacles(pcb_data, nid, config, obstacles)
+            if res and not res.get('failed'):
+                res['se_member_fallback'] = True
+                if 'route_length' not in res:
+                    from net_queries import calculate_route_length
+                    res['route_length'] = calculate_route_length(
+                        res.get('new_segments') or [],
+                        res.get('new_vias') or [], pcb_data)
+                state.results.append(res)
+                record_single_ended_success(
+                    pcb_data, res, nid, config, state.remaining_net_ids,
+                    state.routed_net_ids, state.routed_net_paths,
+                    state.routed_results, state.track_proximity_cache,
+                    state.layer_map)
+                if _member_connected(pcb_data, nid):
+                    outcomes[tag] = 'routed'
+                    summary['routed'].append(nm)
+                    print(f"  {GREEN}SE FALLBACK ROUTED{RESET} {nm} "
+                          f"({pair_name} {tag.upper()} member)")
+                else:
+                    outcomes[tag] = 'partial'
+                    summary['partial'].append(nm)
+                    print(f"  {RED}SE FALLBACK PARTIAL{RESET} {nm}: copper "
+                          f"committed but pad(s) still disconnected")
+            else:
+                outcomes[tag] = 'failed'
+                summary['failed'].append(nm)
+                print(f"  {RED}SE FALLBACK FAILED{RESET} {nm} "
+                      f"({pair_name} {tag.upper()} member) - left for the "
+                      f"downstream single-ended pass")
+        record_pair_diag(state, pair_name, se_fallback=outcomes)
+    return summary
 
 
 # --------------------------------------------------------------------------

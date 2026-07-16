@@ -64,9 +64,14 @@ def main():
         m = re.search(r"JSON_SUMMARY:\s*(\{.*\})", txt)
         if m:
             summary = json.loads(m.group(1))
+            se_fb = summary.get("single_ended_fallback") or {}
             if summary.get("routed_diff_pairs"):
                 # If a future engine CAN route it, that's fine too -- only assert
                 # output exists (already checked above).
+                pass
+            elif se_fb.get("routed") or se_fb.get("partial"):
+                # The single-ended member fallback (Class 2) connected members
+                # in-run: real copper was written, so no passthrough is needed.
                 pass
             elif "wrote board through" not in txt.lower() and "board through" not in txt.lower():
                 fails.append("pair not routed yet no board-through message was printed")

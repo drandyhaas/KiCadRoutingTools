@@ -927,7 +927,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # still-broken with the restored copper as obstacles. Engine-side, so the
     # GUI inherits it. No-op when no casualties occurred.
     from diff_pair_custody import (run_casualty_reconcile, audit_pair_members,
-                                   build_pair_reports)
+                                   build_pair_reports,
+                                   run_single_ended_member_fallback)
     casualty_summary = run_casualty_reconcile(state)
     _recovered = (len(casualty_summary['restored'])
                   + len(casualty_summary['rerouted']))
@@ -936,6 +937,17 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # move it back to the success column.
         successful += _recovered
         failed = max(0, failed - _recovered)
+
+    # ----- Single-ended member fallback (Class 2: BOTH members) -------------
+    # Pairs with NO coupled result (deferred to "the single-ended follow-up",
+    # or hard-failed) used to leave the diff step with neither member
+    # attempted -- relying on a downstream route.py pass that a chain/GUI run
+    # may not have, and under which one member could route while the other
+    # was silently dropped (ulx3s FPDI_D1+). Attempt BOTH members single-ended
+    # here (no rip-up; failures stay honestly listed for the downstream pass).
+    # Engine-side, so the GUI diff tab inherits it.
+    se_fallback_summary = run_single_ended_member_fallback(
+        state, diff_pair_ids_to_route)
 
     # Apply length matching if configured
     if length_match_groups:
@@ -1012,10 +1024,22 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # have free ends by design (the single-ended follow-up connects them), so a
     # dead-end sweep there would strip copper the next pass needs.
     dp_scope = set()
+    from diff_pair_custody import _member_connected as _dpc_member_connected
     for _pn, _pair in diff_pair_ids_to_route:
-        if _pair.p_net_id in routed_results and _pair.n_net_id in routed_results:
-            dp_scope.add(_pair.p_net_id)
-            dp_scope.add(_pair.n_net_id)
+        _rr_p = routed_results.get(_pair.p_net_id)
+        _rr_n = routed_results.get(_pair.n_net_id)
+        if _rr_p is None or _rr_n is None:
+            continue
+        if (_rr_p.get('se_member_fallback') or _rr_n.get('se_member_fallback')):
+            # Single-ended-fallback copper: sweep it only when BOTH members
+            # ended fully connected -- a 'partial' member's remaining stubs
+            # are load-bearing for the downstream pass, exactly like a
+            # deferred pair's.
+            if not (_dpc_member_connected(pcb_data, _pair.p_net_id)
+                    and _dpc_member_connected(pcb_data, _pair.n_net_id)):
+                continue
+        dp_scope.add(_pair.p_net_id)
+        dp_scope.add(_pair.n_net_id)
     _dp_cleanup = run_post_route_cleanup(
         results, pcb_data, dp_scope, config,
         label='Diff-pair ', snap=False, phantom=False, neck=False,
@@ -1040,7 +1064,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     failed_diff_pairs = []
     single_ended_diff_pairs = []
     for pair_name, pair in diff_pair_ids_to_route:
-        if pair.p_net_id in routed_results and pair.n_net_id in routed_results:
+        _rr_p = routed_results.get(pair.p_net_id)
+        _rr_n = routed_results.get(pair.n_net_id)
+        if (_rr_p is not None and _rr_n is not None
+                and not (_rr_p.get('se_member_fallback')
+                         or _rr_n.get('se_member_fallback'))):
+            # A member routed by the single-ended member fallback is NOT a
+            # coupled route -- without the flag check, a deferred/failed pair
+            # whose members were both connected single-ended would count as a
+            # routed diff pair.
             routed_diff_pairs.append(pair_name)
         elif (pair.p_net_id in state.diff_pair_single_ended_nets
               or pair.n_net_id in state.diff_pair_single_ended_nets):
@@ -1112,6 +1144,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # during routing whose reroute failed - restored / rerouted / partial /
         # unrecovered.
         'casualty_reconcile': casualty_summary,
+        # Single-ended member fallback tally (additive): members of non-coupled
+        # pairs attempted P->P / N->N in-run (Class 2 - both members owned).
+        'single_ended_fallback': se_fallback_summary,
     }
     if ac_coupled_summary:
         summary['ac_coupled_xnets'] = ac_coupled_summary
@@ -1149,6 +1184,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             # data as the CLI JSON_SUMMARY keys of the same names.
             'pair_reports': pair_reports,
             'casualty_reconcile': casualty_summary,
+            'single_ended_fallback': se_fallback_summary,
         }
     else:
         wrote = write_routed_output(
