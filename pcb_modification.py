@@ -2557,7 +2557,33 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
         if best is None or sf > best[0]:
             best = (sf, float(ts[i]), float(qx), float(qy))
 
-    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc = _foreign_pad_arrays(pcb_data, s.layer)
+    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc, _custom = \
+        _foreign_pad_arrays(pcb_data, s.layer)
+    # CUSTOM (polygon) pads are kept out of the rounded-rect arrays and get the
+    # exact check_drc outline distance instead (the bbox model both manufactured
+    # phantom grazes and mis-sized real ones). The away direction uses the
+    # closest point on the pad's bbox as a proxy; the shifted result is
+    # re-validated with the exact kernels, so an imperfect direction can only
+    # make the shift fail, never ship a graze.
+    if _custom:
+        from check_drc import point_to_pad_distance as _p2pd
+        for _cnid, _cpad in _custom:
+            if _cnid == net_id:
+                continue
+            _exc = max((getattr(_cpad, 'local_clearance', 0.0) or 0.0) - clearance, 0.0)
+            _ex = _cpad.size_x / 2.0
+            _ey = _cpad.size_y / 2.0
+            if (abs((sx.min() + sx.max()) / 2 - _cpad.global_x) >
+                    R + _ex + (sx.max() - sx.min()) / 2 or
+                    abs((sy.min() + sy.max()) / 2 - _cpad.global_y) >
+                    R + _ey + (sy.max() - sy.min()) / 2):
+                continue
+            for _i in range(len(sx)):
+                _d = _p2pd(float(sx[_i]), float(sy[_i]), _cpad) - _exc
+                if best is None or (required - _d) > best[0]:
+                    _qx = min(max(float(sx[_i]), _cpad.global_x - _ex), _cpad.global_x + _ex)
+                    _qy = min(max(float(sy[_i]), _cpad.global_y - _ey), _cpad.global_y + _ey)
+                    consider(_d, _i, _qx, _qy)
     if cx.size:
         # Per-pad local/footprint clearance overrides (#326): widen the window
         # by the largest excess and subtract each pad's excess from its

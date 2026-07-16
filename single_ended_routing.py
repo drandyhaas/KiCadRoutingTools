@@ -105,9 +105,21 @@ def _foreign_pad_arrays(pcb_data, layer):
     if arr is None:
         nids, cx, cy, hx, hy, cr = [], [], [], [], [], []
         rc, rs, ex, ey, lc = [], [], [], [], []
+        custom = []  # (net_id, pad) -- exact-outline pads handled per-pad
         for nid, pads in pcb_data.pads_by_net.items():
             for pad in pads:
                 if layer in pad.layers or '*.Cu' in pad.layers:
+                    if getattr(pad, 'polygons', None):
+                        # CUSTOM pad with real polygon outline(s): the rounded
+                        # rect model would use its bounding box, which both
+                        # over-blocks gating (phantom grazes, #232 family) and
+                        # blinds remediation -- the re-bend/prune passes saw a
+                        # 59um "deficit" where KiCad measures 1.5um and could
+                        # not find any clearing bend (orangecrab U9). These
+                        # pads are rare; they get the exact check_drc distance
+                        # in the query kernels instead.
+                        custom.append((nid, pad))
+                        continue
                     nids.append(nid)
                     cx.append(pad.global_x); cy.append(pad.global_y)
                     half_x = pad.size_x / 2.0; half_y = pad.size_y / 2.0
@@ -126,9 +138,36 @@ def _foreign_pad_arrays(pcb_data, layer):
         arr = (np.asarray(nids, dtype=np.int64), np.asarray(cx), np.asarray(cy),
                np.asarray(hx), np.asarray(hy), np.asarray(cr),
                np.asarray(rc), np.asarray(rs), np.asarray(ex), np.asarray(ey),
-               np.asarray(lc))
+               np.asarray(lc), custom)
         cache[layer] = arr
     return arr
+
+
+def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None):
+    """Exact min edge distance from sample points to the CUSTOM pads of other
+    nets (check_drc.point_to_pad_distance -- the model kicad-cli agrees with to
+    ~0.1um). Windowed by each pad's bbox + _FOREIGN_PAD_WINDOW; same
+    base_clearance local-override adjustment as the vectorized kernels."""
+    if not custom:
+        return 1e9
+    from check_drc import point_to_pad_distance
+    R = _FOREIGN_PAD_WINDOW
+    best = 1e9
+    for nid, pad in custom:
+        if nid == net_id:
+            continue
+        ex = pad.size_x / 2.0
+        ey = pad.size_y / 2.0
+        adj = 0.0
+        if base_clearance is not None:
+            adj = max((getattr(pad, 'local_clearance', 0.0) or 0.0) - base_clearance, 0.0)
+        for (px, py) in pts:
+            if abs(px - pad.global_x) > R + ex or abs(py - pad.global_y) > R + ey:
+                continue
+            d = point_to_pad_distance(px, py, pad) - adj
+            if d < best:
+                best = d
+    return best
 
 
 def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None):
@@ -144,9 +183,11 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None):
     unchanged `dist >= base + X` threshold enforces the pad's own requirement
     (an "effective distance"). Overrides are bounded well below the 5mm
     window, so windowing stays exact."""
-    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc = _foreign_pad_arrays(pcb_data, layer)
+    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc, custom = \
+        _foreign_pad_arrays(pcb_data, layer)
+    best_custom = _custom_pad_min_dist(custom, net_id, ((x, y),), base_clearance)
     if cx.size == 0:
-        return 1e9
+        return best_custom
     R = _FOREIGN_PAD_WINDOW
     # Expand the window by each pad's own half-extent (global axes, so tilted
     # pads window by their true bbox): a large pad's EDGE can be within R even
@@ -154,7 +195,7 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None):
     # <= R (any excluded pad is > R away, beyond every caller's margin).
     near = (np.abs(cx - x) <= R + ex) & (np.abs(cy - y) <= R + ey) & (nids != net_id)
     if not near.any():
-        return 1e9
+        return best_custom
     fcr = cr[near]
     # Rotate the query offset into each pad's local frame (R(-rot)); identity
     # for axis-aligned pads (cos=1, sin=0), exact tilted outline otherwise.
@@ -167,7 +208,7 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None):
     d = np.hypot(dx, dy) - fcr
     if base_clearance is not None:
         d = d - np.maximum(plc[near] - base_clearance, 0.0)
-    return float(np.min(d))
+    return min(float(np.min(d)), best_custom)
 
 
 def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
@@ -179,10 +220,15 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     bbox + margin, then evaluates ALL sample points against them in one matrix op.
     `base_clearance` (#326 B6): see _pt_foreign_pad_dist -- subtracts each pad's
     local-clearance excess so unchanged caller thresholds honor overrides."""
-    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc = _foreign_pad_arrays(pcb_data, layer)
-    if cx.size == 0:
-        return 1e9
+    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc, custom = \
+        _foreign_pad_arrays(pcb_data, layer)
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
+    _t = np.linspace(0.0, 1.0, n + 1)
+    best_custom = _custom_pad_min_dist(
+        custom, net_id,
+        list(zip(x1 + (x2 - x1) * _t, y1 + (y2 - y1) * _t)), base_clearance)
+    if cx.size == 0:
+        return best_custom
     R = _FOREIGN_PAD_WINDOW
     # Pad bbox (centre +/- global half-extent, true bbox for tilted pads) must
     # reach within R of the segment bbox; a pad excluded here is > R from every
@@ -190,7 +236,7 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     near = ((cx + ex >= min(x1, x2) - R) & (cx - ex <= max(x1, x2) + R) &
             (cy + ey >= min(y1, y2) - R) & (cy - ey <= max(y1, y2) + R) & (nids != net_id))
     if not near.any():
-        return 1e9
+        return best_custom
     fcx, fcy, fhx, fhy, fcr = cx[near], cy[near], hx[near], hy[near], cr[near]
     frc, frs = rc[near], rs[near]
     t = np.linspace(0.0, 1.0, n + 1)
@@ -209,7 +255,7 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     d = np.hypot(dx, dy) - fcr[None, :]
     if base_clearance is not None:
         d = d - np.maximum(plc[near] - base_clearance, 0.0)[None, :]
-    return float(np.min(d))
+    return min(float(np.min(d)), best_custom)
 
 
 def _foreign_seg_arrays(pcb_data, layer):

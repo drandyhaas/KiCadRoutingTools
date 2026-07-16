@@ -874,7 +874,14 @@ def build_routing_obstacle_map(
                     # board global), else copper routes within the pad's
                     # required clearance (no-net fiducial DRC, upduino #146).
                     pad_clr = max(config.clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
-                    margin = route_track_w / 2 + pad_clr
+                    # Half-grid discretization cushion, matching this file's own
+                    # via/segment stamps and build_base_obstacles (#173): cells
+                    # are blocked by CENTER distance, so without the cushion a
+                    # tap trace through a barely-free cell can sit up to
+                    # ~grid/2 inside the pad's clearance ring (orangecrab
+                    # step11: GND jog 1.5um under the U9 custom pad's ring --
+                    # a real KiCad clearance violation).
+                    margin = route_track_w / 2 + pad_clr + config.grid_step / 2
                     if getattr(pad, 'polygons', None):
                         _block_custom_pad_polys(obstacles, pad, coord, margin,
                                                 via_mode=False, layer_idx=layer_idx)
