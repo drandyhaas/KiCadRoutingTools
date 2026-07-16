@@ -93,6 +93,18 @@ class RoutingState:
     # net_id -> net_name.
     diff_pair_single_ended_nets: Dict[int, str] = field(default_factory=dict)
 
+    # Casualty custody (diff_pair_custody.run_casualty_reconcile): every
+    # COMMITTED rip (ripper's route landed; the ripped net's copper is gone
+    # unless a later reroute succeeds) records rid -> (canonical_net_id,
+    # saved_result, ripped_ids, was_in_results) so the end-of-run
+    # casualties-only reconcile can restore the exact pre-rip copper if the
+    # reroute never lands. Inert unless the engine runs the reconcile pass
+    # (batch_route_diff_pairs does; route.py has its own #134 recovery).
+    casualty_custody: Dict[int, Tuple] = field(default_factory=dict)
+    # Per-pair failure diagnostics for JSON_SUMMARY pair_reports:
+    # pair_name -> {'reason', 'stage', 'blocking_nets', 'casualty', ...}.
+    pair_diagnostics: Dict[str, Dict] = field(default_factory=dict)
+
     # Environment
     all_unrouted_net_ids: Set[int] = field(default_factory=set)
     gnd_net_id: Optional[int] = None

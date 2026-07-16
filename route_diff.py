@@ -537,6 +537,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 
     skipped_bad_fanout = [name for name, pair in diff_pair_ids_to_route_set
                           if _fanout_self_overlaps(pair.p_net_id, pair.n_net_id)]
+    # (name, p_net, n_net) for the per-pair JSON reports - captured before the
+    # skipped pairs are dropped from the route set.
+    skipped_fanout_info = [(name, pair.p_net_name, pair.n_net_name)
+                           for name, pair in diff_pair_ids_to_route_set
+                           if name in set(skipped_bad_fanout)]
     if skipped_bad_fanout:
         skip_set = set(skipped_bad_fanout)
         skip_net_ids = {nid for name, pair in diff_pair_ids_to_route_set if name in skip_set
@@ -914,6 +919,24 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     total_time += rq_time
     total_iterations += rq_iterations
 
+    # ----- Casualties-only final reconciliation (depth 1) -------------------
+    # Nets ripped during diff-pair routing whose reroute never landed used to
+    # ship at ZERO copper with no custody. Restore-first: verify actually
+    # broken, restore the original geometry (collision-aware - never leaves
+    # restored copper colliding with newly routed copper), then re-route the
+    # still-broken with the restored copper as obstacles. Engine-side, so the
+    # GUI inherits it. No-op when no casualties occurred.
+    from diff_pair_custody import (run_casualty_reconcile, audit_pair_members,
+                                   build_pair_reports)
+    casualty_summary = run_casualty_reconcile(state)
+    _recovered = (len(casualty_summary['restored'])
+                  + len(casualty_summary['rerouted']))
+    if _recovered:
+        # Each recovered casualty was tallied failed when its reroute failed;
+        # move it back to the success column.
+        successful += _recovered
+        failed = max(0, failed - _recovered)
+
     # Apply length matching if configured
     if length_match_groups:
         run_length_matching(routed_results, length_match_groups, config, pcb_data)
@@ -1001,6 +1024,18 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 
     # Build summary data
     import json
+    # Member audit: verify BOTH members' connectivity claims against the actual
+    # pad connectivity on the final copper (post-sync, post-cleanup) - known
+    # cases exist of one member silently incomplete. Feeds the per-pair reports.
+    member_audit = audit_pair_members(pcb_data, diff_pair_ids_to_route)
+    pair_reports = build_pair_reports(state, diff_pair_ids_to_route,
+                                      member_audit,
+                                      skipped_fanout=skipped_fanout_info)
+    _audit_mismatches = [r for r in pair_reports if r['member_audit_mismatch']]
+    for _r in _audit_mismatches:
+        print(f"{RED}MEMBER AUDIT MISMATCH: {_r['pair']} reported "
+              f"'{_r['outcome']}' but member(s) with disconnected pads: "
+              f"{', '.join(_r['incomplete_members'])}{RESET}")
     routed_diff_pairs = []
     failed_diff_pairs = []
     single_ended_diff_pairs = []
@@ -1069,6 +1104,14 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # Smallest copper clearance any step actually routed at (e.g. fine-pitch
         # taps below the nominal). Grade/check_drc the board at this floor.
         'min_clearance_used': __import__('clearance_ledger').effective(clearance),
+        # Per-pair structured records (additive): outcome, failure reason code
+        # + stage, blocking nets, member connectivity audit. See
+        # diff_pair_custody.build_pair_reports for the schema.
+        'pair_reports': pair_reports,
+        # Casualties-only final reconciliation tally (additive): nets ripped
+        # during routing whose reroute failed - restored / rerouted / partial /
+        # unrecovered.
+        'casualty_reconcile': casualty_summary,
     }
     if ac_coupled_summary:
         summary['ac_coupled_xnets'] = ac_coupled_summary
@@ -1102,6 +1145,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             # failed" result looks like nothing happened.
             'single_ended_diff_pairs': single_ended_diff_pairs,
             'skipped_bad_fanout': sorted(skipped_bad_fanout),
+            # Per-pair diagnostics + casualty custody tally (additive), same
+            # data as the CLI JSON_SUMMARY keys of the same names.
+            'pair_reports': pair_reports,
+            'casualty_reconcile': casualty_summary,
         }
     else:
         wrote = write_routed_output(

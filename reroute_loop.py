@@ -30,6 +30,8 @@ from routing_context import (
     prepare_obstacles_inplace, restore_obstacles_inplace
 )
 from obstacle_cache import update_net_obstacles_after_routing
+from diff_pair_custody import (classify_diff_pair_failure, record_casualty,
+                               record_pair_diag, blocker_names)
 from terminal_colors import RED, GREEN, RESET
 
 
@@ -431,6 +433,10 @@ def run_reroute_loop(
                                 # Queue ripped nets and add to history
                                 rip_and_retry_history.add((ripped_net_id, blocker_canonicals))
                                 for net_id_tmp, saved_result_tmp, ripped_ids, was_in_results in ripped_items:
+                                    # Committed rip: custody of the pre-rip copper
+                                    # for the casualties-only final reconcile.
+                                    record_casualty(state, net_id_tmp, saved_result_tmp,
+                                                    ripped_ids, was_in_results)
                                     if was_in_results:
                                         successful -= 1
                                     if net_id_tmp in diff_pair_by_net_id:
@@ -562,6 +568,10 @@ def run_reroute_loop(
                 iterations = result['iterations'] if result else 0
                 total_iterations += iterations
                 print(f"  REROUTE FAILED: ({elapsed:.2f}s) - attempting rip-up and retry...")
+                # Classify BEFORE the pops below strip the evidence (per-pair
+                # JSON diagnostics; refined to 'congestion' if blockers found).
+                rr_fail_reason = classify_diff_pair_failure(result)
+                rr_fail_blockers = []
 
                 reroute_succeeded = False
                 ripped_items = []
@@ -599,6 +609,10 @@ def run_reroute_loop(
                         rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
                             blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id
                         )
+                        if rippable_blockers:
+                            rr_fail_reason = 'congestion'
+                            rr_fail_blockers = blocker_names(rippable_blockers,
+                                                             diff_pair_by_net_id)
                         current_canonical = ripped_pair.p_net_id
 
                         if blockers and not rippable_blockers:
@@ -769,6 +783,10 @@ def run_reroute_loop(
                                 # Queue ripped nets and add to history
                                 rip_and_retry_history.add((current_canonical, blocker_canonicals))
                                 for net_id_tmp, saved_result_tmp, ripped_ids, was_in_results in ripped_items:
+                                    # Committed rip: custody of the pre-rip copper
+                                    # for the casualties-only final reconcile.
+                                    record_casualty(state, net_id_tmp, saved_result_tmp,
+                                                    ripped_ids, was_in_results)
                                     if was_in_results:
                                         successful -= 1
                                     if net_id_tmp in diff_pair_by_net_id:
@@ -917,6 +935,9 @@ def run_reroute_loop(
                 if not reroute_succeeded:
                     if not ripped_items:
                         print(f"  {RED}REROUTE FAILED - could not find route{RESET}")
+                    record_pair_diag(state, ripped_pair_name, outcome='failed',
+                                     reason=rr_fail_reason, stage='reroute',
+                                     blocking_nets=rr_fail_blockers or None)
                     # Remove from pending_multipoint_nets to prevent Phase 3 from
                     # trying to route taps for a net with no main route.
                     if ripped_pair.p_net_id in state.pending_multipoint_nets:

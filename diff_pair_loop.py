@@ -27,6 +27,8 @@ from diff_pair_multipoint import (
 )
 from routing_context import (build_diff_pair_obstacles, build_diff_pair_leg_obstacles,
                              restore_ripped_net)
+from diff_pair_custody import (classify_diff_pair_failure, record_casualty,
+                               record_pair_diag, blocker_names)
 from terminal_colors import RED, GREEN, RESET
 
 
@@ -229,6 +231,8 @@ def route_diff_pairs(
                   f"coupled floor) - routing single-ended instead of coupled")
             state.diff_pair_single_ended_nets[pair.p_net_id] = pair.p_net_name
             state.diff_pair_single_ended_nets[pair.n_net_id] = pair.n_net_name
+            record_pair_diag(state, pair_name, outcome='deferred',
+                             reason='electrically-short', stage='pre-route')
             total_time += time.time() - start_time
             continue
 
@@ -239,6 +243,8 @@ def route_diff_pairs(
             if leg_results is None:
                 # Genuine multi-point failure (a coupled leg could not route).
                 print(f"  {RED}MULTI-POINT ROUTE FAILED ({len(terminals) - 1} legs needed){RESET}")
+                record_pair_diag(state, pair_name, outcome='failed',
+                                 reason='multipoint-leg-failure', stage='multipoint')
                 failed += 1
                 continue
             results.extend(leg_results)
@@ -278,6 +284,8 @@ def route_diff_pairs(
                 # follow-up pass connects the whole pair.
                 print(f"  All {len(terminals) - 1} legs electrically short - "
                       f"whole pair left for single-ended")
+                record_pair_diag(state, pair_name, outcome='deferred',
+                                 reason='electrically-short', stage='multipoint')
             continue
 
         # Build complete obstacle map for diff pair routing
@@ -356,6 +364,9 @@ def route_diff_pairs(
                      and not result.get('probe_blocked') and not result.get('connector_graze'))
             if clean:
                 for gnet, _sr, _ri, was_in_results, grazed_pair_info in graze_ripped_items:
+                    # Committed rip: custody of the pre-rip copper in case the
+                    # reroute never lands (casualties-only final reconcile).
+                    record_casualty(state, gnet, _sr, _ri, was_in_results)
                     if was_in_results:
                         successful -= 1
                     if grazed_pair_info is not None:
@@ -465,6 +476,8 @@ def route_diff_pairs(
             # If retry succeeded, queue ALL ripped nets for re-routing
             if result and not result.get('failed') and not result.get('probe_blocked'):
                 for ripped_blocker, ripped_saved, ripped_ids_item, ripped_was_in_results in probe_ripped_items:
+                    record_casualty(state, ripped_blocker.net_id, ripped_saved,
+                                    ripped_ids_item, ripped_was_in_results)
                     if ripped_was_in_results:
                         successful -= 1
                     if ripped_blocker.net_id in diff_pair_by_net_id:
@@ -598,6 +611,11 @@ def route_diff_pairs(
         else:
             iterations = result['iterations'] if result else 0
             polarity_skip = bool(result and result.get('polarity_skip'))
+            # Classify BEFORE the blocked_cells_* pops below strip the evidence
+            # (per-pair JSON diagnostics; refined to 'congestion' if rippable
+            # blockers turn up in the analysis).
+            fail_reason = classify_diff_pair_failure(result)
+            fail_blockers = []
             if result and result.get('polarity_swap_denied'):
                 polarity_swap_denied_pairs.add(pair_name)
             if polarity_skip:
@@ -655,6 +673,12 @@ def route_diff_pairs(
                     rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
                         blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id
                     )
+                    if rippable_blockers:
+                        # Committed copper blocks the path: congestion, not a
+                        # router deficiency (diagnostics refinement).
+                        fail_reason = 'congestion'
+                        fail_blockers = blocker_names(rippable_blockers,
+                                                      diff_pair_by_net_id)
 
                     # Progressive rip-up: try N=1, then N=2, etc
                     current_canonical = pair.p_net_id
@@ -876,6 +900,8 @@ def route_diff_pairs(
                             rip_and_retry_history.add((current_canonical, blocker_canonicals))
 
                             for net_id, saved_result, ripped_ids, was_in_results in ripped_items:
+                                record_casualty(state, net_id, saved_result,
+                                                ripped_ids, was_in_results)
                                 if was_in_results:
                                     successful -= 1
                                 if net_id in diff_pair_by_net_id:
@@ -1067,5 +1093,8 @@ def route_diff_pairs(
                 print(f"  Deferring {pair_name} to the single-ended follow-up pass")
                 state.diff_pair_single_ended_nets[pair.p_net_id] = pair.p_net_name
                 state.diff_pair_single_ended_nets[pair.n_net_id] = pair.n_net_name
+                record_pair_diag(state, pair_name, outcome='deferred',
+                                 reason=fail_reason, stage='initial-route',
+                                 blocking_nets=fail_blockers or None)
 
     return successful, failed, total_time, total_iterations, route_index
