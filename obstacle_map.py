@@ -2083,6 +2083,25 @@ def _compute_net_tie_corridors(pcb_data, config, coord):
                         (point_to_pad_distance(float(a), float(b), own) > 1e-9
                          for a, b in zip(px, py)), dtype=bool, count=px.size)
                     bad_x, bad_y = px[out_o], py[out_o]
+                    # Memory: the dense cells x bad-points distance matrix hit
+                    # GB-scale temporaries (a 1.5mm pad sampled at 0.01mm is
+                    # ~20k points; 7GB footprint on hackrf's NT jumpers).
+                    # Split the test: (a) a cell whose disc CENTER falls in
+                    # the bad region fails by set membership (no distances
+                    # needed); (b) for the rest, the nearest bad point is on
+                    # the region BOUNDARY, so the distance matrix only needs
+                    # boundary points -- identical results, ~100x smaller.
+                    _bad_keys = None
+                    if bad_x.size > 256:
+                        _kx = np.round(bad_x / fine).astype(np.int64)
+                        _ky = np.round(bad_y / fine).astype(np.int64)
+                        _bad_keys = set(zip(_kx.tolist(), _ky.tolist()))
+                        _boundary = np.fromiter(
+                            (not ((kx + 1, ky) in _bad_keys and (kx - 1, ky) in _bad_keys
+                                  and (kx, ky + 1) in _bad_keys and (kx, ky - 1) in _bad_keys)
+                             for kx, ky in zip(_kx.tolist(), _ky.tolist())),
+                            dtype=bool, count=bad_x.size)
+                        bad_x, bad_y = bad_x[_boundary], bad_y[_boundary]
                     # Candidate cells: everything a stamp of this partner's
                     # copper could have blocked (bbox + keep-out reach + 1).
                     reach = half_w + config.clearance + coord.grid_step
@@ -2094,9 +2113,26 @@ def _compute_net_tie_corridors(pcb_data, config, coord):
                     cxm = GX.ravel() * coord.grid_step
                     cym = GY.ravel() * coord.grid_step
                     if bad_x.size:
-                        d2 = ((cxm[:, None] - bad_x[None, :]) ** 2 +
-                              (cym[:, None] - bad_y[None, :]) ** 2).min(axis=1)
-                        ok = d2 >= (half_w + fine) ** 2
+                        # Chunked min-distance: bounds the temporaries to
+                        # ~chunk x boundary-points instead of one dense
+                        # cells x points matrix.
+                        thr = (half_w + fine) ** 2
+                        ok = np.empty(cxm.shape, dtype=bool)
+                        _B = 2048
+                        for _s in range(0, cxm.size, _B):
+                            d2 = ((cxm[_s:_s + _B, None] - bad_x[None, :]) ** 2 +
+                                  (cym[_s:_s + _B, None] - bad_y[None, :]) ** 2).min(axis=1)
+                            ok[_s:_s + _B] = d2 >= thr
+                        if _bad_keys is not None:
+                            # (a) center-in-region kill (boundary points alone
+                            # under-measure distances for interior cells).
+                            _ck = np.round(cxm / fine).astype(np.int64)
+                            _cyk = np.round(cym / fine).astype(np.int64)
+                            _inside = np.fromiter(
+                                ((kx, ky) in _bad_keys
+                                 for kx, ky in zip(_ck.tolist(), _cyk.tolist())),
+                                dtype=bool, count=cxm.size)
+                            ok &= ~_inside
                     else:
                         ok = np.ones(cxm.shape, dtype=bool)
                     if not ok.any():
