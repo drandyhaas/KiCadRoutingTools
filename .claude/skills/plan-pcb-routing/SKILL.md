@@ -1304,6 +1304,51 @@ The JSON_SUMMARY line contains structured data including:
 - `failed_multipoint`: List of nets with unconnected pads (includes pad coordinates)
 - `multipoint_pads_connected` vs `multipoint_pads_total`: Connection success rate
 
+### Tune mode (issue #153) — opt-in per-board feedback loop
+
+When the user asks for **tune** (e.g. "plan routing with tune", "tune mode"),
+don't just run the standard pipeline once with defaults: close the loop.
+After EACH step, read the step's own diagnostics and adjust that board's
+options before moving on. Off unless requested — the standard plan stays
+deterministic and fast.
+
+Rules of the loop:
+- **Bounded, guided adjustment — not a grid sweep.** At most 2–3 targeted
+  re-runs per step, each driven by a diagnosed failure mode (the symptom→knob
+  table below and the failure-pattern table in Diagnose and Retry). Never
+  loosen below the fab/board-constraint floor.
+- **Signals to read after each step:** the `JSON_SUMMARY` line (failed nets,
+  `rescue` block, `single_ended_diff_pairs`/`failed_diff_pairs`,
+  `drc_grazes`), the FAILED NET HISTORIES block (`preexisting_blockers`
+  hints, `no rippable blockers`, iteration exhaustion), fanout escape
+  tallies (unescaped balls), and plane-step tap/`ripped`/`STILL FLOATING`
+  reports. `/diagnose-routing-failures` automates most of this.
+- **Symptom → knob map** (beyond the Diagnose and Retry table):
+  - Fanout drops balls in one quadrant → re-run that fanout with
+    `--escape-method underpad`, a smaller via from the fab ladder
+    (0.30/0.15 → 0.25/0.15), or different `--primary-escape` direction.
+  - Signal step fails a cluster of long cross-board nets while an inner
+    layer is plane-reserved → revisit the plane→layer map (dense-board
+    exception above): free one inner layer, drop its `--layer-costs` entry
+    to 1.0–1.5, re-run the failed nets.
+  - `preexisting_blockers` hints repeat for the same nets → re-run those
+    nets with the hinted `--rip-existing-nets` set (the engine now
+    self-escalates once in reconciliation; a manual retry may widen the set).
+  - Power multipoint pads fail inside a BGA courtyard → shrink that rail's
+    `--power-nets-widths` entry toward the ball-field width (0.15–0.2) or
+    promote the rail to a plane/region and re-run.
+  - Diff pairs deferred single-ended → re-run the pairs with smaller
+    `--diff-pair-gap`/width/vias toward the fab floor (keep `--impedance`).
+  - Plane step ships tap failures with fill nearby → re-run
+    route_disconnected_planes with a larger `--max-search-radius`, or at the
+    advanced fab tier so smaller tap vias fit.
+- **Explainability:** keep a short tuning log per board — which knob changed,
+  the before/after metric (completion / DRC / coupled pairs), and whether it
+  helped. Revert a change that didn't help before trying the next.
+- **Honest gates:** grade every accepted retry with `check_connected` AND
+  `check_drc` at the routed clearance (plus the kicad oracle for final
+  boards) — never accept a retry that trades new DRC for completion.
+
 ### Diagnose and Retry
 
 After running routing commands:
