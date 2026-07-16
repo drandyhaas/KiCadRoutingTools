@@ -1044,6 +1044,18 @@ class RoutingDialog(wx.Dialog):
         rip_existing_sizer.Add(self.rip_existing_nets_ctrl, 1, wx.EXPAND)
         options_inner.Add(rip_existing_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
+        # Keep input copper (#84 / --keep-input-copper): the flip side of rip --
+        # rip-existing gates whether the ROUTER may tear up pre-existing tracks
+        # that block a retry; this gates whether the post-route CLEANUP passes
+        # may sweep/rewrite the input's own copper. Placed next to rip so both
+        # "leave my existing copper alone" controls sit together on the Basic tab.
+        self.keep_input_copper = wx.CheckBox(options_scroll, label="Keep all input copper")
+        self.keep_input_copper.SetToolTip(
+            "Treat the board's pre-existing copper as read-only: the post-route cleanup "
+            "passes never remove or rewrite it (fanout escape stubs, hand-routed nets), "
+            "only this run's new copper is cleaned")
+        options_inner.Add(self.keep_input_copper, 0, wx.ALL, 3)
+
         # Layer costs
         layer_sizer = wx.BoxSizer(wx.HORIZONTAL)
         layer_sizer.Add(wx.StaticText(options_scroll, label="Layer Costs:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
@@ -1196,13 +1208,6 @@ class RoutingDialog(wx.Dialog):
         self.mps_layer_swap = wx.CheckBox(options_scroll, label="MPS layer swap")
         self.mps_layer_swap.SetToolTip("Enable MPS-aware layer swaps to reduce crossing conflicts")
         options_inner.Add(self.mps_layer_swap, 0, wx.ALL, 3)
-
-        self.keep_input_copper = wx.CheckBox(options_scroll, label="Keep input copper")
-        self.keep_input_copper.SetToolTip(
-            "Treat the board's pre-existing copper as read-only: the post-route cleanup "
-            "passes never remove or rewrite it (fanout escape stubs, hand-routed nets), "
-            "only this run's new copper is cleaned")
-        options_inner.Add(self.keep_input_copper, 0, wx.ALL, 3)
 
         self.mps_segment_intersection = wx.CheckBox(options_scroll, label="MPS segment intersection")
         self.mps_segment_intersection.SetToolTip("Force MPS to use segment intersection for crossing detection")
