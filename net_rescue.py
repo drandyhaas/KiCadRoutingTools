@@ -144,11 +144,37 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
     rescue_track = min(nominal_w, fab_track)  # never widen a sub-floor choice
     power_widths = dict(config.power_net_widths)
     power_widths.pop(net_id, None)  # this net necks down; other nets are obstacles
+    floor_clearance = config.clearance
     for clearance in _clearance_ladder(config.clearance, fab_clear,
                                        defaults.RESCUE_CLEARANCE_STEPS):
+        floor_clearance = clearance
         rungs.append(replace(config, grid_step=fine_grid, clearance=clearance,
                              track_width=rescue_track, layer_widths={},
                              power_net_widths=power_widths,
+                             max_iterations=max_iters))
+    # Via step-down rungs: the ladder above never shrinks the VIA, so a
+    # trivially-closable cross-layer gap stays unroutable when the run's via
+    # (e.g. 0.5/0.3) cannot drop inside a dense pin field -- the tail-triage
+    # "missing layer transition" class (same-net copper <0.25mm away on
+    # another layer, one via finishes the net). Re-try the floor rung with
+    # each smaller via from the fab ladder (0.30/0.15 fine rung, then the
+    # advanced 0.25/0.15), mirroring the plane-tap escalation. Only rungs
+    # strictly smaller than the run's via are added; the escalation warning
+    # matches the tap path's.
+    from fab_tiers import fab_floor_ladder, warn_fab_escalation
+    n_layers = len(pcb_data.board_info.copper_layers) or 2
+    _ladder = fab_floor_ladder(n_layers)
+    for floor in _ladder:
+        v_dia, v_drill = floor['via_diameter'], floor['via_drill']
+        if v_dia >= config.via_size - 1e-9:
+            continue
+        if v_dia < _ladder[0]['via_diameter'] - 1e-9:
+            warn_fab_escalation(f"net rescue net_{net_id}")
+        rungs.append(replace(config, grid_step=fine_grid,
+                             clearance=floor_clearance,
+                             track_width=rescue_track, layer_widths={},
+                             power_net_widths=power_widths,
+                             via_size=v_dia, via_drill=v_drill,
                              max_iterations=max_iters))
     return rungs
 
