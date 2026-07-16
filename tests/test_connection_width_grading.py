@@ -57,9 +57,30 @@ BOARD_TMPL = """(kicad_pcb
 		)
 		(layer "Edge.Cuts")
 	)
-	(segment (start 10 10) (end 18 10) (width 1) (layer "F.Cu") (net 1))
-	(segment (start 18 10) (end 22 10) (width {bridge}) (layer "F.Cu") (net 1))
-	(segment (start 22 10) (end 30 10) (width 1) (layer "F.Cu") (net 1))
+	(segment
+		(start 10 10)
+		(end 18 10)
+		(width 1)
+		(layer "F.Cu")
+		(net "N1")
+		(uuid "00000000-0000-0000-0000-000000000001")
+	)
+	(segment
+		(start 18 10)
+		(end 22 10)
+		(width {bridge})
+		(layer "F.Cu")
+		(net "N1")
+		(uuid "00000000-0000-0000-0000-000000000002")
+	)
+	(segment
+		(start 22 10)
+		(end 30 10)
+		(width 1)
+		(layer "F.Cu")
+		(net "N1")
+		(uuid "00000000-0000-0000-0000-000000000003")
+	)
 )
 """
 
