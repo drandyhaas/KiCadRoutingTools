@@ -122,6 +122,11 @@ def analyze_pad(pad: Pad, layout: QFNLayout) -> PadInfo:
     makes the escape correct for footprints whose pads are not perpendicular to
     their edge (e.g. parts authored at a 45 deg internal orientation); for the
     usual QFP it is identical to the edge normal.
+
+    Interior pads (no bbox edge within tolerance) are classified 'center' and,
+    since issue #410, carry the same real long-axis escape direction instead of
+    a null vector -- the underpad via-drop uses it for its offset ladder. The
+    'center' side still keeps them out of the surface-fan path.
     """
     x, y = pad.local_x, pad.local_y
 
@@ -143,11 +148,14 @@ def analyze_pad(pad: Pad, layout: QFNLayout) -> PadInfo:
     elif min_dist == dist_right and dist_right < tol:
         side = 'right'
     else:
-        return PadInfo(pad=pad, side='center', escape_direction=(0.0, 0.0),
-                       pad_length=max(pad.size_x, pad.size_y),
-                       pad_width=min(pad.size_x, pad.size_y))
+        side = 'center'
 
     # Escape along the pad's long axis, signed to point away from package center.
+    # Interior ('center') pads get the SAME axis (issue #410): they have no free
+    # surface edge, but the underpad via-drop escapes along the pad's own lead
+    # axis. A pad exactly AT the package center (classic EP) has a zero outward
+    # vector, so the `< 0` test below keeps the positive long-axis direction --
+    # a deterministic fallback.
     ax, ay = _pad_long_axis_global(pad)
     out_x = pad.global_x - layout.center_global_x
     out_y = pad.global_y - layout.center_global_y

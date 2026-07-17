@@ -98,7 +98,11 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     keeping whichever escapes the most pads (issue #161 follow-up). The default
     (forward, nearest-offset-first) is tried first, so when it already escapes
     every pad nothing changes. A pad with no clear offset under any configuration
-    is dropped. Returns (tracks, vias, dropped_net_names)."""
+    is dropped. Returns (tracks, vias, dropped_net_names).
+
+    Interior ('center') pads form their own by_side group on net-scoped runs
+    (issue #410); each uses its own long-axis escape direction from analyze_pad
+    -- nothing here assumes a group shares an edge axis."""
     from obstacle_map import (build_base_obstacle_map, build_layer_map,
                               check_line_clearance, point_to_segment_distance)
     from bga_fanout.reroute import _seg_hits_pad
@@ -336,7 +340,8 @@ def generate_qfn_fanout(footprint: Footprint,
     2. 45 degree segment fanning outward from center
 
     Edge pads get short straight (just past pad) + long 45 degree for maximum fan.
-    Center pads get full straight (no 45 degree) since already separated.
+    Center (interior/EP) pads are skipped by the surface fan; on a net-scoped
+    underpad run they escape via a via-drop instead (issue #410).
 
     Args:
         footprint: The QFN/QFP footprint
@@ -408,8 +413,14 @@ def generate_qfn_fanout(footprint: Footprint,
             continue
 
         pad_info = analyze_pad(pad, layout)
-        if pad_info.side == 'center':
-            continue  # Skip center/EP pads
+        if pad_info.side == 'center' and not (escape_method == "underpad"
+                                              and net_filter):
+            # Interior/EP pads have no free surface edge for the 45-deg fan,
+            # but a via-drop straight down doesn't need one (issue #410). Let
+            # them through ONLY on a net-scoped underpad run: requiring --nets
+            # is a deliberate safety guard so an unscoped run never via-drops
+            # the exposed/thermal pad.
+            continue
 
         pad_infos.append(pad_info)
         side_counts[pad_info.side] += 1

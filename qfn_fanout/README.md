@@ -58,7 +58,7 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 | `--width`, `-w` | Track width (mm) | 0.1 |
 | `--extension` | Extension past pad edge before bend (mm) | 0.1 |
 | `--nets`, `-n` | Net patterns to include | All nets |
-| `--escape-method` | `stub` (surface 45° fan) or `underpad` (via-drop) | stub |
+| `--escape-method` | `stub` (surface 45° fan) or `underpad` (via-drop); with `--nets`, `underpad` also escapes **interior (under-body) pads** (issue #410) | stub |
 | `--via-size` | Underpad escape via outer diameter (mm) | 0.45 |
 | `--via-drill` | Underpad escape via drill diameter (mm) | 0.25 |
 | `--allow-via-in-pad` | Underpad escape: let the via overlap its **own** pad so it can stagger *inward* (via-in-pad) | off |
@@ -103,6 +103,30 @@ gains permission to overlap its own pad. Name and behaviour match the
 
 ```bash
 python3 qfn_fanout.py board.kicad_pcb --component U1 --nets 'DP1*' \
+    --escape-method underpad --allow-via-in-pad \
+    --via-size 0.45 --via-drill 0.2 --clearance 0.15 --grid-step 0.05
+```
+
+#### Interior pads — `--escape-method underpad --nets ...` (issue #410)
+
+Some packages carry pads **under the body** that are not on the perimeter:
+AQFN inner rings, and connector-style parts whose signal pins sit surrounded by
+ground pads. The surface 45° fan can never escape these (there is no free edge
+to route from), so the fanout classifies them `center` and skips them. A
+via-drop needs no free surface edge, though — the via goes straight down — so
+on a run that is **both** `--escape-method underpad` **and** scoped with
+`--nets`, interior pads are escaped like any other pad, each along its own
+long-axis direction.
+
+Requiring `--nets` is a deliberate safety guard: an unscoped run never
+via-drops the exposed/thermal pad. The EP escapes only if your filter
+explicitly matches its net (e.g. `--nets 'GND'`), which is a valid, deliberate
+choice — not a default. Interior pads are usually boxed in by their neighbours,
+so pair this with `--allow-via-in-pad`; the via then sits centred on the pad
+and no stub is emitted at all. Example:
+
+```bash
+python3 qfn_fanout.py board.kicad_pcb --component U1 --nets 'INT*' \
     --escape-method underpad --allow-via-in-pad \
     --via-size 0.45 --via-drill 0.2 --clearance 0.15 --grid-step 0.05
 ```
