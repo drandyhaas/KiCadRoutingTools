@@ -814,8 +814,10 @@ def main():
         allow_via_in_pad=args.allow_via_in_pad
     )
 
-    if tracks:
-        print(f"\nWriting {len(tracks)} tracks to {args.output}...")
+    if tracks or vias:
+        # vias can be non-empty with zero tracks: a via-in-pad centred on its
+        # pad emits no stub, so an underpad run can be vias-only.
+        print(f"\nWriting {len(tracks)} tracks and {len(vias)} vias to {args.output}...")
         net_id_to_name = {nid: net.name for nid, net in pcb_data.nets.items()}
         add_tracks_and_vias_to_pcb(args.pcb, args.output, tracks, vias,
                                    net_id_to_name=net_id_to_name)
@@ -840,7 +842,10 @@ def main():
     # Mirrors bga_fanout (#130/#122). Best-effort: a DRC hiccup must never fail the
     # fanout. drc_grazes is graded at --clearance.
     import json as _json
-    escaped_net_ids = {t['net_id'] for t in tracks if t.get('net_id') is not None}
+    # A stub-less via-in-pad escape emits a via but no track, so vias count as
+    # escapes too -- tracks alone undercounts and grades those pads as failed.
+    escaped_net_ids = ({t['net_id'] for t in tracks if t.get('net_id') is not None}
+                       | {v['net_id'] for v in vias if v.get('net_id') is not None})
     unescaped = sorted(set(_failed_nets))
     escaped = len(escaped_net_ids)
     requested = escaped + len(unescaped)
