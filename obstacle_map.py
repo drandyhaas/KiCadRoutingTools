@@ -883,6 +883,62 @@ def _filter_exempt_xy(gx, gy, exempt_keys):
     return ~np.isin(_cell_keys(gx, gy), exempt_keys)
 
 
+# #423: max grid cells rasterized at once in the banded board-geometry keep-out
+# passes (edge/off-board and cutouts). Bounds the transient numpy temporaries
+# (px/py float64 + inside/edge_dist + where-index arrays) to roughly this many
+# cells per band instead of the whole board, which on a large sparse board at a
+# fine grid was ~2 GB. ~2M cells ≈ a few hundred MB of transient arrays per band;
+# the whole bbox is covered in ceil(area/this) bands with byte-identical results.
+_EDGE_BAND_CELLS = 2_000_000
+
+
+def _rasterize_polygon_banded(poly_points, coord: GridCoord, margin: float,
+                              clip_bounds=None, band_cells: int = _EDGE_BAND_CELLS):
+    """Row-banded generator variant of :func:`_rasterize_polygon` (#423).
+
+    Yields the same ``(gx_flat, gy_flat, inside, edge_dist)`` tuples, but one
+    horizontal row-band at a time, so a whole-board-scale polygon never
+    materialises tens of millions of cells of numpy temporaries at once. crkbd
+    carries a 214x97 mm board-region cutout that rasterized to ~33 M cells
+    (~1.2 GB) at grid_step 0.025 -- the dominant build peak after the edge pass.
+    Byte-identical: the bands partition the bbox rows so every cell appears in
+    exactly one band, with the same per-cell inside/edge_dist as the unbanded
+    kernel. Yields nothing for a degenerate polygon or an empty/clipped bbox.
+    """
+    if len(poly_points) < 3:
+        return
+    poly = np.array(poly_points, dtype=np.float64)
+    x1 = poly[:, 0]
+    y1 = poly[:, 1]
+    x2 = np.roll(poly[:, 0], -1)
+    y2 = np.roll(poly[:, 1], -1)
+    cmin_x, cmax_x = poly[:, 0].min() - margin, poly[:, 0].max() + margin
+    cmin_y, cmax_y = poly[:, 1].min() - margin, poly[:, 1].max() + margin
+    if clip_bounds is not None:
+        cmin_x = max(cmin_x, clip_bounds[0]); cmin_y = max(cmin_y, clip_bounds[1])
+        cmax_x = min(cmax_x, clip_bounds[2]); cmax_y = min(cmax_y, clip_bounds[3])
+        if cmin_x > cmax_x or cmin_y > cmax_y:
+            return
+    gx_lo, gy_lo = coord.to_grid(cmin_x, cmin_y)
+    gx_hi, gy_hi = coord.to_grid(cmax_x, cmax_y)
+    gx_range = np.arange(gx_lo, gx_hi + 1, dtype=np.int32)
+    nx = int(gx_range.size)
+    if nx == 0 or gy_hi < gy_lo:
+        return
+    rows_per_band = max(1, band_cells // nx)
+    for band_lo in range(gy_lo, gy_hi + 1, rows_per_band):
+        band_hi = min(band_lo + rows_per_band - 1, gy_hi)
+        gy_range = np.arange(band_lo, band_hi + 1, dtype=np.int32)
+        gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)
+        gx_flat = gx_grid.ravel()
+        gy_flat = gy_grid.ravel()
+        px = gx_flat.astype(np.float64) * coord.grid_step
+        py = gy_flat.astype(np.float64) * coord.grid_step
+        inside = _points_inside_polygon(px, py, x1, y1, x2, y2)
+        edge_dist = _points_edge_distance(px, py, x1, y1, x2, y2)
+        yield gx_flat, gy_flat, inside, edge_dist
+
+
 def _add_cutout_obstacles(obstacles: GridObstacleMap, cutout: List[Tuple[float, float]],
                           coord: GridCoord, num_layers: int,
                           track_edge_clearance: float, via_edge_clearance: float,
@@ -891,27 +947,27 @@ def _add_cutout_obstacles(obstacles: GridObstacleMap, cutout: List[Tuple[float, 
 
     Cells whose centre is inside the cutout polygon are blocked on all layers; cells
     just outside whose track/via copper would intrude past the edge are blocked too.
+    #423: rasterized in row bands so a whole-board-scale cutout polygon does not
+    spike memory (byte-identical to the unbanded stamp).
     """
     margin = max(track_edge_clearance, via_edge_clearance) + coord.grid_step
-    gx_flat, gy_flat, inside, edge_dist = _rasterize_polygon(cutout, coord, margin)
-    if gx_flat is None:
-        return
-
-    # In-band pad reach exemption (#338) applies only to the NEAR-RING band;
-    # cells inside the cutout hole itself stay hard-blocked (no copper there).
-    ring_track = (~inside) & (edge_dist < track_edge_clearance)
-    ring_via = (~inside) & (edge_dist < via_edge_clearance)
-    if exempt_keys is not None:
-        keep = _filter_exempt_xy(gx_flat, gy_flat, exempt_keys)
-        ring_track &= keep
-        ring_via &= keep
-    # #422: cutouts are permanent board geometry -> static keep-out bitmap.
-    _block_cells_on_layers(obstacles, gx_flat, gy_flat,
-                           inside | ring_track, range(num_layers), static=True)
-    via_mask = inside | ring_via
-    if via_mask.any():
-        obstacles.add_static_blocked_vias_batch(
-            np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
+    for gx_flat, gy_flat, inside, edge_dist in _rasterize_polygon_banded(cutout, coord, margin):
+        # In-band pad reach exemption (#338) applies only to the NEAR-RING band;
+        # cells inside the cutout hole itself stay hard-blocked (no copper there).
+        ring_track = (~inside) & (edge_dist < track_edge_clearance)
+        ring_via = (~inside) & (edge_dist < via_edge_clearance)
+        if exempt_keys is not None:
+            keep = _filter_exempt_xy(gx_flat, gy_flat, exempt_keys)
+            if keep is not None:
+                ring_track &= keep
+                ring_via &= keep
+        # #422: cutouts are permanent board geometry -> static keep-out bitmap.
+        _block_cells_on_layers(obstacles, gx_flat, gy_flat,
+                               inside | ring_track, range(num_layers), static=True)
+        via_mask = inside | ring_via
+        if via_mask.any():
+            obstacles.add_static_blocked_vias_batch(
+                np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
 
 
 def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord, num_layers: int,
@@ -1012,83 +1068,94 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
         polygons = [polygons]
     grid_margin = max(track_expand, via_expand) + 5
 
-    # Generate all grid coordinates as numpy arrays
-    gx_range = np.arange(gmin_x - grid_margin, gmax_x + grid_margin + 1, dtype=np.int32)
-    gy_range = np.arange(gmin_y - grid_margin, gmax_y + grid_margin + 1, dtype=np.int32)
-    gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)  # shape (ny, nx)
-    gx_flat = gx_grid.ravel()  # shape (N,)
-    gy_flat = gy_grid.ravel()
+    gx_lo = gmin_x - grid_margin
+    gx_hi = gmax_x + grid_margin
+    gy_lo = gmin_y - grid_margin
+    gy_hi = gmax_y + grid_margin
+    gx_range = np.arange(gx_lo, gx_hi + 1, dtype=np.int32)
+    nx = int(gx_range.size)
+    if nx == 0 or gy_hi < gy_lo:
+        return
 
-    # Convert grid coords to board coords (float mm)
-    px = gx_flat.astype(np.float64) * coord.grid_step
-    py = gy_flat.astype(np.float64) * coord.grid_step
-
-    # Per-ring edge arrays; on-board = inside ANY ring (ray cast, chunked so
-    # the (points, edges) broadcast temporaries stay bounded, issue #81).
+    # Per-ring edge arrays (computed once). on-board = inside ANY ring; edge
+    # distance is the min over all rings' edges concatenated.
     ring_edges = []
-    inside = None
     for polygon in polygons:
         poly_arr = np.array(polygon, dtype=np.float64)
-        rx1 = poly_arr[:, 0]
-        ry1 = poly_arr[:, 1]
-        rx2 = np.roll(poly_arr[:, 0], -1)
-        ry2 = np.roll(poly_arr[:, 1], -1)
-        ring_edges.append((rx1, ry1, rx2, ry2))
-        ins = _points_inside_polygon(px, py, rx1, ry1, rx2, ry2)
-        inside = ins if inside is None else (inside | ins)
+        ring_edges.append((poly_arr[:, 0], poly_arr[:, 1],
+                           np.roll(poly_arr[:, 0], -1), np.roll(poly_arr[:, 1], -1)))
     x1, y1, x2, y2 = (np.concatenate([e[i] for e in ring_edges]) for i in range(4))
 
-    # --- Vectorized point-to-polygon-edge distance ---
-    # For inside points, compute min distance to any edge
-    # Only compute for points that are inside (saves work for outside points)
-    inside_idx = np.where(inside)[0]
-    outside_idx = np.where(~inside)[0]
+    # #423: process the bounding box in horizontal ROW BANDS instead of one
+    # whole-board array. On a large sparse board (split keyboard) the off-board
+    # keep-out spans nearly the whole bbox, so the full-board (px, py, inside,
+    # where-index) temporaries were ~2 GB of numpy at grid_step 0.025 -- the
+    # dominant peak of the entire route (build_base_obstacle_map alone hit
+    # ~1.8 GB). Banding bounds the transient set to ~_EDGE_BAND_CELLS cells and
+    # is byte-identical: each cell falls in exactly one band and is stamped with
+    # the same rule (outside -> all layers + via; inside within clearance ->
+    # track/via), just in row-band order.
+    rows_per_band = max(1, _EDGE_BAND_CELLS // nx)
+    for band_lo in range(gy_lo, gy_hi + 1, rows_per_band):
+        band_hi = min(band_lo + rows_per_band - 1, gy_hi)
+        gy_range = np.arange(band_lo, band_hi + 1, dtype=np.int32)
+        gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)  # (nband, nx)
+        gx_flat = gx_grid.ravel()
+        gy_flat = gy_grid.ravel()
+        px = gx_flat.astype(np.float64) * coord.grid_step
+        py = gy_flat.astype(np.float64) * coord.grid_step
 
-    # Block all outside points (all layers + vias). #422: board geometry is
-    # PERMANENT (never removed during routing), so stamp it into the static
-    # keep-out bitmap (1 bit/cell) instead of the refcount hashmap (~38 B/cell).
-    # On sparse boards the off-board area + cutouts are ~60% of all blocked cells.
-    if outside_idx.size > 0:
-        out_gx = gx_flat[outside_idx]
-        out_gy = gy_flat[outside_idx]
-        out_cells = np.column_stack([out_gx, out_gy])
-        for layer_idx in range(num_layers):
-            layer_col = np.full((out_cells.shape[0], 1), layer_idx, dtype=np.int32)
-            obstacles.add_static_blocked_cells_batch(np.hstack([out_cells, layer_col]))
-        obstacles.add_static_blocked_vias_batch(out_cells)
+        inside = None
+        for (rx1, ry1, rx2, ry2) in ring_edges:
+            ins = _points_inside_polygon(px, py, rx1, ry1, rx2, ry2)
+            inside = ins if inside is None else (inside | ins)
 
-    # Compute edge distances for inside points (chunked kernel, issue #81)
-    if inside_idx.size > 0:
-        in_px = px[inside_idx]  # (M,)
-        in_py = py[inside_idx]
+        outside_idx = np.where(~inside)[0]
+        inside_idx = np.where(inside)[0]
 
-        min_dist = _points_edge_distance(in_px, in_py, x1, y1, x2, y2)  # (M,)
-
-        in_gx = gx_flat[inside_idx]
-        in_gy = gy_flat[inside_idx]
-
-        # Block tracks if too close to edge
-        track_mask = min_dist < track_edge_clearance
-        if np.any(track_mask):
-            track_gx = in_gx[track_mask]
-            track_gy = in_gy[track_mask]
-            keep = _filter_exempt_xy(track_gx, track_gy, exempt_keys)
-            if keep is not None:
-                track_gx, track_gy = track_gx[keep], track_gy[keep]
-            track_cells = np.column_stack([track_gx, track_gy])
+        # Block all outside (off-board) points (all layers + vias). #422: board
+        # geometry is PERMANENT, so stamp it into the static keep-out bitmap
+        # (1 bit/cell). (A band-only variant that skips the deep off-board was
+        # measured net-negative -- computing each cell's edge distance to decide
+        # band membership cost more than the stamping it saved, and it perturbed
+        # a few routes -- so the full off-board fill is kept.)
+        if outside_idx.size > 0:
+            out_cells = np.column_stack([gx_flat[outside_idx], gy_flat[outside_idx]])
             for layer_idx in range(num_layers):
-                layer_col = np.full((track_cells.shape[0], 1), layer_idx, dtype=np.int32)
-                obstacles.add_static_blocked_cells_batch(np.hstack([track_cells, layer_col]))
+                layer_col = np.full((out_cells.shape[0], 1), layer_idx, dtype=np.int32)
+                obstacles.add_static_blocked_cells_batch(np.hstack([out_cells, layer_col]))
+            obstacles.add_static_blocked_vias_batch(out_cells)
 
-        # Block vias if too close to edge
-        via_mask = min_dist < via_edge_clearance
-        if np.any(via_mask):
-            via_gx = in_gx[via_mask]
-            via_gy = in_gy[via_mask]
-            keep = _filter_exempt_xy(via_gx, via_gy, exempt_keys)
-            if keep is not None:
-                via_gx, via_gy = via_gx[keep], via_gy[keep]
-            obstacles.add_static_blocked_vias_batch(np.column_stack([via_gx, via_gy]))
+        # Compute edge distances for inside points (chunked kernel, issue #81)
+        if inside_idx.size > 0:
+            in_px = px[inside_idx]
+            in_py = py[inside_idx]
+            min_dist = _points_edge_distance(in_px, in_py, x1, y1, x2, y2)
+            in_gx = gx_flat[inside_idx]
+            in_gy = gy_flat[inside_idx]
+
+            # Block tracks if too close to edge
+            track_mask = min_dist < track_edge_clearance
+            if np.any(track_mask):
+                track_gx = in_gx[track_mask]
+                track_gy = in_gy[track_mask]
+                keep = _filter_exempt_xy(track_gx, track_gy, exempt_keys)
+                if keep is not None:
+                    track_gx, track_gy = track_gx[keep], track_gy[keep]
+                track_cells = np.column_stack([track_gx, track_gy])
+                for layer_idx in range(num_layers):
+                    layer_col = np.full((track_cells.shape[0], 1), layer_idx, dtype=np.int32)
+                    obstacles.add_static_blocked_cells_batch(np.hstack([track_cells, layer_col]))
+
+            # Block vias if too close to edge
+            via_mask = min_dist < via_edge_clearance
+            if np.any(via_mask):
+                via_gx = in_gx[via_mask]
+                via_gy = in_gy[via_mask]
+                keep = _filter_exempt_xy(via_gx, via_gy, exempt_keys)
+                if keep is not None:
+                    via_gx, via_gy = via_gx[keep], via_gy[keep]
+                obstacles.add_static_blocked_vias_batch(np.column_stack([via_gx, via_gy]))
 
 
 def block_via_cells_near_drills(obstacles: GridObstacleMap,
