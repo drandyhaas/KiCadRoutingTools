@@ -260,6 +260,7 @@ def _empty_results_data() -> dict:
         'boundary_debug_labels': [],
         'segments_to_remove': [],
         'vias_to_remove': [],
+        'blockers': [],
     }
 
 
@@ -1875,6 +1876,30 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # T5 coverage gate: disturbed out-of-scope nets shipping broken
         # (additive; also present as failed_multipoint entries above).
         summary['coverage_gate_nets'] = coverage_gate_nets
+    # #409: report-only frontier-blocking attribution per net still failed at
+    # END of run (additive; key omitted when no failed net has a recorded
+    # analysis). Last-wins per net -- 'stage' names the loop that recorded it;
+    # a net that failed early but was later rescued/rerouted is filtered out
+    # here because the final failed sets are authoritative.
+    blockers_report = []
+    try:
+        _final_failed_ids = list(dict.fromkeys(
+            failed_single_ids + [m['net_id'] for m in failed_multipoint]))
+        for _nid in _final_failed_ids:
+            _fb = state.frontier_blocking.get(_nid)
+            if not _fb or not _fb.get('blocked_by'):
+                continue
+            _name = (pcb_data.nets[_nid].name if _nid in pcb_data.nets
+                     else f"Net {_nid}")
+            _rec = {'net': _name, 'stage': _fb['stage'],
+                    'blocked_by': _fb['blocked_by']}
+            if _fb.get('more'):
+                _rec['more'] = _fb['more']
+            blockers_report.append(_rec)
+        if blockers_report:
+            summary['blockers'] = blockers_report
+    except Exception:
+        blockers_report = []
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
     # Write output file or return results for direct application
@@ -1895,6 +1920,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # live board, mirroring the writer's strip (issue #84).
             'segments_to_remove': dead_end_input_segments,
             'vias_to_remove': stale_input_vias,
+            # #409: same data as JSON_SUMMARY['blockers'] (may be empty).
+            'blockers': blockers_report,
         }
     else:
         # Write output file using extracted output_writer module

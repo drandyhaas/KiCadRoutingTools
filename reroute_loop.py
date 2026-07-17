@@ -19,7 +19,7 @@ from pcb_modification import add_route_to_pcb_data
 from single_ended_routing import route_net_with_obstacles, route_multipoint_main, route_multipoint_taps
 from diff_pair_routing import (route_diff_pair_with_obstacles, get_diff_pair_endpoints,
                                _route_direct_coupled_middle)
-from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
+from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache, record_frontier_blocking
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import apply_polarity_swap, get_canonical_net_id, rip_combo_already_tried
 from layer_swap_fallback import try_fallback_layer_swap, add_own_stubs_as_obstacles_for_diff_pair
@@ -265,6 +265,8 @@ def run_reroute_loop(
                             source_xy=reroute_source_xy,
                             obstacle_cache=obstacle_cache
                         )
+                        record_frontier_blocking(state, ripped_net_id,
+                                                 blockers, "reroute")
                         print_blocking_analysis(blockers)
 
                         # Filter to only rippable blockers
@@ -284,6 +286,9 @@ def run_reroute_loop(
                                     source_xy=reroute_source_xy,
                                     obstacle_cache=obstacle_cache
                                 )
+                                record_frontier_blocking(state, ripped_net_id,
+                                                         fresh_blockers,
+                                                         "reroute")
                                 print_blocking_analysis(fresh_blockers, prefix="    ")
                                 next_blocker = None
                                 for b in fresh_blockers:

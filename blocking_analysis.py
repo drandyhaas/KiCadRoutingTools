@@ -129,6 +129,40 @@ class BlockingInfo:
     validator_named: bool = False
 
 
+# JSON cap matches print_blocking_analysis(max_display=10)'s "Top blockers".
+FRONTIER_BLOCKING_RECORD_CAP = 10
+
+
+def blocking_info_to_dict(info: BlockingInfo) -> Dict:
+    """Issue #409: BlockingInfo -> JSON_SUMMARY 'blocked_by' entry."""
+    return {
+        'net': info.net_name,
+        'blocked_count': info.blocked_count,
+        'unique_cells': info.unique_cells,
+        'track_cells': info.track_cells,
+        'via_cells': info.via_cells,
+        'near_target_cells': info.near_target_cells,
+        'near_source_cells': info.near_source_cells,
+    }
+
+
+def record_frontier_blocking(state, net_id: int, blockers: List[BlockingInfo],
+                             stage: str,
+                             cap: int = FRONTIER_BLOCKING_RECORD_CAP) -> None:
+    """Issue #409: keep the LATEST non-empty analysis per net (last-wins) on
+    state.frontier_blocking (mirrors diff_pair_custody.record_pair_diag).
+    Empty analyses are not recorded and do not clear a prior record.
+    Report-only: serialized into JSON_SUMMARY['blockers'] for nets still
+    failed at the end of the run; never read by routing decisions."""
+    if not blockers:
+        return
+    entry = {'stage': stage,
+             'blocked_by': [blocking_info_to_dict(b) for b in blockers[:cap]]}
+    if len(blockers) > cap:
+        entry['more'] = len(blockers) - cap
+    state.frontier_blocking[net_id] = entry
+
+
 def compute_net_obstacle_cells(
     pcb_data: PCBData,
     net_id: int,

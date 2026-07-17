@@ -18,6 +18,11 @@ grep "JSON_SUMMARY" /tmp/route_output.txt | sed 's/.*JSON_SUMMARY: //' | python3
 Key fields:
 - `failed_single`: failed single-ended net names
 - `failed_multipoint`: nets with unconnected pads, including pad coordinates
+- `blockers`: per still-failed net, the run's LAST frontier blocking analysis
+  (#409): `{net, stage, blocked_by: [{net, blocked_count, unique_cells,
+  track_cells, via_cells, near_target_cells, near_source_cells}], more?}` —
+  "net X failed BECAUSE nets Y,Z wall it off" as data. Key absent when no
+  failed net has an attributable (routed-copper) blocker.
 - `multipoint_pads_connected` vs `multipoint_pads_total`: connection success rate.
   Derived from the final-board union-find (the same check `check_connected.py`
   uses), so it credits pads reached via planes/zones, fanout stubs, and
@@ -40,6 +45,8 @@ grep -B2 -A8 -i "blocked by\|no rippable blockers\|Route stuck" /tmp/route_outpu
 ```
 
 These name the previously-routed nets occupying the failed route's frontier and where the search got stuck (position + layer).
+
+Note: the final `JSON_SUMMARY` carries the same attribution structured — the `blockers` key (#409) holds each still-failed net's last analysis. Prefer it for final-state diagnosis; the greps above remain useful for transient mid-run analyses (blockers of nets that later routed).
 
 ## Step 2: Correlate Failures Spatially
 

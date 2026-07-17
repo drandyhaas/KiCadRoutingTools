@@ -1318,6 +1318,7 @@ grep -A5 "FAILED NET HISTORIES" /tmp/route_output.txt
 The JSON_SUMMARY line contains structured data including:
 - `failed_single`: List of failed single-ended net names
 - `failed_multipoint`: List of nets with unconnected pads (includes pad coordinates)
+- `blockers`: Per still-failed net, which routed nets wall it off (`blocked_by` with cell counts; #409)
 - `multipoint_pads_connected` vs `multipoint_pads_total`: Connection success rate
 
 ### Tune mode (issue #153) — opt-in per-board feedback loop

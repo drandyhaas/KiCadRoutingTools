@@ -90,7 +90,7 @@ Recommends which nets deserve copper planes and on which layers. Reads the stack
 
 ### /diagnose-routing-failures
 
-Root-causes failed routes after a `route.py` / `route_diff.py` run. Parses the `JSON_SUMMARY`, failed-net histories, and blocking reports from the captured logs, correlates failures spatially with board regions and components, classifies the failure mode (BGA exclusion zone, corridor congestion, layer conflicts, budget exhaustion, grid-vs-pitch, genuine capacity), and outputs a targeted retry command for just the failed nets — most-targeted fix first, global parameter increases last.
+Root-causes failed routes after a `route.py` / `route_diff.py` run. Parses the `JSON_SUMMARY` (including the structured per-failed-net `blockers` attribution, #409), failed-net histories, and blocking reports from the captured logs, correlates failures spatially with board regions and components, classifies the failure mode (BGA exclusion zone, corridor congestion, layer conflicts, budget exhaustion, grid-vs-pitch, genuine capacity), and outputs a targeted retry command for just the failed nets — most-targeted fix first, global parameter increases last.
 
 ### /review-routed-board
 
