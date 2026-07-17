@@ -2619,9 +2619,16 @@ if __name__ == "__main__":
         from list_nets import read_design_rules, net_clearance_map
         _rules = read_design_rules(args.pcb)
         if _rules.get('classes'):
-            from kicad_parser import extract_nets
+            # Pass the detected file-format version: KiCad 10 dropped the
+            # numbered net table, so the version-less extract_nets() call
+            # returned ZERO nets on those boards and cross-class grading was
+            # silently OFF (cparti step7b: KiCad GUI 92 violations, this
+            # checker 0 -- the #344 numeric-net-matcher class of bug).
+            from kicad_parser import extract_nets, detect_kicad_version
             with open(args.pcb, encoding='utf-8', errors='replace') as _f:
-                _net_objs, _ = extract_nets(_f.read())
+                _content = _f.read()
+            _net_objs, _ = extract_nets(_content, detect_kicad_version(_content))
+            del _content
             net_clearances = net_clearance_map(
                 args.pcb, [n.name for n in _net_objs.values()],
                 rules=_rules) or None
