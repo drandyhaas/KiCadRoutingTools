@@ -88,7 +88,6 @@ def get_dialog_settings(dialog):
         'mps_reverse_rounds': dialog.mps_reverse_rounds.GetValue(),
         'mps_layer_swap': dialog.mps_layer_swap.GetValue(),
         'keep_input_copper': dialog.keep_input_copper.GetValue(),
-        'failed_first_restart': dialog.failed_first_restart.GetValue(),
         'mps_segment_intersection': dialog.mps_segment_intersection.GetValue(),
         'no_crossing_layer_check': dialog.no_crossing_layer_check.GetValue(),
         'can_swap_to_top': dialog.can_swap_to_top.GetValue(),
@@ -372,8 +371,6 @@ def restore_dialog_settings(dialog, settings):
         dialog.mps_layer_swap.SetValue(settings['mps_layer_swap'])
     if 'keep_input_copper' in settings:
         dialog.keep_input_copper.SetValue(settings['keep_input_copper'])
-    if 'failed_first_restart' in settings:
-        dialog.failed_first_restart.SetValue(settings['failed_first_restart'])
     if 'mps_segment_intersection' in settings:
         dialog.mps_segment_intersection.SetValue(settings['mps_segment_intersection'])
     if 'no_crossing_layer_check' in settings:

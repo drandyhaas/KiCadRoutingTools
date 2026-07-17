@@ -74,9 +74,6 @@ BOOL_FLAGS = {
     # singular. Both map to the GUI's no_bga_zone special (bare = exclude ALL).
     '--no-bga-zone': 'no_bga_zone',
     '--no-bga-zones': 'no_bga_zone',
-    # route.py failed-first restart lever (store_true); control name matches
-    # the batch_route param so claude_plan applies it directly.
-    '--failed-first-restart': 'failed_first_restart',
 }
 
 # Flags whose values are file paths / bookkeeping -- consumed, never params.
