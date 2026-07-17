@@ -185,6 +185,9 @@ class AboutTab(wx.Panel):
         try:
             import sys
             sys.path.insert(0, os.path.join(ROOT_DIR, 'rust_router'))
+            if ROOT_DIR not in sys.path:
+                sys.path.insert(0, ROOT_DIR)
+            import rust_alloc  # noqa: F401  # issue #419: MIMALLOC_PURGE_DELAY before grid_router
             import grid_router
             router_version = grid_router.__version__
         except Exception:

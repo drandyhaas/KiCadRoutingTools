@@ -2845,6 +2845,9 @@ class RoutingDialog(wx.Dialog):
                     rust_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'rust_router')
                     if rust_dir not in sys.path:
                         sys.path.insert(0, rust_dir)
+                    if ROOT_DIR not in sys.path:
+                        sys.path.insert(0, ROOT_DIR)
+                    import rust_alloc  # noqa: F401  # issue #419: MIMALLOC_PURGE_DELAY before grid_router
                     import grid_router
                 except ImportError:
                     msg = "Rust router module not found.\n\n"

@@ -32,6 +32,7 @@ from plane_obstacle_builder import (
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
+import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 from grid_router import GridObstacleMap, GridRouter
 from single_ended_routing import _track_margin_for_width
 import routing_defaults as defaults

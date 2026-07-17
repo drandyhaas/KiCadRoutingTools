@@ -61,11 +61,62 @@ def _tree_rss_kb(pid):
     return total
 
 
-def run_with_peak_rss(argv, cwd, interval=0.5, timeout=None):
+def _footprint_mb(pid):
+    """phys_footprint (MB) of one pid via /usr/bin/footprint (darwin only).
+
+    macOS RSS (ps) under-reports the true memory a routing process holds:
+    mimalloc-retained pages and GPU-driver / IOAccelerator-tagged regions
+    (issue #419) are part of phys_footprint but not of the RSS ps reports.
+    `footprint` is the authoritative number the OS uses for memory pressure.
+    Returns 0.0 on any error or non-darwin."""
+    if sys.platform != "darwin":
+        return 0.0
+    try:
+        out = subprocess.run(["/usr/bin/footprint", str(pid)],
+                             capture_output=True, text=True, timeout=15).stdout
+        for line in out.splitlines():
+            if "Footprint:" in line and "phys_footprint" not in line:
+                parts = line.split("Footprint:")[1].strip().split()
+                val = float(parts[0])
+                unit = parts[1] if len(parts) > 1 else "MB"
+                if unit == "GB":
+                    val *= 1024
+                elif unit == "KB":
+                    val /= 1024
+                return val
+    except Exception:
+        pass
+    return 0.0
+
+
+def _tree_footprint_mb(pid):
+    """Sum phys_footprint (MB) of a process plus its direct children (darwin
+    only). The footprint tool is ~10x costlier than `ps` (it forks and reads
+    the VM map), so callers sample it coarsely (every few seconds), unlike the
+    0.5s RSS cadence."""
+    if sys.platform != "darwin":
+        return 0.0
+    total = _footprint_mb(pid)
+    try:
+        kids = subprocess.run(["pgrep", "-P", str(pid)],
+                              capture_output=True, text=True).stdout.split()
+        for k in kids:
+            total += _footprint_mb(k)
+    except Exception:
+        pass
+    return total
+
+
+def run_with_peak_rss(argv, cwd, interval=0.5, timeout=None, footprint_interval=5.0):
     """Run a command (inheriting stdout/stderr) while sampling its process-tree
-    RSS; return (returncode, peak_rss_kb, timed_out). Lets the replay record
-    per-step peak memory so an engine change's memory effect is comparable, not
-    just its time.
+    RSS; return (returncode, peak_rss_kb, timed_out, peak_footprint_mb). Lets the
+    replay record per-step peak memory so an engine change's memory effect is
+    comparable, not just its time.
+
+    On darwin also samples /usr/bin/footprint (phys_footprint, MB) every
+    ``footprint_interval`` seconds -- the authoritative memory number that
+    captures mimalloc-retained + IOAccelerator-tagged memory RSS misses
+    (issue #419). ``peak_footprint_mb`` is 0.0 on non-darwin.
 
     If timeout (seconds) is given and the command runs past it, kill the process
     tree and return timed_out=True. The original LLM run has a per-command cap
@@ -75,11 +126,21 @@ def run_with_peak_rss(argv, cwd, interval=0.5, timeout=None):
     finishing boards complete while still bailing a true non-termination."""
     p = subprocess.Popen(argv, cwd=cwd)
     peak = 0
+    peak_fp = 0.0
     start = time.time()
+    # Sample footprint first at start+interval (not at t~0, which would catch
+    # only the pre-allocation startup value); commands shorter than one interval
+    # get no footprint sample and report 0 (honest -- they aren't the memory
+    # concern #419 targets, which are the minutes-long heavy route.py steps).
+    last_fp = start
     timed_out = False
     while p.poll() is None:
         peak = max(peak, _tree_rss_kb(p.pid))
-        if timeout is not None and time.time() - start > timeout:
+        now = time.time()
+        if sys.platform == "darwin" and now - last_fp >= footprint_interval:
+            peak_fp = max(peak_fp, _tree_footprint_mb(p.pid))
+            last_fp = now
+        if timeout is not None and now - start > timeout:
             timed_out = True
             # Kill the children first (the heavy router workers), then the wrapper.
             for k in subprocess.run(["pgrep", "-P", str(p.pid)],
@@ -95,7 +156,7 @@ def run_with_peak_rss(argv, cwd, interval=0.5, timeout=None):
             p.wait()
             break
         time.sleep(interval)
-    return p.returncode, peak, timed_out
+    return p.returncode, peak, timed_out, peak_fp
 
 
 def parse_manifest(path):
@@ -552,15 +613,21 @@ def main():
             os.makedirs(cwd, exist_ok=True)
         cmd_t0 = time.time()
         timeout = args.timeout if args.timeout and args.timeout > 0 else None
-        rc, peak_kb, timed_out = run_with_peak_rss(argv, cwd, timeout=timeout)
+        rc, peak_kb, timed_out, peak_fp_mb = run_with_peak_rss(argv, cwd, timeout=timeout)
         if rc == 0 and not timed_out:
             # A `cp`/`mv` of a board must carry its .kicad_pro (the recorded DRC
             # floor) or the renamed board grades at the looser design default.
             mirror_project_sibling(argv, cwd)
         dt = time.time() - cmd_t0
-        timings.append({"index": i, "seconds": round(dt, 3), "returncode": rc,
-                        "peak_rss_mb": round(peak_kb / 1024, 1),
-                        "timed_out": timed_out, "argv": argv})
+        rec = {"index": i, "seconds": round(dt, 3), "returncode": rc,
+               "peak_rss_mb": round(peak_kb / 1024, 1),
+               "timed_out": timed_out, "argv": argv}
+        # peak_footprint_mb (darwin only): the authoritative memory number that
+        # captures mimalloc-retained + IOAccelerator-tagged pages RSS misses
+        # (issue #419). Omitted on platforms where it's unavailable (0.0).
+        if peak_fp_mb:
+            rec["peak_footprint_mb"] = round(peak_fp_mb, 1)
+        timings.append(rec)
         suffix = f"  exit {rc}" if rc != 0 else ""
         if timed_out:
             suffix = f"  TIMED OUT after {timeout:.0f}s (killed)"
@@ -588,7 +655,9 @@ def main():
         print("Per-command time (slowest first):")
         for t in sorted(timings, key=lambda x: -x["seconds"]):
             tool = next((os.path.basename(a) for a in t["argv"] if a.endswith(".py")), "?")
-            print(f"  {t['seconds']:7.2f}s  {t.get('peak_rss_mb', 0):7.0f}MB  [{t['index']}] {tool}")
+            fp = t.get("peak_footprint_mb")
+            fp_col = f" {fp:7.0f}MBfp" if fp is not None else ""
+            print(f"  {t['seconds']:7.2f}s  {t.get('peak_rss_mb', 0):7.0f}MBrss{fp_col}  [{t['index']}] {tool}")
     if args.timings_out:
         with open(args.timings_out, "w") as f:
             json.dump({"manifest": args.manifest, "total_seconds": round(total, 3),

@@ -296,16 +296,27 @@ def do_board(set_dir, out_dir, label, board):
     # list and a per-tool sum (route.py / route_planes.py / ... -- where the
     # vectorization speedups land), plus the total.
     steps, time_by_tool, peak_by_tool, total_s, peak_board = [], {}, {}, 0.0, 0.0
+    peak_fp_by_tool, peak_fp_board = {}, 0.0
     if os.path.exists(timings_path):
         for c in json.loads(Path(timings_path).read_text()).get("commands", []):
             tool = _tool_of(c.get("argv", []))
             sec = c.get("seconds", 0.0)
             pk = c.get("peak_rss_mb", 0.0)
-            steps.append({"tool": tool, "seconds": sec, "peak_rss_mb": pk, "rc": c.get("returncode")})
+            # peak_footprint_mb (darwin only): the authoritative memory number
+            # RSS under-reports -- mimalloc-retained + IOAccelerator-tagged pages
+            # (issue #419). Absent on non-darwin timings; treated as 0 then.
+            fp = c.get("peak_footprint_mb", 0.0) or 0.0
+            step = {"tool": tool, "seconds": sec, "peak_rss_mb": pk, "rc": c.get("returncode")}
+            if fp:
+                step["peak_footprint_mb"] = fp
+            steps.append(step)
             time_by_tool[tool] = round(time_by_tool.get(tool, 0.0) + sec, 3)
             peak_by_tool[tool] = round(max(peak_by_tool.get(tool, 0.0), pk), 1)  # max, not sum
+            if fp:
+                peak_fp_by_tool[tool] = round(max(peak_fp_by_tool.get(tool, 0.0), fp), 1)
             total_s += sec
             peak_board = max(peak_board, pk)
+            peak_fp_board = max(peak_fp_board, fp)
     # Coupled diff-pair completion is parsed from route_diff's JSON_SUMMARY in the
     # replay log (captured above), so it reflects what actually coupled-routed.
     log_path = f"{dst}/_replay.log"
@@ -324,6 +335,11 @@ def do_board(set_dir, out_dir, label, board):
            "total_seconds": round(total_s, 3), "peak_rss_mb": round(peak_board, 1),
            "time_by_tool": time_by_tool, "peak_by_tool": peak_by_tool, "steps": steps,
            **dp}
+    # Footprint (darwin) is the memory number that actually caught issue #419;
+    # keep it additive so non-darwin records are unchanged.
+    if peak_fp_board:
+        res["peak_footprint_mb"] = round(peak_fp_board, 1)
+        res["peak_footprint_by_tool"] = peak_fp_by_tool
     if done:
         # Unrouted-input baseline (#326/#338): the manifest's first command's
         # first .kicad_pcb argument is the pristine input board; its kicad
@@ -335,9 +351,10 @@ def do_board(set_dir, out_dir, label, board):
         res.update(grade(final, clr, baseline=baseline,
                          intentional_edge_band_nets=intentional))
     dps = f"{res['diff_pairs_coupled']}/{res['diff_pairs_total']}" if res['diff_pairs_total'] else "-"
+    fp_note = f" fp={res['peak_footprint_mb']}MB" if res.get("peak_footprint_mb") else ""
     print(f"[{label}] {board}: chain={'ok' if done else 'BROKEN'} "
           f"drc={res['drc']} kdrc={res.get('kicad_drc')} conn={res['conn']} compl={res['completion_pct']}% "
-          f"dpair={dps} t={res['total_seconds']}s peak={res['peak_rss_mb']}MB final={res['final']}", flush=True)
+          f"dpair={dps} t={res['total_seconds']}s peak={res['peak_rss_mb']}MB{fp_note} final={res['final']}", flush=True)
     return res
 
 
@@ -487,6 +504,10 @@ def compare(old_json, new_json):
                 dst[k] = round(max(dst.get(k, 0.0), v), 1)
         op, npc = o.get("completion_pct"), n.get("completion_pct")
         po, pn = o.get("peak_rss_mb"), n.get("peak_rss_mb")
+        # Footprint (darwin) -- the memory number that actually catches #419-class
+        # regressions RSS misses. Appended as an extra column only when present.
+        pfo, pfn = o.get("peak_footprint_mb"), n.get("peak_footprint_mb")
+        fp_col = f"  fp {_fmt(pfo):>6} -> {_fmt(pfn):<6}" if (pfo or pfn) else ""
         flag = ""
         if dd > 0 or cd > 0 or dpd < 0:    flag = "  <-- REGRESSION"
         elif dd < 0 or cd < 0 or dpd > 0:  flag = "  improved"
@@ -498,7 +519,7 @@ def compare(old_json, new_json):
         speed = f"  ({to/tn:.2f}x)" if (to and tn) else ""
         print(f"{b:14} {_fmt(od):>4} -> {_fmt(nd):<4} {_fmt(oi):>5} -> {_fmt(ni):<5} "
               f"{_fmt(op):>5} -> {_fmt(npc):<5} {dp_o:>5} -> {dp_n:<5} "
-              f"{_fmt(to):>6} -> {_fmt(tn):<6}{speed:>9} {_fmt(po):>6} -> {_fmt(pn):<6}{flag}")
+              f"{_fmt(to):>6} -> {_fmt(tn):<6}{speed:>9} {_fmt(po):>6} -> {_fmt(pn):<6}{fp_col}{flag}")
     print("-" * 128)
     verdict = "REGRESSION" if (drc_delta > 0 or incompl_delta > 0 or dpair_delta < 0) else "no regression"
     print(f"net delta: drc {drc_delta:+d}, incomplete nets {incompl_delta:+d} "

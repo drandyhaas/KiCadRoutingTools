@@ -25,6 +25,7 @@ from net_queries import resolve_gnd_net_id
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
+import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 
 try:
     from grid_router import GridObstacleMap, GridRouter, PoseRouter

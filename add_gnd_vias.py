@@ -11,6 +11,7 @@ from typing import List, Dict
 from kicad_parser import PCBData, Via, pad_drill_capsule
 from geometry_utils import point_to_segment_distance
 from routing_config import GridRouteConfig, GridCoord
+import rust_alloc  # noqa: F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 from grid_router import GridObstacleMap
 
 
