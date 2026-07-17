@@ -6,6 +6,7 @@ extracted from route.py for better maintainability.
 """
 from __future__ import annotations
 
+import os
 import time
 from typing import List, Tuple, Optional, Any, Dict, Set
 
@@ -270,6 +271,22 @@ def route_single_ended_nets(
             prox_cache_mb = estimate_track_proximity_cache_mb(track_proximity_cache)
             print(f"[MEMORY] Route {route_index}/{total_routes}: {current_mem:.1f} MB total, "
                   f"track_proximity_cache: {prox_cache_mb:.1f} MB ({len(track_proximity_cache)} nets)")
+        # #422 probe: env-gated live-set audit (Rust map get_stats + Python caches)
+        if os.environ.get('KICAD_MEM_PROBE') and (route_index % 10 == 1 or route_index == total_routes):
+            try:
+                import gc as _gc
+                from memory_debug import (estimate_net_obstacles_cache_mb as _enc,
+                                          format_obstacle_map_stats as _foms)
+                _cache_mb = _enc(state.net_obstacles_cache) if state.net_obstacles_cache else 0.0
+                print(f"[MEMPROBE] route={route_index}/{total_routes} pid={os.getpid()} "
+                      f"net_obstacles_cache={_cache_mb:.1f}MB "
+                      f"prox_cache={estimate_track_proximity_cache_mb(track_proximity_cache):.1f}MB "
+                      f"routed_paths={len(routed_net_paths)} "
+                      f"ripped_layer_costs={len(state.ripped_route_layer_costs)} "
+                      f"ripped_via_pos={len(state.ripped_route_via_positions)}", flush=True)
+                print("[MEMPROBE] " + _foms(state.working_obstacles).replace("\n", "\n[MEMPROBE] "), flush=True)
+            except Exception as _e:
+                print(f"[MEMPROBE] error: {_e}", flush=True)
 
         start_time = time.time()
 

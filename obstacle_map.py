@@ -333,14 +333,22 @@ def _rasterize_polygon(poly_points, coord: GridCoord, margin: float, clip_bounds
     return gx_flat, gy_flat, inside, edge_dist
 
 
-def _block_cells_on_layers(obstacles: GridObstacleMap, gx_flat, gy_flat, mask, layer_idxs):
-    """Block the masked (gx, gy) cells on each layer in `layer_idxs`."""
+def _block_cells_on_layers(obstacles: GridObstacleMap, gx_flat, gy_flat, mask, layer_idxs,
+                           static: bool = False):
+    """Block the masked (gx, gy) cells on each layer in `layer_idxs`.
+
+    #422: with static=True the cells go into the permanent static keep-out bitmap
+    (1 bit/cell) instead of the refcount hashmap -- used for board geometry
+    (cutouts) that never changes during routing.
+    """
     if not mask.any():
         return
     cells = np.column_stack([gx_flat[mask], gy_flat[mask]])
+    add = (obstacles.add_static_blocked_cells_batch if static
+           else obstacles.add_blocked_cells_batch)
     for li in layer_idxs:
         layer_col = np.full((cells.shape[0], 1), li, dtype=np.int32)
-        obstacles.add_blocked_cells_batch(np.hstack([cells, layer_col]))
+        add(np.hstack([cells, layer_col]))
 
 
 def _polygon_grid_cells(points_mm, coord: GridCoord):
@@ -849,11 +857,13 @@ def _add_cutout_obstacles(obstacles: GridObstacleMap, cutout: List[Tuple[float, 
         keep = _filter_exempt_xy(gx_flat, gy_flat, exempt_keys)
         ring_track &= keep
         ring_via &= keep
+    # #422: cutouts are permanent board geometry -> static keep-out bitmap.
     _block_cells_on_layers(obstacles, gx_flat, gy_flat,
-                           inside | ring_track, range(num_layers))
+                           inside | ring_track, range(num_layers), static=True)
     via_mask = inside | ring_via
     if via_mask.any():
-        obstacles.add_blocked_vias_batch(np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
+        obstacles.add_static_blocked_vias_batch(
+            np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
 
 
 def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord, num_layers: int,
@@ -886,9 +896,9 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
                 continue  # in-band pad reach exemption (#338)
             if block_track:
                 for layer_idx in range(num_layers):
-                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+                    obstacles.add_static_blocked_cell(gx, gy, layer_idx)
             if block_via:
-                obstacles.add_blocked_via(gx, gy)
+                obstacles.add_static_blocked_via(gx, gy)
 
     # Block right edge (full height)
     for gx in range(gmax_x - edge_expand, gmax_x + grid_margin + 1):
@@ -901,9 +911,9 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
                 continue  # in-band pad reach exemption (#338)
             if block_track:
                 for layer_idx in range(num_layers):
-                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+                    obstacles.add_static_blocked_cell(gx, gy, layer_idx)
             if block_via:
-                obstacles.add_blocked_via(gx, gy)
+                obstacles.add_static_blocked_via(gx, gy)
 
     # Block top edge (middle span; corners covered by the left/right sweeps above)
     for gy in range(gmin_y - grid_margin, gmin_y + edge_expand + 1):
@@ -916,9 +926,9 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
                 continue  # in-band pad reach exemption (#338)
             if block_track:
                 for layer_idx in range(num_layers):
-                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+                    obstacles.add_static_blocked_cell(gx, gy, layer_idx)
             if block_via:
-                obstacles.add_blocked_via(gx, gy)
+                obstacles.add_static_blocked_via(gx, gy)
 
     # Block bottom edge (middle span)
     for gy in range(gmax_y - edge_expand, gmax_y + grid_margin + 1):
@@ -931,9 +941,9 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
                 continue  # in-band pad reach exemption (#338)
             if block_track:
                 for layer_idx in range(num_layers):
-                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+                    obstacles.add_static_blocked_cell(gx, gy, layer_idx)
             if block_via:
-                obstacles.add_blocked_via(gx, gy)
+                obstacles.add_static_blocked_via(gx, gy)
 
 
 def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
@@ -986,15 +996,18 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
     inside_idx = np.where(inside)[0]
     outside_idx = np.where(~inside)[0]
 
-    # Block all outside points (all layers + vias)
+    # Block all outside points (all layers + vias). #422: board geometry is
+    # PERMANENT (never removed during routing), so stamp it into the static
+    # keep-out bitmap (1 bit/cell) instead of the refcount hashmap (~38 B/cell).
+    # On sparse boards the off-board area + cutouts are ~60% of all blocked cells.
     if outside_idx.size > 0:
         out_gx = gx_flat[outside_idx]
         out_gy = gy_flat[outside_idx]
         out_cells = np.column_stack([out_gx, out_gy])
         for layer_idx in range(num_layers):
             layer_col = np.full((out_cells.shape[0], 1), layer_idx, dtype=np.int32)
-            obstacles.add_blocked_cells_batch(np.hstack([out_cells, layer_col]))
-        obstacles.add_blocked_vias_batch(out_cells)
+            obstacles.add_static_blocked_cells_batch(np.hstack([out_cells, layer_col]))
+        obstacles.add_static_blocked_vias_batch(out_cells)
 
     # Compute edge distances for inside points (chunked kernel, issue #81)
     if inside_idx.size > 0:
@@ -1017,7 +1030,7 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
             track_cells = np.column_stack([track_gx, track_gy])
             for layer_idx in range(num_layers):
                 layer_col = np.full((track_cells.shape[0], 1), layer_idx, dtype=np.int32)
-                obstacles.add_blocked_cells_batch(np.hstack([track_cells, layer_col]))
+                obstacles.add_static_blocked_cells_batch(np.hstack([track_cells, layer_col]))
 
         # Block vias if too close to edge
         via_mask = min_dist < via_edge_clearance
@@ -1027,7 +1040,7 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
             keep = _filter_exempt_xy(via_gx, via_gy, exempt_keys)
             if keep is not None:
                 via_gx, via_gy = via_gx[keep], via_gy[keep]
-            obstacles.add_blocked_vias_batch(np.column_stack([via_gx, via_gy]))
+            obstacles.add_static_blocked_vias_batch(np.column_stack([via_gx, via_gy]))
 
 
 def block_via_cells_near_drills(obstacles: GridObstacleMap,

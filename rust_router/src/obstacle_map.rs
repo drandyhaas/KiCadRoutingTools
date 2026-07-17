@@ -63,6 +63,15 @@ impl BlockedBitmap {
         }
     }
 
+    /// Total number of set bits across all layers plus overflow cells (#422:
+    /// used only by get_static_stats for memory diagnostics -- popcount is O(bits)
+    /// but this is off the routing hot path).
+    fn population(&self) -> usize {
+        let bits: usize = self.bits.iter().map(|w| w.count_ones() as usize).sum();
+        let ov: usize = self.overflow.iter().map(|s| s.len()).sum();
+        bits + ov
+    }
+
     /// Hot-path test: is the cell's blocked bit set?
     #[inline]
     fn test(&self, gx: i32, gy: i32, layer: usize) -> bool {
@@ -191,6 +200,23 @@ pub struct GridObstacleMap {
     /// S2: per-layer bitmap CACHE of "blocked_cells refcount > 0". Written only
     /// at 0->1 / 1->0 transitions inside the refcount-mutating functions.
     blocked_bitmap: BlockedBitmap,
+    /// #422: per-layer bitmap of PERMANENT keep-out cells (board-edge clearance,
+    /// off-board / outside-outline area, board cutouts / switch holes). These
+    /// regions never change during routing, so they need only a set bit -- NOT a
+    /// refcount `blocked_cells` entry (~38 B/cell vs 1 bit). On a large sparse
+    /// board (split keyboard: 73 switch-hole cutouts + outside-outline) this is
+    /// ~60% of all blocked cells; storing them as bits instead of hashmap entries
+    /// is the #422 memory fix. is_blocked ORs this with `blocked_bitmap`, so a
+    /// statically-blocked cell behaves identically to a refcounted one; it is
+    /// simply never cleared by per-net remove/restore (no coincident-cell desync,
+    /// because the two structures are independent -- a net's own copper still
+    /// refcounts through `blocked_cells`, and removing it leaves the static bit).
+    static_blocked_bitmap: BlockedBitmap,
+    /// #422: single-"layer" bitmap of PERMANENT via keep-out cells (edge/cutout/
+    /// outside). Mirrors static_blocked_bitmap for is_via_blocked. Vias span all
+    /// copper layers, so one layer suffices (matches `blocked_vias` being a single
+    /// map, not per-layer).
+    static_via_bitmap: BlockedBitmap,
     /// Blocked via positions: packed (gx, gy) -> ref count
     pub blocked_vias: FxHashMap<u64, u16>,
     /// Stub proximity costs: (gx, gy) -> cost
@@ -236,6 +262,8 @@ impl GridObstacleMap {
         Self {
             blocked_cells: (0..num_layers).map(|_| FxHashMap::default()).collect(),
             blocked_bitmap: BlockedBitmap::new(num_layers),
+            static_blocked_bitmap: BlockedBitmap::new(num_layers),
+            static_via_bitmap: BlockedBitmap::new(1),
             blocked_vias: FxHashMap::default(),
             stub_proximity: FxHashMap::default(),
             layer_proximity_costs: (0..num_layers).map(|_| FxHashMap::default()).collect(),
@@ -290,6 +318,8 @@ impl GridObstacleMap {
         Self {
             blocked_cells: self.blocked_cells.clone(),
             blocked_bitmap: self.blocked_bitmap.clone(),
+            static_blocked_bitmap: self.static_blocked_bitmap.clone(),
+            static_via_bitmap: self.static_via_bitmap.clone(),
             blocked_vias: self.blocked_vias.clone(),
             stub_proximity: self.stub_proximity.clone(),
             layer_proximity_costs: self.layer_proximity_costs.clone(),
@@ -314,6 +344,8 @@ impl GridObstacleMap {
         Self {
             blocked_cells: self.blocked_cells.clone(),
             blocked_bitmap: self.blocked_bitmap.clone(),
+            static_blocked_bitmap: self.static_blocked_bitmap.clone(),
+            static_via_bitmap: self.static_via_bitmap.clone(),
             blocked_vias: self.blocked_vias.clone(),
             stub_proximity: self.stub_proximity.clone(),
             layer_proximity_costs: self.layer_proximity_costs.clone(),
@@ -382,6 +414,8 @@ impl GridObstacleMap {
         self.cross_layer_tracks.shrink_to_fit();
         self.free_via_positions.shrink_to_fit();
         self.stub_via_block_cells.shrink_to_fit();
+        self.static_blocked_bitmap.bits.shrink_to_fit();
+        self.static_via_bitmap.bits.shrink_to_fit();
     }
 
     /// Clear allowed cells (for reuse with different source/target)
@@ -444,6 +478,59 @@ impl GridObstacleMap {
             let key = pack_xy(gx, gy);
             *self.blocked_vias.entry(key).or_insert(0) += 1;
         }
+    }
+
+    /// #422: Add a single PERMANENT (static) blocked cell (bitmap only, no
+    /// refcount entry). Mirrors add_blocked_cell for board geometry.
+    pub fn add_static_blocked_cell(&mut self, gx: i32, gy: i32, layer: usize) {
+        if layer < self.num_layers {
+            self.static_blocked_bitmap.set(gx, gy, layer);
+        }
+    }
+
+    /// #422: Add a single PERMANENT (static) blocked via cell (bitmap only).
+    pub fn add_static_blocked_via(&mut self, gx: i32, gy: i32) {
+        self.static_via_bitmap.set(gx, gy, 0);
+    }
+
+    /// #422: Batch add PERMANENT (static) blocked cells from numpy array
+    /// (shape: N x 3, columns gx, gy, layer). These cells are set in the static
+    /// keep-out bitmap ONLY -- no `blocked_cells` refcount entry -- because they
+    /// are board geometry (edge clearance, off-board area, cutouts) that never
+    /// changes during routing. is_blocked ORs the static bitmap with the dynamic
+    /// one, so routing sees them identically to refcounted blocks; they are just
+    /// stored as 1 bit instead of a ~38 B hashmap entry, and are immune to the
+    /// per-net remove/restore cycle (never cleared).
+    pub fn add_static_blocked_cells_batch(&mut self, cells: PyReadonlyArray2<i32>) {
+        let arr = cells.as_array();
+        for row in arr.rows() {
+            let gx = row[0];
+            let gy = row[1];
+            let layer = row[2] as usize;
+            if layer < self.num_layers {
+                self.static_blocked_bitmap.set(gx, gy, layer);
+            }
+        }
+    }
+
+    /// #422: Batch add PERMANENT (static) blocked via cells (shape: N x 2,
+    /// columns gx, gy). Set in the static via bitmap only (no `blocked_vias`
+    /// refcount entry). Mirrors add_static_blocked_cells_batch for vias.
+    pub fn add_static_blocked_vias_batch(&mut self, vias: PyReadonlyArray2<i32>) {
+        let arr = vias.as_array();
+        for row in arr.rows() {
+            let gx = row[0];
+            let gy = row[1];
+            self.static_via_bitmap.set(gx, gy, 0);
+        }
+    }
+
+    /// #422: (static_blocked_cells, static_blocked_vias) population counts, for
+    /// memory diagnostics only. Kept separate from get_stats() so its tuple arity
+    /// (and every existing caller) is unchanged.
+    pub fn get_static_stats(&self) -> (usize, usize) {
+        (self.static_blocked_bitmap.population(),
+         self.static_via_bitmap.population())
     }
 
     /// Merge blocked cells and vias from another obstacle map into this one
@@ -566,7 +653,12 @@ impl GridObstacleMap {
         // Check if cell is in blocked_cells (tracks, stubs, pads from other nets).
         // S2: the per-layer bitmap caches "refcount > 0" (the refcount hashmaps
         // stay authoritative; the bitmap is written only at their transitions).
-        if self.blocked_bitmap.test(gx, gy, layer) {
+        // #422: OR the static keep-out bitmap (board edge / off-board / cutouts).
+        // A statically-blocked cell behaves identically to a refcounted one --
+        // same source/target override -- it is just stored as a bit, not a
+        // hashmap entry, and never cleared by per-net remove/restore.
+        if self.blocked_bitmap.test(gx, gy, layer)
+            || self.static_blocked_bitmap.test(gx, gy, layer) {
             // Blocked by other nets' obstacles - check if it's a source/target cell.
             // source_target_cells can override blocking for exact endpoint positions
             // only; this takes precedence over BGA zone allowed_cells.
@@ -675,6 +767,12 @@ impl GridObstacleMap {
     pub fn is_via_blocked(&self, gx: i32, gy: i32) -> bool {
         // Check explicit via blocks (with ref counting, presence means count > 0)
         if self.blocked_vias.contains_key(&pack_xy(gx, gy)) {
+            return true;
+        }
+        // #422: static (permanent) via keep-outs (edge/cutout/outside) live in a
+        // bitmap, not the refcount map -- check it too. Unconditional block, same
+        // as a blocked_vias entry (vias never get a source/target override here).
+        if self.static_via_bitmap.test(gx, gy, 0) {
             return true;
         }
         // Check BGA zones - vias blocked inside unless allowed

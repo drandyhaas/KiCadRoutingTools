@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.18.1**
+**Current Version: 0.18.2**
 
 ## Features
 
@@ -305,6 +305,25 @@ src/
 - **Costs**: ORTHO_COST=1000, DIAG_COST=1414 (sqrt(2) * 1000), DEFAULT_TURN_COST=1000
 
 ## Version History
+
+- **0.18.2**: **#422 static keep-out bitmap (memory)** — permanent board
+  geometry (board-edge clearance band, off-board / outside-outline area, board
+  cutouts / switch holes) is now stored in a separate never-cleared per-layer
+  **static bitmap** (`add_static_blocked_cell[s_batch]` / `..._via[s_batch]`)
+  instead of the `blocked_cells` / `blocked_vias` refcount hashmaps. These cells
+  never change during routing, so a set bit (1 bit/cell) suffices where a hashmap
+  entry costs ~16 B (u64 key + u16 refcount padded to a 16 B bucket + control byte
+  + power-of-two slack). `is_blocked` / `is_via_blocked` OR the static bitmap with
+  the dynamic map, so a statically-blocked cell behaves **byte-identically** to a
+  refcounted one (same source/target override) — it is simply cheaper to store
+  and immune to the per-net remove/restore cycle (no coincident-cell desync: the
+  two structures are independent). On sparse large boards (split keyboards: many
+  switch-hole cutouts + big off-board area) this static class is ~60% of all
+  blocked cells; moving it out of the hashmaps cuts the obstacle-map (and its
+  per-run working clone) memory proportionally. New pymethods:
+  `add_static_blocked_cell(s_batch)`, `add_static_blocked_via(s_batch)`,
+  `get_static_stats()`. `clone`/`clone_fresh`/`shrink_to_fit` handle the new
+  bitmaps; `get_stats()` arity is unchanged. Routing results are identical.
 
 - **0.18.1**: **S3-b (#385)** — admissible bounding-box heuristic for large
   target lists. `heuristic_to_targets` was O(targets) per push (min octile
