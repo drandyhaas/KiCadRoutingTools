@@ -378,6 +378,55 @@ impl GridObstacleMap {
          layer_proximity_count, cross_layer_count, source_target_count, free_vias_count)
     }
 
+    /// #422: Promote ALL current dynamic blocked cells/vias into the permanent
+    /// static bitmaps, then empty the dynamic refcount maps. Valid ONLY on a map
+    /// that will never have any of these cells individually removed again -- i.e.
+    /// the BASE obstacle map, which holds non-target, non-rippable copper + board
+    /// geometry and is never mutated after construction (target nets and rippable
+    /// pre-existing nets live in the per-net caches added on top of a CLONE, not
+    /// in base). After freezing, is_blocked/is_via_blocked read these cells from
+    /// the static bitmap (identical result); the working clone then carries the
+    /// frozen base as cheap bits and only the mutable per-net caches as refcount
+    /// entries. Cuts the working map's hashmap to just the cache cells.
+    pub fn freeze_dynamic_to_static(&mut self) {
+        for layer in 0..self.num_layers {
+            // Take the layer map out to avoid borrowing self while mutating the
+            // static bitmap; the dynamic layer map is left empty.
+            let m = std::mem::take(&mut self.blocked_cells[layer]);
+            for &key in m.keys() {
+                let (gx, gy) = unpack_xy(key);
+                self.static_blocked_bitmap.set(gx, gy, layer);
+            }
+        }
+        // The dynamic bitmap cached exactly these (now-frozen) cells; reset it.
+        self.blocked_bitmap = BlockedBitmap::new(self.num_layers);
+        let mv = std::mem::take(&mut self.blocked_vias);
+        for &key in mv.keys() {
+            let (gx, gy) = unpack_xy(key);
+            self.static_via_bitmap.set(gx, gy, 0);
+        }
+    }
+
+    /// #422 diagnostic: (distinct_cells, cells_with_refcount>=2, max_refcount,
+    /// distinct_vias, vias_refcount>=2) across the DYNAMIC refcount maps. Sizes
+    /// the potential "bitmap + overflow" sparse rewrite (only refcount>=2 cells
+    /// truly need a hashmap entry; refcount-1 cells are redundant with the bitmap).
+    pub fn dynamic_refcount_stats(&self) -> (usize, usize, usize, usize, usize) {
+        let mut distinct = 0usize;
+        let mut ge2 = 0usize;
+        let mut maxc = 0usize;
+        for layer in &self.blocked_cells {
+            for &c in layer.values() {
+                distinct += 1;
+                if c >= 2 { ge2 += 1; }
+                if c as usize > maxc { maxc = c as usize; }
+            }
+        }
+        let vd = self.blocked_vias.len();
+        let vge2 = self.blocked_vias.values().filter(|&&c| c >= 2).count();
+        (distinct, ge2, maxc, vd, vge2)
+    }
+
     /// Clear stub proximity costs and zone centers (for reuse with different stubs).
     /// B2: also symmetrically removes the blocked_vias increments made by
     /// add_stub_proximity_costs_batch(block_vias=true) -- the per-net

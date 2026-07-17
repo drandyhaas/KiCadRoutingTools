@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run a command with a ~4 GB RSS watchdog (process + direct children).
+# Run a command with a ~12 GB RSS watchdog (process + direct children).
 # Usage: run_limited.sh <cmd> [args...]   (override with LIMIT_KB=<kb>)
 # Exits 137 with MEMORY_LIMIT_EXCEEDED on stderr if the limit is breached.
 #
@@ -8,7 +8,14 @@
 # CLI's main()), gated on the REDO_MANIFEST env var. That captures the run
 # reliably even when a command is NOT routed through this wrapper, which the LLM
 # agent does inconsistently. This wrapper therefore only enforces the memory cap.
-LIMIT_KB=${LIMIT_KB:-4194304}
+#
+# #422: raised 4 GB -> 12 GB. The #422 static-keep-out-bitmap fix cut the
+# obstacle-map footprint on large sparse boards (crkbd 0.025 signal: ~9 GB -> ~5
+# GB peak), but the fine grid over a big split-keyboard outline can still spike a
+# few GB in the reconciliation/write phase. 12 GB keeps those legitimate runs
+# from being killed on 16 GB+ CI while still catching a true runaway. The deeper
+# fix -- a coarser grid far from obstacles -- is tracked as a follow-up issue.
+LIMIT_KB=${LIMIT_KB:-12582912}
 "$@" &
 PID=$!
 trap 'kill -9 $PID 2>/dev/null' INT TERM

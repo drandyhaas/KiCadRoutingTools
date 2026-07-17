@@ -855,7 +855,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     else:
         base_obstacles = build_base_obstacle_map(
             pcb_data, config, base_map_exclusions,
-            net_clearances=net_clearances)
+            net_clearances=net_clearances,
+            # #422: base holds only permanent copper/geometry (target + rippable
+            # nets live in the per-net caches on a CLONE); stamp it straight into
+            # the static keep-out bitmap so the working clone carries it as bits.
+            static_base=not os.environ.get("KICAD_NO_STATIC_BASE"))
 
     base_elapsed = time.time() - base_start
     print(f"Base obstacle map built in {base_elapsed:.2f}s")

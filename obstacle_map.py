@@ -32,10 +32,47 @@ except ImportError:
     GridObstacleMap = None
 
 
+class _StaticStampProxy:
+    """#422: transparent wrapper that redirects every blocked-cell/via ADD to the
+    permanent static keep-out bitmap (``add_static_blocked_*``) instead of the
+    refcount hashmaps. Used to build a BASE obstacle map whose cells are all
+    permanent for the run (non-target, non-rippable copper + board geometry; base
+    is never mutated after construction, and target/rippable nets live in the
+    per-net caches added to a CLONE of base). Stamping straight to the bitmap
+    avoids ever materialising the multi-million-entry dynamic hashmap for base,
+    so its later working clone carries base as ~1 bit/cell. All other methods
+    (cost maps, BGA zones, source/target, is_blocked, ...) pass through unchanged.
+    Byte-identical: is_blocked/is_via_blocked OR the static bitmap, so a
+    statically stamped cell blocks exactly as a refcount entry would."""
+    __slots__ = ("_real",)
+
+    def __init__(self, real):
+        object.__setattr__(self, "_real", real)
+
+    def unwrap(self):
+        return self._real
+
+    def add_blocked_cell(self, gx, gy, layer):
+        self._real.add_static_blocked_cell(gx, gy, layer)
+
+    def add_blocked_via(self, gx, gy):
+        self._real.add_static_blocked_via(gx, gy)
+
+    def add_blocked_cells_batch(self, cells):
+        self._real.add_static_blocked_cells_batch(cells)
+
+    def add_blocked_vias_batch(self, vias):
+        self._real.add_static_blocked_vias_batch(vias)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                             nets_to_route: List[int],
                             extra_clearance: float = 0.0,
-                            net_clearances: dict = None) -> GridObstacleMap:
+                            net_clearances: dict = None,
+                            static_base: bool = False) -> GridObstacleMap:
     """Build base obstacle map with static obstacles (BGA zones, pads, pre-existing tracks/vias).
 
     Excludes all nets that will be routed (nets_to_route) - their stubs will be added
@@ -73,7 +110,15 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         # reproduces the prior behaviour exactly (inert until a per-net clearance map is supplied).
         return max(effective_clearance, net_clearances.get(net_id, config.clearance))
 
-    obstacles = GridObstacleMap(num_layers)
+    _real_obstacles = GridObstacleMap(num_layers)
+    # #422: when static_base, stamp every base blocked cell/via into the permanent
+    # static bitmap (they are all immutable for the run) via a transparent proxy,
+    # so the multi-million-entry dynamic hashmap is never materialised for base.
+    # Guarded by hasattr so an older Rust binary (no static API) falls back to the
+    # normal dynamic path. Byte-identical either way.
+    obstacles = (_StaticStampProxy(_real_obstacles)
+                 if static_base and hasattr(_real_obstacles, "add_static_blocked_cells_batch")
+                 else _real_obstacles)
 
     # Set BGA proximity radius for is_in_bga_proximity() checks
     bga_prox_radius_grid = coord.to_grid_dist(config.bga_proximity_radius)
@@ -212,7 +257,10 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     add_drill_hole_obstacles(obstacles, pcb_data, config, nets_to_route_set,
                              extra_clearance)
 
-    return obstacles
+    # #422: return the real map (never the stamp proxy) so downstream clone/
+    # cache/rip-up all operate on the genuine GridObstacleMap with its normal
+    # dynamic add/remove methods.
+    return _real_obstacles
 
 
 # Cap the size of the (points, edges) float64 broadcast temporaries used by the
