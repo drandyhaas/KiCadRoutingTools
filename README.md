@@ -829,7 +829,6 @@ The shared option groups — geometry, power-net widths, algorithm/strategy, pro
 - Stub layer swaps for multipoint nets (3+ pads) only handle the all-stubs-to-one-common-layer case; mixed per-cluster layer assignment is not attempted
 - No blind or buried vias
 - No coarse grid assignment before detailed routing to plan overall topology
-- No via cost or other parameter learning/tuning
 - No design rules by region/area support
 
 ## Contributing
