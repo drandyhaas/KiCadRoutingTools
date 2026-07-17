@@ -1763,17 +1763,25 @@ def build_base_obstacles(
     # added no copper via-via placement clearance. our_track_half uses track_width
     # (== min connection width): the region router routes at the min width against
     # this base map and adds its own extra margin when it widens.
-    foreign_centers_by_size: Dict[float, List[Tuple[int, int]]] = {}
+    # #434: price each foreign net at config.obstacle_clearance(net_id) --
+    # max(run clearance, that net's netclass clearance) -- so repair copper
+    # honors KiCad's pairwise max(classA, classB) like batch_route does
+    # (cparti: repair joins landed 0.2mm from SMA-class copper whose class
+    # demands 0.35). Group by (size, clearance) so batching stays intact;
+    # all-Default boards collapse to the old single-clearance groups.
+    foreign_centers_by_size: Dict[Tuple[float, float], List[Tuple[int, int]]] = {}
     for via in pcb_data.vias:
         if via.net_id in exclude_net_ids:
             continue
-        foreign_centers_by_size.setdefault(via.size, []).append(coord.to_grid(via.x, via.y))
-    for vsize, centers in foreign_centers_by_size.items():
-        track_keepout_mm = vsize / 2 + track_width / 2 + config.clearance + cushion
+        _clr = config.obstacle_clearance(via.net_id)
+        foreign_centers_by_size.setdefault((via.size, _clr), []).append(
+            coord.to_grid(via.x, via.y))
+    for (vsize, _clr), centers in foreign_centers_by_size.items():
+        track_keepout_mm = vsize / 2 + track_width / 2 + _clr + cushion
         track_offs = _precompute_circle_offsets((track_keepout_mm / coord.grid_step) ** 2)
         for layer_idx in range(num_layers):
             _batch_block_circles_cell(obstacles, centers, track_offs, layer_idx)
-        via_keepout_mm = vsize / 2 + config.via_size / 2 + config.clearance + cushion
+        via_keepout_mm = vsize / 2 + config.via_size / 2 + _clr + cushion
         via_offs = _precompute_circle_offsets((via_keepout_mm / coord.grid_step) ** 2)
         _batch_block_circles_via(obstacles, centers, via_offs)
 
@@ -1842,10 +1850,11 @@ def build_base_obstacles(
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
-        seg_expansion_mm = track_width / 2 + seg.width / 2 + config.clearance + cushion
+        _seg_clr = config.obstacle_clearance(seg.net_id)  # #434 cross-class
+        seg_expansion_mm = track_width / 2 + seg.width / 2 + _seg_clr + cushion
         _block_segment_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_mm)
         # Also block vias along this segment - must include segment width for proper clearance
-        via_seg_expansion_mm = config.via_size / 2 + seg.width / 2 + config.clearance + cushion
+        via_seg_expansion_mm = config.via_size / 2 + seg.width / 2 + _seg_clr + cushion
         _block_segment_via_obstacle(obstacles, seg, coord, via_seg_expansion_mm)
 
     # Block pads from non-plane nets on their respective layers
@@ -1877,8 +1886,10 @@ def build_base_obstacles(
                 continue
 
             # Block rectangular area around pad with clearance for track routing.
-            # Honor a per-pad local clearance override (fiducial keep-clear etc.).
-            pad_clr = max(config.clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
+            # Honor a per-pad local clearance override (fiducial keep-clear etc.)
+            # and the pad net's netclass clearance (#434 cross-class).
+            pad_clr = max(config.obstacle_clearance(pad_net_id),
+                          getattr(pad, 'local_clearance', 0.0) or 0.0)
             pad_expansion_mm = track_width / 2 + pad_clr + cushion
             half_w, half_h = pad_rect_halfspan(pad, pad_expansion_mm)
             min_gx, _ = coord.to_grid(pad.global_x - half_w, 0)
@@ -1896,7 +1907,7 @@ def build_base_obstacles(
                     obstacles.add_blocked_cells_batch(np.hstack([rect_cells, layer_col]))
             # Also block vias around pad - new via radius + clearance from pad edge
             # (issue #173 parity: was config.via_size/2 + the flat 0.8 constant).
-            via_expansion_mm = config.via_size / 2 + config.clearance + cushion
+            via_expansion_mm = config.via_size / 2 + pad_clr + cushion
             via_half_w, via_half_h = pad_rect_halfspan(pad, via_expansion_mm)
             via_min_gx, _ = coord.to_grid(pad.global_x - via_half_w, 0)
             via_max_gx, _ = coord.to_grid(pad.global_x + via_half_w, 0)

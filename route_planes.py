@@ -1864,10 +1864,21 @@ def _write_output_and_reroute(
                         _edge = read_project_edge_clearance(input_file)
                     except Exception:
                         _edge = 0.0
+                    # #434: same missing-sibling-.kicad_pro hazard for the
+                    # netclass map -- resolve it from the ORIGINAL input so the
+                    # blocker reroutes honor cross-class clearances.
+                    try:
+                        from list_nets import net_clearance_map_by_id
+                        _ncl = net_clearance_map_by_id(
+                            input_file,
+                            {nid: n.name for nid, n in pcb_data.nets.items()})
+                    except Exception:
+                        _ncl = None
                     routed, failed, route_time = batch_route(
                         input_file=output_file,
                         output_file=output_file,
                         net_names=still_names,
+                        net_clearances=_ncl,
                         layers=all_copper_layers,
                         track_width=track_width,
                         clearance=clearance,
@@ -1992,6 +2003,7 @@ def create_plane(
     no_bga_zone: bool = False,
     progress_callback=None,
     cancel_check=None,
+    net_clearances: Optional[dict] = None,
 ) -> Union[Tuple[int, int, int],
            Tuple[int, int, int, list, list, list, int, list]]:
     """
@@ -2195,6 +2207,24 @@ def create_plane(
         layers=all_layers,
         layer_costs=layer_costs
     )
+    # Cross-class clearance (#434, mirrors batch_route/repair): auto-read the
+    # board's non-Default netclasses from the INPUT's sibling .kicad_pro when
+    # no map was passed, so tap tracks/vias and blocker reroutes honor KiCad's
+    # pairwise max(classA, classB). All-Default boards -> empty map -> inert.
+    if net_clearances is None and input_file and os.path.isfile(input_file):
+        try:
+            from list_nets import net_clearance_map_by_id
+            net_clearances = net_clearance_map_by_id(
+                input_file, {nid: n.name for nid, n in pcb_data.nets.items()})
+            if net_clearances:
+                print(f"  Auto-read netclass clearances for "
+                      f"{len(net_clearances)} net(s) (cross-class max(A,B) "
+                      f"respected for plane taps).")
+        except Exception as _e:
+            print(f"  Warning: could not auto-read netclass clearances ({_e}).")
+            net_clearances = None
+    if net_clearances:
+        config.net_clearances = dict(net_clearances)
     coord = GridCoord(grid_step)
 
     # Create reusable router for via-to-pad routing
@@ -3171,6 +3201,7 @@ def create_plane(
                         power_nets=power_nets,
                         power_nets_widths=power_nets_widths,
                         disable_bga_zones=([] if no_bga_zone else None),
+                        net_clearances=net_clearances,  # #434 cross-class
                         return_results=True, pcb_data=pcb_data)
 
                     def _sd(_s):

@@ -424,11 +424,17 @@ def build_via_obstacle_map(
     # blocked and a new via could land within clearance of it. Group by actual
     # via size so each size gets its own keep-out disc.
     t0 = time.time()
-    centers_by_size: Dict[float, List[Tuple[int, int]]] = {}
+    # #434: foreign vias are priced at config.obstacle_clearance(net_id) --
+    # max(run clearance, their netclass clearance) -- so tap vias honor KiCad's
+    # pairwise max(classA, classB); same-net vias keep the run clearance.
+    # Group by (size, clearance); all-Default boards collapse to the old groups.
+    centers_by_size: Dict[Tuple[float, float], List[Tuple[int, int]]] = {}
     for via in pcb_data.vias:
-        centers_by_size.setdefault(via.size, []).append(coord.to_grid(via.x, via.y))
-    for vsize, via_centers in centers_by_size.items():
-        via_via_expansion_mm = vsize / 2 + config.via_size / 2 + config.clearance + grid_cushion
+        _clr = (config.clearance if via.net_id == exclude_net_id
+                else config.obstacle_clearance(via.net_id))
+        centers_by_size.setdefault((via.size, _clr), []).append(coord.to_grid(via.x, via.y))
+    for (vsize, _clr), via_centers in centers_by_size.items():
+        via_via_expansion_mm = vsize / 2 + config.via_size / 2 + _clr + grid_cushion
         circle_offsets = _precompute_circle_offsets((via_via_expansion_mm / config.grid_step) ** 2)
         _batch_block_circles_via(obstacles, via_centers, circle_offsets)
     if verbose:
@@ -445,8 +451,10 @@ def build_via_obstacle_map(
         if not seg.layer.endswith('.Cu'):
             continue
         # Use actual segment width for clearance calculation (not config.track_width)
-        # Include grid cushion for discretization
-        seg_expansion_mm = config.via_size / 2 + seg.width / 2 + config.clearance + grid_cushion
+        # Include grid cushion for discretization; price the segment's net at its
+        # netclass clearance (#434 cross-class).
+        seg_expansion_mm = (config.via_size / 2 + seg.width / 2
+                            + config.obstacle_clearance(seg.net_id) + grid_cushion)
         _add_segment_via_obstacle(obstacles, seg, coord, seg_expansion_mm)
         seg_count += 1
     if verbose:
@@ -530,8 +538,10 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
     gx, gy = coord.to_grid(pad.global_x, pad.global_y)
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
-    # Add half grid step buffer to account for grid quantization errors
-    clearance = config.clearance if clearance_override is None else clearance_override
+    # Add half grid step buffer to account for grid quantization errors.
+    # Foreign pads are priced at their net's netclass clearance (#434).
+    clearance = (config.obstacle_clearance(pad.net_id)
+                 if clearance_override is None else clearance_override)
     # Honor a per-pad local clearance override (fiducial keep-clear rings etc.)
     # unless an explicit same-net override was supplied.
     if clearance_override is None:
@@ -874,7 +884,8 @@ def build_routing_obstacle_map(
                     # keep-clear rings carry a clearance far larger than the
                     # board global), else copper routes within the pad's
                     # required clearance (no-net fiducial DRC, upduino #146).
-                    pad_clr = max(config.clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
+                    pad_clr = max(config.obstacle_clearance(net_id),  # #434 cross-class
+                                  getattr(pad, 'local_clearance', 0.0) or 0.0)
                     # Half-grid discretization cushion, matching this file's own
                     # via/segment stamps and build_base_obstacles (#173): cells
                     # are blocked by CENTER distance, so without the cushion a
@@ -923,7 +934,8 @@ def build_routing_obstacle_map(
         # The exact capsule keep-out measures from the real segment, so the blocked
         # halo matches the true clearance envelope without the grid-rounding that used
         # to leave connection traces within clearance of signal copper (#146/#173).
-        seg_expansion_mm = route_track_w / 2 + seg.width / 2 + config.clearance
+        seg_expansion_mm = (route_track_w / 2 + seg.width / 2
+                            + config.obstacle_clearance(seg.net_id))  # #434
         _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_mm)
         seg_count += 1
     if verbose:
@@ -941,7 +953,8 @@ def build_routing_obstacle_map(
         # so a sub-cell via offset can't let a 0.3 mm plane trace sit inside the
         # clearance envelope (#70). The grid-circle-on-quantised-cell form lost up
         # to ~half a cell on the via side.
-        r_mm = via.size / 2 + route_track_w / 2 + config.clearance + config.grid_step / 2
+        r_mm = (via.size / 2 + route_track_w / 2
+                + config.obstacle_clearance(via.net_id) + config.grid_step / 2)  # #434
         rg = coord.to_grid_dist_safe(r_mm)
         r_sq = r_mm * r_mm
         # Vectorized real-centre disc (bit-identical to the scalar double loop:

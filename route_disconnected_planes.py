@@ -359,6 +359,7 @@ def route_planes(
     no_bga_zone: bool = False,
     progress_callback=None,
     cancel_check=None,
+    net_clearances: Optional[dict] = None,
 ) -> Tuple[int, int]:
     """
     Route between disconnected regions in power plane zones.
@@ -457,6 +458,32 @@ def route_planes(
         grid_step=grid_step,
         board_edge_clearance=board_edge_clearance
     )
+
+    # Cross-class clearance (#434): the repair step's own copper (region joins,
+    # pad taps) and its ripped-blocker reconnects were priced at the uniform
+    # clearance only, so repair copper landed inside fat-class bands (cparti
+    # BTN4 reconnect 0.20-0.31mm from SMA-class copper whose class demands
+    # 0.35). Mirror batch_route's contract: auto-read the board's non-Default
+    # netclasses from the INPUT's sibling .kicad_pro when no map was passed
+    # (id-keyed; all-Default boards -> empty map -> inert), stamp them on the
+    # repair config, and forward the map to the reconnect sub-runs below --
+    # those route from the OUTPUT file, whose sibling .kicad_pro may not exist
+    # yet (same hazard as the #338 edge resolution).
+    if net_clearances is None and input_file and os.path.isfile(input_file):
+        try:
+            from list_nets import net_clearance_map_by_id
+            net_clearances = net_clearance_map_by_id(
+                input_file, {nid: n.name for nid, n in pcb_data.nets.items()})
+            if net_clearances:
+                print(f"Auto-read netclass clearances for "
+                      f"{len(net_clearances)} net(s) (cross-class max(A,B) "
+                      f"respected during plane repair).")
+        except Exception as _e:
+            print(f"Warning: could not auto-read netclass clearances ({_e}); "
+                  f"repairing at the uniform clearance.")
+            net_clearances = None
+    if net_clearances:
+        config.net_clearances = dict(net_clearances)
 
     # Auto-detect routing layers if not specified
     if routing_layers is None:
@@ -1135,6 +1162,7 @@ def route_planes(
                         power_nets=power_nets,
                         power_nets_widths=power_nets_widths,
                         disable_bga_zones=([] if no_bga_zone else None),
+                        net_clearances=net_clearances,
                         return_results=True, pcb_data=pcb_data)
                     def _sd(_s):
                         return {'start': (_s.start_x, _s.start_y),
@@ -1303,7 +1331,14 @@ def route_planes(
                     grid_step=grid_step, max_iterations=max_iterations,
                     power_nets=power_nets, power_nets_widths=power_nets_widths,
                     board_edge_clearance=_edge,
-                    disable_bga_zones=([] if no_bga_zone else None))
+                    disable_bga_zones=([] if no_bga_zone else None),
+                    # #434: OUTPUT_FILE's sibling .kicad_pro may not exist yet
+                    # (same hazard as the #338 edge resolution above), so
+                    # batch_route's own auto-read would find no netclasses and
+                    # the reconnect would route class-blind into fat-class
+                    # bands (cparti BTN4 vs the SMA 0.35 band). Forward the
+                    # map resolved from the ORIGINAL input's project.
+                    net_clearances=net_clearances)
                 LAST_RIPPED_RECONNECT = {'nets': _cnames,
                                          'successful': _ok, 'failed': _fail}
                 if _fail:
