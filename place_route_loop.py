@@ -64,13 +64,22 @@ def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str):
                   - summary.get('multipoint_pads_connected', 0))
     failures = len(summary.get('failed_single', [])) + mp_deficit
 
-    # Blocker nets from frontier diagnostics:  "  1. /MD1: 46 (31.7%) ..."
-    blockers = re.findall(r'^\s+\d+\.\s+(\S+?):\s+\d+\s+\(', log, re.M)
+    # Blocker nets from frontier diagnostics. Prefer the structured
+    # JSON_SUMMARY 'blockers' key (#409): the last-wins attribution of nets
+    # still failed at END of run, capped 10/net -- a narrower, more targeted
+    # move-candidate set. Fallback for older logs: scrape every transient
+    # "  1. /MD1: 46 (31.7%) ..." line in the whole log (includes blockers of
+    # nets that later routed and every N-retry re-analysis).
+    jb = summary.get('blockers')
+    if jb:
+        blockers = {b['net'] for e in jb for b in e.get('blocked_by', [])}
+    else:
+        blockers = set(re.findall(r'^\s+\d+\.\s+(\S+?):\s+\d+\s+\(', log, re.M))
 
     return {
         'failures': failures,
         'failed_nets': failed_nets,
-        'blockers': sorted(set(blockers)),
+        'blockers': sorted(blockers),
         'iterations': summary.get('total_iterations', 0),
         'vias': summary.get('total_vias', 0),
     }
