@@ -22,6 +22,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from typing import List, Optional, Tuple
 
 from kicad_parser import Segment as _Seg, Via as _Via
@@ -32,12 +33,94 @@ KICAD_CLI_CANDIDATES = [
     '/usr/lib/kicad/bin/kicad-cli',
 ]
 
+# Per-round kicad-cli DRC timeout (#420). Was 600s: some boards
+# (lily58: keyboard-shaped zones) made kicad-cli's DRC spend 10+ minutes in
+# pathological polygon triangulation (SHAPE_POLY_SET::Collide ->
+# cacheTriangulation, driven by the silk/copper-clearance providers), burning
+# the whole timeout and losing the oracle data. With the fast-connectivity
+# project below a normal DRC is seconds, so a genuinely stuck board is caught
+# far sooner and its remaining rounds are skipped.
+ORACLE_DRC_TIMEOUT = 240
+
+# realpath() of boards whose kicad-cli DRC blew ORACLE_DRC_TIMEOUT once. The
+# oracle is called once per plane-repair step, so remembering a slow board
+# stops it re-burning the timeout on every later step of the same run.
+_ORACLE_TIMED_OUT = set()
+
+# The oracle reads ONLY unconnected_items, which KiCad's connectivity engine
+# computes independently of the geometric DRC rule providers. Forcing every
+# such provider to "ignore" (#420) skips the expensive silk/copper-clearance
+# polygon triangulation while leaving the ratsnest (unconnected_items) intact.
+# Zone-fill geometry is unaffected -- only rule SEVERITIES change here, never
+# the clearance values or net classes that drive the fill. Empirically this
+# took a lily58 oracle DRC from 10+ min to ~6 s with an identical 13-item
+# unconnected report.
+_IGNORE_SEVERITIES = [
+    "clearance", "creepage", "hole_clearance", "edge_clearance",
+    "hole_near_hole", "hole_to_hole", "track_width", "annular_width",
+    "drill_out_of_range", "via_diameter", "padstack",
+    "microvia_drill_out_of_range", "courtyards_overlap", "malformed_courtyard",
+    "pth_inside_courtyard", "npth_inside_courtyard", "item_on_disabled_layer",
+    "invalid_outline", "duplicate_footprints", "missing_footprint",
+    "net_conflict", "unresolved_variable", "assertion_failure",
+    "copper_sliver", "silk_over_copper", "silk_overlap", "silk_edge_clearance",
+    "text_height", "text_thickness", "length_out_of_range",
+    "skew_out_of_range", "via_count_exceeded", "diff_pair_gap_out_of_range",
+    "diff_pair_uncoupled_length_too_long", "footprint_type_mismatch",
+    "through_hole_pad_without_hole", "extra_footprint", "solder_mask_bridge",
+    "silk_mask_clearance", "starved_thermal", "connection_width",
+    "zone_has_empty_net", "lib_footprint_issues", "lib_footprint_mismatch",
+    "footprint", "holes_co_located",
+]
+
 
 def find_kicad_cli() -> Optional[str]:
     for c in KICAD_CLI_CANDIDATES:
         if c and os.path.exists(c):
             return c
     return None
+
+
+def _fast_connectivity_project(board_file: str):
+    """Stage `board_file` in a temp dir beside a .kicad_pro whose DRC rule
+    severities are all 'ignore' except unconnected_items (#420), so kicad-cli
+    skips the pathological silk/copper-clearance polygon triangulation and
+    still reports the ratsnest opens the oracle consumes.
+
+    The staged project preserves the real board's design rules and net
+    classes (only severities are flipped), so `--refill-zones` produces the
+    same fill geometry -- the connectivity result is identical, just fast.
+    When the board has no sibling .kicad_pro yet (mid-chain, before the
+    project is written), a minimal ignore-only project is synthesized, which
+    matches kicad-cli's own default-rule fill it would have used anyway.
+
+    Returns (staged_board_path, tempdir) on success, or (board_file, None) if
+    staging fails (caller runs kicad-cli directly on the original board)."""
+    try:
+        sibling_pro = os.path.splitext(board_file)[0] + '.kicad_pro'
+        proj = {}
+        if os.path.exists(sibling_pro):
+            with open(sibling_pro, 'r', encoding='utf-8') as f:
+                proj = json.load(f)
+        ds = proj.setdefault('board', {}).setdefault('design_settings', {})
+        sev = dict(ds.get('rule_severities', {}))
+        for k in _IGNORE_SEVERITIES:
+            sev[k] = 'ignore'
+        sev['unconnected_items'] = 'error'
+        ds['rule_severities'] = sev
+        if 'meta' not in proj:
+            proj['meta'] = {'filename': 'oracle.kicad_pro', 'version': 1}
+
+        tmpdir = tempfile.mkdtemp(prefix='oracle_drc_')
+        stem = os.path.splitext(os.path.basename(board_file))[0]
+        staged_pcb = os.path.join(tmpdir, stem + '.kicad_pcb')
+        staged_pro = os.path.join(tmpdir, stem + '.kicad_pro')
+        shutil.copyfile(board_file, staged_pcb)
+        with open(staged_pro, 'w', encoding='utf-8') as f:
+            json.dump(proj, f, indent=2)
+        return staged_pcb, tmpdir
+    except Exception:
+        return board_file, None
 
 
 # Greedy: a net name may itself contain ']' (the old lazy match truncated
@@ -64,20 +147,35 @@ def _parse_item(item: dict) -> Optional[Tuple[str, float, float, Optional[str]]]
             lm.group(1) if lm else None, kind)
 
 
-def kicad_unconnected(board_file: str, kicad_cli: str) -> Optional[List[Tuple]]:
+def kicad_unconnected(board_file: str, kicad_cli: str,
+                      timeout: int = ORACLE_DRC_TIMEOUT) -> Optional[List[Tuple]]:
     """[(net, (x,y,layer|None), (x,y,layer|None)), ...] per kicad-cli DRC
-    unconnected item, after a zone refill. None on tool failure."""
+    unconnected item, after a zone refill. None on tool failure.
+
+    Runs against a fast-connectivity staged project (#420) so the DRC skips
+    the expensive geometric providers and returns in seconds; a board that
+    still blows `timeout` is remembered in _ORACLE_TIMED_OUT so later steps
+    skip it instead of re-burning the wall time."""
     with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
         out = f.name
+    staged, tmpdir = _fast_connectivity_project(board_file)
+    t0 = time.monotonic()
     try:
         r = subprocess.run(
-            [kicad_cli, 'pcb', 'drc', board_file, '--format', 'json',
+            [kicad_cli, 'pcb', 'drc', staged, '--format', 'json',
              '-o', out, '--severity-all', '--refill-zones'],
-            capture_output=True, text=True, timeout=600)
+            capture_output=True, text=True, timeout=timeout)
         if r.returncode not in (0, 5):  # 5 = violations exist, still wrote json
             return None
         with open(out) as f:
             data = json.load(f)
+    except subprocess.TimeoutExpired:
+        dt = time.monotonic() - t0
+        _ORACLE_TIMED_OUT.add(os.path.realpath(board_file))
+        print(f"  KiCad-oracle recheck: WARNING kicad-cli DRC timed out after "
+              f"{dt:.0f}s (>{timeout}s) on {os.path.basename(board_file)}; "
+              f"skipping the oracle for this board")
+        return None
     except Exception:
         return None
     finally:
@@ -85,6 +183,12 @@ def kicad_unconnected(board_file: str, kicad_cli: str) -> Optional[List[Tuple]]:
             os.unlink(out)
         except OSError:
             pass
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+    dt = time.monotonic() - t0
+    if dt > 60:
+        print(f"  KiCad-oracle recheck: WARNING kicad-cli DRC took {dt:.0f}s "
+              f"on {os.path.basename(board_file)}")
     links = []
     for u in data.get('unconnected_items', []):
         items = u.get('items', [])
@@ -451,6 +555,15 @@ def oracle_reconnect(board_file: str, net_names, config,
     kicad_cli = find_kicad_cli()
     if kicad_cli is None:
         print("  KiCad-oracle recheck: kicad-cli not found, skipping")
+        return {'available': False, 'rounds': 0, 'links_routed': 0,
+                'links_failed': 0, 'remaining': -1}
+
+    # A board whose DRC already blew ORACLE_DRC_TIMEOUT once (#420) will do it
+    # again on every later plane-repair step of this run -- skip it outright
+    # rather than re-burn minutes of wall time for the same lost result.
+    if os.path.realpath(board_file) in _ORACLE_TIMED_OUT:
+        print("  KiCad-oracle recheck: kicad-cli DRC previously timed out on "
+              "this board, skipping")
         return {'available': False, 'rounds': 0, 'links_routed': 0,
                 'links_failed': 0, 'remaining': -1}
 
