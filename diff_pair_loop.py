@@ -28,7 +28,12 @@ from diff_pair_multipoint import (
 from routing_context import (build_diff_pair_obstacles, build_diff_pair_leg_obstacles,
                              restore_ripped_net)
 from diff_pair_custody import (classify_diff_pair_failure, record_casualty,
-                               record_pair_diag, blocker_names)
+                               record_pair_diag,
+                               blocker_names as custody_blocker_names)
+# NOTE: imported under an alias -- route_diff_pairs below has a pre-existing
+# LOCAL variable also called ``blocker_names`` (the retry-print list), which
+# would otherwise shadow the import for the whole function scope and make the
+# early diagnostics call an UnboundLocalError (butterstick set2 replay).
 from terminal_colors import RED, GREEN, RESET
 
 
@@ -677,8 +682,8 @@ def route_diff_pairs(
                         # Committed copper blocks the path: congestion, not a
                         # router deficiency (diagnostics refinement).
                         fail_reason = 'congestion'
-                        fail_blockers = blocker_names(rippable_blockers,
-                                                      diff_pair_by_net_id)
+                        fail_blockers = custody_blocker_names(rippable_blockers,
+                                                              diff_pair_by_net_id)
 
                     # Progressive rip-up: try N=1, then N=2, etc
                     current_canonical = pair.p_net_id
