@@ -23,6 +23,14 @@ Known-benign asymmetries filtered out:
   * check_drc warnings (same-net copper classes + sub-coincidence gaps) --
     KiCad permits same-net overlap outright.
 
+Graded SEPARATELY (#406, never matched against check_drc): KiCad's
+`connection_width` min-copper-web class. The checker is OFF by default
+(min_connection 0, warning severity), so _staged_copy stages the constraint
+(author-set min_connection kept, else the project's min_track_width) and
+lifts the severity; the count is reported as kicad_connection_width (None =
+not graded -- no recorded floor). check_drc has no counterpart by design:
+the flagged artifact lives in KiCad's own float-borderline web measurement.
+
 Usage:
   python3 tests/stress/kicad_drc_compare.py <board.kicad_pcb> [...]
   python3 tests/stress/kicad_drc_compare.py --wave <wave_dir>   # summary.json
@@ -32,6 +40,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -39,8 +48,10 @@ import tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
 
-KICAD_CLI = os.environ.get(
-    "KICAD_CLI", "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli")
+# Env var wins; else PATH (Windows/Linux installs put kicad-cli there, the
+# kicad_oracle.py idiom); else the macOS app-bundle default.
+KICAD_CLI = (os.environ.get("KICAD_CLI") or shutil.which("kicad-cli")
+             or "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli")
 
 # kicad violation types that correspond to copper-clearance/short classes
 # check_drc grades. Everything else (annular_width, courtyard, silk, thermal,
@@ -52,12 +63,20 @@ KICAD_COPPER_TYPES = {
     "copper_edge_clearance",
 }
 
+# Min-copper-web class (#406): graded SEPARATELY from the copper-clearance
+# classes -- check_drc has no counterpart (the artifact lives in KiCad's own
+# float-borderline web measurement, which a from-scratch geometric check
+# cannot reproduce), so these items never enter the match and can never
+# pollute kicad_only (the check_drc-false-negative alarm channel).
+KICAD_WEB_TYPES = {"connection_width"}
+
 MATCH_RADIUS_MM = 0.5
 
 
 def run_kicad_drc(board: str):
     """Run kicad-cli DRC, return (violations, error) with items filtered to
-    copper classes. Each -> {type, nets:frozenset, pos:(x,y), desc}."""
+    copper + web classes. Each -> {type, nets:frozenset, pos:(x,y), desc,
+    kinds} (kinds = the offending item kinds, e.g. ('track', 'zone'))."""
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
         out_json = f.name
     try:
@@ -78,22 +97,26 @@ def run_kicad_drc(board: str):
     out = []
     for v in data.get("violations", []):
         vtype = v.get("type", "")
-        if vtype not in KICAD_COPPER_TYPES:
+        if vtype not in KICAD_COPPER_TYPES and vtype not in KICAD_WEB_TYPES:
             continue
         nets = set()
         pos = None
+        kinds = set()
         for item in v.get("items", []):
             d = item.get("description", "")
             # descriptions look like: "Track [/NET] on F.Cu, length ..." or
             # "Via [/NET] on F.Cu - B.Cu" or "Pad 3 [/NET] of U1 on F.Cu"
             if "[" in d and "]" in d:
                 nets.add(d[d.index("[") + 1:d.index("]")])
+            if d:
+                kinds.add(d.split()[0].lower())
             p = item.get("pos")
             if pos is None and p:
                 pos = (float(p.get("x", 0.0)), float(p.get("y", 0.0)))
         out.append({"type": vtype, "nets": frozenset(nets),
                     "pos": pos or (0.0, 0.0),
-                    "desc": v.get("description", "")})
+                    "desc": v.get("description", ""),
+                    "kinds": tuple(sorted(kinds))})
     return out, None
 
 
@@ -388,8 +411,30 @@ def _drop_net_tie_accepted(items, tie_pairs):
     return kept, dropped
 
 
+def _web_min_connection(cfg: dict):
+    """The min-copper-web width (mm) a board should be graded at (#406), from
+    its .kicad_pro: an author-set `min_connection` is a real design rule and
+    wins; otherwise the project's `min_track_width` (the post-route ledger
+    floors it at the smallest object on the board, so the graded condition is
+    "a copper web narrower than the narrowest intentional track"). None when
+    neither is recorded -- connection_width is then NOT graded (KiCad's
+    default min_connection is 0 = checker off), and the caller reports None
+    rather than a fake clean 0."""
+    try:
+        rules = cfg.get("board", {}).get("design_settings", {}).get("rules", {})
+        for key in ("min_connection", "min_track_width"):
+            try:
+                v = float(rules.get(key))
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                return v
+    except AttributeError:
+        pass
+    return None
+
+
 def _staged_copy(board: str, clearance: float):
-    clearance = float(clearance)
     """Copy board + sibling .kicad_pro into a temp dir with the DEFAULT
     net-class clearance forced to `clearance`, so KiCad grades at the SAME
     constraint check_drc uses (the routed clearance) instead of the board's
@@ -403,6 +448,7 @@ def _staged_copy(board: str, clearance: float):
     classes down (the old behaviour) would grade that copper LOOSER than it was
     routed and hide genuine class-clearance shortfalls."""
     import shutil
+    clearance = float(clearance)
     d = tempfile.mkdtemp(prefix="kdrc_")
     b2 = os.path.join(d, os.path.basename(board))
     shutil.copy(board, b2)
@@ -448,6 +494,19 @@ def _staged_copy(board: str, clearance: float):
     sev = cfg["board"]["design_settings"].setdefault("rule_severities", {})
     for k in ("silk_over_copper", "silk_overlap", "silk_edge_clearance"):
         sev[k] = "ignore"
+    # Min copper web (#406): KiCad's connection_width checker is OFF by default
+    # (min_connection 0) and warning-severity, so routed-copper micro-webs were
+    # invisible to every automated consumer in the repo -- the corpus gave NO
+    # signal on the class. Same config-artifact family as the #338 edge rule:
+    # stage the constraint (author-set min_connection kept, else the project's
+    # min_track_width; see _web_min_connection) and lift the severity to error
+    # so the --severity-error run reports it. Items are graded SEPARATELY from
+    # the copper-clearance classes (KICAD_WEB_TYPES) -- check_drc has no
+    # counterpart to match against.
+    web_min = _web_min_connection(cfg)
+    if web_min is not None:
+        rules["min_connection"] = web_min
+        sev["connection_width"] = "error"
     json.dump(cfg, open(pro2, "w"))
     return d, b2
 
@@ -542,11 +601,32 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     kicad, err = kicad_items_for(board, clearance)
     if err:
         return {"board": label, "skip": err}
-    pre = 0
+    # Min copper web (#406): split the web class out BEFORE baseline
+    # subtraction and matching -- the positional subtraction pass is
+    # type-blind, so pooling would let a baseline clearance item consume a
+    # final web item (and vice versa); and check_drc has no web counterpart,
+    # so matching would orphan every item into kicad_only (the false-negative
+    # alarm channel). web_min mirrors the _staged_copy condition: None =
+    # connection_width was NOT graded (no staged run / no recorded floor),
+    # reported as None rather than a fake clean 0.
+    web_min = None
+    if clearance:
+        pro = os.path.splitext(board)[0] + ".kicad_pro"
+        try:
+            web_min = _web_min_connection(
+                json.load(open(pro)) if os.path.exists(pro) else {})
+        except Exception:  # noqa: BLE001 -- unreadable project = not graded
+            web_min = None
+    web_items = [v for v in kicad if v["type"] in KICAD_WEB_TYPES]
+    kicad = [v for v in kicad if v["type"] not in KICAD_WEB_TYPES]
+    pre = web_pre = 0
     if baseline and os.path.exists(baseline):
         base_items, berr = kicad_items_for(baseline, clearance)
         if not berr and base_items:
+            base_web = [v for v in base_items if v["type"] in KICAD_WEB_TYPES]
+            base_items = [v for v in base_items if v["type"] not in KICAD_WEB_TYPES]
             kicad, pre = _subtract_baseline(kicad, base_items)
+            web_items, web_pre = _subtract_baseline(web_items, base_web)
     cd = run_check_drc(board, clearance, netclasses=not bool(clearance))
     # Symmetric baseline subtraction (#405): drop the input's own check_drc
     # items too (e.g. vfo_ctrl's 23 FG chassis-ground segments already <edge on
@@ -607,6 +687,12 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
             "pairs_both": len(kpairs & cpairs),
             "pairs_kicad_only": len(pk_only), "pairs_checkdrc_only": len(pc_only),
             "verdict": verdict,
+            # #406 min copper web: None = not graded (no recorded floor).
+            "kicad_connection_width": (len(web_items) if web_min is not None
+                                       else None),
+            "connection_width_min": web_min,
+            "connection_width_preexisting": web_pre,
+            "connection_width_items": web_items,
             "kicad_only_items": kicad_only, "checkdrc_only_items": cd_only}
 
 
@@ -614,7 +700,8 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
 _SUMMARY_KEYS = ("board", "kicad", "kicad_preexisting", "check_drc",
                  "kicad_intentional_edge", "checkdrc_intentional_edge",
                  "matched", "kicad_only", "checkdrc_only",
-                 "pairs_kicad_only", "pairs_checkdrc_only")
+                 "pairs_kicad_only", "pairs_checkdrc_only",
+                 "kicad_connection_width", "connection_width_min")
 
 
 def compare_board(board: str, label: str = None, clearance: float = None,
@@ -634,14 +721,24 @@ def compare_board(board: str, label: str = None, clearance: float = None,
     ie = data.get("kicad_intentional_edge", 0) or data.get("checkdrc_intentional_edge", 0)
     ie_note = (f" [#408: -{data.get('kicad_intentional_edge', 0)} kicad / "
                f"-{data.get('checkdrc_intentional_edge', 0)} check_drc intentional edge]") if ie else ""
+    # #406 min copper web: separate class, not matched against check_drc.
+    cw = data.get("kicad_connection_width")
+    cw_min = data.get("connection_width_min")
+    cw_pre = data.get("connection_width_preexisting", 0)
+    cw_pre_note = f" (+{cw_pre} pre-existing, subtracted)" if cw_pre else ""
+    cw_note = (f" connwidth={cw}@<{cw_min}mm{cw_pre_note}" if cw is not None
+               else " connwidth=not-graded")
     print(f"{label}: kicad={data['kicad']}{pre_note} check_drc={data['check_drc']}{cd_pre_note} "
           f"matched={data['matched']} kicad_only={data['kicad_only']} checkdrc_only={data['checkdrc_only']}{ie_note} | "
           f"net-pairs: both={data['pairs_both']} kicad_only={data['pairs_kicad_only']} "
-          f"checkdrc_only={data['pairs_checkdrc_only']}  {data['verdict']}")
+          f"checkdrc_only={data['pairs_checkdrc_only']} |{cw_note}  {data['verdict']}")
     for kv in data["kicad_only_items"]:
         print(f"    KICAD-ONLY  {kv['type']:16s} {sorted(kv['nets'])} @ {kv['pos']}  {kv.get('desc','')[:60]}")
     for cv in data["checkdrc_only_items"]:
         print(f"    CHECKDRC-ONLY {cv['type']:16s} {sorted(cv['nets'])} @ {cv['pos']}")
+    for wv in data.get("connection_width_items", []):
+        print(f"    CONNWIDTH   {'/'.join(wv.get('kinds', ())) or '?':16s} "
+              f"{sorted(wv['nets'])} @ {wv['pos']}  {wv.get('desc', '')[:60]}")
     return {k: data[k] for k in _SUMMARY_KEYS}
 
 
@@ -692,6 +789,11 @@ def main():
           f"{len(div)} diverged "
           f"(kicad_only total {sum(r['kicad_only'] for r in rows)}, "
           f"checkdrc_only total {sum(r['checkdrc_only'] for r in rows)})")
+    # #406 min copper web -- graded on boards with a recorded floor only.
+    cw_rows = [r for r in rows if r.get("kicad_connection_width") is not None]
+    print(f"connection_width: {sum(r['kicad_connection_width'] for r in cw_rows)} "
+          f"item(s) on {len(cw_rows)} graded board(s) "
+          f"({len(rows) - len(cw_rows)} not graded: no recorded min floor)")
     return 1 if div else 0
 
 

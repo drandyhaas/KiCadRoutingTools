@@ -206,7 +206,8 @@ def _kicad_grade(pcb, clearance, baseline=None, intentional_edge_band_nets=None)
     edge-clearance violation on those nets is accepted-by-design and dropped from
     both engines (net-scoped), reported as kicad_intentional_edge /
     checkdrc_intentional_edge."""
-    _none = {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None}
+    _none = {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None,
+             "kicad_connection_width": None}
     try:
         sys.path.insert(0, str(REPO / "tests" / "stress"))
         from kicad_drc_compare import KICAD_CLI, compare_board_data
@@ -220,7 +221,10 @@ def _kicad_grade(pcb, clearance, baseline=None, intentional_edge_band_nets=None)
                 "kicad_only": data["kicad_only"], "checkdrc_only": data["checkdrc_only"],
                 "kicad_matched": data["matched"],
                 "kicad_intentional_edge": data.get("kicad_intentional_edge", 0),
-                "checkdrc_intentional_edge": data.get("checkdrc_intentional_edge", 0)}
+                "checkdrc_intentional_edge": data.get("checkdrc_intentional_edge", 0),
+                # #406 min copper web (KiCad-only class; None = not graded).
+                "kicad_connection_width": data.get("kicad_connection_width"),
+                "connection_width_min": data.get("connection_width_min")}
     except Exception:
         return _none
 
@@ -353,7 +357,8 @@ def do_board(set_dir, out_dir, label, board):
     dps = f"{res['diff_pairs_coupled']}/{res['diff_pairs_total']}" if res['diff_pairs_total'] else "-"
     fp_note = f" fp={res['peak_footprint_mb']}MB" if res.get("peak_footprint_mb") else ""
     print(f"[{label}] {board}: chain={'ok' if done else 'BROKEN'} "
-          f"drc={res['drc']} kdrc={res.get('kicad_drc')} conn={res['conn']} compl={res['completion_pct']}% "
+          f"drc={res['drc']} kdrc={res.get('kicad_drc')} cw={res.get('kicad_connection_width')} "
+          f"conn={res['conn']} compl={res['completion_pct']}% "
           f"dpair={dps} t={res['total_seconds']}s peak={res['peak_rss_mb']}MB{fp_note} final={res['final']}", flush=True)
     return res
 
@@ -466,10 +471,14 @@ def compare(old_json, new_json):
     def _drc(r):
         v = r.get("drc_real")
         return v if v is not None else r.get("drc")
-    print(f"{'board':14} {'drc o->n':>11} {'incompl o->n':>13} {'compl% o->n':>13} "
+    # #406 min copper web (kicad-cli class, graded when a floor is recorded).
+    # None (not graded / pre-#406 summary / no kicad-cli) contributes no delta.
+    def _cw(r):
+        return r.get("kicad_connection_width")
+    print(f"{'board':14} {'drc o->n':>11} {'connw o->n':>12} {'incompl o->n':>13} {'compl% o->n':>13} "
           f"{'dpair o->n':>13} {'time(s) o->n':>16} {'peakMB o->n':>15}  note")
-    print("-" * 128)
-    drc_delta = incompl_delta = dpair_delta = 0
+    print("-" * 140)
+    drc_delta = incompl_delta = dpair_delta = cw_delta = 0
     t_old = t_new = 0.0
     time_old, time_new = {}, {}   # per-tool wall-clock summed across boards (speedup view)
     pk_old, pk_new = {}, {}       # per-tool peak RSS = max across boards (memory view)
@@ -478,14 +487,16 @@ def compare(old_json, new_json):
         oc = o and o["chain_complete"]
         nc = n and n["chain_complete"]
         if not (oc and nc):
-            print(f"{b:14} {'-':>11} {'-':>13} {'-':>13} {'-':>13} {'-':>16} {'-':>15}  chain incomplete "
+            print(f"{b:14} {'-':>11} {'-':>12} {'-':>13} {'-':>13} {'-':>13} {'-':>16} {'-':>15}  chain incomplete "
                   f"(old={'ok' if oc else 'broken'}, new={'ok' if nc else 'broken'}) -- excluded")
             continue
         oi, ni = _incompl(o), _incompl(n)
         od, nd = _drc(o), _drc(n)
         dd = (nd - od) if (od is not None and nd is not None) else 0
         cd = (ni - oi) if (oi is not None and ni is not None) else 0  # incomplete-net delta
-        drc_delta += dd; incompl_delta += cd
+        ocw, ncw = _cw(o), _cw(n)
+        cwd = (ncw - ocw) if (ocw is not None and ncw is not None) else 0  # web delta (#406)
+        drc_delta += dd; incompl_delta += cd; cw_delta += cwd
         # coupled diff-pair count (fewer coupled = quality regression)
         ocp, ncp = o.get("diff_pairs_coupled"), n.get("diff_pairs_coupled")
         odt, ndt = o.get("diff_pairs_total"), n.get("diff_pairs_total")
@@ -509,20 +520,23 @@ def compare(old_json, new_json):
         pfo, pfn = o.get("peak_footprint_mb"), n.get("peak_footprint_mb")
         fp_col = f"  fp {_fmt(pfo):>6} -> {_fmt(pfn):<6}" if (pfo or pfn) else ""
         flag = ""
-        if dd > 0 or cd > 0 or dpd < 0:    flag = "  <-- REGRESSION"
-        elif dd < 0 or cd < 0 or dpd > 0:  flag = "  improved"
+        if dd > 0 or cd > 0 or dpd < 0 or cwd > 0:    flag = "  <-- REGRESSION"
+        elif dd < 0 or cd < 0 or dpd > 0 or cwd < 0:  flag = "  improved"
         # #408: annotate when accepted-by-design edge items were subtracted, so a
         # drop from raw drc to drc_real is visible rather than looking like noise.
         nie = n.get("drc_intentional_edge") or 0
         if nie:
             flag += f"  (#408 -{nie} edge accepted)"
         speed = f"  ({to/tn:.2f}x)" if (to and tn) else ""
-        print(f"{b:14} {_fmt(od):>4} -> {_fmt(nd):<4} {_fmt(oi):>5} -> {_fmt(ni):<5} "
+        print(f"{b:14} {_fmt(od):>4} -> {_fmt(nd):<4} {_fmt(ocw):>4} -> {_fmt(ncw):<4} "
+              f"{_fmt(oi):>5} -> {_fmt(ni):<5} "
               f"{_fmt(op):>5} -> {_fmt(npc):<5} {dp_o:>5} -> {dp_n:<5} "
               f"{_fmt(to):>6} -> {_fmt(tn):<6}{speed:>9} {_fmt(po):>6} -> {_fmt(pn):<6}{fp_col}{flag}")
-    print("-" * 128)
-    verdict = "REGRESSION" if (drc_delta > 0 or incompl_delta > 0 or dpair_delta < 0) else "no regression"
-    print(f"net delta: drc {drc_delta:+d}, incomplete nets {incompl_delta:+d} "
+    print("-" * 140)
+    verdict = ("REGRESSION" if (drc_delta > 0 or incompl_delta > 0
+                                or dpair_delta < 0 or cw_delta > 0) else "no regression")
+    print(f"net delta: drc {drc_delta:+d}, connection_width {cw_delta:+d} (#406), "
+          f"incomplete nets {incompl_delta:+d} "
           f"(unrouted + connectivity-issue), coupled diff-pairs {dpair_delta:+d}"
           f"  ==>  {verdict}")
     if t_old and t_new:
@@ -538,7 +552,8 @@ def compare(old_json, new_json):
     else:
         print("(timing/peak not available in one/both summaries -- re-run waves with the "
               "current ab_replay_grade to capture per-step timing + peak memory)")
-    return drc_delta <= 0 and incompl_delta <= 0 and dpair_delta >= 0
+    return (drc_delta <= 0 and incompl_delta <= 0 and dpair_delta >= 0
+            and cw_delta <= 0)
 
 
 def main():

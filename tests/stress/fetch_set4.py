@@ -35,7 +35,7 @@ def main():
             print(f"  FAIL {b['repo']}  <- {b['raw_url']}")
             continue
         ok += 1
-        print(f"  OK  {b['repo']:42} v{b['version']:<9} {dest.stat().st_size // 1024}KB")
+        print(f"  OK  {b['repo']:42} v{b.get('version', '?'):<9} {dest.stat().st_size // 1024}KB")
     print(f"\n{ok}/{len(boards)} set-4 sources -> {out_dir}")
     return 0 if ok == len(boards) else 1
 
