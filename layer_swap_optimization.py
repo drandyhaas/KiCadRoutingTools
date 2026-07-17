@@ -1626,6 +1626,69 @@ def _stub_free_end_is_open(pcb_data: PCBData, stub, tolerance: float,
     return True
 
 
+def _classify_multipoint_endpoints(
+    pcb_data: PCBData,
+    config: GridRouteConfig,
+    net_id: int,
+    endpoints: List[Tuple],
+    connected_pads: set,
+) -> Optional[List[Dict]]:
+    """Classify a multi-point net's endpoints for layer-swap planning (#265).
+
+    Shared by the common-layer collapse and the per-cluster fallback. For each
+    endpoint returns a dict:
+      'ok'   : None  -> compatible with EVERY layer without moving (bare
+               through-hole / via'd pad); or a set of layer names the endpoint
+               already lives on with no move (a stub's current layer, or a bare
+               SMD pad's copper layers).
+      'stub' : a StubInfo when the endpoint is a genuinely dangling, fully
+               walked fanout stub that a validated switch may relayer; else None.
+      'cur'  : the endpoint's current layer name.
+
+    Returns None when any endpoint's layer index is out of range (caller aborts).
+    `endpoints` is get_multipoint_net_pads() output:
+    [(gx, gy, layer_idx, orig_x, orig_y, endpoint_obj), ...].
+    """
+    from net_queries import expand_pad_layers
+    from kicad_parser import pad_is_plated_through
+
+    tol = STUB_POSITION_TOLERANCE
+
+    def _has_via_at(px, py):
+        return any(v.net_id == net_id and abs(v.x - px) < tol and abs(v.y - py) < tol
+                   for v in pcb_data.vias)
+
+    entries = []
+    for gx, gy, layer_idx, ox, oy, obj in endpoints:
+        if layer_idx >= len(config.layers):
+            return None
+        layer_name = config.layers[layer_idx]
+        stub = get_stub_info(pcb_data, net_id, ox, oy, layer_name)
+        if stub is not None and stub.segments:
+            movable = _stub_free_end_is_open(pcb_data, stub, tol, connected_pads)
+            if movable:
+                # apply_stub_layer_switch moves the walked chain (plus
+                # pad-touching segments); if the free-end walk did not cover
+                # the group's whole same-layer component (T-branch, tolerance
+                # jump), moving the subset would sever the group mid-trace.
+                comp = connected_stub_segments_on_layer(
+                    pcb_data, net_id, stub.layer, stub.segments)
+                if len(comp) != len(stub.segments):
+                    movable = False
+            entries.append({'ok': {layer_name},
+                            'stub': stub if movable else None,
+                            'cur': layer_name})
+        else:
+            # Bare endpoint: a pad (or free-end position) with no copper here.
+            if pad_is_plated_through(obj) or _has_via_at(ox, oy):
+                entries.append({'ok': None, 'stub': None, 'cur': layer_name})  # all layers
+            else:
+                fixed = set(expand_pad_layers(getattr(obj, 'layers', None) or [],
+                                              config.layers)) or {layer_name}
+                entries.append({'ok': fixed, 'stub': None, 'cur': layer_name})
+    return entries
+
+
 def _collapse_multipoint_net_to_common_layer(
     pcb_data: PCBData,
     config: GridRouteConfig,
@@ -1649,7 +1712,10 @@ def _collapse_multipoint_net_to_common_layer(
     pads are fixed to their copper layers, stubs count as movable only when
     their free end is a genuinely dangling fanout stub — and swap all
     off-layer movable stubs onto it, so the incremental routing needs no
-    layer-change vias. Mixed-layer (per-cluster) assignment is a later pass.
+    layer-change vias. When no single common layer is feasible/validated this
+    returns -1 and the caller falls back to a per-cluster assignment
+    (_assign_multipoint_net_per_cluster) that minimises the number of distinct
+    layers instead of forcing one.
 
     `endpoints` is get_multipoint_net_pads() output:
     [(gx, gy, layer_idx, orig_x, orig_y, endpoint_obj), ...].
@@ -1657,43 +1723,10 @@ def _collapse_multipoint_net_to_common_layer(
     Returns: number of stubs moved (> 0 = applied), 0 = a common layer already
     exists with nothing to move, -1 = no feasible/validated common layer.
     """
-    from net_queries import expand_pad_layers
-    from kicad_parser import pad_is_plated_through
-
-    tol = STUB_POSITION_TOLERANCE
-
-    def _has_via_at(px, py):
-        return any(v.net_id == net_id and abs(v.x - px) < tol and abs(v.y - py) < tol
-                   for v in pcb_data.vias)
-
-    # Classify each endpoint: ok_layers (None = compatible with every layer
-    # without moving anything), plus a StubInfo when the endpoint is movable.
-    entries = []
-    for gx, gy, layer_idx, ox, oy, obj in endpoints:
-        if layer_idx >= len(config.layers):
-            return -1
-        layer_name = config.layers[layer_idx]
-        stub = get_stub_info(pcb_data, net_id, ox, oy, layer_name)
-        if stub is not None and stub.segments:
-            movable = _stub_free_end_is_open(pcb_data, stub, tol, connected_pads)
-            if movable:
-                # apply_stub_layer_switch moves the walked chain (plus
-                # pad-touching segments); if the free-end walk did not cover
-                # the group's whole same-layer component (T-branch, tolerance
-                # jump), moving the subset would sever the group mid-trace.
-                comp = connected_stub_segments_on_layer(
-                    pcb_data, net_id, stub.layer, stub.segments)
-                if len(comp) != len(stub.segments):
-                    movable = False
-            entries.append({'ok': {layer_name}, 'stub': stub if movable else None})
-        else:
-            # Bare endpoint: a pad (or free-end position) with no copper here.
-            if pad_is_plated_through(obj) or _has_via_at(ox, oy):
-                entries.append({'ok': None, 'stub': None})  # reaches all layers
-            else:
-                fixed = set(expand_pad_layers(getattr(obj, 'layers', None) or [],
-                                              config.layers)) or {layer_name}
-                entries.append({'ok': fixed, 'stub': None})
+    entries = _classify_multipoint_endpoints(
+        pcb_data, config, net_id, endpoints, connected_pads)
+    if entries is None:
+        return -1
 
     # Rank candidate destination layers: fewest new pad vias, then fewest
     # moved stubs, then stack order. A zero-move candidate means some layer
@@ -1759,6 +1792,182 @@ def _collapse_multipoint_net_to_common_layer(
         return len(to_move)
 
     return -1
+
+
+def _assign_multipoint_net_per_cluster(
+    pcb_data: PCBData,
+    config: GridRouteConfig,
+    net_name: str,
+    net_id: int,
+    endpoints: List[Tuple],
+    can_swap_to_top_layer: bool,
+    combined_stubs_by_layer: Dict,
+    all_segment_modifications: List,
+    all_swap_vias: List,
+    all_swap_segments: Optional[List],
+    connected_pads: set,
+    verbose: bool = False
+) -> int:
+    """Per-cluster layer assignment fallback for a multi-point net (issue #265).
+
+    Runs only after _collapse_multipoint_net_to_common_layer returns -1 (no
+    single layer serves every endpoint). Instead of forcing one common layer,
+    partition the endpoints onto the FEWEST distinct layers (a greedy set
+    cover), so the incremental multi-point router needs as few layer-change
+    vias as possible, then relayer only the stubs whose assigned layer differs
+    from their current one — each through apply_stub_layer_switch and the same
+    validators the common-layer path uses. A stub whose validated switch fails
+    is left on its current layer (its cluster just stays split; never forced).
+
+    Returns: number of stubs moved (> 0 = applied), 0 = a valid multi-layer
+    assignment needs no moves (net naturally spans layers), -1 = nothing done
+    (no moves were feasible/validated, board unchanged).
+    """
+    entries = _classify_multipoint_endpoints(
+        pcb_data, config, net_id, endpoints, connected_pads)
+    if entries is None:
+        return -1
+    n = len(entries)
+    if n == 0:
+        return -1
+
+    def _placement(entry, L):
+        """'free' (already there / no move), 'move' (needs validated switch),
+        or None (endpoint cannot live on L)."""
+        if entry['ok'] is None or L in entry['ok']:
+            return 'free'
+        if entry['stub'] is not None:
+            if L == 'F.Cu' and not can_swap_to_top_layer:
+                return None
+            return 'move'
+        return None
+
+    # --- Greedy set cover: pick the fewest layers that cover every endpoint.
+    # At each step take the layer feasible for the most still-uncovered
+    # endpoints; deterministic tie-break = lowest layer index (config order).
+    uncovered = set(range(n))
+    chosen: List[str] = []
+    while uncovered:
+        best_L, best_count = None, 0
+        for L in config.layers:
+            cnt = sum(1 for i in uncovered if _placement(entries[i], L) is not None)
+            if cnt > best_count:
+                best_count, best_L = cnt, L
+        if best_L is None or best_count == 0:
+            # Some endpoint is feasible on no layer at all -- cannot happen
+            # (every endpoint is at least 'free' on its own current layer),
+            # but guard defensively rather than loop forever.
+            return -1
+        chosen.append(best_L)
+        uncovered = {i for i in uncovered if _placement(entries[i], best_L) is None}
+
+    if len(chosen) <= 1:
+        # A single layer covered everything -- the common-layer path already
+        # tried (and failed) this; nothing new to attempt here.
+        return -1
+
+    chosen_by_index = [L for L in config.layers if L in chosen]
+
+    # --- Assignment: keep every endpoint on a chosen layer it already lives on
+    # (prefer its current layer), moving a stub only when none of the chosen
+    # layers is free for it. Immovable endpoints forced a layer into `chosen`,
+    # so they always land 'free'.
+    assign: List[Optional[str]] = [None] * n
+    for i, e in enumerate(entries):
+        if e['cur'] in chosen and _placement(e, e['cur']) == 'free':
+            assign[i] = e['cur']
+    for i, e in enumerate(entries):
+        if assign[i] is not None:
+            continue
+        free_here = [L for L in chosen_by_index if _placement(e, L) == 'free']
+        if free_here:
+            assign[i] = free_here[0]
+        else:
+            move_here = [L for L in chosen_by_index if _placement(e, L) == 'move']
+            # move_here is non-empty: set cover guarantees e is coverable by a
+            # chosen layer, and it wasn't free on any of them.
+            assign[i] = move_here[0]
+
+    # --- Spatial sanity guard: don't scatter a spatially tight pair across
+    # layers when a single chosen layer is FREE for both. Only co-locates onto
+    # a shared free-in-`chosen` layer (never introduces a move or a new layer),
+    # so it is safe and deterministic. Single pass over sorted pairs.
+    coords = [(endpoints[i][3], endpoints[i][4]) for i in range(n)]
+    dists = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            dx = coords[i][0] - coords[j][0]
+            dy = coords[i][1] - coords[j][1]
+            dists.append((dx * dx + dy * dy) ** 0.5)
+    if dists:
+        srt = sorted(dists)
+        median = srt[len(srt) // 2]
+        thresh = 2.0 * median
+        for i in range(n):
+            for j in range(i + 1, n):
+                if assign[i] == assign[j]:
+                    continue
+                dx = coords[i][0] - coords[j][0]
+                dy = coords[i][1] - coords[j][1]
+                if (dx * dx + dy * dy) ** 0.5 > thresh:
+                    continue
+                shared = [L for L in chosen_by_index
+                          if _placement(entries[i], L) == 'free'
+                          and _placement(entries[j], L) == 'free']
+                if shared:
+                    assign[i] = assign[j] = shared[0]
+
+    # --- Collect the stubs that actually need to move (assigned != current).
+    to_move = []  # (stub, dest_layer)
+    for i, e in enumerate(entries):
+        if e['stub'] is not None and assign[i] != e['cur']:
+            to_move.append((e['stub'], assign[i]))
+
+    if not to_move:
+        # A valid multi-layer split needs no swaps -- the net naturally spans
+        # `chosen` layers. Nothing to change; report as handled.
+        if verbose:
+            print(f"  Multi-point per-cluster: {net_name} spans "
+                  f"{len(chosen)} layer(s) natively -- no swap needed")
+        return 0
+
+    # Apply each validated move; skip (leave on current layer) any that fail
+    # validation. Then via-fit the accumulated new pad vias COLLECTIVELY (two
+    # same-net pad vias were each validated against the pre-move board, never
+    # against each other -- same funnel as the common-layer path / #299).
+    net_vias, net_mods = [], []
+    net_segments = [] if all_swap_segments is not None else None
+    moved = 0
+    for stub, dest_layer in to_move:
+        valid, reason = validate_single_swap(
+            stub, dest_layer, combined_stubs_by_layer, pcb_data, config)
+        if not valid:
+            if verbose:
+                print(f"  Per-cluster swap rejected: {net_name} -> {dest_layer}: {reason}")
+            continue
+        vias, mods = apply_stub_layer_switch(
+            pcb_data, stub, dest_layer, config, debug=False,
+            new_segments_out=net_segments)
+        net_vias.extend(vias)
+        net_mods.extend(mods)
+        moved += 1
+
+    if moved == 0:
+        return -1
+
+    if net_vias and not _swap_vias_fit_or_shrink(pcb_data, net_vias, config):
+        revert_stub_layer_switch(pcb_data, net_mods, net_vias)
+        if verbose:
+            print(f"  Multi-point per-cluster REJECTED (pad vias do not fit): {net_name}")
+        return -1
+
+    all_swap_vias.extend(net_vias)
+    all_segment_modifications.extend(net_mods)
+    if all_swap_segments is not None and net_segments:
+        all_swap_segments.extend(net_segments)
+    print(f"  Multi-point per-cluster: {net_name} -> {len(chosen)} layer(s) "
+          f"({moved} stub(s) moved)")
+    return moved
 
 
 def apply_single_ended_layer_swaps(
@@ -1983,6 +2192,7 @@ def apply_single_ended_layer_swaps(
     # pcb_data copper) sees their moves as committed; conservative
     # common-layer collapse only — see _collapse_multipoint_net_to_common_layer.
     multipoint_collapse_count = 0
+    multipoint_cluster_count = 0
     multipoint_unswapped = []
     if multipoint_candidates:
         print(f"\nAnalyzing layer swaps for {len(multipoint_candidates)} multi-point net(s) spanning layers...")
@@ -1996,7 +2206,19 @@ def apply_single_ended_layer_swaps(
             multipoint_collapse_count += 1
             total_layer_swaps += moved
         elif moved < 0:
-            multipoint_unswapped.append(net_name)
+            # No single common layer: fall back to a per-cluster assignment that
+            # minimises the number of distinct layers (issue #265 follow-up).
+            cluster_moved = _assign_multipoint_net_per_cluster(
+                pcb_data, config, net_name, net_id, endpoints,
+                can_swap_to_top_layer, combined_stubs_by_layer,
+                all_segment_modifications, all_swap_vias, all_swap_segments,
+                _conn_pads(net_id), verbose=verbose)
+            if cluster_moved > 0:
+                multipoint_cluster_count += 1
+                total_layer_swaps += cluster_moved
+            elif cluster_moved < 0:
+                multipoint_unswapped.append(net_name)
+            # cluster_moved == 0: net natively spans >1 layer, no swap needed
         # moved == 0: some layer already satisfies every endpoint - no swap needed
 
     if multipoint_unswapped:
@@ -2011,5 +2233,7 @@ def apply_single_ended_layer_swaps(
         print(f"Applied {solo_switch_count} single-ended solo switch(es)")
     if multipoint_collapse_count > 0:
         print(f"Applied {multipoint_collapse_count} multi-point common-layer collapse(s)")
+    if multipoint_cluster_count > 0:
+        print(f"Applied {multipoint_cluster_count} multi-point per-cluster assignment(s)")
 
     return total_layer_swaps
