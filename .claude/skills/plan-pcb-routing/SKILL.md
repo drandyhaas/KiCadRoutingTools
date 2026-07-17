@@ -1342,6 +1342,16 @@ Rules of the loop:
   - Plane step ships tap failures with fill nearby → re-run
     route_disconnected_planes with a larger `--max-search-radius`, or at the
     advanced fab tier so smaller tap vias fit.
+  - A handful of nets fail on a NOT-saturated board (few failed nets, short
+    detours available, failures share a corridor with early-routed nets) →
+    try a **failed-first split**: re-run the step as two invocations, first
+    `--nets <the failed nets>` on the clean input, then everything else to a
+    fresh output. Ordering is the cheapest knob but rarely decisive:
+    measured on castor / butterstick / ddr5 / glasgow, an automatic
+    failed-first restart NEVER beat the normal order (twice it graded
+    worse), so an in-engine restart was tried and removed — only reach for
+    this manually when the failure histories actually show corridor
+    competition, and expect it to matter on few boards.
 - **Explainability:** keep a short tuning log per board — which knob changed,
   the before/after metric (completion / DRC / coupled pairs), and whether it
   helped. Revert a change that didn't help before trying the next.
