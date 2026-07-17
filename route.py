@@ -1209,10 +1209,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # pass once more on a clean slate with the previously-failed nets routed
     # FIRST (then the previously-successful ones, both keeping first-pass
     # relative order -- a pure function of first-pass outcomes, so
-    # deterministic). Keep the restart only when it Pareto-improves
-    # connectivity (no worse on connected nets NOR connected pads, better on
-    # at least one); otherwise restore the first pass exactly, so the flag
-    # can never make a board worse. Runs BEFORE net_rescue and the end-of-run
+    # deterministic). Keep whichever pass connects strictly more (nets, then
+    # pads); otherwise restore the first pass exactly, so the flag can never
+    # make a board worse. Runs BEFORE net_rescue and the end-of-run
     # reconciliation so those operate on the winning pass only.
     ffr_record = None
     if failed_first_restart and not skip_routing:
@@ -1310,14 +1309,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _core2 = _run_routing_core(single_ended_nets=_restart_nets,
                                        **_core_kwargs)
             _nets2, _pads2, _failed2 = _ffr_grade(_core2.results)
-            # Pareto acceptance: the restart must be no worse on EITHER axis
-            # and better on at least one. A nets-first lexicographic accept
-            # took a +4-net/-6-pad restart on butterstick whose lost
-            # multipoint pads the downstream rescue/reconciliation could not
-            # win back (final board graded worse than flag-off) -- a pad
-            # regression is exactly the unrecoverability signal, so it vetoes.
-            _better = (_nets2 >= _nets1 and _pads2 >= _pads1
-                       and (_nets2, _pads2) != (_nets1, _pads1))
+            _better = (_nets2, _pads2) > (_nets1, _pads1)
             print(f"\nFailed-first restart: first pass connected {_nets1} "
                   f"net(s) / {_pads1} pad(s); restart {_nets2} / {_pads2} "
                   f"-> keeping the {'RESTART' if _better else 'FIRST'} pass")
