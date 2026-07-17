@@ -1,51 +1,45 @@
-6e88568 2026-07-15 parity sweep 6e09425..6e88568 (pr392 cross-class merge + plane-edge/grader/cp1252/partial-replay). No wiring gaps; the previously-open net_clearances asymmetry is now RESOLVED by pr392 Task 1b.
+810ce7d 2026-07-17 parity sweep 6e88568..810ce7d (the #217/#412 connectivity
+wave, ~37 commits: Tier-1 levers, T5 custody + SE member fallback, net-tie
+support, rescue-window fence, full-stack layer normalization, #416 terminal
+connector, #418 pad stroke extent, #419 mimalloc purge, #420 oracle fast
+project, #422 static bitmap / Rust 0.18.2, #265 per-cluster swaps, PR415
+connection_width grading merge). Outcome: parity CONFIRMED via the no-wx
+gates + placement audit; no wiring gaps found.
 
-AUDIT: 17 commits swept. The only new engine surface is pr392's two flags
-(--net-clearances, --keep-input-copper); both are threaded through BOTH fronts
-plus the manifest converter and parity map. Everything else (plane-edge tap
-clamp, grader unify, cp1252 console, partial_replay tool) is shared-engine /
-grader-only / tooling with no GUI surface.
+AUDIT: no new CLI flags survive at HEAD. The one flag added during the wave
+(--failed-first-restart, with full CLI/GUI/manifest/parity threading) was
+REVERTED after measuring zero real-board wins — its threading went with it.
+Every behavioral change of the wave lives inside shared engine functions
+(batch_route, batch_route_diff_pairs, create_plane, the
+route_disconnected_planes repair path, close_soft_joints,
+apply_single_ended_layer_swaps, plane_pad_tap/try_tap_pad), so both fronts
+inherit them with no per-front wiring:
+  * PlaneComponentOracle: internal to the shared repair path (plane_oracle
+    param defaults None; oracle-less callers byte-identical).
+  * T5 casualty reconcile + coverage gate + honest sweep: inside batch_route;
+    additive results keys only.
+  * Diff pair_reports / casualty_reconcile / single_ended_fallback: inside
+    batch_route_diff_pairs; keys mirrored into GUI results_data by the same
+    engine code.
+  * Full-stack layer normalization: inside the three shared engine functions
+    (route_disconnected_planes exempt by design, documented inline).
+  * #416 connector + narrow_pad_joint: close_soft_joints + check_weird
+    (shared cleanup/checker).
+  * #265 per-cluster assignment: PHASE 3 of apply_single_ended_layer_swaps.
+  * rust_alloc.py (MIMALLOC_PURGE_DELAY=0): wired at every CLI entry point
+    AND both GUI call sites (per #419 agent; spot-verified imports).
+  * Rust 0.18.2 static bitmap: below the Python API, front-agnostic;
+    neutrality proven bit-identical (total_iterations).
 
-RESOLVED THIS PASS (was the standing OPEN ASYMMETRY in the prior marker):
-  * net_clearances CLI/GUI divergence is CLOSED. pr392 Task 1b (e73d9ed) makes
-    the CLI auto-read the non-Default netclass clearances from the board's
-    sibling .kicad_pro and build net_clearances (route.py: "Auto-read netclass
-    clearances ... from the board's .kicad_pro"), AND stops clamping the
-    netclasses DOWN in the output (fix_kicad_drc_settings: clamp removed /
-    gated). This is exactly the CLI auto-build 5b4c191 aspired to. Both fronts
-    now reserve each net's OWN class clearance as an obstacle (KiCad cross-class
-    max(A,B)); neither rewrites the netclasses to hide violations. CLI and GUI
-    are behaviorally aligned on multi-class boards. Task 1a (ae2453b) also
-    honors cross-class clearance for IN-RUN mixed-class copper in the shared
-    engine -> both fronts free.
-
-WHAT WAS CHECKED (all parity-clean):
-  * --net-clearances: CLI argparse (route.py) + engine (routing_config
-    set_net_clearances / obstacle_clearance) + GUI builds it from the live
-    board's netclasses (swig_gui.py, settings_persistence.py) + manifest_to_plan
-    special-cases it (tests/stress/manifest_to_plan.py:84) + test_gui_engine_
-    parity config map. Auto-read from .kicad_pro is in the SHARED engine path, so
-    both fronts get it.
-  * --keep-input-copper: CLI flag (route.py:1951, action=store_true default
-    False) -> batch_route kwarg -> cleanup_pipeline (shared) -> GUI reaches it
-    via the same cleanup call. route_diff carries the mirrored --keep-input-copper.
-  * plane-edge tap clamp (2448070): clamp_tap_via_to_edge lives in shared
-    plane_pad_tap.py / route_planes, reached by both fronts (planes_gui path).
-  * grader unify (61e1d63), cp1252 console (be5f126), partial_replay (1c6b99d):
-    grader / entry-point / test-tooling only, no routing-engine or GUI surface.
-
-GATES RUN GREEN:
-  * test_manifest_plan_parity.py: 6201 flag-checks / 157 manifests, 0 mismatch;
+GATES RUN GREEN AT HEAD:
+  * test_manifest_plan_parity.py: 6201 flag-checks, 0 mismatches;
     param->control resolution 12/12.
-  * test_cli_postpass_coverage.py: 4 registered, 8 in active use, 0 failures
-    (bga/qfn run_drc remains the one acknowledged CLI-only report-only pass).
-  * test_gui_engine_parity.py (KiCad python) NOT re-run this pass (no wx/pcbnew in
-    this session); the no-wx gates + the shared-engine placement of both new flags
-    cover the wiring. Next audit should re-run it on a multi-class board now that
-    the CLI auto-builds net_clearances, to confirm the copper sets converge (the
-    prior marker's ~264/293 copper delta was attributed to this asymmetry, now
-    resolved -> expect the delta to shrink toward the A*-tie-break/UUID floor).
+  * test_cli_postpass_coverage.py: 0 failures (bga/qfn run_drc remains the
+    one acknowledged CLI-only report-only pass).
 
-STILL NOT DIRECTLY GUI-ENGINE-TESTED (structurally covered by the no-wx gates):
-a diff route through the GUI engine and a QFN GUI fanout; plus the multi-class
-net_clearances convergence check noted above. Next audit picks up from this marker.
+NOT RUN THIS PASS: tests/gui_parity/test_gui_engine_parity.py (needs KiCad
+python/wx). No batch_route kwarg was added or removed at final HEAD, so the
+76-key param set is unchanged from the prior marker. Carried over from the
+prior marker and still pending a KiCad-python session: the multi-class
+net_clearances convergence check, a GUI-engine diff route, and a QFN GUI
+fanout. Next audit picks up from this marker.
