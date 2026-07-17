@@ -519,14 +519,244 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                                              end_y=yj, width=w, layer=layer, net_id=net_id))
                     used.add(i); used.add(j)
                     break
-    if new_conns:
-        for c in new_conns:
+
+    # Terminal corner-graze web (issue #416): a degree-1 free end whose cap
+    # overlaps a same-net pad only near a CORNER joins through a sub-floor copper
+    # web -- connected and DRC-clean, but a fab hazard. Firm it the soft-joint
+    # way (add copper, never move the routed track): a short connector from the
+    # endpoint to a point deep enough inside the pad that the connector's OWN
+    # overlap with the pad is a full floor-width band -- a parallel path that
+    # lifts the joint web to the floor (see the header above terminal_pad_web_
+    # shortfall). Same clears() gate as the bridges above; it lands on the net's
+    # OWN pad, so it cannot short or disconnect anything.
+    from routing_utils import _to_pad_frame
+    web_conns = []
+    F416 = _board_min_track_width(pcb_data, scope_net_ids, config)
+    e416 = F416 / 2.0
+    for s in list(pcb_data.segments):
+        if scope_net_ids is not None and s.net_id not in scope_net_ids:
+            continue
+        if getattr(s, 'graphic', False):
+            continue
+        w = s.width
+        r = w / 2.0
+        if r < e416 - 1e-9:
+            continue  # track thinner than the floor: no floor-width web exists
+        for (ex, ey, nx, ny) in ((s.start_x, s.start_y, s.end_x, s.end_y),
+                                 (s.end_x, s.end_y, s.start_x, s.start_y)):
+            if ep_count[(s.net_id, s.layer, rk(ex, ey))] != 1:
+                continue  # not a free end
+            if any(math.hypot(ex - vx, ey - vy) <= vr + 0.01
+                   for vx, vy, vr in via_by_net.get(s.net_id, [])):
+                continue  # anchored on a same-net via: a via terminal, not this
+            target = None
+            for pad in pcb_data.pads_by_net.get(s.net_id, []):
+                if getattr(pad, 'shape', None) not in ('rect', 'roundrect', 'oval'):
+                    continue  # sharp-corner necks: skip circle/custom pads
+                if not pad.size_x or not pad.size_y:
+                    continue
+                if not (s.layer in pad.layers or any('*' in L for L in pad.layers)):
+                    continue
+                if point_to_pad_distance(ex, ey, pad) < r - 1e-6:
+                    target = pad
+                    break
+            if target is None:
+                continue
+            elx, ely = _to_pad_frame(ex, ey, target)
+            nlx, nly = _to_pad_frame(nx, ny, target)
+            is_neck, tloc = terminal_pad_web_shortfall(
+                nlx, nly, elx, ely, target.size_x / 2.0, target.size_y / 2.0,
+                r, e416)
+            if not is_neck:
+                continue
+            # Confirm the cheap (over-reporting) pre-filter with KiCad's exact
+            # erosion, so a perpendicular shallow entry that only trips the
+            # filter is left alone; False = provably not a neck, None = shapely
+            # unavailable (keep the conservative verdict).
+            if terminal_web_neck_exact(pcb_data, s.net_id, s.layer,
+                                       ex, ey, F416) is False:
+                continue
+            tlx, tly = tloc
+            rad = math.radians(getattr(target, 'rect_rotation', 0.0) or 0.0)
+            cc, ssn = math.cos(rad), math.sin(rad)
+            bx = round(target.global_x + tlx * cc - tly * ssn, 4)
+            by = round(target.global_y + tlx * ssn + tly * cc, 4)
+            if math.hypot(bx - ex, by - ey) < 1e-4:
+                continue
+            if not clears(s.net_id, ex, ey, bx, by, s.layer, w):
+                continue  # connector would graze foreign copper: leave for DRC
+            web_conns.append(Segment(start_x=ex, start_y=ey, end_x=bx, end_y=by,
+                                     width=w, layer=s.layer, net_id=s.net_id))
+            break  # one connector firms the joint; move to the next segment
+
+    if new_conns or web_conns:
+        for c in new_conns + web_conns:
             pcb_data.segments.append(c)
         # Tagged so accounting/summary code can tell this cleanup copper from a
         # net's routed result (it has no net-level identity of its own).
-        results.append({'new_segments': new_conns, 'new_vias': [],
-                        'cleanup': 'soft_joint_bridge'})
-    return len(new_conns)
+        if new_conns:
+            results.append({'new_segments': new_conns, 'new_vias': [],
+                            'cleanup': 'soft_joint_bridge'})
+        if web_conns:
+            results.append({'new_segments': web_conns, 'new_vias': [],
+                            'cleanup': 'terminal_web_connector'})
+    return len(new_conns) + len(web_conns)
+
+
+# ---------------------------------------------------------------------------
+# Corner-graze terminal joint web (issue #416)
+# ---------------------------------------------------------------------------
+# The A* terminal cell is grid-quantised: a track can terminate so its round END
+# CAP overlaps only the CORNER of its target SMD pad. The joint is electrically
+# connected and DRC-clean (the caps touch), so no gap-closer fires -- but the
+# only copper joining track to pad is a thin corner sliver, narrower than the
+# board's minimum track width (KiCad's connection_width class): a fab hazard, the
+# joint can etch open. This is NOT an open, so it is a natural extension of
+# close_soft_joints, which already firms up fragile same-net joints with a short
+# added connector -- here the second endpoint is a PAD rather than a dangle, and
+# the connector adds a PARALLEL wide copper path into the pad interior so the
+# thin corner sliver is no longer the sole connection.
+#
+# The min-web test is KiCad's own: union the joint's copper and erode by floor/2;
+# a web >= floor survives connected, a sub-floor web splits/vanishes
+# (tests/stress/classify_connection_width.py). Specialised to a terminal (a
+# round-capped segment meeting a convex pad rectangle) that erosion has an exact
+# closed form -- no shapely, so it runs in the KiCad-python GUI front too: in the
+# pad's axis-aligned local frame the eroded track is the segment buffered by
+# (r - e) (r = track half-width, e = floor/2, and r >= e because floor is the
+# thinnest track on the board), and the eroded pad is the rectangle shrunk by e.
+# The joint survives IFF that buffered segment reaches the shrunk rectangle, i.e.
+#   dist(segment, pad_rect_shrunk_by_e) <= r - e.
+# When it does not, close_soft_joints adds a short connector from the endpoint to
+# the nearest point INSIDE the shrunk rectangle: the connector's far cap then
+# lands deep enough that its own overlap with the pad is a full floor-width band,
+# a parallel path that survives the erosion. The connector is clearance-checked
+# against every foreign object and the board edge, and lands on the SAME net's
+# own pad, so it can never disconnect or short anything.
+
+
+def terminal_pad_web_shortfall(nlx, nly, elx, ely, hx, hy, r, e,
+                               target_margin=0.0):
+    """CONSERVATIVE pre-filter for a sub-floor terminal joint, plus the connector
+    target -- in the pad's axis-aligned LOCAL frame (pad centred at the origin).
+
+    This tests the union-OF-erosions (does the eroded track reach the eroded
+    pad), which is a SUBSET of the erosion-OF-union KiCad actually measures, so
+    it never MISSES a real neck but it over-reports (a perpendicular shallow
+    entry crossing an edge far from a corner is fine yet trips it). Callers use
+    it as a cheap reject and CONFIRM a positive with ``terminal_web_neck_exact``
+    (exact shapely erosion, matches kicad-cli's connection_width). Kept separate
+    so the confirm runs only on the handful of candidates, and so a shapely-less
+    environment still has a safe (conservative) fallback.
+
+    Args:
+        nlx, nly: neighbour (non-terminal) segment vertex, local frame.
+        elx, ely: terminal endpoint (the cap centre), local frame.
+        hx, hy:   pad rectangle half-extents.
+        r:        track half-width (cap radius).
+        e:        erosion radius = floor / 2.
+        target_margin: extra inset for the connector target (0 for a pure test).
+
+    Returns ``(maybe_neck, target_local_or_None)``. ``target_local`` is the
+    nearest point inside the (e + target_margin)-eroded rectangle -- the far end
+    of the short connector that firms the joint -- or None when the pad is too
+    small in some dimension to host a floor-width web (< 2e wide: unfixable)."""
+    from check_drc import segment_to_rect_distance
+    ex_half, ey_half = hx - e, hy - e
+    if ex_half <= 1e-6 or ey_half <= 1e-6:
+        return False, None  # pad narrower than the floor: no floor-width web exists
+    reach = max(0.0, r - e)
+    d, _ = segment_to_rect_distance(nlx, nly, elx, ely, 0.0, 0.0, ex_half, ey_half)
+    if d <= reach + 1e-4:
+        return False, None  # eroded track already reaches the eroded pad: web OK
+    # Candidate neck: the connector target is the nearest point inside the
+    # (e+margin)-shrunk rectangle (margin capped so the rectangle stays non-empty).
+    ti = min(e + target_margin, hx - 1e-3, hy - 1e-3)
+    if ti < e:
+        return False, None  # cannot reach even the bare erosion floor: unfixable
+    txh, tyh = hx - ti, hy - ti
+    tlx = max(-txh, min(txh, elx))
+    tly = max(-tyh, min(tyh, ely))
+    return True, (tlx, tly)
+
+
+def _pad_web_polygon(pad):
+    """Shapely polygon of a pad's copper for the connection_width erosion test
+    (mirrors tests/stress/classify_connection_width.py). None for no-copper
+    NPTH pads or degenerate sizes."""
+    from shapely.geometry import Point, box
+    import shapely.affinity as aff
+    if getattr(pad, 'pad_type', None) == 'np_thru_hole':
+        return None
+    w = (pad.size_x or 0) / 2.0
+    h = (pad.size_y or 0) / 2.0
+    if w <= 0 or h <= 0:
+        return None
+    if pad.shape == 'circle':
+        return Point(pad.global_x, pad.global_y).buffer(w, quad_segs=32)
+    shp = box(pad.global_x - w, pad.global_y - h, pad.global_x + w, pad.global_y + h)
+    if pad.shape in ('oval', 'roundrect'):
+        rr = min(w, h) * (1.0 if pad.shape == 'oval'
+                          else (getattr(pad, 'roundrect_rratio', 0.25) or 0.25))
+        if rr > 1e-6:
+            shp = shp.buffer(-rr).buffer(rr, quad_segs=16)
+    rot = getattr(pad, 'rect_rotation', 0) or 0
+    if rot:
+        shp = aff.rotate(shp, rot, origin=(pad.global_x, pad.global_y))
+    return shp
+
+
+def terminal_web_neck_exact(pcb_data, net_id, layer, ex, ey, floor,
+                            radius=3.0):
+    """EXACT connection_width neck test at a terminal endpoint (ex, ey), by
+    KiCad's own method: union the net's LOCAL copper on ``layer`` (same-net
+    round-capped segments + pads within ``radius`` mm), erode by floor/2, and
+    test whether the component nearest the endpoint stays connected. Returns
+    True for a real sub-floor neck, False when the web clears the floor, or None
+    when the geometry cannot be built (shapely missing / no local copper) so the
+    caller keeps the conservative pre-filter verdict. Same erosion as
+    tests/stress/classify_connection_width.py -- detection and repair agree."""
+    try:
+        from shapely.geometry import LineString, Point
+        from shapely.ops import unary_union
+    except Exception:
+        return None
+    e = floor / 2.0
+    P = Point(ex, ey)
+    shapes = []
+    for s in pcb_data.segments:
+        if s.net_id != net_id or s.layer != layer:
+            continue
+        seg = LineString([(s.start_x, s.start_y), (s.end_x, s.end_y)])
+        if seg.distance(P) < radius:
+            shapes.append(seg.buffer(s.width / 2.0, quad_segs=32))
+    for pad in pcb_data.pads_by_net.get(net_id, []):
+        if not (layer in pad.layers or any('*' in L for L in pad.layers)):
+            continue
+        if abs(pad.global_x - ex) < radius and abs(pad.global_y - ey) < radius:
+            shp = _pad_web_polygon(pad)
+            if shp is not None:
+                shapes.append(shp)
+    if not shapes:
+        return None
+    union = unary_union(shapes)
+    comps = list(union.geoms) if union.geom_type == 'MultiPolygon' else [union]
+    comp = min(comps, key=lambda c: c.distance(P))
+    eroded = comp.buffer(-e * (1.0 - 1e-3))
+    if eroded.is_empty:
+        return True
+    return eroded.geom_type == 'MultiPolygon' and len(list(eroded.geoms)) > 1
+
+
+def _board_min_track_width(pcb_data, scope_net_ids, config) -> float:
+    """The connection_width grading floor: the thinnest track on the board
+    (KiCad's scan_board_minima). Falls back to the configured track width."""
+    widths = [s.width for s in pcb_data.segments
+              if not getattr(s, 'graphic', False) and s.width and s.width > 0]
+    cfg_w = getattr(config, 'track_width', 0.0) or 0.0
+    if cfg_w > 0:
+        widths.append(cfg_w)
+    return min(widths) if widths else (cfg_w or 0.1)
 
 
 def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,

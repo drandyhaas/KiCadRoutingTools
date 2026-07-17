@@ -520,6 +520,68 @@ def _check_orphan_islands(net_id, name, net_segs, net_vias, net_pads,
             f"NO pad of the net", size=total))
 
 
+def _check_terminal_web(pcb_data, net_id, name, net_segs, net_pads, floor,
+                        findings):
+    """Flag degree-1 terminal endpoints whose cap overlaps a same-net pad only
+    near a CORNER, joining through a copper web thinner than the min-track floor
+    (issue #416). DRC-clean and connected, but a manufacturability hazard (the
+    joint can etch open); KiCad's connection_width class catches it. Uses the
+    SAME closed-form erosion criterion (``terminal_pad_web_shortfall``) as the
+    close_soft_joints connector that repairs it, so detection and repair agree.
+    Read-only."""
+    if floor <= 0 or not net_pads or not net_segs:
+        return
+    from pcb_modification import (terminal_pad_web_shortfall,
+                                  terminal_web_neck_exact)
+    from routing_utils import _to_pad_frame
+    e = floor / 2.0
+
+    def k(layer, x, y):
+        return (layer, round(x, 4), round(y, 4))
+
+    deg = {}
+    for s in net_segs:
+        if getattr(s, 'graphic', False):
+            continue
+        deg[k(s.layer, s.start_x, s.start_y)] = deg.get(k(s.layer, s.start_x, s.start_y), 0) + 1
+        deg[k(s.layer, s.end_x, s.end_y)] = deg.get(k(s.layer, s.end_x, s.end_y), 0) + 1
+    for s in net_segs:
+        if getattr(s, 'graphic', False):
+            continue
+        r = s.width / 2.0
+        if r < e - 1e-9:
+            continue  # track thinner than the floor: no floor-width web exists
+        for (ex, ey, nx, ny) in ((s.start_x, s.start_y, s.end_x, s.end_y),
+                                 (s.end_x, s.end_y, s.start_x, s.start_y)):
+            if deg.get(k(s.layer, ex, ey), 0) != 1:
+                continue  # not a free end
+            target = None
+            for pad in net_pads:
+                if getattr(pad, 'shape', None) not in ('rect', 'roundrect', 'oval'):
+                    continue
+                if not pad.size_x or not pad.size_y:
+                    continue
+                if not (s.layer in pad.layers or any('*' in L for L in pad.layers)):
+                    continue
+                if point_to_pad_distance(ex, ey, pad) < r - 1e-6:
+                    target = pad
+                    break
+            if target is None:
+                continue
+            elx, ely = _to_pad_frame(ex, ey, target)
+            nlx, nly = _to_pad_frame(nx, ny, target)
+            is_neck, _ = terminal_pad_web_shortfall(
+                nlx, nly, elx, ely, target.size_x / 2.0, target.size_y / 2.0, r, e)
+            if is_neck and terminal_web_neck_exact(
+                    pcb_data, net_id, s.layer, ex, ey, floor) is not False:
+                findings.append(_finding(
+                    'narrow_pad_joint', name, s.layer, ex, ey,
+                    f"terminal cap joins pad {target.component_ref}."
+                    f"{target.pad_number} through a copper web below the "
+                    f"{floor:.3f}mm min-track floor (connection_width hazard)",
+                    size=None))
+
+
 def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
                 thorough: bool = False, quiet: bool = True,
                 tolerance: float = 0.1
@@ -544,6 +606,12 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
 
     copper_layers = (getattr(pcb_data.board_info, 'copper_layers', None)
                      or ['F.Cu', 'B.Cu'])
+
+    # Connection-width floor for the terminal-web check (#416): the thinnest
+    # track on the board -- KiCad's scan_board_minima min_track_width.
+    _widths = [s.width for s in pcb_data.segments
+               if not getattr(s, 'graphic', False) and s.width and s.width > 0]
+    min_track_w = min(_widths) if _widths else 0.0
 
     net_ids = set(segs_by_net) | set(vias_by_net)
     check_ids = []
@@ -580,6 +648,8 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
         _check_stacked(net_id, name, net_segs, net_vias, findings)
         _check_unsupported_vias(net_id, name, net_segs, net_vias, net_pads,
                                 net_zones, copper_layers, findings)
+        _check_terminal_web(pcb_data, net_id, name, net_segs, net_pads,
+                            min_track_w, findings)
 
     if tolerance and tolerance > 0:
         findings = [f for f in findings
