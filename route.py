@@ -344,7 +344,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 pcb_data=None,
                 net_clearances: dict = None,
                 keep_input_copper: bool = False,
-                rip_existing_nets: Optional[List[str]] = None) -> Tuple[int, int, float]:
+                rip_existing_nets: Optional[List[str]] = None,
+                clamp_netclasses: bool = False) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -471,7 +472,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # routing also respects KiCad's pairwise max(classA, classB). A caller that
     # already resolved the map (route.py main, the GUI) passes a dict (possibly
     # empty) so this does not re-read. All-Default boards -> empty map -> inert.
-    if net_clearances is None and input_file and os.path.isfile(input_file):
+    # #439: --clamp-netclasses SUPPRESSES the auto-read, so non-Default nets route
+    # at the uniform --clearance instead of their own class (the opt-out for a
+    # board whose netclasses are too loose to route to -- the output writeback
+    # then clamps those classes DOWN to --clearance so grading still matches).
+    if clamp_netclasses:
+        if net_clearances is None:
+            net_clearances = {}
+    elif net_clearances is None and input_file and os.path.isfile(input_file):
         try:
             from list_nets import net_clearance_map_by_id
             net_clearances = net_clearance_map_by_id(
@@ -479,7 +487,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             if net_clearances:
                 print(f"Auto-read netclass clearances for {len(net_clearances)} net(s) "
                       f"from {os.path.basename(os.path.splitext(input_file)[0])}.kicad_pro "
-                      f"(cross-class max(A,B) respected during routing).")
+                      f"(non-Default nets route at their own class; --clearance is "
+                      f"the Default/routing floor).")
         except Exception as _e:
             print(f"Warning: could not auto-read netclass clearances ({_e}); "
                   f"routing at the uniform clearance.")
@@ -2292,7 +2301,14 @@ For differential pair routing, use route_diff.py:
     # net-class clearance (KiCad's max(classA, classB)). None/absent -> empty map -> prior
     # behaviour. The GUI front builds the same map from live net classes (swig_gui).
     _net_clearances_map = None
-    if args.net_clearances:
+    if getattr(args, 'clamp_netclasses', False):
+        # #439 opt-out: clamp non-Default classes to --clearance for routing
+        # (empty map -> everything routes at --clearance); the writeback then
+        # clamps those classes DOWN so grading matches.
+        _net_clearances_map = {}
+        print("--clamp-netclasses: non-Default net classes routed at the uniform "
+              "--clearance (not their own class).")
+    elif args.net_clearances:
         with open(args.net_clearances, encoding="utf-8") as _f:
             _name_to_clr = json.load(_f)
         _net_clearances_map = {}

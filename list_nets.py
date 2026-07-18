@@ -237,10 +237,18 @@ def net_clearance_map_by_id(pcb_path, nets, design_rules=None):
     A net's classes come from BOTH the explicit ``netclass_assignments`` and every
     matching ``netclass_patterns`` glob (KiCad merges memberships); its effective
     clearance is the MAX over those classes' clearances (KiCad enforces the strictest).
-    Only nets whose effective clearance EXCEEDS the Default class clearance are
-    returned, because the router's config.clearance IS the Default/routing clearance
-    -- so an all-Default board (or nets that resolve only to Default) yields an EMPTY
-    map, behaviour identical to not passing a map at all. Returns {net_id: clearance_mm}.
+
+    A net is returned iff it belongs to at least one NON-Default net class -- with
+    that class's clearance, EVEN WHEN it equals or is below the Default class
+    clearance (#439). This is the fix for the old "eff > Default" gate, which
+    dropped a net whose class equalled Default: on an all-0.2-classes board (zynq
+    -- Default/ADDRES/DQ* all 0.2) the map came back EMPTY, so those nets routed
+    at the smaller ``--clearance`` instead of their 0.2 class and shipped
+    DRC-violating. Nets that resolve ONLY to Default are still omitted (they use
+    the router's config.clearance = ``--clearance``, which IS the Default/routing
+    clearance). The map value is a FLOOR the caller max()es with config.clearance,
+    so a non-Default class BELOW ``--clearance`` is inert -- correct: ``--clearance``
+    is the routing floor for those too. Returns {net_id: clearance_mm}.
 
     Pattern matching is glob-style (KiCad ``*``/``?`` wildcards). Exotic patterns that
     do not translate to a glob simply fail to match -> that net falls back to
@@ -251,7 +259,6 @@ def net_clearance_map_by_id(pcb_path, nets, design_rules=None):
     classes = dr.get('classes') or {}
     assignments = dr.get('assignments') or {}
     patterns = dr.get('patterns') or []
-    default_clr = (classes.get('Default') or {}).get('clearance')
 
     def _class_clr(cname):
         c = classes.get(cname) or {}
@@ -268,20 +275,19 @@ def net_clearance_map_by_id(pcb_path, nets, design_rules=None):
             cand.add(a)
         for pat, cname in patterns:
             if not pat:
-                continue  # empty pattern = the Default catch-all; skipped below anyway
+                continue  # empty pattern = the Default catch-all
             try:
                 if fnmatch.fnmatchcase(name, pat):
                     cand.add(cname)
             except Exception:
                 pass
-        clrs = [c for c in (_class_clr(cn) for cn in cand) if c is not None]
+        # Only NON-Default class memberships matter: a Default-only net routes at
+        # config.clearance. Take the strictest (max) NON-Default class clearance.
+        clrs = [c for c in (_class_clr(cn) for cn in cand if cn != 'Default')
+                if c is not None]
         if not clrs:
             continue
-        eff = max(clrs)
-        # Skip nets that resolve only to (or below) the Default/routing clearance.
-        if default_clr is not None and eff <= default_clr + 1e-9:
-            continue
-        out[nid] = eff
+        out[nid] = max(clrs)
     return out
 
 
