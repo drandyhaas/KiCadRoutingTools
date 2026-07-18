@@ -939,6 +939,12 @@ class PlanExecutor:
             # Best-effort persistence for a later close/reopen; note KiCad
             # may overwrite this if it saves its in-memory project state.
             if board_file and os.path.isfile(board_file):
+                # #439: clamp non-Default classes in the written .kicad_pro only when
+                # this plan routed with a --clearance ceiling (the Min-Clearance
+                # override the executor checks when a step sets clearance), matching
+                # the interactive route tab -- not unconditionally (the function default).
+                _cc = getattr(self.dialog, 'clearance_check', None)
+                _clamp = bool(_cc.GetValue()) if _cc is not None else False
                 from fix_kicad_drc_settings import fix_project_for_output
                 fix_project_for_output(
                     board_file, input_pcb=board_file,
@@ -949,7 +955,8 @@ class PlanExecutor:
                     hole_to_hole=floors.get('hole_to_hole_clearance'),
                     edge_clearance=floors.get('board_edge_clearance'),
                     diff_pair_width=floors.get('diff_pair_width'),
-                    diff_pair_gap=floors.get('diff_pair_gap'))
+                    diff_pair_gap=floors.get('diff_pair_gap'),
+                    clamp_nondefault_netclasses=_clamp)
                 self.log(f"Claude plan: recorded DRC floors in the project "
                          f"file (clearance {eff:.4g}; live session already "
                          f"updated via the API)")

@@ -660,6 +660,10 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
         "min_hole_to_hole": "m_HoleToHoleMin",
         "min_copper_edge_clearance": "m_CopperEdgeClearance",
         "min_hole_clearance": "m_HoleClearance",
+        # #439 parity with apply_targets_to_project (annular is ignore-severity by
+        # default, so usually moot, but the CLI lowers it -- keep the two paths
+        # writing the same rule set). Guarded by hasattr below for older KiCad.
+        "min_via_annular_width": "m_ViasMinAnnularWidth",
     }
     for key, target in targets.items():
         a = attr.get(key)
@@ -726,7 +730,12 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
         nd_map = {"SetClearance": targets.get("min_clearance"),
                   "SetTrackWidth": targets.get("min_track_width"),
                   "SetViaDiameter": targets.get("min_via_diameter"),
-                  "SetViaDrill": targets.get("min_through_hole_diameter")}
+                  "SetViaDrill": targets.get("min_through_hole_diameter"),
+                  # #439 parity with apply_targets_to_project's non-Default clamp:
+                  # lower the diff-pair draw defaults on non-Default classes too.
+                  "SetDiffPairGap": diff_pair_gap,
+                  "SetDiffPairViaGap": diff_pair_gap,
+                  "SetDiffPairWidth": diff_pair_width}
         if any(v is not None for v in nd_map.values()):
             other = {}
             ns2 = getattr(bds, "m_NetSettings", None)
