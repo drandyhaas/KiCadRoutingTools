@@ -1182,16 +1182,19 @@ class RoutingDialog(wx.Dialog):
 
         self.no_clamp_netclasses_check = wx.CheckBox(
             options_scroll, label="Keep net-class clearances")
-        # PR392: default ON (keep classes). Routing now RESPECTS non-Default
-        # netclass clearances (pairwise max(classA, classB)), so the output keeps
-        # each class's original clearance instead of clamping it down.
-        self.no_clamp_netclasses_check.SetValue(True)
+        # #439: default OFF (clamp classes to the routed floor). Stock net-class
+        # clearances are aspirational -- boards are routed below them (even the
+        # human-routed references violate their own 0.2 class), so keeping the
+        # original class spec in the output manufactures phantom sub-class DRC.
+        # The router honors min(class, routed) in-run; the writeback clamps to match.
+        self.no_clamp_netclasses_check.SetValue(False)
         self.no_clamp_netclasses_check.SetToolTip(
-            "Keep the board's NON-Default net-class clearance/track/via floors in the "
-            "output (ON by default since routing now RESPECTS those classes). Uncheck "
-            "to clamp them DOWN to the routed values -- only needed for a routing path "
-            "that does not honor classes and would otherwise storm KiCad's per-net-"
-            "class DRC (matches the CLI's --clamp-netclasses when unchecked).")
+            "Clamp the board's NON-Default net-class clearance/track/via floors DOWN "
+            "to the routed values in the output (OFF/clamped by default -- stock "
+            "class clearances are aspirational and would otherwise storm KiCad's per-"
+            "net-class DRC). Check to KEEP the original class spec in the output -- "
+            "only for an impedance-controlled board actually routed to its class "
+            "(matches the CLI's --no-clamp-netclasses when checked).")
         options_inner.Add(self.no_clamp_netclasses_check, 0, wx.ALL, 3)
 
         options_inner.AddSpacer(10)
@@ -3421,7 +3424,7 @@ class RoutingDialog(wx.Dialog):
                     via_drill=config.get('via_drill'))
                 drc_changes = apply_targets_to_board(
                     board, targets, severity_plan(keep_thermal=config.get('keep_thermal', False)),
-                    clamp_nondefault_netclasses=not config.get('no_clamp_netclasses', True))
+                    clamp_nondefault_netclasses=not config.get('no_clamp_netclasses', False))
                 if drc_changes:
                     board.SetModified()
                     print(f"DRC settings: loosened {len(drc_changes)} Board Setup "

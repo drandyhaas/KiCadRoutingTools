@@ -542,16 +542,23 @@ def add_drc_fix_args(parser, *, include_no_fix=True):
     g.add_argument("--keep-thermal", action="store_true",
                    help="When fixing DRC settings, leave thermal-relief severity (starved_thermal) "
                         "untouched instead of demoting it to a warning.")
-    g.add_argument("--clamp-netclasses", action="store_true",
-                   help="Clamp NON-Default net classes' clearance/track/via floors DOWN to the "
-                        "routed values in the output .kicad_pro. OFF by default since PR392: the "
-                        "router now RESPECTS non-Default netclass clearances (auto-read from the "
-                        ".kicad_pro, priced pairwise max(classA, classB)), so the output KEEPS each "
-                        "class's original clearance. Pass this only for a routing path that does NOT "
-                        "honor classes and would otherwise storm KiCad's per-net-class DRC.")
-    # Backward-compat: --no-clamp-netclasses is now the default (no-op); kept so
-    # older command lines / recorded manifests still parse.
+    # #439: clamping non-Default net classes DOWN to the routed clearance in the
+    # output .kicad_pro is the DEFAULT. Stress-corpus (and many real) boards carry
+    # ASPIRATIONAL netclasses their own copper does not meet -- the human-routed
+    # zynq itself has 499 clearance violations at its 0.2 class (routed ~0.1). So
+    # grading at the stock class over-penalizes copper routed at the real fab
+    # floor; clamping each class to what was actually routed makes KiCad DRC match
+    # reality. --no-clamp-netclasses PRESERVES the original class spec, for a
+    # genuine impedance-controlled board whose classes are real and met.
     g.add_argument("--no-clamp-netclasses", action="store_true",
+                   help="Preserve the original NON-Default net class clearance/track/via "
+                        "spec in the output .kicad_pro instead of clamping it down to the "
+                        "routed values. Use for a real impedance-controlled board whose "
+                        "classes are met. Default: clamp classes to the routed clearance so "
+                        "KiCad DRC matches the copper (aspirational stock classes are common).")
+    # Backward-compat: --clamp-netclasses is now the default; accept and ignore it
+    # so older command lines / recorded manifests still parse.
+    g.add_argument("--clamp-netclasses", action="store_true",
                    help=argparse.SUPPRESS)
     g.add_argument("--enable-used-layers", action="store_true",
                    help="Add any layer the board uses but that is missing from its (layers) table "
@@ -565,10 +572,10 @@ def drc_fix_kwargs(args):
     """Map args parsed via :func:`add_drc_fix_args` to :func:`fix_project_for_output`
     keyword arguments (the shared DRC-fix flags only -- per-script routing floors
     like clearance/track/via are passed separately by each caller)."""
-    # PR392: clamping non-Default netclasses is now OPT-IN (--clamp-netclasses),
-    # since routing respects those classes. --no-clamp-netclasses is a legacy no-op
-    # (already the default) but still forces no-clamp if combined.
-    clamp = bool(getattr(args, "clamp_netclasses", False)) and not getattr(args, "no_clamp_netclasses", False)
+    # #439: clamp NON-Default classes to the routed clearance BY DEFAULT (stock
+    # netclasses are often aspirational -- even the human boards violate them).
+    # --no-clamp-netclasses preserves the class spec for a real impedance board.
+    clamp = not getattr(args, "no_clamp_netclasses", False)
     return dict(keep_thermal=args.keep_thermal, enable_layers=args.enable_used_layers,
                 clamp_nondefault_netclasses=clamp)
 
@@ -579,7 +586,7 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
                            diff_pair_gap=None, diff_pair_width=None,
                            keep_courtyards=False, keep_mask=False, keep_footprint=False,
                            keep_thermal=False, enable_layers=False,
-                           clamp_nondefault_netclasses=False,
+                           clamp_nondefault_netclasses=True,  # #439: clamp by default
                            extra_ignore=(), verbose=True):
     """Make the DRC settings of a freshly written board consistent with the
     routing floors (issue #160 auto-invoke). Ensures ``output_pcb`` has a sibling
