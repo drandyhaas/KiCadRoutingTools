@@ -2951,7 +2951,7 @@ def main():
                 track_width=args.track_width,
                 via_diameter=getattr(args, 'via_size', None),
                 via_drill=getattr(args, 'via_drill', None),
-                clamp_nondefault_netclasses=not getattr(args, 'no_clamp_netclasses', False))
+                clamp_nondefault_netclasses=True)  # #439: fanout escapes route to --clearance; always clamp
         except Exception as _e:
             print(f"  (skipped DRC-settings fix: {_e})")
     summary = {

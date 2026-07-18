@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Issue #295 addendum + --no-clamp-netclasses flag: after routing, the NON-Default
-net classes (an impedance design's HDMI/USB/Zxx classes at e.g. 0.125mm) are, BY
-DEFAULT, clamped down to the routed floor so KiCad's per-net-class DRC does not
-storm copper legitimately routed at the smaller run clearance. The
-``--no-clamp-netclasses`` flag disables that, for a final impedance-controlled
-board whose class spec must survive. The Default class is always clamped either
-way; the .kicad_pcb is never touched.
+"""Issue #295 / #439: the standalone fix_kicad_drc_settings writeback clamps EVERY
+net class (Default and the impedance design's HDMI/USB/Zxx classes) DOWN to the
+routed floor so KiCad's per-net-class DRC does not storm copper legitimately routed
+at the smaller run clearance. #439 removed the old --no-clamp-netclasses flag: the
+standalone fixer always clamps (clamping only ever lowers a class to the copper
+actually routed, so it is always DRC-safe). To PRESERVE a class spec instead, route
+with route.py and OMIT --clearance -- the router then honors each class in full and
+the writeback keeps it. The .kicad_pcb is never touched.
 """
 import json
 import os
@@ -70,21 +71,11 @@ def main():
         if not near(cls["Z100_inner"]["track_width"], 0.0889):
             fails.append(f"[clamp] Z100_inner.track_width = {cls['Z100_inner'].get('track_width')}, expected 0.0889")
 
-    # --no-clamp-netclasses: Default still clamps, impedance class UNTOUCHED.
-    with tempfile.TemporaryDirectory() as tmp:
-        cls = _run(tmp, "--no-clamp-netclasses")
-        if not near(cls["Default"]["clearance"], 0.09):
-            fails.append(f"[no-clamp] Default.clearance = {cls['Default'].get('clearance')}, expected 0.09 (Default always clamps)")
-        if not near(cls["Z100_inner"]["clearance"], 0.125):
-            fails.append(f"[no-clamp] Z100_inner.clearance = {cls['Z100_inner'].get('clearance')}, expected 0.125 (must survive)")
-        if not near(cls["Z100_inner"]["track_width"], 0.162):
-            fails.append(f"[no-clamp] Z100_inner.track_width = {cls['Z100_inner'].get('track_width')}, expected 0.162 (must survive)")
-
     if fails:
         print("FAIL: " + "; ".join(fails))
         return 1
-    print("PASS: non-Default netclasses clamped to the routed floor by default; "
-          "--no-clamp-netclasses preserves the impedance class spec; Default always clamped")
+    print("PASS: the standalone writeback clamps every net class (Default + impedance) "
+          "to the routed floor; --no-clamp-netclasses is gone (#439)")
     return 0
 
 

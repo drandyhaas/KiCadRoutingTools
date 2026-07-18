@@ -1984,8 +1984,12 @@ For differential pair routing, use route_diff.py:
                         help=f"Track width in mm (default: {defaults.TRACK_WIDTH}). Ignored if --impedance is specified.")
     parser.add_argument("--impedance", type=float, default=None,
                         help="Target single-ended impedance in ohms (e.g., 50). Calculates track width per layer from board stackup.")
-    parser.add_argument("--clearance", type=float, default=defaults.CLEARANCE,
-                        help=f"Clearance between tracks in mm (default: {defaults.CLEARANCE})")
+    parser.add_argument("--clearance", type=float, default=None,
+                        help="Copper clearance CEILING in mm. When given, every net class "
+                             "(Default included) is capped at min(class, this). When OMITTED, "
+                             "each net routes at its own net-class clearance (base = the board's "
+                             f"Default class from the sibling .kicad_pro, else {defaults.CLEARANCE}). "
+                             "Use --net-clearances <json> for explicit per-net values.")
     parser.add_argument("--via-size", type=float, default=defaults.VIA_SIZE,
                         help=f"Via outer diameter in mm (default: {defaults.VIA_SIZE})")
     parser.add_argument("--via-drill", type=float, default=defaults.VIA_DRILL,
@@ -2130,10 +2134,12 @@ For differential pair routing, use route_diff.py:
                              f"KICAD_RIPUP_ABANDON_METRIC (default: {defaults.RIPUP_ABANDON_METRIC})")
     parser.add_argument("--routing-clearance-margin", type=float, default=defaults.ROUTING_CLEARANCE_MARGIN,
                         help=f"Multiplier on track-via clearance ({defaults.ROUTING_CLEARANCE_MARGIN} = minimum DRC)")
-    parser.add_argument("--hole-to-hole-clearance", type=float, default=defaults.HOLE_TO_HOLE_CLEARANCE,
-                        help=f"Minimum clearance between drill holes in mm (default: {defaults.HOLE_TO_HOLE_CLEARANCE})")
-    parser.add_argument("--board-edge-clearance", type=float, default=defaults.BOARD_EDGE_CLEARANCE,
-                        help=f"Clearance from board edge in mm (default: {defaults.BOARD_EDGE_CLEARANCE} = use track clearance)")
+    parser.add_argument("--hole-to-hole-clearance", type=float, default=None,
+                        help="Minimum clearance between drill holes in mm. Default: the "
+                             f"board's own min_hole_to_hole constraint, else {defaults.HOLE_TO_HOLE_CLEARANCE}.")
+    parser.add_argument("--board-edge-clearance", type=float, default=None,
+                        help="Clearance from board edge in mm. Default: the board's own "
+                             f"min_copper_edge_clearance constraint, else {defaults.BOARD_EDGE_CLEARANCE}.")
     from fix_kicad_drc_settings import add_drc_fix_args
     add_drc_fix_args(parser)
 
@@ -2183,6 +2189,45 @@ For differential pair routing, use route_diff.py:
                            enforce_fab_floors, count_copper_layers_in_file)
     add_fab_tier_args(parser)
     args = parser.parse_args()
+    # #439: the PRESENCE of --clearance is the clamp switch. Given -> it is the
+    # ceiling: non-Default classes are capped at min(class, --clearance) and the
+    # output .kicad_pro clamps them to the routed floor. Omitted -> honor the
+    # classes: the base clearance defaults to the board's OWN Default net-class
+    # clearance, each non-Default net routes at its full class value (uncapped), and
+    # the writeback preserves the classes. --hole-to-hole-clearance and
+    # --board-edge-clearance work the same way (omitted -> the board's own
+    # constraint minimum). Resolved here, before enforce_fab_floors and every
+    # downstream use. Stashed on args for drc_fix_kwargs (the writeback clamp).
+    from list_nets import (board_default_netclass_clearance, board_constraint)
+    # --clearance, when given, is a pure CEILING on EVERY class -- Default included,
+    # nothing special. Each net routes at min(its class, ceiling): the base clearance
+    # (Default-class nets) is min(Default class, ceiling), and non-Default classes are
+    # capped at the ceiling in the map below. Omitted -> no ceiling: every net routes
+    # at its own class (base = the board's Default class).
+    _ceiling = args.clearance                       # None iff --clearance omitted
+    args._clamp_netclasses = _ceiling is not None
+    args._clearance_ceiling = _ceiling
+    _dflt_clr = board_default_netclass_clearance(args.input_file)
+    if _ceiling is None:
+        args.clearance = _dflt_clr if _dflt_clr is not None else defaults.CLEARANCE
+        print(f"--clearance not given; honoring net classes with base = "
+              f"{'the board Default net-class' if _dflt_clr is not None else 'the fallback'} "
+              f"clearance {args.clearance}mm.")
+    else:
+        # min(Default class, ceiling) so Default is capped like every other class.
+        args.clearance = min(_dflt_clr, _ceiling) if _dflt_clr is not None else _ceiling
+    if args.hole_to_hole_clearance is None:
+        _h2h = board_constraint(args.input_file, 'min_hole_to_hole')
+        args.hole_to_hole_clearance = _h2h if _h2h is not None else defaults.HOLE_TO_HOLE_CLEARANCE
+        print(f"--hole-to-hole-clearance not given; using "
+              f"{'the board min_hole_to_hole' if _h2h is not None else 'the fallback'} "
+              f"{args.hole_to_hole_clearance}mm.")
+    if args.board_edge_clearance is None:
+        _edge = board_constraint(args.input_file, 'min_copper_edge_clearance')
+        args.board_edge_clearance = _edge if _edge is not None else defaults.BOARD_EDGE_CLEARANCE
+        print(f"--board-edge-clearance not given; using "
+              f"{'the board min_copper_edge_clearance' if _edge is not None else 'the fallback'} "
+              f"{args.board_edge_clearance}mm.")
     set_default_fab_tier(*fab_tier_from_args(args))
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.input_file),
@@ -2293,15 +2338,13 @@ For differential pair routing, use route_diff.py:
     # this board's nets so the obstacle-map builders price each pre-placed obstacle at its own
     # net-class clearance (KiCad's max(classA, classB)). None/absent -> empty map -> prior
     # behaviour. The GUI front builds the same map from live net classes (swig_gui).
-    # #439: ALWAYS build the non-Default netclass map; --clearance is the CEILING
-    # on every class (eff = min(class, --clearance)) unless --no-clamp-netclasses
-    # lifts it. Stock netclasses are often aspirational -- copper the design never
-    # meets (the human-routed zynq itself violates its 0.2 class, routed ~0.1) --
-    # so by default a class looser than --clearance is capped to --clearance:
-    # routing floors at --clearance anyway, and the writeback records each class
-    # at min(class, --clearance) so KiCad grades exactly what was routed. A tight
-    # class (< --clearance) survives the cap. --no-clamp-netclasses keeps the full
-    # classes, for a real impedance board whose classes are met.
+    # #439: ALWAYS build the non-Default netclass map. When --clearance was GIVEN
+    # (args._clamp_netclasses) it is the CEILING -- each class is capped at
+    # min(class, --clearance), because stock classes are often aspirational (the
+    # human-routed zynq itself violates its 0.2 class, routed ~0.1). When --clearance
+    # was OMITTED the classes are honored in full (each net routes at its own class),
+    # and the writeback preserves them. --net-clearances <json> overrides with
+    # explicit per-net values, used as-is.
     _net_clearances_map = None
     if args.net_clearances:
         with open(args.net_clearances, encoding="utf-8") as _f:
@@ -2316,14 +2359,14 @@ For differential pair routing, use route_diff.py:
         from list_nets import net_clearance_map_by_id
         _net_clearances_map = net_clearance_map_by_id(
             args.input_file, {_nid: _net.name for _nid, _net in pcb_data.nets.items()})
-        if _net_clearances_map and not getattr(args, 'no_clamp_netclasses', False):
-            _net_clearances_map = {nid: min(clr, args.clearance)
+        if _net_clearances_map and args._clamp_netclasses:
+            _net_clearances_map = {nid: min(clr, args._clearance_ceiling)
                                    for nid, clr in _net_clearances_map.items()}
         if _net_clearances_map:
             _classes = sorted({round(v, 4) for v in _net_clearances_map.values()})
-            _mode = ("preserved (--no-clamp-netclasses)"
-                     if getattr(args, 'no_clamp_netclasses', False)
-                     else f"capped at --clearance {args.clearance}")
+            _mode = (f"capped at --clearance {args._clearance_ceiling}"
+                     if args._clamp_netclasses
+                     else "honored in full (--clearance omitted)")
             print(f"Netclass clearances for {len(_net_clearances_map)} net(s), {_mode} "
                   f"(mm: {_classes}); cross-class max(A,B) respected.")
 

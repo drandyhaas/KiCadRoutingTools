@@ -541,20 +541,6 @@ def add_drc_fix_args(parser, *, include_no_fix=True):
     g.add_argument("--keep-thermal", action="store_true",
                    help="When fixing DRC settings, leave thermal-relief severity (starved_thermal) "
                         "untouched instead of demoting it to a warning.")
-    # #439: clamping non-Default net classes DOWN to the routed clearance in the
-    # output .kicad_pro is the DEFAULT. Stress-corpus (and many real) boards carry
-    # ASPIRATIONAL netclasses their own copper does not meet -- the human-routed
-    # zynq itself has 499 clearance violations at its 0.2 class (routed ~0.1). So
-    # grading at the stock class over-penalizes copper routed at the real fab
-    # floor; clamping each class to what was actually routed makes KiCad DRC match
-    # reality. --no-clamp-netclasses PRESERVES the original class spec, for a
-    # genuine impedance-controlled board whose classes are real and met.
-    g.add_argument("--no-clamp-netclasses", action="store_true",
-                   help="Preserve the original NON-Default net class clearance/track/via "
-                        "spec in the output .kicad_pro instead of clamping it down to the "
-                        "routed values. Use for a real impedance-controlled board whose "
-                        "classes are met. Default: clamp classes to the routed clearance so "
-                        "KiCad DRC matches the copper (aspirational stock classes are common).")
     g.add_argument("--enable-used-layers", action="store_true",
                    help="Add any layer the board uses but that is missing from its (layers) table "
                         "back into the .kicad_pcb, so KiCad shows it as selectable and stops "
@@ -567,10 +553,13 @@ def drc_fix_kwargs(args):
     """Map args parsed via :func:`add_drc_fix_args` to :func:`fix_project_for_output`
     keyword arguments (the shared DRC-fix flags only -- per-script routing floors
     like clearance/track/via are passed separately by each caller)."""
-    # #439: clamp NON-Default classes to the routed clearance BY DEFAULT (stock
-    # netclasses are often aspirational -- even the human boards violate them).
-    # --no-clamp-netclasses preserves the class spec for a real impedance board.
-    clamp = not getattr(args, "no_clamp_netclasses", False)
+    # #439: clamp NON-Default classes to the routed clearance whenever the caller
+    # routed with an explicit --clearance ceiling (args._clamp_netclasses, set by
+    # route.py / route_diff.py main); when --clearance was omitted the classes were
+    # honored in full, so the writeback preserves them. Callers that do not set the
+    # attribute (fanout, standalone runs) clamp by default -- the safe choice, since
+    # clamping only ever lowers the output class to the copper actually routed.
+    clamp = getattr(args, "_clamp_netclasses", True)
     return dict(keep_thermal=args.keep_thermal, enable_layers=args.enable_used_layers,
                 clamp_nondefault_netclasses=clamp)
 
@@ -909,7 +898,7 @@ def main():
                                        ignore_current_warnings=args.ignore_warnings,
                                        diff_pair_gap=args.diff_pair_gap,
                                        diff_pair_width=args.diff_pair_width,
-                                       clamp_nondefault_netclasses=not args.no_clamp_netclasses)
+                                       clamp_nondefault_netclasses=True)  # #439: clamp to the routed floor
 
     if not changes:
         print(f"{pro}: already consistent, nothing to change.")

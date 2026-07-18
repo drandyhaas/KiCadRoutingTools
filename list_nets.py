@@ -223,6 +223,43 @@ def read_design_rules(pcb_path):
             'source': source}
 
 
+def board_default_netclass_clearance(pcb_path, design_rules=None):
+    """Return the board's **Default** net-class clearance (mm) from the sibling
+    .kicad_pro, or ``None`` when there is no project / no Default class / no
+    clearance value. The routing CLIs and GUI use this as the base clearance when
+    the user gives none (#439 follow-up), so a board routes to its OWN Default
+    class instead of the generic ``routing_defaults.CLEARANCE``. Pass a cached
+    ``read_design_rules`` result as ``design_rules`` to avoid re-reading."""
+    try:
+        dr = design_rules if design_rules is not None else read_design_rules(pcb_path)
+    except Exception:
+        return None
+    clr = ((dr.get('classes') or {}).get('Default') or {}).get('clearance')
+    try:
+        return float(clr) if clr is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def board_constraint(pcb_path, key, design_rules=None):
+    """Return a DRC-enforced Board Constraint (mm) from the sibling .kicad_pro's
+    ``design_settings.rules`` -- e.g. ``min_hole_to_hole``,
+    ``min_copper_edge_clearance``, ``min_clearance`` -- or ``None`` when there is
+    no project / that constraint is unset. The routing CLIs use this so an omitted
+    ``--hole-to-hole-clearance`` / ``--board-edge-clearance`` defaults to the
+    board's OWN minimum (#439 follow-up) instead of a generic constant. Pass a
+    cached ``read_design_rules`` result as ``design_rules`` to avoid re-reading."""
+    try:
+        dr = design_rules if design_rules is not None else read_design_rules(pcb_path)
+    except Exception:
+        return None
+    v = (dr.get('constraints') or {}).get(key)
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def net_clearance_map_by_id(pcb_path, nets, design_rules=None):
     """Resolve each net to its net-class clearance (mm) from the sibling
     .kicad_pro netclasses, for the routing CLIs' cross-class clearance map.

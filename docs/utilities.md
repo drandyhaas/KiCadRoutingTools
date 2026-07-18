@@ -361,14 +361,14 @@ Options:
 
 ### Design rules
 
-The routers **auto-read** the board's *non-Default* net classes from the sibling
-`.kicad_pro` and honor KiCad's cross-class `max(classA, classB)` spacing, but
-they still take the base `--clearance` / `--track-width` from the CLI (defaulting
-to the Default net-class clearance), and by default **cap** each non-Default class
-at `--clearance` (`min(class, --clearance)`, #439 — stock classes are largely
-aspirational; `--no-clamp-netclasses` lifts the cap). They do **not** infer the
-base floor or per-net track/via nominals on their own, so `--design-rules` reads
-the real rules for you to pass explicitly:
+The routers **auto-read** the board's net classes from the sibling `.kicad_pro`
+and honor KiCad's cross-class `max(classA, classB)` spacing. `--clearance` is a
+**ceiling**: given, every class (Default included) is capped at `min(class,
+--clearance)`; omitted, each net routes at its own net-class clearance (base = the
+board's Default class), and `--hole-to-hole-clearance` / `--board-edge-clearance`
+default to the board's own `min_hole_to_hole` / `min_copper_edge_clearance`
+constraint (#439). They do **not** infer per-net track/via nominals on their own,
+so `--design-rules` reads the real rules for you to pass explicitly:
 
 ```bash
 python list_nets.py board.kicad_pcb --design-rules
