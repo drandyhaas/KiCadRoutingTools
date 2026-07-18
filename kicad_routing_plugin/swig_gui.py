@@ -622,6 +622,15 @@ class RoutingDialog(wx.Dialog):
         when the board value is unavailable, and is pinned UP to the fab floor."""
         if getattr(self, name + '_check').GetValue():
             val = getattr(self, name).GetValue()
+            # #439 B: Min Clearance is a pure CEILING on every class incl. Default, so
+            # the base clearance is min(Default class, override) -- exactly like the
+            # CLI's args.clearance = min(_dflt_clr, _ceiling). An override ABOVE the
+            # board's Default class therefore never loosens the base (the interactive
+            # validation warns + pins it; this is the route-time safety net).
+            if name == 'clearance':
+                dflt = (_get_netclass_parameters('Default') or {}).get('clearance')
+                if dflt is not None and val > dflt:
+                    val = dflt
         else:
             if name == 'hole_to_hole_clearance':
                 constraints = _get_board_minimum_constraints() or {}
@@ -675,6 +684,29 @@ class RoutingDialog(wx.Dialog):
                 f"declare a smaller fab capability.",
                 "Fab Floor", wx.OK | wx.ICON_WARNING)
             return
+
+        # #439 B: the Min Clearance override is a pure CEILING. A value ABOVE the
+        # board's Default net-class clearance has no effect on the base clearance
+        # (nets never route looser than their own class -- min(Default, override), as
+        # in the CLI). Pin it to the Default class and warn, so what you enter routes.
+        if ctrl_name == 'clearance' and ctrl is not None \
+                and getattr(self, 'clearance_check', None) is not None \
+                and self.clearance_check.GetValue():
+            dflt = (_get_netclass_parameters('Default') or {}).get('clearance')
+            if dflt is not None and ctrl.GetValue() > dflt + 1e-9:
+                self._drc_validating = True
+                try:
+                    ctrl.SetValue(dflt)
+                finally:
+                    self._drc_validating = False
+                wx.CallAfter(
+                    wx.MessageBox,
+                    f"Min Clearance is a ceiling: a value above the board's Default "
+                    f"net-class clearance ({dflt:.4f} mm) has no effect on the base "
+                    f"clearance (nets never route looser than their own class). "
+                    f"Pinned to {dflt:.4f} mm.",
+                    "Min Clearance", wx.OK | wx.ICON_WARNING)
+                return
 
         if not (hasattr(self, 'obey_drc_check') and self.obey_drc_check.GetValue()):
             event.Skip()
