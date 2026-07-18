@@ -1448,8 +1448,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             max(clearance, class(net_a), class(net_b), pad overrides) --
             KiCad's per-pair resolution -- instead of the single global value.
     """
-    # Use track clearance for board edge if not specified
-    effective_board_edge_clearance = board_edge_clearance if board_edge_clearance > 0 else clearance
+    # Board-edge clearance: the explicit/board value when set, else the fab
+    # copper-to-edge floor (0.20, #439 -- the routers pin the edge up to it, so a
+    # project-less final's copper is >=0.20 from the edge) or the copper clearance,
+    # whichever is larger.
+    effective_board_edge_clearance = board_edge_clearance if board_edge_clearance > 0 else max(clearance, 0.20)
     if quiet and net_patterns:
         # Print a brief summary line in quiet mode
         print(f"Checking {', '.join(net_patterns)} for DRC...", end=" ", flush=True)
@@ -2639,6 +2642,17 @@ if __name__ == "__main__":
             if not args.quiet:
                 print(f"Board-edge clearance {_pro_edge:.4g} mm "
                       f"(from project min_copper_edge_clearance)")
+        # #439: board-derive the hole-to-hole floor too (symmetry with edge above
+        # and with the router, which pins it from min_hole_to_hole). Without this a
+        # board declaring min_hole_to_hole > the 0.2 default is graded too loose and
+        # a real hole-to-hole violation between 0.2 and the board value is missed.
+        _pro_h2h = float(_rules.get('constraints', {})
+                         .get('min_hole_to_hole') or 0.0)
+        if _pro_h2h > args.hole_to_hole_clearance:
+            args.hole_to_hole_clearance = _pro_h2h
+            if not args.quiet:
+                print(f"Hole-to-hole clearance {_pro_h2h:.4g} mm "
+                      f"(from project min_hole_to_hole)")
     except Exception as e:
         if not args.quiet:
             print(f"  (netclass/edge rules not read: {e})")

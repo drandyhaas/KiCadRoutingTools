@@ -435,18 +435,22 @@ def _web_min_connection(cfg: dict):
 
 
 def _staged_copy(board: str, clearance: float):
-    """Copy board + sibling .kicad_pro into a temp dir with the DEFAULT
-    net-class clearance forced to `clearance`, so KiCad grades at the SAME
-    constraint check_drc uses (the routed clearance) instead of the board's
-    original design netclass -- grading stricter manufactures phantom
-    clearance items and drowns the real signal.
+    """Copy board + sibling .kicad_pro into a temp dir, staged so KiCad grades at
+    the routed floor. `clearance` here is the caller's RESOLVED grading clearance,
+    which compare_board_data now sets to the board's OWN recorded floor (#439), so
+    the Default-class equalization below is a no-op on routed output (the recorded
+    Default class already IS the floor) -- it only bites a stock/project-less board.
 
-    PR392: only the DEFAULT class (the routing side, routed at the run clearance)
-    is equalized. NON-Default classes keep their ORIGINAL clearance because the
-    router now RESPECTS them (pairwise max(classA, classB)); KiCad then grades each
-    cross-class pair at its true max(A,B) from the real classes. Clamping non-Default
-    classes down (the old behaviour) would grade that copper LOOSER than it was
-    routed and hide genuine class-clearance shortfalls."""
+    NON-Default classes are left untouched because the #439 writeback already
+    CLAMPED them to the routed floor in the .kicad_pro (clamp_nondefault_netclasses,
+    default True), so KiCad reads back the routed values directly and grades each
+    cross-class pair at its true max(A,B). (Pre-#439 this relied on PR392's
+    "router respects non-Default classes"; post-#439 the writeback does the clamping.)
+
+    This function still does the useful, board-derived work: skip the slow silk DRC
+    provider, stage the #406 min-connection web check, and pin an ABSENT edge rule to
+    the fab floor. The clearance forcings are legacy and mostly inert now that the
+    caller passes the recorded floor."""
     import shutil
     clearance = float(clearance)
     d = tempfile.mkdtemp(prefix="kdrc_")
@@ -485,7 +489,11 @@ def _staged_copy(board: str, clearance: float):
     # the absent key to the routed clearance so both engines grade alike. A
     # RECORDED rule is left untouched (it is a real design constraint).
     if "min_copper_edge_clearance" not in rules:
-        rules["min_copper_edge_clearance"] = clearance
+        # #439: the routers enforce max(cli, board rule, 0.20 fab copper-to-edge
+        # floor) to the edge, so a project-less final's copper is >=0.20 from the
+        # edge -- grade it at max(clearance, 0.20), not the (looser) copper clearance,
+        # else a real 0.1-0.2 edge defect is missed. Symmetric with check_drc's fallback.
+        rules["min_copper_edge_clearance"] = max(clearance, 0.20)
     # Silk checks are OUT OF SCOPE (results are filtered to copper classes)
     # but DRC_TEST_PROVIDER_SILK_CLEARANCE dominates wall time on art-heavy
     # boards -- lily58's keyboard legends made kicad-cli spin >10 MINUTES at
@@ -596,8 +604,21 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     Returns a dict (numeric grade + item lists + verdict for the printer), or
     None if kicad-cli could not grade the board (caller degrades to Nones)."""
     label = label or os.path.basename(board)
-    if clearance is None:
-        clearance = _pro_clearance(board)
+    # #439: grade at the board's OWN recorded routed floor (the Default net-class
+    # clearance the clearance ledger + writeback record in the sibling .kicad_pro --
+    # always <= the manifest --clearance because the writeback only-lowers), NOT the
+    # passed manifest clearance. A board may legitimately fine-tap SOME connections
+    # below the nominal --clearance; grading at the manifest ceiling manufactures
+    # phantom sub-clearance items on that copper (neo6502: 499 phantom at 0.127 vs 0
+    # at the recorded 0.1; olimex_lora: 125 vs 36). The passed value is only a
+    # FALLBACK for a final shipped without a recorded floor (project-less board,
+    # #217; stock/minimal project, the tigard class). Reassigning it here threads the
+    # recorded floor to EVERY kicad_items_for / run_check_drc / web_min call below --
+    # finals AND baseline -- so the two engines agree and baseline subtraction (#405)
+    # lines up at the same floor.
+    recorded = _pro_clearance(board)
+    if recorded is not None:
+        clearance = recorded
     kicad, err = kicad_items_for(board, clearance)
     if err:
         return {"board": label, "skip": err}
