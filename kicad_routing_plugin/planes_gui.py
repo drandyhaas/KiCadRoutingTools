@@ -974,6 +974,41 @@ class PlanesTab(wx.Panel):
         # copper cleanup (CLI parity) scopes to them (see _apply_results_to_board).
         self._plane_net_names = list(dict.fromkeys(expanded_nets))
 
+        # #439: build net_clearances from the live board so plane taps/vias and
+        # ripped-net reroutes honor KiCad's cross-class max(A,B) -- mirrors
+        # route_planes.py and the route tab (swig_gui). Passing an explicit map
+        # STOPS the engine's internal always-cap auto-read, so honoring classes
+        # (Min Clearance override unchecked) actually reaches the router.
+        # Checking Min Clearance (== the CLI passing --clearance) caps each class
+        # at min(class, clearance); unchecked routes each class in full. The
+        # clamp/ceiling params are also threaded so create_plane's OWN internal
+        # auto-read (the ripped-net reroute path) honors/caps the same way.
+        _plane_clearance = config.get('clearance', defaults.CLEARANCE)
+        _plane_clamp = config.get('clamp_netclasses', False)
+        _plane_ceiling = _plane_clearance if _plane_clamp else None
+        _plane_net_clearances = {}
+        try:
+            from .fanout_gui import _get_net_classes_from_board
+            from .swig_gui import _get_netclass_parameters
+            all_net_to_class, all_class_names = _get_net_classes_from_board()
+            class_clearance_cache = {}
+            for cname in all_class_names:
+                params = _get_netclass_parameters(cname)
+                if params:
+                    class_clearance_cache[cname] = params.get('clearance', _plane_clearance)
+                else:
+                    class_clearance_cache[cname] = _plane_clearance
+            for net in self.pcb_data.nets.values():
+                cname = all_net_to_class.get(net.name, 'Default')
+                _plane_net_clearances[net.net_id] = class_clearance_cache.get(
+                    cname, _plane_clearance)
+            if _plane_clamp:
+                _plane_net_clearances = {nid: min(clr, _plane_clearance)
+                                         for nid, clr in _plane_net_clearances.items()}
+        except Exception as e:
+            print(f"Warning: Could not get net class clearances: {e}")
+            _plane_net_clearances = None
+
         failed_pads = 0
         try:
             (vias, traces, pads_needing, new_vias, new_segments, new_zones,
@@ -1041,6 +1076,9 @@ class PlanesTab(wx.Panel):
                 # should skip re-emitting an existing zone. A plan can override
                 # to False (the CLI default) to match a route_planes.py replay.
                 skip_existing_zones=config.get('skip_existing_zones', True),
+                net_clearances=_plane_net_clearances,
+                clamp_netclasses=_plane_clamp,
+                clearance_ceiling=_plane_ceiling,
                 progress_callback=self._make_progress_callback(),
                 cancel_check=lambda: self._cancel_requested,
             )
@@ -1150,6 +1188,34 @@ class PlanesTab(wx.Panel):
         # Nets this repair touched, for the post-apply plane copper cleanup.
         self._plane_net_names = list(dict.fromkeys(net_names))
 
+        # #439: same live-board net_clearances map as the create path, so repair
+        # taps/reconnects honor cross-class max(A,B). Explicit map stops the
+        # engine's internal always-cap auto-read; clamp/ceiling threaded so the
+        # ripped-net reconnect sub-runs honor/cap identically.
+        _plane_clearance = config.get('clearance', defaults.CLEARANCE)
+        _plane_clamp = config.get('clamp_netclasses', False)
+        _plane_ceiling = _plane_clearance if _plane_clamp else None
+        _plane_net_clearances = {}
+        try:
+            from .fanout_gui import _get_net_classes_from_board
+            from .swig_gui import _get_netclass_parameters
+            all_net_to_class, all_class_names = _get_net_classes_from_board()
+            class_clearance_cache = {}
+            for cname in all_class_names:
+                params = _get_netclass_parameters(cname)
+                class_clearance_cache[cname] = (params.get('clearance', _plane_clearance)
+                                                if params else _plane_clearance)
+            for net in self.pcb_data.nets.values():
+                cname = all_net_to_class.get(net.name, 'Default')
+                _plane_net_clearances[net.net_id] = class_clearance_cache.get(
+                    cname, _plane_clearance)
+            if _plane_clamp:
+                _plane_net_clearances = {nid: min(clr, _plane_clearance)
+                                         for nid, clr in _plane_net_clearances.items()}
+        except Exception as e:
+            print(f"Warning: Could not get net class clearances: {e}")
+            _plane_net_clearances = None
+
         print(f"Repairing zones: {list(zip(net_names, plane_layers))}")
 
         try:
@@ -1211,6 +1277,9 @@ class PlanesTab(wx.Panel):
                 dry_run=True,  # Don't write to file, apply via pcbnew
                 pcb_data=self.pcb_data,
                 return_results=True,
+                net_clearances=_plane_net_clearances,
+                clamp_netclasses=_plane_clamp,
+                clearance_ceiling=_plane_ceiling,
                 progress_callback=self._make_progress_callback(),
                 cancel_check=lambda: self._cancel_requested,
             )

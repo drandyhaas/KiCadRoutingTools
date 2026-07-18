@@ -1349,8 +1349,9 @@ Examples:
                              "(behavior unchanged). Matches route.py / route_planes.")
 
     # Track and via geometry
-    parser.add_argument("--track-width", type=float, default=0.3,
-                        help="Track width in mm (default: 0.3). Ignored if --impedance is specified.")
+    parser.add_argument("--track-width", type=float, default=None,
+                        help="Track width in mm (default: the board Default net-class width, "
+                             "else 0.3). Ignored if --impedance is specified.")
     parser.add_argument("--impedance", type=float, default=None,
                         help="Target differential impedance in ohms (e.g., 100). Calculates track width per layer from board stackup using --diff-pair-gap as spacing.")
     parser.add_argument("--clearance", type=float, default=None,
@@ -1367,10 +1368,10 @@ Examples:
                              "in-run obstacle of a different class is priced at max(routing floor, "
                              "that obstacle net's own clearance) = KiCad's cross-class max(A,B). The "
                              "GUI derives the same map from the board's live net classes.")
-    parser.add_argument("--via-size", type=float, default=0.5,
-                        help="Via outer diameter in mm (default: 0.5)")
-    parser.add_argument("--via-drill", type=float, default=0.3,
-                        help="Via drill size in mm (default: 0.3)")
+    parser.add_argument("--via-size", type=float, default=None,
+                        help="Via outer diameter in mm (default: the board Default net-class via, else 0.5)")
+    parser.add_argument("--via-drill", type=float, default=None,
+                        help="Via drill size in mm (default: the board Default net-class via drill, else 0.3)")
 
     # Router algorithm parameters
     parser.add_argument("--grid-step", type=float, default=0.1,
@@ -1536,7 +1537,21 @@ Examples:
     # uncapped, writeback preserves. --hole-to-hole-clearance / --board-edge-clearance
     # default to the board's own constraint minimum when omitted. Resolved before
     # enforce_fab_floors; _clamp_netclasses is stashed for drc_fix_kwargs.
-    from list_nets import (board_default_netclass_clearance, board_constraint)
+    from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
+                           board_constraint)
+    # track_width / via_size / via_drill: when omitted, default to the board's OWN
+    # Default net-class value (else the routing_defaults constant), so a bare route
+    # uses the board's own geometry -- parity with route.py / the GUI's per-control
+    # override. (track_width may still be overridden by --impedance downstream.)
+    for _pname, _nckey, _fallback in (('track_width', 'track_width', defaults.TRACK_WIDTH),
+                                      ('via_size', 'via_diameter', defaults.VIA_SIZE),
+                                      ('via_drill', 'via_drill', defaults.VIA_DRILL)):
+        if getattr(args, _pname) is None:
+            _v = board_default_netclass_param(args.input_file, _nckey)
+            setattr(args, _pname, _v if _v is not None else _fallback)
+            print(f"--{_pname.replace('_', '-')} not given; using "
+                  f"{'the board Default net-class' if _v is not None else 'the fallback'} "
+                  f"{getattr(args, _pname)}mm.")
     # --clearance given -> pure ceiling on EVERY class (Default included): base =
     # min(Default class, ceiling), non-Default capped at the ceiling. Omitted -> no
     # ceiling: each net routes at its own class (base = board Default class).

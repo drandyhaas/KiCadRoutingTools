@@ -901,6 +901,38 @@ class DifferentialTab(wx.Panel):
                 # Brief sleep releases GIL, allowing main thread to process CallAfter events
                 time.sleep(0.01)
 
+            # #439: build net_clearances from the live board so obstacles from
+            # nets in wider classes are priced at their own clearance (KiCad's
+            # cross-class max(A,B)) -- mirrors the single-ended route tab
+            # (swig_gui). Passing an explicit map STOPS the engine's internal
+            # always-cap auto-read, so honoring classes (Min Clearance override
+            # unchecked) actually reaches the router. Checking Min Clearance
+            # (== the CLI passing --clearance) caps each class at
+            # min(class, clearance); unchecked routes each class in full.
+            _diff_clearance = config.get('clearance', 0.1)
+            net_clearances = {}
+            try:
+                from .fanout_gui import _get_net_classes_from_board
+                from .swig_gui import _get_netclass_parameters
+                all_net_to_class, all_class_names = _get_net_classes_from_board()
+                class_clearance_cache = {}
+                for cname in all_class_names:
+                    params = _get_netclass_parameters(cname)
+                    if params:
+                        class_clearance_cache[cname] = params.get('clearance', _diff_clearance)
+                    else:
+                        class_clearance_cache[cname] = _diff_clearance
+                for net in self.pcb_data.nets.values():
+                    cname = all_net_to_class.get(net.name, 'Default')
+                    net_clearances[net.net_id] = class_clearance_cache.get(
+                        cname, _diff_clearance)
+                if config.get('clamp_netclasses', False):
+                    net_clearances = {nid: min(clr, _diff_clearance)
+                                      for nid, clr in net_clearances.items()}
+            except Exception as e:
+                print(f"Warning: Could not get net class clearances: {e}")
+                net_clearances = None
+
             successful, failed, total_time, results_data = batch_route_diff_pairs(
                 input_file=self.board_filename,
                 output_file="",  # Not used when return_results=True
@@ -997,6 +1029,7 @@ class DifferentialTab(wx.Panel):
                 debug_memory=config.get('debug_memory', False),
                 return_results=True,
                 pcb_data=self.pcb_data,
+                net_clearances=net_clearances,
                 cancel_check=check_cancel,
                 progress_callback=on_progress,
             )

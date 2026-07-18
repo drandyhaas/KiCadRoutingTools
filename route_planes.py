@@ -1727,7 +1727,9 @@ def _write_output_and_reroute(
     power_nets: Optional[List[str]] = None,
     power_nets_widths: Optional[List[float]] = None,
     add_teardrops: bool = False,
-    no_bga_zone: bool = False
+    no_bga_zone: bool = False,
+    clamp_netclasses: bool = True,
+    clearance_ceiling: Optional[float] = None
 ) -> bool:
     """
     Write output file and optionally reroute ripped nets.
@@ -1872,6 +1874,10 @@ def _write_output_and_reroute(
                         _ncl = net_clearance_map_by_id(
                             input_file,
                             {nid: n.name for nid, n in pcb_data.nets.items()})
+                        # #439: cap at the ceiling only when clamping.
+                        if _ncl and clamp_netclasses and clearance_ceiling is not None:
+                            _ncl = {nid: min(c, clearance_ceiling)
+                                    for nid, c in _ncl.items()}
                     except Exception:
                         _ncl = None
                     routed, failed, route_time = batch_route(
@@ -2004,6 +2010,8 @@ def create_plane(
     progress_callback=None,
     cancel_check=None,
     net_clearances: Optional[dict] = None,
+    clamp_netclasses: bool = True,
+    clearance_ceiling: Optional[float] = None,
 ) -> Union[Tuple[int, int, int],
            Tuple[int, int, int, list, list, list, int, list]]:
     """
@@ -2223,6 +2231,11 @@ def create_plane(
         except Exception as _e:
             print(f"  Warning: could not auto-read netclass clearances ({_e}).")
             net_clearances = None
+    # #439: --clearance was the CEILING -> cap every class at min(class, ceiling).
+    # When not clamping (--clearance omitted), honor the classes in full.
+    if net_clearances and clamp_netclasses and clearance_ceiling is not None:
+        net_clearances = {nid: min(c, clearance_ceiling)
+                          for nid, c in net_clearances.items()}
     if net_clearances:
         config.net_clearances = dict(net_clearances)
     coord = GridCoord(grid_step)
@@ -3132,7 +3145,9 @@ def create_plane(
             power_nets=power_nets,
             power_nets_widths=power_nets_widths,
             add_teardrops=add_teardrops,
-            no_bga_zone=no_bga_zone
+            no_bga_zone=no_bga_zone,
+            clamp_netclasses=clamp_netclasses,
+            clearance_ceiling=clearance_ceiling
         )
 
         # Geometric truth check (issues #89 and #107): the via-placement
@@ -3275,10 +3290,10 @@ Examples:
                         help="Plane layer(s) for the zone(s), one per net (e.g., In1.Cu In2.Cu)")
 
     # Via and track geometry
-    parser.add_argument("--via-size", type=float, default=defaults.VIA_SIZE, help="Via outer diameter in mm (default: 0.5)")
-    parser.add_argument("--via-drill", type=float, default=defaults.VIA_DRILL, help="Via drill size in mm (default: 0.3)")
-    parser.add_argument("--track-width", type=float, default=defaults.TRACK_WIDTH, help="Track width for via-to-pad connections in mm (default: 0.3)")
-    parser.add_argument("--clearance", type=float, default=defaults.CLEARANCE, help="Clearance in mm (default: 0.25)")
+    parser.add_argument("--via-size", type=float, default=None, help="Via outer diameter in mm (default: the board Default net-class via, else 0.5)")
+    parser.add_argument("--via-drill", type=float, default=None, help="Via drill size in mm (default: the board Default net-class via drill, else 0.3)")
+    parser.add_argument("--track-width", type=float, default=None, help="Track width for via-to-pad connections in mm (default: the board Default net-class width, else 0.3)")
+    parser.add_argument("--clearance", type=float, default=None, help="Copper clearance CEILING in mm. When given, every net class (Default included) is capped at min(class, this) and the writeback clamps. When OMITTED, each net routes at its own net-class clearance (base = the board's Default class, else 0.25).")
 
     # Zone options
     parser.add_argument("--zone-clearance", type=float, default=defaults.PLANE_ZONE_CLEARANCE, help="Zone clearance from other copper in mm (default: 0.2)")
@@ -3289,7 +3304,7 @@ Examples:
     parser.add_argument("--max-search-radius", type=float, default=defaults.PLANE_MAX_SEARCH_RADIUS, help="Max radius to search for valid via position in mm (default: 10.0)")
     parser.add_argument("--max-via-reuse-radius", type=float, default=defaults.PLANE_MAX_VIA_REUSE_RADIUS, help="Max radius to reuse existing via instead of placing new one in mm (default: 1.0)")
     parser.add_argument("--close-via-radius", type=float, default=None, help="Radius to check for nearby vias before placing new one (default: 2.5 * via-size)")
-    parser.add_argument("--hole-to-hole-clearance", type=float, default=defaults.HOLE_TO_HOLE_CLEARANCE, help=f"Minimum clearance between drill holes in mm (default: {defaults.HOLE_TO_HOLE_CLEARANCE}, the fab floor)")
+    parser.add_argument("--hole-to-hole-clearance", type=float, default=None, help=f"Minimum clearance between drill holes in mm (default: the board min_hole_to_hole, else {defaults.HOLE_TO_HOLE_CLEARANCE})")
     parser.add_argument("--layers", "-l", nargs="+", default=None,
                         help="All copper layers for routing and via span (default: F.Cu + plane-layers + B.Cu)")
     parser.add_argument("--layer-costs", nargs="+", type=float, default=[],
@@ -3331,8 +3346,9 @@ Examples:
                         help="Max A* iterations for routing plane connections (default: 200000)")
 
     # Board edge clearance
-    parser.add_argument("--board-edge-clearance", type=float, default=defaults.PLANE_EDGE_CLEARANCE,
-                        help="Clearance from board edge for zones in mm (default: 0.5)")
+    parser.add_argument("--board-edge-clearance", type=float, default=None,
+                        help=f"Clearance from board edge for zones in mm (default: the board "
+                             f"min_copper_edge_clearance, else {defaults.PLANE_EDGE_CLEARANCE})")
     from fix_kicad_drc_settings import add_drc_fix_args
     add_drc_fix_args(parser)
 
@@ -3364,6 +3380,50 @@ Examples:
                            enforce_fab_floors, count_copper_layers_in_file)
     add_fab_tier_args(parser)
     args = parser.parse_args()
+    # #439: identical net-class/clearance model to route.py. --clearance is the
+    # clamp switch: GIVEN -> ceiling, every class capped at min(class, ceiling),
+    # writeback clamps (_clamp_netclasses True). OMITTED -> each net routes at its
+    # own class (base = board Default class), classes preserved. Geometry flags
+    # omitted -> default from the board (track/clearance/via from Default net-class,
+    # hole/edge from board constraints, else a routing_defaults constant). Planes
+    # keep their larger PLANE_EDGE_CLEARANCE fallback when the board declares none.
+    # Resolved here, before enforce_fab_floors and every downstream use.
+    from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
+                           board_constraint)
+    for _pname, _nckey, _fallback in (('track_width', 'track_width', defaults.TRACK_WIDTH),
+                                      ('via_size', 'via_diameter', defaults.VIA_SIZE),
+                                      ('via_drill', 'via_drill', defaults.VIA_DRILL)):
+        if getattr(args, _pname) is None:
+            _v = board_default_netclass_param(args.input_file, _nckey)
+            setattr(args, _pname, _v if _v is not None else _fallback)
+            print(f"--{_pname.replace('_', '-')} not given; using "
+                  f"{'the board Default net-class' if _v is not None else 'the fallback'} "
+                  f"{getattr(args, _pname)}mm.")
+    _ceiling = args.clearance                       # None iff --clearance omitted
+    args._clamp_netclasses = _ceiling is not None
+    args._clearance_ceiling = _ceiling
+    _dflt_clr = board_default_netclass_clearance(args.input_file)
+    if _ceiling is None:
+        args.clearance = _dflt_clr if _dflt_clr is not None else defaults.CLEARANCE
+        print(f"--clearance not given; honoring net classes with base = "
+              f"{'the board Default net-class' if _dflt_clr is not None else 'the fallback'} "
+              f"clearance {args.clearance}mm.")
+    else:
+        args.clearance = min(_dflt_clr, _ceiling) if _dflt_clr is not None else _ceiling
+    if args.hole_to_hole_clearance is None:
+        _h2h = board_constraint(args.input_file, 'min_hole_to_hole')
+        args.hole_to_hole_clearance = _h2h if _h2h is not None else defaults.HOLE_TO_HOLE_CLEARANCE
+        print(f"--hole-to-hole-clearance not given; using "
+              f"{'the board min_hole_to_hole' if _h2h is not None else 'the fallback'} "
+              f"{args.hole_to_hole_clearance}mm.")
+    if args.board_edge_clearance is None:
+        # Planes keep their larger edge keep-out (PLANE_EDGE_CLEARANCE) only when
+        # the board declares no edge rule of its own.
+        _edge = board_constraint(args.input_file, 'min_copper_edge_clearance')
+        args.board_edge_clearance = _edge if _edge is not None else defaults.PLANE_EDGE_CLEARANCE
+        print(f"--board-edge-clearance not given; using "
+              f"{'the board min_copper_edge_clearance' if _edge is not None else 'the fallback'} "
+              f"{args.board_edge_clearance}mm.")
     set_default_fab_tier(*fab_tier_from_args(args))
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.input_file),
@@ -3467,6 +3527,8 @@ Examples:
         same_net_pad_clearance=args.same_net_pad_clearance,
         skip_existing_zones=args.skip_existing_zones,
         no_bga_zone=args.no_bga_zone,
+        clamp_netclasses=args._clamp_netclasses,
+        clearance_ceiling=args._clearance_ceiling,
     )
 
     # Add GND return vias if requested
