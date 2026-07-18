@@ -430,19 +430,20 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
     minimum -- they are draw defaults -- so lowering them cannot create a new
     violation, consistent with the only-loosen guarantee.
 
-    ``clamp_nondefault_netclasses`` (default False since PR392) would clamp the
-    NON-Default net classes' clearance/track/via floors DOWN to the routed values.
-    It now defaults OFF because the router RESPECTS non-Default netclass clearances
-    end-to-end (KiCad pairwise max(classA, classB), auto-read from the .kicad_pro):
-    copper of a non-Default class is genuinely routed to that class's clearance, so
-    the output must KEEP the class's ORIGINAL clearance rather than erase it. This
-    was a HACK from when routing IGNORED classes and had to clamp them down to avoid
-    a DRC storm. Re-enable it (CLI ``--clamp-netclasses``) only for a path that does
-    NOT yet respect classes and would otherwise storm. The Default-class /
+    ``clamp_nondefault_netclasses`` clamps the NON-Default net classes'
+    clearance/track/via floors DOWN to the routed values. The real entry points
+    (``fix_project_for_output`` and the CLI) default it ON (#439) because stock net
+    classes are largely ASPIRATIONAL: corpus and real boards route below them (even
+    the human-routed references violate their own class -- zynq has 499 clearance
+    violations at its 0.2 class, routed ~0.1), so keeping the stock class in the
+    output manufactures phantom sub-class DRC on copper that was routed correctly at
+    the fab floor. The router honors min(class, --clearance) in-run and the writeback
+    records that same floor, so KiCad grades exactly what was routed. ``--no-clamp-
+    netclasses`` passes False to PRESERVE the original class spec, only for a genuine
+    impedance-controlled board whose classes are met. The Default-class /
     rules.min_clearance write below is UNRELATED to this flag and stays: it records
-    the actual ROUTING clearance (the router's config.clearance, which it genuinely
-    honors for the routing side), only-lowering so a board routed tighter than its
-    stock Default class does not storm."""
+    the actual ROUTING clearance (the router's config.clearance), only-lowering so a
+    board routed tighter than its stock Default class does not storm."""
     EPS = 1e-9
     ds = proj.setdefault("board", {}).setdefault("design_settings", {})
     rules = ds.setdefault("rules", {})
@@ -486,14 +487,12 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
             if cur is None or cur > target + EPS:
                 changes.append(f"net_class[Default].{field}: {cur} -> {target} mm")
                 default_cls[field] = target
-    # NON-Default classes (#295 follow-up, now OFF by default -- PR392): historically
-    # the router IGNORED per-class clearances, so copper routed at the smaller run
-    # clearance would storm KiCad's per-net-class DRC, and the class floors were
-    # clamped DOWN to the routed values to hide it. The router now RESPECTS non-
-    # Default classes (auto-read from the .kicad_pro, priced pairwise max(A,B)), so
-    # that copper genuinely meets its class clearance and the ORIGINAL class rules
-    # must survive into the output. Only re-enabled (--clamp-netclasses) for a path
-    # that still routes without honoring classes and would otherwise storm.
+    # NON-Default classes (#295 follow-up; ON by default since #439): stock net
+    # classes are largely aspirational, so copper routed at the real fab floor
+    # (min(class, --clearance)) would storm KiCad's per-net-class DRC if the output
+    # kept the stock class. Clamp each non-Default class DOWN to the routed values
+    # so grading matches the copper. --no-clamp-netclasses preserves the original
+    # class rules, only for a genuine impedance board whose classes are met.
     if clamp_nondefault_netclasses:
         for cls in classes:
             if cls is default_cls or not isinstance(cls, dict):
@@ -556,10 +555,6 @@ def add_drc_fix_args(parser, *, include_no_fix=True):
                         "routed values. Use for a real impedance-controlled board whose "
                         "classes are met. Default: clamp classes to the routed clearance so "
                         "KiCad DRC matches the copper (aspirational stock classes are common).")
-    # Backward-compat: --clamp-netclasses is now the default; accept and ignore it
-    # so older command lines / recorded manifests still parse.
-    g.add_argument("--clamp-netclasses", action="store_true",
-                   help=argparse.SUPPRESS)
     g.add_argument("--enable-used-layers", action="store_true",
                    help="Add any layer the board uses but that is missing from its (layers) table "
                         "back into the .kicad_pcb, so KiCad shows it as selectable and stops "
@@ -655,12 +650,12 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
     guarded. Returns a list of change strings. Caller should mark the board
     modified so the user's next save persists the change.
 
-    ``clamp_nondefault_netclasses`` (default False since PR392, parity with
-    apply_targets_to_project) would clamp the NON-Default net classes' floors down
-    to the routed values; it is OFF because routing now RESPECTS those classes, so
-    the output keeps their original clearances. Re-enable (GUI "Clamp non-Default
-    netclasses" / CLI ``--clamp-netclasses``) only for a path that does not honor
-    classes and would otherwise storm."""
+    ``clamp_nondefault_netclasses`` (parity with apply_targets_to_project) clamps
+    the NON-Default net classes' floors down to the routed values. The GUI call
+    sites default it ON (#439: stock classes are aspirational; keeping them
+    manufactures phantom sub-class DRC). Pass False (GUI "Keep net-class clearances"
+    checked / CLI ``--no-clamp-netclasses``) to preserve the original class spec,
+    only for a genuine impedance board whose classes are met."""
     import pcbnew
     MM = 1e6  # mm -> internal nm
     EPS = 1.0  # nm

@@ -155,7 +155,7 @@ live board via the pcbnew API.
 |--------|---------|-------------|
 | `--no-fix-drc-settings` | off (fix is on) | Do **not** adjust the output's `.kicad_pro` DRC constraints afterwards; leave KiCad's stock floors |
 | `--keep-thermal` | off | Leave `starved_thermal` (thermal-relief) severity untouched instead of demoting it to a warning |
-| `--no-clamp-netclasses` | off (clamp is on) | Do **not** clamp non-Default net classes' clearance/track/via floors down to the routed values (issue #295). Pass this for a **final** board whose net-class rules *are* the spec and must survive |
+| `--no-clamp-netclasses` | off (clamp is on) | Do **not** cap/clamp non-Default net classes down to `--clearance` — build the class map but preserve the full spec (routing honors it, writeback keeps it). By **default** each non-Default class is routed and graded at `min(class, --clearance)` and the output `.kicad_pro` clamps it to the routed floor (#439 — stock classes are largely *aspirational*; the human-routed references violate their own class, so keeping them manufactures phantom sub-class DRC). Pass this only for a **final** impedance-controlled board whose net-class rules *are* the spec and are actually met |
 | `--enable-used-layers` | off | Add any layer the board uses but is missing from its `(layers)` table back into the `.kicad_pcb`, so KiCad stops flagging `item_on_disabled_layer`. Off by default because it edits the board, not just DRC settings |
 
 ### Power Net Options

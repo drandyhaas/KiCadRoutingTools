@@ -157,10 +157,19 @@ assert config.obstacle_clearance(some_default_net) == 0.15  # not in the map -> 
   incremental obstacle stamper read, so ADD and REMOVE derive an identical per-obstacle
   clearance (ref-count symmetry).
 - The map is **auto-read** from the sibling `.kicad_pro` netclasses by `route.py` /
-  `route_diff.py` (and inside `batch_route` for any other caller, e.g. the plane
-  routers). Only non-Default classes appear, so an all-Default board yields `{}`.
+  `route_diff.py` / the fanout and plane CLIs (and inside `batch_route` for any other
+  caller). Only non-Default classes appear, so an all-Default board yields `{}`.
   Supply `--net-clearances <json>` (net name → mm) to override. The GUI derives the
   same map from the live board.
+- **`--clearance` is a ceiling on the map (#439).** By default each auto-read class
+  is capped at the routing `clearance` (`net_clearances[nid] = min(class, clearance)`)
+  before it is installed — a class *tighter* than `--clearance` survives; a *looser*
+  one is capped, because stock net classes are largely aspirational (real boards, and
+  even the human-routed references, route below them). The output `.kicad_pro`
+  writeback then clamps each non-Default class to that same routed floor, so KiCad
+  grades exactly what was routed. `--no-clamp-netclasses` lifts the cap **and** the
+  writeback clamp, preserving the full class spec for a genuine impedance board whose
+  classes are met. An explicit `--net-clearances` map is used as given (not capped).
 
 ### Strategies and recovery
 

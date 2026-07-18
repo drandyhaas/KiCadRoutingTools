@@ -48,18 +48,26 @@ Validate routed boards against the *real* spec, with the right checker — most
 - **Routers can report false success.** A router's own "routed" tally may come from
   a local/heuristic proxy while pads stay disconnected; re-verify with the
   authoritative, zone/fill-aware `check_net_connectivity` before trusting it.
-- **Cross-class clearance is RESPECTED, not clamped (PR392).** The router honors
-  KiCad's pairwise `max(classA, classB)` between nets of different net classes —
-  including copper routed earlier in the SAME call (in-run) — pricing each foreign
-  obstacle at `config.obstacle_clearance(net_id)` (see `docs/api-routing-config.md`).
-  `route.py` / `route_diff.py` **auto-read** the non-Default netclass clearances from
-  the sibling `.kicad_pro` (override with `--net-clearances <json>`; all-Default
-  boards are inert). Because routing now respects the classes, the output `.kicad_pro`
-  **no longer clamps** non-Default netclasses down to the routed clearance — the
-  original class clearances survive. `--clamp-netclasses` re-enables the old clamp
-  only for a path that still routes without honoring classes (would otherwise storm).
-  Grade multi-class boards at the ORIGINAL netclasses (`kicad_drc_compare._staged_copy`
-  equalizes only the Default class now).
+- **Cross-class clearance is RESPECTED (PR392), then CAPPED at `--clearance` and
+  CLAMPED by default (#439).** The router honors KiCad's pairwise `max(classA, classB)`
+  between nets of different net classes — including copper routed earlier in the SAME
+  call (in-run) — pricing each foreign obstacle at `config.obstacle_clearance(net_id)`
+  (see `docs/api-routing-config.md`). `route.py` / `route_diff.py` / the fanout and
+  plane scripts **always auto-read** the non-Default netclass clearances from the
+  sibling `.kicad_pro` (override with `--net-clearances <json>`; all-Default boards
+  are inert), but treat `--clearance` as a **ceiling**: each class routes and grades
+  at `min(class, --clearance)`. A class tighter than `--clearance` survives; a looser
+  one is capped. **Why capped/clamped by default:** stock net classes are largely
+  *aspirational* — corpus and real boards route below them, and even the human-routed
+  references violate their own class (zynq: 499 clearance violations at its 0.2 class,
+  routed ~0.1). Keeping the stock class in the output therefore manufactures phantom
+  sub-class DRC on copper routed correctly at the fab floor, so every stage's output
+  `.kicad_pro` writeback clamps each non-Default class DOWN to the routed floor and
+  KiCad grades exactly what was routed. `--no-clamp-netclasses` opts out (build the
+  map, DON'T cap or clamp — preserve the full class spec) only for a genuine
+  impedance-controlled board whose classes are real and met; then grade at the
+  ORIGINAL netclasses (`kicad_drc_compare._staged_copy` equalizes only the Default
+  class). The old `--clamp-netclasses` flag is **removed** (clamp is now the default).
 
 ## Stress testing & A/B replay
 
