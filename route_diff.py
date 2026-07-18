@@ -1351,7 +1351,9 @@ Examples:
     # Track and via geometry
     parser.add_argument("--track-width", type=float, default=None,
                         help="Differential-pair leg width in mm (default: the board Default "
-                             "net-class diff_pair_width, else 0.3). Ignored if --impedance is specified.")
+                             "net-class diff_pair_width, else 0.3). With --impedance it is the "
+                             "min-width floor and the no-stackup fallback (per-layer impedance "
+                             "width can only widen it), not ignored.")
     parser.add_argument("--impedance", type=float, default=None,
                         help="Target differential impedance in ohms (e.g., 100). Calculates track width per layer from board stackup using --diff-pair-gap as spacing.")
     parser.add_argument("--clearance", type=float, default=None,

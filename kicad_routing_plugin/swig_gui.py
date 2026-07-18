@@ -537,7 +537,7 @@ class RoutingDialog(wx.Dialog):
             "copper-to-edge constraint when obeying design rules, else none)")
         self.edge_clearance_check.Bind(wx.EVT_CHECKBOX, self._on_edge_clearance_check)
         r = defaults.PARAM_RANGES['board_edge_clearance']
-        self.board_edge_clearance = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=defaults.CLEARANCE, inc=r['inc'])
+        self.board_edge_clearance = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=defaults.BOARD_EDGE_CLEARANCE, inc=r['inc'])
         self.board_edge_clearance.SetDigits(r['digits'])
         self.board_edge_clearance.Bind(wx.EVT_SPINCTRLDOUBLE, lambda evt: self._on_drc_param_changed(evt, 'board_edge_clearance'))
         self.board_edge_clearance.SetToolTip(

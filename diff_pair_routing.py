@@ -2264,6 +2264,14 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
 
     routing_layers = _routing_copper_layers(pcb_data, config)
     clearance = config.clearance
+    # Cross-class aware (#439): the required spacing to a foreign obstacle is KiCad's
+    # max(pair class, foreign class) = config.obstacle_clearance(foreign_net), not the
+    # flat base clearance -- so a foreign WIDER-class pad/via/track is validated at its
+    # real spacing (this gate previously used only config.clearance). Falls back to the
+    # base clearance when the config carries no net-clearance map.
+    _oc = getattr(config, 'obstacle_clearance', None)
+    def _obs_clr(net_id):
+        return _oc(net_id) if _oc is not None else clearance
     pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
     vias = getattr(pcb_data, 'vias', None) or []
     # Foreign tracks (not on either pair net), bucketed by layer for a cheap prefilter.
@@ -2276,37 +2284,40 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
     for seg in pair_segs:
         sxmin, sxmax = min(seg.start_x, seg.end_x), max(seg.start_x, seg.end_x)
         symin, symax = min(seg.start_y, seg.end_y), max(seg.start_y, seg.end_y)
-        seg_margin = clearance + seg.width / 2
         # vs foreign pads (includes the partner net's pads)
         for pad_net, pads in pads_by_net.items():
             if pad_net == seg.net_id:
                 continue  # the connector legitimately lands on its own-net pad
+            pclr = _obs_clr(pad_net)
             for pad in pads:
+                # per-pad override (#326) wins where larger (keep-clear rings etc.)
+                pc = max(pclr, getattr(pad, 'local_clearance', 0.0) or 0.0)
                 # Coarse bounding-box reject before the exact rect-distance test.
-                pm = seg_margin + max(pad.size_x, pad.size_y) / 2
+                pm = pc + seg.width / 2 + max(pad.size_x, pad.size_y) / 2
                 if (pad.global_x < sxmin - pm or pad.global_x > sxmax + pm or
                         pad.global_y < symin - pm or pad.global_y > symax + pm):
                     continue
                 hit, overlap, _ = check_pad_segment_overlap(
-                    pad, seg, clearance, routing_layers, _DRC_CLEARANCE_MARGIN)
+                    pad, seg, pc, routing_layers, _DRC_CLEARANCE_MARGIN)
                 if hit:
                     return ('pad', pad, seg, overlap)
         # vs foreign vias (includes the partner net's escape/underpad vias)
         for via in vias:
             if via.net_id == seg.net_id:
                 continue  # the connector legitimately lands on its own-net via
-            vm = seg_margin + via.size / 2
+            vclr = _obs_clr(via.net_id)
+            vm = vclr + seg.width / 2 + via.size / 2
             if (via.x < sxmin - vm or via.x > sxmax + vm or
                     via.y < symin - vm or via.y > symax + vm):
                 continue
             hit, overlap = check_via_segment_overlap(
-                via, seg, clearance, _DRC_CLEARANCE_MARGIN)
+                via, seg, vclr, _DRC_CLEARANCE_MARGIN)
             if hit:
                 return ('via', via, seg, overlap)
         # vs foreign tracks on the same layer (issue #246)
         for o in foreign_tracks_by_layer.get(seg.layer, ()):
             ow = o.width if getattr(o, 'width', 0) else seg.width
-            need = clearance + seg.width / 2 + ow / 2 - _DRC_CLEARANCE_MARGIN
+            need = _obs_clr(o.net_id) + seg.width / 2 + ow / 2 - _DRC_CLEARANCE_MARGIN
             if need <= 0:
                 continue
             if (max(o.start_x, o.end_x) < sxmin - need or
