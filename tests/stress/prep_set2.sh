@@ -8,6 +8,12 @@ STRESS="$HOME/Documents/kicad_stress_test"
 SRC="$STRESS/sources/github_set2"
 KPY="/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3"
 PREP="$STRESS/scripts/prep_set2.py"
+SILKPY="$(cd "$(dirname "$0")" && pwd)/set_silk_ignore.py"
+# Silk-DENSE boards (keyboard legends etc.) whose O(n^2) silkscreen DRC makes KiCad's
+# interactive DRC crawl for minutes -- demote the silk checks to 'ignore' in their
+# .kicad_pro so DRC is fast (our router never places silkscreen). Space-separated;
+# add board names as needed.
+SILK_IGNORE="lily58"
 mkdir -p "$STRESS/boards_unrouted_set2" "$STRESS/boards_set2"
 
 # name|source-filename-fragment|dest-dir
@@ -45,6 +51,11 @@ for entry in "${MAP[@]}"; do
   # copy sibling .kicad_pro next to the routed reference so list_nets finds netclasses
   profile="${srcfile%.kicad_pcb}.kicad_pro"
   [ -f "$profile" ] && cp "$profile" "$refdir/$name.kicad_pro"
+  # silk-heavy boards: skip KiCad's slow silkscreen DRC. Apply to whichever .kicad_pro
+  # copies exist (routed reference + stripped/unrouted board); missing ones are skipped.
+  case " $SILK_IGNORE " in
+    *" $name "*) python3 "$SILKPY" "$refdir/$name.kicad_pro" "$destdir/$name.kicad_pro" ;;
+  esac
 done
 echo "Done. stripped->boards_unrouted_set2/ (+ replacement in boards_unrouted/);"
 echo "routed reference + .kicad_pro -> boards_set2/ (+ replacement in boards/)."
