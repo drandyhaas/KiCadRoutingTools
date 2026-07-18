@@ -221,7 +221,11 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         results, pcb_data, scope_net_ids, clearance=config.clearance,
         max_shift=(microshift_max_shift if microshift_max_shift is not None
                    else config.grid_step / 2),
-        keep_input_copper=keep_input_copper)
+        keep_input_copper=keep_input_copper,
+        # #436: cross-class-aware graze fix — measure shortfall against each
+        # net's own netclass floor and each foreign net's class, not the global
+        # clearance (daisho's 456 same-class grid grazes, cparti's SW1-vs-SMA).
+        net_clearances=getattr(config, 'net_clearances', None) or None)
     counts['microshifted'] = _ms_segs
     _trace('microshift')
     strip.extend(_ms_strip)

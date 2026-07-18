@@ -299,13 +299,21 @@ def _foreign_seg_arrays(pcb_data, layer):
     return arr
 
 
-def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
+def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                          net_clearances=None, base_clearance=0.0):
     """Min edge distance from a (short, terminal) segment to any OTHER-net segment or
     via on `layer` -- the segment analogue of _seg_foreign_pad_dist. Distance is from
     the terminal centreline to the foreign copper EDGE (point-to-segment distance to
     the foreign centreline minus the foreign half-width), sampled along the terminal
     and vectorized over windowed foreign segments. A negative result (centreline
-    inside foreign copper) is returned as-is so the caller necks to the floor."""
+    inside foreign copper) is returned as-is so the caller necks to the floor.
+
+    #436: when `net_clearances` (net_id -> class clearance mm) is given, each
+    foreign segment's netclass EXCESS over `base_clearance` (max(0, classF -
+    base)) is SUBTRACTED from its distance, so a uniform caller check
+    `dist >= base_clearance + w/2` enforces KiCad's pairwise max(base, classF)
+    per foreign net. base_clearance should be the moving net's own floor
+    (max(global, own class)). Inert when net_clearances is None."""
     nid, fax, fay, fbx, fby, fhw = _foreign_seg_arrays(pcb_data, layer)
     if nid.size == 0:
         return 1e9
@@ -331,6 +339,12 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
     projx = ax[None, :] + tt * abx[None, :]
     projy = ay[None, :] + tt * aby[None, :]
     dist = np.hypot(sx[:, None] - projx, sy[:, None] - projy) - hw[None, :]
+    if net_clearances:
+        # #436: fold each foreign net's class-excess into its distance.
+        fnid = nid[near]
+        excess = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
+                           for f in fnid], dtype=float)
+        dist = dist - excess[None, :]
     return float(np.min(dist))
 
 
@@ -355,10 +369,13 @@ def _foreign_via_arrays(pcb_data):
     return cache[1]
 
 
-def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
+def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                          net_clearances=None, base_clearance=0.0):
     """Min edge distance from a segment to any OTHER-net VIA (body), exact point-to-
     segment minus via radius. The via analogue of _seg_foreign_pad_dist; a negative
-    result (centreline inside the via) is returned as-is."""
+    result (centreline inside the via) is returned as-is. #436: `net_clearances`
+    subtracts each foreign via's netclass excess over `base_clearance` (see
+    _seg_foreign_seg_dist)."""
     nids, cx, cy, rad = _foreign_via_arrays(pcb_data)
     if cx.size == 0:
         return 1e9
@@ -376,6 +393,11 @@ def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
     else:
         tt = np.clip(((fcx - x1) * dx + (fcy - y1) * dy) / l2, 0.0, 1.0)
         d = np.hypot(fcx - (x1 + tt * dx), fcy - (y1 + tt * dy)) - fr
+    if net_clearances:
+        fnid = nids[near]
+        excess = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
+                           for f in fnid], dtype=float)
+        d = d - excess
     return float(np.min(d))
 
 

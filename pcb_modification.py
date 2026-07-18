@@ -2756,16 +2756,30 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
             nets_changed, original_to_remove, added_segments)
 
 
-def _seg_worst_offender(pcb_data, net_id, s, clearance):
+def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None):
     """The single worst foreign-copper offender below clearance of segment `s`:
     returns (shortfall_mm, t, away_x, away_y) or None. t is the parameter of the
     closest approach along `s`; (away_x, away_y) is the unit direction that
     increases the distance. Distances are edge-to-centreline, sampled like the
-    _seg_foreign_*_dist trio (pads as their board-axis rect)."""
+    _seg_foreign_*_dist trio (pads as their board-axis rect).
+
+    #436: `clearance` should be the moving net's own floor (max(global, own
+    class)); when `net_clearances` (net_id -> class clr) is given, each foreign
+    element's class EXCESS over `clearance` is subtracted from its distance, so
+    the shortfall ranking and the away-shift honor KiCad's pairwise max(own,
+    foreign) per offender (e.g. a signal grazing an SMA-class trace is ranked by
+    its 0.35 shortfall, not the 0.1 global)."""
     import numpy as np
     from single_ended_routing import (_foreign_pad_arrays, _foreign_seg_arrays,
                                       _foreign_via_arrays, _foreign_hole_capsules)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
+
+    def _excess(fnids):
+        # per-foreign class clearance above `clearance` (the moving net's floor)
+        if not net_clearances:
+            return np.zeros(len(fnids), dtype=float)
+        return np.array([max(0.0, net_clearances.get(int(f), clearance) - clearance)
+                         for f in fnids], dtype=float)
     required = clearance + s.width / 2.0
     # NPTH mounting/mechanical holes carry no copper, so the pad/seg/via terms
     # miss them; a track crossing one is graded at the higher NPTH-to-track floor
@@ -2826,7 +2840,7 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
         if near.any():
             fcx, fcy, fhx, fhy, fcr = cx[near], cy[near], hx[near], hy[near], cr[near]
             frc, frs = rc[near], rs[near]
-            fexc = np.maximum(plc[near] - clearance, 0.0)
+            fexc = np.maximum(plc[near] - clearance, 0.0) + _excess(nids[near])  # +#436 class
             # Work in each pad's LOCAL frame (query offsets rotated by R(-rot),
             # identity for axis-aligned pads) so tilted pads use their true
             # outline (#356). Closest point on the pad's rounded-rect boundary:
@@ -2867,6 +2881,7 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
             qx = ax[None, :] + tt * abx[None, :]
             qy = ay[None, :] + tt * aby[None, :]
             d = np.hypot(sx[:, None] - qx, sy[:, None] - qy) - hw[None, :]
+            d = d - _excess(fnid[near])[None, :]  # #436 class-excess
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, qx[i, j], qy[i, j])
 
@@ -2878,6 +2893,7 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
         if near.any():
             fcx, fcy, fr = vx[near], vy[near], vr[near]
             d = np.hypot(sx[:, None] - fcx[None, :], sy[:, None] - fcy[None, :]) - fr[None, :]
+            d = d - _excess(vnid[near])[None, :]  # #436 class-excess
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, fcx[j], fcy[j])
 
@@ -2914,7 +2930,8 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
 def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                              clearance: float = 0.1,
                              max_shift: float = 0.025,
-                             keep_input_copper: bool = False) -> Tuple[int, int, List[Segment], List[Segment]]:
+                             keep_input_copper: bool = False,
+                             net_clearances=None) -> Tuple[int, int, List[Segment], List[Segment]]:
     """Micro-shift copper that still grazes after prune / re-bend / neck (#276).
 
     Complements nudge_grazing_octolinear, which keeps a jog's anchor endpoints
@@ -2956,6 +2973,14 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     # and the copper distance terms don't see them (issue #308, urti GND vs J3).
     npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
 
+    def eff_clr(nid):
+        # #436: the moving net's own clearance floor = max(global, its netclass).
+        # Foreign-net class EXCESS above this is folded in by the distance
+        # functions / _seg_worst_offender when net_clearances is passed.
+        if not net_clearances:
+            return clearance
+        return max(clearance, net_clearances.get(nid, clearance))
+
     routed_seg_result = {}
     for r in results:
         for s in r.get('new_segments') or []:
@@ -2979,12 +3004,15 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         return True
 
     def clears(x1, y1, x2, y2, layer, net_id, w):
+        eff = eff_clr(net_id)  # #436 own-net floor; foreign class excess folded in
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      base_clearance=clearance),
-                _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
-                _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer))
+                                      base_clearance=eff),
+                _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                      net_clearances=net_clearances, base_clearance=eff),
+                _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                      net_clearances=net_clearances, base_clearance=eff))
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
-        return (d >= clearance + w / 2.0 - 1e-4 and
+        return (d >= eff + w / 2.0 - 1e-4 and
                 hd >= npth_clr + w / 2.0 - 1e-4 and
                 edge_clears(x1, y1, x2, y2, w))
 
@@ -3018,14 +3046,17 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         # Cheap 0.02-sampled prefilter (incl. foreign TRACKS -- cynthion's
         # offender is a track); the precise 0.005-sampled offender scan runs
         # only on the handful that fail this.
-        thr = clearance + s.width / 2.0 - 1e-4
+        eff = eff_clr(s.net_id)  # #436 own floor; foreign class excess folded in
+        thr = eff + s.width / 2.0 - 1e-4
         if min(_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                      s.end_x, s.end_y, s.layer,
-                                     base_clearance=clearance),
+                                     base_clearance=eff),
                _seg_foreign_seg_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                     s.end_x, s.end_y, s.layer),
+                                     s.end_x, s.end_y, s.layer,
+                                     net_clearances=net_clearances, base_clearance=eff),
                _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                     s.end_x, s.end_y, s.layer)) < thr:
+                                     s.end_x, s.end_y, s.layer,
+                                     net_clearances=net_clearances, base_clearance=eff)) < thr:
             return True
         # NPTH-hole graze uses the higher NPTH-to-track floor (issue #308).
         hole_thr = npth_clr + s.width / 2.0 - 1e-4
@@ -3050,7 +3081,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                        if (not keep_input_copper or id(s) in routed_seg_result
                            or id(s) in added_ids)
                        and grazes(s)]
-            offenders = [(s, _seg_worst_offender(pcb_data, net_id, s, clearance))
+            offenders = [(s, _seg_worst_offender(pcb_data, net_id, s, eff_clr(net_id),
+                                                 net_clearances=net_clearances))
                          for s in grazing]
             offenders = [(s, o) for s, o in offenders if o is not None]
             if not offenders:
