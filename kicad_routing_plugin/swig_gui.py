@@ -614,6 +614,17 @@ class RoutingDialog(wx.Dialog):
             val = board_min
         return self._fab_floored('board_edge_clearance', val)
 
+    def _effective_plane_edge_clearance(self):
+        """Plane-zone edge inset (mirrors route_planes.py / route_disconnected_planes.py):
+        the board's DECLARED copper-edge rule if it has one, else PLANE_EDGE_CLEARANCE
+        (0.5 -- plane pours want more edge margin than signal traces); pinned up to the
+        fab copper-to-edge floor. NOT the signal _effective_board_edge_clearance, which
+        fab-floors a no-edge-rule board's 0 up to 0.2 and loses the 'declared vs not'
+        distinction (that collapsed the GUI plane inset to 0.2 while the CLI held 0.5)."""
+        rule = (_get_board_minimum_constraints() or {}).get('min_copper_edge_clearance')
+        val = rule if (rule and rule > 1e-9) else defaults.PLANE_EDGE_CLEARANCE
+        return self._fab_floored('board_edge_clearance', val)
+
     def _effective_geometry_floor(self, name):
         """Geometry floor to route/grade with (#439 parity with the CLI):
         the dedicated control when its override checkbox is checked; otherwise
@@ -1549,7 +1560,10 @@ class RoutingDialog(wx.Dialog):
         from .planes_gui import PlanesTab
 
         def get_shared_params():
-            edge_clearance = self._effective_board_edge_clearance()
+            # Plane zones use the PLANE edge inset (board rule else PLANE_EDGE_CLEARANCE
+            # 0.5, fab-floored) -- like the CLI plane scripts -- NOT the signal edge,
+            # which would collapse a no-edge-rule board to the 0.2 fab floor.
+            edge_clearance = self._effective_plane_edge_clearance()
             # Power nets/widths from the route tab, so plane rip-up re-routes a
             # ripped wide power net at its proper width, not the signal default
             # (matches the CLI passing --power-nets to route_disconnected_planes).
