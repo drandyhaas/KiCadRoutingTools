@@ -595,34 +595,45 @@ class RoutingDialog(wx.Dialog):
         if self.obey_drc_check.GetValue():
             self._apply_board_minimums_to_controls()
 
+    def _fab_floored(self, ctrl_name, val):
+        """Pin ``val`` UP to the fab floor for ``ctrl_name`` (the fab can't make
+        sub-floor geometry) -- parity with the CLI's enforce_fab_floors, and it
+        respects the same --fab-tier / fab-overrides file. Idempotent for a control
+        value that was already fab-floored interactively."""
+        floor = self._fab_floor_for_ctrl(ctrl_name)
+        if floor is not None and val is not None and val < floor:
+            return floor
+        return val
+
     def _effective_board_edge_clearance(self):
         """Board-edge clearance to route with: the dedicated control when its
-        checkbox is enabled; otherwise the board's minimum copper-to-edge
-        constraint when obeying design rules (0 = no edge keepout)."""
+        override checkbox is checked, else the board's own min_copper_edge_clearance
+        constraint (parity with the CLI, which always uses it -- NOT gated on
+        obey_drc). Pinned UP to the fab copper-to-edge floor either way."""
         if self.edge_clearance_check.GetValue():
-            return self.board_edge_clearance.GetValue()
-        if self.obey_drc_check.GetValue():
+            val = self.board_edge_clearance.GetValue()
+        else:
             minimums = _get_board_minimum_constraints() or {}
-            return minimums.get('min_copper_edge_clearance') or 0.0
-        return 0.0
+            val = minimums.get('min_copper_edge_clearance') or 0.0
+        return self._fab_floored('board_edge_clearance', val)
 
     def _effective_geometry_floor(self, name):
         """Geometry floor to route/grade with (#439 parity with the CLI):
         the dedicated control when its override checkbox is checked; otherwise
         the board's own value -- Default net-class for track/clearance/via,
         board Constraint for the hole floor. Falls back to the control value
-        when the board value is unavailable."""
+        when the board value is unavailable, and is pinned UP to the fab floor."""
         if getattr(self, name + '_check').GetValue():
-            return getattr(self, name).GetValue()
-        if name == 'hole_to_hole_clearance':
-            constraints = _get_board_minimum_constraints() or {}
-            board_val = constraints.get('min_hole_to_hole')
+            val = getattr(self, name).GetValue()
         else:
-            netclass = _get_netclass_parameters('Default') or {}
-            board_val = netclass.get(name)
-        if board_val is None:
-            return getattr(self, name).GetValue()
-        return board_val
+            if name == 'hole_to_hole_clearance':
+                constraints = _get_board_minimum_constraints() or {}
+                board_val = constraints.get('min_hole_to_hole')
+            else:
+                netclass = _get_netclass_parameters('Default') or {}
+                board_val = netclass.get(name)
+            val = board_val if board_val is not None else getattr(self, name).GetValue()
+        return self._fab_floored(name, val)
 
     def _effective_track_width(self):
         return self._effective_geometry_floor('track_width')

@@ -25,6 +25,7 @@
 #   hole_to_hole       0.20               0.20      (via drill-to-drill)
 #   pad_hole_to_hole   0.45               0.45      (pad drill-to-drill)
 #   annular            0.25 (2L)/0.20(4+) 0.18 (2L) / 0.15 (4+)   (informational)
+#   board_edge         0.20               0.20      (copper-to-board-outline min)
 #
 # NOTE: track_width and clearance are LAYER-DEPENDENT in the tier tables, but an
 # override here is a SINGLE value applied on every board regardless of layer count.
