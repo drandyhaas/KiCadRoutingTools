@@ -1350,8 +1350,8 @@ Examples:
 
     # Track and via geometry
     parser.add_argument("--track-width", type=float, default=None,
-                        help="Track width in mm (default: the board Default net-class width, "
-                             "else 0.3). Ignored if --impedance is specified.")
+                        help="Differential-pair leg width in mm (default: the board Default "
+                             "net-class diff_pair_width, else 0.3). Ignored if --impedance is specified.")
     parser.add_argument("--impedance", type=float, default=None,
                         help="Target differential impedance in ohms (e.g., 100). Calculates track width per layer from board stackup using --diff-pair-gap as spacing.")
     parser.add_argument("--clearance", type=float, default=None,
@@ -1426,8 +1426,9 @@ Examples:
                         help="Cost penalty near routed tracks (0 = disabled, default: 0.0)")
 
     # Differential pair routing options
-    parser.add_argument("--diff-pair-gap", type=float, default=0.101,
-                        help="Gap between P and N traces of differential pairs in mm (default: 0.101)")
+    parser.add_argument("--diff-pair-gap", type=float, default=None,
+                        help="Gap between P and N traces of differential pairs in mm "
+                             "(default: the board Default net-class diff_pair_gap, else 0.101)")
     parser.add_argument("--diff-pair-centerline-setback", type=float, default=None,
                         help="Distance in front of stubs to start centerline route in mm (default: 2x P-N spacing)")
     parser.add_argument("--min-turning-radius", type=float, default=0.2,
@@ -1539,12 +1540,19 @@ Examples:
     # enforce_fab_floors; _clamp_netclasses is stashed for drc_fix_kwargs.
     from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
                            board_constraint)
-    # track_width / via_size / via_drill: when omitted, default to the board's OWN
-    # Default net-class value (else the routing_defaults constant), so a bare route
-    # uses the board's own geometry -- parity with route.py / the GUI's per-control
-    # override. (track_width may still be overridden by --impedance downstream.)
-    for _pname, _nckey, _fallback in (('track_width', 'track_width', defaults.TRACK_WIDTH),
-                                      ('via_size', 'via_diameter', defaults.VIA_SIZE),
+    # --track-width IS the diff-pair LEG WIDTH here: when omitted, default to the
+    # board's OWN Default net-class diff_pair_width (else routing_defaults), so a
+    # bare diff route uses the board's own differential geometry -- parity with the
+    # GUI diff tab's per-control override. (May still be overridden by --impedance.)
+    if args.track_width is None:
+        _v = board_default_netclass_param(args.input_file, 'diff_pair_width')
+        args.track_width = _v if _v is not None else defaults.DIFF_PAIR_WIDTH
+        print(f"--track-width not given; using "
+              f"{'the board Default net-class diff-pair-width' if _v is not None else 'the fallback'} "
+              f"{args.track_width}mm.")
+    # via_size / via_drill: when omitted, default to the board's OWN Default
+    # net-class value (else the routing_defaults constant).
+    for _pname, _nckey, _fallback in (('via_size', 'via_diameter', defaults.VIA_SIZE),
                                       ('via_drill', 'via_drill', defaults.VIA_DRILL)):
         if getattr(args, _pname) is None:
             _v = board_default_netclass_param(args.input_file, _nckey)
@@ -1552,6 +1560,15 @@ Examples:
             print(f"--{_pname.replace('_', '-')} not given; using "
                   f"{'the board Default net-class' if _v is not None else 'the fallback'} "
                   f"{getattr(args, _pname)}mm.")
+    # --diff-pair-gap: when omitted, default to the board's OWN Default net-class
+    # diff_pair_gap (else the routing_defaults constant).
+    if args.diff_pair_gap is None:
+        _g = board_default_netclass_param(args.input_file, 'diff_pair_gap')
+        _gap_fallback = getattr(defaults, 'DIFF_PAIR_GAP', 0.101)
+        args.diff_pair_gap = _g if _g is not None else _gap_fallback
+        print(f"--diff-pair-gap not given; using "
+              f"{'the board Default net-class diff-pair-gap' if _g is not None else 'the fallback'} "
+              f"{args.diff_pair_gap}mm.")
     # --clearance given -> pure ceiling on EVERY class (Default included): base =
     # min(Default class, ceiling), non-Default capped at the ceiling. Omitted -> no
     # ceiling: each net routes at its own class (base = board Default class).

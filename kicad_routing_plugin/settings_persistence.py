@@ -139,7 +139,6 @@ def get_dialog_settings(dialog):
         'net_panel_hide': dialog.net_panel.hide_check.GetValue() if dialog.net_panel.hide_check else False,
         'net_panel_hide_diff': dialog.net_panel.hide_diff_check.GetValue() if dialog.net_panel.hide_diff_check else False,
         'net_panel_separate_netclass': dialog.net_panel.separate_netclass_check.GetValue(),
-        'use_netclass_definitions': dialog.use_netclass_check.GetValue(),
         'swappable_hide': dialog.swappable_net_panel.hide_check.GetValue() if dialog.swappable_net_panel.hide_check else False,
         'diff_panel_hide': dialog.differential_tab.pair_panel.hide_check.GetValue() if dialog.differential_tab.pair_panel.hide_check else False,
         'fanout_hide': dialog.fanout_tab.net_panel.hide_check.GetValue() if dialog.fanout_tab.net_panel.hide_check else False,
@@ -157,7 +156,8 @@ def get_dialog_settings(dialog):
         'fanout_component': dialog.fanout_tab.net_panel.component_dropdown.GetSelection() if dialog.fanout_tab.net_panel.component_dropdown else 0,
 
         # Differential tab parameters
-        'diff_use_netclass': dialog.differential_tab.use_netclass_check.GetValue(),
+        'diff_pair_width_override': dialog.differential_tab.diff_pair_width_check.GetValue(),
+        'diff_pair_gap_override': dialog.differential_tab.diff_pair_gap_check.GetValue(),
         'diff_pair_width': dialog.differential_tab.diff_pair_width.GetValue(),
         'diff_pair_gap': dialog.differential_tab.diff_pair_gap.GetValue(),
         'diff_impedance': dialog.differential_tab.diff_impedance.GetValue(),
@@ -472,11 +472,6 @@ def restore_dialog_settings(dialog, settings):
         dialog.net_panel.separate_netclass_check.SetValue(settings['net_panel_separate_netclass'])
         if settings['net_panel_separate_netclass']:
             dialog.net_panel._on_separate_netclass_changed(None)
-    # Restore use net class definitions checkbox and trigger its handler
-    if 'use_netclass_definitions' in settings:
-        dialog.use_netclass_check.SetValue(settings['use_netclass_definitions'])
-        if settings['use_netclass_definitions']:
-            dialog._on_use_netclass_changed(None)
     if 'swappable_hide' in settings and dialog.swappable_net_panel.hide_check:
         dialog.swappable_net_panel.hide_check.SetValue(settings['swappable_hide'])
     if 'diff_panel_hide' in settings and dialog.differential_tab.pair_panel.hide_check:
@@ -531,10 +526,13 @@ def restore_dialog_settings(dialog, settings):
         dialog.differential_tab.diff_pair_gap.SetValue(settings['diff_pair_gap'])
     if 'diff_impedance' in settings:
         dialog.differential_tab.diff_impedance.SetValue(settings['diff_impedance'])
-    if 'diff_use_netclass' in settings:
-        dialog.differential_tab.use_netclass_check.SetValue(settings['diff_use_netclass'])
-        # Trigger the change to enable/disable controls
-        dialog.differential_tab._on_use_netclass_changed(None)
+    # Restore the diff-pair width/gap override checkboxes and sync spinctrl enable
+    if 'diff_pair_width_override' in settings:
+        dialog.differential_tab.diff_pair_width_check.SetValue(settings['diff_pair_width_override'])
+        dialog.differential_tab.diff_pair_width.Enable(settings['diff_pair_width_override'])
+    if 'diff_pair_gap_override' in settings:
+        dialog.differential_tab.diff_pair_gap_check.SetValue(settings['diff_pair_gap_override'])
+        dialog.differential_tab.diff_pair_gap.Enable(settings['diff_pair_gap_override'])
     if 'min_turning_radius' in settings:
         dialog.differential_tab.min_turning_radius.SetValue(settings['min_turning_radius'])
     if 'max_setback_angle' in settings:

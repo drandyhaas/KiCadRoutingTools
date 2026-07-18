@@ -462,13 +462,14 @@ def apply_step_params(step, dialog):
                 notes.append(f"ignored non-numeric layer_costs={costs!r}")
     elif action == "route_diff":
         tab = dialog.differential_tab
-        if "diff_pair_width" in params or "diff_pair_gap" in params:
-            # Explicit values from the plan override netclass-derived ones
-            tab.use_netclass_check.SetValue(False)
-            tab.diff_pair_width.Enable(True)
-            tab.diff_pair_gap.Enable(True)
+        # An explicit diff_pair_width/gap in the plan overrides the board
+        # net-class value: check that param's override box and enable its spinctrl
+        # so _effective_diff_pair_width/gap return the plan value (an omitted param
+        # leaves the box unchecked -> board Default net-class value is used).
         for name in ("diff_pair_width", "diff_pair_gap"):
             if name in params:
+                getattr(tab, name + "_check").SetValue(True)
+                getattr(tab, name).Enable(True)
                 try:
                     getattr(tab, name).SetValue(float(params[name]))
                 except (TypeError, ValueError):

@@ -458,33 +458,49 @@ class DifferentialTab(wx.Panel):
         param_box = wx.StaticBox(self, label="Differential Pair Parameters")
         param_sizer = wx.StaticBoxSizer(param_box, wx.VERTICAL)
 
-        # Use net class definitions checkbox
-        self.use_netclass_check = wx.CheckBox(self, label="Use net class definitions")
-        self.use_netclass_check.SetValue(False)
-        self.use_netclass_check.SetToolTip("Use DP width and gap from selected net class")
-        self.use_netclass_check.Bind(wx.EVT_CHECKBOX, self._on_use_netclass_changed)
-        param_sizer.Add(self.use_netclass_check, 0, wx.ALL, 5)
-
         param_grid = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
         param_grid.AddGrowableCol(1)
 
-        # Diff pair width
+        # Diff pair width -- "override checkbox + spinctrl" row (like the Basic
+        # tab's geometry floors). Unchecked = default from the board Default
+        # net-class diff_pair_width; checking the box overrides with the typed value.
         param_grid.Add(wx.StaticText(self, label="Pair Width (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         r = defaults.PARAM_RANGES['diff_pair_width']
+        dpw_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.diff_pair_width_check = wx.CheckBox(self, label="")
+        self.diff_pair_width_check.SetValue(False)
+        self.diff_pair_width_check.SetToolTip(
+            "Override the pair leg width (unchecked = use the board Default "
+            "net-class differential-pair width)")
+        self.diff_pair_width_check.Bind(wx.EVT_CHECKBOX, self._on_diff_geom_override_check)
         self.diff_pair_width = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
                                                   initial=defaults.DIFF_PAIR_WIDTH, inc=r['inc'])
         self.diff_pair_width.SetDigits(r['digits'])
         self.diff_pair_width.SetToolTip("Track width for differential pair traces")
-        param_grid.Add(self.diff_pair_width, 0, wx.EXPAND)
+        self.diff_pair_width.Enable(False)
+        dpw_sizer.Add(self.diff_pair_width_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        dpw_sizer.Add(self.diff_pair_width, 1, wx.EXPAND)
+        param_grid.Add(dpw_sizer, 0, wx.EXPAND)
 
-        # Diff pair gap
+        # Diff pair gap -- same override pattern (unchecked = board Default
+        # net-class diff_pair_gap).
         param_grid.Add(wx.StaticText(self, label="Pair Gap (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         r = defaults.PARAM_RANGES['diff_pair_gap']
+        dpg_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.diff_pair_gap_check = wx.CheckBox(self, label="")
+        self.diff_pair_gap_check.SetValue(False)
+        self.diff_pair_gap_check.SetToolTip(
+            "Override the pair gap (unchecked = use the board Default net-class "
+            "differential-pair gap)")
+        self.diff_pair_gap_check.Bind(wx.EVT_CHECKBOX, self._on_diff_geom_override_check)
         self.diff_pair_gap = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
                                                 initial=defaults.DIFF_PAIR_GAP, inc=r['inc'])
         self.diff_pair_gap.SetDigits(r['digits'])
         self.diff_pair_gap.SetToolTip("Gap between P and N traces")
-        param_grid.Add(self.diff_pair_gap, 0, wx.EXPAND)
+        self.diff_pair_gap.Enable(False)
+        dpg_sizer.Add(self.diff_pair_gap_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        dpg_sizer.Add(self.diff_pair_gap, 1, wx.EXPAND)
+        param_grid.Add(dpg_sizer, 0, wx.EXPAND)
 
         # Differential impedance (optional). When > 0 the per-layer trace width
         # is computed from the board stackup using Pair Gap as spacing and
@@ -637,8 +653,8 @@ class DifferentialTab(wx.Panel):
 
     def _short_params(self):
         """Current (track_width, gap, centerline_setback) driving the short test."""
-        return (self.diff_pair_width.GetValue(),
-                self.diff_pair_gap.GetValue(),
+        return (self._effective_diff_pair_width(),
+                self._effective_diff_pair_gap(),
                 self.centerline_setback.GetValue())
 
     def _is_short_pair(self, p_net_id, n_net_id):
@@ -1315,8 +1331,8 @@ class DifferentialTab(wx.Panel):
         """Get the differential pair configuration."""
         setback = self.centerline_setback.GetValue()
         return {
-            'diff_pair_width': self.diff_pair_width.GetValue(),
-            'diff_pair_gap': self.diff_pair_gap.GetValue(),
+            'diff_pair_width': self._effective_diff_pair_width(),
+            'diff_pair_gap': self._effective_diff_pair_gap(),
             'impedance': self.diff_impedance.GetValue() or None,  # 0 = off
             'min_turning_radius': self.min_turning_radius.GetValue(),
             'max_setback_angle': self.max_setback_angle.GetValue(),
@@ -1329,49 +1345,56 @@ class DifferentialTab(wx.Panel):
             'ac_couple_match': self.ac_couple_check.GetValue(),
         }
 
-    def _on_use_netclass_changed(self, event):
-        """Handle the 'Use net class definitions' checkbox toggle."""
-        use_netclass = self.use_netclass_check.GetValue()
+    def _on_diff_geom_override_check(self, event):
+        """Enable/disable the paired spinctrl for whichever override checkbox
+        fired. Unchecked = the value comes from the board Default net-class."""
+        chk = event.GetEventObject()
+        for name in ('diff_pair_width', 'diff_pair_gap'):
+            if getattr(self, name + '_check', None) is chk:
+                getattr(self, name).Enable(chk.GetValue())
+                break
+        event.Skip()
 
-        if use_netclass:
-            # Try to get net class from first selected pair, fall back to Default
-            class_name = self._get_selected_pair_netclass() or 'Default'
-            from .swig_gui import _get_netclass_parameters
-            params = _get_netclass_parameters(class_name)
-            if params:
-                # Update diff pair width and gap from net class
-                if 'diff_pair_width' in params and params['diff_pair_width'] > 0:
-                    self.diff_pair_width.SetValue(params['diff_pair_width'])
-                if 'diff_pair_gap' in params and params['diff_pair_gap'] > 0:
-                    self.diff_pair_gap.SetValue(params['diff_pair_gap'])
-            # Disable manual editing
-            self.diff_pair_width.Enable(False)
-            self.diff_pair_gap.Enable(False)
-        else:
-            # Re-enable manual editing
-            self.diff_pair_width.Enable(True)
-            self.diff_pair_gap.Enable(True)
-
-    def _get_selected_pair_netclass(self):
-        """Get the net class name for the first selected pair, or None."""
+    def _fab_floor_via_parent(self, ctrl_name, val):
+        """Pin ``val`` UP to the parent dialog's fab floor for ``ctrl_name`` when
+        the top-level dialog exposes ``_fab_floored`` (parity with the Basic tab);
+        return ``val`` unchanged when the dialog isn't reachable."""
         try:
-            import pcbnew
-            board = pcbnew.GetBoard()
-            if board is None:
-                return None
-
-            # Get first selected pair's P net
-            selected = self.get_selected_pair_net_ids()
-            if not selected:
-                return None
-
-            _, p_net_id, _ = selected[0]
-            net = board.FindNet(p_net_id)
-            if net:
-                return net.GetNetClassName()
-            return None
+            import wx
+            top = wx.GetTopLevelParent(self)
+            if top is not None and hasattr(top, '_fab_floored'):
+                return top._fab_floored(ctrl_name, val)
         except Exception:
-            return None
+            pass
+        return val
+
+    def _effective_diff_pair_width(self):
+        """Diff-pair leg width to route with. CHECKED: the entered value.
+        UNCHECKED: the board Default net-class ``diff_pair_width`` (control value
+        fallback when the board has none). Floored at the parent's 'track_width'
+        fab floor when the parent dialog is reachable."""
+        if self.diff_pair_width_check.GetValue():
+            val = self.diff_pair_width.GetValue()
+        else:
+            from .swig_gui import _get_netclass_parameters
+            nc = _get_netclass_parameters('Default') or {}
+            board_val = nc.get('diff_pair_width')
+            val = board_val if board_val else self.diff_pair_width.GetValue()
+        return self._fab_floor_via_parent('track_width', val)
+
+    def _effective_diff_pair_gap(self):
+        """Diff-pair gap to route with. CHECKED: the entered value. UNCHECKED:
+        the board Default net-class ``diff_pair_gap`` (control value fallback when
+        the board has none). Floored at the parent's 'clearance' fab floor when the
+        parent dialog is reachable."""
+        if self.diff_pair_gap_check.GetValue():
+            val = self.diff_pair_gap.GetValue()
+        else:
+            from .swig_gui import _get_netclass_parameters
+            nc = _get_netclass_parameters('Default') or {}
+            board_val = nc.get('diff_pair_gap')
+            val = board_val if board_val else self.diff_pair_gap.GetValue()
+        return self._fab_floor_via_parent('clearance', val)
 
     def get_selected_pairs(self):
         """Get list of selected differential pair base names."""

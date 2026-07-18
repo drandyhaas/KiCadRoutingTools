@@ -421,13 +421,6 @@ class RoutingDialog(wx.Dialog):
         param_box = wx.StaticBox(panel, label="Parameters")
         param_box_sizer = wx.StaticBoxSizer(param_box, wx.VERTICAL)
 
-        # Use net class definitions checkbox
-        self.use_netclass_check = wx.CheckBox(panel, label="Use net class definitions")
-        self.use_netclass_check.SetValue(False)
-        self.use_netclass_check.SetToolTip("Use track width, clearance, via size from selected net class")
-        self.use_netclass_check.Bind(wx.EVT_CHECKBOX, self._on_use_netclass_changed)
-        param_box_sizer.Add(self.use_netclass_check, 0, wx.ALL, 5)
-
         # Obey design rule constraints checkbox
         self.obey_drc_check = wx.CheckBox(panel, label="Obey design rule constraints")
         self.obey_drc_check.SetValue(True)
@@ -2291,11 +2284,12 @@ class RoutingDialog(wx.Dialog):
             self.planes_tab.net_panel._component_filter_value = ""
 
         # Reset differential tab
-        self.differential_tab.use_netclass_check.SetValue(False)
+        self.differential_tab.diff_pair_width_check.SetValue(False)
         self.differential_tab.diff_pair_width.SetValue(defaults.DIFF_PAIR_WIDTH)
-        self.differential_tab.diff_pair_width.Enable(True)
+        self.differential_tab.diff_pair_width.Enable(False)
+        self.differential_tab.diff_pair_gap_check.SetValue(False)
         self.differential_tab.diff_pair_gap.SetValue(defaults.DIFF_PAIR_GAP)
-        self.differential_tab.diff_pair_gap.Enable(True)
+        self.differential_tab.diff_pair_gap.Enable(False)
         self.differential_tab.min_turning_radius.SetValue(defaults.DIFF_PAIR_MIN_TURNING_RADIUS)
         self.differential_tab.max_setback_angle.SetValue(defaults.DIFF_PAIR_MAX_SETBACK_ANGLE)
         self.differential_tab.max_turn_angle.SetValue(defaults.DIFF_PAIR_MAX_TURN_ANGLE)
@@ -2581,64 +2575,7 @@ class RoutingDialog(wx.Dialog):
         # Parse layer costs
         config['layer_costs'] = self._selected_layer_costs()
 
-        # If using net class definitions, build per-class parameter mapping
-        if self.use_netclass_check.GetValue():
-            nets_by_class = self._group_nets_by_class(selected_nets)
-            class_params = {}
-            for class_name in nets_by_class.keys():
-                params = self._get_netclass_params(class_name)
-                if params:
-                    class_params[class_name] = params
-                else:
-                    # Fallback to current control values
-                    class_params[class_name] = {
-                        'track_width': config['track_width'],
-                        'clearance': config['clearance'],
-                        'via_size': config['via_size'],
-                        'via_drill': config['via_drill'],
-                    }
-            config['use_netclass_params'] = True
-            config['nets_by_class'] = nets_by_class
-            config['class_params'] = class_params
-        else:
-            config['use_netclass_params'] = False
-
         return config
-
-    def _on_use_netclass_changed(self, event):
-        """Handle the 'Use net class definitions' checkbox toggle."""
-        use_netclass = self.use_netclass_check.GetValue()
-
-        # List of controls that are overridden by net class
-        netclass_controls = [self.track_width, self.clearance, self.via_size, self.via_drill]
-
-        if use_netclass:
-            # Get the selected net class name
-            class_name = self._get_selected_netclass_name()
-            params = self._get_netclass_params(class_name)
-
-            if params:
-                # Populate the controls with net class values
-                self.track_width.SetValue(params['track_width'])
-                self.clearance.SetValue(params['clearance'])
-                self.via_size.SetValue(params['via_size'])
-                self.via_drill.SetValue(params['via_drill'])
-
-            # Disable the controls
-            for ctrl in netclass_controls:
-                ctrl.Disable()
-
-            # Connect to net panel's notebook tab changes if in tabbed mode
-            if hasattr(self.net_panel, '_netclass_notebook') and self.net_panel._netclass_notebook:
-                self.net_panel._netclass_notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self._on_netclass_tab_changed)
-        else:
-            # Enable the controls
-            for ctrl in netclass_controls:
-                ctrl.Enable()
-
-            # Unbind tab change handler
-            if hasattr(self.net_panel, '_netclass_notebook') and self.net_panel._netclass_notebook:
-                self.net_panel._netclass_notebook.Unbind(wx.EVT_NOTEBOOK_PAGE_CHANGED)
 
     def _on_tabbed_view_changed(self, notebook):
         """Called when net panel's tabbed view is created or destroyed.
@@ -2646,18 +2583,7 @@ class RoutingDialog(wx.Dialog):
         Args:
             notebook: The wx.Notebook if tabbed view was created, None if destroyed
         """
-        if notebook and self.use_netclass_check.GetValue():
-            # Tabbed view was created and we're using net class definitions
-            # Bind the tab change event and update parameters for current tab
-            notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self._on_netclass_tab_changed)
-            class_name = self._get_selected_netclass_name()
-            params = self._get_netclass_params(class_name)
-            if params:
-                self.track_width.SetValue(params['track_width'])
-                self.clearance.SetValue(params['clearance'])
-                self.via_size.SetValue(params['via_size'])
-                self.via_drill.SetValue(params['via_drill'])
-        elif notebook is None and hasattr(self, '_last_notebook') and self._last_notebook:
+        if notebook is None and hasattr(self, '_last_notebook') and self._last_notebook:
             # Tabbed view was destroyed - unbind from old notebook
             try:
                 self._last_notebook.Unbind(wx.EVT_NOTEBOOK_PAGE_CHANGED)
@@ -2667,64 +2593,9 @@ class RoutingDialog(wx.Dialog):
         # Keep track of the notebook for cleanup
         self._last_notebook = notebook
 
-    def _on_netclass_tab_changed(self, event):
-        """Handle net class tab change to update parameters."""
-        event.Skip()  # Allow normal tab switching
-
-        if not self.use_netclass_check.GetValue():
-            return
-
-        class_name = self._get_selected_netclass_name()
-        params = self._get_netclass_params(class_name)
-
-        if params:
-            self.track_width.SetValue(params['track_width'])
-            self.clearance.SetValue(params['clearance'])
-            self.via_size.SetValue(params['via_size'])
-            self.via_drill.SetValue(params['via_drill'])
-
-    def _get_selected_netclass_name(self):
-        """Get the currently selected net class name from the net panel."""
-        if (hasattr(self.net_panel, '_separate_by_netclass') and
-            self.net_panel._separate_by_netclass and
-            self.net_panel._netclass_notebook):
-            # Get the selected tab's class name
-            current_tab = self.net_panel._netclass_notebook.GetSelection()
-            if current_tab >= 0 and current_tab < len(self.net_panel._netclass_names):
-                return self.net_panel._netclass_names[current_tab]
-        return 'Default'
-
     def _get_netclass_params(self, class_name):
         """Get parameters for a net class."""
         return _get_netclass_parameters(class_name)
-
-    def _group_nets_by_class(self, net_names):
-        """Group net names by their net class.
-
-        Args:
-            net_names: List of net names
-
-        Returns:
-            dict: {class_name: [net_names]} mapping
-        """
-        # Use the net_to_class mapping from the net panel if available
-        if (hasattr(self.net_panel, '_net_to_class') and
-            self.net_panel._net_to_class):
-            net_to_class = self.net_panel._net_to_class
-        else:
-            # Build mapping from pcbnew
-            from .fanout_gui import _get_net_classes_from_board
-            net_to_class, _ = _get_net_classes_from_board()
-
-        # Group nets by class
-        groups = {}
-        for net_name in net_names:
-            class_name = net_to_class.get(net_name, 'Default')
-            if class_name not in groups:
-                groups[class_name] = []
-            groups[class_name].append(net_name)
-
-        return groups
 
     def _maybe_offer_planes_for_power_nets(self, selected_nets):
         """If GND and/or VCC is selected without an existing zone, ask the user
@@ -3089,157 +2960,14 @@ class RoutingDialog(wx.Dialog):
                     net_clearances=net_clearances,
                 )
 
-            # Check if using per-netclass parameters
-            if config.get('use_netclass_params') and config.get('nets_by_class'):
-                # Route each net class group with its own parameters
-                total_successful = 0
-                total_failed = 0
-                # #382 E5: aggregate the FULL results_data key set. The old
-                # init listed only 6 keys and the extend loop below re-added
-                # only those; `vias_to_remove` (populated by rip-existing,
-                # route.py:1539, and consumed by _apply_results_to_board) was
-                # silently dropped, so a per-netclass GUI route with
-                # --rip-existing-nets left the ripped nets' stale vias on the
-                # board (stacked/duplicate vias, #300/#318 class). Seed every
-                # key empty and extend generically so no key can be dropped.
-                all_results = {k: [] for k in (
-                    'results', 'all_swap_vias', 'all_swap_segments',
-                    'exclusion_zone_lines', 'boundary_debug_labels',
-                    'segments_to_remove', 'vias_to_remove', 'pad_swaps',
-                    'single_ended_target_swap_info', 'all_segment_modifications')}
-
-                class_names = list(config['nets_by_class'].keys())
-                total_classes = len(class_names)
-
-                for class_idx, class_name in enumerate(class_names):
-                    if self._cancel_requested:
-                        break
-
-                    class_nets = config['nets_by_class'][class_name]
-                    params = config['class_params'].get(class_name, {})
-
-                    # Update status to show which class is being routed
-                    track_w = params.get('track_width', config['track_width'])
-
-                    print(f"\nRouting {len(class_nets)} nets from class '{class_name}' "
-                          f"(track={track_w:.3f}mm, "
-                          f"clearance={params.get('clearance', config['clearance']):.3f}mm)")
-
-                    # Create class-aware progress callback
-                    def make_class_progress(cname, cidx, total_cls):
-                        def class_on_progress(current, total, net_name=""):
-                            status = f"[{cname}] {net_name}" if net_name else f"[{cname}]"
-                            wx.CallAfter(self._update_progress, current, total, status)
-                            time.sleep(0.01)
-                        return class_on_progress
-
-                    class_progress = make_class_progress(class_name, class_idx, total_classes)
-
-                    successful, failed, batch_time, results_data = batch_route(
-                        input_file=self.board_filename,
-                        output_file="",
-                        net_names=class_nets,
-                        layers=config['layers'],
-                        track_width=params.get('track_width', config['track_width']),
-                        clearance=params.get('clearance', config['clearance']),
-                        via_size=params.get('via_size', config['via_size']),
-                        via_drill=params.get('via_drill', config['via_drill']),
-                        grid_step=config['grid_step'],
-                        via_cost=config['via_cost'],
-                        impedance=config.get('impedance'),
-                        max_iterations=config['max_iterations'],
-                        max_probe_iterations=config.get('max_probe_iterations', 5000),
-                        heuristic_weight=config['heuristic_weight'],
-                        proximity_heuristic_factor=config.get('proximity_heuristic_factor', 0.02),
-                        turn_cost=config['turn_cost'],
-                        direction_preference_cost=config.get('direction_preference_cost', 50),
-                        max_rip_up_count=config['max_ripup'],
-                        ripup_abandon_metric=config.get('ripup_abandon_metric', defaults.RIPUP_ABANDON_METRIC),
-                        ordering_strategy=config['ordering_strategy'],
-                        direction_order=config.get('direction'),
-                        stub_proximity_radius=config['stub_proximity_radius'],
-                        stub_proximity_cost=config['stub_proximity_cost'],
-                        power_tap_neckdown=config.get('power_tap_neckdown', True),
-                        neckdown_length=config.get('neckdown_length', defaults.NECKDOWN_LENGTH),
-                        neckdown_taper_length=config.get('neckdown_taper_length', defaults.NECKDOWN_TAPER_LENGTH),
-                        via_proximity_cost=config['via_proximity_cost'],
-                        track_proximity_distance=config['track_proximity_distance'],
-                        track_proximity_cost=config['track_proximity_cost'],
-                        bga_proximity_radius=config.get('bga_proximity_radius', 7.0),
-                        bga_proximity_cost=config.get('bga_proximity_cost', 0.2),
-                        vertical_attraction_radius=config.get('vertical_attraction_radius', 1.0),
-                        vertical_attraction_cost=config.get('vertical_attraction_cost', 0.0),
-                        ripped_route_avoidance_radius=config.get('ripped_route_avoidance_radius', 1.0),
-                        ripped_route_avoidance_cost=config.get('ripped_route_avoidance_cost', 0.1),
-                        crossing_penalty=config.get('crossing_penalty', 1000.0),
-                        routing_clearance_margin=config['routing_clearance_margin'],
-                        hole_to_hole_clearance=config['hole_to_hole_clearance'],
-                        board_edge_clearance=config['board_edge_clearance'],
-                        enable_layer_switch=config['enable_layer_switch'],
-                        crossing_layer_check=not config.get('no_crossing_layer_check', False),
-                        can_swap_to_top_layer=config.get('can_swap_to_top_layer', False),
-                        swappable_net_patterns=config.get('swappable_nets'),
-                        schematic_dir=config.get('schematic_dir'),
-                        mps_reverse_rounds=config.get('mps_reverse_rounds', False),
-                        mps_layer_swap=config.get('mps_layer_swap', False),
-                        keep_input_copper=config.get('keep_input_copper', False),
-                        mps_segment_intersection=config.get('mps_segment_intersection', False),
-                        bus_enabled=config.get('bus_enabled', False),
-                        bus_detection_radius=config.get('bus_detection_radius', 5.0),
-                        bus_attraction_radius=config.get('bus_attraction_radius', 5.0),
-                        bus_attraction_bonus=config.get('bus_attraction_bonus', 5000),
-                        bus_min_nets=config.get('bus_min_nets', 2),
-                        guide_corridor_enabled=config.get('guide_corridor_enabled', False),
-                        guide_corridor_layer=config.get('guide_corridor_layer', 'User.1'),
-                        guide_corridor_spacing=config.get('guide_corridor_spacing', 0.0),
-                        keepout_enabled=config.get('keepout_enabled', False),
-                        keepout_layer=config.get('keepout_layer', 'User.2'),
-                        power_nets=config.get('power_nets', []),
-                        power_nets_widths=config.get('power_nets_widths', []),
-                        disable_bga_zones=config.get('no_bga_zones'),
-                        rip_existing_nets=config.get('rip_existing_nets'),
-                        layer_costs=config.get('layer_costs', []),
-                        length_match_groups=config.get('length_match_groups'),
-                        length_match_tolerance=config.get('length_match_tolerance', 0.1),
-                        meander_amplitude=config.get('meander_amplitude', 1.0),
-                        time_matching=config.get('time_matching', False),
-                        time_match_tolerance=config.get('time_match_tolerance', 1.0),
-                        add_teardrops=config.get('add_teardrops', False),
-                        verbose=config.get('verbose', False),
-                        skip_routing=config.get('skip_routing', False),
-                        debug_memory=config.get('debug_memory', False),
-                        collect_stats=config.get('stats', False),
-                        debug_lines=config['debug_lines'],
-                        cancel_check=check_cancel,
-                        progress_callback=class_progress,
-                        return_results=True,
-                        pcb_data=self.pcb_data,
-                        net_clearances=net_clearances,
-                    )
-
-                    total_successful += successful
-                    total_failed += failed
-                    if results_data:
-                        # Generic extend of every list-valued key (#382 E5):
-                        # covers all_swap_segments (#340), segments_to_remove
-                        # (dead-end/cycle prune), vias_to_remove (rip-existing),
-                        # and any future key without another manual add.
-                        for _k, _v in results_data.items():
-                            if isinstance(_v, list):
-                                all_results.setdefault(_k, []).extend(_v)
-
-                successful = total_successful
-                failed = total_failed
-                results_data = all_results
-            else:
-                # Standard routing with single set of parameters
-                successful, failed, total_time, results_data = run_batch(
-                    config['nets'],
-                    config['track_width'],
-                    config['clearance'],
-                    config['via_size'],
-                    config['via_drill'],
-                )
+            # Standard routing with a single set of parameters for all selected nets
+            successful, failed, total_time, results_data = run_batch(
+                config['nets'],
+                config['track_width'],
+                config['clearance'],
+                config['via_size'],
+                config['via_drill'],
+            )
 
             if self._cancel_requested:
                 wx.CallAfter(self._routing_finished, self._routing_cancelled)
