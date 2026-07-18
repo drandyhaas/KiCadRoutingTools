@@ -1225,7 +1225,7 @@ class DifferentialTab(wx.Panel):
                         board, targets, severity_plan(keep_thermal=cfg.get('keep_thermal', False)),
                         diff_pair_gap=cfg.get('diff_pair_gap'),
                         diff_pair_width=cfg.get('track_width'),
-                        clamp_nondefault_netclasses=not cfg.get('no_clamp_netclasses', False)):
+                        clamp_nondefault_netclasses=cfg.get('clamp_netclasses', False)):
                     board.SetModified()
                     print("DRC settings: loosened Board Setup floors to the diff-pair routing values (save to persist)")
             except Exception as e:

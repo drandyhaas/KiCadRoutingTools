@@ -464,20 +464,36 @@ class RoutingDialog(wx.Dialog):
         }
         params = [
             ('track_width', 'Track Width (mm):', defaults.TRACK_WIDTH, "Width of routed traces"),
-            ('clearance', 'Clearance (mm):', defaults.CLEARANCE, "Minimum spacing between traces and other copper"),
+            ('clearance', 'Min Clearance (mm):', defaults.CLEARANCE, "Minimum spacing between traces and other copper"),
             ('via_size', 'Via Size (mm):', defaults.VIA_SIZE, "Outer diameter of vias"),
             ('via_drill', 'Via Drill (mm):', defaults.VIA_DRILL, "Drill hole diameter for vias"),
-            ('hole_to_hole_clearance', 'Hole Clearance (mm):', defaults.HOLE_TO_HOLE_CLEARANCE, "Minimum spacing between via/pad drill holes"),
+            ('hole_to_hole_clearance', 'Min Hole Clearance (mm):', defaults.HOLE_TO_HOLE_CLEARANCE, "Minimum spacing between via/pad drill holes"),
         ]
+        # Each geometry floor is a "checkbox + spinctrl" row like the edge control
+        # (#439): unchecked = default from the board (Default net-class for
+        # track/clearance/via, board Constraint for the hole floor); checking the
+        # box overrides with the typed value. Checking the CLEARANCE box is also
+        # the "clamp non-Default net-classes" switch (== CLI passing --clearance).
         for name, label, default, tooltip in params:
             r = defaults.PARAM_RANGES[name]
             grid.Add(wx.StaticText(parent, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+            row_sizer = wx.BoxSizer(wx.HORIZONTAL)
+            chk = wx.CheckBox(parent, label="")
+            chk.SetValue(False)
+            chk.SetToolTip(
+                "Override this value (unchecked = use the board's own value: "
+                "Default net-class for track/clearance/via, board Constraint for hole).")
+            chk.Bind(wx.EVT_CHECKBOX, self._on_param_override_check)
             ctrl = wx.SpinCtrlDouble(parent, min=r['min'], max=r['max'], initial=default, inc=r['inc'])
             ctrl.SetDigits(r['digits'])
             ctrl.SetToolTip(tooltip)
             ctrl.Bind(wx.EVT_SPINCTRLDOUBLE, lambda evt, n=name: self._on_drc_param_changed(evt, n))
+            ctrl.Enable(False)
             setattr(self, name, ctrl)
-            grid.Add(ctrl, 0, wx.EXPAND)
+            setattr(self, name + '_check', chk)
+            row_sizer.Add(chk, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+            row_sizer.Add(ctrl, 1, wx.EXPAND)
+            grid.Add(row_sizer, 0, wx.EXPAND)
 
         # Fab tier (issue #237): the JLC manufacturing floor every tab routes/grades
         # DOWN toward. 'standard' (no extra cost) auto-escalates to 'advanced' (the
@@ -519,7 +535,7 @@ class RoutingDialog(wx.Dialog):
         grid.Add(ovr_sizer, 0, wx.EXPAND)
 
         # Edge clearance (checkbox + value)
-        grid.Add(wx.StaticText(parent, label="Edge Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.Add(wx.StaticText(parent, label="Min Edge Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         edge_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.edge_clearance_check = wx.CheckBox(parent, label="")
         self.edge_clearance_check.SetValue(False)
@@ -589,6 +605,39 @@ class RoutingDialog(wx.Dialog):
             minimums = _get_board_minimum_constraints() or {}
             return minimums.get('min_copper_edge_clearance') or 0.0
         return 0.0
+
+    def _effective_geometry_floor(self, name):
+        """Geometry floor to route/grade with (#439 parity with the CLI):
+        the dedicated control when its override checkbox is checked; otherwise
+        the board's own value -- Default net-class for track/clearance/via,
+        board Constraint for the hole floor. Falls back to the control value
+        when the board value is unavailable."""
+        if getattr(self, name + '_check').GetValue():
+            return getattr(self, name).GetValue()
+        if name == 'hole_to_hole_clearance':
+            constraints = _get_board_minimum_constraints() or {}
+            board_val = constraints.get('min_hole_to_hole')
+        else:
+            netclass = _get_netclass_parameters('Default') or {}
+            board_val = netclass.get(name)
+        if board_val is None:
+            return getattr(self, name).GetValue()
+        return board_val
+
+    def _effective_track_width(self):
+        return self._effective_geometry_floor('track_width')
+
+    def _effective_clearance(self):
+        return self._effective_geometry_floor('clearance')
+
+    def _effective_via_size(self):
+        return self._effective_geometry_floor('via_size')
+
+    def _effective_via_drill(self):
+        return self._effective_geometry_floor('via_drill')
+
+    def _effective_hole_to_hole_clearance(self):
+        return self._effective_geometry_floor('hole_to_hole_clearance')
 
     def _on_drc_param_changed(self, event, ctrl_name):
         """Validate parameter change against DRC minimums."""
@@ -1180,23 +1229,6 @@ class RoutingDialog(wx.Dialog):
             "--keep-thermal). Off by default.")
         options_inner.Add(self.keep_thermal_check, 0, wx.ALL, 3)
 
-        self.no_clamp_netclasses_check = wx.CheckBox(
-            options_scroll, label="Keep net-class clearances")
-        # #439: default OFF (clamp classes to the routed floor). Stock net-class
-        # clearances are aspirational -- boards are routed below them (even the
-        # human-routed references violate their own 0.2 class), so keeping the
-        # original class spec in the output manufactures phantom sub-class DRC.
-        # The router honors min(class, routed) in-run; the writeback clamps to match.
-        self.no_clamp_netclasses_check.SetValue(False)
-        self.no_clamp_netclasses_check.SetToolTip(
-            "Clamp the board's NON-Default net-class clearance/track/via floors DOWN "
-            "to the routed values in the output (OFF/clamped by default -- stock "
-            "class clearances are aspirational and would otherwise storm KiCad's per-"
-            "net-class DRC). Check to KEEP the original class spec in the output -- "
-            "only for an impedance-controlled board actually routed to its class "
-            "(matches the CLI's --no-clamp-netclasses when checked).")
-        options_inner.Add(self.no_clamp_netclasses_check, 0, wx.ALL, 3)
-
         options_inner.AddSpacer(10)
 
         # MPS options
@@ -1441,10 +1473,10 @@ class RoutingDialog(wx.Dialog):
             # weights fill cheaper layers first. Empty/invalid -> [].
             layer_costs = self._selected_layer_costs()
             return {
-                'track_width': self.track_width.GetValue(),
-                'clearance': self.clearance.GetValue(),
-                'via_size': self.via_size.GetValue(),
-                'via_drill': self.via_drill.GetValue(),
+                'track_width': self._effective_track_width(),
+                'clearance': self._effective_clearance(),
+                'via_size': self._effective_via_size(),
+                'via_drill': self._effective_via_drill(),
                 'layers': self._get_selected_layers(),
                 'layer_costs': layer_costs,
                 'diff_pair_gap': self.differential_tab.diff_pair_gap.GetValue(),
@@ -1482,12 +1514,12 @@ class RoutingDialog(wx.Dialog):
             except ValueError:
                 power_widths = None
             return {
-                'track_width': self.track_width.GetValue(),
-                'clearance': self.clearance.GetValue(),
-                'via_size': self.via_size.GetValue(),
-                'via_drill': self.via_drill.GetValue(),
+                'track_width': self._effective_track_width(),
+                'clearance': self._effective_clearance(),
+                'via_size': self._effective_via_size(),
+                'via_drill': self._effective_via_drill(),
                 'grid_step': self.grid_step.GetValue(),
-                'hole_to_hole_clearance': self.hole_to_hole_clearance.GetValue(),
+                'hole_to_hole_clearance': self._effective_hole_to_hole_clearance(),
                 'max_iterations': int(self.max_iterations.GetValue()),
                 'max_ripup': int(self.max_ripup.GetValue()),
                 'board_edge_clearance': edge_clearance,
@@ -1505,7 +1537,7 @@ class RoutingDialog(wx.Dialog):
                 # routing" toggle lives on the Basic tab (issue #160).
                 'fix_drc_settings': self.fix_drc_check.GetValue(),
                 'keep_thermal': self.keep_thermal_check.GetValue(),
-                'no_clamp_netclasses': self.no_clamp_netclasses_check.GetValue(),
+                'clamp_netclasses': self.clearance_check.GetValue(),
                 'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
             }
@@ -1547,10 +1579,10 @@ class RoutingDialog(wx.Dialog):
 
         def get_shared_params():
             return {
-                'track_width': self.track_width.GetValue(),
-                'clearance': self.clearance.GetValue(),
-                'via_size': self.via_size.GetValue(),
-                'via_drill': self.via_drill.GetValue(),
+                'track_width': self._effective_track_width(),
+                'clearance': self._effective_clearance(),
+                'via_size': self._effective_via_size(),
+                'via_drill': self._effective_via_drill(),
                 # Shared across all tabs: the single "Fix DRC settings after
                 # routing" toggle lives on the Basic tab (issue #160).
                 'fix_drc_settings': self.fix_drc_check.GetValue(),
@@ -1564,11 +1596,11 @@ class RoutingDialog(wx.Dialog):
             return {
                 'layers': self._get_selected_layers(),
                 'layer_costs': layer_costs,
-                'track_width': self.track_width.GetValue(),
-                'clearance': self.clearance.GetValue(),
-                'via_size': self.via_size.GetValue(),
-                'via_drill': self.via_drill.GetValue(),
-                'hole_to_hole_clearance': self.hole_to_hole_clearance.GetValue(),
+                'track_width': self._effective_track_width(),
+                'clearance': self._effective_clearance(),
+                'via_size': self._effective_via_size(),
+                'via_drill': self._effective_via_drill(),
+                'hole_to_hole_clearance': self._effective_hole_to_hole_clearance(),
                 'board_edge_clearance': self._effective_board_edge_clearance(),
                 'grid_step': self.grid_step.GetValue(),
                 'via_cost': self.via_cost.GetValue(),
@@ -1590,7 +1622,7 @@ class RoutingDialog(wx.Dialog):
                 # Shared Basic-tab toggle, inherited by the Differential tab (#160).
                 'fix_drc_settings': self.fix_drc_check.GetValue(),
                 'keep_thermal': self.keep_thermal_check.GetValue(),
-                'no_clamp_netclasses': self.no_clamp_netclasses_check.GetValue(),
+                'clamp_netclasses': self.clearance_check.GetValue(),
             }
 
         def sync_pcb_data():
@@ -1705,6 +1737,17 @@ class RoutingDialog(wx.Dialog):
         """Handle edge clearance checkbox change."""
         self.board_edge_clearance.Enable(self.edge_clearance_check.GetValue())
 
+    def _on_param_override_check(self, event):
+        """Enable/disable the paired geometry spinctrl for whichever override
+        checkbox fired (#439). Checking a box == the CLI passing that flag."""
+        chk = event.GetEventObject()
+        for name in ('track_width', 'clearance', 'via_size', 'via_drill',
+                     'hole_to_hole_clearance'):
+            if getattr(self, name + '_check', None) is chk:
+                getattr(self, name).Enable(chk.GetValue())
+                break
+        event.Skip()
+
     def _on_main_tab_changed(self, event):
         """Handle main notebook tab change - validate settings when switching tabs."""
         event.Skip()  # Allow normal tab switching
@@ -1717,7 +1760,7 @@ class RoutingDialog(wx.Dialog):
         # Check if switching to Planes tab (index 4)
         if event.GetSelection() == 4:
             # Validate max_track_width >= track_width
-            track_width = self.track_width.GetValue()
+            track_width = self._effective_track_width()
             max_width = self.planes_tab.repair_options.max_track_width.GetValue()
             if max_width < track_width:
                 self.planes_tab.repair_options.max_track_width.SetValue(track_width)
@@ -2155,6 +2198,13 @@ class RoutingDialog(wx.Dialog):
         self.edge_clearance_check.SetValue(False)
         self.board_edge_clearance.SetValue(defaults.BOARD_EDGE_CLEARANCE)
         self.board_edge_clearance.Enable(False)
+        # #439: every geometry-floor override starts UNCHECKED (= use the board's
+        # own value) with its spinctrl disabled, matching a fresh CLI invocation.
+        # (The edge control's checkbox attr is edge_clearance_check, reset above.)
+        for _name in ('track_width', 'clearance', 'via_size', 'via_drill',
+                      'hole_to_hole_clearance'):
+            getattr(self, _name + '_check').SetValue(False)
+            getattr(self, _name).Enable(False)
         self.direction_choice.SetSelection(0)
 
         # Reset advanced options. mps_*/can_swap default OFF to match the checkbox
@@ -2389,10 +2439,10 @@ class RoutingDialog(wx.Dialog):
             'nets': selected_nets,
             'layers': selected_layers,
             # Basic parameters
-            'track_width': self.track_width.GetValue(),
-            'clearance': self.clearance.GetValue(),
-            'via_size': self.via_size.GetValue(),
-            'via_drill': self.via_drill.GetValue(),
+            'track_width': self._effective_track_width(),
+            'clearance': self._effective_clearance(),
+            'via_size': self._effective_via_size(),
+            'via_drill': self._effective_via_drill(),
             'grid_step': self.grid_step.GetValue(),
             'via_cost': self.via_cost.GetValue(),
             'move_copper_text': self.move_text_check.GetValue(),
@@ -2428,7 +2478,7 @@ class RoutingDialog(wx.Dialog):
             'ripped_route_avoidance_cost': self.ripped_route_avoidance_cost.GetValue(),
             'crossing_penalty': self.crossing_penalty.GetValue(),
             'routing_clearance_margin': self.routing_clearance_margin.GetValue(),
-            'hole_to_hole_clearance': self.hole_to_hole_clearance.GetValue(),
+            'hole_to_hole_clearance': self._effective_hole_to_hole_clearance(),
             'board_edge_clearance': self._effective_board_edge_clearance(),
             'enable_layer_switch': self.enable_layer_switch.GetValue(),
             # Direction
@@ -2437,7 +2487,7 @@ class RoutingDialog(wx.Dialog):
             'add_teardrops': self.add_teardrops_check.GetValue(),
             'fix_drc_settings': self.fix_drc_check.GetValue(),
             'keep_thermal': self.keep_thermal_check.GetValue(),
-            'no_clamp_netclasses': self.no_clamp_netclasses_check.GetValue(),
+            'clamp_netclasses': self.clearance_check.GetValue(),
             # Guide corridor (issue #7)
             'guide_corridor_enabled': self.guide_corridor_check.GetValue(),
             'guide_corridor_layer': self.guide_corridor_layer_ctrl.GetValue().strip() or defaults.GUIDE_CORRIDOR_LAYER,
@@ -2892,11 +2942,11 @@ class RoutingDialog(wx.Dialog):
                 for net_name, net_id in net_name_to_id.items():
                     cname = all_net_to_class.get(net_name, 'Default')
                     net_clearances[net_id] = class_clearance_cache.get(cname, config['clearance'])
-                # #439: --clearance (the base clearance control) is the ceiling -- cap
-                # each class at min(class, clearance) by default (stock classes are
-                # aspirational). The "Keep net-class clearances" checkbox (no_clamp)
-                # lifts the cap for a genuine impedance board whose classes are met.
-                if not config.get('no_clamp_netclasses', False):
+                # #439: checking the Min Clearance override box (== the CLI passing
+                # --clearance) makes that base clearance the ceiling -- cap each class
+                # at min(class, clearance). Unchecked = classes routed at their own
+                # (board Default-derived) clearance, no clamp.
+                if config.get('clamp_netclasses', False):
                     _base_clr = config['clearance']
                     net_clearances = {nid: min(clr, _base_clr)
                                       for nid, clr in net_clearances.items()}
@@ -3432,7 +3482,7 @@ class RoutingDialog(wx.Dialog):
                     via_drill=config.get('via_drill'))
                 drc_changes = apply_targets_to_board(
                     board, targets, severity_plan(keep_thermal=config.get('keep_thermal', False)),
-                    clamp_nondefault_netclasses=not config.get('no_clamp_netclasses', False))
+                    clamp_nondefault_netclasses=config.get('clamp_netclasses', False))
                 if drc_changes:
                     board.SetModified()
                     print(f"DRC settings: loosened {len(drc_changes)} Board Setup "

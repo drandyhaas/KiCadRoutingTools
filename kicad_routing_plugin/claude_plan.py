@@ -185,6 +185,34 @@ _PARAM_SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
                   # #381 D5:
                   'impedance', 'length_match_groups', 'swappable_nets'}
 
+# #439: geometry-floor param -> its Basic-tab override checkbox attribute. A plan
+# step that names one of these is the GUI equivalent of the CLI passing that flag,
+# so setting the spinctrl must ALSO check the override box and enable the control
+# (otherwise _effective_<name>() ignores the typed value and uses the board's own).
+# The edge control's checkbox is named edge_clearance_check, not *_check.
+_GEOMETRY_OVERRIDE_CHECKS = {
+    'track_width': 'track_width_check',
+    'clearance': 'clearance_check',
+    'via_size': 'via_size_check',
+    'via_drill': 'via_drill_check',
+    'hole_to_hole_clearance': 'hole_to_hole_clearance_check',
+    'board_edge_clearance': 'edge_clearance_check',
+}
+
+
+def _enable_geometry_override(dialog, name):
+    """Check the override box + enable the spinctrl for a geometry floor set from
+    a plan step (no-op if `name` is not a geometry floor or the control is absent)."""
+    chk_attr = _GEOMETRY_OVERRIDE_CHECKS.get(name)
+    if not chk_attr:
+        return
+    chk = getattr(dialog, chk_attr, None)
+    if chk is not None:
+        chk.SetValue(True)
+    ctrl = getattr(dialog, name, None)
+    if ctrl is not None and hasattr(ctrl, 'Enable'):
+        ctrl.Enable(True)
+
 
 def apply_step_params(step, dialog):
     """Fill parameter controls from the step (plan time). Returns notes."""
@@ -399,6 +427,8 @@ def apply_step_params(step, dialog):
         for owner in _owners():
             if owner is not None and _set_control(owner, lookup, value):
                 notes.append(f"set {name}={value}")
+                # #439: a plan value for a geometry floor enables its override.
+                _enable_geometry_override(dialog, lookup)
                 placed = True
                 break
         if not placed:
@@ -409,6 +439,9 @@ def apply_step_params(step, dialog):
             if name in params:
                 try:
                     getattr(dialog, name).SetValue(float(params[name]))
+                    # #439: an explicit plan value == the CLI passing the flag; check
+                    # the override box + enable so _effective_<name>() uses it.
+                    _enable_geometry_override(dialog, name)
                     notes.append(f"set {name}={params[name]}")
                 except (TypeError, ValueError):
                     notes.append(f"ignored non-numeric {name}={params[name]!r}")
@@ -481,6 +514,8 @@ def apply_step_params(step, dialog):
             if name in params:
                 try:
                     getattr(dialog, name).SetValue(float(params[name]))
+                    # #439: via_size/via_drill are override-gated (grid_step is not).
+                    _enable_geometry_override(dialog, name)
                 except (TypeError, ValueError):
                     notes.append(f"ignored non-numeric {name}={params[name]!r}")
         opts = dialog.planes_tab.repair_options

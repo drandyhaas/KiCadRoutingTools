@@ -45,7 +45,6 @@ def get_dialog_settings(dialog):
         'add_teardrops_check': dialog.add_teardrops_check.GetValue(),
         'fix_drc_settings': dialog.fix_drc_check.GetValue(),
         'keep_thermal': dialog.keep_thermal_check.GetValue(),
-        'no_clamp_netclasses': dialog.no_clamp_netclasses_check.GetValue(),
         'power_nets': dialog.power_nets_ctrl.GetValue(),
         'power_widths': dialog.power_widths_ctrl.GetValue(),
         'no_bga_zones': dialog.no_bga_zones_ctrl.GetValue(),
@@ -82,6 +81,14 @@ def get_dialog_settings(dialog):
         'hole_to_hole_clearance': dialog.hole_to_hole_clearance.GetValue(),
         'edge_clearance_check': dialog.edge_clearance_check.GetValue(),
         'board_edge_clearance': dialog.board_edge_clearance.GetValue(),
+        # #439 geometry-floor override checkboxes (checked = override, unchecked =
+        # use the board's own value). Restored to also enable/disable the spinctrl.
+        'track_width_override': dialog.track_width_check.GetValue(),
+        'clearance_override': dialog.clearance_check.GetValue(),
+        'via_size_override': dialog.via_size_check.GetValue(),
+        'via_drill_override': dialog.via_drill_check.GetValue(),
+        'hole_to_hole_clearance_override': dialog.hole_to_hole_clearance_check.GetValue(),
+        'board_edge_clearance_override': dialog.edge_clearance_check.GetValue(),
         'direction_choice': dialog.direction_choice.GetSelection(),
 
         # Advanced options
@@ -288,8 +295,6 @@ def restore_dialog_settings(dialog, settings):
         dialog.fix_drc_check.SetValue(settings['fix_drc_settings'])
     if 'keep_thermal' in settings:
         dialog.keep_thermal_check.SetValue(settings['keep_thermal'])
-    if 'no_clamp_netclasses' in settings:
-        dialog.no_clamp_netclasses_check.SetValue(settings['no_clamp_netclasses'])
     if 'power_nets' in settings:
         dialog.power_nets_ctrl.SetValue(settings['power_nets'])
     if 'power_widths' in settings:
@@ -361,6 +366,26 @@ def restore_dialog_settings(dialog, settings):
         dialog.board_edge_clearance.Enable(settings['edge_clearance_check'])
     if 'board_edge_clearance' in settings:
         dialog.board_edge_clearance.SetValue(settings['board_edge_clearance'])
+    # #439 geometry-floor override checkboxes: restore checked state AND the
+    # matching spinctrl enable so the row round-trips like the edge control.
+    if 'track_width_override' in settings:
+        dialog.track_width_check.SetValue(settings['track_width_override'])
+        dialog.track_width.Enable(settings['track_width_override'])
+    if 'clearance_override' in settings:
+        dialog.clearance_check.SetValue(settings['clearance_override'])
+        dialog.clearance.Enable(settings['clearance_override'])
+    if 'via_size_override' in settings:
+        dialog.via_size_check.SetValue(settings['via_size_override'])
+        dialog.via_size.Enable(settings['via_size_override'])
+    if 'via_drill_override' in settings:
+        dialog.via_drill_check.SetValue(settings['via_drill_override'])
+        dialog.via_drill.Enable(settings['via_drill_override'])
+    if 'hole_to_hole_clearance_override' in settings:
+        dialog.hole_to_hole_clearance_check.SetValue(settings['hole_to_hole_clearance_override'])
+        dialog.hole_to_hole_clearance.Enable(settings['hole_to_hole_clearance_override'])
+    if 'board_edge_clearance_override' in settings:
+        dialog.edge_clearance_check.SetValue(settings['board_edge_clearance_override'])
+        dialog.board_edge_clearance.Enable(settings['board_edge_clearance_override'])
     if 'direction_choice' in settings:
         dialog.direction_choice.SetSelection(settings['direction_choice'])
 
