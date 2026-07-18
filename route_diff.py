@@ -281,8 +281,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             net_clearances = net_clearance_map_by_id(
                 input_file, {nid: n.name for nid, n in pcb_data.nets.items()})
             if net_clearances:
-                print(f"Auto-read netclass clearances for {len(net_clearances)} net(s) "
-                      f"(cross-class max(A,B) respected during diff-pair routing).")
+                # #439: cap each class at the routing clearance (stock classes are
+                # aspirational). A caller wanting the full classes (--no-clamp) passes
+                # an explicit uncapped map, so this internal fallback always caps.
+                net_clearances = {nid: min(clr, clearance)
+                                  for nid, clr in net_clearances.items()}
+                print(f"Auto-read netclass clearances for {len(net_clearances)} net(s), "
+                      f"capped at clearance {clearance}mm (#439; cross-class max(A,B) respected).")
         except Exception as _e:
             print(f"Warning: could not auto-read netclass clearances ({_e}).")
             net_clearances = None
@@ -1602,11 +1607,18 @@ Examples:
         from list_nets import net_clearance_map_by_id
         _net_clearances_map = net_clearance_map_by_id(
             args.input_file, {_nid: _net.name for _nid, _net in pcb_data.nets.items()})
+        # #439: --clearance is the ceiling -- cap each class at min(class, --clearance)
+        # by default (stock classes are aspirational). --no-clamp-netclasses lifts it.
+        if _net_clearances_map and not getattr(args, 'no_clamp_netclasses', False):
+            _net_clearances_map = {nid: min(clr, args.clearance)
+                                   for nid, clr in _net_clearances_map.items()}
         if _net_clearances_map:
             _classes = sorted({round(v, 4) for v in _net_clearances_map.values()})
-            print(f"Auto-read netclass clearances for {len(_net_clearances_map)} net(s) "
-                  f"from the board's .kicad_pro (non-Default class clearances mm: {_classes}); "
-                  f"diff-pair routing respects KiCad cross-class max(A,B). "
+            _mode = ("preserved (--no-clamp-netclasses)"
+                     if getattr(args, 'no_clamp_netclasses', False)
+                     else f"capped at --clearance {args.clearance}")
+            print(f"Netclass clearances for {len(_net_clearances_map)} net(s), {_mode} "
+                  f"(mm: {_classes}); diff-pair routing respects cross-class max(A,B). "
                   f"Override with --net-clearances.")
 
     batch_route_diff_pairs(args.input_file, args.output_file, net_names,

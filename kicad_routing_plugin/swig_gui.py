@@ -2892,6 +2892,14 @@ class RoutingDialog(wx.Dialog):
                 for net_name, net_id in net_name_to_id.items():
                     cname = all_net_to_class.get(net_name, 'Default')
                     net_clearances[net_id] = class_clearance_cache.get(cname, config['clearance'])
+                # #439: --clearance (the base clearance control) is the ceiling -- cap
+                # each class at min(class, clearance) by default (stock classes are
+                # aspirational). The "Keep net-class clearances" checkbox (no_clamp)
+                # lifts the cap for a genuine impedance board whose classes are met.
+                if not config.get('no_clamp_netclasses', False):
+                    _base_clr = config['clearance']
+                    net_clearances = {nid: min(clr, _base_clr)
+                                      for nid, clr in net_clearances.items()}
             except Exception as e:
                 print(f"Warning: Could not get net class clearances: {e}")
                 # Fall back to using config clearance for all nets
