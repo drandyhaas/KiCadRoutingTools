@@ -606,15 +606,19 @@ class RoutingDialog(wx.Dialog):
         return val
 
     def _effective_board_edge_clearance(self):
-        """Board-edge clearance to route with: the dedicated control when its
-        override checkbox is checked, else the board's own min_copper_edge_clearance
-        constraint (parity with the CLI, which always uses it -- NOT gated on
-        obey_drc). Pinned UP to the fab copper-to-edge floor either way."""
+        """Board-edge clearance to route with. UNCHECKED: the board's own
+        min_copper_edge_clearance constraint (parity with the CLI, which always uses
+        it). CHECKED: the entered override value -- but Obey-DRC (if on) still stops
+        it going below the board's own edge Constraint, i.e. you can't enter a
+        DRC-violating value. Pinned UP to the fab copper-to-edge floor either way."""
+        minimums = _get_board_minimum_constraints() or {}
+        board_min = minimums.get('min_copper_edge_clearance') or 0.0
         if self.edge_clearance_check.GetValue():
             val = self.board_edge_clearance.GetValue()
+            if self.obey_drc_check.GetValue() and val < board_min:
+                val = board_min
         else:
-            minimums = _get_board_minimum_constraints() or {}
-            val = minimums.get('min_copper_edge_clearance') or 0.0
+            val = board_min
         return self._fab_floored('board_edge_clearance', val)
 
     def _effective_geometry_floor(self, name):
