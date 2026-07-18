@@ -223,22 +223,30 @@ def read_design_rules(pcb_path):
             'source': source}
 
 
-def board_default_netclass_clearance(pcb_path, design_rules=None):
-    """Return the board's **Default** net-class clearance (mm) from the sibling
-    .kicad_pro, or ``None`` when there is no project / no Default class / no
-    clearance value. The routing CLIs and GUI use this as the base clearance when
-    the user gives none (#439 follow-up), so a board routes to its OWN Default
-    class instead of the generic ``routing_defaults.CLEARANCE``. Pass a cached
-    ``read_design_rules`` result as ``design_rules`` to avoid re-reading."""
+def board_default_netclass_param(pcb_path, key, design_rules=None):
+    """Return the board's **Default** net-class value for ``key`` -- one of
+    ``clearance``, ``track_width``, ``via_diameter``, ``via_drill`` -- from the
+    sibling .kicad_pro (mm), or ``None`` when there is no project / no Default
+    class / that value is unset. The routing CLIs and GUI use these as the default
+    clearance/track/via when the corresponding flag/override is omitted (#439
+    follow-up), so a board routes to its OWN Default class instead of the generic
+    ``routing_defaults`` constants. Pass a cached ``read_design_rules`` result as
+    ``design_rules`` to avoid re-reading."""
     try:
         dr = design_rules if design_rules is not None else read_design_rules(pcb_path)
     except Exception:
         return None
-    clr = ((dr.get('classes') or {}).get('Default') or {}).get('clearance')
+    v = ((dr.get('classes') or {}).get('Default') or {}).get(key)
     try:
-        return float(clr) if clr is not None else None
+        return float(v) if v is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def board_default_netclass_clearance(pcb_path, design_rules=None):
+    """The board's Default net-class **clearance** (mm), or ``None``. Thin wrapper
+    over :func:`board_default_netclass_param` kept for existing callers."""
+    return board_default_netclass_param(pcb_path, 'clearance', design_rules)
 
 
 def board_constraint(pcb_path, key, design_rules=None):

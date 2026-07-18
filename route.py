@@ -1980,8 +1980,10 @@ For differential pair routing, use route_diff.py:
                              "copper layers)")
 
     # Track and via geometry
-    parser.add_argument("--track-width", type=float, default=defaults.TRACK_WIDTH,
-                        help=f"Track width in mm (default: {defaults.TRACK_WIDTH}). Ignored if --impedance is specified.")
+    parser.add_argument("--track-width", type=float, default=None,
+                        help="Track width in mm. Default: the board's Default net-class "
+                             f"track_width (sibling .kicad_pro), else {defaults.TRACK_WIDTH}. "
+                             "Ignored if --impedance is specified.")
     parser.add_argument("--impedance", type=float, default=None,
                         help="Target single-ended impedance in ohms (e.g., 50). Calculates track width per layer from board stackup.")
     parser.add_argument("--clearance", type=float, default=None,
@@ -1990,10 +1992,12 @@ For differential pair routing, use route_diff.py:
                              "each net routes at its own net-class clearance (base = the board's "
                              f"Default class from the sibling .kicad_pro, else {defaults.CLEARANCE}). "
                              "Use --net-clearances <json> for explicit per-net values.")
-    parser.add_argument("--via-size", type=float, default=defaults.VIA_SIZE,
-                        help=f"Via outer diameter in mm (default: {defaults.VIA_SIZE})")
-    parser.add_argument("--via-drill", type=float, default=defaults.VIA_DRILL,
-                        help=f"Via drill size in mm (default: {defaults.VIA_DRILL})")
+    parser.add_argument("--via-size", type=float, default=None,
+                        help="Via outer diameter in mm. Default: the board's Default net-class "
+                             f"via_diameter (sibling .kicad_pro), else {defaults.VIA_SIZE}.")
+    parser.add_argument("--via-drill", type=float, default=None,
+                        help="Via drill size in mm. Default: the board's Default net-class "
+                             f"via_drill (sibling .kicad_pro), else {defaults.VIA_DRILL}.")
     parser.add_argument("--net-clearances", metavar="JSON", default=None,
                         help="Explicit override for the cross-class clearance map: a JSON object "
                              "mapping net name -> that net's net-class clearance in mm. When OMITTED, "
@@ -2198,7 +2202,20 @@ For differential pair routing, use route_diff.py:
     # --board-edge-clearance work the same way (omitted -> the board's own
     # constraint minimum). Resolved here, before enforce_fab_floors and every
     # downstream use. Stashed on args for drc_fix_kwargs (the writeback clamp).
-    from list_nets import (board_default_netclass_clearance, board_constraint)
+    from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
+                           board_constraint)
+    # track_width / via_size / via_drill: when omitted, default to the board's OWN
+    # Default net-class value (else the routing_defaults constant), so a bare route
+    # uses the board's own geometry -- parity with the GUI's per-control override.
+    for _pname, _nckey, _fallback in (('track_width', 'track_width', defaults.TRACK_WIDTH),
+                                      ('via_size', 'via_diameter', defaults.VIA_SIZE),
+                                      ('via_drill', 'via_drill', defaults.VIA_DRILL)):
+        if getattr(args, _pname) is None:
+            _v = board_default_netclass_param(args.input_file, _nckey)
+            setattr(args, _pname, _v if _v is not None else _fallback)
+            print(f"--{_pname.replace('_', '-')} not given; using "
+                  f"{'the board Default net-class' if _v is not None else 'the fallback'} "
+                  f"{getattr(args, _pname)}mm.")
     # --clearance, when given, is a pure CEILING on EVERY class -- Default included,
     # nothing special. Each net routes at min(its class, ceiling): the base clearance
     # (Default-class nets) is min(Default class, ceiling), and non-Default classes are
