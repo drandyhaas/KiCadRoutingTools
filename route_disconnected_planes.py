@@ -891,11 +891,25 @@ def route_planes(
                 # whose only open via site is farther out is still reached (the
                 # batched grid_router query keeps the wide search cheap). Skip the
                 # distant-trace fallback - we want a real via, nearest-first.
+                # #438: the last-resort tap may place a via inside this edge pad
+                # (fab-acceptable -- no closer to the edge than the pad already
+                # is), but its connecting TRACKS must not run CLOSER to the board
+                # edge than the pad. Cap the tap's edge clearance at the pad's own
+                # edge distance instead of the blanket 0.0 that let a #373 track
+                # fallback graze the outline (ulx3s GND on In2.Cu at 0.0mm).
+                _pad_edge = 0.0
+                _bb = getattr(pcb_data.board_info, 'board_bounds', None)
+                if _bb:
+                    _mnx, _mny, _mxx, _mxy = _bb
+                    _pad_edge = max(0.0, min(pad.global_x - _mnx, _mxx - pad.global_x,
+                                             pad.global_y - _mny, _mxy - pad.global_y)
+                                    - max(pad.size_x, pad.size_y) / 2.0)
                 result = None
                 for vtry, dtry in via_pairs:
                     result = tap_pad_with_escalation(
                         pad, pad_layer, net_id, pcb_data,
-                        replace(tap_config, via_size=vtry, via_drill=dtry),
+                        replace(tap_config, via_size=vtry, via_drill=dtry,
+                                board_edge_clearance=_pad_edge),
                         max_search_radius=max_search_radius, via_size=vtry,
                         via_drill=dtry, verbose=verbose, fine_for_all=True,
                         distant_trace_radius=0.0, disable_reuse=True,

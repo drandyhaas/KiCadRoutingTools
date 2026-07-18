@@ -195,10 +195,19 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     if freeze_hook is not None:
         freeze_hook()
 
+    # #436/#438: cross-class + board-edge floors, threaded into every copper-
+    # MOVING cleanup pass so a re-bend / micro-shift / via-nudge / connector-snap
+    # honors each foreign net's class clearance and the board edge rule (not the
+    # flat routing clearance the base A* map already respected). Inert on an
+    # all-Default board (net_clearances empty) with no strict edge rule.
+    _nc = getattr(config, 'net_clearances', None) or None
+    _bec = getattr(config, 'board_edge_clearance', 0.0) or 0.0
+
     if graze:
         _gz_segs, _gz_nets, _gz_strip = prune_grazing_segments(
             results, pcb_data, scope_net_ids, clearance=config.clearance,
-            check_foreign_segments=True, keep_input_copper=keep_input_copper)
+            check_foreign_segments=True, keep_input_copper=keep_input_copper,
+            net_clearances=_nc)
         counts['graze_pruned'] = _gz_segs
         _trace('graze')
         strip.extend(_gz_strip)
@@ -209,7 +218,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     if octolinear:
         _nz_segs, _nz_nets, _nz_strip, _ = nudge_grazing_octolinear(
             results, pcb_data, scope_net_ids, clearance=config.clearance,
-            keep_input_copper=keep_input_copper)
+            keep_input_copper=keep_input_copper,
+            net_clearances=_nc, board_edge_clearance=_bec)
         counts['octolinear_nudged'] = _nz_segs
         _trace('octolinear')
         strip.extend(_nz_strip)
@@ -225,7 +235,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         # #436: cross-class-aware graze fix — measure shortfall against each
         # net's own netclass floor and each foreign net's class, not the global
         # clearance (daisho's 456 same-class grid grazes, cparti's SW1-vs-SMA).
-        net_clearances=getattr(config, 'net_clearances', None) or None)
+        net_clearances=_nc, board_edge_clearance=_bec)
     counts['microshifted'] = _ms_segs
     _trace('microshift')
     strip.extend(_ms_strip)
@@ -242,7 +252,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             # short to clear the ~40um grazes the looser UNBLOCK_REFIT_MARGIN_MM now
             # leaves; a full cell reaches them while a via never moves more than
             # one cell. Moves the via (still connected), never shrinks it.
-            max_shift=config.grid_step)
+            max_shift=config.grid_step,
+            net_clearances=_nc, board_edge_clearance=_bec)
         counts['vias_nudged'] = _vn_moved
         _trace('via_nudge')
         if _vn_moved:

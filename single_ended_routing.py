@@ -171,7 +171,8 @@ def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None):
     return best
 
 
-def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None):
+def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None,
+                         net_clearances=None):
     """Min edge distance from point (x,y) on `layer` to any pad of a DIFFERENT net.
     The pad is modelled as a rounded rect (accurate for circle/oval/roundrect,
     exact rect at corner_r=0), so a round BGA ball is not over-approximated by its
@@ -183,7 +184,13 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None):
     override above that base is SUBTRACTED from its distance, so the caller's
     unchanged `dist >= base + X` threshold enforces the pad's own requirement
     (an "effective distance"). Overrides are bounded well below the 5mm
-    window, so windowing stays exact."""
+    window, so windowing stays exact.
+
+    `net_clearances` (#436, net_id -> class clearance mm): folds each foreign
+    pad's netclass EXCESS over `base_clearance` into the effective distance the
+    same way local_clearance is (whichever is larger wins), so a caller check
+    `dist >= base_clearance + w/2` enforces KiCad's pairwise max(base, classF)
+    against a pad in a wider (e.g. controlled-impedance) class. Inert when None."""
     nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc, custom = \
         _foreign_pad_arrays(pcb_data, layer)
     best_custom = _custom_pad_min_dist(custom, net_id, ((x, y),), base_clearance)
@@ -208,19 +215,26 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None):
     dy = np.maximum(ly - (hy[near] - fcr), 0.0)
     d = np.hypot(dx, dy) - fcr
     if base_clearance is not None:
-        d = d - np.maximum(plc[near] - base_clearance, 0.0)
+        excess = np.maximum(plc[near] - base_clearance, 0.0)
+        if net_clearances:
+            fcls = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
+                             for f in nids[near]], dtype=float)
+            excess = np.maximum(excess, fcls)
+        d = d - excess
     return min(float(np.min(d)), best_custom)
 
 
 def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                          base_clearance=None):
+                          base_clearance=None, net_clearances=None):
     """Min foreign-pad edge distance sampled along a (short, terminal) segment.
     Pads are modelled as rounded rects (corner_r), so round/oval/roundrect pads --
     e.g. BGA balls -- use their true outline, not the bounding-box corner that
     manufactures phantom grazes (#315). Vectorized: windows pads to the segment's
     bbox + margin, then evaluates ALL sample points against them in one matrix op.
     `base_clearance` (#326 B6): see _pt_foreign_pad_dist -- subtracts each pad's
-    local-clearance excess so unchanged caller thresholds honor overrides."""
+    local-clearance excess so unchanged caller thresholds honor overrides.
+    `net_clearances` (#436): see _pt_foreign_pad_dist -- also folds each foreign
+    pad's netclass excess so cross-class pad grazes are enforced."""
     nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc, custom = \
         _foreign_pad_arrays(pcb_data, layer)
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
@@ -255,7 +269,12 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     dy = np.maximum(ly - (fhy[None, :] - fcr[None, :]), 0.0)
     d = np.hypot(dx, dy) - fcr[None, :]
     if base_clearance is not None:
-        d = d - np.maximum(plc[near] - base_clearance, 0.0)[None, :]
+        excess = np.maximum(plc[near] - base_clearance, 0.0)
+        if net_clearances:
+            fcls = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
+                             for f in nids[near]], dtype=float)
+            excess = np.maximum(excess, fcls)
+        d = d - excess[None, :]
     return min(float(np.min(d)), best_custom)
 
 
@@ -580,6 +599,13 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
     to the grid step (0.05 mm) used to emit sub-fab-floor copper."""
     if floor is None:
         floor = _fab_track_floor(pcb_data)
+    # #436: neck against the moving net's own class floor, folding each foreign
+    # object's class excess, so a terminal grazing a wider (controlled-impedance)
+    # neighbour necks to the pairwise max(classOwn, classForeign), not the flat
+    # global clearance. Inert on an all-Default board.
+    nc = getattr(config, 'net_clearances', None) or None
+    own = (config.obstacle_clearance(net_id)
+           if hasattr(config, 'obstacle_clearance') else config.clearance)
     def touches(s):
         for tx, ty in term_pts:
             if (abs(s.start_x - tx) < 1e-6 and abs(s.start_y - ty) < 1e-6) or \
@@ -592,12 +618,13 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
             continue
         # Nearest foreign EDGE on this layer -- pad or track/via, whichever is
         # closer. Pad distances are override-adjusted (#326): a pad's local/
-        # footprint clearance above config.clearance is subtracted, so the
-        # allowed_half below necks to the pad's OWN required clearance.
+        # footprint clearance above the base is subtracted, so the allowed_half
+        # below necks to the pad's OWN required clearance.
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer,
-                                      base_clearance=config.clearance),
-                _seg_foreign_seg_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer))
-        allowed_half = d - config.clearance - 1e-4  # 1e-4: stay just inside the rule
+                                      base_clearance=own, net_clearances=nc),
+                _seg_foreign_seg_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer,
+                                      net_clearances=nc, base_clearance=own))
+        allowed_half = d - own - 1e-4  # 1e-4: stay just inside the rule
         if allowed_half < s.width / 2.0 - 1e-9:
             new_w = max(floor, 2.0 * allowed_half)
             if new_w < s.width - 1e-9:

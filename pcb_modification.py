@@ -776,7 +776,10 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
     the connector to ``results`` (and pcb_data) so both the CLI writer and the GUI
     pick it up. Returns the number of connectors added.
     """
-    coord_clear = config.clearance
+    # #436/#438: connector clearance = the stub net's own floor (foreign class
+    # excess folded per-object in _connector_clear); edge at the board rule.
+    _nc = getattr(config, 'net_clearances', None) or None
+    _bec = getattr(config, 'board_edge_clearance', 0.0) or 0.0
     added = 0
     new_conns = []
 
@@ -800,6 +803,8 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
         net = pcb_data.nets.get(net_id)
         if net is None:
             continue
+        coord_clear = (config.obstacle_clearance(net_id)
+                       if hasattr(config, 'obstacle_clearance') else config.clearance)
         net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
         net_pads = pcb_data.pads_by_net.get(net_id, [])
         for (nid, lyr), segs in list(segs_by_net_layer.items()):
@@ -885,13 +890,13 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
                                                     edge_cutouts)):
                             continue
                         if _segment_to_rings_distance(px, py, tx, ty, edge_rings) \
-                                < w / 2 + coord_clear - 1e-6:
+                                < w / 2 + max(coord_clear, _bec) - 1e-6:
                             continue
 
                     # Clearance check: the connector must keep `clearance` from
                     # every OTHER net's copper.
                     if not _connector_clear(px, py, tx, ty, w, lyr, net_id,
-                                            pcb_data, coord_clear):
+                                            pcb_data, coord_clear, net_clearances=_nc):
                         continue
                     conn = Segment(start_x=px, start_y=py, end_x=tx, end_y=ty,
                                    width=w, layer=lyr, net_id=net_id)
@@ -910,15 +915,26 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
     return added
 
 
-def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
+def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance,
+                     net_clearances=None):
     """True if a candidate connector segment keeps `clearance` from all OTHER
     nets' copper (segments on its layer, vias on any layer, pads on its layer)
-    and the higher NPTH-to-track floor from copper-less drill holes."""
+    and the higher NPTH-to-track floor from copper-less drill holes.
+
+    #436: `clearance` is the connector net's own floor; when `net_clearances`
+    is given each foreign object is cleared at the pairwise max(clearance, its
+    class), so an added connector never grazes a wider (impedance) neighbour."""
     from geometry_utils import segment_to_segment_distance, point_to_segment_distance
     from check_drc import segment_to_rect_distance
     from single_ended_routing import _seg_foreign_hole_dist
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     half = width / 2
+
+    def _req(fnid):
+        if not net_clearances:
+            return clearance
+        return max(clearance, net_clearances.get(fnid, clearance))
+
     # NPTH (no-copper) drill holes (#370 B2): the pad/via/segment loops below
     # all measure to COPPER, so a connector drawn straight across a mounting
     # hole passed every check. Slot/offset drills handled by the capsule.
@@ -931,13 +947,13 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
             continue
         if segment_to_segment_distance(x1, y1, x2, y2,
                                        s.start_x, s.start_y, s.end_x, s.end_y) \
-                < clearance + half + s.width / 2:
+                < _req(s.net_id) + half + s.width / 2:
             return False
     for v in pcb_data.vias:
         if v.net_id == net_id:
             continue
         if point_to_segment_distance(v.x, v.y, x1, y1, x2, y2) \
-                < clearance + half + getattr(v, 'size', 0.0) / 2:
+                < _req(v.net_id) + half + getattr(v, 'size', 0.0) / 2:
             return False
     for nid, pads in pcb_data.pads_by_net.items():
         if nid == net_id:
@@ -951,7 +967,7 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
             rx2, ry2 = into_pad_frame_point(x2, y2, pad)
             d, _ = segment_to_rect_distance(rx1, ry1, rx2, ry2, pad.global_x, pad.global_y,
                                             pad.size_x / 2, pad.size_y / 2)
-            if d < clearance + half:
+            if d < max(_req(nid), getattr(pad, 'local_clearance', 0.0) or 0.0) + half:
                 return False
     # Other-net copper pours (planes): a connector must not enter or graze them.
     zones = getattr(pcb_data, 'zones', None)
@@ -965,7 +981,7 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
                 t = i / n
                 px, py = x1 + t * (x2 - x1), y1 + t * (y2 - y1)
                 if point_in_polygon(px, py, z.polygon) or \
-                        point_to_polygon_edge_distance(px, py, z.polygon) < clearance + half:
+                        point_to_polygon_edge_distance(px, py, z.polygon) < _req(z.net_id) + half:
                     return False
     return True
 
@@ -1891,16 +1907,25 @@ def neck_wide_segments_grazing_pads(results, pcb_data, config) -> int:
         for pad in fp.pads:
             for layer in expand_pad_layers(pad.layers, config.layers):
                 pads_by_layer[layer].append(pad)
-    clr = config.clearance
+    # #436: pairwise clearance = max(seg-net floor, foreign-pad class,
+    # pad local_clearance override), not the flat global clearance.
+    nc = getattr(config, 'net_clearances', None) or None
+    def _own(nid):
+        if not nc:
+            return config.clearance
+        return max(config.clearance, nc.get(nid, config.clearance))
     necked = 0
     for r in results:
         for seg in r.get('new_segments', []):
             default_w = config.get_track_width(seg.layer)
             if seg.width <= default_w + 1e-9:
                 continue
+            own = _own(seg.net_id)
             for pad in pads_by_layer.get(seg.layer, []):
                 if pad.net_id == seg.net_id or pad.net_id == 0:
                     continue
+                clr = max(own, _own(pad.net_id),
+                          getattr(pad, 'local_clearance', 0.0) or 0.0)
                 d = _pt_seg_dist(pad.global_x, pad.global_y,
                                  seg.start_x, seg.start_y, seg.end_x, seg.end_y)
                 # Bounding-circle pad half (conservative: never misses a violation).
@@ -2253,7 +2278,8 @@ def _seg_seg_min_dist(ax, ay, bx, by, cx, cy, dx, dy) -> float:
 def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                            clearance: float = 0.1,
                            check_foreign_segments: bool = False,
-                           keep_input_copper: bool = False) -> Tuple[int, int, List[Segment]]:
+                           keep_input_copper: bool = False,
+                           net_clearances=None) -> Tuple[int, int, List[Segment]]:
     """Drop a segment that grazes a FOREIGN pad/via below clearance when the net
     stays fully connected without it (issue #224).
 
@@ -2311,17 +2337,28 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                 for cy in range(olo_y, ohi_y + 1):
                     seg_grid[(o.layer, cx, cy)].append(o)
 
+    def _eff(nid):
+        # #436: moving net's own floor; foreign class excess folded by the dist
+        # fns (inert on all-Default boards).
+        if not net_clearances:
+            return clearance
+        return max(clearance, net_clearances.get(nid, clearance))
+
     def grazes(s):
-        thr = clearance + s.width / 2.0 - 1e-4
+        eff = _eff(s.net_id)
+        thr = eff + s.width / 2.0 - 1e-4
         if (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                   s.end_x, s.end_y, s.layer,
-                                  base_clearance=clearance) < thr or
+                                  base_clearance=eff, net_clearances=net_clearances) < thr or
                 _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                      s.end_x, s.end_y, s.layer) < thr):
+                                      s.end_x, s.end_y, s.layer,
+                                      base_clearance=eff, net_clearances=net_clearances) < thr):
             return True
         if check_foreign_segments:
             slo_x, shi_x = min(s.start_x, s.end_x), max(s.start_x, s.end_x)
             slo_y, shi_y = min(s.start_y, s.end_y), max(s.start_y, s.end_y)
+            # widest possible pairwise clearance bounds the bbox prefilter
+            _cmax = max(eff, max(net_clearances.values()) if net_clearances else eff)
             cx0 = int(slo_x // _CELL) - 1; cx1 = int(shi_x // _CELL) + 1
             cy0 = int(slo_y // _CELL) - 1; cy1 = int(shi_y // _CELL) + 1
             seen = set()
@@ -2331,13 +2368,14 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                         if o.net_id == s.net_id or id(o) in seen:
                             continue
                         seen.add(id(o))
-                        margin = clearance + (s.width + o.width) / 2.0
+                        req = max(eff, _eff(o.net_id))   # #436 pairwise clearance
+                        margin = _cmax + (s.width + o.width) / 2.0
                         if (max(o.start_x, o.end_x) < slo_x - margin or min(o.start_x, o.end_x) > shi_x + margin or
                                 max(o.start_y, o.end_y) < slo_y - margin or min(o.start_y, o.end_y) > shi_y + margin):
                             continue  # bbox prefilter
                         d = _seg_seg_min_dist(s.start_x, s.start_y, s.end_x, s.end_y,
                                               o.start_x, o.start_y, o.end_x, o.end_y)
-                        if d - (s.width + o.width) / 2.0 < clearance - 1e-4:
+                        if d - (s.width + o.width) / 2.0 < req - 1e-4:
                             return True
         return False
 
@@ -2443,20 +2481,24 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                 from single_ended_routing import (_seg_foreign_pad_dist as _fpd,
                                                   _seg_foreign_via_dist as _fvd,
                                                   _fab_track_floor)
+                eff = _eff(s.net_id)  # #436 own-net floor; foreign class folded
                 d = min(_fpd(pcb_data, s.net_id, s.start_x, s.start_y,
                              s.end_x, s.end_y, s.layer,
-                             base_clearance=clearance),
+                             base_clearance=eff, net_clearances=net_clearances),
                         _fvd(pcb_data, s.net_id, s.start_x, s.start_y,
-                             s.end_x, s.end_y, s.layer))
+                             s.end_x, s.end_y, s.layer,
+                             base_clearance=eff, net_clearances=net_clearances))
                 if check_foreign_segments:
                     for o in pcb_data.segments:
                         if o.net_id == s.net_id or o.layer != s.layer or o is s:
                             continue
                         dd = _seg_seg_min_dist(s.start_x, s.start_y, s.end_x, s.end_y,
                                                o.start_x, o.start_y, o.end_x, o.end_y) - o.width / 2.0
+                        if net_clearances:
+                            dd -= max(0.0, _eff(o.net_id) - eff)  # #436 fold class
                         if dd < d:
                             d = dd
-                allowed = 2.0 * (d - clearance - 1e-4)
+                allowed = 2.0 * (d - eff - 1e-4)
                 floor = _fab_track_floor(pcb_data)
                 if (allowed >= floor - 1e-9 and allowed < s.width - 1e-9
                         and id(s) in routed_seg_ids):
@@ -2546,7 +2588,9 @@ def _octolinear_bends(A, B):
 
 def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
                              clearance: float = 0.1,
-                             keep_input_copper: bool = False) -> Tuple[int, int, List[Segment]]:
+                             keep_input_copper: bool = False,
+                             net_clearances=None,
+                             board_edge_clearance: float = 0.0) -> Tuple[int, int, List[Segment]]:
     """Re-bend a foreign-pad-grazing octolinear jog so it clears the pad (issue #224).
 
     The complement to prune_grazing_segments: when a grazing segment is LOAD-BEARING
@@ -2572,18 +2616,28 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     # sibling gained this term for #308, this re-bend path never did).
     npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
 
+    def eff_clr(nid):
+        # #436: the moving net's own clearance floor = max(global, its netclass).
+        # Foreign-net class EXCESS above this is folded in by the distance
+        # functions when net_clearances is passed. Inert on all-Default boards.
+        if not net_clearances:
+            return clearance
+        return max(clearance, net_clearances.get(nid, clearance))
+
     routed_seg_result = {}
     for r in results:
         for s in r.get('new_segments') or []:
             routed_seg_result[id(s)] = r
 
     def grazes(s):
-        thr = clearance + s.width / 2.0 - 1e-4
+        eff = eff_clr(s.net_id)
+        thr = eff + s.width / 2.0 - 1e-4
         return (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                       s.end_x, s.end_y, s.layer,
-                                      base_clearance=clearance) < thr or
+                                      base_clearance=eff, net_clearances=net_clearances) < thr or
                 _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                      s.end_x, s.end_y, s.layer) < thr)
+                                      s.end_x, s.end_y, s.layer,
+                                      base_clearance=eff, net_clearances=net_clearances) < thr)
 
     # A re-bent jog must also respect the board edge: the octolinear candidates
     # only clear FOREIGN COPPER, so a bend could otherwise be pushed off-board /
@@ -2592,9 +2646,13 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     from check_drc import board_edge_geometry, _point_on_board, _segment_to_rings_distance
     edge_rings, edge_outer, edge_cutouts = board_edge_geometry(pcb_data.board_info)
     board_bounds = pcb_data.board_info.board_bounds
+    # #438: honor the board's own copper-edge rule (0.5mm on strict boards), not
+    # the flat routing clearance -- a re-bend must not re-open the edge band the
+    # base A* map kept clear.
+    _edge_clr = max(clearance, board_edge_clearance)
 
     def edge_clears(x1, y1, x2, y2, w):
-        required = clearance + w / 2.0 - 1e-4
+        required = _edge_clr + w / 2.0 - 1e-4
         if edge_rings:
             if not _point_on_board(x1, y1, edge_outer, edge_cutouts) or \
                not _point_on_board(x2, y2, edge_outer, edge_cutouts):
@@ -2612,15 +2670,18 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
         # Foreign VIAS must be checked too: grazes() fires on via proximity, so
         # omitting them here let a re-bend that fixed a pad graze land within
         # clearance of (or onto) a foreign via (#254 neo6502 /GPIO1 vs /GPIO2).
+        eff = eff_clr(net_id)  # #436 own-net floor; foreign class excess folded in
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      base_clearance=clearance),
-                _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
-                _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer))
+                                      base_clearance=eff, net_clearances=net_clearances),
+                _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                      net_clearances=net_clearances, base_clearance=eff),
+                _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                      net_clearances=net_clearances, base_clearance=eff))
         # NPTH drill holes at the higher NPTH-to-track floor (#370 B2): the
         # copper terms above never see a copper-less hole, so a re-bend could
         # land the jog across a mounting hole.
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
-        return (d >= clearance + w / 2.0 - 1e-4 and
+        return (d >= eff + w / 2.0 - 1e-4 and
                 hd >= npth_clr + w / 2.0 - 1e-4 and
                 edge_clears(x1, y1, x2, y2, w))
 
@@ -2931,7 +2992,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                              clearance: float = 0.1,
                              max_shift: float = 0.025,
                              keep_input_copper: bool = False,
-                             net_clearances=None) -> Tuple[int, int, List[Segment], List[Segment]]:
+                             net_clearances=None,
+                             board_edge_clearance: float = 0.0) -> Tuple[int, int, List[Segment], List[Segment]]:
     """Micro-shift copper that still grazes after prune / re-bend / neck (#276).
 
     Complements nudge_grazing_octolinear, which keeps a jog's anchor endpoints
@@ -2989,9 +3051,10 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     from check_drc import board_edge_geometry, _point_on_board, _segment_to_rings_distance
     edge_rings, edge_outer, edge_cutouts = board_edge_geometry(pcb_data.board_info)
     board_bounds = pcb_data.board_info.board_bounds
+    _edge_clr = max(clearance, board_edge_clearance)  # #438 honor board edge rule
 
     def edge_clears(x1, y1, x2, y2, w):
-        required = clearance + w / 2.0 - 1e-4
+        required = _edge_clr + w / 2.0 - 1e-4
         if edge_rings:
             if not _point_on_board(x1, y1, edge_outer, edge_cutouts) or \
                not _point_on_board(x2, y2, edge_outer, edge_cutouts):
@@ -3006,7 +3069,7 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     def clears(x1, y1, x2, y2, layer, net_id, w):
         eff = eff_clr(net_id)  # #436 own-net floor; foreign class excess folded in
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      base_clearance=eff),
+                                      base_clearance=eff, net_clearances=net_clearances),
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                       net_clearances=net_clearances, base_clearance=eff),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
@@ -3227,7 +3290,9 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
 def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
                        clearance: float = 0.1, hole_to_hole: float = 0.20,
                        max_shift: float = 0.025,
-                       allowed_via_ids=None) -> Tuple[int, int, List[Tuple]]:
+                       allowed_via_ids=None,
+                       net_clearances=None,
+                       board_edge_clearance: float = 0.0) -> Tuple[int, int, List[Tuple]]:
     """Sub-grid nudge for a VIA that grazes foreign copper or a drill (#280).
 
     Two vias snapped to the routing grid can land a few µm inside clearance
@@ -3276,6 +3341,19 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
     edge_rings, edge_outer, edge_cutouts = board_edge_geometry(board_info)
     MARGIN = 0.002
     WINDOW = 2.0     # local object window around a flagged via (mm)
+    _edge_clr = max(clearance, board_edge_clearance)  # #438 honor board edge rule
+
+    def eff_clr(nid):
+        # #436: moving net's own floor = max(global, its netclass).
+        if not net_clearances:
+            return clearance
+        return max(clearance, net_clearances.get(nid, clearance))
+
+    def pair_clr(own, foreign_nid):
+        # #436: KiCad's pairwise requirement max(own floor, foreign class).
+        if not net_clearances:
+            return own
+        return max(own, net_clearances.get(foreign_nid, clearance))
 
     def worse(before, after):
         return ((before.get('connected') and not after.get('connected')) or
@@ -3317,16 +3395,20 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
 
     def copper_flagged(v):
         """Cheap numpy prefilter: via body sub-clearance to any foreign copper."""
-        thr = clearance + v.size / 2.0 - 1e-4
+        eff = eff_clr(v.net_id)
+        thr = eff + v.size / 2.0 - 1e-4
         if _seg_foreign_via_dist(pcb_data, v.net_id, v.x, v.y, v.x, v.y,
-                                 copper_layers[0]) < thr:
+                                 copper_layers[0], base_clearance=eff,
+                                 net_clearances=net_clearances) < thr:
             return True
         for lyr in copper_layers:
             if _seg_foreign_seg_dist(pcb_data, v.net_id, v.x, v.y, v.x, v.y,
-                                     lyr) < thr:
+                                     lyr, base_clearance=eff,
+                                     net_clearances=net_clearances) < thr:
                 return True
             if _seg_foreign_pad_dist(pcb_data, v.net_id, v.x, v.y, v.x, v.y,
-                                     lyr, base_clearance=clearance) < thr:
+                                     lyr, base_clearance=eff,
+                                     net_clearances=net_clearances) < thr:
                 return True
         return False
 
@@ -3373,6 +3455,7 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
         near_segs, near_vias, near_pads, near_holes = near
         r = v.size / 2.0
         vd = (getattr(v, 'drill', 0) or 0) / 2.0
+        own = eff_clr(v.net_id)  # #436 moving via's own floor
         best = (float('inf'), 1.0, 0.0)
 
         def consider(gap, ox, oy):
@@ -3384,17 +3467,21 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
                 else:
                     best = (gap, 1.0, 0.0)
 
+        # #436: each foreign object's required clearance is the pairwise
+        # max(own floor, that net's class), not the flat routing clearance.
         for s in near_segs:
             d, t = _pt_seg_dist_t(x, y, s)
-            consider(d - (r + s.width / 2.0 + clearance),
+            consider(d - (r + s.width / 2.0 + pair_clr(own, s.net_id)),
                      s.start_x + t * (s.end_x - s.start_x),
                      s.start_y + t * (s.end_y - s.start_y))
         for o in near_vias:
             d = math.hypot(x - o.x, y - o.y)
-            consider(d - (r + o.size / 2.0 + clearance), o.x, o.y)
+            consider(d - (r + o.size / 2.0 + pair_clr(own, o.net_id)), o.x, o.y)
         for p in near_pads:
             tp, g = _nearest_pad_point(x, y, p)
-            consider(g - (r + clearance), tp[0], tp[1])
+            consider(g - (r + max(pair_clr(own, p.net_id),
+                                  getattr(p, 'local_clearance', 0.0) or 0.0)),
+                     tp[0], tp[1])
         if vd > 0:
             for hx, hy, hr in near_holes:
                 d = math.hypot(x - hx, y - hy)
@@ -3405,7 +3492,7 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
             if not _point_on_board(x, y, edge_outer, edge_cutouts):
                 best = (min(best[0], -1.0), best[1], best[2])
             else:
-                eg = _point_to_rings_distance(x, y, edge_rings) - (r + clearance)
+                eg = _point_to_rings_distance(x, y, edge_rings) - (r + _edge_clr)
                 if eg < best[0]:
                     best = (eg, best[1], best[2])
         return best
