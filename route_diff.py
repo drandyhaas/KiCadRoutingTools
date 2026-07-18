@@ -282,8 +282,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 input_file, {nid: n.name for nid, n in pcb_data.nets.items()})
             if net_clearances:
                 # #439: cap each class at the routing clearance (stock classes are
-                # aspirational). A caller wanting the full classes (--no-clamp) passes
-                # an explicit uncapped map, so this internal fallback always caps.
+                # aspirational). A caller that wants the full classes (routed without a
+                # --clearance ceiling) passes an explicit uncapped map, so this internal
+                # fallback always caps.
                 net_clearances = {nid: min(clr, clearance)
                                   for nid, clr in net_clearances.items()}
                 print(f"Auto-read netclass clearances for {len(net_clearances)} net(s), "

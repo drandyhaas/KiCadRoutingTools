@@ -3784,6 +3784,15 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
         bfc = getattr(bf, 'clearance', 0.0); ffc = getattr(ff, 'clearance', 0.0)
         if not close(bfc, ffc):
             diffs.append(f"Footprint {ref} clearance: board={bfc:.3f} file={ffc:.3f}")
+        # Net-tie pad groups (#328): the pcbnew path wraps GetNetTiePadGroups() in a
+        # broad try/except -> [], so a KiCad build that drops them would silently give
+        # the GUI zero net-ties (phantom shorts / refused tie escapes) while the text
+        # parser has them. Compare as order-insensitive sets of frozensets.
+        bnt = {frozenset(g) for g in (getattr(bf, 'net_tie_groups', None) or [])}
+        fnt = {frozenset(g) for g in (getattr(ff, 'net_tie_groups', None) or [])}
+        if bnt != fnt:
+            diffs.append(f"Footprint {ref} net_tie_groups: board={sorted(map(sorted, bnt))} "
+                         f"file={sorted(map(sorted, fnt))}")
         if len(bf.pads) != len(ff.pads):
             diffs.append(f"Footprint {ref} pad count: board={len(bf.pads)} file={len(ff.pads)}")
         else:

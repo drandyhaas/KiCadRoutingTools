@@ -438,9 +438,9 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
     violations at its 0.2 class, routed ~0.1), so keeping the stock class in the
     output manufactures phantom sub-class DRC on copper that was routed correctly at
     the fab floor. The router honors min(class, --clearance) in-run and the writeback
-    records that same floor, so KiCad grades exactly what was routed. ``--no-clamp-
-    netclasses`` passes False to PRESERVE the original class spec, only for a genuine
-    impedance-controlled board whose classes are met. The Default-class /
+    records that same floor, so KiCad grades exactly what was routed. Passing False
+    (the caller routed without a --clearance ceiling, i.e. it HONORED the classes)
+    PRESERVES the original class spec. The Default-class /
     rules.min_clearance write below is UNRELATED to this flag and stays: it records
     the actual ROUTING clearance (the router's config.clearance), only-lowering so a
     board routed tighter than its stock Default class does not storm."""
@@ -491,8 +491,8 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
     # classes are largely aspirational, so copper routed at the real fab floor
     # (min(class, --clearance)) would storm KiCad's per-net-class DRC if the output
     # kept the stock class. Clamp each non-Default class DOWN to the routed values
-    # so grading matches the copper. --no-clamp-netclasses preserves the original
-    # class rules, only for a genuine impedance board whose classes are met.
+    # so grading matches the copper. clamp=False (the caller routed WITHOUT a
+    # --clearance ceiling, honoring the classes) preserves the original class rules.
     if clamp_nondefault_netclasses:
         for cls in classes:
             if cls is default_cls or not isinstance(cls, dict):
@@ -640,11 +640,11 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
     modified so the user's next save persists the change.
 
     ``clamp_nondefault_netclasses`` (parity with apply_targets_to_project) clamps
-    the NON-Default net classes' floors down to the routed values. The GUI call
-    sites default it ON (#439: stock classes are aspirational; keeping them
-    manufactures phantom sub-class DRC). Pass False (GUI "Keep net-class clearances"
-    checked / CLI ``--no-clamp-netclasses``) to preserve the original class spec,
-    only for a genuine impedance board whose classes are met."""
+    the NON-Default net classes' floors down to the routed values. Driven by whether
+    routing used a --clearance ceiling (#439: stock classes are aspirational; keeping
+    them manufactures phantom sub-class DRC). Pass False (routing HONORED the classes
+    -- no --clearance / GUI Min-Clearance override unchecked) to preserve the original
+    class spec, for a genuine impedance board whose classes are met."""
     import pcbnew
     MM = 1e6  # mm -> internal nm
     EPS = 1.0  # nm

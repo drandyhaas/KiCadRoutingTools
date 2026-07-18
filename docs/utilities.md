@@ -982,12 +982,6 @@ Options:
   --keep-footprint      Do not ignore footprint/library categories
                         (annular_width, lib_footprint_issues, lib_footprint_mismatch)
   --keep-thermal        Keep starved_thermal an error (default: demote to warning)
-  --no-clamp-netclasses Preserve the original NON-Default net-class clearance/track/
-                        via spec instead of clamping it down to the routed floor.
-                        Default: CLAMP (#439 — stock classes are largely aspirational,
-                        so keeping them manufactures phantom sub-class DRC on copper
-                        routed at the fab floor). Pass this only for a genuine
-                        impedance-controlled board whose classes are met.
   --ignore CAT [CAT...] Additional severity categories to set to "ignore"
   --ignore-warnings     Set EVERY category currently at "warning" severity to
                         "ignore" (hides all warning markers; errors untouched)
@@ -1010,13 +1004,13 @@ complete one when the input has none). Pass `--no-fix-drc-settings` to skip it, 
 `--keep-thermal` to leave `starved_thermal` at its original severity instead of
 demoting it to a warning (all four routing CLIs accept both flags).
 
-By default the writeback also **clamps** each NON-Default net class'
-clearance/track/via floor DOWN to the routed value (#439), so KiCad grades the
-copper at what was actually routed rather than at the (usually aspirational) stock
-class. `--no-clamp-netclasses` preserves the original class spec — use it only for
-a genuine impedance-controlled board whose classes are met (the fanout and plane
-CLIs accept the same flag, and the GUI's **"Keep net-class clearances"** checkbox,
-off/clamped by default, is its counterpart).
+When routing used an explicit `--clearance` ceiling, the writeback also **clamps**
+each NON-Default net class' clearance/track/via floor DOWN to the routed value
+(#439), so KiCad grades the copper at what was actually routed rather than at the
+(usually aspirational) stock class. When `--clearance` was omitted the classes are
+preserved (each net routed at its own class). There is no separate flag — the
+`--clearance` ceiling is the switch; in the GUI, checking the **Min Clearance**
+override box is the equivalent (unchecked = honor classes, checked = clamp).
 
 The **GUI plugin** does the equivalent on the live board via the pcbnew API
 (`BOARD_DESIGN_SETTINGS` + the Default net class + severities) after routing, and
