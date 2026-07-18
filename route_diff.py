@@ -1603,7 +1603,11 @@ Examples:
         via_size=getattr(args, 'via_size', None),
         via_drill=getattr(args, 'via_drill', None),
         hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None),
-        board_edge_clearance=getattr(args, 'board_edge_clearance', None))
+        board_edge_clearance=getattr(args, 'board_edge_clearance', None),
+        # The diff-pair P/N gap is copper-to-copper spacing; floor it at the fab
+        # copper-clearance min too (parity with the GUI). Impedance may raise the
+        # width/gap per layer above this, never below.
+        diff_pair_gap=getattr(args, 'diff_pair_gap', None))
     # Below-floor params are pinned up to the fab floor (warned); apply the clamps.
     for _pname, _pfloor in _pinned_floors.items():
         setattr(args, _pname, _pfloor)

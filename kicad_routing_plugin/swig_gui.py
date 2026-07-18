@@ -1519,7 +1519,12 @@ class RoutingDialog(wx.Dialog):
                 'via_drill': self._effective_via_drill(),
                 'layers': self._get_selected_layers(),
                 'layer_costs': layer_costs,
-                'diff_pair_gap': self.differential_tab.diff_pair_gap.GetValue(),
+                # Use the diff tab's EFFECTIVE gap (net-class default or override,
+                # fab-floored) -- the same value the diff router / CLI use -- so BGA
+                # fanout escapes P/N at the gap the pairs are then routed at (#439:
+                # was reading the raw control, which diverged when the gap override
+                # was unchecked).
+                'diff_pair_gap': self.differential_tab._effective_diff_pair_gap(),
                 # Escape stub ends are snapped to this grid so the router gets
                 # on-grid terminals (issue #149); use the Basic tab's grid step.
                 'grid_step': self.grid_step.GetValue(),

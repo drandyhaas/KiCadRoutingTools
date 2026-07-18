@@ -171,6 +171,9 @@ _PARAM_FLOOR_KEY = {
     # not run to the milled edge (#439 follow-up).
     'board_edge_clearance': 'board_edge',
     'board_edge': 'board_edge',
+    # The diff-pair P/N gap is copper-to-copper spacing, so it floors at the same
+    # copper-clearance minimum (parity with the GUI, which floors it at 'clearance').
+    'diff_pair_gap': 'clearance',
 }
 
 
