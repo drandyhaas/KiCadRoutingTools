@@ -513,14 +513,17 @@ class _Repair:
                 if cb.side == ca.side:
                     self.base_cap[frozenset((ra, rb))] = self._overlap(
                         ra_rect, cb.rect())
-        self.base_seg: Dict[str, float] = {
-            ref: self.seg_penalty(ref, cap, cap.x, cap.y, cap.rot)
+        # #441: PER-NET seed shortfall {snet: pen}, so the accept gate forbids
+        # penetrating a net that was clear at the seed (not just worsening the
+        # summed total).
+        self.base_seg: Dict[str, Dict[int, float]] = {
+            ref: self._seg_shortfalls(ref, cap, cap.x, cap.y, cap.rot)
             for ref, cap in self.caps.items()}
         # Baseline foreign-pad encroachment at the seed (#235): the repair may
         # not introduce or worsen a foreign-net pad-pad overlap, but tolerates
-        # one already present at the seed (not this step's concern).
-        self.base_pad: Dict[str, float] = {
-            ref: self.pad_penalty(ref, cap, cap.x, cap.y, cap.rot)
+        # one already present at the seed (not this step's concern). Per-net (#441).
+        self.base_pad: Dict[str, Dict[int, float]] = {
+            ref: self._pad_shortfalls(ref, cap, cap.x, cap.y, cap.rot)
             for ref, cap in self.caps.items()}
         # Baseline mover-vs-mover pad encroachment at the seed (#275). The
         # cap-cap COURTYARD baseline above tolerates pre-existing overlaps,
@@ -612,13 +615,18 @@ class _Repair:
                     pen += (keepout - d)
         return pen
 
-    def seg_penalty(self, ref, cap, x, y, rot):
-        """Sum of foreign-net, same-side track clearance shortfalls for a
-        placement, measured exactly (pad rect vs track centerline, #278).
-        halfw already includes the clearance, so a positive shortfall is a
-        real PAD-SEGMENT DRC violation. Uses the per-cap pruned,
-        already-same-side track list."""
-        pen = 0.0
+    def _seg_shortfalls(self, ref, cap, x, y, rot):
+        """PER-FOREIGN-NET, same-side track clearance shortfall for a placement,
+        keyed by the track's net_id (#441): {snet: sum of (halfw - dist) over that
+        net's segments this cap penetrates}. A net absent from the dict is fully
+        clear. halfw already includes the clearance, so a positive shortfall is a
+        real PAD-SEGMENT DRC violation; kept PER-NET so the accept gate can forbid
+        penetrating a net that was CLEAR at the seed even when the aggregate
+        shortfall drops -- the zynq_ad9364 GND<->NetR2_2 repair-pass short (a move
+        that relieved a 260um DDR3_BA2 graze by dropping a GND pad 85um onto a
+        previously-clear NetR2_2 track looked like a net improvement to the old
+        scalar baseline). Uses the per-cap pruned, same-side track list."""
+        by_net: Dict[int, float] = {}
         segs = self.cap_segs[ref]
         for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
             for x1, y1, x2, y2, snet, halfw, side in segs:
@@ -630,16 +638,23 @@ class _Repair:
                     continue
                 d = _seg_to_rect_dist(x1, y1, x2, y2, (bx0, by0, bx1, by1))
                 if d < halfw - EPS:
-                    pen += (halfw - d)
-        return pen
+                    by_net[snet] = by_net.get(snet, 0.0) + (halfw - d)
+        return by_net
 
-    def pad_penalty(self, ref, cap, x, y, rot):
-        """Sum of foreign-net component-pad clearance shortfall for a cap
-        placement (#235): how far each cap pad intrudes inside a different-net
-        pad's clearance keep-out. A through-hole foreign pad blocks both sides;
-        an SMD one only its own side. Same-net pads are ignored (a shared via
-        / touching same-net copper is fine)."""
-        pen = 0.0
+    def seg_penalty(self, ref, cap, x, y, rot):
+        """Scalar sum of the per-net track clearance shortfalls (the objective
+        term / graze report). See _seg_shortfalls for the per-net breakdown the
+        accept gate uses."""
+        return sum(self._seg_shortfalls(ref, cap, x, y, rot).values())
+
+    def _pad_shortfalls(self, ref, cap, x, y, rot):
+        """PER-FOREIGN-NET component-pad clearance shortfall (#235), keyed by the
+        foreign pad's net_id (#441 per-net, mirroring _seg_shortfalls): how far
+        each cap pad intrudes inside a different-net pad's clearance keep-out. A
+        through-hole foreign pad blocks both sides; an SMD one only its own side.
+        Same-net pads are ignored (a shared via / touching same-net copper is
+        fine)."""
+        by_net: Dict[int, float] = {}
         for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
             for (px0, py0, px1, py1, pnet, pside) in self.cap_foreign_pads[ref]:
                 if pnet == net:
@@ -648,8 +663,23 @@ class _Repair:
                     continue  # SMD pad on the other side
                 gap = _rect_gap((bx0, by0, bx1, by1), (px0, py0, px1, py1))
                 if gap < self.clearance - EPS:
-                    pen += (self.clearance - gap)
-        return pen
+                    by_net[pnet] = by_net.get(pnet, 0.0) + (self.clearance - gap)
+        return by_net
+
+    def pad_penalty(self, ref, cap, x, y, rot):
+        """Scalar sum of the per-net foreign-pad shortfalls."""
+        return sum(self._pad_shortfalls(ref, cap, x, y, rot).values())
+
+    @staticmethod
+    def _worsens_any_net(cand_by_net, seed_by_net):
+        """True if the candidate penetrates ANY foreign net beyond its seed
+        shortfall (+EPS) -- in particular, penetrates a net that was CLEAR
+        (absent from seed_by_net) at the seed. Per-net so relieving net A can
+        never pay for a NEW short on net B (#441)."""
+        for net, pen in cand_by_net.items():
+            if pen > seed_by_net.get(net, 0.0) + EPS:
+                return True
+        return False
 
     def attraction(self, cap, x, y, rot):
         """Sum over pads of the distance to the nearest same-net BGA ball,
@@ -700,27 +730,22 @@ class _Repair:
                 return True
         return False
 
-    def hard_blocked(self, ref, cap, x, y, rot, seg_pen=None, pad_pen=None):
+    def hard_blocked(self, ref, cap, x, y, rot):
         """True if a placement leaves the board or introduces/worsens a
         same-side courtyard overlap (with a locked part OR another movable
         cap) beyond its baseline, or worsens a foreign track/pad graze past
         its seed baseline. Caps may never overlap each other's footprints,
-        so any new cap-cap overlap is rejected outright.
-
-        seg_pen/pad_pen may be passed pre-computed (cost() shares them with
-        the objective so the hot candidate loop evaluates each once)."""
+        so any new cap-cap overlap is rejected outright."""
         if self._blocked_geom(ref, cap, x, y, rot):
             return True
-        # no new overlap with a foreign-net track on the cap's side
-        if seg_pen is None:
-            seg_pen = self.seg_penalty(ref, cap, x, y, rot)
-        if seg_pen > self.base_seg.get(ref, 0.0) + EPS:
+        # #441 per-net: no NEW/worse overlap with ANY foreign-net track -- forbid
+        # penetrating a net that was clear at the seed even if the summed shortfall
+        # drops (the zynq GND<->NetR2_2 butterfly). Same for foreign component pads.
+        if self._worsens_any_net(self._seg_shortfalls(ref, cap, x, y, rot),
+                                 self.base_seg.get(ref, {})):
             return True
-        # no new overlap with a foreign-net component pad (#235): rejects the
-        # cap-onto-neighbour-pad short the via/attraction objective could chase.
-        if pad_pen is None:
-            pad_pen = self.pad_penalty(ref, cap, x, y, rot)
-        if pad_pen > self.base_pad.get(ref, 0.0) + EPS:
+        if self._worsens_any_net(self._pad_shortfalls(ref, cap, x, y, rot),
+                                 self.base_pad.get(ref, {})):
             return True
         return False
 
@@ -736,11 +761,15 @@ class _Repair:
     def cost(self, ref, cap, x, y, rot):
         if self._blocked_geom(ref, cap, x, y, rot):
             return float('inf')
-        seg_pen = self.seg_penalty(ref, cap, x, y, rot)
-        pad_pen = self.pad_penalty(ref, cap, x, y, rot)
-        if (seg_pen > self.base_seg.get(ref, 0.0) + EPS
-                or pad_pen > self.base_pad.get(ref, 0.0) + EPS):
+        seg_by_net = self._seg_shortfalls(ref, cap, x, y, rot)
+        pad_by_net = self._pad_shortfalls(ref, cap, x, y, rot)
+        # #441 per-net accept gate (mirror hard_blocked): reject a move that
+        # penetrates any foreign net beyond its seed, even if the total improves.
+        if (self._worsens_any_net(seg_by_net, self.base_seg.get(ref, {}))
+                or self._worsens_any_net(pad_by_net, self.base_pad.get(ref, {}))):
             return float('inf')
+        seg_pen = sum(seg_by_net.values())
+        pad_pen = sum(pad_by_net.values())
         disp = math.hypot(x - cap.seed_x, y - cap.seed_y)
         graze = (self.via_penalty(cap, x, y, rot, self.cap_vias[ref])
                  + seg_pen + pad_pen)
