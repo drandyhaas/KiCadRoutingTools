@@ -15,6 +15,7 @@ from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_m
 from obstacle_costs import compute_track_proximity_for_net
 from net_queries import calculate_route_length
 from pcb_modification import add_route_to_pcb_data
+from dataclasses import replace
 from diff_pair_routing import (route_diff_pair_with_obstacles, get_diff_pair_endpoints,
                                _route_direct_coupled_middle, _seg_to_seglist_min_edge)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
@@ -195,6 +196,20 @@ def route_diff_pairs(
     while _qi < len(_pair_queue):
         pair_name, pair = _pair_queue[_qi]
         _qi += 1
+        # #435: per-pair impedance geometry. Each pair routes at its OWN netclass
+        # diff_pair_gap/width (resolved engine-side when the CLI/GUI did not
+        # explicitly override), with a precise per-(width,gap) obstacle channel.
+        # replace() changes only the two geometry fields -- all other config is
+        # identical -- so using it for the whole iteration is safe. Inert when
+        # pair_diff_geom is unset (all-explicit / no netclass diff geometry).
+        _pgeom = getattr(state, 'pair_diff_geom', None)
+        if _pgeom:
+            _dw, _dg = _pgeom.get(pair.p_net_id,
+                                  (state.config.track_width, state.config.diff_pair_gap))
+            config = replace(state.config, track_width=_dw, diff_pair_gap=_dg)
+            diff_pair_extra_clearance = (_dw + _dg) / 2.0
+            diff_pair_base_obstacles = (getattr(state, 'diff_pair_base_obstacles_by_geom', None)
+                                        or {}).get((_dw, _dg), state.diff_pair_base_obstacles)
         # Check for cancellation request
         if state.cancel_check is not None and state.cancel_check():
             print("\nRouting cancelled by user")
