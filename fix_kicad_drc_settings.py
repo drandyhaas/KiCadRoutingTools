@@ -320,18 +320,19 @@ def fab_edge_floor(pcb_path=None) -> float:
 
 def effective_board_edge_clearance(pcb_path: str, cli_value: float,
                                    fab_floor: bool = True) -> float:
-    """The copper-to-Edge.Cuts clearance a route/grade step must honor: the
-    LARGER of the board's own min_copper_edge_clearance (KiCad enforces it,
-    issue #338), the explicit --board-edge-clearance, and -- unless
-    ``fab_floor`` is False -- the fab copper-to-edge minimum (#441). Pinning to
-    the fab floor stops a board declaring a sub-fab (or 0) edge rule from being
-    routed/graded with copper against the milled edge; the 80/184 corpus boards
-    declaring < 0.20 mm previously routed and graded at their tiny value and so
-    looked clean while copper ran to the edge."""
-    eff = max(cli_value or 0.0, read_project_edge_clearance(pcb_path))
-    if fab_floor:
-        eff = max(eff, fab_edge_floor(pcb_path))
-    return eff
+    """The copper-to-Edge.Cuts clearance a route/grade step must honor.
+
+    An EXPLICIT ``--board-edge-clearance`` (cli_value > 0) OVERRIDES the board's
+    own min_copper_edge_clearance -- a CLI value should be able to relax an
+    aspirational board rule the way every other routing param does (a 0.5-declaring
+    board routed at --board-edge-clearance 0.2, parity with the GUI's override +
+    Obey-DRC-off path), floored ONLY at the fab copper-to-edge minimum. When
+    OMITTED, the board's own rule is used (issue #338, KiCad enforces it). Either
+    way it is pinned UP to the fab floor (#441) unless ``fab_floor`` is False, so a
+    board declaring a sub-fab (or 0) edge rule is never routed/graded with copper
+    against the milled edge (80/184 corpus boards declare < 0.20 mm)."""
+    base = cli_value if (cli_value and cli_value > 0) else read_project_edge_clearance(pcb_path)
+    return max(base, fab_edge_floor(pcb_path)) if fab_floor else base
 
 
 def scan_board_minima(pcb_path: str):
