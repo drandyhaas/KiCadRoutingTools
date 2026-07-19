@@ -821,7 +821,20 @@ width, not the signal default. route.py routes against the live obstacle map
 (planes + repairs included) with safe rip-up/restore, so it reconnects them without
 the shorts the old in-step reroute caused. This produces the canonical final board
 `board_step5.kicad_pcb`. (If Step 5 reports it ripped nothing, you may skip this and
-rename board_step5_repair.kicad_pcb -> board_step5.kicad_pcb.)
+copy board_step5_repair.kicad_pcb -> board_step5.kicad_pcb **with `copy_board.py`, not
+bare `cp`** — see the warning below.)
+
+> **Never `cp` a board without its `.kicad_pro`.** A bare `cp step5_repair.kicad_pcb
+> step5.kicad_pcb` copies only the board and strands the sibling `.kicad_pro`, which
+> holds the DRC floor (the Default-netclass clearance/track/via the chain routed to).
+> The next routing step then reads no project, resolves its floor from the STOCK
+> (looser) netclass, and its writeback stamps that looser floor over tighter copper —
+> so KiCad grades correct sub-floor copper as phantom clearance violations (icepi_zero:
+> a dropped 0.09 floor became 0.10 → 160 phantom grazes). Use
+> **`python3 copy_board.py src.kicad_pcb dst.kicad_pcb`** — it copies the board plus every
+> sibling (`.kicad_pro`/`.kicad_prl`) and self-records into the redo manifest — or, if you
+> must use `cp`, copy the `.kicad_pro` too. The routing scripts also WARN when an input
+> board has no sibling `.kicad_pro` (#441).
 
 python3 -X utf8 route.py board_step5_repair.kicad_pcb board_step5.kicad_pcb \
     --nets "*" "!GND" "!<other_plane_nets...>" \

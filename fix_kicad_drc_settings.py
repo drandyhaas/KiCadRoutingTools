@@ -619,6 +619,31 @@ def drc_fix_kwargs(args):
                 clamp_nondefault_netclasses=clamp)
 
 
+def warn_if_missing_project_floor(input_pcb) -> bool:
+    """Warn loudly when an input board arrives WITHOUT its sibling ``.kicad_pro`` (#441).
+
+    The ``.kicad_pro`` carries the DRC floor -- the Default-netclass clearance/width the
+    board was actually routed to. A bare ``cp board.kicad_pcb copy.kicad_pcb`` that omits
+    the sibling ``.kicad_pro`` strands that floor: the next routing step reads NO project,
+    resolves its floor from the STOCK (looser) netclass, and its writeback then stamps that
+    looser floor over copper routed tighter -- so KiCad grades correct sub-floor copper as
+    a clearance violation (icepi_zero: a dropped 0.09 floor became 0.10 -> 160 phantom
+    grazes). Keep the ``.kicad_pro`` with the board (copy both, or use ``copy_board.py``).
+
+    Returns True iff the project is missing (so callers may also record it in a summary)."""
+    if not input_pcb:
+        return False
+    proj = os.path.splitext(input_pcb)[0] + ".kicad_pro"
+    if os.path.isfile(proj):
+        return False
+    print(f"WARNING: input board '{os.path.basename(input_pcb)}' has NO sibling "
+          f".kicad_pro -- its DRC floor is unknown. This routing step will resolve the "
+          f"floor from the STOCK netclass, which can be LOOSER than the copper already on "
+          f"the board and make KiCad report phantom sub-clearance DRC (#441). If the board "
+          f"was copied/renamed, copy its .kicad_pro too (or use copy_board.py).")
+    return True
+
+
 def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
                            hole_clearance=None, hole_to_hole=None, edge_clearance=None,
                            track_width=None, via_diameter=None, via_drill=None,

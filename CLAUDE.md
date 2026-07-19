@@ -45,6 +45,15 @@ Validate routed boards against the *real* spec, with the right checker — most
   to the same output path reads it back and silently changes the routing (looks
   like non-determinism; it isn't). For clean A/B comparisons, route to a FRESH
   output path each run (or `rm` the `.kicad_pro` first).
+- **Never `cp` a board without its `.kicad_pro` (#441).** The sibling `.kicad_pro`
+  carries the DRC floor (the Default-netclass clearance/track/via the chain routed
+  to). A bare `cp a.kicad_pcb b.kicad_pcb` strands it: the next route step reads no
+  project, resolves its floor from the STOCK (looser) netclass, and stamps that over
+  tighter copper — so KiCad grades correct sub-floor copper as phantom clearance DRC
+  (icepi_zero: a dropped 0.09 floor became 0.10 → 160 phantom grazes). Use
+  `python3 copy_board.py src.kicad_pcb dst.kicad_pcb` (copies `.kicad_pcb` + every
+  sibling, self-records into the redo manifest), or copy the `.kicad_pro` too. The
+  route scripts WARN when an input board has no sibling `.kicad_pro`.
 - **Routers can report false success.** A router's own "routed" tally may come from
   a local/heuristic proxy while pads stay disconnected; re-verify with the
   authoritative, zone/fill-aware `check_net_connectivity` before trusting it.

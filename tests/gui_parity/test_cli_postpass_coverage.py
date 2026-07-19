@@ -75,7 +75,12 @@ POSTPASS_MODULES = ['kicad_oracle', 'fix_kicad_drc_settings', 'check_drc']
 # VALUE level, not the call level.
 DISCOVERY_EXEMPT = {'add_drc_fix_args', 'drc_fix_kwargs', 'find_kicad_cli',
                     'compute_targets', 'severity_plan',
-                    'read_project_edge_clearance'}
+                    'read_project_edge_clearance',
+                    # #441: pre-engine helper that WARNS when an input board has no
+                    # sibling .kicad_pro (dropped DRC floor). Report-only, runs before
+                    # routing, no board mutation; the GUI operates on the live board and
+                    # never cp's, so no GUI counterpart is needed.
+                    'warn_if_missing_project_floor'}
 
 # #381 D8: post-engine passes that are CLI-only BY DESIGN -- report/audit ONLY,
 # they do NOT mutate the output board, so the GUI producing an identical board

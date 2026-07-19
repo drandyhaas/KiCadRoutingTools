@@ -1656,6 +1656,8 @@ Examples:
     _ceiling = args.clearance                       # None iff --clearance omitted
     args._clamp_netclasses = _ceiling is not None
     args._clearance_ceiling = _ceiling
+    from fix_kicad_drc_settings import warn_if_missing_project_floor
+    warn_if_missing_project_floor(args.input_file)  # #441: a dropped sibling .kicad_pro strands the DRC floor
     _dflt_clr = board_default_netclass_clearance(args.input_file)
     if _ceiling is None:
         args.clearance = _dflt_clr if _dflt_clr is not None else defaults.CLEARANCE
