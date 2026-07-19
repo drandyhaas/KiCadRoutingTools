@@ -2275,6 +2275,186 @@ def _seg_seg_min_dist(ax, ay, bx, by, cx, cy, dx, dy) -> float:
                pt_seg(cx, cy, ax, ay, bx, by), pt_seg(dx, dy, ax, ay, bx, by))
 
 
+def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=None,
+                                   clearance: float = 0.1,
+                                   keep_input_copper: bool = False,
+                                   net_clearances=None) -> Tuple[int, int, List[Segment]]:
+    """Remove a redundant out-and-back DETOUR whose middle vertex nubs a foreign
+    net, welding the two solidly-overlapping neighbour endpoints coincident so the
+    connection also survives at the STRICT (coincidence) level (#441 picodvi DVI_CK).
+
+    Pattern -- ``A --s1--> B --s2--> C`` on ONE net, where:
+      * ``B`` is a vertex touched by ONLY ``s1`` and ``s2`` (no via/pad there),
+      * ``s1``/``s2`` are ROUTED short jogs (a grid->float bridge, not a real run),
+      * ``A`` and ``C`` are each anchored to the net's MAIN path (another same-net
+        segment / via / pad),
+      * ``A`` and ``C`` already OVERLAP in copper -- ``dist(A,C) < (wA+wC)/2`` -- so
+        the pair is *physically connected already*; welding only FORMALISES that
+        overlap, it never invents a new connection, and
+      * ``s1`` or ``s2`` grazes FOREIGN copper below clearance (the reason to act).
+
+    route_diff's hybrid leaves this when a terminal leg's A* near-end lands ~half a
+    grid step off the coupled-middle end: ``_path_to_segments_vias`` bridges the gap
+    with an out-and-back jog that pokes at the partner track.
+    :func:`prune_grazing_segments` detects that graze but its strict connectivity
+    gate (#322) refuses to drop the jog -- the surviving ``A~C`` overlap is
+    non-coincident, so the strict graph sees the removal as a split -- and necking
+    can't clear it (already at the fab floor). Here we instead WELD ``C`` onto ``A``
+    (a ``< (wA+wC)/2`` move, i.e. entirely inside the copper the pair already
+    shares), re-anchor ``C``'s main segment to ``A``, and delete ``s1``/``s2`` --
+    but ONLY when the re-anchored segment still clears foreign copper and the net's
+    connectivity is no worse. The join is coincident afterwards, so the strict gate
+    is satisfied and the graze is gone. Widths/positions of unrelated copper are
+    untouched, and a weld that can't provably clear foreign copper is skipped (the
+    graze then ships honestly), so this cannot manufacture a new violation.
+
+    Returns (detours_welded, nets_touched, original_segments_removed)."""
+    from collections import defaultdict
+    from single_ended_routing import _seg_foreign_pad_dist, _seg_foreign_via_dist
+    from check_connected import check_net_connectivity
+
+    routed_seg_ids = set()
+    for r in results:
+        for s in r.get('new_segments') or []:
+            routed_seg_ids.add(id(s))
+
+    def _eff(nid):
+        if not net_clearances:
+            return clearance
+        return max(clearance, net_clearances.get(nid, clearance))
+
+    def clears(x0, y0, x1, y1, w, layer, nid):
+        """True iff a segment at these coords clears ALL foreign copper by the
+        pairwise clearance (same metric as prune_grazing_segments.grazes)."""
+        eff = _eff(nid)
+        thr = eff + w / 2.0 - 1e-4
+        if _seg_foreign_pad_dist(pcb_data, nid, x0, y0, x1, y1, layer,
+                                 base_clearance=eff, net_clearances=net_clearances) < thr:
+            return False
+        if _seg_foreign_via_dist(pcb_data, nid, x0, y0, x1, y1, layer,
+                                 base_clearance=eff, net_clearances=net_clearances) < thr:
+            return False
+        for o in pcb_data.segments:
+            if o.net_id == nid or o.layer != layer:
+                continue
+            d = _seg_seg_min_dist(x0, y0, x1, y1, o.start_x, o.start_y, o.end_x, o.end_y)
+            if d - (w + o.width) / 2.0 < max(eff, _eff(o.net_id)) - 1e-4:
+                return False
+        return True
+
+    def _worse(before, after):
+        return ((before.get('connected') and not after.get('connected')) or
+                len(after.get('disconnected_pads') or []) > len(before.get('disconnected_pads') or []) or
+                (after.get('num_components') or 1) > (before.get('num_components') or 1))
+
+    vias_by_net = defaultdict(list)
+    for v in pcb_data.vias:
+        vias_by_net[v.net_id].append(v)
+    segs_by_net = defaultdict(list)
+    _seen = set()
+    for s in pcb_data.segments:
+        if scope_net_ids is None or s.net_id in scope_net_ids:
+            if id(s) in _seen:
+                continue
+            _seen.add(id(s))
+            segs_by_net[s.net_id].append(s)
+
+    def kk(x, y):
+        return (round(x, 4), round(y, 4))
+
+    welded = 0
+    nets = set()
+    original_to_remove = []
+    removed_routed_ids = set()
+
+    for net_id, net_segs in segs_by_net.items():
+        net_vias = vias_by_net.get(net_id, [])
+        net_pads = pcb_data.pads_by_net.get(net_id, [])
+        via_pts = {kk(v.x, v.y) for v in net_vias}
+        pad_pts = {kk(pd.global_x, pd.global_y) for pd in net_pads}
+        touch = defaultdict(list)
+        for s in net_segs:
+            touch[kk(s.start_x, s.start_y)].append((s, 's'))
+            touch[kk(s.end_x, s.end_y)].append((s, 'e'))
+        before = check_net_connectivity(net_id, net_segs, net_vias, net_pads, [])
+
+        for Bxy, inc in list(touch.items()):
+            if len(inc) != 2 or Bxy in via_pts or Bxy in pad_pts:
+                continue
+            (s1, e1), (s2, e2) = inc
+            if s1 is s2 or s1.layer != s2.layer:
+                continue
+            if id(s1) not in routed_seg_ids or id(s2) not in routed_seg_ids:
+                continue
+            if id(s1) in removed_routed_ids or id(s2) in removed_routed_ids:
+                continue
+            Axy = kk(s1.end_x, s1.end_y) if e1 == 's' else kk(s1.start_x, s1.start_y)
+            Cxy = kk(s2.end_x, s2.end_y) if e2 == 's' else kk(s2.start_x, s2.start_y)
+            if Axy == Cxy:
+                continue
+
+            def anchored(xy, excl):
+                if any(t[0] is not excl and t[0] not in (s1, s2) for t in touch.get(xy, [])):
+                    return True
+                return xy in via_pts or xy in pad_pts
+
+            if not anchored(Axy, s1) or not anchored(Cxy, s2):
+                continue
+            wA, wC = s1.width, s2.width
+            g = math.hypot(Axy[0] - Cxy[0], Axy[1] - Cxy[1])
+            if g >= (wA + wC) / 2.0 - 1e-6:
+                continue  # not already overlapping -> welding would INVENT a link; skip
+            if not (not clears(s1.start_x, s1.start_y, s1.end_x, s1.end_y, s1.width, s1.layer, net_id)
+                    or not clears(s2.start_x, s2.start_y, s2.end_x, s2.end_y, s2.width, s2.layer, net_id)):
+                continue  # neither jog grazes foreign copper -> leave clean detours alone
+
+            def try_weld(keepxy, movexy):
+                movers = [(s, end) for (s, end) in touch.get(movexy, []) if s is not s1 and s is not s2]
+                if not movers or any(id(s) not in routed_seg_ids for (s, _) in movers):
+                    return None  # nothing to move, or would mutate an ORIGINAL seg in place
+                snap = [(s, s.start_x, s.start_y, s.end_x, s.end_y) for (s, _) in movers]
+                for (s, end) in movers:
+                    if end == 's':
+                        s.start_x, s.start_y = keepxy
+                    else:
+                        s.end_x, s.end_y = keepxy
+                if all(clears(s.start_x, s.start_y, s.end_x, s.end_y, s.width, s.layer, net_id)
+                       for (s, _) in movers):
+                    return snap
+                for (s, sx, sy, ex, ey) in snap:  # revert
+                    s.start_x, s.start_y, s.end_x, s.end_y = sx, sy, ex, ey
+                return None
+
+            snap = try_weld(Axy, Cxy)              # weld C onto A (move C's main seg)
+            if snap is None:
+                snap = try_weld(Cxy, Axy)          # else weld A onto C
+            if snap is None:
+                continue
+            trial = [s for s in net_segs if s is not s1 and s is not s2]
+            if _worse(before, check_net_connectivity(net_id, trial, net_vias, net_pads, [])):
+                for (s, sx, sy, ex, ey) in snap:   # revert the weld
+                    s.start_x, s.start_y, s.end_x, s.end_y = sx, sy, ex, ey
+                continue
+            for s in (s1, s2):
+                if id(s) in routed_seg_ids:
+                    removed_routed_ids.add(id(s))
+                else:
+                    original_to_remove.append(s)
+            welded += 1
+            nets.add(net_id)
+
+    if removed_routed_ids:
+        for r in results:
+            segs = r.get('new_segments')
+            if segs:
+                r['new_segments'] = [s for s in segs if id(s) not in removed_routed_ids]
+    if removed_routed_ids or original_to_remove:
+        orig_ids = {id(s) for s in original_to_remove}
+        pcb_data.segments = [s for s in pcb_data.segments
+                             if id(s) not in removed_routed_ids and id(s) not in orig_ids]
+    return welded, len(nets), original_to_remove
+
+
 def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                            clearance: float = 0.1,
                            check_foreign_segments: bool = False,

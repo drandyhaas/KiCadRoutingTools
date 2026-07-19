@@ -36,6 +36,7 @@ from pcb_modification import (
     snap_stub_gaps,
     drop_phantom_copper,
     prune_grazing_segments,
+    weld_redundant_grazing_detours,
     nudge_grazing_octolinear,
     nudge_grazing_microshift,
     nudge_grazing_vias,
@@ -214,6 +215,19 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         if _gz_segs:
             print(f"{label}Graze prune: removed {_gz_segs} grazing segment(s) "
                   f"across {_gz_nets} net(s)")
+        # #441: drop a redundant out-and-back detour whose nub grazes a foreign net
+        # and that prune_grazing_segments' strict gate refused (the surviving A~C
+        # overlap is non-coincident), by welding the solidly-overlapping neighbours
+        # coincident (picodvi DVI_CK terminal-leg jog).
+        _wd_segs, _wd_nets, _wd_strip = weld_redundant_grazing_detours(
+            results, pcb_data, scope_net_ids, clearance=config.clearance,
+            keep_input_copper=keep_input_copper, net_clearances=_nc)
+        counts['detours_welded'] = _wd_segs
+        _trace('weld_detour')
+        strip.extend(_wd_strip)
+        if _wd_segs:
+            print(f"{label}Detour weld: removed {_wd_segs} redundant grazing "
+                  f"detour seg(s) across {_wd_nets} net(s)")
 
     if octolinear:
         _nz_segs, _nz_nets, _nz_strip, _ = nudge_grazing_octolinear(
