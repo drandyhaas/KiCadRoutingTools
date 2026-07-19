@@ -13,5 +13,20 @@
     "layers_est": 6,
     "footprints": 61,
     "routable_nets": 74
+  },
+  {
+    "short_name": "mikoto_nrf52840",
+    "set": "set11",
+    "tier": "medium",
+    "repo": "zhiayang/mikoto",
+    "raw_url": "https://github.com/zhiayang/mikoto/archive/refs/heads/master.zip",
+    "zip_member": "mikoto-master/mikoto.kicad_pcb",
+    "local_path": "/Users/andy/Downloads/mikoto-master/mikoto.kicad_pcb",
+    "file": "/Users/andy/Documents/kicad_stress_test/sources/local_set11/mikoto.kicad_pcb",
+    "license": "Apache-2.0 (zhiayang/mikoto)",
+    "note": "nRF52840 in a RAW AQFN-73-1EP 7x7mm P0.5mm footprint (not a module) -- the interior-pad geometry qfn_fanout's center-pad path targets (#410/PR433). 73 signal/power pins on two perimeter rings (edge-fan escaped); the central exposed pad is drawn as a 4x4 grid of thermal sub-pads plus the GND EP, so the center-pad underpad escape is exercised by the realistic 'via-drop the GND EP with --nets GND --escape-method underpad --allow-via-in-pad' thermal-stitch case. 4 copper layers, 67 footprints, KiCad v8 (20240108). One off-board fp (within curation tolerance).",
+    "layers_est": 4,
+    "footprints": 67,
+    "routable_nets": 61
   }
 ]

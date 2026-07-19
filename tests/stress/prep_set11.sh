@@ -19,6 +19,7 @@ mkdir -p "$STRESS/boards_unrouted_set11" "$STRESS/boards_set11"
 # short-name | source-filename-fragment (unique within local_set11/)
 MAP=(
   "rp2350_fpga_eensy|RP2350_FPGA_eensy"
+  "mikoto_nrf52840|mikoto"
 )
 
 for entry in "${MAP[@]}"; do
