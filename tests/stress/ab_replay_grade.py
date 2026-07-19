@@ -138,19 +138,6 @@ def _diff_pair_stats(log_text):
             "diff_coupled_pct": round(100.0 * coupled / total, 1) if total else None}
 
 
-def _intentional_edge_nets(log_text):
-    """#408: the router's intentional_edge_band_nets across the chain's
-    JSON_SUMMARY lines, via the SHARED parser in kicad_drc_compare (so the CLI
-    and this driver read the key identically). Empty list on any import/parse
-    hiccup so grading never breaks."""
-    try:
-        sys.path.insert(0, str(REPO / "tests" / "stress"))
-        from kicad_drc_compare import parse_intentional_edge_nets
-        return parse_intentional_edge_nets(log_text)
-    except Exception:  # noqa: BLE001 -- report-only input; never fail grading
-        return []
-
-
 def manifest_baseline(txt, *search_dirs):
     """Resolve the pristine UNROUTED input board = first .kicad_pcb token of the
     first real command. Manifests reference it either by ABSOLUTE path or by a
@@ -182,7 +169,7 @@ def manifest_baseline(txt, *search_dirs):
     return tok
 
 
-def _kicad_grade(pcb, clearance, baseline=None, intentional_edge_band_nets=None):
+def _kicad_grade(pcb, clearance, baseline=None):
     """KiCad's own DRC verdict on the final board (#316): copper-class
     violation count + the two-sided diff vs check_drc, graded with the
     netclass clearance equalized to the routed clearance. Returns Nones when
@@ -199,13 +186,7 @@ def _kicad_grade(pcb, clearance, baseline=None, intentional_edge_band_nets=None)
     design conditions (e.g. edge-connector pads inside the board's own
     copper_edge rule) that no routing can fix -- subtracted from both engines so
     kicad_drc/kicad_only reflect ROUTER-introduced items; the subtracted count
-    is reported as kicad_preexisting.
-
-    `intentional_edge_band_nets` (#408) = the router's JSON_SUMMARY list of net
-    names it deliberately routed into the edge band to reach an in-band pad; every
-    edge-clearance violation on those nets is accepted-by-design and dropped from
-    both engines (net-scoped), reported as kicad_intentional_edge /
-    checkdrc_intentional_edge."""
+    is reported as kicad_preexisting."""
     _none = {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None,
              "kicad_connection_width": None}
     try:
@@ -213,8 +194,7 @@ def _kicad_grade(pcb, clearance, baseline=None, intentional_edge_band_nets=None)
         from kicad_drc_compare import KICAD_CLI, compare_board_data
         if not os.path.exists(KICAD_CLI):
             return _none
-        data = compare_board_data(pcb, clearance=float(clearance), baseline=baseline,
-                                  intentional_edge_band_nets=intentional_edge_band_nets)
+        data = compare_board_data(pcb, clearance=float(clearance), baseline=baseline)
         if data is None or "skip" in data:
             return _none
         return {"kicad_drc": data["kicad"], "kicad_preexisting": data["kicad_preexisting"],
@@ -229,7 +209,7 @@ def _kicad_grade(pcb, clearance, baseline=None, intentional_edge_band_nets=None)
         return _none
 
 
-def grade(pcb, clearance, baseline=None, intentional_edge_band_nets=None):
+def grade(pcb, clearance, baseline=None):
     # Grade at the board's OWN recorded floors when the sibling .kicad_pro
     # exists (check_drc auto-grades from it -- the Stage-C clearance ledger
     # writes the true minimum every step used, including legitimate fine-tap
@@ -267,15 +247,12 @@ def grade(pcb, clearance, baseline=None, intentional_edge_band_nets=None):
     total, incomplete, pct = _completion(ctext)
     out = {"drc": _drc_count(drc.stdout + drc.stderr), "conn": _conn_count(ctext),
            "nets_total": total, "nets_incomplete": incomplete, "completion_pct": pct}
-    out.update(_kicad_grade(pcb, clearance, baseline=baseline,
-                            intentional_edge_band_nets=intentional_edge_band_nets))
-    # #408: raw `drc` is the full check_drc count; `drc_real` removes the
-    # accepted-by-design edge-clearance items (router routed into the band to
-    # reach an in-band edge pad -- a card-edge connector's landing copper, not a
-    # defect). compare()/the regression gate grade on drc_real so those don't
-    # read as regressions, while raw drc stays for reference. The subtraction
-    # count comes from the shared grading core (check_drc side), so it needs
-    # kicad-cli; without it drc_real == drc.
+    out.update(_kicad_grade(pcb, clearance, baseline=baseline))
+    # raw `drc` is the full check_drc count; `drc_real` removes the accepted-by-
+    # design net-tie contact items (Kelvin-shunt escape touches its partner pad --
+    # not a defect). compare()/the regression gate grade on drc_real; raw drc stays
+    # for reference. The count comes from the shared grading core (check_drc side),
+    # so it needs kicad-cli; without it drc_real == drc.
     cie = out.get("checkdrc_intentional_edge") or 0
     out["drc_intentional_edge"] = cie
     out["drc_real"] = max(0, out["drc"] - cie) if out["drc"] is not None else None
@@ -330,9 +307,6 @@ def do_board(set_dir, out_dir, label, board):
     log_path = f"{dst}/_replay.log"
     log_text = Path(log_path).read_text(errors="replace") if os.path.exists(log_path) else ""
     dp = _diff_pair_stats(log_text)
-    # #408: the router's intentional_edge_band_nets ride the same JSON_SUMMARY
-    # lines; accepted-by-design edge items get subtracted from the DRC grade.
-    intentional = _intentional_edge_nets(log_text)
     fname = final_output_name(txt)
     final = os.path.join(dst, fname) if fname else None
     done = bool(final) and os.path.exists(final)
@@ -356,8 +330,7 @@ def do_board(set_dir, out_dir, label, board):
         # router-introduced items. Resolve a relative token against the board's
         # dest/src dirs (board0.kicad_pcb lives there after the remap).
         baseline = manifest_baseline(txt, dst, src)
-        res.update(grade(final, clr, baseline=baseline,
-                         intentional_edge_band_nets=intentional))
+        res.update(grade(final, clr, baseline=baseline))
     dps = f"{res['diff_pairs_coupled']}/{res['diff_pairs_total']}" if res['diff_pairs_total'] else "-"
     fp_note = f" fp={res['peak_footprint_mb']}MB" if res.get("peak_footprint_mb") else ""
     print(f"[{label}] {board}: chain={'ok' if done else 'BROKEN'} "
@@ -430,7 +403,6 @@ def regrade(out_dir, set_dir):
         lp = bdir / "_replay.log"
         log_text = lp.read_text(errors="replace") if lp.exists() else ""
         dp = _diff_pair_stats(log_text)
-        intentional = _intentional_edge_nets(log_text)  # #408
         res = {"board": b, "clearance": clr, "replay_rc": 0,
                "final": fname if done else None, "chain_complete": done,
                "drc": None, "conn": None, "nets_total": None, "nets_incomplete": None,
@@ -440,8 +412,7 @@ def regrade(out_dir, set_dir):
             # the manifest's set dir (a relative board0.kicad_pcb token lives in
             # both) so #405 symmetric subtraction fires (see manifest_baseline).
             baseline = manifest_baseline(txt, bdir, set_dir / b)
-            res.update(grade(str(final), clr, baseline=baseline,
-                             intentional_edge_band_nets=intentional))
+            res.update(grade(str(final), clr, baseline=baseline))
         print(f"[regrade] {b}: chain={'ok' if done else 'BROKEN'} drc={res['drc']} "
               f"conn={res['conn']} compl={res['completion_pct']}%")
         results.append(res)

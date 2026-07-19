@@ -664,27 +664,29 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         board_outline = pcb_data.board_info.board_outline
         if board_outline and len(board_outline) >= 3:
             board_outlines = [board_outline]
-    # Reach exemption (#338): a pad whose own copper sits INSIDE the edge band
-    # (edge connectors, camera modules -- the board's own design violates its
-    # edge rule) must stay reachable, or every net on it becomes unroutable
-    # (core1106_cam fell from 100% to 67% completion). Exempt a disk around
-    # each such pad big enough to land a track and to bridge the band to the
-    # interior. Off-board and inside-cutout cells stay hard-blocked.
-    exempt_keys = _edge_band_pad_exemption(pcb_data, coord, edge_clearance,
-                                           track_edge_clearance)
+    # #441: a pad whose own copper reaches into the edge-clearance band (an edge
+    # connector / edge-mounted part -- core1106_cam's U1, whose pads sit 0.05mm
+    # from the edge) must stay landable, or every net on it becomes unroutable.
+    # Exempt from the TRACK keep-out ONLY the pad's own copper cells, on the pad's
+    # OWN layer, that lie ON the board (never a cell past the actual edge). This is
+    # self-net-scoped: a foreign net on those cells would short the pad, so it
+    # cannot ride the hole, and no edge-parallel corridor is exposed (the reach-
+    # exemption disk that let chocofi's row0 hug the edge is gone).
+    layer_exempt = _edge_band_pad_layer_exemption(
+        pcb_data, coord, edge_clearance, layer_list, board_outlines, board_bounds)
 
     if board_outlines:
         # Use polygon-based blocking for non-rectangular boards
         _add_polygon_edge_obstacles(obstacles, board_outlines, coord, num_layers,
                                      track_edge_clearance, via_edge_clearance,
                                      gmin_x, gmin_y, gmax_x, gmax_y, track_expand, via_expand,
-                                     exempt_keys=exempt_keys)
+                                     layer_exempt=layer_exempt)
     else:
         # Use simple rectangular blocking
         _add_rectangular_edge_obstacles(obstacles, coord, num_layers,
                                          gmin_x, gmin_y, gmax_x, gmax_y,
                                          track_expand, via_expand,
-                                         exempt_keys=exempt_keys)
+                                         layer_exempt=layer_exempt)
 
     # Block areas inside board cutouts (e.g., connector/switch openings)
     board_cutouts = pcb_data.board_info.board_cutouts
@@ -692,195 +694,68 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         for cutout in board_cutouts:
             if len(cutout) >= 3:
                 _add_cutout_obstacles(obstacles, cutout, coord, num_layers,
-                                      track_edge_clearance, via_edge_clearance,
-                                      exempt_keys=exempt_keys)
+                                      track_edge_clearance, via_edge_clearance)
 
 
-def _cell_keys(gx, gy):
-    """Encode (gx, gy) int arrays into single int64 keys for np.isin filtering."""
-    return (np.asarray(gx, dtype=np.int64) << 32) + (np.asarray(gy, dtype=np.int64) & 0xFFFFFFFF)
-
-
-def _edge_band_in_band_pads(pcb_data, edge_clearance: float):
-    """Shared in-band pad detection, backing both the #338 reach exemption
-    (_edge_band_pad_exemption) and the #408 intentional-edge-band report
-    (compute_intentional_edge_band_nets). Returns
-        (pads, pxs, pys, halves, d_signed, rings, ring_edges)
-    where ``d_signed`` is the SIGNED distance from each pad CENTER to the nearest
-    board edge / cutout (positive inside the board, negative off-board),
-    ``halves`` the pad's copper half-extent, and ``ring_edges`` the concatenated
-    outline segment arrays ``(x1, y1, x2, y2)`` for polygon boards or ``None``
-    for rectangular boards. A pad is in-band iff ``d_signed - halves <
-    edge_clearance``. Returns ``None`` when the board carries no pads/bounds."""
-    rings = [o for o in (getattr(pcb_data.board_info, 'board_outlines', None) or [])
-             if len(o) >= 3]
-    if not rings:
-        bo = pcb_data.board_info.board_outline
-        if bo and len(bo) >= 3:
-            rings = [bo]
-    bounds = pcb_data.board_info.board_bounds
-    pads = [p for fp in pcb_data.footprints.values() for p in fp.pads
-            if getattr(p, 'pad_type', '') != 'np_thru_hole']
-    if not pads or not bounds:
-        return None
-    pxs = np.array([p.global_x for p in pads])
-    pys = np.array([p.global_y for p in pads])
-    halves = np.array([max(p.size_x, p.size_y) / 2.0 for p in pads])
-    ring_edges = None
-    if rings:
-        edges = []
-        inside = None
-        for ring in rings:
-            arr = np.array(ring, dtype=np.float64)
-            rx1, ry1 = arr[:, 0], arr[:, 1]
-            rx2, ry2 = np.roll(rx1, -1), np.roll(ry1, -1)
-            edges.append((rx1, ry1, rx2, ry2))
-            ins = _points_inside_polygon(pxs, pys, rx1, ry1, rx2, ry2)
-            inside = ins if inside is None else (inside | ins)
-        x1, y1, x2, y2 = (np.concatenate([e[i] for e in edges]) for i in range(4))
-        ring_edges = (x1, y1, x2, y2)
-        d = _points_edge_distance(pxs, pys, x1, y1, x2, y2)
-        # Cutouts count as edges too (camera-module openings).
-        for cut in (pcb_data.board_info.board_cutouts or []):
-            if len(cut) >= 3:
-                arr = np.array(cut, dtype=np.float64)
-                cx1, cy1 = arr[:, 0], arr[:, 1]
-                cx2, cy2 = np.roll(cx1, -1), np.roll(cy1, -1)
-                d = np.minimum(d, _points_edge_distance(pxs, pys, cx1, cy1, cx2, cy2))
-        # Signed: off-board pads (center outside every outer ring) route into the
-        # band from outside, so treat their center distance as negative -- keeps
-        # ``d_signed - halves < edge_clearance`` equivalent to the old
-        # ``(~inside) | (d - halves < edge_clearance)`` test.
-        d_signed = np.where(inside, d, -d)
-    else:
-        min_x, min_y, max_x, max_y = bounds
-        d_signed = np.minimum.reduce([pxs - min_x, max_x - pxs, pys - min_y, max_y - pys])
-    return pads, pxs, pys, halves, d_signed, rings, ring_edges
-
-
-def compute_intentional_edge_band_nets(pcb_data, edge_clearance: float):
-    """Report-only (#408): the NET NAMES the router must route into the board-
-    edge clearance band because a pad on that net sits inside the band (card-edge
-    connectors, edge-mounted USB-C, mounting pads -- routing to them must ride the
-    band). Mirrors the #338 reach exemption. Emitted in JSON_SUMMARY so a grader
-    can accept-by-design every ``copper_edge_clearance`` violation on these nets
-    (net-scoped: a signal net only reaches the edge at its connector, so its whole
-    edge class is accepted).
-
-    Returns a sorted list of unique net-name strings; empty when the board honors
-    its own edge rule (the common case). Purely advisory: no routing depends on it."""
-    if edge_clearance <= 0 or getattr(pcb_data, 'board_info', None) is None \
-            or not pcb_data.board_info.board_bounds:
-        return []
-    geom = _edge_band_in_band_pads(pcb_data, edge_clearance)
-    if geom is None:
-        return []
-    pads, _pxs, _pys, halves, d_signed, _rings, _ring_edges = geom
-    in_band = (d_signed - halves) < edge_clearance
-    nets = set()
-    for i in np.where(in_band)[0]:
-        p = pads[i]
-        # Only NET-BEARING pads: an unconnected in-band pad carries no routed
-        # copper, so there is no edge-clearance violation to attribute to it.
-        if getattr(p, 'net_id', 0) and p.net_name:
-            nets.add(p.net_name)
-    return sorted(nets)
-
-
-def _edge_band_pad_exemption(pcb_data, coord: GridCoord, edge_clearance: float,
-                             track_edge_clearance: float):
-    """int64 cell keys exempt from the edge band: disks around copper pads
-    whose own copper intrudes into the band (pad edge closer than
-    edge_clearance to the outline, or pad center off-board). Disk radius =
-    pad_half + track_edge_clearance, which both lets a track land on the pad
-    and bridges the band depth to the interior. Returns None when no pad
-    qualifies (the common case -- boards that honor their own edge rule)."""
-    geom = _edge_band_in_band_pads(pcb_data, edge_clearance)
-    if geom is None:
-        return None
-    pads, pxs, pys, halves, d_signed, rings, ring_edges = geom
-    bounds = pcb_data.board_info.board_bounds
-    in_band = (d_signed - halves) < edge_clearance
-    # Synthetic window fence (make_local_window installs window bounds as
-    # board_bounds and stashes the REAL board's bounds): a pad qualifies for
-    # the reach exemption only if it is in-band w.r.t. the PARENT board's edge
-    # too. A pad that merely straddles the synthetic window boundary must NOT
-    # punch a hole in the fence -- the rescue A* escapes through it into
-    # unstamped space beyond the window and lands copper on obstacles the
-    # window map never saw (butterstick DQ11).
-    parent_bb = getattr(pcb_data.board_info, 'parent_board_bounds', None)
-    if parent_bb is not None and not rings and in_band.any():
-        pminx, pminy, pmaxx, pmaxy = parent_bb
-        d_parent = np.minimum.reduce([pxs - pminx, pmaxx - pxs,
-                                      pys - pminy, pmaxy - pys])
-        in_band &= (d_parent - halves) < edge_clearance
-    if not in_band.any():
-        return None
-    if ring_edges is not None:
-        x1, y1, x2, y2 = ring_edges
-
-    # Exempt a perpendicular SPOKE per pad (pad copper + a track-wide path
-    # straight inward), NOT a disk: connector rows' overlapping disks chained
-    # into a corridor ALONG the edge that routes exploited as a highway
-    # (core1106_cam: 58 avoidable in-band items running parallel to the edge).
-    def _nearest_edge_dir(px_, py_):
-        best = None
-        seg_sets = []
-        if rings:
-            seg_sets.append((x1, y1, x2, y2))
-        for cut in (pcb_data.board_info.board_cutouts or []):
-            if len(cut) >= 3:
-                arr = np.array(cut, dtype=np.float64)
-                seg_sets.append((arr[:, 0], arr[:, 1],
-                                 np.roll(arr[:, 0], -1), np.roll(arr[:, 1], -1)))
-        if not seg_sets:
-            min_x, min_y, max_x, max_y = bounds
-            cands = [(px_ - min_x, (1, 0)), (max_x - px_, (-1, 0)),
-                     (py_ - min_y, (0, 1)), (max_y - py_, (0, -1))]
-            return min(cands)[1]
-        for (ex1, ey1, ex2, ey2) in seg_sets:
-            dx, dy = ex2 - ex1, ey2 - ey1
-            ln2 = dx * dx + dy * dy
-            t = np.clip(((px_ - ex1) * dx + (py_ - ey1) * dy) / np.where(ln2 > 0, ln2, 1), 0, 1)
-            nx_, ny_ = ex1 + t * dx, ey1 + t * dy
-            dd = np.hypot(px_ - nx_, py_ - ny_)
-            j = int(np.argmin(dd))
-            if best is None or dd[j] < best[0]:
-                best = (float(dd[j]), float(nx_[j]), float(ny_[j]))
-        _, nx0, ny0 = best
-        vx, vy = px_ - nx0, py_ - ny0
-        n = math.hypot(vx, vy)
-        return (vx / n, vy / n) if n > 1e-9 else (0.0, 1.0)
-
-    keys = set()
-    band_depth = track_edge_clearance
-    for i in np.where(in_band)[0]:
-        cx_, cy_ = pxs[i], pys[i]
-        # (a) the pad's own copper + a track landing margin
-        r = halves[i] + coord.grid_step
-        # (b) spoke: from the pad center straight inward past the band
-        ux, uy = _nearest_edge_dir(cx_, cy_)
-        L = band_depth + halves[i] + coord.grid_step
-        half_w = max(coord.grid_step, 0.15)  # one track wide
-        n_steps = int(math.ceil(L / coord.grid_step))
-        pts = [(cx_, cy_, r)] + [
-            (cx_ + ux * (k * coord.grid_step), cy_ + uy * (k * coord.grid_step), half_w)
-            for k in range(1, n_steps + 1)]
-        for (qx, qy, qr) in pts:
-            rg = int(math.ceil(qr / coord.grid_step))
-            cgx, cgy = coord.to_grid(qx, qy)
-            for ex in range(-rg, rg + 1):
-                for ey in range(-rg, rg + 1):
-                    if (ex * ex + ey * ey) * coord.grid_step ** 2 <= qr * qr:
-                        keys.add(((cgx + ex) << 32) + ((cgy + ey) & 0xFFFFFFFF))
-    return np.array(sorted(keys), dtype=np.int64) if keys else None
-
-
-def _filter_exempt_xy(gx, gy, exempt_keys):
-    """Boolean keep-mask over parallel gx/gy arrays (True = keep blocked)."""
-    if exempt_keys is None or len(gx) == 0:
-        return None
-    return ~np.isin(_cell_keys(gx, gy), exempt_keys)
+def _edge_band_pad_layer_exemption(pcb_data, coord: GridCoord, edge_clearance: float,
+                                   layer_list, board_outlines, bounds):
+    """Per-layer cells of an in-band pad's OWN copper that lie ON the board --
+    exempt from the board-edge TRACK keep-out (#441). A pad whose copper reaches
+    into the edge-clearance band (an edge connector / edge-mounted part) must stay
+    landable, but ONLY the pad's own copper on ITS layer is opened, and never a
+    cell past the actual board edge -- so a foreign net cannot ride the hole (it
+    would short the pad) and no edge-parallel corridor is exposed. Returns
+    ``{layer_idx: set(packed gx<<32 | gy&0xFFFFFFFF)}``; ``{}`` when no pad reaches
+    the band (the common edge-honoring board)."""
+    min_x, min_y, max_x, max_y = bounds
+    layer_index = {name: i for i, name in enumerate(layer_list)}
+    step = coord.grid_step
+    rings = [np.asarray(o, dtype=np.float64) for o in (board_outlines or []) if len(o) >= 3]
+    gmnx, gmny = coord.to_grid(min_x, min_y)
+    gmxx, gmxy = coord.to_grid(max_x, max_y)
+    exempt: Dict[int, set] = {}
+    for fp in pcb_data.footprints.values():
+        for pad in fp.pads:
+            if getattr(pad, 'pad_type', '') == 'np_thru_hole':
+                continue
+            hx, hy = pad.size_x / 2.0, pad.size_y / 2.0
+            half = max(hx, hy)
+            # Coarse pre-filter: only pads whose copper can reach the band matter.
+            if not (pad.global_x - half < min_x + edge_clearance or
+                    pad.global_x + half > max_x - edge_clearance or
+                    pad.global_y - half < min_y + edge_clearance or
+                    pad.global_y + half > max_y - edge_clearance):
+                continue
+            pad_layers = [layer_index[L] for L in expand_pad_layers(pad.layers, layer_list)
+                          if L in layer_index]
+            if not pad_layers:
+                continue
+            pgx, pgy = coord.to_grid(pad.global_x, pad.global_y)
+            cells = pad_blocked_cells_array(
+                pgx, pgy, hx, hy, 0.0, step,
+                off_x=pad.global_x - pgx * step, off_y=pad.global_y - pgy * step,
+                rotation_deg=getattr(pad, 'rect_rotation', 0.0) or 0.0)
+            if len(cells) == 0:
+                continue
+            gx = cells[:, 0].astype(np.int64)
+            gy = cells[:, 1].astype(np.int64)
+            # ON-board only: a cell past the actual edge stays hard-blocked.
+            if rings:
+                onb = None
+                px, py = gx * step, gy * step
+                for r in rings:
+                    ins = _points_inside_polygon(px, py, r[:, 0], r[:, 1],
+                                                 np.roll(r[:, 0], -1), np.roll(r[:, 1], -1))
+                    onb = ins if onb is None else (onb | ins)
+            else:
+                onb = (gx >= gmnx) & (gx <= gmxx) & (gy >= gmny) & (gy <= gmxy)
+            keys = ((gx[onb] << 32) + (gy[onb] & 0xFFFFFFFF))
+            if len(keys) == 0:
+                continue
+            kset = set(int(k) for k in keys)
+            for li in pad_layers:
+                exempt.setdefault(li, set()).update(kset)
+    return exempt
 
 
 # #423: max grid cells rasterized at once in the banded board-geometry keep-out
@@ -941,8 +816,7 @@ def _rasterize_polygon_banded(poly_points, coord: GridCoord, margin: float,
 
 def _add_cutout_obstacles(obstacles: GridObstacleMap, cutout: List[Tuple[float, float]],
                           coord: GridCoord, num_layers: int,
-                          track_edge_clearance: float, via_edge_clearance: float,
-                          exempt_keys=None):
+                          track_edge_clearance: float, via_edge_clearance: float):
     """Block tracks and vias inside a board cutout and within clearance of its edges.
 
     Cells whose centre is inside the cutout polygon are blocked on all layers; cells
@@ -952,15 +826,8 @@ def _add_cutout_obstacles(obstacles: GridObstacleMap, cutout: List[Tuple[float, 
     """
     margin = max(track_edge_clearance, via_edge_clearance) + coord.grid_step
     for gx_flat, gy_flat, inside, edge_dist in _rasterize_polygon_banded(cutout, coord, margin):
-        # In-band pad reach exemption (#338) applies only to the NEAR-RING band;
-        # cells inside the cutout hole itself stay hard-blocked (no copper there).
         ring_track = (~inside) & (edge_dist < track_edge_clearance)
         ring_via = (~inside) & (edge_dist < via_edge_clearance)
-        if exempt_keys is not None:
-            keep = _filter_exempt_xy(gx_flat, gy_flat, exempt_keys)
-            if keep is not None:
-                ring_track &= keep
-                ring_via &= keep
         # #422: cutouts are permanent board geometry -> static keep-out bitmap.
         _block_cells_on_layers(obstacles, gx_flat, gy_flat,
                                inside | ring_track, range(num_layers), static=True)
@@ -972,9 +839,7 @@ def _add_cutout_obstacles(obstacles: GridObstacleMap, cutout: List[Tuple[float, 
 
 def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord, num_layers: int,
                                      gmin_x: int, gmin_y: int, gmax_x: int, gmax_y: int,
-                                     track_expand: int, via_expand: int,
-                                     exempt_keys=None):
-    exset = set(exempt_keys.tolist()) if exempt_keys is not None else None
+                                     track_expand: int, via_expand: int, layer_exempt=None):
     """Add obstacles for simple rectangular board outline.
 
     The via keep-out band (via_expand) reaches FURTHER inboard than the track
@@ -984,8 +849,11 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
     never visited the inner via-only band, so route.py dropped vias up to
     (via_expand - track_expand) cells past the via keep-out, intruding into the
     board-edge clearance (#170). The track keep-out and the parallel corner
-    handoff to the left/right sweeps are unchanged.
+    handoff to the left/right sweeps are unchanged. ``layer_exempt`` (#441) keeps
+    an in-band pad's own copper cells landable on its own layer.
     """
+    _le = layer_exempt or {}
+    _EMPTY = frozenset()
     edge_expand = max(track_expand, via_expand)
     grid_margin = edge_expand + 5
 
@@ -996,10 +864,11 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
         if not (block_track or block_via):
             continue
         for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
-            if exset is not None and ((gx << 32) + (gy & 0xFFFFFFFF)) in exset:
-                continue  # in-band pad reach exemption (#338)
             if block_track:
+                _k = (gx << 32) + (gy & 0xFFFFFFFF)
                 for layer_idx in range(num_layers):
+                    if _k in _le.get(layer_idx, _EMPTY):
+                        continue  # #441: pad-own copper on its layer stays landable
                     obstacles.add_static_blocked_cell(gx, gy, layer_idx)
             if block_via:
                 obstacles.add_static_blocked_via(gx, gy)
@@ -1011,10 +880,11 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
         if not (block_track or block_via):
             continue
         for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
-            if exset is not None and ((gx << 32) + (gy & 0xFFFFFFFF)) in exset:
-                continue  # in-band pad reach exemption (#338)
             if block_track:
+                _k = (gx << 32) + (gy & 0xFFFFFFFF)
                 for layer_idx in range(num_layers):
+                    if _k in _le.get(layer_idx, _EMPTY):
+                        continue  # #441: pad-own copper on its layer stays landable
                     obstacles.add_static_blocked_cell(gx, gy, layer_idx)
             if block_via:
                 obstacles.add_static_blocked_via(gx, gy)
@@ -1026,10 +896,11 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
         if not (block_track or block_via):
             continue
         for gx in range(gmin_x + track_expand + 1, gmax_x - track_expand):
-            if exset is not None and ((gx << 32) + (gy & 0xFFFFFFFF)) in exset:
-                continue  # in-band pad reach exemption (#338)
             if block_track:
+                _k = (gx << 32) + (gy & 0xFFFFFFFF)
                 for layer_idx in range(num_layers):
+                    if _k in _le.get(layer_idx, _EMPTY):
+                        continue  # #441: pad-own copper on its layer stays landable
                     obstacles.add_static_blocked_cell(gx, gy, layer_idx)
             if block_via:
                 obstacles.add_static_blocked_via(gx, gy)
@@ -1041,10 +912,11 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
         if not (block_track or block_via):
             continue
         for gx in range(gmin_x + track_expand + 1, gmax_x - track_expand):
-            if exset is not None and ((gx << 32) + (gy & 0xFFFFFFFF)) in exset:
-                continue  # in-band pad reach exemption (#338)
             if block_track:
+                _k = (gx << 32) + (gy & 0xFFFFFFFF)
                 for layer_idx in range(num_layers):
+                    if _k in _le.get(layer_idx, _EMPTY):
+                        continue  # #441: pad-own copper on its layer stays landable
                     obstacles.add_static_blocked_cell(gx, gy, layer_idx)
             if block_via:
                 obstacles.add_static_blocked_via(gx, gy)
@@ -1054,8 +926,7 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
                                  coord: GridCoord, num_layers: int,
                                  track_edge_clearance: float, via_edge_clearance: float,
                                  gmin_x: int, gmin_y: int, gmax_x: int, gmax_y: int,
-                                 track_expand: int, via_expand: int,
-                                 exempt_keys=None):
+                                 track_expand: int, via_expand: int, layer_exempt=None):
     """Add obstacles for non-rectangular board outline using polygon testing.
 
     ``polygons`` is one outer ring or a LIST of outer rings (#304): a cell is
@@ -1139,22 +1010,30 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
             if np.any(track_mask):
                 track_gx = in_gx[track_mask]
                 track_gy = in_gy[track_mask]
-                keep = _filter_exempt_xy(track_gx, track_gy, exempt_keys)
-                if keep is not None:
-                    track_gx, track_gy = track_gx[keep], track_gy[keep]
                 track_cells = np.column_stack([track_gx, track_gy])
+                # #441: keys for per-layer pad-own-copper exemption (see
+                # _edge_band_pad_layer_exemption). Only layers with an exempt set
+                # pay the filter; every other layer stamps the full band.
+                _le = layer_exempt or {}
+                track_keys = ((track_gx.astype(np.int64) << 32)
+                              + (track_gy.astype(np.int64) & 0xFFFFFFFF)) if _le else None
                 for layer_idx in range(num_layers):
-                    layer_col = np.full((track_cells.shape[0], 1), layer_idx, dtype=np.int32)
-                    obstacles.add_static_blocked_cells_batch(np.hstack([track_cells, layer_col]))
+                    ex = _le.get(layer_idx)
+                    if ex:
+                        keep = ~np.isin(track_keys, np.fromiter(ex, dtype=np.int64, count=len(ex)))
+                        cells_L = track_cells[keep]
+                    else:
+                        cells_L = track_cells
+                    if cells_L.shape[0] == 0:
+                        continue
+                    layer_col = np.full((cells_L.shape[0], 1), layer_idx, dtype=np.int32)
+                    obstacles.add_static_blocked_cells_batch(np.hstack([cells_L, layer_col]))
 
             # Block vias if too close to edge
             via_mask = min_dist < via_edge_clearance
             if np.any(via_mask):
                 via_gx = in_gx[via_mask]
                 via_gy = in_gy[via_mask]
-                keep = _filter_exempt_xy(via_gx, via_gy, exempt_keys)
-                if keep is not None:
-                    via_gx, via_gy = via_gx[keep], via_gy[keep]
                 obstacles.add_static_blocked_vias_batch(np.column_stack([via_gx, via_gy]))
 
 

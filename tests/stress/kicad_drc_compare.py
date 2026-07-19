@@ -302,56 +302,6 @@ def reconcile_edge_family(kicad_only, cd_only):
 
 
 # --- #408: accept-by-design edge-clearance subtraction -----------------------
-# The dominant remaining corpus DRC class, copper_edge_clearance, mixes real
-# defects with accepted-by-design edge routing: a pad/connector whose own copper
-# sits inside the board's edge-clearance band (card-edge connectors, edge-mounted
-# USB-C, mounting pads) can only be reached by running copper INTO the band. The
-# router EMITS those nets as `intentional_edge_band_nets` in its JSON_SUMMARY
-# (#408). Grading is NET-SCOPED: if a net was routed into the edge band to reach
-# an in-band pad, ALL of its edge-clearance items are accepted-by-design and
-# ignored on BOTH engines. Net-scoping keeps the two engines symmetric for free
-# (they anchor the same edge violation at different points, so a positional test
-# would drop one side and orphan its twin into kicad_only) -- and it is enough:
-# a signal net only reaches the edge at its connector, so accepting its whole
-# edge class is the right call.
-
-
-def parse_intentional_edge_nets(log_text: str):
-    """Collect `intentional_edge_band_nets` (#408) -- the net names the router
-    routed into the edge band -- from every JSON_SUMMARY line in a routing/replay
-    log (a board's chain runs several steps, each of which may emit the key:
-    single-ended route, plane taps, plane reconnect). Returns the sorted union of
-    net names; empty when no step carried the key (the common edge-honoring
-    board). Tolerates the older rich {net, ...} dict schema too."""
-    nets = set()
-    for m in re.finditer(r"JSON_SUMMARY:\s*(\{.*\})", log_text):
-        try:
-            d = json.loads(m.group(1))
-        except Exception:  # noqa: BLE001 -- a non-JSON tail must not abort parsing
-            continue
-        for e in d.get("intentional_edge_band_nets") or []:
-            n = e if isinstance(e, str) else (e.get("net") if isinstance(e, dict) else None)
-            if n:
-                nets.add(n)
-    return sorted(nets)
-
-
-def _drop_intentional_edge(items, edge_types, intentional_nets):
-    """Drop accepted-by-design edge items (#408): every edge-family violation
-    whose net is in `intentional_nets` (a set of net names). Net-scoped -- once a
-    net is known to reach an in-band pad, its whole edge class is accepted.
-    Returns (kept_items, n_dropped)."""
-    if not intentional_nets:
-        return items, 0
-    kept, dropped = [], 0
-    for v in items:
-        if v["type"] in edge_types and (v["nets"] & intentional_nets):
-            dropped += 1
-        else:
-            kept.append(v)
-    return kept, dropped
-
-
 def _net_tie_accepted_pairs(board: str):
     """[(frozenset({netA, netB}), (x, y))] -- net pairs a footprint's
     net_tie_pad_groups deliberately shorts, with the footprint position.
@@ -593,7 +543,7 @@ def _subtract_baseline(items, base_items):
 
 
 def compare_board_data(board: str, label: str = None, clearance: float = None,
-                       baseline: str = None, intentional_edge_band_nets=None):
+                       baseline: str = None):
     """SHARED per-board grading core used by BOTH the CLI (`compare_board`) and
     ab_replay_grade's `_kicad_grade` -- neither reimplements subtraction or
     matching, so the two tools produce identical numbers for the same board by
@@ -605,14 +555,6 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     design conditions (e.g. edge-connector pads inside the board's own
     copper_edge rule) that no routing can fix -- subtracted from BOTH engines so
     the counts reflect router-introduced copper.
-
-    `intentional_edge_band_nets` (#408) = the router's JSON_SUMMARY list of net
-    names it deliberately routed into the edge band to reach an in-band pad. Every
-    edge-clearance violation on those nets is accepted-by-design (routing to an
-    edge connector must ride the band) and dropped from BOTH engines (net-scoped),
-    counted as kicad_intentional_edge / checkdrc_intentional_edge; kicad /
-    check_drc then report the REAL edge defects. Unlike `baseline`, these are
-    router-ADDED but accepted, so baseline subtraction alone never catches them.
 
     Returns a dict (numeric grade + item lists + verdict for the printer), or
     None if kicad-cli could not grade the board (caller degrades to Nones)."""
@@ -673,18 +615,7 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
         except Exception:  # noqa: BLE001 -- best-effort, tolerate a bad input
             cd_base = None
         cd, cd_pre = _subtract_baseline(cd, cd_base or [])
-    # #408: accept-by-design edge items -- every copper_edge_clearance (kicad) /
-    # *-board-edge (check_drc) violation on a net the router routed into the edge
-    # band to reach an in-band pad. Net-scoped drop from BOTH engines BEFORE
-    # matching: since both sides lose the same nets' edge items, match/reconcile
-    # never see them and neither side is orphaned into *_only (a positional test
-    # would drop one engine's anchor and inflate the other's divergence). What
-    # remains is REAL edge defects on nets that had no business at the edge.
     kicad_intentional = checkdrc_intentional = 0
-    inets = frozenset(n for n in (intentional_edge_band_nets or []) if n)
-    if inets:
-        kicad, kicad_intentional = _drop_intentional_edge(kicad, EDGE_KICAD_TYPES, inets)
-        cd, checkdrc_intentional = _drop_intentional_edge(cd, EDGE_CD_TYPES, inets)
     # Net-tie accepted contact (Kelvin shunts): tie-pair shorting/clearance
     # items AT the tie footprint are accepted-by-design on human-routed
     # originals too -- drop from BOTH engines before matching (board-derived,
@@ -739,13 +670,12 @@ _SUMMARY_KEYS = ("board", "kicad", "kicad_preexisting", "check_drc",
 
 
 def compare_board(board: str, label: str = None, clearance: float = None,
-                  baseline: str = None, intentional_edge_band_nets=None):
+                  baseline: str = None):
     """Thin CLI wrapper over compare_board_data: print the per-board line +
     divergence detail, return the summary-key subset (schema unchanged)."""
     label = label or os.path.basename(board)
     data = compare_board_data(board, label=label, clearance=clearance,
-                              baseline=baseline,
-                              intentional_edge_band_nets=intentional_edge_band_nets)
+                              baseline=baseline)
     if data is None or "skip" in (data or {}):
         print(f"{label}: SKIP ({data.get('skip') if data else 'no result'})")
         return None
@@ -787,37 +717,19 @@ def main():
                          "the board's own edge rule) are subtracted so "
                          "kicad_only reflects router-introduced items "
                          "(single-board mode only)")
-    ap.add_argument("--intentional-edge-log", default=None,
-                    help="routing/replay log to read the router's "
-                         "intentional_edge_band_nets (#408) from; its "
-                         "accepted-by-design edge-clearance items are subtracted "
-                         "(single-board mode; --wave auto-reads each board's "
-                         "_replay.log)")
     args = ap.parse_args()
     boards = list(args.boards)
-    # #408: single-board intentional list from an explicit log (if any).
-    cli_intentional = None
-    if args.intentional_edge_log and os.path.exists(args.intentional_edge_log):
-        with open(args.intentional_edge_log, errors="replace") as f:
-            cli_intentional = parse_intentional_edge_nets(f.read())
-    jobs = [(b, None, cli_intentional) for b in boards]
+    jobs = [(b, None) for b in boards]
     for wave in args.wave:
         for e in json.load(open(os.path.join(wave, "summary.json"))):
             if e.get("final"):
                 p = os.path.join(wave, e["board"], os.path.basename(e["final"]))
                 if os.path.exists(p):
                     clr = e.get("clearance")
-                    # #408: the board's chain log carries its intentional list.
-                    log = os.path.join(wave, e["board"], "_replay.log")
-                    intentional = None
-                    if os.path.exists(log):
-                        with open(log, errors="replace") as f:
-                            intentional = parse_intentional_edge_nets(f.read())
-                    jobs.append((p, float(clr) if clr else None, intentional))
-    rows = [r for b, clr, intentional in jobs
+                    jobs.append((p, float(clr) if clr else None))
+    rows = [r for b, clr in jobs
             if (r := compare_board(b, label=None, clearance=clr,
-                                   baseline=args.baseline,
-                                   intentional_edge_band_nets=intentional))]
+                                   baseline=args.baseline))]
     div = [r for r in rows if r["kicad_only"] or r["checkdrc_only"]]
     print(f"\n{len(rows)} boards compared: {len(rows) - len(div)} consistent, "
           f"{len(div)} diverged "
