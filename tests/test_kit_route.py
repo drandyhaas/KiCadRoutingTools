@@ -2,10 +2,43 @@
 """
 Test routing on kit-dev-coldfire-xilinx_5213 board.
 Routes nets directly from pads without fanout.
+
+All routing outputs are written into a fresh temporary directory rather than
+into the tracked ``kicad_files/`` tree.  This keeps two problems from biting
+(issue #426):
+
+  * The chain writes a sibling ``<output>.kicad_pro`` DRC-floor for every
+    stage (route.py / route_planes.py / route_disconnected_planes.py).  If
+    those land on committed paths the run dirties the repo, and -- worse --
+    a *re-run* reads the previously written ``.kicad_pro`` back in and
+    silently re-routes to that stale clearance floor (the DRC-floor carryover
+    footgun documented in CLAUDE.md).  A fresh temp dir has no stale
+    ``.kicad_pro`` to read back, so every stage routes to the ``--clearance``
+    on the command line.
+  * Running the test never mutates a tracked file, so ``git status`` stays
+    clean afterwards.
+
+The input board is read straight from ``kicad_files/`` (read-only); only the
+generated ``kit-out*`` artifacts move to the temp dir.
+
+Known result (issue #426): this is a dense, fine-pitch board and the router
+does NOT complete it with these parameters -- ``route.py`` (step 1) leaves
+roughly 50 of the U102<->U301 signal nets unrouted (their pads are boxed in by
+neighbouring copper), so the final ``check_connected`` / ``check_drc`` still
+report unconnected pads and a handful of small (~0.02-0.05 mm) congestion
+grazes.  That shortfall is genuine routing difficulty, not a stale-fixture
+artifact: step 1's input board has no sibling ``.kicad_pro`` so it cannot be
+contaminated by any carried-over DRC floor.  The test is a smoke test -- it
+runs the full plane-connected chain and prints the checker output; it does not
+assert clean, so it stays green while #426 tracks improving completion on this
+board.
 """
 
 import argparse
-from run_utils import run
+import os
+import tempfile
+
+from run_utils import run, ROOT_DIR
 
 
 def main():
@@ -16,6 +49,10 @@ def main():
                         help='Run python commands with -u (unbuffered output)')
     parser.add_argument('--planes-only', action='store_true',
                         help='Skip the routing and just redo the planes')
+    parser.add_argument('--workdir', default=None,
+                        help='Directory for generated kit-out* artifacts '
+                             '(default: a fresh temp dir, auto-removed). Pass a '
+                             'path to keep the outputs for inspection.')
     args = parser.parse_args()
 
     quick = args.quick
@@ -38,27 +75,52 @@ def main():
     --stub-proximity-cost 4.0 --stub-proximity-radius 5.0 --max-ripup 10 --max-iterations 10000000 \
     --bus --bus-detection-radius 5 --bus-attraction-bonus 5000 --bus-attraction-radius 1 '+power_nets
 
-    # Route some nets from pads (no fanout needed)
-    if not args.planes_only:
-        run('python3 route.py kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb kicad_files/kit-out.kicad_pcb '+target+" "+options, unbuffered)
+    # Input board is read from the tracked tree; outputs go to a fresh work dir
+    # so the run never touches committed files and never reads back a stale
+    # sibling .kicad_pro DRC floor (issue #426).
+    src_pcb = 'kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb'
 
-    # Route some power nets with vias to planes
-    run('python3 route_planes.py kicad_files/kit-out.kicad_pcb kicad_files/kit-out-plane.kicad_pcb --nets +3.3V GND +3.3V GND --plane-layers F.Cu In1.Cu In2.Cu B.Cu \
-    --max-via-reuse-radius 3 --rip-blocker-nets --reroute-ripped-nets '+base_options, unbuffered)
+    tmp = None
+    if args.workdir:
+        workdir = os.path.abspath(args.workdir)
+        os.makedirs(workdir, exist_ok=True)
+    else:
+        tmp = tempfile.TemporaryDirectory(prefix='kit_route_')
+        workdir = tmp.name
 
-    # Connect broken plane regions
-    run('python3 route_disconnected_planes.py kicad_files/kit-out-plane.kicad_pcb kicad_files/kit-out-plane-connected.kicad_pcb --analysis-grid-step 0.1 '+base_options)
+    def wpath(name):
+        # run() executes from ROOT_DIR, so hand it a path relative to that.
+        return os.path.relpath(os.path.join(workdir, name), ROOT_DIR)
 
-    # Check for DRC errors
-    run('python3 check_drc.py kicad_files/kit-out-plane-connected.kicad_pcb --clearance 0.2 --hole-to-hole-clearance 0.3', unbuffered)
+    out       = wpath('kit-out.kicad_pcb')
+    out_plane = wpath('kit-out-plane.kicad_pcb')
+    out_conn  = wpath('kit-out-plane-connected.kicad_pcb')
 
-    # Check for connectivity
-    run('python3 check_connected.py kicad_files/kit-out-plane-connected.kicad_pcb '+target, unbuffered)
+    try:
+        # Route some nets from pads (no fanout needed)
+        if not args.planes_only:
+            run(f'python3 route.py {src_pcb} {out} '+target+" "+options, unbuffered)
 
-    # Check for orphan stub segments
-    run('python3 check_orphan_stubs.py kicad_files/kit-out-plane-connected.kicad_pcb ')
+        # Route some power nets with vias to planes
+        run(f'python3 route_planes.py {out} {out_plane} --nets +3.3V GND +3.3V GND --plane-layers F.Cu In1.Cu In2.Cu B.Cu \
+        --max-via-reuse-radius 3 --rip-blocker-nets --reroute-ripped-nets '+base_options, unbuffered)
 
-    print("\n=== Test completed ===")
+        # Connect broken plane regions
+        run(f'python3 route_disconnected_planes.py {out_plane} {out_conn} --analysis-grid-step 0.1 '+base_options)
+
+        # Check for DRC errors
+        run(f'python3 check_drc.py {out_conn} --clearance 0.2 --hole-to-hole-clearance 0.3', unbuffered)
+
+        # Check for connectivity
+        run(f'python3 check_connected.py {out_conn} '+target, unbuffered)
+
+        # Check for orphan stub segments
+        run(f'python3 check_orphan_stubs.py {out_conn} ')
+
+        print("\n=== Test completed ===")
+    finally:
+        if tmp is not None:
+            tmp.cleanup()
 
 if __name__ == "__main__":
     main()
