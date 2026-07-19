@@ -1595,9 +1595,17 @@ def _net_connected_pad_locs(pcb_data: PCBData, net_id: int, tolerance: float) ->
     pads = pcb_data.pads_by_net.get(net_id, [])
     zones = [z for z in (getattr(pcb_data, 'zones', None) or []) if getattr(z, 'net_id', None) == net_id]
     res = check_net_connectivity(net_id, segs, vias, pads, zones, tolerance=tolerance)
+    # pad_components keys are (x, y, layer, component_ref): a THROUGH-HOLE pad
+    # spans EVERY copper layer, so its per-layer expansion produces one entry per
+    # layer, all sharing the same union-find root but at the SAME (x, y). Collapse
+    # a pad's own multi-layer expansion to ONE anchor per position (issue #429) so
+    # a lone THT pad (a connector reaching all layers, connected to nothing else)
+    # is not mistaken for >=2 mutually-connected pads -- which would wrongly pin a
+    # dangling fanout stub off it as immovable. A root only counts as committed
+    # pad-to-pad copper when it spans >=2 DISTINCT pad positions.
     by_root = {}
     for loc, root in (res.get('pad_components') or {}).items():
-        by_root.setdefault(root, []).append((loc[0], loc[1]))
+        by_root.setdefault(root, set()).add((loc[0], loc[1]))
     connected = set()
     for locs in by_root.values():
         if len(locs) >= 2:

@@ -186,6 +186,51 @@ def main():
     check("stubs still on In1.Cu",
           all(s.layer == 'In1.Cu' for s in pcb.segments))
 
+    # -- 6: issue #429 -- lone THT pad + dangling stub -> MOVABLE ----------
+    # A through-hole pad spans every copper layer, so check_net_connectivity's
+    # pad_components lists one entry per layer for that single pad, all at the
+    # SAME (x, y). _net_connected_pad_locs must NOT mistake that per-layer
+    # expansion for >=2 mutually-connected pads: a bare THT pad (connector)
+    # connected to nothing else is committed to NOTHING, so a fanout stub off it
+    # is safe to relayer (the pad reaches all layers). Before the fix the stub
+    # read as pinned/immovable.
+    print("\nScenario 6: issue #429 -- lone THT pad + dangling stub is movable")
+    from layer_swap_optimization import (
+        _net_connected_pad_locs, _stub_free_end_is_open, STUB_POSITION_TOLERANCE)
+    from stub_layer_switching import get_stub_info
+
+    # The bug only bites when the net's copper spans >=2 layers, so the THT pad's
+    # *.Cu expansion lands on multiple layers (one pad_components entry per layer,
+    # same root). Here J1 is a lone THT connector pad with a dangling In1 stub;
+    # U2 is a separate, UNCONNECTED F.Cu pad+stub that just puts F.Cu into the
+    # net's layer set. J1 must still read as connected to nothing.
+    seg_j1 = _seg(0.0, 0.0, 2.0, 0.0, 'In1.Cu')   # dangling In1 stub off the THT pad
+    seg_u2 = _seg(20.0, 0.0, 22.0, 0.0, 'F.Cu')   # unrelated F.Cu stub (2nd layer)
+    tht = _pad('J1', '1', 0.0, 0.0, layers=['*.Cu'], drill=0.8, pad_type='thru_hole')
+    u2 = _pad('U2', '1', 20.0, 0.0, layers=['F.Cu'])
+    pcb = _pcb([seg_j1, seg_u2], [], [tht, u2])
+    conn = _net_connected_pad_locs(pcb, MP_NET, STUB_POSITION_TOLERANCE)
+    check("lone THT pad's per-layer expansion is not counted as connected copper",
+          (0.0, 0.0) not in conn)
+    stub = get_stub_info(pcb, MP_NET, 2.0, 0.0, 'In1.Cu')
+    check("stub off the THT pad is recognized", stub is not None and bool(stub.segments))
+    movable = _stub_free_end_is_open(pcb, stub, STUB_POSITION_TOLERANCE, conn)
+    check("stub off a bare THT pad is MOVABLE (relayerable)", movable is True)
+
+    # Guard: a stub whose pad IS genuinely connected to another pad stays pinned.
+    seg_a = _seg(0.0, 0.0, 5.0, 0.0, 'In1.Cu')   # committed A<->B trace on In1
+    seg_b = _seg(5.0, 0.0, 10.0, 0.0, 'In1.Cu')
+    branch = _seg(5.0, 0.0, 5.0, 2.0, 'In1.Cu')  # dangling branch off the trunk
+    pa = _pad('J2', '1', 0.0, 0.0, layers=['*.Cu'], drill=0.8, pad_type='thru_hole')
+    pb = _pad('J2', '2', 10.0, 0.0, layers=['*.Cu'], drill=0.8, pad_type='thru_hole')
+    pcb2 = _pcb([seg_a, seg_b, branch], [], [pa, pb])
+    conn2 = _net_connected_pad_locs(pcb2, MP_NET, STUB_POSITION_TOLERANCE)
+    check("two THT pads joined by committed copper ARE connected",
+          (0.0, 0.0) in conn2 and (10.0, 0.0) in conn2)
+    stub2 = get_stub_info(pcb2, MP_NET, 5.0, 2.0, 'In1.Cu')
+    movable2 = _stub_free_end_is_open(pcb2, stub2, STUB_POSITION_TOLERANCE, conn2)
+    check("committed pad-to-pad copper stays IMMOVABLE", movable2 is False)
+
     if fails:
         print(f"\nFAIL ({len(fails)}): " + "; ".join(fails))
         return 1
