@@ -3493,8 +3493,9 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
         stays visible in DRC;
       * a candidate is committed only when the via clears EVERY foreign
         object at its new spot (segment/via/pad body, drill hole-to-hole
-        incl. same-net, and the board edge) -- strictly fewer grazes, never a
-        new one;
+        incl. same-net, via COPPER to an unplated NPTH hole at the pad's
+        clearance (#441), and the board edge) -- strictly fewer grazes, never
+        a new one;
       * connectivity is re-checked per net and the move reverted if worse.
 
     Only vias CREATED BY THIS RUN may move: the writers re-emit this run's
@@ -3563,6 +3564,28 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
     hole_y = _np.asarray([h[2] for h in hole_list], dtype=float)
     hole_r = _np.asarray([h[3] for h in hole_list], dtype=float)
 
+    # Unplated (NPTH) pad holes carry a COPPER-to-hole clearance (KiCad's
+    # hole_clearance rule): a via's COPPER -- not just its drill -- must clear an
+    # unplated hole edge by the pad's clearance. A plated pad's copper already
+    # enforces this through near_pads, but an np_thru_hole pad has NO copper, so
+    # gather_near skips it and the drill-to-drill hole_to_hole check (a looser floor)
+    # is all that would otherwise apply. Model it here (#441 ghoul: a GND via sat
+    # 6.5um inside SW13's mounting-hole 0.30 local_clearance -- clear on the 0.20
+    # hole-to-hole rule, so the nudge never saw the graze). Pairwise clearance is
+    # max(via floor, pad local_clearance).
+    npth_holes = []
+    for fp in pcb_data.footprints.values():
+        for p in fp.pads:
+            if getattr(p, 'pad_type', '') != 'np_thru_hole' or (p.drill or 0) <= 0:
+                continue
+            pc = getattr(p, 'local_clearance', 0.0) or 0.0
+            for hx, hy, hd in pad_drill_circles(p):
+                npth_holes.append((hx, hy, hd / 2.0, pc))
+    npth_x = _np.asarray([h[0] for h in npth_holes], dtype=float)
+    npth_y = _np.asarray([h[1] for h in npth_holes], dtype=float)
+    npth_r = _np.asarray([h[2] for h in npth_holes], dtype=float)
+    npth_c = _np.asarray([h[3] for h in npth_holes], dtype=float)
+
     vias_by_net = defaultdict(list)
     for v in pcb_data.vias:
         vias_by_net[v.net_id].append(v)
@@ -3603,6 +3626,15 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
             mask[i] = False
         return bool(mask.any())
 
+    def npth_copper_flagged(v):
+        """Via COPPER sub-clearance to an unplated (NPTH) hole edge (#441)."""
+        if npth_x.size == 0:
+            return False
+        own = eff_clr(v.net_id)
+        req = _np.maximum(own, npth_c)   # pairwise max(via floor, pad clearance)
+        d = _np.hypot(npth_x - v.x, npth_y - v.y)
+        return bool((d < v.size / 2.0 + npth_r + req - 1e-4).any())
+
     def gather_near(v):
         """Foreign copper + all holes within WINDOW of the via, evaluated exactly."""
         near_segs, near_vias, near_pads, near_holes = [], [], [], []
@@ -3627,12 +3659,14 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
         for hid, hx, hy, hr in hole_list:
             if hid != me and abs(hx - x) <= WINDOW and abs(hy - y) <= WINDOW:
                 near_holes.append((hx, hy, hr))
-        return near_segs, near_vias, near_pads, near_holes
+        near_npth = [(hx, hy, hr, pc) for (hx, hy, hr, pc) in npth_holes
+                     if abs(hx - x) <= WINDOW and abs(hy - y) <= WINDOW]
+        return near_segs, near_vias, near_pads, near_holes, near_npth
 
     def worst_gap(x, y, v, near):
         """(gap, ux, uy): most negative clearance surplus at (x, y) and the unit
         direction AWAY from that offender. Positive gap = fully clear."""
-        near_segs, near_vias, near_pads, near_holes = near
+        near_segs, near_vias, near_pads, near_holes, near_npth = near
         r = v.size / 2.0
         vd = (getattr(v, 'drill', 0) or 0) / 2.0
         own = eff_clr(v.net_id)  # #436 moving via's own floor
@@ -3666,6 +3700,11 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
             for hx, hy, hr in near_holes:
                 d = math.hypot(x - hx, y - hy)
                 consider(d - (vd + hr + hole_to_hole), hx, hy)
+        # #441: via COPPER vs unplated (NPTH) hole edge at max(own, pad clearance)
+        # -- the copper-to-hole rule an NPTH pad enforces without any copper.
+        for hx, hy, hr, pc in near_npth:
+            d = math.hypot(x - hx, y - hy)
+            consider(d - (r + hr + max(own, pc)), hx, hy)
         # board edge: include in the gap so a candidate never trades a copper
         # graze for an edge one (no direction needed -- it's a veto, not a target)
         if edge_rings:
@@ -3689,7 +3728,7 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
               if id(v) in own_ids
               and (scope_net_ids is None or v.net_id in scope_net_ids)]
     for v in scoped:
-        if not (copper_flagged(v) or hole_flagged(v)):
+        if not (copper_flagged(v) or hole_flagged(v) or npth_copper_flagged(v)):
             continue
         near = gather_near(v)
         gap, ux, uy = worst_gap(v.x, v.y, v, near)
