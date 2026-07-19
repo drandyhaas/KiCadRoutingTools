@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Hole-to-hole via keepout must be enforced by REAL mm distance, not a floored
-integer-cell disk, so a via cannot land a sub-cell inside the drill hole-to-hole
-minimum (issue #70 / #125 -- the castor_pollux RV3 PAD-DRILL-VIA-DRILL).
+"""Via-to-drill keepout must enforce both hole-to-hole and copper-to-hole by
+REAL mm distance, not a floored integer-cell disk, so a via cannot land a
+sub-cell inside either minimum (issues #70/#125 and #441).
 
     python3 tests/test_drill_hole_keepout.py
 """
@@ -34,7 +34,8 @@ def run():
 
     # Reproduce the castor_pollux geometry: a 3.0mm mounting-lug drill, default
     # 0.1mm grid, via drill 0.3, hole-to-hole 0.2 -> required c-c = 1.85mm.
-    cfg = GridRouteConfig(grid_step=0.1, via_drill=0.3, hole_to_hole_clearance=0.2)
+    cfg = GridRouteConfig(grid_step=0.1, via_size=0.6, via_drill=0.3,
+                          clearance=0.1, hole_to_hole_clearance=0.2)
     coord = GridCoord(cfg.grid_step)
     pcb = _pcb_with_pad(79.80, 80.70, 3.0)
 
@@ -49,10 +50,18 @@ def run():
     vx, vy = coord.to_grid(81.50, 81.40)
     check("violating via cell (1.838mm < 1.85) is blocked", obs.is_via_blocked(vx, vy))
 
-    # A cell just outside the minimum must remain free (no over-blocking).
-    # (81.50,81.50): distance sqrt(1.7^2+0.8^2)=1.879mm > 1.85mm.
+    # This cell clears the 1.85mm drill-to-drill minimum but not the larger
+    # 1.90mm copper-to-hole minimum (1.5 + 0.3 + 0.1).
+    # (81.50,81.50): distance sqrt(1.7^2+0.8^2)=1.879mm.
     ox, oy = coord.to_grid(81.50, 81.50)
-    check("cell beyond the minimum (1.879mm) stays free", not obs.is_via_blocked(ox, oy))
+    check("h2h-legal but copper-to-hole violating via cell is blocked",
+          obs.is_via_blocked(ox, oy))
+
+    # Just beyond both constraints remains routable.
+    # (81.60,81.50): distance sqrt(1.8^2+0.8^2)=1.970mm > 1.90mm.
+    jx, jy = coord.to_grid(81.60, 81.50)
+    check("cell beyond both drill and copper-to-hole minima stays free",
+          not obs.is_via_blocked(jx, jy))
 
     # A cell well inside is blocked; a far cell is free.
     ix, iy = coord.to_grid(80.50, 80.70)   # 0.70mm away
@@ -66,9 +75,9 @@ def run():
             print(f"  FAIL  {f}")
         print(f"\n{len(fails)} failure(s)")
         return 1
-    print("  PASS  hole-to-hole via keepout enforced by mm distance: blocks the")
-    print("        sub-cell-inside via, leaves just-outside/far cells free")
-    print("\n4/4 checks passed")
+    print("  PASS  via-to-drill keepout enforces hole-to-hole and copper-to-hole")
+    print("        by exact mm distance without blocking cells beyond both floors")
+    print("\n5/5 checks passed")
     return 0
 
 

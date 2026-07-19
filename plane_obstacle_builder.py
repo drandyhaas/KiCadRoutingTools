@@ -762,7 +762,7 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
 def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                     config: GridRouteConfig, exclude_net_id: int):
     """Block via placement near existing drill holes."""
-    if config.hole_to_hole_clearance <= 0:
+    if config.hole_to_hole_clearance <= 0 and config.clearance <= 0:
         return
 
     # Collect drill holes
@@ -789,7 +789,8 @@ def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # the signal router) rather than a disk centred on the quantized drill cell,
     # so a stitching via cannot land a sub-cell inside the minimum (issue #70).
     block_via_cells_near_drills(obstacles, drill_holes, config.via_drill,
-                                config.hole_to_hole_clearance, config.grid_step)
+                                config.hole_to_hole_clearance, config.grid_step,
+                                config.via_size, config.clearance)
 
 
 def block_via_position(obstacles: GridObstacleMap, via_x: float, via_y: float,

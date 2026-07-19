@@ -1160,17 +1160,21 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
 
 def block_via_cells_near_drills(obstacles: GridObstacleMap,
                                  drill_holes, via_drill: float,
-                                 hole_to_hole_clearance: float, grid_step: float):
-    """Block via-placement cells within the hole-to-hole drill minimum of each
-    drill hole.
+                                 hole_to_hole_clearance: float, grid_step: float,
+                                 via_size: float = 0.0,
+                                 copper_to_hole_clearance: float = 0.0):
+    """Block via-placement cells within the required clearance of each drill.
 
     A via placed on the grid sits at its cell's real center; block the cell when
-    that center is within the required center-to-center distance of the REAL
-    drill center, tested in mm -- NOT as a floored/quantized integer-cell disk.
+    that center is within the larger of the drill-to-drill and via-copper-to-hole
+    center distances from the REAL drill center, tested in mm -- NOT as a
+    floored/quantized integer-cell disk.
     Flooring the radius (or centering the disk on the quantized drill cell) lets
     a via land a sub-cell inside the hole-to-hole minimum (issue #70 / #125:
     PAD-DRILL-VIA-DRILL at the default 0.1mm grid). Being exact in mm avoids both
     the under-block (a real fab violation) and the over-block (lost routability).
+    Reserving only the via drill also lets a larger via annulus touch an existing
+    hole while its drill still clears (issue #441, vfo_ctrl hole_clearance).
 
     Shared by the signal router (add_drill_hole_obstacles) and route_planes
     (_add_drill_hole_via_obstacles) so both enforce the keepout identically.
@@ -1181,14 +1185,20 @@ def block_via_cells_near_drills(obstacles: GridObstacleMap,
         via_drill: drill diameter of the via being placed (mm)
         hole_to_hole_clearance: minimum drill edge-to-edge clearance (mm)
         grid_step: grid resolution (mm)
+        via_size: outer copper diameter of the via being placed (mm)
+        copper_to_hole_clearance: minimum via copper to drill edge clearance (mm)
     """
-    if hole_to_hole_clearance <= 0:
+    if hole_to_hole_clearance <= 0 and \
+       (via_size <= 0 or copper_to_hole_clearance <= 0):
         return
     coord = GridCoord(grid_step)
     cells = []
     for hx, hy, drill_dia in drill_holes:
-        # Required center-to-center distance = drill/2 + via_drill/2 + clearance.
-        required_dist = drill_dia / 2.0 + via_drill / 2.0 + hole_to_hole_clearance
+        h2h_dist = drill_dia / 2.0 + via_drill / 2.0 + max(
+            hole_to_hole_clearance, 0.0)
+        copper_hole_dist = drill_dia / 2.0 + via_size / 2.0 + max(
+            copper_to_hole_clearance, 0.0)
+        required_dist = max(h2h_dist, copper_hole_dist)
         req_sq = required_dist * required_dist
         gx, gy = coord.to_grid(hx, hy)
         expand = coord.to_grid_dist_safe(required_dist) + 1  # ceil + 1-cell bbox margin
@@ -1413,10 +1423,12 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         config.grid_step, list(range(len(config.layers))),
         extra_clearance=extra_clearance, include_plated=False)
 
-    # Via keep-out (hole-to-hole drill minimum) near every drill.
-    if config.hole_to_hole_clearance > 0 and drill_holes:
+    # Via keep-out near every drill: enforce both drill-to-drill spacing and
+    # the via annulus's copper-to-hole floor (#441).
+    if drill_holes and (config.hole_to_hole_clearance > 0 or config.clearance > 0):
         block_via_cells_near_drills(obstacles, drill_holes, config.via_drill,
-                                    config.hole_to_hole_clearance, config.grid_step)
+                                    config.hole_to_hole_clearance, config.grid_step,
+                                    config.via_size, config.clearance)
 
 
 def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
