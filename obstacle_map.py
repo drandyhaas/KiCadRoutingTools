@@ -1270,6 +1270,17 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                     # net-tied mounting holes; copper across one's "own" NPTH
                     # hole is just as cut by the drill).
                     npth_holes.extend(circles)
+                elif (max(pad.size_x, pad.size_y) < pad.drill
+                      and net_id not in nets_to_route_set):
+                    # #441: a PLATED pad whose copper ring does NOT span its drill
+                    # (a near-zero annular mounting hole -- vfo_ctrl's U4 "MH":
+                    # 0.001mm copper over a 2.5mm drill) leaves the hole exposed,
+                    # so _pad_has_copper is True but the pad-copper obstacle is a
+                    # ~1um speck that never keeps a track off the real 2.5mm drill.
+                    # Treat it as NPTH for the TRACK keep-out too. Scoped to pads
+                    # FOREIGN to the nets being routed so a genuinely reachable (if
+                    # degenerate) signal pad is never made unroutable.
+                    npth_holes.extend(circles)
 
     # Track keep-out for NPTH holes on every copper layer (issue #233). The
     # copper-to-NPTH-hole floor is the JLC "NPTH to Track" fab value, never below
