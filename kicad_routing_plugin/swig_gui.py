@@ -2935,6 +2935,12 @@ class RoutingDialog(wx.Dialog):
                     net_names=net_names,
                     layers=config['layers'],
                     track_width=track_width,
+                    # #435 companion: Track Width override UNCHECKED (and no impedance)
+                    # -> route each net at its OWN netclass width engine-side, matching
+                    # the CLI's omitted --track-width. Checked/impedance = the CLI's
+                    # explicit flag (verbatim global width).
+                    track_width_from_class=(not self.track_width_check.GetValue()
+                                            and not config.get('impedance')),
                     clearance=clearance,
                     via_size=via_size,
                     via_drill=via_drill,

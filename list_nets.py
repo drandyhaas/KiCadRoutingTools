@@ -336,6 +336,35 @@ def net_clearance_map_by_id(pcb_path, nets, design_rules=None):
     return out
 
 
+def net_track_width_map_by_id(pcb_path, nets, design_rules=None):
+    """Resolve each net to its net-class TRACK WIDTH (mm) -- the single-ended
+    companion to net_clearance_map_by_id, so route.py can route each net at its OWN
+    class width when --track-width is omitted (a controlled-impedance signal class or
+    a power class, each with a different width). Unlike clearance (KiCad enforces the
+    strictest max), a net's width is the width of its ASSIGNED class, so this uses
+    resolve_net_class (explicit assignment, else the first matching pattern).
+
+    `nets` is {net_id: net_name}. Returns {net_id: width_mm} for nets whose resolved
+    class is NON-Default AND defines a track_width (Default-only nets use
+    config.track_width = the board Default class width already). Empty when the board
+    has no netclass widths. The caller floors each value at the fab minimum."""
+    dr = design_rules if design_rules is not None else read_design_rules(pcb_path)
+    classes = dr.get('classes') or {}
+    if not classes:
+        return {}
+    out = {}
+    for nid, name in nets.items():
+        if not name:
+            continue
+        cname = resolve_net_class(name, dr)
+        if cname == 'Default':
+            continue
+        w = (classes.get(cname) or {}).get('track_width')
+        if isinstance(w, (int, float)):
+            out[nid] = float(w)
+    return out
+
+
 def resolve_net_class(net_name, rules):
     """Class name for a net under `rules` (a read_design_rules() result):
     explicit assignment wins, else the first matching wildcard pattern

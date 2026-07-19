@@ -197,6 +197,12 @@ _GEOMETRY_OVERRIDE_CHECKS = {
     'via_drill': 'via_drill_check',
     'hole_to_hole_clearance': 'hole_to_hole_clearance_check',
     'board_edge_clearance': 'edge_clearance_check',
+    # #435: diff-tab geometry overrides (differential panel). A plan step setting
+    # diff_pair_width/gap == the CLI passing --track-width/--diff-pair-gap, so the
+    # override box must be checked -- otherwise _effective_* ignores the typed value
+    # and each pair uses its OWN netclass diff geometry (the omitted-flag default).
+    'diff_pair_width': 'diff_pair_width_check',
+    'diff_pair_gap': 'diff_pair_gap_check',
 }
 
 

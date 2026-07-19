@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import sys
 import os
+from dataclasses import replace
 
 # Run startup checks before other imports
 from startup_checks import run_all_checks
@@ -136,6 +137,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 track_proximity_distance: float = defaults.TRACK_PROXIMITY_DISTANCE,
                 track_proximity_cost: float = defaults.TRACK_PROXIMITY_COST,
                 diff_pair_gap: float = defaults.DIFF_PAIR_GAP,
+                diff_pair_width_from_class: bool = False,
+                diff_pair_gap_from_class: bool = False,
                 diff_pair_centerline_setback: float = None,
                 min_turning_radius: float = defaults.DIFF_PAIR_MIN_TURNING_RADIUS,
                 debug_lines: bool = False,
@@ -729,12 +732,61 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         mem_after_dp = get_process_memory_mb()
         print(format_memory_stats("After diff pair obstacle map", mem_after_dp, mem_after_dp - mem_start))
 
-    # Block connector regions for ALL diff pairs upfront
-    # Vias span all layers, so we must block connector regions before any routing starts
+    # #435: per-pair impedance geometry. When --track-width / --diff-pair-gap were
+    # NOT explicitly given, each pair falls back to its OWN netclass diff_pair_width
+    # / diff_pair_gap (not the board Default), so a multi-class board routes every
+    # pair to its own controlled-impedance geometry. Build one base obstacle map per
+    # DISTINCT (width, gap) so each pair reserves exactly its own coupled channel;
+    # block each pair's connector regions on ITS geometry map.
+    pair_diff_geom = {}                       # {p_net_id: (width, gap)}; EMPTY when
+                                              # geometry is explicit (loop stays inert)
+    diff_pair_base_obstacles_by_geom = {}     # {(width, gap): obstacle_map}
     if diff_pair_ids_to_route:
+        _global_geom = (round(config.track_width, 4), round(config.diff_pair_gap, 4))
+        diff_pair_base_obstacles_by_geom[_global_geom] = diff_pair_base_obstacles
+        # Only resolve per-pair geometry when a flag was OMITTED (from_class). When
+        # both were explicit, pair_diff_geom stays empty and every pair routes at the
+        # global config exactly as before -- no per-pair replace(), byte-identical.
+        if diff_pair_width_from_class or diff_pair_gap_from_class:
+            try:
+                from list_nets import read_design_rules, resolve_net_class, fab_floors
+                _rules = read_design_rules(input_file) if input_file else {}
+                _classes = (_rules.get('classes') or {}) if _rules else {}
+                _fab = fab_floors(len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4)
+                _wfloor, _gfloor = _fab.get('track_width', 0.0), _fab.get('clearance', 0.0)
+            except Exception as _e:
+                print(f"  (#435: could not read per-pair netclass diff geometry: {_e})")
+                _classes, _rules, _wfloor, _gfloor = {}, {}, 0.0, 0.0
+            for _pn, _pair in diff_pair_ids_to_route:
+                _c = _classes.get(resolve_net_class(_pair.p_net_name, _rules), {}) if _classes else {}
+                _w = _c.get('diff_pair_width') if diff_pair_width_from_class else None
+                _g = _c.get('diff_pair_gap') if diff_pair_gap_from_class else None
+                _ew = max(_w if _w is not None else config.track_width, _wfloor)
+                _eg = max(_g if _g is not None else config.diff_pair_gap, _gfloor)
+                geom = (round(_ew, 4), round(_eg, 4))
+                pair_diff_geom[_pair.p_net_id] = geom
+                # Build one base obstacle map per DISTINCT geometry (dedup; ~1-3 classes).
+                if geom not in diff_pair_base_obstacles_by_geom:
+                    _ec = (geom[0] + geom[1]) / 2
+                    print(f"  #435: building diff obstacle map for class geometry "
+                          f"width={geom[0]} gap={geom[1]} (extra clearance {_ec:.3f}mm)...")
+                    diff_pair_base_obstacles_by_geom[geom] = build_base_obstacle_map(
+                        pcb_data, replace(config, track_width=geom[0], diff_pair_gap=geom[1]),
+                        all_net_ids_to_route, _ec, net_clearances=net_clearances)
+            if len(set(pair_diff_geom.values())) > 1:
+                print(f"  #435: {len(diff_pair_base_obstacles_by_geom)} distinct diff-pair "
+                      f"geometries across {len(pair_diff_geom)} pair(s).")
+
+        # Block connector regions upfront, each on ITS geometry map with ITS config
+        # (global map when geometry is explicit -- pair_diff_geom empty)
+        # (vias span all layers, so connector regions must be blocked before routing).
         print(f"Blocking connector regions for {len(diff_pair_ids_to_route)} diff pair(s)...")
         for pair_name, pair in diff_pair_ids_to_route:
-            connector_info = get_diff_pair_connector_regions(pcb_data, pair, config)
+            geom = pair_diff_geom.get(pair.p_net_id, _global_geom)
+            _dp_map = diff_pair_base_obstacles_by_geom[geom]
+            _pcfg = config if geom == _global_geom else replace(
+                config, track_width=geom[0], diff_pair_gap=geom[1])
+            connector_info = get_diff_pair_connector_regions(pcb_data, pair, _pcfg)
             if connector_info:
                 for end in ('src', 'tgt'):
                     dir_x, dir_y = connector_info[f'{end}_dir']
@@ -743,10 +795,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                     signs = (1, -1) if connector_info[f'{end}_dir_synthesized'] else (1,)
                     for sign in signs:
                         add_connector_region_via_blocking(
-                            diff_pair_base_obstacles,
+                            _dp_map,
                             connector_info[f'{end}_center'][0], connector_info[f'{end}_center'][1],
                             dir_x * sign, dir_y * sign,
-                            connector_info[f'{end}_setback'], connector_info['spacing_mm'], config
+                            connector_info[f'{end}_setback'], connector_info['spacing_mm'], _pcfg
                         )
 
     # Get ALL unrouted nets in the PCB for stub proximity costs
@@ -824,6 +876,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         cancel_check=cancel_check,
         progress_callback=progress_callback,
     )
+    # #435: per-pair impedance geometry + per-(width,gap) base obstacle maps, read
+    # by route_diff_pairs to route each pair at its own netclass geometry. Attached
+    # post-hoc (RoutingState is a plain dataclass) so no signature churn; the loop
+    # reads them via getattr and is inert when unset.
+    state.pair_diff_geom = pair_diff_geom
+    state.diff_pair_base_obstacles_by_geom = diff_pair_base_obstacles_by_geom
 
     # Create local aliases for frequently-used state fields
     routed_net_ids = state.routed_net_ids
@@ -1542,6 +1600,13 @@ Examples:
     # enforce_fab_floors; _clamp_netclasses is stashed for drc_fix_kwargs.
     from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
                            board_constraint)
+    # #435: whether the diff geometry was EXPLICITLY set on the CLI. If NOT, each
+    # pair falls back engine-side to its OWN netclass diff_pair_gap/width (not the
+    # board Default class), so a multi-class board routes every pair to its own
+    # impedance geometry. An explicit value (or --impedance for width) is honored
+    # verbatim for all pairs, subject only to the fab/board DRC floors.
+    _dp_width_explicit = (args.track_width is not None) or (args.impedance is not None)
+    _dp_gap_explicit = args.diff_pair_gap is not None
     # --track-width IS the diff-pair LEG WIDTH here: when omitted, default to the
     # board's OWN Default net-class diff_pair_width (else routing_defaults), so a
     # bare diff route uses the board's own differential geometry -- parity with the
@@ -1736,6 +1801,8 @@ Examples:
                 track_proximity_distance=args.track_proximity_distance,
                 track_proximity_cost=args.track_proximity_cost,
                 diff_pair_gap=args.diff_pair_gap,
+                diff_pair_width_from_class=not _dp_width_explicit,
+                diff_pair_gap_from_class=not _dp_gap_explicit,
                 diff_pair_centerline_setback=args.diff_pair_centerline_setback,
                 min_turning_radius=args.min_turning_radius,
                 debug_lines=args.debug_lines,

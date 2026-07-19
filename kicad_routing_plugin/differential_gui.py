@@ -971,6 +971,8 @@ class DifferentialTab(wx.Panel):
                 keepout_enabled=config.get('keepout_enabled', False),
                 keepout_layer=config.get('keepout_layer', defaults.KEEPOUT_LAYER),
                 diff_pair_gap=config.get('diff_pair_gap', 0.101),
+                diff_pair_width_from_class=config.get('diff_pair_width_from_class', False),
+                diff_pair_gap_from_class=config.get('diff_pair_gap_from_class', False),
                 min_turning_radius=config.get('min_turning_radius', 0.2),
                 max_setback_angle=config.get('max_setback_angle', 45.0),
                 max_turn_angle=config.get('max_turn_angle', 180.0),
@@ -1333,6 +1335,11 @@ class DifferentialTab(wx.Panel):
         return {
             'diff_pair_width': self._effective_diff_pair_width(),
             'diff_pair_gap': self._effective_diff_pair_gap(),
+            # #435: override UNCHECKED -> resolve each pair's OWN netclass diff
+            # geometry engine-side (not the Default class the _effective_* value
+            # falls back to, which is only the fallback for classless pairs).
+            'diff_pair_width_from_class': not self.diff_pair_width_check.GetValue(),
+            'diff_pair_gap_from_class': not self.diff_pair_gap_check.GetValue(),
             'impedance': self.diff_impedance.GetValue() or None,  # 0 = off
             'min_turning_radius': self.min_turning_radius.GetValue(),
             'max_setback_angle': self.max_setback_angle.GetValue(),
