@@ -358,6 +358,28 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         _collect_via_obstacles(via, coord, num_layers, via_track_list,
                                 via_via_radius, diagonal_margin,
                                 blocked_cells_set, blocked_vias_set)
+        # #441: net-INDEPENDENT drill hole-to-hole keepout, stamped into the via
+        # map IN ADDITION to the copper via-via disc above (which is copper-only:
+        # vs/2 + via_size/2 + clearance). A future ROUTE via must also clear this
+        # via's DRILL by the fab hole-to-hole floor -- without it two different-net
+        # vias drill within it (vis_nir_spec / cryologger_aws: diff-net via drills
+        # ~0.26mm overlap on boards whose min_hole_to_hole > the copper spacing).
+        # Mirrors precompute_via_placement_obstacles's plane-path disc exactly
+        # (float-centre, strict <); added to blocked_vias_set so it is added AND
+        # removed with the whole NetObstacleData -- ref-count balanced (#208).
+        _h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
+        if _h2h > 0 and getattr(via, 'drill', 0) > 0:
+            _gx, _gy = coord.to_grid(via.x, via.y)
+            _req = via.drill / 2.0 + config.via_drill / 2.0 + _h2h
+            _de = coord.to_grid_dist_safe(_req) + 1  # ceil + 1-cell bbox margin
+            _off = np.arange(-_de, _de + 1)
+            _dxg, _dyg = np.meshgrid(_off, _off, indexing="ij")
+            _cx = (_gx + _dxg) * config.grid_step
+            _cy = (_gy + _dyg) * config.grid_step
+            _dm = ((_cx - via.x) ** 2 + (_cy - via.y) ** 2) < _req * _req
+            if _dm.any():
+                blocked_vias_set.append(
+                    np.column_stack([(_gx + _dxg)[_dm], (_gy + _dyg)[_dm]]).astype(np.int32))
 
     # Process pads
     pads = pcb_data.pads_by_net.get(net_id, [])
