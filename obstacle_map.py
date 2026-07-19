@@ -1486,6 +1486,29 @@ def add_net_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                           clearance_override=obs_clearance)
 
 
+def _via_h2h_cells(via, config: GridRouteConfig, coord: GridCoord):
+    """int32 (N,2) cells of the net-INDEPENDENT drill hole-to-hole keepout around
+    a via (#441): a future ROUTE via must clear this via's DRILL by the fab
+    hole-to-hole floor, IN ADDITION to the copper via-via disc (which is
+    copper-only). Float-centre, strict < -- mirrors block_via_cells_near_drills /
+    the plane path exactly. Returns None when h2h is off or the via has no drill,
+    so add/remove twins short-circuit identically and stay ref-count balanced."""
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
+    if h2h <= 0 or getattr(via, 'drill', 0) <= 0:
+        return None
+    gx, gy = coord.to_grid(via.x, via.y)
+    req = via.drill / 2.0 + config.via_drill / 2.0 + h2h
+    de = coord.to_grid_dist_safe(req) + 1  # ceil + 1-cell bbox margin
+    off = np.arange(-de, de + 1)
+    dxg, dyg = np.meshgrid(off, off, indexing="ij")
+    cx = (gx + dxg) * config.grid_step
+    cy = (gy + dyg) * config.grid_step
+    dm = ((cx - via.x) ** 2 + (cy - via.y) ** 2) < req * req
+    if not dm.any():
+        return None
+    return np.column_stack([(gx + dxg)[dm], (gy + dyg)[dm]]).astype(np.int32)
+
+
 def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                net_id: int, config: GridRouteConfig,
                                extra_clearance: float = 0.0,
@@ -1519,6 +1542,11 @@ def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         # required) -- a real cross-net via-via DRC violation the router never saw.
         via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
         _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid, diagonal_margin)
+        # #441: net-independent drill hole-to-hole disc (add-only: every caller of
+        # this fn stamps a fresh/clone map that is discarded, never rip-removed).
+        _h2h = _via_h2h_cells(via, config, coord)
+        if _h2h is not None:
+            obstacles.add_blocked_vias_batch(_h2h)
 
 
 def _ledger_bracket(obstacles):
@@ -1576,6 +1604,11 @@ def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
         # required) -- a real cross-net via-via DRC violation the router never saw.
         via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
         _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid, diagonal_margin)
+        # #441: net-independent drill hole-to-hole disc, MIRRORED in
+        # remove_vias_list_from_obstacles so rip-up stays ref-count balanced.
+        _h2h = _via_h2h_cells(via, config, coord)
+        if _h2h is not None:
+            obstacles.add_blocked_vias_batch(_h2h)
     _ledger_close(obstacles, _pre, "add_vias_list")
 
 
@@ -1730,6 +1763,12 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
             for ey in range(-vr_range, vr_range + 1):
                 if ex*ex + ey*ey <= vr_sq:
                     vias_to_remove.append((gx + ex, gy + ey))
+
+        # #441: mirror the drill hole-to-hole disc add_vias_list_as_obstacles
+        # stamped (same _via_h2h_cells), so rip-up removes exactly what it added.
+        _h2h = _via_h2h_cells(via, config, coord)
+        if _h2h is not None:
+            vias_to_remove.extend((int(a), int(b)) for a, b in _h2h)
 
     # Batch remove cells and vias
     if cells_to_remove:
