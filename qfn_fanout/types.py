@@ -40,9 +40,12 @@ class PadInfo:
     """Analyzed information about a pad."""
     pad: Pad
     side: str  # 'top', 'bottom', 'left', 'right', 'center'
-    escape_direction: Tuple[float, float]  # Unit vector pointing outward
-    pad_length: float  # Length of pad (along edge)
-    pad_width: float   # Width of pad (perpendicular to edge)
+    # Unit vector along the pad's long axis, signed away from package center.
+    # Since issue #410 'center' (interior/EP) pads carry a real axis too; a pad
+    # exactly at the package center keeps the positive long-axis direction.
+    escape_direction: Tuple[float, float]
+    pad_length: float  # Extent across the escape axis (along edge)
+    pad_width: float   # Extent along the escape axis
 
 
 @dataclass

@@ -588,7 +588,9 @@ Options:
                       terminals; MATCH the --grid-step you pass to route.py
   --escape-method     stub (default) = surface 45-degree fan; underpad = drop a
                       through-via just past each pad and escape on an inner layer
-                      (issue #164), for crowded fine-pitch edges
+                      (issue #164), for crowded fine-pitch edges. With --nets,
+                      underpad also escapes interior (under-body) pads; unscoped
+                      runs never via-drop the exposed/thermal pad (issue #410)
   --via-size          Underpad escape via outer diameter in mm (default: 0.45)
   --via-drill         Underpad escape via drill diameter in mm (default: 0.25)
   --board-edge-clearance  Min clearance from stub/via copper to the Edge.Cuts
