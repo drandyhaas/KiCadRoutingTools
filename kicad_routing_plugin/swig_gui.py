@@ -600,18 +600,19 @@ class RoutingDialog(wx.Dialog):
 
     def _effective_board_edge_clearance(self):
         """Board-edge clearance to route with. UNCHECKED: the board's own
-        min_copper_edge_clearance constraint (parity with the CLI, which always uses
-        it). CHECKED: the entered override value -- but Obey-DRC (if on) still stops
-        it going below the board's own edge Constraint, i.e. you can't enter a
-        DRC-violating value. Pinned UP to the fab copper-to-edge floor either way."""
-        minimums = _get_board_minimum_constraints() or {}
-        board_min = minimums.get('min_copper_edge_clearance') or 0.0
+        min_copper_edge_clearance constraint (parity with the CLI, which uses it
+        when --board-edge-clearance is omitted). CHECKED: the entered override
+        value, honored as given -- identical to the other basic-tab overrides
+        (_effective_geometry_floor): the shared Obey-DRC interactive validation
+        (_on_drc_param_changed / _apply_board_minimums_to_controls, keyed via
+        _drc_min_keys['board_edge_clearance']) already clamps the control up to the
+        board minimum while Obey-DRC is on, so no redundant route-time re-clamp is
+        needed here (edge was the only param that carried one). Pinned UP to the
+        fab copper-to-edge floor either way."""
         if self.edge_clearance_check.GetValue():
             val = self.board_edge_clearance.GetValue()
-            if self.obey_drc_check.GetValue() and val < board_min:
-                val = board_min
         else:
-            val = board_min
+            val = (_get_board_minimum_constraints() or {}).get('min_copper_edge_clearance') or 0.0
         return self._fab_floored('board_edge_clearance', val)
 
     def _effective_plane_edge_clearance(self):
