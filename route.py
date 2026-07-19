@@ -270,6 +270,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 ordering_strategy: str = "inside_out",
                 disable_bga_zones: Optional[List[str]] = None,
                 track_width: float = defaults.TRACK_WIDTH,
+                track_width_from_class: bool = False,
                 impedance: Optional[float] = None,
                 power_nets: Optional[List[str]] = None,
                 power_nets_widths: Optional[List[float]] = None,
@@ -487,6 +488,28 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"routing at the uniform clearance.")
             net_clearances = None
 
+    # #435 companion: when --track-width was OMITTED, route each net at its OWN
+    # netclass track width (a controlled-impedance signal class or a power class,
+    # each with a different width), not the single Default-class width. Explicit
+    # --track-width is honored verbatim for all nets (this stays empty). Floored at
+    # the fab track minimum; a manual --power-nets-widths override still wins.
+    net_track_widths = {}
+    if track_width_from_class and input_file and os.path.isfile(input_file):
+        try:
+            from list_nets import net_track_width_map_by_id, fab_floors
+            _twfloor = fab_floors(len(getattr(pcb_data.board_info, 'copper_layers', None)
+                                      or []) or 4).get('track_width', 0.0)
+            net_track_widths = {nid: max(w, _twfloor) for nid, w in
+                                net_track_width_map_by_id(
+                                    input_file,
+                                    {nid: n.name for nid, n in pcb_data.nets.items()}).items()}
+            if net_track_widths:
+                print(f"Auto-read netclass track widths for {len(net_track_widths)} "
+                      f"non-Default net(s) (#435 single-ended companion).")
+        except Exception as _e:
+            print(f"Warning: could not auto-read netclass track widths ({_e}).")
+            net_track_widths = {}
+
     # Issue #8: snapshot the input board's copper per net BEFORE any routing.
     # The final connectivity reconciliation reports against the copper that will
     # be WRITTEN (this original copper + the write-list's new copper), not against
@@ -628,6 +651,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if net_clearances:
         config.net_clearances = {nid: c for nid, c in net_clearances.items()
                                  if c and c > 0}
+
+    # #435 companion: per-net netclass track widths (auto-read above when
+    # --track-width was omitted). get_net_track_width() routes each net at its own
+    # class width; a manual --power-nets-widths override below still wins.
+    if net_track_widths:
+        config.net_track_widths = dict(net_track_widths)
 
     # Identify power nets and set up per-net widths
     if power_nets and power_nets_widths:
@@ -2204,6 +2233,11 @@ For differential pair routing, use route_diff.py:
     # downstream use. Stashed on args for drc_fix_kwargs (the writeback clamp).
     from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
                            board_constraint)
+    # #435 companion: whether --track-width was EXPLICITLY set. If NOT, each net
+    # routes at its OWN netclass track width engine-side (not the single board
+    # Default-class width). --impedance derives width per layer, so it counts as
+    # explicit here. Captured before the fill below overwrites the None.
+    _tw_explicit = (args.track_width is not None) or (getattr(args, 'impedance', None) is not None)
     # track_width / via_size / via_drill: when omitted, default to the board's OWN
     # Default net-class value (else the routing_defaults constant), so a bare route
     # uses the board's own geometry -- parity with the GUI's per-control override.
@@ -2395,6 +2429,7 @@ For differential pair routing, use route_diff.py:
                 rip_existing_nets=args.rip_existing_nets,
                 layers=args.layers,
                 track_width=args.track_width,
+                track_width_from_class=not _tw_explicit,
                 impedance=args.impedance,
                 power_nets=args.power_nets,
                 power_nets_widths=args.power_nets_widths,

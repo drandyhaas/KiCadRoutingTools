@@ -129,6 +129,11 @@ class GridRouteConfig:
     layer_widths: Dict[str, float] = field(default_factory=dict)  # Per-layer widths for impedance control
     # Power net routing - per-net width overrides
     power_net_widths: Dict[int, float] = field(default_factory=dict)  # net_id -> width in mm
+    # Per-net netclass track width (auto-read from the .kicad_pro when --track-width
+    # is omitted). Unlike power_net_widths this is the net's OWN class width and may
+    # be SMALLER than the global track_width (a narrower class), floored at the fab
+    # minimum by the caller. Lower priority than a manual power_net_widths override.
+    net_track_widths: Dict[int, float] = field(default_factory=dict)  # net_id -> width in mm
     # Layer cost weights - prefer certain layers over others (1.0 = normal, 1.5 = 50% more expensive)
     layer_costs: List[float] = field(default_factory=list)  # Per-layer cost multipliers
     # Debug options
@@ -219,23 +224,26 @@ class GridRouteConfig:
         """Get track width for a specific net on a specific layer.
 
         Priority order:
-        1. Per-net power width override (power_net_widths)
-        2. Layer-specific width (layer_widths, for impedance control)
-        3. Default track_width
-
-        The returned width is always at least track_width (power net widths
-        cannot be smaller than the base track width).
+        1. Per-net power width override (power_net_widths) -- floored UP to track_width
+        2. Per-net netclass width (net_track_widths) -- the net's OWN class width,
+           EXACTLY (may be narrower than the global track_width); floored at the fab
+           minimum by the caller. Only populated when --track-width was omitted.
+        3. Layer-specific width (layer_widths, for impedance control)
+        4. Default track_width
 
         Args:
             net_id: The net ID to get width for
             layer: The layer name
 
         Returns:
-            Track width in mm (never less than track_width)
+            Track width in mm
         """
         if net_id in self.power_net_widths:
             # Ensure power net width is at least the base track width
             return max(self.power_net_widths[net_id], self.track_width)
+        if self.net_track_widths and net_id in self.net_track_widths:
+            # #435 companion: route this net at its OWN class width (either direction).
+            return self.net_track_widths[net_id]
         return self.get_track_width(layer)
 
     def get_net_clearance(self, net_id: int) -> float:
