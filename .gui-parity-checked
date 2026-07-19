@@ -1,3 +1,24 @@
+ad1bd5e 2026-07-19 parity sweep 810ce7d..ad1bd5e (the #436/#438 cross-class
+cleanup umbrella, #426/#427/#429 agent fixes, the replay clobber guard, and
+#435 per-pair diff geometry + single-ended per-net track width). Outcome:
+parity CONFIRMED -- wx test_gui_engine_parity VERDICT PARITY (kicad unconnected
+0/0, drc 0/0) + both no-wx gates pass. New CLI-visible engine params and their
+GUI wiring:
+  * #436/#438 umbrella (cross-class + board-edge aware cleanup): entirely inside
+    the shared cleanup_pipeline, which reads config.net_clearances /
+    config.board_edge_clearance -- both fronts inherit, no per-front wiring.
+  * #435 diff geometry: diff_pair_{width,gap}_from_class threaded through
+    route_diff main (argparse absence) AND differential_gui (override checkbox);
+    claude_plan _GEOMETRY_OVERRIDE_CHECKS extended with diff_pair_width/gap ->
+    their diff-tab boxes; manifest_to_plan already maps --diff-pair-gap and
+    route_diff --track-width; reset already resets the boxes.
+  * #435 single-ended companion: track_width_from_class threaded through route.py
+    main (argparse absence) AND swig_gui (track_width_check unchecked + no
+    impedance); track_width_check already in claude_plan's override map + reset.
+  * #427 edge-severity + clobber guard: check_drc.py / tests-stress only (no GUI
+    surface). No wiring gaps found.
+
+--- prior sweeps ---
 810ce7d 2026-07-17 parity sweep 6e88568..810ce7d (the #217/#412 connectivity
 wave, ~37 commits: Tier-1 levers, T5 custody + SE member fallback, net-tie
 support, rescue-window fence, full-stack layer normalization, #416 terminal
