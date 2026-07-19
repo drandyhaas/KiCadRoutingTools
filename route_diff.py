@@ -738,12 +738,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # pair to its own controlled-impedance geometry. Build one base obstacle map per
     # DISTINCT (width, gap) so each pair reserves exactly its own coupled channel;
     # block each pair's connector regions on ITS geometry map.
-    pair_diff_geom = {}                       # {p_net_id: (width, gap)}
+    pair_diff_geom = {}                       # {p_net_id: (width, gap)}; EMPTY when
+                                              # geometry is explicit (loop stays inert)
     diff_pair_base_obstacles_by_geom = {}     # {(width, gap): obstacle_map}
     if diff_pair_ids_to_route:
         _global_geom = (round(config.track_width, 4), round(config.diff_pair_gap, 4))
         diff_pair_base_obstacles_by_geom[_global_geom] = diff_pair_base_obstacles
-        _cls_geom = {}
+        # Only resolve per-pair geometry when a flag was OMITTED (from_class). When
+        # both were explicit, pair_diff_geom stays empty and every pair routes at the
+        # global config exactly as before -- no per-pair replace(), byte-identical.
         if diff_pair_width_from_class or diff_pair_gap_from_class:
             try:
                 from list_nets import read_design_rules, resolve_net_class, fab_floors
@@ -760,29 +763,26 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 _g = _c.get('diff_pair_gap') if diff_pair_gap_from_class else None
                 _ew = max(_w if _w is not None else config.track_width, _wfloor)
                 _eg = max(_g if _g is not None else config.diff_pair_gap, _gfloor)
-                _cls_geom[_pair.p_net_id] = (round(_ew, 4), round(_eg, 4))
-        # Assign every pair a geometry (default = the global config) and build any
-        # base obstacle map not yet built (dedup by geometry -- usually 1-3 classes).
-        for _pn, _pair in diff_pair_ids_to_route:
-            geom = _cls_geom.get(_pair.p_net_id, _global_geom)
-            pair_diff_geom[_pair.p_net_id] = geom
-            if geom not in diff_pair_base_obstacles_by_geom:
-                _w, _g = geom
-                _ec = (_w + _g) / 2
-                print(f"  #435: building diff obstacle map for class geometry "
-                      f"width={_w} gap={_g} (extra clearance {_ec:.3f}mm)...")
-                diff_pair_base_obstacles_by_geom[geom] = build_base_obstacle_map(
-                    pcb_data, replace(config, track_width=_w, diff_pair_gap=_g),
-                    all_net_ids_to_route, _ec, net_clearances=net_clearances)
-        if len({g for g in pair_diff_geom.values()}) > 1:
-            print(f"  #435: {len(diff_pair_base_obstacles_by_geom)} distinct diff-pair "
-                  f"geometries across {len(pair_diff_geom)} pair(s).")
+                geom = (round(_ew, 4), round(_eg, 4))
+                pair_diff_geom[_pair.p_net_id] = geom
+                # Build one base obstacle map per DISTINCT geometry (dedup; ~1-3 classes).
+                if geom not in diff_pair_base_obstacles_by_geom:
+                    _ec = (geom[0] + geom[1]) / 2
+                    print(f"  #435: building diff obstacle map for class geometry "
+                          f"width={geom[0]} gap={geom[1]} (extra clearance {_ec:.3f}mm)...")
+                    diff_pair_base_obstacles_by_geom[geom] = build_base_obstacle_map(
+                        pcb_data, replace(config, track_width=geom[0], diff_pair_gap=geom[1]),
+                        all_net_ids_to_route, _ec, net_clearances=net_clearances)
+            if len(set(pair_diff_geom.values())) > 1:
+                print(f"  #435: {len(diff_pair_base_obstacles_by_geom)} distinct diff-pair "
+                      f"geometries across {len(pair_diff_geom)} pair(s).")
 
         # Block connector regions upfront, each on ITS geometry map with ITS config
+        # (global map when geometry is explicit -- pair_diff_geom empty)
         # (vias span all layers, so connector regions must be blocked before routing).
         print(f"Blocking connector regions for {len(diff_pair_ids_to_route)} diff pair(s)...")
         for pair_name, pair in diff_pair_ids_to_route:
-            geom = pair_diff_geom[pair.p_net_id]
+            geom = pair_diff_geom.get(pair.p_net_id, _global_geom)
             _dp_map = diff_pair_base_obstacles_by_geom[geom]
             _pcfg = config if geom == _global_geom else replace(
                 config, track_width=geom[0], diff_pair_gap=geom[1])
