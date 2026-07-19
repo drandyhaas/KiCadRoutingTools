@@ -1481,7 +1481,15 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # copper-to-edge floor (0.20, #439 -- the routers pin the edge up to it, so a
     # project-less final's copper is >=0.20 from the edge) or the copper clearance,
     # whichever is larger.
-    effective_board_edge_clearance = board_edge_clearance if board_edge_clearance > 0 else max(clearance, 0.20)
+    # #441: pin the copper-to-edge grade floor to the fab minimum (fab_tiers
+    # board_edge, the active fab tier's copper-to-edge floor) even when the
+    # board/CLI declares a smaller one -- a board setting a sub-fab (or 0) edge
+    # rule would otherwise grade clean while copper runs to the milled edge. A
+    # declared rule ABOVE the fab floor (e.g. 0.5) is honored via max().
+    from fix_kicad_drc_settings import fab_edge_floor
+    _fab_edge = fab_edge_floor()
+    effective_board_edge_clearance = (max(board_edge_clearance, _fab_edge)
+                                      if board_edge_clearance > 0 else max(clearance, _fab_edge))
     if quiet and net_patterns:
         # Print a brief summary line in quiet mode
         print(f"Checking {', '.join(net_patterns)} for DRC...", end=" ", flush=True)

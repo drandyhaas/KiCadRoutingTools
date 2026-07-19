@@ -3267,7 +3267,7 @@ class RoutingDialog(wx.Dialog):
         if successful > 0 and config.get('fix_drc_settings', True):
             try:
                 from fix_kicad_drc_settings import (compute_targets, severity_plan,
-                                                    apply_targets_to_board)
+                                                    apply_targets_to_board, fab_edge_floor)
                 # Grade at the smallest clearance any step actually routed at
                 # (e.g. fine-pitch single-ended taps below nominal), like the CLI.
                 import clearance_ledger
@@ -3279,7 +3279,8 @@ class RoutingDialog(wx.Dialog):
                     edge_clearance=config.get('board_edge_clearance'),
                     track_width=config.get('track_width'),
                     via_diameter=config.get('via_size'),
-                    via_drill=config.get('via_drill'))
+                    via_drill=config.get('via_drill'),
+                    fab_edge=fab_edge_floor())
                 drc_changes = apply_targets_to_board(
                     board, targets, severity_plan(keep_thermal=config.get('keep_thermal', False)),
                     clamp_nondefault_netclasses=config.get('clamp_netclasses', False))

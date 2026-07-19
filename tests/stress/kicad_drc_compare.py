@@ -482,18 +482,23 @@ def _staged_copy(board: str, clearance: float):
     mhc = _f(rules.get("min_hole_clearance"), None)
     if mhc and mhc > clearance:
         rules["min_hole_clearance"] = clearance
-    # Edge (#338/#295 class): when the project records NO copper-to-edge rule,
-    # kicad-cli falls back to its built-in 0.5mm default while check_drc falls
-    # back to the routed clearance -- a pure config artifact (openstint: chain
-    # lost the project, kicad's default manufactured 11 phantom items). Pin
-    # the absent key to the routed clearance so both engines grade alike. A
-    # RECORDED rule is left untouched (it is a real design constraint).
-    if "min_copper_edge_clearance" not in rules:
-        # #439: the routers enforce max(cli, board rule, 0.20 fab copper-to-edge
-        # floor) to the edge, so a project-less final's copper is >=0.20 from the
-        # edge -- grade it at max(clearance, 0.20), not the (looser) copper clearance,
-        # else a real 0.1-0.2 edge defect is missed. Symmetric with check_drc's fallback.
-        rules["min_copper_edge_clearance"] = max(clearance, 0.20)
+    # Edge (#338/#295/#441 class): copper-to-edge is graded at max(recorded rule,
+    # clearance, 0.20 fab copper-to-edge floor). Two config artifacts this fixes:
+    #  * ABSENT key -- kicad-cli falls back to its built-in 0.5mm default while
+    #    check_drc falls back to the routed clearance (openstint: a lost project
+    #    manufactured 11 phantom items). Pin it so both engines grade alike.
+    #  * RECORDED sub-fab key -- 80/184 corpus boards declare < 0.20 (32 at 0.0);
+    #    grading at that tiny value masks copper run to the milled edge (#441). It
+    #    is NOT a legitimate design constraint below what the fab can make, so it is
+    #    pinned UP to the fab floor -- matching the routers, which now enforce
+    #    max(cli, board rule, 0.20) to the edge (effective_board_edge_clearance).
+    # A recorded rule ABOVE the fab floor (e.g. 0.5) is preserved as a real design
+    # constraint via the max().
+    from fix_kicad_drc_settings import fab_edge_floor
+    _fab_edge = fab_edge_floor(board)
+    _rec_edge = _f(rules.get("min_copper_edge_clearance"), None)
+    rules["min_copper_edge_clearance"] = max(
+        _rec_edge if _rec_edge is not None else clearance, _fab_edge)
     # Silk checks are OUT OF SCOPE (results are filtered to copper classes)
     # but DRC_TEST_PROVIDER_SILK_CLEARANCE dominates wall time on art-heavy
     # boards -- lily58's keyboard legends made kicad-cli spin >10 MINUTES at
@@ -502,6 +507,14 @@ def _staged_copy(board: str, clearance: float):
     sev = cfg["board"]["design_settings"].setdefault("rule_severities", {})
     for k in ("silk_over_copper", "silk_overlap", "silk_edge_clearance"):
         sev[k] = "ignore"
+    # #441: force copper_edge_clearance ON. A board may author it "ignore" (many
+    # corpus boards do -- lpddr4_testbed's unrouted input ignores it), which makes
+    # kicad-cli skip the edge provider entirely -> the wave undercounts edge defects
+    # AND, worse, grades the UNROUTED baseline (ignore) differently from the routed
+    # final (error), so baseline subtraction spuriously attributes the whole delta
+    # to the router. Staging both sides at "error" restores symmetry and surfaces
+    # real router copper run to the milled edge (graded at the pinned floor above).
+    sev["copper_edge_clearance"] = "error"
     # Min copper web (#406): KiCad's connection_width checker is OFF by default
     # (min_connection 0) and warning-severity, so routed-copper micro-webs were
     # invisible to every automated consumer in the repo -- the corpus gave NO

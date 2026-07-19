@@ -239,13 +239,18 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
               (float(via_size) - float(via_drill)) / 2
               if via_size and via_drill else None, min_ann)
         lower('m_HoleToHoleMin', hole_to_hole)
-        # CLI parity (#338): 0.0 edge clearance means "not enforced this
-        # step", NOT "lower the rule to zero" -- writing 0 erased the board's
-        # own min_copper_edge_clearance (compute_targets now skips it the
-        # same way). A real enforced value is >= the board rule (the engines
-        # route to max(flag, board rule)), so only-lower keeps the design
-        # value.
-        lower('m_CopperEdgeClearance', edge_clearance or None)
+        # CLI parity (#338/#441): 0.0 edge clearance means "not enforced this
+        # step", NOT "lower the rule to zero". Unlike every other floor here,
+        # copper-to-edge is PINNED UP to the fab minimum (0.20 mm): a board
+        # declaring a sub-fab (or 0) edge rule would otherwise grade clean while
+        # copper runs to the milled edge. Raise to max(routed edge, fab floor);
+        # a board rule already above the fab floor (e.g. 0.5) is preserved.
+        from fix_kicad_drc_settings import fab_edge_floor
+        _edge_pin = max(edge_clearance or 0.0, fab_edge_floor())
+        if _edge_pin > 0:
+            _pin_iu = pcbnew.FromMM(float(_edge_pin))
+            if getattr(bds, 'm_CopperEdgeClearance', 0) < _pin_iu:
+                bds.m_CopperEdgeClearance = _pin_iu
         try:
             for _name, _nc in board.GetNetClasses().items():
                 if _name != 'Default':

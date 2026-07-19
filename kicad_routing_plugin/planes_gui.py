@@ -1753,7 +1753,7 @@ class PlanesTab(wx.Panel):
         if cfg and cfg.get('fix_drc_settings', True):
             try:
                 from fix_kicad_drc_settings import (compute_targets, severity_plan,
-                                                    apply_targets_to_board)
+                                                    apply_targets_to_board, fab_edge_floor)
                 # Grade at the smallest clearance any step actually routed at
                 # (e.g. fine-pitch taps below nominal), mirroring the CLI.
                 import clearance_ledger
@@ -1765,7 +1765,8 @@ class PlanesTab(wx.Panel):
                     edge_clearance=cfg.get('board_edge_clearance'),
                     track_width=cfg.get('track_width'),
                     via_diameter=cfg.get('via_size'),
-                    via_drill=cfg.get('via_drill'))
+                    via_drill=cfg.get('via_drill'),
+                    fab_edge=fab_edge_floor())
                 if apply_targets_to_board(
                         board, targets, severity_plan(keep_thermal=cfg.get('keep_thermal', False)),
                         clamp_nondefault_netclasses=cfg.get('clamp_netclasses', False)):

@@ -1260,7 +1260,7 @@ class DifferentialTab(wx.Panel):
         if tracks_added > 0 and cfg and cfg.get('fix_drc_settings', True):
             try:
                 from fix_kicad_drc_settings import (compute_targets, severity_plan,
-                                                    apply_targets_to_board)
+                                                    apply_targets_to_board, fab_edge_floor)
                 # Grade at the smallest clearance any step actually routed at, like the CLI.
                 import clearance_ledger
                 eff_clearance = clearance_ledger.effective(cfg.get('clearance')) \
@@ -1271,7 +1271,8 @@ class DifferentialTab(wx.Panel):
                     edge_clearance=cfg.get('board_edge_clearance'),
                     track_width=cfg.get('track_width'),
                     via_diameter=cfg.get('via_size'),
-                    via_drill=cfg.get('via_drill'))
+                    via_drill=cfg.get('via_drill'),
+                    fab_edge=fab_edge_floor())
                 if apply_targets_to_board(
                         board, targets, severity_plan(keep_thermal=cfg.get('keep_thermal', False)),
                         diff_pair_gap=cfg.get('diff_pair_gap'),

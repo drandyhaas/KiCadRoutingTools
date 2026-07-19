@@ -289,12 +289,49 @@ def read_project_edge_clearance(pcb_path: str):
     return 0.0
 
 
-def effective_board_edge_clearance(pcb_path: str, cli_value: float) -> float:
-    """The copper-to-Edge.Cuts clearance a route/grade step must honor
-    (issue #338): the LARGER of the board's own min_copper_edge_clearance
-    (KiCad enforces it) and the explicit --board-edge-clearance. 0.0 = neither
-    set (callers keep their track-clearance fallback)."""
-    return max(cli_value or 0.0, read_project_edge_clearance(pcb_path))
+def fab_edge_floor(pcb_path=None) -> float:
+    """The fab-process copper-to-Edge.Cuts minimum (JLC routed-outline 0.20 mm)
+    for the active fab tier -- the hard lower bound below which routed copper
+    runs into the milled board edge. Independent of what the board declares: a
+    board whose min_copper_edge_clearance is below this (or 0) is pinned UP to it
+    for both routing and grading (#441). Copper-to-edge is a hard fab defect, so
+    -- unlike the aspirational copper netclasses (#439), which clamp DOWN -- the
+    edge floor is only ever raised, never relaxed below the fab minimum. Returns
+    0.0 only if the active fab tier explicitly sets board_edge to 0 (a custom
+    tier that genuinely allows edge copper -- via ``--fab-overrides board_edge=0``,
+    the way to disable the pin for a board with intentional edge copper)."""
+    try:
+        from fab_tiers import fab_floor_min
+        ncu = 2
+        if pcb_path:
+            try:
+                from list_nets import _count_copper_layers
+                with open(pcb_path, encoding='utf-8') as f:
+                    ncu = _count_copper_layers(f.read()) or 2
+            except Exception:
+                pass
+        return float(fab_floor_min(ncu).get('board_edge') or 0.0)
+    except Exception:
+        # fab_tiers is the single source of the copper-to-edge floor; if it cannot
+        # be imported (broken install) degrade to no pin rather than duplicate the
+        # magic value here.
+        return 0.0
+
+
+def effective_board_edge_clearance(pcb_path: str, cli_value: float,
+                                   fab_floor: bool = True) -> float:
+    """The copper-to-Edge.Cuts clearance a route/grade step must honor: the
+    LARGER of the board's own min_copper_edge_clearance (KiCad enforces it,
+    issue #338), the explicit --board-edge-clearance, and -- unless
+    ``fab_floor`` is False -- the fab copper-to-edge minimum (#441). Pinning to
+    the fab floor stops a board declaring a sub-fab (or 0) edge rule from being
+    routed/graded with copper against the milled edge; the 80/184 corpus boards
+    declaring < 0.20 mm previously routed and graded at their tiny value and so
+    looked clean while copper ran to the edge."""
+    eff = max(cli_value or 0.0, read_project_edge_clearance(pcb_path))
+    if fab_floor:
+        eff = max(eff, fab_edge_floor(pcb_path))
+    return eff
 
 
 def scan_board_minima(pcb_path: str):
@@ -345,7 +382,7 @@ def scan_board_minima(pcb_path: str):
 
 def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
                     edge_clearance=None, track_width=None, via_diameter=None,
-                    via_drill=None, minima=None):
+                    via_drill=None, minima=None, fab_edge=None):
     """Map KiCad rule keys -> target floor (mm) from the routing parameters.
     Each value, when given, becomes a floor; sizes fall back to the board's
     smallest such object (``minima`` from :func:`scan_board_minima`) when the
@@ -364,10 +401,15 @@ def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
     # "lower the rule to zero" -- writing 0.0 erased the board's own
     # min_copper_edge_clearance so neither KiCad nor check_drc could grade the
     # rule the design demands (issue #338, core1106_cam's 0.5 -> 0.0 clobber).
-    # The routers now route to max(--board-edge-clearance, the board rule), so
-    # a real enforced value is always >= the rule and only-lower keeps it.
-    if edge_clearance:
-        targets["min_copper_edge_clearance"] = edge_clearance
+    # The routers route to max(--board-edge-clearance, the board rule), so a real
+    # enforced value is always >= the rule. Unlike the other (aspirational) floors
+    # this one is PINNED to the fab copper-to-edge minimum (#441): copper closer
+    # to the milled edge than the fab can make is a hard defect, so the recorded
+    # floor is max(the routed edge clearance, fab_edge) and apply_targets is
+    # allowed to RAISE it above a sub-fab board rule (never lower it below fab).
+    edge_target = max(edge_clearance or 0.0, fab_edge or 0.0)
+    if edge_target > 0:
+        targets["min_copper_edge_clearance"] = round(edge_target, 6)
 
     # Size minima: take the SMALLER of the routing param and the smallest such
     # object already on the board. A multi-step chain leaves thinner tracks /
@@ -455,6 +497,18 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
             continue
         target = round(float(target), 6)
         cur = rules.get(key)
+        # min_copper_edge_clearance is the one floor that may RAISE (#441): it is
+        # pinned to max(board rule, fab copper-to-edge minimum) because sub-fab
+        # edge copper is a hard defect, so a board declaring a tiny/zero edge rule
+        # is lifted to the fab floor rather than kept. `target` already carries
+        # max(routed edge, fab_edge); take max with cur so a board rule ABOVE the
+        # fab floor (e.g. 0.5) is preserved.
+        if key == "min_copper_edge_clearance":
+            new = max(cur or 0.0, target)
+            if cur is None or abs(new - cur) > EPS:
+                changes.append(f"rules.{key}: {cur} -> {new} mm (fab-edge pin)")
+                rules[key] = new
+            continue
         if cur is None or cur > target + EPS:        # lower only; never raise
             changes.append(f"rules.{key}: {cur} -> {target} mm")
             rules[key] = target
@@ -609,7 +663,8 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
     targets = compute_targets(clearance=clr, hole_clearance=hole_clearance,
                               hole_to_hole=hole_to_hole, edge_clearance=edge_clearance,
                               track_width=track_width, via_diameter=via_diameter,
-                              via_drill=via_drill, minima=minima)
+                              via_drill=via_drill, minima=minima,
+                              fab_edge=fab_edge_floor(output_pcb))
     plan = severity_plan(keep_courtyards=keep_courtyards, keep_mask=keep_mask,
                          keep_footprint=keep_footprint, keep_thermal=keep_thermal,
                          extra_ignore=extra_ignore)
@@ -671,6 +726,18 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
             continue
         tgt_nm = round(float(target) * MM)
         cur = getattr(bds, a)
+        # Edge clearance may RAISE to the fab copper-to-edge floor (#441); every
+        # other rule is only-lower. `target` already carries max(routed, fab_edge);
+        # max with cur preserves a board rule above the fab floor.
+        if key == "min_copper_edge_clearance":
+            new_nm = max(cur or 0, tgt_nm)
+            if cur is None or abs(new_nm - cur) > EPS:
+                try:
+                    setattr(bds, a, new_nm)
+                    changes.append(f"{a}: {(cur or 0)/MM:.4g} -> {new_nm/MM:.4g} mm (fab-edge pin)")
+                except Exception:
+                    pass
+            continue
         if cur is None or cur > tgt_nm + EPS:
             try:
                 setattr(bds, a, tgt_nm)
@@ -899,7 +966,7 @@ def main():
         track_width=args.track_width if args.track_width is not None else _fab['track_width'],
         via_diameter=args.via_size if args.via_size is not None else _fab['via_diameter'],
         via_drill=args.via_drill if args.via_drill is not None else _fab['via_drill'],
-        minima=minima)
+        minima=minima, fab_edge=fab_edge_floor(pcb_path))
     plan = severity_plan(keep_courtyards=args.keep_courtyards, keep_mask=args.keep_mask,
                          keep_footprint=args.keep_footprint, keep_thermal=args.keep_thermal,
                          extra_ignore=args.ignore)
