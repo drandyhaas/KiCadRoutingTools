@@ -1411,6 +1411,30 @@ def _edge_phrase(edge: str) -> str:
     return f"too close to {edge} board edge"  # bbox fallback: left/right/top/bottom
 
 
+def edge_clearance_severity(pcb_file: str) -> Optional[str]:
+    """Return the board's ``copper_edge_clearance`` DRC severity from the sibling
+    .kicad_pro ('error' / 'warning' / 'ignore'), or None when unset / no project.
+
+    KiCad's DRC does NOT run a rule whose severity is 'ignore' -- not even
+    ``kicad-cli pcb drc --severity-all`` (that flag surfaces every ENABLED
+    severity, it does not re-enable a disabled rule). So a board whose author
+    set copper_edge_clearance to 'ignore' (common on castellated / edge-connector
+    / route-to-edge hobby boards -- e.g. nrfmicro) reports ZERO board-edge items
+    from the KiCad oracle. check_drc reads the same setting and skips its
+    board-edge check to match, instead of manufacturing phantom SEGMENT-BOARD-EDGE
+    items the board's own DRC deliberately suppresses (#427)."""
+    import os as _os
+    import json as _json
+    pro = _os.path.splitext(pcb_file)[0] + '.kicad_pro'
+    try:
+        with open(pro, encoding='utf-8') as f:
+            j = _json.load(f)
+    except (OSError, ValueError):
+        return None
+    return (((j.get('board', {}) or {}).get('design_settings', {}) or {})
+            .get('rule_severities', {}) or {}).get('copper_edge_clearance')
+
+
 def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[str]] = None,
             debug_output: bool = False, quiet: bool = False,
             hole_to_hole_clearance: float = defaults.HOLE_TO_HOLE_CLEARANCE, board_edge_clearance: float = 0.0,
@@ -1420,7 +1444,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             min_via_drill: Optional[float] = None,
             check_sizes: bool = True, size_margin: float = 0.0,
             check_pad_edge: bool = False, print_summary: bool = True,
-            net_clearances: Optional[Dict[str, float]] = None):
+            net_clearances: Optional[Dict[str, float]] = None,
+            respect_edge_severity: bool = True):
     """Run DRC checks on the PCB file.
 
     Args:
@@ -1447,6 +1472,10 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             netclasses (issue #326). Pair checks grade at
             max(clearance, class(net_a), class(net_b), pad overrides) --
             KiCad's per-pair resolution -- instead of the single global value.
+        respect_edge_severity: When True (default), skip the board-edge check on
+            boards whose sibling .kicad_pro sets copper_edge_clearance severity to
+            'ignore' -- matching the KiCad oracle, which runs no board-edge check
+            there (#427). Pass False to force the check regardless of the setting.
     """
     # Board-edge clearance: the explicit/board value when set, else the fab
     # copper-to-edge floor (0.20, #439 -- the routers pin the edge up to it, so a
@@ -2206,7 +2235,15 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # cutout/slot/notch -- which sits inside the bounding box -- is caught (issue
     # #236). Fall back to the rectangular bounding box otherwise.
     board_bounds = pcb_data.board_info.board_bounds
-    if board_bounds and effective_board_edge_clearance > 0:
+    # Honor the board's own copper_edge_clearance DRC severity (#427): when the
+    # project sets it to 'ignore', KiCad runs NO board-edge check (its oracle
+    # reports zero), so grading it here only manufactures phantom
+    # SEGMENT-BOARD-EDGE items the board deliberately suppressed. Skip to match.
+    edge_ignored = respect_edge_severity and edge_clearance_severity(pcb_file) == 'ignore'
+    if board_bounds and effective_board_edge_clearance > 0 and edge_ignored and not quiet:
+        print("Skipping board edge clearances "
+              "(project sets copper_edge_clearance severity to 'ignore')...")
+    if board_bounds and effective_board_edge_clearance > 0 and not edge_ignored:
         edge_rings, edge_outer, edge_cutouts = board_edge_geometry(pcb_data.board_info)
         use_poly = bool(edge_rings)
         if not quiet:
