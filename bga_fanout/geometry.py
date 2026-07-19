@@ -50,7 +50,14 @@ def via_clears_pad_rects(x: float, y: float, v_half: float, clearance: float,
     whose ring grazed the real copper."""
     from routing_utils import point_to_pad_rect_dist
     for p in pads:
-        if point_to_pad_rect_dist(x, y, p) < v_half + clearance - 1e-9:
+        # Custom-shape pads: measure to the REAL polygon copper, not the
+        # symmetric bbox rect, which for an off-centre outline (meander antenna,
+        # comb pad) reports a false graze metres from any copper (#232 class).
+        if getattr(p, 'shape', None) == 'custom' and getattr(p, 'polygons', None):
+            from check_drc import _point_to_polys_distance
+            if _point_to_polys_distance(x, y, p.polygons) < v_half + clearance - 1e-9:
+                return False
+        elif point_to_pad_rect_dist(x, y, p) < v_half + clearance - 1e-9:
             return False
     return True
 

@@ -37,6 +37,35 @@ from list_nets import fab_floors, fab_floor_ladder, fab_floor_min, warn_fab_esca
 from routing_defaults import HOLE_TO_HOLE_CLEARANCE
 
 
+def _custom_polys(pad):
+    """The pad's REAL polygon copper (board mm) if it is a custom-shape pad,
+    else None. For a custom pad pad.size_x/size_y is only its symmetric bbox,
+    which for an off-centre outline (a meander antenna, a comb/finger pad) is a
+    gross over-estimate -- the #232 phantom class."""
+    if getattr(pad, 'shape', None) == 'custom':
+        return getattr(pad, 'polygons', None) or None
+    return None
+
+
+def _pad_extent(pad):
+    """(centre_x, centre_y, radius) of the pad's copper. For a custom pad this
+    is the bounding circle of the REAL polygons (contains all copper, never
+    under-blocks) instead of the bbox disk centred on the pad origin, which for
+    an off-centre outline phantom-blocks vias far from any copper (mikoto's AE1
+    antenna: a Ø20mm bbox disk reaching a QFN 8mm away)."""
+    polys = _custom_polys(pad)
+    if polys:
+        pts = [pt for poly in polys for pt in poly]
+        if pts:
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            cx = (min(xs) + max(xs)) / 2.0
+            cy = (min(ys) + max(ys)) / 2.0
+            r = max(math.hypot(px - cx, py - cy) for px, py in pts)
+            return cx, cy, r
+    return pad.global_x, pad.global_y, max(pad.size_x, pad.size_y) / 2.0
+
+
 # Cardinal + diagonal steps; straight moves are cheaper so routes stay straight.
 _STEPS = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
 
@@ -115,6 +144,32 @@ class _Occ:
         for i in range(n + 1):
             t = i / n
             self.block_layer(li, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, r)
+
+    def block_poly(self, polys, r, li=None):
+        """Keep-out for a custom pad's REAL polygon copper: block every cell
+        whose lattice point lies within `r` mm of any polygon (li=None => all
+        copper layers). The accurate analogue of block_all/block_layer's bbox
+        disk -- mirrors the main obstacle map's polygon rasteriser so a
+        meander-antenna / comb pad stops phantom-blocking escapes far from any
+        real copper (#232 class, BGA side)."""
+        from check_drc import _point_to_polys_distance
+        pts = [pt for poly in polys for pt in poly]
+        if not pts:
+            return
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        ia, ja = self.cell(min(xs) - r, min(ys) - r)
+        ib, jb = self.cell(max(xs) + r, max(ys) + r)
+        thr = r + 1e-9
+        for a in range(max(0, ia), min(self.nx, ib + 1)):
+            for b in range(max(0, ja), min(self.ny, jb + 1)):
+                x, y = self.xy(a, b)
+                if _point_to_polys_distance(x, y, polys) <= thr:
+                    if li is None:
+                        for k in range(self.nl):
+                            self.grid[k][a * self.ny + b] = 1
+                    else:
+                        self.grid[li][a * self.ny + b] = 1
 
     def blocked(self, li, ix, iy):
         return self.grid[li][ix * self.ny + iy]
@@ -460,7 +515,13 @@ def generate_underpad_escape(footprint: Footprint,
         if not (bounds[0] - _pad_margin <= p.global_x <= bounds[2] + _pad_margin and
                 bounds[1] - _pad_margin <= p.global_y <= bounds[3] + _pad_margin):
             continue
-        p_half = max(p.size_x, p.size_y) / 2.0
+        # Custom-shape pads (meander antenna, comb) stamp their REAL polygon
+        # copper, not the bbox disk that phantom-blocks vias far from any copper
+        # (#232 class); cx/cy/p_half is the polygon bounding circle for the
+        # coarse carve stamps (a plain disk is fine there -- it only un-exempts a
+        # neighbouring ball's home cells, and never under-covers).
+        cpolys = _custom_polys(p)
+        cx, cy, p_half = _pad_extent(p)
         p_keep = p_half + track_width / 2 + clearance + margin
         if p.drill and p.drill > 0:
             occ.block_all(p.global_x, p.global_y, p_keep)
@@ -472,15 +533,20 @@ def generate_underpad_escape(footprint: Footprint,
             continue
         pad_layer_names = p.layers or []
         if '*.Cu' in pad_layer_names:
-            occ.block_all(p.global_x, p.global_y, p_keep)
-            carve_disks.append((p.global_x, p.global_y, p_keep, None, p.net_id))
+            if cpolys:
+                occ.block_poly(cpolys, p_keep, None)
+            else:
+                occ.block_all(p.global_x, p.global_y, p_keep)
+            carve_disks.append((cx, cy, p_keep, None, p.net_id))
         else:
             for lname in pad_layer_names:
                 if lname in layer_set:
-                    occ.block_layer(layers.index(lname),
-                                    p.global_x, p.global_y, p_keep)
-                    carve_disks.append((p.global_x, p.global_y, p_keep,
-                                        layers.index(lname), p.net_id))
+                    li = layers.index(lname)
+                    if cpolys:
+                        occ.block_poly(cpolys, p_keep, li)
+                    else:
+                        occ.block_layer(li, p.global_x, p.global_y, p_keep)
+                    carve_disks.append((cx, cy, p_keep, li, p.net_id))
         locked_smd_pads.append(p)
 
     def via_site_ok(x, y, v_half):

@@ -73,7 +73,24 @@ def _seg_hits_pad(x1, y1, x2, y2, pad, samples=16, margin: float = 0.0) -> bool:
     the pad's own frame, so the true (rotated) rectangle is tested rather than its
     axis-aligned bounding box - exact for diagonal pads (e.g. a part placed at a
     non-orthogonal angle, or a foreign pad seen in a rotated fanout frame).
+
+    Custom-shape pads are tested against their REAL polygon copper (pad.polygons),
+    not the axis-aligned bbox: for a custom pad pad.size_x/size_y is the SYMMETRIC
+    bbox about the pad centre, which for an off-centre outline (a meander antenna,
+    a comb/finger pad) phantom-blocks a via metres of clearance away from any real
+    copper (the antenna at mikoto's AE1: a 20x11mm bbox reaching a QFN 8mm off,
+    the #232 phantom class). Mirrors check_drc's polygon model so the two agree.
     """
+    polys = getattr(pad, 'polygons', None) if getattr(pad, 'shape', None) == 'custom' else None
+    if polys:
+        from check_drc import _point_to_polys_distance
+        n = max(1, int(math.hypot(x2 - x1, y2 - y1) / 0.05))
+        for t in range(n + 1):
+            f = t / n
+            if _point_to_polys_distance(x1 + (x2 - x1) * f,
+                                        y1 + (y2 - y1) * f, polys) <= margin + 1e-9:
+                return True
+        return False
     hx = pad.size_x / 2.0 + margin
     hy = pad.size_y / 2.0 + margin
     px, py = pad.global_x, pad.global_y
