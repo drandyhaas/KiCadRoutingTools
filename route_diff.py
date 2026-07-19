@@ -212,6 +212,20 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         If return_results=False: (successful_count, failed_count, total_time)
         If return_results=True: (successful_count, failed_count, total_time, results_data)
     """
+    # Diff-pair coupling gap may never sit below `clearance` (#441). KiCad grades a
+    # pair's P<->N coupling under the plain copper-clearance rule (P and N are
+    # different nets), so a gap tighter than clearance is flagged as a clearance
+    # violation on every coupled segment (stm32g474_fc: USB gap 0.1 mm under
+    # clearance 0.15 mm -> 9-14 clearance errors). We are NOT allowed to lower the
+    # board-wide clearance, so raise the gap to the clearance floor. Done first --
+    # before the parity dump, the --impedance width solve, and routing -- so the
+    # impedance-derived width is computed at the ACTUAL (floored) gap and stays
+    # on target, and every downstream consumer sees a single, consistent gap.
+    if diff_pair_gap is not None and clearance and diff_pair_gap < clearance:
+        print(f"Diff-pair gap {diff_pair_gap}mm is below clearance {clearance}mm; "
+              f"raising gap to {clearance}mm (KiCad grades P<->N coupling as clearance).")
+        diff_pair_gap = clearance
+
     # --- #381 D1: parameter-parity probe for the DIFF path, mirroring
     # batch_route's dump so the GUI/plan diff front can be diffed key-by-key
     # against `route_diff.py` on identical inputs (this is what would have caught
@@ -1650,6 +1664,16 @@ Examples:
               f"clearance {args.clearance}mm.")
     else:
         args.clearance = min(_dflt_clr, _ceiling) if _dflt_clr is not None else _ceiling
+    # #441: a diff-pair coupling gap below clearance is graded as a clearance
+    # violation by KiCad (P<->N are different nets). Raise the gap to the clearance
+    # floor now that both are resolved -- BOTH the engine call below and the
+    # post-route .kicad_pro writeback then record the same floored gap, so the
+    # written diff_pair_gap never drops under the class clearance either. (The
+    # engine floors again as a safety net for direct callers.)
+    if args.diff_pair_gap is not None and args.clearance and args.diff_pair_gap < args.clearance:
+        print(f"Diff-pair gap {args.diff_pair_gap}mm is below clearance "
+              f"{args.clearance}mm; raising gap to clearance (#441).")
+        args.diff_pair_gap = args.clearance
     if args.hole_to_hole_clearance is None:
         _h2h = board_constraint(args.input_file, 'min_hole_to_hole')
         args.hole_to_hole_clearance = _h2h if _h2h is not None else defaults.HOLE_TO_HOLE_CLEARANCE

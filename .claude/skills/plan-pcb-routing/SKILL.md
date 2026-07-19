@@ -392,6 +392,9 @@ Use the printed flags as-is:
   (NOT the wide net-class values), plus `--impedance` when the interface is
   impedance-controlled; shrink track/gap/via further toward the fab floor for any
   pair that fails or grazes (see "Diff-pair sizing default + shrink-to-succeed").
+  **Never set `--diff-pair-gap` below the same command's `--clearance`** — KiCad
+  grades the pair's P↔N coupling as a plain clearance violation, so `route_diff`
+  floors the gap up to clearance (#441). Set the two equal (both at the fab floor).
 
 **Verification (DRC/connectivity) grades at the manufacturing floor**, not the
 inflated net-class clearance — that is the same rule the human original passes, so

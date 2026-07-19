@@ -1273,9 +1273,17 @@ class DifferentialTab(wx.Panel):
                     via_diameter=cfg.get('via_size'),
                     via_drill=cfg.get('via_drill'),
                     fab_edge=fab_edge_floor())
+                # #441: record the coupling gap at >= clearance, matching the gap
+                # the engine actually routed to (batch_route_diff_pairs floors gap
+                # up to clearance because KiCad grades P<->N coupling under the plain
+                # clearance rule). Keeps the written diff_pair_gap from sitting below
+                # the class clearance and re-manufacturing the violation on re-grade.
+                _dp_gap = cfg.get('diff_pair_gap')
+                if _dp_gap is not None and cfg.get('clearance'):
+                    _dp_gap = max(_dp_gap, cfg.get('clearance'))
                 if apply_targets_to_board(
                         board, targets, severity_plan(keep_thermal=cfg.get('keep_thermal', False)),
-                        diff_pair_gap=cfg.get('diff_pair_gap'),
+                        diff_pair_gap=_dp_gap,
                         diff_pair_width=cfg.get('track_width'),
                         clamp_nondefault_netclasses=cfg.get('clamp_netclasses', False)):
                     board.SetModified()
