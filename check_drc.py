@@ -2222,10 +2222,16 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 # NPTH: no copper to connect to; keep the own-net track skip.
                 viol &= (snet != hnet)
             else:
-                # Plated override hole: net-independent, but a track whose
-                # copper overlaps the pad copper is CONNECTED -- KiCad's
-                # hole_clearance does not flag it (observed on #326 boards).
-                # Touch test approximates the pad by its bounding disc.
+                # Plated override hole: net-independent for FOREIGN copper, but
+                # KiCad exempts a track of the pad's OWN net -- it lands on the
+                # pad and connects there, so hole_clearance never flags it
+                # (#442: ecp5_mini GND track -> GND pad hole, check_drc 56 vs
+                # kicad-cli 0). Same-net exemption mirrors the NPTH branch above.
+                viol &= (snet != hnet)
+                # Foreign copper that still physically overlaps the pad copper
+                # is a pad-segment SHORT reported there, not a hole graze --
+                # exempt it here to avoid a double count. Touch test
+                # approximates the pad by its bounding disc.
                 ecx, ecy, er = copper_exempt
                 viol &= _pts_to_tracks(ecx, ecy) > (er + sw / 2.0)
             if matching_net_ids is not None:
