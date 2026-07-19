@@ -602,6 +602,30 @@ def main():
                 print(f"    WARNING: cwd {cwd} not covered by --remap; this command will "
                       f"run in (and may overwrite) the original run dir. Use --workdir.")
             cwd = remapped
+        # SAFETY GUARD -- silent-clobber prevention. When confinement is intended
+        # (--workdir or --remap given), a PRODUCING command's OUTPUT board must land
+        # inside an intended destination, never the original recorded run dir. If the
+        # remap did not cover the output path -- e.g. the manifest was recorded under a
+        # different dir than --set/--remap names (a COPIED or MOVED run dir, whose
+        # redo_commands.sh still carries the original absolute paths) -- the write would
+        # silently OVERWRITE the original run's boards. Refuse loudly instead of
+        # clobbering. Producers have >= 2 .kicad_pcb tokens (in -> out); board_image /
+        # check_* name a single read-only board and are exempt.
+        _pcbs = [a for a in argv if a.endswith(".kicad_pcb")]
+        if dest_dirs and len(_pcbs) >= 2 and not is_check_cmd(argv):
+            _out = _pcbs[-1]
+            _res = os.path.realpath(_out if os.path.isabs(_out)
+                                    else os.path.join(cwd or ".", _out))
+            _dests = [os.path.realpath(d) for d in dest_dirs]
+            if not any(_res == d or _res.startswith(d + os.sep) for d in _dests):
+                sys.exit(
+                    f"\nABORT (clobber guard): command {i} would write its output board to\n"
+                    f"  {_res}\n"
+                    f"which is OUTSIDE the intended destination(s):\n"
+                    f"  {chr(10).join('  ' + d for d in _dests)}\n"
+                    f"The manifest's baked paths were not covered by --remap (a copied or moved\n"
+                    f"run dir?). Pass --remap <the-manifest's-own-recorded-dir>:<dest>, or\n"
+                    f"--workdir <dest>. Refusing to overwrite the original run.\n")
         if args.skip_checks and is_check_cmd(argv):
             print(f"[{i}/{len(cmds)}] skip check: {' '.join(map(shlex.quote, argv[:3]))} ...")
             continue

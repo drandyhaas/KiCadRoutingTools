@@ -291,8 +291,12 @@ def do_board(set_dir, out_dir, label, board):
     clr = route_clearance(txt)
     timings_path = f"{dst}/timings.json"
     with open(f"{dst}/_replay.log", "w") as log:
+        # --workdir dst confines every command to the wave dir; combined with the
+        # --remap it makes redo_stress_test's clobber guard authoritative (a manifest
+        # whose baked paths don't match `src` aborts loudly instead of overwriting the
+        # original run dir -- the copied-set footgun).
         rc = subprocess.run([sys.executable, str(REPO / "tests/stress/redo_stress_test.py"),
-                             str(manifest), "--remap", f"{src}:{dst}",
+                             str(manifest), "--remap", f"{src}:{dst}", "--workdir", dst,
                              "--skip-checks", "--continue-on-error",
                              "--timings-out", timings_path],
                             stdout=log, stderr=subprocess.STDOUT).returncode
