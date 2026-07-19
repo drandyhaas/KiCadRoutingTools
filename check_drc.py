@@ -2151,6 +2151,20 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 holes.append((hp1, hp2, hr, pad_net,
                               f"{pad.component_ref}.{pad.pad_number}",
                               max(npth_clr, lc), None))
+            elif max(pad.size_x, pad.size_y) < pad.drill:
+                # #441: a PLATED pad whose copper ring does NOT span its drill
+                # (vfo_ctrl's U4 "MH": 0.001mm copper over a 2.5mm drill) leaves
+                # the hole exposed -- a track that crosses it is cut by the drill,
+                # net-independently, exactly like an NPTH mounting hole. Grade it
+                # the same way (copper-to-drill floor), exempting only the tiny
+                # copper speck so the pad's own micro-ring doesn't self-flag.
+                # Parity with add_drill_hole_obstacles's ring-uncovered case.
+                hp1, hp2, hr = pad_drill_capsule(pad)
+                holes.append((hp1, hp2, hr, pad_net,
+                              f"{pad.component_ref}.{pad.pad_number}",
+                              max(npth_clr, lc),
+                              (pad.global_x, pad.global_y,
+                               max(pad.size_x, pad.size_y) / 2.0)))
             elif lc > 0:
                 hp1, hp2, hr = pad_drill_capsule(pad)
                 holes.append((hp1, hp2, hr, pad_net,
