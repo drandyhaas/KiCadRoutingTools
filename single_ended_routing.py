@@ -1695,6 +1695,26 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
 
     from plane_pad_tap import tap_pad_with_escalation, inflight_copper_dicts
     from list_nets import fab_floor_ladder, warn_fab_escalation
+
+    # Board-edge floor for the in-pad via (#448): the old blanket
+    # board_edge_clearance=0.0 let the via ring land closer to the milled
+    # outline than even the pad's own copper (crkbd rJ1 VBUSR: ring 0.141mm
+    # from the edge, sub-fab). Demand the normal edge clearance, RELAXED to
+    # the pad's own copper-to-outline distance when the pad itself overhangs
+    # the band -- the via then never adds edge exposure beyond what the
+    # placed (edge-exempt) pad already establishes.
+    _edge_eff = (config.board_edge_clearance if config.board_edge_clearance > 0
+                 else config.clearance)
+    try:
+        from check_drc import (board_edge_geometry, _point_to_rings_distance,
+                               _pad_perimeter_points)
+        _rings, _, _ = board_edge_geometry(pcb_data.board_info)
+        if _rings:
+            _pad_edge_d = min(_point_to_rings_distance(px, py, _rings)
+                              for px, py in _pad_perimeter_points(pad_obj))
+            _edge_eff = min(_edge_eff, max(0.0, _pad_edge_d))
+    except Exception:  # noqa: BLE001 -- fall back to the plain edge clearance
+        pass
     # Copper stamped in the working obstacle map but not yet committed to
     # pcb_data (phase-3 tap rip-up windows) must block this via too, or it is
     # drilled straight through a pending foreign track (#310, snapdragon
@@ -1726,7 +1746,8 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
         # trace, so the fine pass never fails where the default would succeed.
         tap_res = tap_pad_with_escalation(
             pad_obj, pad_layer, net_id, pcb_data,
-            replace(config, via_size=vd, via_drill=dr, board_edge_clearance=0.0),
+            replace(config, via_size=vd, via_drill=dr,
+                    board_edge_clearance=_edge_eff),
             max_search_radius=0.0, via_size=vd, via_drill=dr,
             extra_vias=inflight_vias, extra_segments=inflight_segments,
             try_default=False, fine_for_all=True,
