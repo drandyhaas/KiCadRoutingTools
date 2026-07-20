@@ -83,6 +83,7 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | `impedance_target` | `None` | Target Z0 in Ω; when set, per-layer widths come from `layer_widths` |
 | `layer_widths` | `{}` | Layer name → width (filled by `impedance.calculate_layer_widths_for_impedance`) |
 | `power_net_widths` | `{}` | net_id → width override for power nets (never below `track_width`) |
+| `net_track_widths` | `{}` | net_id → the net's OWN netclass width (mm, #435), used EXACTLY (may be *narrower* than `track_width`); auto-read from the `.kicad_pro` only when `--track-width` is omitted, floored at the fab minimum by the caller. Lower priority than a manual `power_net_widths` override |
 | `net_clearances` | `{}` | net_id → netclass clearance (mm, #326): each net's own copper is stamped as an obstacle at `max(clearance, its value)` so same-run nets keep the class spacing to it; `get_net_clearance(net_id)` resolves it (never below `clearance`) |
 
 ### Differential pairs
@@ -225,8 +226,10 @@ Layer-aware width: `layer_widths[layer]` if impedance-controlled, else
 ```python
 config.get_net_track_width(net_id, layer) -> float
 ```
-Net- and layer-aware width. Priority: `power_net_widths[net_id]` →
-`layer_widths[layer]` → `track_width`. This is what obstacle expansion uses.
+Net- and layer-aware width. Priority: `power_net_widths[net_id]` (floored up to
+`track_width`) → `net_track_widths[net_id]` (the net's own class width, used
+exactly, #435) → `layer_widths[layer]` → `track_width`. This is what obstacle
+expansion uses.
 
 ```python
 config.get_max_track_width() -> float
