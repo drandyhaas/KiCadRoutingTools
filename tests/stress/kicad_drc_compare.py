@@ -169,6 +169,12 @@ def run_check_drc(board: str, clearance: float = None, netclasses: bool = False)
                 pos = (float(p[0]), float(p[1]))
                 break
         item = {"type": v["type"], "nets": nets, "pos": pos or (0.0, 0.0)}
+        # check_drc publishes 'accepted' edge items (a track covered by an
+        # edge-exempt pad -- no new edge copper): not a check_drc failure, but the
+        # matching kicad copper_edge_clearance finding must be dropped, not alarmed
+        # on as a false negative. Carry the flag through for the reconciler.
+        if v.get("accepted"):
+            item["accepted"] = v["accepted"]
         # Board-edge reconciliation (edge family) needs the WHOLE segment, not
         # just its start: check_drc anchors segment-board-edge at the segment
         # start while kicad anchors copper_edge_clearance at the edge-closest
@@ -299,6 +305,35 @@ def reconcile_edge_family(kicad_only, cd_only):
     rem_k = [v for i, v in enumerate(kicad_only) if i not in k_matched]
     rem_c = [v for i, v in enumerate(cd_only) if i not in c_matched]
     return len(k_matched), rem_k, rem_c
+
+
+def _drop_kicad_covered_by_accepted(kicad, cd_accepted):
+    """Drop kicad copper_edge_clearance items that match an ACCEPTED check_drc edge
+    item -- a track whose edge copper is covered by an edge-exempt pad (check_drc's
+    authority; ottercast R7.2). Respecting check_drc's accept here keeps the item out
+    of kicad_only (the false-negative alarm) instead of double-reporting a
+    pad-placement condition no routing can fix. Returns (remaining_kicad, n_dropped)."""
+    acc = [c for c in cd_accepted if c.get("type") in EDGE_CD_TYPES]
+    if not acc:
+        return kicad, 0
+    c_used, keep, dropped = set(), [], 0
+    for kv in kicad:
+        if kv.get("type") not in EDGE_KICAD_TYPES:
+            keep.append(kv)
+            continue
+        best = None
+        for i, cv in enumerate(acc):
+            if i in c_used or not _edge_net_ok(kv, cv):
+                continue
+            d = _edge_dist(kv, cv)
+            if d <= EDGE_MATCH_RADIUS_MM and (best is None or d < best[0]):
+                best = (d, i)
+        if best is not None:
+            c_used.add(best[1])
+            dropped += 1  # covered by an edge-exempt pad -> accepted-by-design
+        else:
+            keep.append(kv)
+    return keep, dropped
 
 
 # --- #408: accept-by-design edge-clearance subtraction -----------------------
@@ -604,6 +639,12 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
             kicad, pre = _subtract_baseline(kicad, base_items)
             web_items, web_pre = _subtract_baseline(web_items, base_web)
     cd = run_check_drc(board, clearance, netclasses=not bool(clearance))
+    # check_drc 'accepted' edge items (track covered by an edge-exempt pad): not
+    # check_drc failures -- split them out of the counted list, and use them to drop
+    # the matching kicad copper_edge_clearance finding below (respect check_drc's
+    # authority instead of alarming it as a false negative).
+    cd_accepted = [c for c in cd if c.get("accepted")]
+    cd = [c for c in cd if not c.get("accepted")]
     # Symmetric baseline subtraction (#405): drop the input's own check_drc
     # items too (e.g. vfo_ctrl's 23 FG chassis-ground segments already <edge on
     # the bare board), mirroring the kicad side, so both are graded on
@@ -616,6 +657,13 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
             cd_base = None
         cd, cd_pre = _subtract_baseline(cd, cd_base or [])
     kicad_intentional = checkdrc_intentional = 0
+    # Accept-by-design: drop kicad edge findings covered by an edge-exempt pad
+    # (check_drc published them as 'accepted'), symmetric with check_drc having
+    # already excluded them from its count.
+    if cd_accepted:
+        kicad, _k_acc = _drop_kicad_covered_by_accepted(kicad, cd_accepted)
+        kicad_intentional += _k_acc
+        checkdrc_intentional += len(cd_accepted)
     # Net-tie accepted contact (Kelvin shunts): tie-pair shorting/clearance
     # items AT the tie footprint are accepted-by-design on human-routed
     # originals too -- drop from BOTH engines before matching (board-derived,

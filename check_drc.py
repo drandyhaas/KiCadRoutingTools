@@ -1606,6 +1606,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         vias_by_net[via.net_id].append(via)
 
     violations = []
+    _accepted_edge = []  # pad-covered edge items: published (not counted) for kicad_drc_compare
 
     # Pre-compute matching nets for filtering
     if net_patterns:
@@ -2278,6 +2279,55 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             print("Checking board edge clearances "
                   f"({'real Edge.Cuts outline' if use_poly else 'bounding box'})...")
 
+        # Near-edge pad copper: a track whose edge-violating portion lies INSIDE an
+        # (edge-exempt) pad adds no NEW edge-violating copper -- the pad copper was
+        # already there, and pads are edge-exempt by design (--check-pad-edge off: a
+        # placed part cannot be moved off the outline). ottercast_audio R7.2: a track
+        # lands on a pad placed 0.39mm from a 0.5mm-rule edge; the pad is exempt, so
+        # the track running into it must be too. Build the near-edge pad set once.
+        _edge_pads = []
+        _ep_edge = {}  # id(pad) -> pad copper's own min distance to the outline
+        if use_poly and edge_rings:
+            for _pd in (p for fp in pcb_data.footprints.values() for p in fp.pads):
+                if getattr(_pd, 'pad_type', '') == 'np_thru_hole' or not (_pd.size_x and _pd.size_y):
+                    continue  # NPTH has no copper
+                _ext = max(_pd.size_x, _pd.size_y) / 2.0 + effective_board_edge_clearance + 0.05
+                if _point_to_rings_distance(_pd.global_x, _pd.global_y, edge_rings) <= _ext:
+                    _edge_pads.append(_pd)
+                    _ep_edge[id(_pd)] = min((_point_to_rings_distance(px, py, edge_rings)
+                                             for px, py in _pad_perimeter_points(_pd)),
+                                            default=_point_to_rings_distance(
+                                                _pd.global_x, _pd.global_y, edge_rings))
+
+        def _seg_edge_all_in_pads(seg):
+            """True iff every board-edge-violating point of ``seg`` is COVERED by a
+            near-edge (edge-exempt) pad: the track copper TOUCHES the pad copper (the
+            centreline is within a half-width of it) AND that point is no closer to the
+            outline than the pad's own copper -- so the pad already establishes the
+            near-edge copper there and the track adds no new edge exposure (ottercast
+            R7.2: a +3V3 tap runs into / alongside a pad placed 0.39mm from a 0.5mm
+            edge). A point CLOSER to the edge than every touching pad is a REAL graze."""
+            if not _edge_pads:
+                return False
+            half = seg.width / 2.0
+            req = effective_board_edge_clearance + half
+            L = math.hypot(seg.end_x - seg.start_x, seg.end_y - seg.start_y)
+            steps = max(2, int(L / 0.05) + 1)
+            saw_viol = False
+            for i in range(steps + 1):
+                t = i / steps
+                x = seg.start_x + t * (seg.end_x - seg.start_x)
+                y = seg.start_y + t * (seg.end_y - seg.start_y)
+                pt_edge = _point_to_rings_distance(x, y, edge_rings)
+                if pt_edge < req:
+                    saw_viol = True
+                    covered = any(point_to_pad_distance(x, y, _pd) <= half + 1e-6
+                                  and _ep_edge[id(_pd)] <= pt_edge - half + 1e-6
+                                  for _pd in _edge_pads)
+                    if not covered:
+                        return False  # closer to the edge than any touching pad -> real
+            return saw_viol
+
         # Check segments
         for seg in pcb_data.segments:
             seg_matches = matching_seg_net_set is None or seg.net_id in matching_seg_net_set
@@ -2293,14 +2343,23 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if has_violation:
                 net_name = pcb_data.nets.get(seg.net_id, None)
                 net_str = net_name.name if net_name else f"net_{seg.net_id}"
-                violations.append({
+                _viol = {
                     'type': 'segment-board-edge',
                     'net1': net_str,
                     'edge': edge,
                     'layer': seg.layer,
                     'overlap_mm': overlap,
                     'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
-                })
+                }
+                if edge != "off-board" and use_poly and _seg_edge_all_in_pads(seg):
+                    # Track copper covered by an edge-exempt pad -> NOT a check_drc
+                    # failure, but PUBLISH it (accepted) so kicad_drc_compare subtracts
+                    # the matching kicad copper_edge_clearance finding rather than
+                    # alarming on a false negative (ottercast R7.2).
+                    _viol['accepted'] = 'edge-exempt-pad'
+                    _accepted_edge.append(_viol)
+                else:
+                    violations.append(_viol)
 
         # Check vias
         for via in pcb_data.vias:
@@ -2462,7 +2521,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         else:
             if print_summary:
                 print("OK" + (f" ({len(warnings)} same-net copper warning(s))" if warnings else ""))
-            return violations
+            return violations + _accepted_edge
 
     # Print detailed results (always for non-quiet, or when violations in quiet mode)
     if not quiet or violations:
@@ -2593,7 +2652,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     if debug_output and violations:
         write_debug_lines(pcb_file, violations, clearance)
 
-    return violations
+    return violations + _accepted_edge
 
 
 if __name__ == "__main__":
@@ -2732,4 +2791,6 @@ if __name__ == "__main__":
                          size_margin=args.size_margin,
                          check_pad_edge=args.check_pad_edge,
                          net_clearances=net_clearances)
-    sys.exit(1 if violations else 0)
+    # 'accepted' items (e.g. a track covered by an edge-exempt pad) are published in
+    # the return for other graders but are NOT failures -- exclude from exit status.
+    sys.exit(1 if any(not v.get('accepted') for v in violations) else 0)
