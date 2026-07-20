@@ -1940,8 +1940,12 @@ def build_base_obstacles(
         obstacles, pcb_data, track_width, config.clearance,
         config.grid_step, list(range(num_layers)))
 
-    # Block areas outside the board outline (supports non-rectangular boards)
-    add_board_edge_obstacles(obstacles, pcb_data, config, 0.0, layers=routing_layers)
+    # Block areas outside the board outline (supports non-rectangular boards).
+    # #447: size the edge band at the width this map is stamped at (track_width =
+    # min_track_width here), not config.track_width, so wide plane connections
+    # routed with track_margin=0 do not graze the outline sub-fab.
+    add_board_edge_obstacles(obstacles, pcb_data, config, 0.0, layers=routing_layers,
+                             track_width=track_width)
 
     # Keep plane-repair routes out of user-drawn keepouts (#27) and KiCad
     # keep-out rule areas (#25), on the plane routing layers.

@@ -616,7 +616,8 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
 
 def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                               config: GridRouteConfig, extra_clearance: float = 0.0,
-                              layers: Optional[List[str]] = None):
+                              layers: Optional[List[str]] = None,
+                              track_width: Optional[float] = None):
     """Block tracks and vias near the board edge.
 
     Supports both rectangular and non-rectangular board outlines. For non-rectangular
@@ -641,8 +642,14 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
 
     # Use board_edge_clearance if set, otherwise use track clearance
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
-    # Add track half-width to clearance (tracks need to stay away from edge)
-    track_edge_clearance = edge_clearance + config.track_width / 2 + extra_clearance
+    # Add track half-width to clearance (tracks need to stay away from edge).
+    # #447: the edge band must use the width the map is STAMPED at -- build_base_obstacles
+    # (route_disconnected_planes plane connections) stamps every obstacle at
+    # min_track_width, wider than config.track_width, and routes the narrowest
+    # connection with track_margin=0; a config.track_width band lets that wider copper
+    # graze the outline sub-fab (crkbd/dilemma). Callers pass the stamped width here.
+    _edge_tw = track_width if track_width is not None else config.track_width
+    track_edge_clearance = edge_clearance + _edge_tw / 2 + extra_clearance
     via_edge_clearance = edge_clearance + config.via_size / 2 + extra_clearance
 
     # Convert to grid coordinates. Use to_grid_dist_safe (ceil) for the via

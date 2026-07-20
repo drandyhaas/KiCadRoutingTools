@@ -702,7 +702,8 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
 
 
 def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
-                                     config: GridRouteConfig, layer_idx: int):
+                                     config: GridRouteConfig, layer_idx: int,
+                                     track_width: Optional[float] = None):
     """Block track routing near board edges on a single layer.
 
     Supports both rectangular and non-rectangular board outlines.
@@ -716,7 +717,12 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     min_x, min_y, max_x, max_y = board_bounds
 
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
-    track_edge_clearance = edge_clearance + config.track_width / 2
+    # #447: use the width the map is STAMPED at, not always config.track_width.
+    # build_routing_obstacle_map stamps at the per-layer route_track_w (wider than
+    # config.track_width on impedance boards); a config.track_width edge band would
+    # let those wider tracks graze the outline sub-fab. Callers pass the stamp width.
+    _edge_tw = track_width if track_width is not None else config.track_width
+    track_edge_clearance = edge_clearance + _edge_tw / 2
     track_expand = coord.to_grid_dist_safe(track_edge_clearance)
 
     gmin_x, gmin_y = coord.to_grid(min_x, min_y)
@@ -1004,7 +1010,8 @@ def build_routing_obstacle_map(
 
     # Add board edge track blocking (supports non-rectangular boards)
     t0 = time.time()
-    _add_board_edge_track_obstacles(obstacles, pcb_data, config, layer_idx)
+    _add_board_edge_track_obstacles(obstacles, pcb_data, config, layer_idx,
+                                    track_width=route_track_w)
     if verbose:
         print(f"  Board edge: {time.time() - t0:.2f}s")
 
