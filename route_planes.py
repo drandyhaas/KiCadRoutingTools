@@ -3118,6 +3118,54 @@ def create_plane(
         all_new_segments, all_new_vias, pcb_data, clearance, all_layers,
         track_width, grid_step, via_size, via_drill, hole_to_hole_clearance)
 
+    # NPTH slot edge keepouts (#448): KiCad's DRC grades copper proximity to a
+    # milled NPTH SLOT as copper_edge_clearance, but its zone filler pulls fill
+    # back from the slot at only the hole clearance -- so any plane zone poured
+    # over a slotted footprint (keyboard switches: sofle_pico SW25) self-flags
+    # against the board's edge rule on refill. Emit a copper_pour-only keepout
+    # rule area around each slot, dilated to the board's effective edge
+    # clearance, whenever this run creates/replaces a zone. Shared here (before
+    # the dry_run/write split) so the CLI file write and the GUI results path
+    # emit identically.
+    if all_zone_sexprs or all_zone_data:
+        try:
+            from kicad_writer import (npth_slot_keepout_polygons,
+                                      generate_keepout_zone_sexpr)
+            from fix_kicad_drc_settings import fab_edge_floor
+            try:
+                from fix_kicad_drc_settings import read_project_edge_clearance
+                _rec_edge = read_project_edge_clearance(input_file) or 0.0
+            except Exception:
+                _rec_edge = 0.0
+            _slot_edge = max(board_edge_clearance, _rec_edge,
+                             fab_edge_floor(input_file))
+            _slot_polys = npth_slot_keepout_polygons(pcb_data, _slot_edge)
+            if _slot_polys:
+                try:
+                    with open(input_file, 'r', encoding='utf-8') as _f:
+                        _in_text = _f.read()
+                except Exception:
+                    _in_text = ''
+                _added = 0
+                _cu = list(pcb_data.board_info.copper_layers or all_layers)
+                for _ref, _pts in _slot_polys:
+                    _kname = f"npth-slot-keepout-{_ref}"
+                    if _kname in _in_text:
+                        continue  # already present from an earlier plane run
+                    all_zone_sexprs.append(generate_keepout_zone_sexpr(
+                        _cu, _pts, _kname,
+                        use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION))
+                    all_zone_data.append({
+                        'keepout': True, 'name': _kname, 'layers': _cu,
+                        'polygon_points': _pts,
+                    })
+                    _added += 1
+                if _added:
+                    print(f"  Added {_added} NPTH-slot copper_pour keepout(s) "
+                          f"at {_slot_edge:.3f}mm edge clearance (#448)")
+        except Exception as _e:  # noqa: BLE001 -- keepouts are additive; never fail the run
+            print(f"  (NPTH-slot keepouts skipped: {_e})")
+
     geo_results: Dict[int, Dict] = {}
     if dry_run:
         print("\nDry run - no output file written")

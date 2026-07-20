@@ -337,6 +337,90 @@ def generate_zone_sexpr(
 	)'''
 
 
+def npth_slot_keepout_polygons(pcb_data, dilate: float,
+                               arc_segments: int = 32) -> List[Tuple[str, List[Tuple[float, float]]]]:
+    """[(ref, polygon_points)] outlining every NPTH SLOT (oval-drill) hole's
+    capsule dilated by ``dilate`` mm (#448).
+
+    KiCad's DRC edge provider treats milled NPTH slots as board edge
+    (copper_edge_clearance), but its zone FILLER pulls fill back from them at
+    only the hole clearance -- so a plane zone poured over a slotted footprint
+    (keyboard switches, USB shields) self-flags against the board's edge rule.
+    These polygons back copper_pour keepout rule areas that make the filler
+    honor the edge clearance. Round NPTH drills are excluded: KiCad grades
+    those under hole_clearance, which the filler already honors.
+
+    ``dilate`` should be the board's effective copper-to-edge clearance. A
+    small sagitta allowance for the inscribed arc polygons is added here so
+    the chord error cannot re-expose sub-clearance fill.
+    """
+    import math as _math
+    from kicad_parser import pad_drill_capsule
+    dilate = dilate + 0.01  # inscribed-polygon sagitta allowance
+    out = []
+    for fp in pcb_data.footprints.values():
+        for pad in fp.pads:
+            if getattr(pad, 'pad_type', '') != 'np_thru_hole' or pad.drill <= 0:
+                continue
+            (x1, y1), (x2, y2), r = pad_drill_capsule(pad)
+            if _math.hypot(x2 - x1, y2 - y1) <= 1e-9:
+                continue  # round drill: not part of the milled edge
+            rr = r + dilate
+            a0 = _math.atan2(y2 - y1, x2 - x1)
+            pts = []
+            for i in range(arc_segments + 1):  # cap around (x2, y2)
+                ang = a0 - _math.pi / 2 + _math.pi * i / arc_segments
+                pts.append((x2 + rr * _math.cos(ang), y2 + rr * _math.sin(ang)))
+            for i in range(arc_segments + 1):  # cap around (x1, y1)
+                ang = a0 + _math.pi / 2 + _math.pi * i / arc_segments
+                pts.append((x1 + rr * _math.cos(ang), y1 + rr * _math.sin(ang)))
+            ref = f"{pad.component_ref}.{pad.pad_number}".rstrip('.')
+            # Index into the name: split keyboards repeat footprint refs
+            # (two SW25 halves), and rule-area names must be unique.
+            out.append((f"{ref}-{len(out)}", pts))
+    return out
+
+
+def generate_keepout_zone_sexpr(layers: List[str],
+                                polygon_points: List[Tuple[float, float]],
+                                name: str,
+                                use_net_name: bool = False) -> str:
+    """Rule-area zone blocking only copper POUR (tracks/vias/pads stay
+    allowed -- the router enforces its own clearances). Used for the NPTH
+    slot edge keepouts (#448). use_net_name=True emits the KiCad 10 net
+    header (same switch as generate_zone_sexpr)."""
+    pts_str = " ".join(f"(xy {x:.6f} {y:.6f})" for x, y in polygon_points)
+    layers_str = " ".join(f'"{l}"' for l in layers)
+    net_lines = '(net "")' if use_net_name else '(net 0)\n\t\t(net_name "")'
+    return f'''	(zone
+		{net_lines}
+		(layers {layers_str})
+		(uuid "{uuid.uuid4()}")
+		(name "{name}")
+		(hatch edge 0.5)
+		(connect_pads
+			(clearance 0)
+		)
+		(min_thickness 0.25)
+		(keepout
+			(tracks allowed)
+			(vias allowed)
+			(pads allowed)
+			(copperpour not_allowed)
+			(footprints allowed)
+		)
+		(fill
+			(thermal_gap 0.5)
+			(thermal_bridge_width 0.5)
+		)
+		(polygon
+			(pts
+				{pts_str}
+			)
+		)
+	)'''
+
+
 def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict],
                       net_id_to_name: Dict[int, str] = None) -> bool:
     """

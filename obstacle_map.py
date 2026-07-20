@@ -1250,6 +1250,7 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     """
     drill_holes = []   # every drill -> via (hole-to-hole) keep-out
     npth_holes = []    # no-copper holes only -> track keep-out
+    npth_slot_holes = []  # milled SLOT subset: board-edge clearance applies (#448)
 
     # Via drills. The hole-to-hole keep-out is NET-INDEPENDENT (#335): a drill
     # does not care about net membership, and the old own-net exemption let the
@@ -1277,6 +1278,13 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                     # net-tied mounting holes; copper across one's "own" NPTH
                     # hole is just as cut by the drill).
                     npth_holes.extend(circles)
+                    # Milled SLOTS are board edge to KiCad's DRC (#448):
+                    # copper near a slot wall is graded at copper_edge_clearance,
+                    # not the NPTH hole floor. Track them separately so the
+                    # slot keep-out can grow to the edge clearance below.
+                    (_c1, _c2, _r) = pad_drill_capsule(pad)
+                    if abs(_c2[0] - _c1[0]) > 1e-9 or abs(_c2[1] - _c1[1]) > 1e-9:
+                        npth_slot_holes.extend(circles)
                 elif (max(pad.size_x, pad.size_y) < pad.drill
                       and net_id not in nets_to_route_set):
                     # #441: a PLATED pad whose copper ring does NOT span its drill
@@ -1300,6 +1308,30 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         block_track_cells_near_drills(obstacles, npth_holes, config.track_width,
                                       npth_clr, config.grid_step,
                                       list(range(len(config.layers))))
+
+    # Milled NPTH SLOTS are board edge to KiCad (#448): its DRC grades copper
+    # proximity to the slot wall at copper_edge_clearance (sofle_pico SW25),
+    # which is usually ABOVE the NPTH hole floor stamped above. Grow the slot
+    # keep-out to the effective edge clearance for tracks, and keep via COPPER
+    # (not just its drill) the same distance off the slot wall. No-op when the
+    # edge clearance doesn't exceed the NPTH floor (byte-identical maps).
+    if npth_slot_holes:
+        edge_eff = (config.board_edge_clearance if config.board_edge_clearance > 0
+                    else config.clearance)
+        slot_clr = edge_eff + extra_clearance
+        if slot_clr > max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE) + extra_clearance:
+            block_track_cells_near_drills(obstacles, npth_slot_holes,
+                                          config.track_width, slot_clr,
+                                          config.grid_step,
+                                          list(range(len(config.layers))))
+        # Via-copper edge band: block_via_cells_near_drills builds its radius as
+        # hole_r + clearance + via_drill/2, so passing
+        # edge_eff + (via_size - via_drill)/2 yields hole_r + edge_eff + via_size/2
+        # -- the via COPPER edge held edge_eff off the slot wall.
+        via_slot_clr = edge_eff + (config.via_size - config.via_drill) / 2.0
+        if via_slot_clr > config.hole_to_hole_clearance:
+            block_via_cells_near_drills(obstacles, npth_slot_holes, config.via_drill,
+                                        via_slot_clr, config.grid_step)
 
     # NPTH holes whose pad carries a clearance OVERRIDE above the fab floor
     # (KiCad's hole_clearance honors it, #326 residual). Plated pads are left

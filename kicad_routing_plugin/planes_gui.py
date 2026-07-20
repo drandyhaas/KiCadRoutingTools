@@ -1667,7 +1667,60 @@ class PlanesTab(wx.Panel):
             except Exception:
                 pass
 
+            # Names of existing rule areas so re-runs never duplicate the
+            # NPTH-slot keepouts (#448).
+            existing_zone_names = set()
+            try:
+                for existing_zone in board.Zones():
+                    try:
+                        existing_zone_names.add(existing_zone.GetZoneName())
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
             for zone_data in self._new_zones:
+                if zone_data.get('keepout'):
+                    # NPTH-slot copper_pour keepout rule area (#448) -- mirrors
+                    # the CLI's generate_keepout_zone_sexpr output.
+                    kname = zone_data.get('name', '')
+                    if kname and kname in existing_zone_names:
+                        zones_skipped += 1
+                        continue
+                    try:
+                        zone = pcbnew.ZONE(board)
+                        zone.SetIsRuleArea(True)
+                        zone.SetDoNotAllowCopperPour(True)
+                        zone.SetDoNotAllowTracks(False)
+                        zone.SetDoNotAllowVias(False)
+                        try:
+                            zone.SetDoNotAllowPads(False)
+                            zone.SetDoNotAllowFootprints(False)
+                        except AttributeError:
+                            pass  # older pcbnew API names
+                        if kname:
+                            zone.SetZoneName(kname)
+                        lset = pcbnew.LSET()
+                        for lname in zone_data.get('layers', []):
+                            lid = get_layer_id(lname)
+                            try:
+                                lset.AddLayer(lid)
+                            except AttributeError:
+                                lset.addLayer(lid)  # older binding name
+                        zone.SetLayerSet(lset)
+                        outline = zone.Outline()
+                        outline.NewOutline()
+                        for x, y in zone_data['polygon_points']:
+                            outline.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
+                        try:
+                            zone.HatchBorder()
+                        except Exception:
+                            pass
+                        board.Add(zone)
+                        zones_added += 1
+                    except Exception as e:
+                        print(f"Failed to add NPTH-slot keepout {kname}: {e}")
+                    continue
                 key = (zone_data.get('net_name', ''), zone_data.get('layer', ''))
                 if key in existing_zone_keys:
                     print(f"Skipping new zone for '{key[0]}' on {key[1]} "
