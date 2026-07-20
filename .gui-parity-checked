@@ -1,3 +1,48 @@
+143d097 2026-07-20 parity sweep a92ccec..143d097 (the #446 QFN fan-tip
+re-snap, #452 Rust diagonal direction cost / rust_router 0.18.3, the corpus
+expansion to sets 11-25, and a self-reverted bga_fanout experiment). Outcome:
+parity CONFIRMED via both no-wx gates + a per-commit code audit. NO
+batch_route*/create_plane/generate_*_fanout kwarg was added or removed, so the
+76-key param set is IDENTICAL to the a92ccec marker. Release: v0.18.3.
+
+  * SHARED engine functions -> both fronts inherit, no wiring:
+    - #446 QFN fan-tip re-snap (c0737e9): _snap_tip_on_grid is a PRIVATE helper
+      called from inside generate_qfn_fanout's #123 foreign-pad clearance pass.
+      fanout_gui._run_qfn_fanout imports and calls generate_qfn_fanout directly
+      (fanout_gui.py ~L1366), so the GUI inherits it. No new parameter: grid_step
+      and the `grazes` gate are both already in scope at the call site, and the
+      generate_qfn_fanout signature is untouched (the def line appears only as a
+      diff hunk header). Nothing to add to claude_plan / manifest_to_plan /
+      reset_params_to_defaults.
+    - #452 diagonal direction cost (a0e7fd4, rust_router 0.18.3): router.rs
+      charges the wrong-axis component of DIAGONAL moves. Below the Python API
+      and therefore front-agnostic -- both fronts load the same grid_router.
+  * NO-OP (self-reverted, nothing survives at HEAD):
+    - 16d3822 bga_fanout snap_exit_end candidate ladder, reverted by 143d097.
+      Net diff over the pair is empty; no audit surface.
+  * NO GUI SURFACE (corpus/test data only):
+    - c82a7ff corpus expansion to sets 11-25 (+223 boards): tests/stress
+      manifests + fetch/prep scripts only. Note this GREW the manifest_plan
+      parity corpus -- the converter gate now sweeps 158 manifests / 6229
+      flag-checks (was 6201), all still 0 mismatches.
+
+GATES RUN GREEN AT HEAD:
+  * test_manifest_plan_parity.py: 6229 flag-checks across 158 manifests,
+    0 mismatches; param->control resolution 12/12, 0 unresolved.
+  * test_cli_postpass_coverage.py: 4 registered, 10 in active CLI use,
+    0 failures, 0 warnings (bga/qfn run_drc remains the one acknowledged
+    CLI-only report-only pass).
+
+NOT RUN THIS PASS: tests/gui_parity/test_gui_engine_parity.py (no wx/pcbnew in
+this session) -- carried over. With the 76-key param set unchanged the prior wx
+VERDICT PARITY still covers the engine signature. Still pending a KiCad-python
+session (carried): multi-class net_clearances convergence, a GUI-engine diff
+route, a QFN GUI fanout -- and, carried from the a92ccec marker, creating a
+plane via the GUI on a slotted board (sofle) to confirm the pcbnew rule areas
+match the CLI's copperpour keepout sexprs. NEW for next wx session: a GUI QFN
+fanout on zynq_ad9364 U11 to confirm the #446 tips land on-grid there too.
+
+--- prior sweeps ---
 a92ccec 2026-07-20 parity sweep ada9778..a92ccec (the #448/#449/#450/#451/#445
 burndown: NPTH-slot-as-edge family, meander skip-offset, custom-pad anchor
 tessellation, fanout rect-pad stamps, cap-mover via gate, plus the grading/
