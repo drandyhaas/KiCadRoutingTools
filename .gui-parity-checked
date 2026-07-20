@@ -1,3 +1,63 @@
+a92ccec 2026-07-20 parity sweep ada9778..a92ccec (the #448/#449/#450/#451/#445
+burndown: NPTH-slot-as-edge family, meander skip-offset, custom-pad anchor
+tessellation, fanout rect-pad stamps, cap-mover via gate, plus the grading/
+compare work). Outcome: parity CONFIRMED via both no-wx gates + a per-commit
+code audit. NO batch_route*/create_plane kwarg was added or removed (route.py /
+route_diff.py untouched in the whole range), so the 76-key param set is
+IDENTICAL to the ada9778 marker. Every behavioral change is one of:
+
+  * SHARED engine functions -> both fronts inherit, no wiring:
+    - #449 meander skip-offset (c71d5a8): generate_trombone_meander /
+      generate_centerline_meander internals (batch_route length matching).
+    - #448 slot obstacle band (1ddf220): add_drill_hole_obstacles grows slot
+      keep-outs to the edge clearance (shared obstacle map).
+    - #448 in-pad via edge floor (7492ae9): _place_shrunk_via_in_pad
+      (single_ended_routing, shared last-resort rescue).
+    - #451 fanout rect-pad stamps (b3e7ace): bga_fanout/underpad occupancy --
+      fanout_gui calls generate_bga_fanout, inherits.
+    - #445 cap-mover via gate (a92ccec): placement/fanout_clearance
+      _via_shortfalls + hard/cost gates -- fanout_gui calls
+      repair_fanout_clearance, inherits.
+    - #447 stamped-width edge band (0bb71e4): add_board_edge_obstacles callers
+      audited -- all engine-side (obstacle_map x2, plane_region_connector).
+    - #441 plane edge pin (ab2d523): effective_board_edge_clearance resolver
+      inside repair_planes (engine); registered DISCOVERY_EXEMPT (16e6407).
+  * NEW GUI WIRING (done with the engine change, this sweep's one addition):
+    - #448 NPTH-slot copperpour keepouts (1ddf220): create_plane computes them
+      BEFORE the dry_run/write split; CLI writes generate_keepout_zone_sexpr,
+      planes_gui applies pcbnew RULE AREAS ({'keepout': True} entries in the
+      EXISTING new_zones list -- no return-shape change, no new param, so
+      claude_plan / manifest_to_plan / reset need nothing; dedupe by zone name
+      both fronts).
+  * PARSER PARITY (the CLAUDE.md text-vs-pcbnew rule), checked explicitly:
+    - #450 custom-pad anchor tessellation (35a7f88) is a TEXT-parser fix; the
+      pcbnew path already uses pad.GetEffectivePolygon() (KiCad-exact, finer
+      than the new adaptive 5um polygon) -- parity holds with NO mirror needed.
+    - Copper-GRAPHIC circles remain a 16-gon in BOTH paths (kicad_parser
+      gr_circle + the pcbnew _CIRC branch) -- equally coarse on both fronts,
+      noted as a shared-precision observation, not a front divergence.
+  * GRADING/COMPARE TOOLS only, NO GUI surface: check_drc (2ce4fcb slot edge +
+    accepted publications, 3839c6e capsule helper + derive-once margin +
+    worst-overlap bbox checks, 35a7f88 pad-via pair dedupe),
+    kicad_drc_compare (respect_edge_severity, copper-anchored edge items,
+    all-pad hole_clearance design-condition drop), ab_replay_grade (4abb1b3),
+    fix_outline_gaps.py (corpus board-prep, b13675c).
+
+GATES RUN GREEN AT HEAD:
+  * test_manifest_plan_parity.py: param->control 12/12, 0 unresolved.
+  * test_cli_postpass_coverage.py: 0 failures (bga/qfn run_drc the one
+    acknowledged CLI-only report-only pass; effective_board_edge_clearance
+    registered DISCOVERY_EXEMPT).
+
+NOT RUN THIS PASS: tests/gui_parity/test_gui_engine_parity.py (no wx/pcbnew in
+this session) -- carried over; with the 76-key param set unchanged the prior wx
+VERDICT PARITY still covers the engine signature. Still pending a KiCad-python
+session (carried): multi-class net_clearances convergence, a GUI-engine diff
+route, a QFN GUI fanout -- plus NEW for next wx session: create one plane via
+the GUI on a slotted board (sofle) and confirm the pcbnew rule areas match the
+CLI's copperpour keepout sexprs.
+
+--- prior sweeps ---
 ada9778 2026-07-19 parity sweep ad1bd5e..ada9778 (the #441 residual-DRC wave:
 h2h / hole_clearance / shorting_items / edge fab-floor / diff-pair gap floor /
 cp-drop-floor prevention / picodvi detour weld / ghoul NPTH nudge, plus the #442
