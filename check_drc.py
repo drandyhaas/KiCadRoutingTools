@@ -1888,6 +1888,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     if not quiet:
         print("Checking pad-to-via clearances...")
 
+    _pv_seen = set()  # a *.Cu pad is indexed on EVERY layer: test each pair once
     for via in pcb_data.vias:
         via_net = via.net_id
         via_net_matches = matching_net_ids is None or via_net in matching_net_ids
@@ -1898,6 +1899,10 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     continue  # Same net
                 if _pad_has_no_copper(pad):
                     continue  # NPTH hole: covered by the drill-to-drill check
+                _pv_key = (id(pad), id(via))
+                if _pv_key in _pv_seen:
+                    continue  # already tested on another layer (the check is layer-independent)
+                _pv_seen.add(_pv_key)
 
                 pad_net_matches = matching_net_ids is None or pad_net in matching_net_ids
                 if not via_net_matches and not pad_net_matches:

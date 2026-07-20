@@ -639,8 +639,19 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
                                 (ax / 2, ay / 2), (-ax / 2, ay / 2)]
             else:
                 r = min(ax, ay) / 2.0
-                anchor_local = [(r * math.cos(i * math.pi / 8),
-                                 r * math.sin(i * math.pi / 8)) for i in range(16)]
+                # Adaptive tessellation (#450): a fixed inscribed 16-gon has a
+                # 38um radial error on a 4mm anchor (scalenode SP6: a via KiCad
+                # measures 70um from the real circle read as 102um here, so a
+                # sub-clearance graze graded clean). Stay INSCRIBED (the
+                # polygon never exceeds the real copper -- no phantom grazes,
+                # no router over-block) but pick the vertex count for a <=5um
+                # sagitta.
+                _eps = 0.005
+                n = 16
+                if r > _eps:
+                    n = max(16, int(math.ceil(math.pi / math.acos(1.0 - _eps / r))))
+                anchor_local = [(r * math.cos(2.0 * i * math.pi / n),
+                                 r * math.sin(2.0 * i * math.pi / n)) for i in range(n)]
             polys.append(to_global(anchor_local))
     return polys or None
 
