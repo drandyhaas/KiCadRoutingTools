@@ -525,6 +525,15 @@ class _Repair:
         self.base_pad: Dict[str, Dict[int, float]] = {
             ref: self._pad_shortfalls(ref, cap, cap.x, cap.y, cap.rot)
             for ref, cap in self.caps.items()}
+        # Baseline foreign-VIA penetration at the seed (#445): via_penalty was
+        # only a WEIGHTED cost term, so a move relieving a big track graze
+        # could pay for dropping a pad onto an existing via (zynq_ad9364 R2
+        # rotated onto the DDR3_VREF via -- a KiCad-confirmed pad-via short).
+        # Same per-net hard gate as tracks/pads: never penetrate a via net
+        # beyond its seed shortfall.
+        self.base_via: Dict[str, Dict[int, float]] = {
+            ref: self._via_shortfalls(ref, cap, cap.x, cap.y, cap.rot)
+            for ref, cap in self.caps.items()}
         # Baseline mover-vs-mover pad encroachment at the seed (#275). The
         # cap-cap COURTYARD baseline above tolerates pre-existing overlaps,
         # but overlap depth is a poor proxy for pad geometry: two 45-degree
@@ -614,6 +623,24 @@ class _Repair:
                 if d < keepout - EPS:
                     pen += (keepout - d)
         return pen
+
+    def _via_shortfalls(self, ref, cap, x, y, rot):
+        """PER-FOREIGN-NET via penetration for a placement, keyed by the via's
+        net_id (#445) -- the via analogue of _seg_shortfalls/_pad_shortfalls.
+        A net absent from the dict is fully clear; a positive value is a real
+        PAD-VIA DRC violation. Backs the hard accept gate so a move can never
+        drop a pad onto a via net that was clear at the seed, no matter how
+        much track graze it relieves elsewhere (zynq_ad9364 R2 onto the
+        DDR3_VREF via)."""
+        by_net: Dict[int, float] = {}
+        for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
+            for vx, vy, vnet, keepout in self.cap_vias[ref]:
+                if vnet == net:
+                    continue
+                d = _point_to_rect_dist(vx, vy, (bx0, by0, bx1, by1))
+                if d < keepout - EPS:
+                    by_net[vnet] = by_net.get(vnet, 0.0) + (keepout - d)
+        return by_net
 
     def _seg_shortfalls(self, ref, cap, x, y, rot):
         """PER-FOREIGN-NET, same-side track clearance shortfall for a placement,
@@ -747,6 +774,12 @@ class _Repair:
         if self._worsens_any_net(self._pad_shortfalls(ref, cap, x, y, rot),
                                  self.base_pad.get(ref, {})):
             return True
+        # #445: same per-net gate for existing VIAS -- via_penalty alone is a
+        # weighted objective, and a big track-graze relief could pay for
+        # dropping a pad onto a via (zynq_ad9364 R2 onto DDR3_VREF).
+        if self._worsens_any_net(self._via_shortfalls(ref, cap, x, y, rot),
+                                 self.base_via.get(ref, {})):
+            return True
         return False
 
     def graze_penalty(self, ref, cap, x, y, rot):
@@ -763,16 +796,18 @@ class _Repair:
             return float('inf')
         seg_by_net = self._seg_shortfalls(ref, cap, x, y, rot)
         pad_by_net = self._pad_shortfalls(ref, cap, x, y, rot)
-        # #441 per-net accept gate (mirror hard_blocked): reject a move that
-        # penetrates any foreign net beyond its seed, even if the total improves.
+        via_by_net = self._via_shortfalls(ref, cap, x, y, rot)
+        # #441/#445 per-net accept gate (mirror hard_blocked): reject a move
+        # that penetrates any foreign net -- track, pad, or VIA -- beyond its
+        # seed, even if the total improves.
         if (self._worsens_any_net(seg_by_net, self.base_seg.get(ref, {}))
-                or self._worsens_any_net(pad_by_net, self.base_pad.get(ref, {}))):
+                or self._worsens_any_net(pad_by_net, self.base_pad.get(ref, {}))
+                or self._worsens_any_net(via_by_net, self.base_via.get(ref, {}))):
             return float('inf')
         seg_pen = sum(seg_by_net.values())
         pad_pen = sum(pad_by_net.values())
         disp = math.hypot(x - cap.seed_x, y - cap.seed_y)
-        graze = (self.via_penalty(cap, x, y, rot, self.cap_vias[ref])
-                 + seg_pen + pad_pen)
+        graze = (sum(via_by_net.values()) + seg_pen + pad_pen)
         return (VIA_WEIGHT * graze
                 + ATTRACT_WEIGHT * self.attraction(cap, x, y, rot)
                 + DISPLACEMENT_WEIGHT * disp)
