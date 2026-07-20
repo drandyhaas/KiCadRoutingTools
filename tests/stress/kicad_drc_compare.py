@@ -675,6 +675,26 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
             cd_base = None
         cd, cd_pre = _subtract_baseline(cd, cd_base or [])
     kicad_intentional = checkdrc_intentional = 0
+    # Static footprint-geometry conditions (#450 kbic65): a hole_clearance
+    # item whose participants are ALL pads is placement/footprint design
+    # (overlapping alternative-layout switch footprints: a PTH pad's copper
+    # over the neighbor variant's NPTH mounting hole) -- pad copper and pad
+    # holes are footprint geometry. Baseline subtraction normally removes
+    # them, EXCEPT when (remove_unused_layers) hid the pad's inner-layer
+    # copper on the UNROUTED input: connecting the pad materializes the
+    # copper, so the item exists only on the routed board while remaining
+    # 100% footprint geometry. Drop them as pre-existing design conditions.
+    # Scoped to hole_clearance: all-pad clearance/shorting items stay visible
+    # (the cap optimizer MOVES passives, so those can be chain-attributable).
+    _pad_kinds = {"pth", "npth", "pad"}
+    _static_pad = [v for v in kicad
+                   if v["type"] == "hole_clearance"
+                   and v.get("kinds") and set(v["kinds"]) <= _pad_kinds]
+    if _static_pad:
+        kicad = [v for v in kicad if v not in _static_pad]
+        pre += len(_static_pad)
+        print(f"    ({len(_static_pad)} all-pad footprint-geometry item(s) "
+              f"dropped as pre-existing design conditions)")
     # Accept-by-design: drop kicad edge findings covered by an edge-exempt pad
     # (check_drc published them as 'accepted'), symmetric with check_drc having
     # already excluded them from its count.
