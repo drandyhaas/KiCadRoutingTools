@@ -1862,8 +1862,13 @@ def _write_output_and_reroute(
                     # edge resolution would read nothing. Resolve the enforced
                     # board-edge rule from the ORIGINAL input's project instead.
                     try:
-                        from fix_kicad_drc_settings import read_project_edge_clearance
-                        _edge = read_project_edge_clearance(input_file)
+                        from fix_kicad_drc_settings import effective_board_edge_clearance
+                        # #441: pin to the fab floor. Do NOT forward this function's
+                        # board_edge_clearance (the plane-zone inset); cli=0 reads the
+                        # project rule and floors it at the fab edge minimum, so this
+                        # self-invocation re-route never lays copper sub-fab when the
+                        # (possibly missing) sibling .kicad_pro declares a 0/sub-fab rule.
+                        _edge = effective_board_edge_clearance(input_file, 0.0)
                     except Exception:
                         _edge = 0.0
                     # #434: same missing-sibling-.kicad_pro hazard for the

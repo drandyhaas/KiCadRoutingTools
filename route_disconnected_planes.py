@@ -977,7 +977,14 @@ def route_planes(
                     # fill-aware check and UNDO the track if still floating.
                     track_res = tap_pad_with_escalation(
                         pad, pad_layer, net_id, pcb_data,
-                        replace(tap_config, via_size=via_size, via_drill=via_drill),
+                        # #438/#441: the #373 last-resort track must not run CLOSER
+                        # to the board edge than the pad it connects. The blanket
+                        # tap_config board_edge_clearance=0.0 falls back to
+                        # config.clearance in the edge keep-out, letting the fallback
+                        # trace graze the outline sub-fab (ulx3s In2.Cu at 0.0). Cap
+                        # it at the pad's own edge distance, as the via tap above does.
+                        replace(tap_config, via_size=via_size, via_drill=via_drill,
+                                board_edge_clearance=_pad_edge),
                         max_search_radius=max_search_radius,
                         via_size=via_size, via_drill=via_drill,
                         verbose=verbose, fine_for_all=True, pour_trace_only=True,
@@ -1341,8 +1348,13 @@ def route_planes(
                 # board_edge_clearance -- that is the plane-zone inset, not an
                 # enforced routing floor.
                 try:
-                    from fix_kicad_drc_settings import read_project_edge_clearance
-                    _edge = read_project_edge_clearance(input_file)
+                    from fix_kicad_drc_settings import effective_board_edge_clearance
+                    # #441: pin to the fab floor. Do NOT forward this function's
+                    # board_edge_clearance (the plane-zone inset); cli=0 reads the
+                    # project rule and floors it at the fab edge minimum, so the
+                    # ripped-net reconnect never stamps its edge band sub-fab when the
+                    # (possibly missing) sibling .kicad_pro declares a 0/sub-fab rule.
+                    _edge = effective_board_edge_clearance(input_file, 0.0)
                 except Exception:
                     _edge = 0.0
                 _ok, _fail, _t = batch_route(
@@ -1729,8 +1741,11 @@ Examples:
         # args.board_edge_clearance is NOT an enforced routing floor; see the
         # ripped-net reconnect above).
         try:
-            from fix_kicad_drc_settings import read_project_edge_clearance
-            _oracle_edge = read_project_edge_clearance(args.input_file)
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            # #441: the oracle must validate at the fab-floor-pinned edge, not the
+            # board's raw (possibly sub-fab / 0) rule, so it agrees with the router
+            # and grader. cli=0 -> read project rule, floor at fab edge minimum.
+            _oracle_edge = effective_board_edge_clearance(args.input_file, 0.0)
         except Exception:
             _oracle_edge = 0.0
         _ocfg = GridRouteConfig(
