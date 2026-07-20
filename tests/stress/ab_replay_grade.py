@@ -188,7 +188,8 @@ def _kicad_grade(pcb, clearance, baseline=None):
     kicad_drc/kicad_only reflect ROUTER-introduced items; the subtracted count
     is reported as kicad_preexisting."""
     _none = {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None,
-             "kicad_connection_width": None}
+             "kicad_connection_width": None, "checkdrc_reconciled": None,
+             "checkdrc_preexisting": None}
     try:
         sys.path.insert(0, str(REPO / "tests" / "stress"))
         from kicad_drc_compare import KICAD_CLI, compare_board_data
@@ -198,6 +199,12 @@ def _kicad_grade(pcb, clearance, baseline=None):
         if data is None or "skip" in data:
             return _none
         return {"kicad_drc": data["kicad"], "kicad_preexisting": data["kicad_preexisting"],
+                # baseline-subtracted + accepted-removed check_drc count (== the
+                # kicad_drc_compare CLI's `check_drc=N`): the ROUTER-ATTRIBUTABLE
+                # real DRC, used for drc_real below so pre-existing input copper
+                # doesn't inflate the summary.
+                "checkdrc_reconciled": data["check_drc"],
+                "checkdrc_preexisting": data["checkdrc_preexisting"],
                 "kicad_only": data["kicad_only"], "checkdrc_only": data["checkdrc_only"],
                 "kicad_matched": data["matched"],
                 "kicad_intentional_edge": data.get("kicad_intentional_edge", 0),
@@ -248,14 +255,25 @@ def grade(pcb, clearance, baseline=None):
     out = {"drc": _drc_count(drc.stdout + drc.stderr), "conn": _conn_count(ctext),
            "nets_total": total, "nets_incomplete": incomplete, "completion_pct": pct}
     out.update(_kicad_grade(pcb, clearance, baseline=baseline))
-    # raw `drc` is the full check_drc count; `drc_real` removes the accepted-by-
-    # design net-tie contact items (Kelvin-shunt escape touches its partner pad --
-    # not a defect). compare()/the regression gate grade on drc_real; raw drc stays
-    # for reference. The count comes from the shared grading core (check_drc side),
-    # so it needs kicad-cli; without it drc_real == drc.
+    # raw `drc` is the full check_drc count (NOT baseline-subtracted -- it counts
+    # pre-existing input copper like edge-connector pads and chassis-ground pours).
+    # `drc_real` is the ROUTER-ATTRIBUTABLE real DRC that compare()/the regression
+    # gate grade on: prefer the shared grading core's reconciled check_drc count
+    # (checkdrc_reconciled -- baseline-subtracted per #405 AND accepted-by-design
+    # removed, identical to the kicad_drc_compare CLI's check_drc=N), so a track
+    # routed into a pre-existing edge-exempt pad no longer looks like a regression
+    # (orangecrab: raw drc 3 tracks-into-connector-pads -> reconciled 0). Falls back
+    # to raw-minus-accepted-edge when kicad-cli (hence the core) is unavailable, and
+    # to raw drc for pre-#408 summaries that lack the field.
     cie = out.get("checkdrc_intentional_edge") or 0
     out["drc_intentional_edge"] = cie
-    out["drc_real"] = max(0, out["drc"] - cie) if out["drc"] is not None else None
+    recon = out.get("checkdrc_reconciled")
+    if recon is not None:
+        out["drc_real"] = recon
+    elif out["drc"] is not None:
+        out["drc_real"] = max(0, out["drc"] - cie)
+    else:
+        out["drc_real"] = None
     return out
 
 
