@@ -101,6 +101,7 @@ def run_kicad_drc(board: str):
             continue
         nets = set()
         pos = None
+        copper_pos = None
         kinds = set()
         for item in v.get("items", []):
             d = item.get("description", "")
@@ -113,6 +114,16 @@ def run_kicad_drc(board: str):
             p = item.get("pos")
             if pos is None and p:
                 pos = (float(p.get("x", 0.0)), float(p.get("y", 0.0)))
+            # For edge violations the FIRST item is often the Edge.Cuts /
+            # NPTH-pad object, whose anchor can sit a far corner away from
+            # the offending copper (quickfeather: a 58mm gr_line anchored
+            # 24mm from the flagged track) -- proximity pairing against
+            # check_drc's copper-anchored items then never matches. Prefer
+            # the position of the COPPER item (the one carrying a [net]).
+            if copper_pos is None and p and "[" in d and "]" in d:
+                copper_pos = (float(p.get("x", 0.0)), float(p.get("y", 0.0)))
+        if vtype in EDGE_KICAD_TYPES and copper_pos is not None:
+            pos = copper_pos
         out.append({"type": vtype, "nets": frozenset(nets),
                     "pos": pos or (0.0, 0.0),
                     "desc": v.get("description", ""),
