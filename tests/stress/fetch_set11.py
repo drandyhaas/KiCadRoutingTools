@@ -45,6 +45,24 @@ def _stage_from_zip(b, dest):
     return False
 
 
+def _stage_from_raw(b, dest):
+    """Plain raw .kicad_pcb download (entries with no `zip_member`).
+
+    Set 11 was originally all zip-published sources; the boards added to fill
+    it out are ordinary raw GitHub URLs, like fetch_set5..10. Also grabs the
+    sibling .kicad_pro -- without it the route step resolves its DRC floor from
+    the STOCK netclass and KiCad grades phantom clearance violations (#441).
+    """
+    r = subprocess.run(["curl", "-sL", "--fail", b["raw_url"], "-o", str(dest)],
+                       capture_output=True, timeout=300)
+    if r.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
+        raise RuntimeError(f"curl rc={r.returncode}")
+    pro_url = b["raw_url"][: -len(".kicad_pcb")] + ".kicad_pro"
+    p = subprocess.run(["curl", "-sL", "--fail", pro_url, "-o",
+                        str(dest.with_suffix(".kicad_pro"))], capture_output=True, timeout=300)
+    return p.returncode == 0
+
+
 def _stage_from_local(b, dest):
     src = Path(b["local_path"])
     if not src.exists():
@@ -67,9 +85,10 @@ def main():
         got_pro = None
         origin = None
         if b.get("raw_url"):
+            stage = _stage_from_zip if b.get("zip_member") else _stage_from_raw
             try:
-                got_pro = _stage_from_zip(b, dest)
-                origin = "zip"
+                got_pro = stage(b, dest)
+                origin = "zip" if b.get("zip_member") else "raw"
             except Exception as e:
                 print(f"  WARN {b['short_name']}: download failed ({e}); trying local_path")
         if origin is None and b.get("local_path"):

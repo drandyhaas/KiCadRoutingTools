@@ -20,6 +20,21 @@ mkdir -p "$STRESS/boards_unrouted_set11" "$STRESS/boards_set11"
 MAP=(
   "rp2350_fpga_eensy|RP2350_FPGA_eensy"
   "mikoto_nrf52840|mikoto"
+  # boards added to fill set 11 out to 15; these are raw-URL sources staged by
+  # fetch_set11.py as <short-name>.kicad_pcb, so name == fragment.
+  "zynthian_v5_main|zynthian_v5_main"
+  "lora_cubesat_cm|lora_cubesat_cm"
+  "duodyne_z80_proc|duodyne_z80_proc"
+  "fsae_custom_bms|fsae_custom_bms"
+  "g474_power_charger|g474_power_charger"
+  "len42_filter2|len42_filter2"
+  "cm5_minima1|cm5_minima1"
+  "fellapc_6502|fellapc_6502"
+  "ergosnm_trackball|ergosnm_trackball"
+  "squishbox|squishbox"
+  "kria_4x_pmod|kria_4x_pmod"
+  "meshbot_v1|meshbot_v1"
+  "rc2014_ym2149|rc2014_ym2149"
 )
 
 for entry in "${MAP[@]}"; do
