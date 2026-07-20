@@ -512,9 +512,6 @@ def generate_underpad_escape(footprint: Footprint,
     _pad_margin = 1.0
     locked_smd_pads = []   # copper SMD pads a THROUGH via must also clear
     for p in immovable_foreign_pads(pcb_data, footprint.reference):
-        if not (bounds[0] - _pad_margin <= p.global_x <= bounds[2] + _pad_margin and
-                bounds[1] - _pad_margin <= p.global_y <= bounds[3] + _pad_margin):
-            continue
         # Custom-shape pads (meander antenna, comb) stamp their REAL polygon
         # copper, not the bbox disk that phantom-blocks vias far from any copper
         # (#232 class); cx/cy/p_half is the polygon bounding circle for the
@@ -522,6 +519,15 @@ def generate_underpad_escape(footprint: Footprint,
         # neighbouring ball's home cells, and never under-covers).
         cpolys = _custom_polys(p)
         cx, cy, p_half = _pad_extent(p)
+        # Window by the pad's COPPER EXTENT, not its centre (#451 root cause):
+        # zynq7020_som's U11 GND thermal paddle (3.4x4.3) centres 1.3mm outside
+        # the escape region, so the centre-only test dropped it -- and the K5
+        # escape stub was drawn 0.15mm INTO the paddle copper the region never
+        # modeled. A big pad reaches p_half beyond its centre.
+        _reach = _pad_margin + p_half
+        if not (bounds[0] - _reach <= p.global_x <= bounds[2] + _reach and
+                bounds[1] - _reach <= p.global_y <= bounds[3] + _reach):
+            continue
         p_keep = p_half + track_width / 2 + clearance + margin
         if p.drill and p.drill > 0:
             occ.block_all(p.global_x, p.global_y, p_keep)
@@ -531,21 +537,37 @@ def generate_underpad_escape(footprint: Footprint,
             exact_pads.append((p.global_x, p.global_y, p_half, p.drill / 2.0,
                                p.net_id, p.pad_type != 'np_thru_hole'))
             continue
+        # Non-custom pads stamp their REAL RECT outline (rect_rotation-aware),
+        # not a disk of radius max(size)/2: that disk under-covers a rect's
+        # CORNERS by up to hypot(hx,hy)-max(hx,hy) -- 0.59mm on zynq7020_som's
+        # 3.4x4.3 U11 GND thermal paddle, whose corner region the K5 escape
+        # stub was then drawn straight into (#451 root cause). The rect poly
+        # is exact for rect/roundrect and a conservative superset for
+        # circle/oval. Stamp radius shrinks to the track/clearance term since
+        # the copper extent is now in the polygon itself.
+        _rect_keep = track_width / 2 + clearance + margin
+        _rect_poly = None
+        if not cpolys:
+            hx, hy = p.size_x / 2.0, p.size_y / 2.0
+            _corners = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]
+            rr = getattr(p, 'rect_rotation', 0.0) or 0.0
+            if rr:
+                _rad = math.radians(rr)
+                _c, _s = math.cos(_rad), math.sin(_rad)
+                _corners = [(lx * _c - ly * _s, lx * _s + ly * _c)
+                            for lx, ly in _corners]
+            _rect_poly = [[(p.global_x + lx, p.global_y + ly)
+                           for lx, ly in _corners]]
         pad_layer_names = p.layers or []
         if '*.Cu' in pad_layer_names:
-            if cpolys:
-                occ.block_poly(cpolys, p_keep, None)
-            else:
-                occ.block_all(p.global_x, p.global_y, p_keep)
+            occ.block_poly(cpolys or _rect_poly, p_keep if cpolys else _rect_keep, None)
             carve_disks.append((cx, cy, p_keep, None, p.net_id))
         else:
             for lname in pad_layer_names:
                 if lname in layer_set:
                     li = layers.index(lname)
-                    if cpolys:
-                        occ.block_poly(cpolys, p_keep, li)
-                    else:
-                        occ.block_layer(li, p.global_x, p.global_y, p_keep)
+                    occ.block_poly(cpolys or _rect_poly,
+                                   p_keep if cpolys else _rect_keep, li)
                     carve_disks.append((cx, cy, p_keep, li, p.net_id))
         locked_smd_pads.append(p)
 
