@@ -2385,6 +2385,19 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'layer': seg.layer, 'overlap_mm': overlap,
                     'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
                 })
+            else:
+                # Strictly positive but sub-margin: grid-quantization noise
+                # (ghoul 0.8um, dilemma 2-4um at the 0.20 floor). PUBLISH as
+                # accepted -- kicad-cli grades the exact metric and reports
+                # these, so kicad_drc_compare must subtract its finding rather
+                # than alarm it as a kicad-only divergence (#448, same
+                # publish-don't-drop contract as the pad-covered class above).
+                _accepted_edge.append({
+                    'type': 'segment-board-edge', 'net1': net_str, 'edge': s_edge,
+                    'layer': seg.layer, 'overlap_mm': s_overlap,
+                    'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+                    'accepted': 'quantization-margin',
+                })
 
         # Check vias
         for via in pcb_data.vias:
@@ -2392,15 +2405,38 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if matching_via_nets is not None and not via_matches:
                 continue
             if use_poly:
+                s_viol, s_overlap, s_edge = check_via_board_edge_poly(
+                    via, edge_rings, edge_outer, edge_cutouts,
+                    effective_board_edge_clearance, 0.0)
                 has_violation, overlap, edge = check_via_board_edge_poly(
                     via, edge_rings, edge_outer, edge_cutouts,
                     effective_board_edge_clearance, clearance_margin)
             else:
+                s_viol, s_overlap, s_edge = check_via_board_edge(
+                    via, board_bounds, effective_board_edge_clearance, 0.0)
                 has_violation, overlap, edge = check_via_board_edge(
                     via, board_bounds, effective_board_edge_clearance, clearance_margin)
-            if has_violation:
+            if has_violation or s_viol:
                 net_name = pcb_data.nets.get(via.net_id, None)
                 net_str = net_name.name if net_name else f"net_{via.net_id}"
+            # Via-in-edge-pad exemption (#448, via analog of the ottercast
+            # R7.2 segment rule): a via whose barrel lands ON an (edge-exempt)
+            # pad's copper, and whose ring stays no closer to the outline than
+            # the pad's own copper already is, adds no NEW edge exposure --
+            # the last-resort via-in-pad rescue (#189) legitimately taps USB
+            # connector pads that overhang the outline (crkbd rJ1 VBUSR).
+            if s_viol and s_edge != "off-board" and use_poly and _edge_pads:
+                _via_edge_d = _point_to_rings_distance(via.x, via.y, edge_rings) - via.size / 2.0
+                if any(point_to_pad_distance(via.x, via.y, _pd) <= via.size / 2.0 + _edge_touch_quant
+                       and _ep_edge[id(_pd)] <= _via_edge_d + 1e-6
+                       for _pd in _edge_pads):
+                    _accepted_edge.append({
+                        'type': 'via-board-edge', 'net1': net_str, 'edge': s_edge,
+                        'overlap_mm': s_overlap, 'via_loc': (via.x, via.y),
+                        'accepted': 'edge-exempt-pad',
+                    })
+                    continue
+            if has_violation:
                 violations.append({
                     'type': 'via-board-edge',
                     'net1': net_str,
@@ -2408,6 +2444,107 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'overlap_mm': overlap,
                     'via_loc': (via.x, via.y),
                 })
+            elif s_viol:
+                # sub-margin graze: publish accepted (quantization; see the
+                # matching segment branch above)
+                _accepted_edge.append({
+                    'type': 'via-board-edge', 'net1': net_str, 'edge': s_edge,
+                    'overlap_mm': s_overlap, 'via_loc': (via.x, via.y),
+                    'accepted': 'quantization-margin',
+                })
+
+        # NPTH SLOT (milled oval) holes are board edge to KiCad (#448): its edge
+        # provider grades copper proximity to a slot's hole wall as
+        # copper_edge_clearance, while ROUND NPTH drills stay in the
+        # hole_clearance / copper-to-hole domain (verified with kicad-cli 10
+        # probes on sofle_pico: a track 0.22mm from the SW25 2.8x1.5 slot flags
+        # copper_edge_clearance; the same track 0.10mm from a round 3.0mm NPTH
+        # flags nothing). Grade tracks and vias against each slot capsule at the
+        # same effective edge clearance, with EXACT capsule distance -- these
+        # breaches are often a few um (sofle SW25A: 13.5um under the 0.3 rule),
+        # so ring sampling error would swallow them.
+        _slot_caps = []
+        from kicad_parser import pad_drill_capsule as _pdc
+        for _fp in pcb_data.footprints.values():
+            for _pd in _fp.pads:
+                if getattr(_pd, 'pad_type', '') != 'np_thru_hole' or _pd.drill <= 0:
+                    continue
+                (_s1, _s2, _sr) = _pdc(_pd)
+                if math.hypot(_s2[0] - _s1[0], _s2[1] - _s1[1]) <= 1e-9:
+                    continue  # round drill: not part of the milled edge
+                _slot_caps.append((_s1, _s2, _sr,
+                                   f"{_pd.component_ref}.{_pd.pad_number}"))
+        if _slot_caps:
+            _esx1 = np.array([s.start_x for s in pcb_data.segments])
+            _esy1 = np.array([s.start_y for s in pcb_data.segments])
+            _esx2 = np.array([s.end_x for s in pcb_data.segments])
+            _esy2 = np.array([s.end_y for s in pcb_data.segments])
+            _esw = np.array([s.width for s in pcb_data.segments])
+            _edx = _esx2 - _esx1
+            _edy = _esy2 - _esy1
+            _elen2 = _edx * _edx + _edy * _edy
+            _esafe2 = np.where(_elen2 > 0, _elen2, 1.0)
+            _edge_tol = effective_board_edge_clearance * clearance_margin
+
+            def _slot_pts_to_tracks(hx, hy):
+                t = np.clip(((hx - _esx1) * _edx + (hy - _esy1) * _edy) / _esafe2, 0.0, 1.0)
+                return np.sqrt((hx - (_esx1 + t * _edx)) ** 2 +
+                               (hy - (_esy1 + t * _edy)) ** 2)
+
+            for (_h1x, _h1y), (_h2x, _h2y), _hr, _slot_ref in _slot_caps:
+                # segment-to-capsule-axis distance (min of the 4 endpoint
+                # projections; proper crossings -> 0), same scheme as the
+                # copper-to-hole check above.
+                _d = np.minimum(_slot_pts_to_tracks(_h1x, _h1y),
+                                _slot_pts_to_tracks(_h2x, _h2y))
+                _hdx, _hdy = _h2x - _h1x, _h2y - _h1y
+                _hlen2 = _hdx * _hdx + _hdy * _hdy
+                for _px, _py in ((_esx1, _esy1), (_esx2, _esy2)):
+                    _t2 = np.clip(((_px - _h1x) * _hdx + (_py - _h1y) * _hdy) / _hlen2, 0.0, 1.0)
+                    _d = np.minimum(_d, np.sqrt((_px - (_h1x + _t2 * _hdx)) ** 2 +
+                                                (_py - (_h1y + _t2 * _hdy)) ** 2))
+                _d1 = _edx * (_h1y - _esy1) - _edy * (_h1x - _esx1)
+                _d2 = _edx * (_h2y - _esy1) - _edy * (_h2x - _esx1)
+                _d3 = _hdx * (_esy1 - _h1y) - _hdy * (_esx1 - _h1x)
+                _d4 = _hdx * (_esy2 - _h1y) - _hdy * (_esx2 - _h1x)
+                _d = np.where((_d1 * _d2 < 0) & (_d3 * _d4 < 0), 0.0, _d)
+                _ovl = (effective_board_edge_clearance + _esw / 2.0) - (_d - _hr)
+                for _k in np.nonzero(_ovl > 1e-9)[0].tolist():
+                    seg = pcb_data.segments[_k]
+                    if matching_seg_net_set is not None and seg.net_id not in matching_seg_net_set:
+                        continue
+                    net_name = pcb_data.nets.get(seg.net_id, None)
+                    net_str = net_name.name if net_name else f"net_{seg.net_id}"
+                    _v = {
+                        'type': 'segment-board-edge', 'net1': net_str,
+                        'edge': 'npth-slot', 'layer': seg.layer,
+                        'overlap_mm': float(_ovl[_k]), 'slot_ref': _slot_ref,
+                        'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+                    }
+                    if _ovl[_k] > _edge_tol:
+                        violations.append(_v)
+                    else:  # sub-margin: publish accepted (quantization)
+                        _v['accepted'] = 'quantization-margin'
+                        _accepted_edge.append(_v)
+                for via in pcb_data.vias:
+                    if matching_via_nets is not None and via.net_id not in matching_via_nets:
+                        continue
+                    _t = 0.0 if _hlen2 <= 0 else max(0.0, min(1.0, ((via.x - _h1x) * _hdx + (via.y - _h1y) * _hdy) / _hlen2))
+                    _vd = math.hypot(via.x - (_h1x + _t * _hdx), via.y - (_h1y + _t * _hdy)) - _hr
+                    _vovl = (effective_board_edge_clearance + via.size / 2.0) - _vd
+                    if _vovl > 1e-9:
+                        net_name = pcb_data.nets.get(via.net_id, None)
+                        net_str = net_name.name if net_name else f"net_{via.net_id}"
+                        _v = {
+                            'type': 'via-board-edge', 'net1': net_str,
+                            'edge': 'npth-slot', 'overlap_mm': float(_vovl),
+                            'slot_ref': _slot_ref, 'via_loc': (via.x, via.y),
+                        }
+                        if _vovl > _edge_tol:
+                            violations.append(_v)
+                        else:
+                            _v['accepted'] = 'quantization-margin'
+                            _accepted_edge.append(_v)
 
         # Check pads (issue #236). Off by default: pad-to-edge violations are
         # almost always pre-existing edge-connector pads on the bare board (the

@@ -133,6 +133,13 @@ def run_check_drc(board: str, clearance: float = None, netclasses: bool = False)
     stricter than what kicad-cli sees."""
     from check_drc import run_drc
     kw = {"clearance": clearance} if clearance else {}
+    # _staged_copy forces copper_edge_clearance severity to "error" on the
+    # kicad-cli side (#441: authored-"ignore" boards must not hide router copper
+    # run to the milled edge). Mirror that here or every edge item on an
+    # ignore-authored board (sofle_pico) grades one-sided as kicad_only -- and
+    # check_drc's accepted-edge publications (pad-covered, quantization-margin,
+    # #448 npth-slot) never happen, so the reconciler can't subtract them.
+    kw["respect_edge_severity"] = False
     try:
         from fix_kicad_drc_settings import read_project_edge_clearance
         edge = read_project_edge_clearance(board)
