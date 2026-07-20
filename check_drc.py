@@ -2287,6 +2287,15 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         # the track running into it must be too. Build the near-edge pad set once.
         _edge_pads = []
         _ep_edge = {}  # id(pad) -> pad copper's own min distance to the outline
+        # Grid-quantization allowance (~grid_step/2 for the default 0.05 routing
+        # grid): a track routed right ALONGSIDE an edge-exempt pad snaps to grid
+        # nodes, so a sampled centre point can land ~grid_step/2 shy of literally
+        # overlapping the pad copper (ottercast R7.2: a +3V3 tap sample sits 0.085mm
+        # from a pad whose half-width reach is 0.0635mm -- a 0.021mm quantization
+        # sliver). Treat the track as touching the pad within this tolerance. Only
+        # loosens the TOUCH test; the pad-closer-to-edge guard below stays strict, so
+        # a track poking genuinely CLOSER to the edge than the pad is still a real graze.
+        _edge_touch_quant = 0.025
         if use_poly and edge_rings:
             for _pd in (p for fp in pcb_data.footprints.values() for p in fp.pads):
                 if getattr(_pd, 'pad_type', '') == 'np_thru_hole' or not (_pd.size_x and _pd.size_y):
@@ -2321,7 +2330,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 pt_edge = _point_to_rings_distance(x, y, edge_rings)
                 if pt_edge < req:
                     saw_viol = True
-                    covered = any(point_to_pad_distance(x, y, _pd) <= half + 1e-6
+                    covered = any(point_to_pad_distance(x, y, _pd) <= half + _edge_touch_quant
                                   and _ep_edge[id(_pd)] <= pt_edge - half + 1e-6
                                   for _pd in _edge_pads)
                     if not covered:
@@ -2333,6 +2342,36 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             seg_matches = matching_seg_net_set is None or seg.net_id in matching_seg_net_set
             if matching_seg_net_set is not None and not seg_matches:
                 continue
+            # The pad-covered EXEMPTION is a geometric fact (a track running into
+            # an edge-exempt pad adds no new edge copper), independent of the
+            # grid-quantization margin: a covered segment must PUBLISH as accepted
+            # -- so kicad_drc_compare subtracts the matching kicad
+            # copper_edge_clearance -- whether its overlap is 8um or 100um. Decide
+            # coverage on the STRICT (margin-0) geometry first; only NON-exempt
+            # grazes are then margin-gated into a real failure (ottercast R7.2: two
+            # +3V3 taps graze 0.008/0.020mm, below the 0.025mm margin, but are
+            # pad-covered -- they were silently margin-dropped and left their kicad
+            # findings orphaned as false-negative alarms).
+            if use_poly:
+                s_viol, s_overlap, s_edge = check_segment_board_edge_poly(
+                    seg, edge_rings, edge_outer, edge_cutouts,
+                    effective_board_edge_clearance, 0.0)
+            else:
+                s_viol, s_overlap, s_edge = check_segment_board_edge(
+                    seg, board_bounds, effective_board_edge_clearance, 0.0)
+            if not s_viol:
+                continue  # no sub-rule edge graze at all
+            net_name = pcb_data.nets.get(seg.net_id, None)
+            net_str = net_name.name if net_name else f"net_{seg.net_id}"
+            if s_edge != "off-board" and use_poly and _seg_edge_all_in_pads(seg):
+                _accepted_edge.append({
+                    'type': 'segment-board-edge', 'net1': net_str, 'edge': s_edge,
+                    'layer': seg.layer, 'overlap_mm': s_overlap,
+                    'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+                    'accepted': 'edge-exempt-pad',
+                })
+                continue
+            # not exempt -> real only if it clears the grid-quantization margin
             if use_poly:
                 has_violation, overlap, edge = check_segment_board_edge_poly(
                     seg, edge_rings, edge_outer, edge_cutouts,
@@ -2341,25 +2380,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 has_violation, overlap, edge = check_segment_board_edge(
                     seg, board_bounds, effective_board_edge_clearance, clearance_margin)
             if has_violation:
-                net_name = pcb_data.nets.get(seg.net_id, None)
-                net_str = net_name.name if net_name else f"net_{seg.net_id}"
-                _viol = {
-                    'type': 'segment-board-edge',
-                    'net1': net_str,
-                    'edge': edge,
-                    'layer': seg.layer,
-                    'overlap_mm': overlap,
+                violations.append({
+                    'type': 'segment-board-edge', 'net1': net_str, 'edge': edge,
+                    'layer': seg.layer, 'overlap_mm': overlap,
                     'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
-                }
-                if edge != "off-board" and use_poly and _seg_edge_all_in_pads(seg):
-                    # Track copper covered by an edge-exempt pad -> NOT a check_drc
-                    # failure, but PUBLISH it (accepted) so kicad_drc_compare subtracts
-                    # the matching kicad copper_edge_clearance finding rather than
-                    # alarming on a false negative (ottercast R7.2).
-                    _viol['accepted'] = 'edge-exempt-pad'
-                    _accepted_edge.append(_viol)
-                else:
-                    violations.append(_viol)
+                })
 
         # Check vias
         for via in pcb_data.vias:
