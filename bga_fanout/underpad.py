@@ -942,36 +942,6 @@ def generate_underpad_escape(footprint: Footprint,
             gx, gy = snap_out(bx, 0.0), snap_out(by, dy)
         if abs(gx - bx) < 1e-9 and abs(gy - by) < 1e-9:
             return
-
-        # Candidate LADDER (#446 class, BGA side). The single (gx, gy) above is
-        # one point; when it is blocked this used to give up and ship an
-        # OFF-GRID terminal, which the on-grid router then cannot END on -- it
-        # stops a cell short, its cap merely overlaps the escape cap (already
-        # "connected" to the connectivity model), and the board ships a
-        # same-net soft joint. Offer the neighbouring grid points too, ordered
-        # nearest-first, so a blocked first choice does not cost the guarantee.
-        #
-        # Constraints preserved exactly:
-        #   * the dominant (travel) axis may only move OUTWARD -- never pull
-        #     the free end back inside the escape region boundary;
-        #   * the cross axis may take either bracketing value;
-        #   * every candidate still passes the same _ok clearance gate below,
-        #     so this can never introduce a graze; if none clears, the
-        #     off-grid end is kept exactly as before.
-        _g = grid_step
-        if abs(dx) >= abs(dy):
-            _dom_dir = 1.0 if dx > 0 else -1.0
-            _doms = [gx, gx + _dom_dir * _g]
-            _crs = sorted({math.floor(by / _g) * _g, math.ceil(by / _g) * _g},
-                          key=lambda v: abs(v - by))
-            cands = [(dxx, cc) for dxx in _doms for cc in _crs]
-        else:
-            _dom_dir = 1.0 if dy > 0 else -1.0
-            _doms = [gy, gy + _dom_dir * _g]
-            _crs = sorted({math.floor(bx / _g) * _g, math.ceil(bx / _g) * _g},
-                          key=lambda v: abs(v - bx))
-            cands = [(cc, dyy) for dyy in _doms for cc in _crs]
-        cands.sort(key=lambda p: (p[0] - bx) ** 2 + (p[1] - by) ** 2)
         # Append a short jog from the found end to the grid point rather than
         # re-aiming the whole final segment: the corridor behind the end is
         # often exactly one lattice cell wide (neighbouring escapes block the
@@ -986,18 +956,10 @@ def generate_underpad_escape(footprint: Footprint,
             return (occ.seg_clear(li, p, q, exempt=exempt) and
                     not (occ.has_soft and occ.seg_soft_hits(li, p, q, net_id_for_snap,
                                                             exempt=exempt)))
-        # Nearest candidate first; for each, prefer the short jog (appending a
-        # sub-grid-step segment past the boundary) over re-aiming the whole
-        # final segment, exactly as before.
-        for cand in cands:
-            if _ok((bx, by), cand):
-                pts.append(cand)
-                return
-            if _ok((ax, ay), cand):
-                pts[-1] = cand
-                return
-        # Nothing on-grid clears: keep the off-grid end (route.py still copes,
-        # just slower) -- a clear-but-off-grid tip beats a graze.
+        if _ok((bx, by), (gx, gy)):
+            pts.append((gx, gy))
+        elif _ok((ax, ay), (gx, gy)):
+            pts[-1] = (gx, gy)
 
     def commit(p, path, carve=None):
         """Emit tracks + the via-in-pad for a found path and mark occupancy."""
