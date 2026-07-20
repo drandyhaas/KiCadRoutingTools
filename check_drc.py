@@ -1032,41 +1032,19 @@ def check_segment_board_edge(seg: Segment, board_bounds: Tuple[float, float, flo
     min_x, min_y, max_x, max_y = board_bounds
     half_width = seg.width / 2
     required_clearance = clearance + half_width
+    tolerance = clearance * clearance_margin
 
-    # Check all segment points against all edges
+    # Report the WORST overlap over all endpoints x edges (not the first match,
+    # so a strict margin=0 result can derive any margined verdict exactly).
+    best_overlap, best_edge = 0.0, ""
     for x, y in [(seg.start_x, seg.start_y), (seg.end_x, seg.end_y)]:
-        # Left edge
-        dist_left = x - min_x
-        if dist_left < required_clearance:
-            overlap = required_clearance - dist_left
-            tolerance = clearance * clearance_margin
-            if overlap > tolerance:
-                return True, overlap, "left"
-
-        # Right edge
-        dist_right = max_x - x
-        if dist_right < required_clearance:
-            overlap = required_clearance - dist_right
-            tolerance = clearance * clearance_margin
-            if overlap > tolerance:
-                return True, overlap, "right"
-
-        # Bottom edge
-        dist_bottom = y - min_y
-        if dist_bottom < required_clearance:
-            overlap = required_clearance - dist_bottom
-            tolerance = clearance * clearance_margin
-            if overlap > tolerance:
-                return True, overlap, "bottom"
-
-        # Top edge
-        dist_top = max_y - y
-        if dist_top < required_clearance:
-            overlap = required_clearance - dist_top
-            tolerance = clearance * clearance_margin
-            if overlap > tolerance:
-                return True, overlap, "top"
-
+        for dist, name in ((x - min_x, "left"), (max_x - x, "right"),
+                           (y - min_y, "bottom"), (max_y - y, "top")):
+            overlap = required_clearance - dist
+            if overlap > tolerance and overlap > best_overlap:
+                best_overlap, best_edge = overlap, name
+    if best_edge:
+        return True, best_overlap, best_edge
     return False, 0.0, ""
 
 
@@ -1086,40 +1064,20 @@ def check_via_board_edge(via: Via, board_bounds: Tuple[float, float, float, floa
     min_x, min_y, max_x, max_y = board_bounds
     half_size = via.size / 2
     required_clearance = clearance + half_size
+    tolerance = clearance * clearance_margin
 
     x, y = via.x, via.y
 
-    # Left edge
-    dist_left = x - min_x
-    if dist_left < required_clearance:
-        overlap = required_clearance - dist_left
-        tolerance = clearance * clearance_margin
-        if overlap > tolerance:
-            return True, overlap, "left"
-
-    # Right edge
-    dist_right = max_x - x
-    if dist_right < required_clearance:
-        overlap = required_clearance - dist_right
-        tolerance = clearance * clearance_margin
-        if overlap > tolerance:
-            return True, overlap, "right"
-
-    # Bottom edge
-    dist_bottom = y - min_y
-    if dist_bottom < required_clearance:
-        overlap = required_clearance - dist_bottom
-        tolerance = clearance * clearance_margin
-        if overlap > tolerance:
-            return True, overlap, "bottom"
-
-    # Top edge
-    dist_top = max_y - y
-    if dist_top < required_clearance:
-        overlap = required_clearance - dist_top
-        tolerance = clearance * clearance_margin
-        if overlap > tolerance:
-            return True, overlap, "top"
+    # Report the WORST overlap over all edges (not the first match, so a
+    # strict margin=0 result can derive any margined verdict exactly).
+    best_overlap, best_edge = 0.0, ""
+    for dist, name in ((x - min_x, "left"), (max_x - x, "right"),
+                       (y - min_y, "bottom"), (max_y - y, "top")):
+        overlap = required_clearance - dist
+        if overlap > tolerance and overlap > best_overlap:
+            best_overlap, best_edge = overlap, name
+    if best_edge:
+        return True, best_overlap, best_edge
 
     return False, 0.0, ""
 
@@ -1433,6 +1391,31 @@ def edge_clearance_severity(pcb_file: str) -> Optional[str]:
         return None
     return (((j.get('board', {}) or {}).get('design_settings', {}) or {})
             .get('rule_severities', {}) or {}).get('copper_edge_clearance')
+
+
+def _np_capsule_to_tracks(h1x, h1y, h2x, h2y,
+                          sx1, sy1, sx2, sy2, dx, dy, safe_len2):
+    """Vectorized min distance from a drill CAPSULE's axis ((h1),(h2)) to every
+    track segment (arrays as built by the copper-to-hole check); 0 for proper
+    crossings (orientation sign test). Round drills pass a zero-length axis.
+    Shared by the copper-to-hole check and the NPTH-slot edge check (#448)."""
+    def _pts(hx, hy):
+        t = np.clip(((hx - sx1) * dx + (hy - sy1) * dy) / safe_len2, 0.0, 1.0)
+        return np.sqrt((hx - (sx1 + t * dx)) ** 2 + (hy - (sy1 + t * dy)) ** 2)
+    dist = np.minimum(_pts(h1x, h1y), _pts(h2x, h2y))
+    hdx, hdy = h2x - h1x, h2y - h1y
+    hlen2 = hdx * hdx + hdy * hdy
+    if hlen2 > 1e-12:
+        for px, py in ((sx1, sy1), (sx2, sy2)):
+            t2 = np.clip(((px - h1x) * hdx + (py - h1y) * hdy) / hlen2, 0.0, 1.0)
+            dist = np.minimum(dist, np.sqrt((px - (h1x + t2 * hdx)) ** 2 +
+                                            (py - (h1y + t2 * hdy)) ** 2))
+        d1 = dx * (h1y - sy1) - dy * (h1x - sx1)
+        d2 = dx * (h2y - sy1) - dy * (h2x - sx1)
+        d3 = hdx * (sy1 - h1y) - hdy * (sx1 - h1x)
+        d4 = hdx * (sy2 - h1y) - hdy * (sx2 - h1x)
+        dist = np.where((d1 * d2 < 0) & (d3 * d4 < 0), 0.0, dist)
+    return dist
 
 
 def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[str]] = None,
@@ -2173,6 +2156,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                               lc, (pad.global_x, pad.global_y,
                                    max(pad.size_x, pad.size_y) / 2.0)))
     segs = list(pcb_data.segments)
+    _seg_arrays = None  # (sx1, sy1, sx2, sy2, dx, dy, safe_len2, sw); also reused by the slot-edge check
     if holes and segs:
         sx1 = np.array([s.start_x for s in segs], dtype=np.float64)
         sy1 = np.array([s.start_y for s in segs], dtype=np.float64)
@@ -2184,6 +2168,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         dy = sy2 - sy1
         seglen2 = dx * dx + dy * dy
         safe_len2 = np.where(seglen2 > 0, seglen2, 1.0)
+        _seg_arrays = (sx1, sy1, sx2, sy2, dx, dy, safe_len2, sw)
         if matching_net_ids is not None:
             seg_match = np.array([n in matching_net_ids for n in snet], dtype=bool)
         def _pts_to_tracks(hx, hy):
@@ -2199,23 +2184,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             # (no layer filter). An NPTH hole's own-net track legitimately
             # connects to it -> skip; a plated override hole is graded
             # net-independently, exempting only copper that touches the pad.
-            # Segment-to-segment distance = min of the four
-            # endpoint-to-other-segment distances, or 0 when they intersect.
-            dist = np.minimum(_pts_to_tracks(h1x, h1y), _pts_to_tracks(h2x, h2y))
-            hdx, hdy = h2x - h1x, h2y - h1y
-            if hdx * hdx + hdy * hdy > 1e-12:
-                hlen2 = hdx * hdx + hdy * hdy
-                for px, py in ((sx1, sy1), (sx2, sy2)):
-                    t2 = np.clip(((px - h1x) * hdx + (py - h1y) * hdy) / hlen2, 0.0, 1.0)
-                    dist = np.minimum(dist, np.sqrt((px - (h1x + t2 * hdx)) ** 2 +
-                                                    (py - (h1y + t2 * hdy)) ** 2))
-                # Proper intersection -> distance 0 (orientation sign test)
-                d1 = (sx2 - sx1) * (h1y - sy1) - (sy2 - sy1) * (h1x - sx1)
-                d2 = (sx2 - sx1) * (h2y - sy1) - (sy2 - sy1) * (h2x - sx1)
-                d3 = hdx * (sy1 - h1y) - hdy * (sx1 - h1x)
-                d4 = hdx * (sy2 - h1y) - hdy * (sx2 - h1x)
-                crossing = (d1 * d2 < 0) & (d3 * d4 < 0)
-                dist = np.where(crossing, 0.0, dist)
+            dist = _np_capsule_to_tracks(h1x, h1y, h2x, h2y, *_seg_arrays[:7])
             overlap = (hr + sw / 2.0 + req_clr) - dist
             tolerance = req_clr * clearance_margin
             viol = overlap > tolerance
@@ -2371,18 +2340,14 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'accepted': 'edge-exempt-pad',
                 })
                 continue
-            # not exempt -> real only if it clears the grid-quantization margin
-            if use_poly:
-                has_violation, overlap, edge = check_segment_board_edge_poly(
-                    seg, edge_rings, edge_outer, edge_cutouts,
-                    effective_board_edge_clearance, clearance_margin)
-            else:
-                has_violation, overlap, edge = check_segment_board_edge(
-                    seg, board_bounds, effective_board_edge_clearance, clearance_margin)
-            if has_violation:
+            # not exempt -> real only if it clears the grid-quantization margin.
+            # Derived from the STRICT result already computed above (identical
+            # distances, only the tolerance differs) -- re-running the check at
+            # the margin doubled the full outline-ring scan per segment.
+            if s_edge == "off-board" or s_overlap > effective_board_edge_clearance * clearance_margin:
                 violations.append({
-                    'type': 'segment-board-edge', 'net1': net_str, 'edge': edge,
-                    'layer': seg.layer, 'overlap_mm': overlap,
+                    'type': 'segment-board-edge', 'net1': net_str, 'edge': s_edge,
+                    'layer': seg.layer, 'overlap_mm': s_overlap,
                     'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
                 })
             else:
@@ -2404,19 +2369,19 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             via_matches = matching_via_nets is None or via.net_id in matching_via_nets
             if matching_via_nets is not None and not via_matches:
                 continue
+            # One STRICT check; the margined verdict is derived from it (same
+            # distances, different tolerance -- avoids a second ring scan).
             if use_poly:
                 s_viol, s_overlap, s_edge = check_via_board_edge_poly(
                     via, edge_rings, edge_outer, edge_cutouts,
                     effective_board_edge_clearance, 0.0)
-                has_violation, overlap, edge = check_via_board_edge_poly(
-                    via, edge_rings, edge_outer, edge_cutouts,
-                    effective_board_edge_clearance, clearance_margin)
             else:
                 s_viol, s_overlap, s_edge = check_via_board_edge(
                     via, board_bounds, effective_board_edge_clearance, 0.0)
-                has_violation, overlap, edge = check_via_board_edge(
-                    via, board_bounds, effective_board_edge_clearance, clearance_margin)
-            if has_violation or s_viol:
+            has_violation = s_viol and (
+                s_edge == "off-board"
+                or s_overlap > effective_board_edge_clearance * clearance_margin)
+            if s_viol:
                 net_name = pcb_data.nets.get(via.net_id, None)
                 net_str = net_name.name if net_name else f"net_{via.net_id}"
             # Via-in-edge-pad exemption (#448, via analog of the ottercast
@@ -2440,8 +2405,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 violations.append({
                     'type': 'via-board-edge',
                     'net1': net_str,
-                    'edge': edge,
-                    'overlap_mm': overlap,
+                    'edge': s_edge,
+                    'overlap_mm': s_overlap,
                     'via_loc': (via.x, via.y),
                 })
             elif s_viol:
@@ -2474,40 +2439,27 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     continue  # round drill: not part of the milled edge
                 _slot_caps.append((_s1, _s2, _sr,
                                    f"{_pd.component_ref}.{_pd.pad_number}"))
-        if _slot_caps:
-            _esx1 = np.array([s.start_x for s in pcb_data.segments])
-            _esy1 = np.array([s.start_y for s in pcb_data.segments])
-            _esx2 = np.array([s.end_x for s in pcb_data.segments])
-            _esy2 = np.array([s.end_y for s in pcb_data.segments])
-            _esw = np.array([s.width for s in pcb_data.segments])
-            _edx = _esx2 - _esx1
-            _edy = _esy2 - _esy1
-            _elen2 = _edx * _edx + _edy * _edy
-            _esafe2 = np.where(_elen2 > 0, _elen2, 1.0)
+        if _slot_caps and pcb_data.segments:
+            # Reuse the copper-to-hole check's per-segment arrays when it ran
+            # (slots are NPTH pads, so they are always in its holes list);
+            # build them only if that block was skipped.
+            if _seg_arrays is None:
+                _bx1 = np.array([s.start_x for s in pcb_data.segments], dtype=np.float64)
+                _by1 = np.array([s.start_y for s in pcb_data.segments], dtype=np.float64)
+                _bx2 = np.array([s.end_x for s in pcb_data.segments], dtype=np.float64)
+                _by2 = np.array([s.end_y for s in pcb_data.segments], dtype=np.float64)
+                _bdx, _bdy = _bx2 - _bx1, _by2 - _by1
+                _blen2 = _bdx * _bdx + _bdy * _bdy
+                _seg_arrays = (_bx1, _by1, _bx2, _by2, _bdx, _bdy,
+                               np.where(_blen2 > 0, _blen2, 1.0),
+                               np.array([s.width for s in pcb_data.segments], dtype=np.float64))
+            _esw = _seg_arrays[7]
             _edge_tol = effective_board_edge_clearance * clearance_margin
 
-            def _slot_pts_to_tracks(hx, hy):
-                t = np.clip(((hx - _esx1) * _edx + (hy - _esy1) * _edy) / _esafe2, 0.0, 1.0)
-                return np.sqrt((hx - (_esx1 + t * _edx)) ** 2 +
-                               (hy - (_esy1 + t * _edy)) ** 2)
-
             for (_h1x, _h1y), (_h2x, _h2y), _hr, _slot_ref in _slot_caps:
-                # segment-to-capsule-axis distance (min of the 4 endpoint
-                # projections; proper crossings -> 0), same scheme as the
-                # copper-to-hole check above.
-                _d = np.minimum(_slot_pts_to_tracks(_h1x, _h1y),
-                                _slot_pts_to_tracks(_h2x, _h2y))
+                _d = _np_capsule_to_tracks(_h1x, _h1y, _h2x, _h2y, *_seg_arrays[:7])
                 _hdx, _hdy = _h2x - _h1x, _h2y - _h1y
                 _hlen2 = _hdx * _hdx + _hdy * _hdy
-                for _px, _py in ((_esx1, _esy1), (_esx2, _esy2)):
-                    _t2 = np.clip(((_px - _h1x) * _hdx + (_py - _h1y) * _hdy) / _hlen2, 0.0, 1.0)
-                    _d = np.minimum(_d, np.sqrt((_px - (_h1x + _t2 * _hdx)) ** 2 +
-                                                (_py - (_h1y + _t2 * _hdy)) ** 2))
-                _d1 = _edx * (_h1y - _esy1) - _edy * (_h1x - _esx1)
-                _d2 = _edx * (_h2y - _esy1) - _edy * (_h2x - _esx1)
-                _d3 = _hdx * (_esy1 - _h1y) - _hdy * (_esx1 - _h1x)
-                _d4 = _hdx * (_esy2 - _h1y) - _hdy * (_esx2 - _h1x)
-                _d = np.where((_d1 * _d2 < 0) & (_d3 * _d4 < 0), 0.0, _d)
                 _ovl = (effective_board_edge_clearance + _esw / 2.0) - (_d - _hr)
                 for _k in np.nonzero(_ovl > 1e-9)[0].tolist():
                     seg = pcb_data.segments[_k]
