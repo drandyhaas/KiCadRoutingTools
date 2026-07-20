@@ -115,7 +115,8 @@ def test_foreign_pad_blocks_move_into_short():
     # Foreign-net SMD pad on the cap's side, sitting right on that pad.
     foreign = (pcx - 0.25, pcy - 0.25, pcx + 0.25, pcy + 0.25, FOREIGN, cap.side)
     st.cap_foreign_pads[CAP] = [foreign]
-    st.base_pad[CAP] = st.pad_penalty(CAP, cap, cap.x, cap.y, cap.rot)
+    # per-net baseline since #441 (4b955ce)
+    st.base_pad[CAP] = st._pad_shortfalls(CAP, cap, cap.x, cap.y, cap.rot)
     assert st.pad_penalty(CAP, cap, tx, ty, tr) > 1e-6
     assert st.hard_blocked(CAP, cap, tx, ty, tr)
     # Same-net foreign pad at the same spot is NOT a violation.
@@ -161,7 +162,10 @@ def test_via_clear_fallback_respects_hard_clearances():
                         2.0, 0.3, 'C', set())
     for ref, cap in after.caps.items():
         got = after.pad_penalty(ref, cap, cap.x, cap.y, cap.rot)
-        assert got <= seed.base_pad.get(ref, 0.0) + 1e-6, \
+        # base_pad is PER-NET since #441 (4b955ce); compare against its total.
+        base = seed.base_pad.get(ref, {})
+        base_total = sum(base.values()) if isinstance(base, dict) else float(base)
+        assert got <= base_total + 1e-6, \
             f"{ref} grazes a foreign pad worse than seed after fallback"
 
 
@@ -200,10 +204,12 @@ def test_seed_track_graze_is_resolved():
     pcb.vias = []
     st = _new_repair(pcb)
     st.cap_segs[CAP] = [seg]
-    st.base_seg[CAP] = st.seg_penalty(CAP, st.caps[CAP],
-                                      st.caps[CAP].x, st.caps[CAP].y,
-                                      st.caps[CAP].rot)
-    assert st.base_seg[CAP] > 1e-6, "fixture should start with a seed graze"
+    # per-net baseline since #441 (4b955ce)
+    st.base_seg[CAP] = st._seg_shortfalls(CAP, st.caps[CAP],
+                                          st.caps[CAP].x, st.caps[CAP].y,
+                                          st.caps[CAP].rot)
+    assert sum(st.base_seg[CAP].values()) > 1e-6, \
+        "fixture should start with a seed graze"
     assert st.graze_penalty(CAP, st.caps[CAP], st.caps[CAP].x,
                             st.caps[CAP].y, st.caps[CAP].rot) > 1e-6
     # A move away from the track (track sits at y < pad min-y) clears the
@@ -253,11 +259,16 @@ def test_mover_pad_short_is_hard_blocked():
                     x = cap.x + (ox0 + ox1) / 2.0 - (px0 + px1) / 2.0
                     y = cap.y + (oy0 + oy1) / 2.0 - (py0 + py1) / 2.0
                     # neutralize every other hard constraint for this pose
+                    # (base_seg/base_pad are PER-NET dicts since #441; an
+                    # every-net-infinite dict neutralizes the guard)
+                    class _AllInf(dict):
+                        def get(self, _k, _d=0.0):
+                            return float('inf')
                     st.base_cap[frozenset((ref, oref))] = float('inf')
                     for i, _r in st.cap_static[ref]:
                         st.base_static[(ref, i)] = float('inf')
-                    st.base_seg[ref] = float('inf')
-                    st.base_pad[ref] = float('inf')
+                    st.base_seg[ref] = _AllInf()
+                    st.base_pad[ref] = _AllInf()
                     assert st.hard_blocked(ref, cap, x, y, cap.rot), \
                         f"{ref} pad allowed onto {oref} pad (different nets)"
                     # sanity: the guard is baseline-relative, not absolute --

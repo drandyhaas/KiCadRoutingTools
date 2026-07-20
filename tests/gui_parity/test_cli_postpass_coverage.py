@@ -80,7 +80,12 @@ DISCOVERY_EXEMPT = {'add_drc_fix_args', 'drc_fix_kwargs', 'find_kicad_cli',
                     # sibling .kicad_pro (dropped DRC floor). Report-only, runs before
                     # routing, no board mutation; the GUI operates on the live board and
                     # never cp's, so no GUI counterpart is needed.
-                    'warn_if_missing_project_floor'}
+                    'warn_if_missing_project_floor',
+                    # #441: pure RESOLVER (max(cli, project edge rule, fab floor) ->
+                    # float) feeding the engine's board_edge_clearance; same VALUE-level
+                    # parity story as read_project_edge_clearance above -- the GUI
+                    # planes tab reads the live board rule via gui_utils.
+                    'effective_board_edge_clearance'}
 
 # #381 D8: post-engine passes that are CLI-only BY DESIGN -- report/audit ONLY,
 # they do NOT mutate the output board, so the GUI producing an identical board
