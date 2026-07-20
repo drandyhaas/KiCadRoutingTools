@@ -1,3 +1,61 @@
+ada9778 2026-07-19 parity sweep ad1bd5e..ada9778 (the #441 residual-DRC wave:
+h2h / hole_clearance / shorting_items / edge fab-floor / diff-pair gap floor /
+cp-drop-floor prevention / picodvi detour weld / ghoul NPTH nudge, plus the #442
+Class-B grading fix). Outcome: parity CONFIRMED via both no-wx gates + a
+per-commit code audit. No new CLI-visible engine param requires GUI wiring -- the
+76-key batch_route* signature set is UNCHANGED (no engine kwarg added/removed),
+and every behavioral change is one of:
+
+  * SHARED engine/cleanup/obstacle functions -> both fronts inherit, no wiring:
+    - h2h (ade0fe9/83afbac): drill hole-to-hole disc added to obstacle_cache
+      precompute_net_obstacles + obstacle_map add/remove-vias stampers.
+    - hole_clearance (b74c3e3/ef3e0f9): ring-uncovered plated pad treated as
+      NPTH in obstacle_map.add_drill_hole_obstacles (+ check_drc, grading-side).
+    - shorting_items (4b955ce/f60273d): per-net accept gate in
+      placement/fanout_clearance.repair_fanout_clearance.
+    - edge sub-class C (964ccce): per-layer pad-own-copper landing exemption in
+      obstacle_map (replaced the removed net-agnostic reach exemption; JSON
+      intentional_edge_band emission removed from the route mains + grader).
+    - picodvi detour weld (52f9661): weld_redundant_grazing_detours wired INTO
+      the shared run_post_route_cleanup graze stage -- both fronts' route calls
+      run the pipeline, so the GUI inherits it.
+    - ghoul NPTH nudge (54ed114): via-copper-vs-NPTH-hole term added inside the
+      shared nudge_grazing_vias.
+    - edge fab-floor + explicit override (b1e5ced/32d9434):
+      fix_kicad_drc_settings.effective_board_edge_clearance / fab_edge_floor --
+      the ENGINE reads these; both route mains AND the GUI writeback call them.
+  * ALREADY GUI-WIRED this session:
+    - diff-pair gap floor (ffea47e): engine batch_route_diff_pairs floors
+      diff_pair_gap up to clearance FIRST (GUI routing inherits, since the GUI
+      calls that engine fn); differential_gui writeback ALSO floors the recorded
+      gap = max(cfg gap, cfg clearance) (~L1281). It's an automatic floor on the
+      EXISTING diff_pair_gap param (no new control), so claude_plan /
+      manifest_to_plan / reset need no change.
+    - GUI edge re-clamp removal (3b9fdff): swig_gui _effective_board_edge_
+      clearance dropped its redundant route-time board-min re-clamp so the edge
+      param matches the other five basic-tab floors (the shared Obey-DRC
+      interactive validation still enforces the board minimum).
+  * GRADING-TOOL only, NO GUI surface: check_drc.py (b1e5ced edge floor,
+    b74c3e3 ring-uncovered hole, ada9778 #442 same-net track->own-hole exemption).
+  * CLI-only, no GUI counterpart (the GUI operates on the LIVE board and never
+    cp's a file): copy_board.py (new) + fix_kicad_drc_settings.warn_if_missing_
+    project_floor wired into the 4 route mains (65078be) -- registered
+    DISCOVERY_EXEMPT in test_cli_postpass_coverage.
+
+GATES RUN GREEN AT HEAD:
+  * test_manifest_plan_parity.py: param->control 12/12, 0 unresolved.
+  * test_cli_postpass_coverage.py: 0 failures (bga/qfn run_drc the one
+    acknowledged CLI-only report-only pass; weld_redundant_grazing_detours +
+    warn_if_missing_project_floor both registered).
+
+NOT RUN THIS PASS: tests/gui_parity/test_gui_engine_parity.py (no wx/pcbnew in
+this session) -- carried over, as in the prior two markers. No batch_route*
+kwarg changed, so the 76-key param set is IDENTICAL to the ad1bd5e marker and
+that marker's wx VERDICT PARITY still covers the engine signature. Still pending
+a KiCad-python session (carried from prior markers): multi-class net_clearances
+convergence, a GUI-engine diff route, a QFN GUI fanout.
+
+--- prior sweeps ---
 ad1bd5e 2026-07-19 parity sweep 810ce7d..ad1bd5e (the #436/#438 cross-class
 cleanup umbrella, #426/#427/#429 agent fixes, the replay clobber guard, and
 #435 per-pair diff geometry + single-ended per-net track width). Outcome:
