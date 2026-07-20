@@ -754,9 +754,15 @@ def generate_trombone_meander(
 
     # Generate meander bumps
     direction = 1  # Alternates: 1 = up (positive perpendicular), -1 = down
-    first_bump_direction = None  # Track direction of first bump for exit chamfer
     prev_bump_direction = None  # Track previous bump direction for same-direction spacing
     blocked_direction = None  # Track which direction is completely blocked (safe_amp=0)
+    # Which perpendicular side (+1/-1) the meander baseline currently sits at,
+    # or None when the cursor is on the original centerline. After a bump the
+    # cursor rests chamfer (0.1mm) off the centerline; copper emitted there
+    # WITHOUT a clearance check (the skip-forward walk, the lead-out) can graze
+    # the very neighbor that blocked the bumps (#449: sata_sniffer skip trains
+    # printed 0.1mm from an adjacent DDR net's trunk -> 151 shorting_items).
+    offset_dir = None
     bump_count = 0
 
     # Leave some margin at start and end
@@ -791,8 +797,10 @@ def generate_trombone_meander(
         # Determine amplitude for this bump
         bump_amplitude = amplitude
 
-        # First bump includes entry chamfer, subsequent bumps don't
-        is_first = (bump_count == 0)
+        # A bump starting from the centerline (the very first, or the first
+        # after a skip returned the cursor to the centerline) needs an entry
+        # chamfer; bumps chained from the ±chamfer baseline don't.
+        is_first = (offset_dir is None)
         has_entry_chamfer = is_first
 
         # Calculate the ACTUAL bump start position (after any same-direction spacing)
@@ -844,7 +852,27 @@ def generate_trombone_meander(
                     needs_same_dir_spacing = other_needs_spacing
                     check_cx, check_cy = other_check_cx, other_check_cy
                 else:
-                    # No room for a bump here, skip forward with a straight segment
+                    # No room for a bump here. If the cursor sits at the
+                    # ±chamfer meander baseline, chamfer back to the original
+                    # centerline FIRST: the skip segments below are emitted
+                    # without any clearance check, and walking them at the
+                    # offset lays copper 0.1mm off the DRC-clean route -- into
+                    # the clearance band of the neighbor that blocked the
+                    # bumps (#449). The centerline is the original routed
+                    # corridor, so skipping along it is safe by construction.
+                    if offset_dir is not None:
+                        new_x = cx + ux * chamfer - px * chamfer * offset_dir
+                        new_y = cy + uy * chamfer - py * chamfer * offset_dir
+                        new_segments.append(Segment(
+                            start_x=cx, start_y=cy,
+                            end_x=new_x, end_y=new_y,
+                            width=segment.width, layer=segment.layer, net_id=segment.net_id
+                        ))
+                        cx, cy = new_x, new_y
+                        offset_dir = None
+                        prev_bump_direction = None  # next bump re-enters with its own chamfer
+                        continue
+                    # On the centerline: skip forward with a straight segment
                     skip_dist = 0.2
                     new_x = cx + ux * skip_dist
                     new_y = cy + uy * skip_dist
@@ -928,9 +956,9 @@ def generate_trombone_meander(
                 ))
                 cx, cy = nx, ny
 
-        # Entry chamfer (only for first bump)
+        # Entry chamfer (only for bumps starting from the centerline)
         if has_entry_chamfer:
-            first_bump_direction = direction  # Record direction for exit chamfer
+            offset_dir = direction  # baseline moves to ±chamfer off centerline
             # Direction switching already ensured we're going in the unblocked direction
             nx = cx + ux * chamfer + px * chamfer * direction
             ny = cy + uy * chamfer + py * chamfer * direction
@@ -992,20 +1020,15 @@ def generate_trombone_meander(
         # Alternate direction for next bump
         direction *= -1
 
-    # Add exit chamfer to return to centerline
-    # After any number of bumps, we're at ±chamfer from centerline.
-    # Use first_bump_direction to determine the exit direction.
-    if bump_count > 0 and first_bump_direction is not None:
-        # Check if exit chamfer would go into blocked direction
-        exit_direction = -first_bump_direction
-        if blocked_direction is not None and exit_direction == blocked_direction:
-            # Can't return to centerline in blocked direction, use flat segment
-            nx = cx + ux * chamfer
-            ny = cy + uy * chamfer
-        else:
-            # Normal exit chamfer
-            nx = cx + ux * chamfer - px * chamfer * first_bump_direction
-            ny = cy + uy * chamfer - py * chamfer * first_bump_direction
+    # Add exit chamfer to return to centerline. offset_dir tracks which side
+    # the baseline sits at (None = a skip already returned us to centerline).
+    # Always exit to the centerline: the old "blocked direction" flat kept the
+    # tail at the offset, sending the unchecked lead-out 0.1mm off the routed
+    # corridor (#449) -- returning TO the original centerline is safe even when
+    # full bumps toward that side don't fit.
+    if bump_count > 0 and offset_dir is not None:
+        nx = cx + ux * chamfer - px * chamfer * offset_dir
+        ny = cy + uy * chamfer - py * chamfer * offset_dir
         new_segments.append(Segment(
             start_x=cx, start_y=cy,
             end_x=nx, end_y=ny,
@@ -2012,7 +2035,11 @@ def generate_centerline_meander(
 
     # Meander generation
     direction = 1
-    first_bump_direction = None
+    # Which perpendicular side (+1/-1) the meander baseline currently sits at,
+    # or None when the cursor is on the original centerline (see #449: copper
+    # emitted at the offset without a clearance check can graze the neighbor
+    # that blocked the bumps).
+    offset_dir = None
     bump_count = 0
     total_extra_added = 0.0
 
@@ -2040,9 +2067,11 @@ def generate_centerline_meander(
         if dist_to_end < bump_width + margin:
             break
 
-        # Find safe amplitude at this position
+        # Find safe amplitude at this position. A bump starting from the
+        # centerline (first, or first after a skip returned there) needs an
+        # entry chamfer; bumps chained from the ±chamfer baseline don't.
         bump_amplitude = amplitude
-        is_first = (bump_count == 0)
+        is_first = (offset_dir is None)
 
         if pcb_data is not None:
             # Adjust clearance for diff pair width
@@ -2062,7 +2091,19 @@ def generate_centerline_meander(
                     direction = -direction
                     safe_amp = safe_amp_other
                 else:
-                    # Skip forward
+                    # No room for a bump here. Chamfer back to the original
+                    # centerline first when sitting at the ±chamfer baseline:
+                    # the skip points below are emitted without any clearance
+                    # check, and walking them at the offset lays the pair
+                    # off the DRC-clean corridor, into the clearance band of
+                    # the neighbor that blocked the bumps (#449).
+                    if offset_dir is not None:
+                        cx += ux * 2 * chamfer - px * chamfer * offset_dir
+                        cy += uy * 2 * chamfer - py * chamfer * offset_dir
+                        new_path.append((cx, cy, layer))
+                        offset_dir = None
+                        continue
+                    # Skip forward along the centerline
                     skip_count += 1
                     if skip_count > max_skips:
                         break
@@ -2081,7 +2122,7 @@ def generate_centerline_meander(
         # Calculate extra length for this bump
         # All chamfers are wider (2:1 ratio) for P/N track spacing
         chamfer_diag_wide = chamfer * math.sqrt(5)  # wider chamfer (2:1)
-        has_entry_chamfer = (bump_count == 0)
+        has_entry_chamfer = is_first
 
         if has_entry_chamfer:
             # wide entry chamfer + 2 wide top chamfers + risers
@@ -2096,7 +2137,7 @@ def generate_centerline_meander(
 
         # Generate bump points
         if has_entry_chamfer:
-            first_bump_direction = direction
+            offset_dir = direction  # baseline moves to ±chamfer off centerline
             # Entry chamfer - wider (2x forward) to give P/N tracks room
             cx += ux * 2 * chamfer + px * chamfer * direction
             cy += uy * 2 * chamfer + py * chamfer * direction
@@ -2126,10 +2167,11 @@ def generate_centerline_meander(
         bump_count += 1
         direction *= -1
 
-    # Exit chamfer - wider (2x forward) to match entry
-    if bump_count > 0 and first_bump_direction is not None:
-        cx += ux * 2 * chamfer - px * chamfer * first_bump_direction
-        cy += uy * 2 * chamfer - py * chamfer * first_bump_direction
+    # Exit chamfer - wider (2x forward) to match entry (skipped when a skip
+    # already returned the cursor to the centerline)
+    if bump_count > 0 and offset_dir is not None:
+        cx += ux * 2 * chamfer - px * chamfer * offset_dir
+        cy += uy * 2 * chamfer - py * chamfer * offset_dir
         new_path.append((cx, cy, layer))
 
     # Lead-out to end: use wider chamfer (2:1) to smoothly transition back to path
