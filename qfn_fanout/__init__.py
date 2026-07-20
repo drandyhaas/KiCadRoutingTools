@@ -28,6 +28,55 @@ from qfn_fanout.layout import analyze_qfn_layout, analyze_pad
 from qfn_fanout.geometry import calculate_fanout_stub
 
 
+def _snap_tip_on_grid(corner, tip, net_id, grid_step, grazes):
+    """Move a shortened fan tip back ONTO the routing grid (#446).
+
+    `corner` is the (on-grid-by-construction) start of the 45 fan, `tip` the
+    clearance-shortened end, `grazes(p1, p2, nid)` the caller's foreign-copper
+    gate. Returns an on-grid point when one is safe, else `tip` unchanged.
+
+    Why: an off-grid stub terminal cannot be reached exactly by the on-grid
+    router, which then stops a cell short and leaves a cap-overlap soft joint.
+
+    Safety contract -- this can never introduce a clearance violation:
+      * every candidate is re-tested with the caller's own `grazes` gate;
+      * candidates are constrained to lie no FURTHER from the corner than the
+        clearing tip (searching inward only, never back out toward the graze);
+      * if nothing on-grid clears, the unsnapped clearing tip is returned.
+    """
+    if not grid_step or grid_step <= 0:
+        return tip
+    cx, cy = corner
+    tx, ty = tip
+    span = math.hypot(tx - cx, ty - cy)
+    if span < 1e-9:
+        return tip  # fan fully collapsed onto the corner; nothing to snap
+
+    def on_grid(v):
+        return abs(round(v / grid_step) - v / grid_step) < 1e-6
+
+    if on_grid(tx) and on_grid(ty):
+        return tip  # already there
+
+    # Walk inward from the clearing tip; at each step consider the four grid
+    # points bracketing that position, nearest first.
+    for frac in (1.0, 0.85, 0.7, 0.55, 0.4, 0.25):
+        px, py = cx + (tx - cx) * frac, cy + (ty - cy) * frac
+        gx0, gy0 = math.floor(px / grid_step), math.floor(py / grid_step)
+        cands = []
+        for gx in (gx0, gx0 + 1):
+            for gy in (gy0, gy0 + 1):
+                qx, qy = gx * grid_step, gy * grid_step
+                # never further out than the clearing tip
+                if math.hypot(qx - cx, qy - cy) > span + 1e-9:
+                    continue
+                cands.append(((qx - px) ** 2 + (qy - py) ** 2, (qx, qy)))
+        for _d, cand in sorted(cands):
+            if not grazes(corner, cand, net_id):
+                return cand
+    return tip  # nothing on-grid is safe: keep the clear (off-grid) tip
+
+
 # Public API
 __all__ = [
     'generate_qfn_fanout',
@@ -621,6 +670,24 @@ def generate_qfn_fanout(footprint: Footprint,
                 if not _seg_grazes(stub.corner_pos, cand, nid):
                     new_end = cand
                     break
+            # Re-snap the shortened tip ON GRID (#446). calculate_fanout_stub
+            # lands the tip on the routing grid (#149) so the router gets an
+            # on-grid terminal it can END on; this shortening then moved it to
+            # an arbitrary ninth of the way in, silently discarding that
+            # guarantee. An off-grid terminal cannot be reached exactly by the
+            # on-grid router: it stops a cell short, its cap merely OVERLAPS
+            # the stub cap (which already reads as "connected"), and the board
+            # ships a fragile soft joint -- zynq_ad9364 VCC_3V3, a 0.068mm
+            # near-open that close_soft_joints then could not bridge at the
+            # run's clearance.
+            #
+            # Every candidate is re-tested with the SAME _seg_grazes gate, so
+            # the #123 clearance guarantee is preserved exactly; candidates are
+            # searched INWARD of the clearing point only (never back out toward
+            # the graze). If nothing on-grid clears, keep the unsnapped point --
+            # a clear-but-off-grid tip is strictly better than a violation.
+            new_end = _snap_tip_on_grid(stub.corner_pos, new_end, nid,
+                                        grid_step, _seg_grazes)
             stub.stub_end = new_end
             n_short += 1
         kept_stubs.append(stub)
