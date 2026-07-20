@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.18.2**
+**Current Version: 0.18.3**
 
 ## Features
 
@@ -305,6 +305,23 @@ src/
 - **Costs**: ORTHO_COST=1000, DIAG_COST=1414 (sqrt(2) * 1000), DEFAULT_TURN_COST=1000
 
 ## Version History
+
+- **0.18.3**: **#452 direction preference no longer bypassed by diagonals** — the
+  per-layer H/V preference penalty (`direction_preference_cost`, applied via
+  `layer_direction_preferences`) charged only PURE axis moves against the
+  preference (`dy != 0 && dx == 0` on a horizontal layer). A 45 diagonal
+  satisfies neither test, so it cost ZERO on every layer — and since the router
+  moves 8-way, the cheapest way to travel along the non-preferred axis was a
+  chain of free diagonals. The preference was not weak, it was *bypassed*:
+  raising the knob could not restore discipline. The penalty now charges any
+  move that advances along the non-preferred axis, diagonals included (one cell
+  of wrong-axis progress either way, so the same charge). Deliberately gentle:
+  50 vs DIAG_COST 1414 is a ~3.5% nudge that tips ties toward the preferred
+  axis without discouraging useful 45 routing. Measured motivation (#296 corpus
+  study): humans hold per-layer discipline (urchin F.Cu 68% H / B.Cu 86% V) and
+  spend 1.67 vias/net; we spent 2.41 (+44%) while routing SHORTER, i.e. paying
+  for length in layer changes, and our texture showed the staircase signature
+  (segments/mm 0.80 vs 0.49 human, off-grid bends 0.13 vs 0.02).
 
 - **0.18.2**: **#422 static keep-out bitmap (memory)** — permanent board
   geometry (board-edge clearance band, off-board / outside-outline area, board

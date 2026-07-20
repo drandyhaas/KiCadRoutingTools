@@ -611,9 +611,21 @@ impl GridSearch {
                 let direction_penalty = if router.direction_preference_cost > 0 {
                     let preferred = router.layer_direction_preferences
                         .get(current.layer as usize).copied().unwrap_or(255);
+                    // Charge progress along the NON-PREFERRED axis, diagonals
+                    // included (#452). Charging only PURE axis moves
+                    // (`dy != 0 && dx == 0`) left a free staircase: a 45 move
+                    // satisfies neither test, so on an H-preferred layer the
+                    // cheapest way to travel vertically was a chain of
+                    // zero-penalty diagonals, and the preference was bypassed
+                    // rather than merely weak (raising the knob could not fix
+                    // it). A diagonal advances one cell of wrong-axis progress
+                    // exactly like a pure axis move, so it pays the same.
+                    // Weight stays gentle by design: 50 vs DIAG_COST 1414 is a
+                    // ~3.5% nudge that tips ties toward the preferred axis
+                    // without discouraging useful 45 routing.
                     match preferred {
-                        0 => if dy != 0 && dx == 0 { router.direction_preference_cost } else { 0 },
-                        1 => if dx != 0 && dy == 0 { router.direction_preference_cost } else { 0 },
+                        0 => if dy != 0 { router.direction_preference_cost } else { 0 },
+                        1 => if dx != 0 { router.direction_preference_cost } else { 0 },
                         _ => 0, // No preference (255 or other)
                     }
                 } else { 0 };
