@@ -39,6 +39,11 @@ FLAG_PARAMS = {
     '--max-ripup': 'max_ripup',
     '--ripup-abandon-metric': 'ripup_abandon_metric',
     '--ripup-blocker-select': 'ripup_blocker_select',
+    # route.py spells the strategy flag --ordering; the GUI control (and the
+    # plan executor's param name) is ordering_strategy. Without this mapping
+    # the generic fallthrough carried it as 'ordering', which matches no
+    # dialog control, so a replayed plan silently routed in default order.
+    '--ordering': 'ordering_strategy',
     '--hole-to-hole-clearance': 'hole_to_hole_clearance',
     '--board-edge-clearance': 'board_edge_clearance',
     '--via-cost': 'via_cost',
