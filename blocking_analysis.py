@@ -493,8 +493,10 @@ def mincut_probe_order(pcb_data, config, working_obstacles, net_id,
 
     Returns (ordered_net_ids, feasible): candidates the probe path actually
     crosses, in first-crossing order (rip these, in this order); feasible
-    False means even the soft-cost search failed -- the net is unroutable at
-    any rip depth and the ladder can be skipped entirely.
+    False means even the soft-cost search failed -- the separating wall is
+    static (unrippable) copper. Callers should treat that as ADVISORY, not
+    proof the ladder is useless: rip retries also unlock pad-via placement
+    and swaps, topology changes this path probe does not model.
     """
     from dataclasses import replace as _replace
     from obstacle_cache import remove_net_obstacles_from_cache

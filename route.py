@@ -1900,6 +1900,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             if _bn not in _hinted:
                                 _hinted.append(_bn)
             _RIP_ESCALATION_CAP = 12
+            # Auto-granted rip authority must respect the caller's own net
+            # filter: a net excluded by pattern ('!GND' while planes route
+            # in a later step) is excluded BY PLAN, and ripping its stubs
+            # here reroutes the whole net as track copper in a step that was
+            # told not to touch it (ottercast: 52 dogbone stubs became a
+            # 757-segment GND web). Explicit --rip-existing-nets from the
+            # operator is honored as given; only the escalation filters.
+            if _hinted and net_names:
+                from net_queries import matches_net_filter as _mnf
+                _hinted = [_bn for _bn in _hinted if _mnf(_bn, net_names)]
             if _hinted and '*' not in (rip_existing_nets or []):
                 _hinted = _hinted[:_RIP_ESCALATION_CAP]
                 _rk['rip_existing_nets'] = list(dict.fromkeys(
@@ -2188,8 +2198,8 @@ For differential pair routing, use route_diff.py:
                              "BOTH search directions (genuine separating walls); "
                              "'mincut' = soft-cost probe on a map clone that "
                              "reads the actual crossing set (names the true "
-                             "joint cut; also proves unroutability and skips "
-                             "doomed ladders). Default: count.")
+                             "joint cut; falls back to count order when the "
+                             "wall is static copper). Default: count.")
     parser.add_argument("--routing-clearance-margin", type=float, default=defaults.ROUTING_CLEARANCE_MARGIN,
                         help=f"Multiplier on track-via clearance ({defaults.ROUTING_CLEARANCE_MARGIN} = minimum DRC)")
     parser.add_argument("--hole-to-hole-clearance", type=float, default=None,

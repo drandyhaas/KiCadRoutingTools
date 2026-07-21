@@ -730,10 +730,16 @@ def route_single_ended_nets(
                             pcb_data, config, state.working_obstacles, net_id,
                             rippable_blockers, state.net_obstacles_cache)
                         if not _mc_feasible:
-                            print(f"  MINCUT probe: no path even with all rippable "
-                                  f"copper soft-costed -- unroutable at any rip "
-                                  f"depth, skipping the ladder")
-                            rippable_blockers = []
+                            # No PATH even with rippable copper soft-costed --
+                            # but a ladder retry is more than a re-search:
+                            # ripping frees space that lets the pad-via and
+                            # swap rescues change the topology, which the
+                            # probe does not model. Keep the ladder, legacy
+                            # order (measured: skipping here lost nets the
+                            # count ladder's side-mechanisms recovered).
+                            print(f"  MINCUT probe: no path with rippable "
+                                  f"copper soft-costed (wall is static) -- "
+                                  f"falling back to count order")
                         elif _mc_order:
                             _by_id = {b.net_id: b for b in rippable_blockers}
                             _front = [_by_id[n] for n in _mc_order if n in _by_id]

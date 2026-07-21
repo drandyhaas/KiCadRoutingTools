@@ -594,7 +594,8 @@ class RoutingDialog(wx.Dialog):
             "first -- the true last-mile blocker hugs the failing pad but has "
             "few cells), bidir (boost nets blocking BOTH search directions), "
             "mincut (soft-cost probe on a map clone reads the actual crossing "
-            "set: the true joint cut, plus unroutability fast-fail)")
+            "set: the true joint cut; falls back to count when the wall is "
+            "static copper)")
         grid.Add(self.ripup_blocker_select, 0, wx.EXPAND)
 
     def _on_obey_drc_changed(self, event):
