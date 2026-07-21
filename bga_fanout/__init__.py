@@ -2121,7 +2121,7 @@ def generate_bga_fanout(footprint: Footprint,
         if keep[0][0] not in balance_layers:
             # rebalance treats its first entry as the top layer (edge escapes)
             balance_layers = [keep[0][0]] + balance_layers
-        if escape_method == 'underpad':
+        if escape_method in ('underpad', 'dogbone'):
             layers = underpad_layers
         else:
             layers = [keep[0][0]] + [l for l, _ in
@@ -2171,7 +2171,7 @@ def generate_bga_fanout(footprint: Footprint,
     # deficit -- and the run still reports failed:0, since the success metric ignores
     # sub-clearance grazes. We have all four numbers here, so warn (don't silently
     # ship the graze). Doesn't apply to underpad, which routes under the pad field.
-    if escape_method != 'underpad':
+    if escape_method not in ('underpad', 'dogbone'):
         half_pitch = min(grid.pitch_x, grid.pitch_y) / 2.0
         need = via_size / 2.0 + track_width / 2.0 + clearance
         if need > half_pitch + 1e-6:
@@ -2184,7 +2184,9 @@ def generate_bga_fanout(footprint: Footprint,
                   f"escape layers. See issue #158.")
 
     # Under-pad grid escape (issue #122) - a separate engine for dense arrays.
-    if escape_method == 'underpad':
+    # Dog-bone (#128) is the same engine with gap-site vias instead of
+    # via-in-pad: ball -> 45-stub -> via in the diagonal inter-ball gap.
+    if escape_method in ('underpad', 'dogbone'):
         from bga_fanout.underpad import generate_underpad_escape
         net_filter_fn = None
         if net_filter:
@@ -2203,6 +2205,7 @@ def generate_bga_fanout(footprint: Footprint,
             diff_pairs=up_diff_pairs, diff_pair_gap=diff_pair_gap,
             grid_step=grid_step,
             only_pad_keys=_pad_filter,
+            dogbone=(escape_method == 'dogbone'),
         )
         return tracks, vias_to_add, [], failed_nets
 
@@ -2777,13 +2780,17 @@ def main():
     parser.add_argument('--no-inner-top-layer', action='store_true',
                         help='Prevent inner pads from using F.Cu (top layer). '
                              'Use when there is not enough clearance on top layer for inner routes.')
-    parser.add_argument('--escape-method', choices=['auto', 'channel', 'underpad'], default='auto',
+    parser.add_argument('--escape-method', choices=['auto', 'channel', 'underpad', 'dogbone'], default='auto',
                         help='Fanout engine (default: auto). "channel" = 45-stub + '
                              'channel router with diff-pair support. "underpad" = dense-array '
                              'grid escape (issue #122): each signal vias in its pad and routes '
                              'under the pad field on inner layers, escaping fully-populated '
                              'arrays (e.g. ulx3s 22x22) the channel router cannot. Use a small '
                              'via/track for dense pitches (e.g. via 0.35, track 0.12 at 0.8mm). '
+                             '"dogbone" = underpad with the escape via in the diagonal '
+                             'inter-ball gap instead of in the pad (issue #128): ball -> 45 '
+                             'stub -> staggered gap via, keeping ball-grid positions free of '
+                             'barrels on the inner layers (the standard hand-layout escape). '
                              '"auto" = channel first, and if it drops any ball, retry with '
                              'underpad and keep whichever escapes more (issue #288).')
     parser.add_argument('--grid-step', type=float, default=0.1,

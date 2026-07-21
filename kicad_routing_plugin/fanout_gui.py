@@ -741,7 +741,7 @@ class BGAOptionsPanel(wx.ScrolledWindow):
     """
 
     # wx.Choice index -> engine escape_method value (order matches the dropdown)
-    ESCAPE_METHODS = ('auto', 'channel', 'underpad')
+    ESCAPE_METHODS = ('auto', 'channel', 'underpad', 'dogbone')
 
     def __init__(self, parent, on_differential_changed=None):
         """
@@ -830,7 +830,8 @@ class BGAOptionsPanel(wx.ScrolledWindow):
         self.escape_method_choice = wx.Choice(
             self, choices=["Auto (channel, under-pad retry)",
                            "Channel",
-                           "Under-pad (dense BGA)"])
+                           "Under-pad (dense BGA)",
+                           "Dog-bone (gap vias)"])
         self.escape_method_choice.SetSelection(0)
         self.escape_method_choice.SetToolTip(
             "Auto (default): run the channel router and, if it drops any ball, "
@@ -839,7 +840,11 @@ class BGAOptionsPanel(wx.ScrolledWindow):
             "each signal vias in its pad and routes under the pad field on "
             "inner layers - escapes fully-populated arrays the channel router "
             "can't (#122); use a small via/track for dense pitch (e.g. via "
-            "0.35, track 0.12).")
+            "0.35, track 0.12). Dog-bone: under-pad with each escape via in "
+            "the diagonal inter-ball gap instead of in the pad (#128) - the "
+            "standard hand-layout escape; keeps ball-grid positions free of "
+            "barrels on inner layers and avoids via-vs-neighbour-ball grazes "
+            "on small balls.")
         esc_method_row.Add(self.escape_method_choice, 1)
         options_sizer.Add(esc_method_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
