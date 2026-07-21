@@ -287,6 +287,158 @@ def test_neighbor_lists_cover_rotation_fallback():
     os.unlink(path)
 
 
+# An accepted swap hands a part its partner's rotation, inserting the bounds
+# entry into bounds_by_rot AFTER build_neighbor_lists ran -- so each part's
+# seed box must union over its whole movable same-footprint group's rotation
+# set, not just its own entries. Discriminating geometry: S3 is a 4-pad
+# square part (local bbox +-3.0, halo 1.0) seeded at 0 degrees, whose own
+# entries are the four coinciding 90-degree boxes (half 3.0); its group-mate
+# S1 (same footprint, movable) is seeded at 45 degrees, adding a rotated box
+# of half 3*sqrt(2) = 4.2426 to the group closure. Against S2 (union half
+# 0.8, halo 0.85355), margin
+#   m = 1.0 + 1.0 + max(0.25, 1.0 + 0.85355) + 1e-9 = 3.85355
+# so the y reach is 3.0 + 0.8 + m = 7.6536 for S3's own box and
+# 4.2426 + 0.8 + m = 8.8962 for the closure box. S2_DY = 8.2 sits between:
+# an own-entries-only build prunes the pair, the group closure keeps it.
+# (No in-budget pose can make the pair actually collide from this band --
+# the margin spends both budgets while a probe moves only one part -- so
+# the guard is structural: membership plus the differential lock check.)
+S3_XY = (20.0, 20.0)
+S1_XY = (45.0, 45.0)
+S1_ROT = 45.0
+SQ_PAD = 2.5             # 4 pads at local (+-2.5, +-2.5), size 1x1
+S2_DY = 8.2
+
+
+def _swap_rot_board(lock_s1=False):
+    """60x60mm board: square 4-pad S1 at 45 degrees + same-footprint S3 at
+    0 degrees + small S2 straight below S3 (see block comment). Locking S1
+    removes it from the movable group, so S3's closure loses the 45-degree
+    entry. Writes the board to a temp file, returns (pcb_data, path)."""
+    body = '(kicad_pcb\n\t(version 20241229)\n'
+    body += '\t(net 0 "")\n\t(net 1 "NA")\n\t(net 2 "NB")\n'
+    body += '''\t(gr_rect
+\t\t(start 0 0)
+\t\t(end 60 60)
+\t\t(stroke
+\t\t\t(width 0.1)
+\t\t\t(type solid)
+\t\t)
+\t\t(layer "Edge.Cuts")
+\t\t(uuid "edge1")
+\t)
+'''
+    def square(ref, x, y, rot, locked):
+        at = f'(at {x} {y} {rot:.0f})' if rot else f'(at {x} {y})'
+        lock = '\t\t(locked yes)\n' if locked else ''
+        fp = f'''\t(footprint "test:SQ4P"
+\t\t(layer "F.Cu")
+\t\t(uuid "fp-{ref}")
+{lock}\t\t{at}
+\t\t(property "Reference" "{ref}"
+\t\t\t(at 0 0)
+\t\t)
+'''
+        for i, (px, py) in enumerate(
+                [(-SQ_PAD, -SQ_PAD), (SQ_PAD, -SQ_PAD),
+                 (-SQ_PAD, SQ_PAD), (SQ_PAD, SQ_PAD)]):
+            fp += f'''\t\t(pad "{i + 1}" smd rect
+\t\t\t(at {px} {py} {rot:.0f})
+\t\t\t(size 1 1)
+\t\t\t(layers "F.Cu")
+\t\t\t(net 1 "NA")
+\t\t\t(uuid "p{i + 1}-{ref}")
+\t\t)
+'''
+        return fp + '\t)\n'
+
+    body += square('S1', S1_XY[0], S1_XY[1], S1_ROT, lock_s1)
+    body += square('S3', S3_XY[0], S3_XY[1], 0.0, False)
+    body += f'''\t(footprint "test:SMALL2P"
+\t\t(layer "F.Cu")
+\t\t(uuid "fp-S2")
+\t\t(at {S3_XY[0]} {S3_XY[1] + S2_DY})
+\t\t(property "Reference" "S2"
+\t\t\t(at 0 0)
+\t\t)
+\t\t(pad "1" smd rect
+\t\t\t(at -0.5 0)
+\t\t\t(size 0.6 0.8)
+\t\t\t(layers "F.Cu")
+\t\t\t(net 2 "NB")
+\t\t\t(uuid "p1-S2")
+\t\t)
+\t\t(pad "2" smd rect
+\t\t\t(at 0.5 0)
+\t\t\t(size 0.6 0.8)
+\t\t\t(layers "F.Cu")
+\t\t\t(net 2 "NB")
+\t\t\t(uuid "p2-S2")
+\t\t)
+\t)
+'''
+    body += ')\n'
+    fd, path = tempfile.mkstemp(suffix='.kicad_pcb')
+    with os.fdopen(fd, 'w') as f:
+        f.write(body)
+    return parse_kicad_pcb(path), path
+
+
+def test_neighbor_lists_cover_swap_inherited_rotations():
+    """White-box guard for the group-rotation closure: a 0-degree-seeded part
+    must get pruning boxes covering rotations it can only acquire by swapping
+    with a movable same-footprint partner (the swap path adds the bounds
+    entry lazily, after the lists are built)."""
+    pcb, path = _swap_rot_board()
+    state = QuenchState(pcb, path, **KNOBS)
+    s1, s2, s3 = state.parts['S1'], state.parts['S2'], state.parts['S3']
+    assert 45.0 in s1.bounds_by_rot
+    assert 45.0 not in s3.bounds_by_rot, \
+        "S3 must not have the 45-degree entry itself -- the closure adds it"
+
+    # Hand-computed discrimination with the implementation's own numbers:
+    # S3's own-entries union box must miss S2, the group closure must not.
+    m = BUDGET + BUDGET + max(state.clearance, s3.halo + s2.halo) + 1e-9
+    s2_union = _seed_box(s2, (
+        min(b[0] for b in s2.bounds_by_rot.values()),
+        min(b[1] for b in s2.bounds_by_rot.values()),
+        max(b[2] for b in s2.bounds_by_rot.values()),
+        max(b[3] for b in s2.bounds_by_rot.values())))
+    s3_own = _seed_box(s3, (
+        min(b[0] for b in s3.bounds_by_rot.values()),
+        min(b[1] for b in s3.bounds_by_rot.values()),
+        max(b[2] for b in s3.bounds_by_rot.values()),
+        max(b[3] for b in s3.bounds_by_rot.values())))
+    b45 = s1.bounds_by_rot[45.0]
+    s3_closure = _seed_box(s3, (
+        min(s3.bounds_by_rot[0.0][0], b45[0]),
+        min(s3.bounds_by_rot[0.0][1], b45[1]),
+        max(s3.bounds_by_rot[0.0][2], b45[2]),
+        max(s3.bounds_by_rot[0.0][3], b45[3])))
+    assert not _margin_overlaps(s3_own, s2_union, m), \
+        "geometry no longer discriminates: S3's own box already reaches S2"
+    assert _margin_overlaps(s3_closure, s2_union, m), \
+        "geometry no longer discriminates: the closure box misses S2"
+
+    state.build_neighbor_lists(BUDGET)
+    assert 'S2' in state._neighbors['S3'], \
+        "S3 lost swap-reachable neighbour S2 (own-entries-only seed box?)"
+    assert 'S3' in state._neighbors['S2']
+
+    # Differential proof that the group closure (not slack) kept the pair:
+    # with S1 locked it leaves the movable group, S3 can never acquire the
+    # 45-degree rotation, and excluding S2 becomes exact again.
+    pcb_l, path_l = _swap_rot_board(lock_s1=True)
+    locked_state = QuenchState(pcb_l, path_l, **KNOBS)
+    assert locked_state.parts['S1'].locked
+    locked_state.build_neighbor_lists(BUDGET)
+    assert 'S2' not in locked_state._neighbors['S3'], \
+        "locked S1 must not contribute rotations to S3's closure"
+
+    os.unlink(path)
+    os.unlink(path_l)
+
+
 if __name__ == '__main__':
     test_neighbor_list_parity()
     mp = pytest.MonkeyPatch()
@@ -295,4 +447,5 @@ if __name__ == '__main__':
     finally:
         mp.undo()
     test_neighbor_lists_cover_rotation_fallback()
+    test_neighbor_lists_cover_swap_inherited_rotations()
     print("ALL PASS")

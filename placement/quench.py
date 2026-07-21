@@ -357,15 +357,27 @@ class QuenchState:
         exceeds both budgets plus the largest interaction reach (hard
         clearance / summed halos) can NEVER interact -- excluding it is exact
         for candidate_valid AND part_geometry_cost, not an approximation."""
+        # A swap can hand a part any rotation currently held by a movable
+        # same-footprint partner (the swap path adds the bounds entry lazily,
+        # after this build), so each part's union box must cover its whole
+        # group's rotation set, not just its own bounds_by_rot entries.
+        group_rots: Dict[str, set] = {}
+        for p in self.parts.values():
+            if not p.locked:
+                group_rots.setdefault(p.footprint_name, set()).update(
+                    p.bounds_by_rot)
         geom = {}
         for ref, p in self.parts.items():
             if p.locked:
                 geom[ref] = (p.rect(), 0.0)
             else:
-                u0 = min(b[0] for b in p.bounds_by_rot.values())
-                u1 = min(b[1] for b in p.bounds_by_rot.values())
-                u2 = max(b[2] for b in p.bounds_by_rot.values())
-                u3 = max(b[3] for b in p.bounds_by_rot.values())
+                boxes = [p.bounds_by_rot[r] if r in p.bounds_by_rot
+                         else _rotate_local_bounds(*p.bounds_by_rot[0.0], r)
+                         for r in group_rots[p.footprint_name]]
+                u0 = min(b[0] for b in boxes)
+                u1 = min(b[1] for b in boxes)
+                u2 = max(b[2] for b in boxes)
+                u3 = max(b[3] for b in boxes)
                 geom[ref] = ((p.seed_x + u0, p.seed_y + u1,
                               p.seed_x + u2, p.seed_y + u3), travel_budget)
         self._neighbors = {}
