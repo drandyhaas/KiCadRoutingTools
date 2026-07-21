@@ -292,6 +292,11 @@ def add_cross_layer_tracks(obstacles: GridObstacleMap, pcb_data: PCBData,
                             exclude_net_ids: Set[int] = None):
     """Populate cross-layer track positions for vertical alignment attraction.
 
+    NET-AGNOSTIC by design (soft-knobs C4): the per-cell layer bitmask carries
+    no net id, so vertical attraction pulls the route toward ANY other net's
+    tracks on other layers (corridor stacking with strangers included). It
+    cannot express "stack with my own group" -- that needs a per-group mask.
+
     Adds positions of all routed tracks (excluding specified nets) to the
     obstacle map's cross-layer lookup structure. This enables the router
     to give a cost bonus for routing on top of existing tracks on other layers.
