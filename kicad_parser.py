@@ -2001,11 +2001,21 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             # (size resolution below was already fixed to the absolute angle).
             total_rotation = pad_rotation % 360
 
-            # Extract size
-            size_match = re.search(r'\(size\s+([\d.-]+)\s+([\d.-]+)\)', pad_text)
-            if size_match:
-                size_x = float(size_match.group(1))
-                size_y = float(size_match.group(2))
+            # Extract size. A KiCad 9 custom PADSTACK gives per-copper-layer
+            # geometry inside the pad: e.g. an oval 2.54x1.27 on top but a larger
+            # custom 2.6416x1.778 on B.Cu (apple1_mainboard DIP pads). The base
+            # (size ...) alone UNDER-models the pad on the bigger layer -- the
+            # router then drops vias against that layer's copper (apple1: a via
+            # 0.027mm from a B.Cu pad KiCad flags but check_drc missed, because
+            # both read only the 2.54x1.27 base). Take the MAX extent over the
+            # base and every padstack layer's (size ...): DRC-safe (reserves for
+            # the largest copper on any layer), slightly conservative where a
+            # layer's copper is smaller. pad_text is the balanced pad sexpr, so
+            # these matches are all THIS pad's (base + padstack), never the next.
+            sizes = re.findall(r'\(size\s+([\d.-]+)\s+([\d.-]+)\)', pad_text)
+            if sizes:
+                size_x = max(float(sx) for sx, _ in sizes)
+                size_y = max(float(sy) for _, sy in sizes)
             else:
                 size_x = size_y = 0.5  # default
 
@@ -3124,10 +3134,25 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 # Fallback: compute from global position
                 local_x, local_y = _global_to_local(fp_x, fp_y, fp_rotation, global_x, global_y)
 
-            # Size
+            # Size. KiCad 9 custom PADSTACKS carry per-copper-layer geometry;
+            # GetSize() returns only the default layer, UNDER-modeling the pad on
+            # a larger layer (apple1 DIP pads: 2.54x1.27 top, 2.6416x1.778 B.Cu).
+            # Mirror the text parser: take the MAX extent over every copper layer
+            # so both fronts reserve for the largest copper (padstack parity).
+            # Defensive: the per-layer GetSize(layer) API is KiCad 9+ only, so
+            # fall back to the plain GetSize() everywhere it is unavailable.
             pad_size = pad.GetSize()
             size_x = to_mm(pad_size.x)
             size_y = to_mm(pad_size.y)
+            try:
+                cu = list(pad.GetLayerSet().CuStack())
+                if len(cu) > 1:
+                    for _lyr in cu:
+                        _s = pad.GetSize(_lyr)
+                        size_x = max(size_x, to_mm(_s.x))
+                        size_y = max(size_y, to_mm(_s.y))
+            except (TypeError, AttributeError, Exception):
+                pass  # older API / no per-layer size: keep the default GetSize()
 
             # Shape
             shape = get_pad_shape_name(pad.GetShape())
