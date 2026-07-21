@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.18.3**
+**Current Version: 0.18.4**
 
 ## Features
 
@@ -305,6 +305,23 @@ src/
 - **Costs**: ORTHO_COST=1000, DIAG_COST=1414 (sqrt(2) * 1000), DEFAULT_TURN_COST=1000
 
 ## Version History
+
+- **0.18.4**: **cross-layer bus attraction** (#296 R9 phase B) — new
+  `GridRouter` kwarg `attraction_cross_layer_pct` (default 0 = legacy): when
+  > 0, the bus attraction-path bonus is granted at that percentage on layers
+  OTHER than the path point's layer (same-layer points still win at 100%),
+  so a planned bus corridor keeps guiding a member after a via transition
+  instead of going silent. Wildcard-layer bucket keys added to the
+  attraction spatial hash (only consulted when the fraction is enabled).
+  Also converts the bus path attraction from a subtractive bonus to a
+  multiplicative step DISCOUNT (0-90%; 50 legacy bonus units = 1%, so the
+  default 5000 = full strength): the old subtraction exceeded the move cost
+  (~1000), creating negative-cost edges that break A*'s first-arrival
+  invariant, and once floored it saturated -- collapsing every proximity/
+  alignment/layer gradation (soft-knobs review finding #2). The vertical
+  (cross-layer copper) attraction stays subtractive but is now capped so a
+  step can never go below a tenth of the base move cost (router.rs +
+  pose_router.rs).
 
 - **0.18.3**: **#452 direction preference no longer bypassed by diagonals** — the
   per-layer H/V preference penalty (`direction_preference_cost`, applied via

@@ -383,7 +383,10 @@ impl PoseRouter {
                         let attraction_bonus = obstacles.get_cross_layer_attraction(
                             nx, ny, current.layer as usize,
                             self.vertical_attraction_radius, self.vertical_attraction_bonus);
-                        let new_g = g + move_cost + proximity_cost - attraction_bonus;
+                        // Floor: attraction must not make a move free/negative
+                        // (soft-knobs review; same invariant as router.rs).
+                        let new_g = g + (move_cost + proximity_cost - attraction_bonus)
+                            .max(move_cost / 10);
 
                         if new_g < nodes.g(neighbor_key) {
                             // Update constraint tracking for straight move;
@@ -447,7 +450,8 @@ impl PoseRouter {
                         let attraction_bonus = obstacles.get_cross_layer_attraction(
                             nx, ny, current.layer as usize,
                             self.vertical_attraction_radius, self.vertical_attraction_bonus);
-                        let new_g = g + move_cost + self.turn_cost + proximity_cost - attraction_bonus;
+                        let new_g = g + (move_cost + self.turn_cost + proximity_cost
+                            - attraction_bonus).max(move_cost / 10);
 
                         if new_g < nodes.g(neighbor_key) {
                             // After a turn, require min_radius_grid straight steps

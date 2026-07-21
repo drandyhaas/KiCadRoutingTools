@@ -1272,6 +1272,17 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     bus_attraction_radius_grid = coord.to_grid_dist(config.bus_attraction_radius) if config.bus_attraction_radius > 0 else 0
     bus_attraction_bonus = config.scaled_cell_units(config.bus_attraction_bonus) if config.bus_attraction_bonus > 0 else 0
 
+    # Cross-layer fraction of the bus attraction bonus (#296 R9 phase B):
+    # keeps a planned corridor guiding a member across via transitions.
+    # Experimental default 35% when bus routing is on; override with
+    # KICAD_BUS_XLAYER_PCT (0 = legacy same-layer-only attraction).
+    bus_xlayer_pct = 0
+    if getattr(config, 'bus_enabled', False) and bus_attraction_bonus > 0:
+        try:
+            bus_xlayer_pct = int(os.environ.get('KICAD_BUS_XLAYER_PCT', '35'))
+        except ValueError:
+            bus_xlayer_pct = 35
+
     router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
                         vertical_attraction_radius=attraction_radius_grid,
@@ -1281,7 +1292,8 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                         layer_direction_preferences=config.get_layer_direction_preferences(),
                         direction_preference_cost=config.direction_preference_cost,
                         attraction_radius=bus_attraction_radius_grid,
-                        attraction_bonus=bus_attraction_bonus)
+                        attraction_bonus=bus_attraction_bonus,
+                        attraction_cross_layer_pct=bus_xlayer_pct)
 
     # Set attraction path for bus routing (if provided)
     if attraction_path:

@@ -629,11 +629,21 @@ impl GridSearch {
                         _ => 0, // No preference (255 or other)
                     }
                 } else { 0 };
-                // Path attraction bonus for bus routing - direction-based, no spiraling
-                let path_attraction_bonus =
+                // Path attraction for bus routing: a multiplicative DISCOUNT
+                // percent (0-90) on the whole step, direction-based, no
+                // spiraling. Multiplicative + capped means a step can never
+                // go free or negative (A* first-arrival stays valid) and the
+                // proximity/alignment/layer gradations survive any bonus
+                // setting instead of saturating a subtractive floor. The
+                // vertical (cross-layer copper) attraction stays subtractive
+                // but is capped so it too cannot zero the step.
+                let path_discount_pct =
                     router.get_path_attraction_bonus(ngx, ngy, current.layer, dx, dy);
-                let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty
-                    - attraction_bonus - path_attraction_bonus;
+                let base_step = move_cost + turn_cost + proximity_cost + direction_penalty;
+                let after_vert = (base_step - attraction_bonus).max(move_cost / 10);
+                let step_cost = (after_vert * (100 - path_discount_pct) / 100)
+                    .max(move_cost / 10);
+                let new_g = g + step_cost;
 
                 if new_g < existing_g {
                     if existing_g != i32::MAX {
@@ -803,6 +813,11 @@ pub struct GridRouter {
     attraction_path: Vec<(i32, i32, u8, i8, i8)>,  // Path to attract to with direction
     attraction_radius: i32,  // Grid units for attraction (0 = disabled)
     attraction_bonus: i32,   // Cost reduction when moving parallel to path (same layer)
+    // Fraction (percent) of the attraction bonus granted on layers OTHER
+    // than the path point's layer (issue #296 R9 phase B: a bus corridor
+    // must survive a via transition -- with 0 the river loses all guidance
+    // the moment a member changes layer). 0 = same-layer only (legacy).
+    attraction_cross_layer_pct: i32,
     // Spatial hash for efficient path distance lookup (C2: was a map whose
     // values were never read; membership is all that matters)
     attraction_path_hash: FxHashSet<u64>,  // buckets with path points nearby
@@ -811,12 +826,13 @@ pub struct GridRouter {
 #[pymethods]
 impl GridRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0, layer_costs=None, proximity_heuristic_cost=None, layer_direction_preferences=None, direction_preference_cost=0, attraction_radius=0, attraction_bonus=0))]
+    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0, layer_costs=None, proximity_heuristic_cost=None, layer_direction_preferences=None, direction_preference_cost=0, attraction_radius=0, attraction_bonus=0, attraction_cross_layer_pct=0))]
     pub fn new(via_cost: i32, h_weight: f32, turn_cost: Option<i32>, via_proximity_cost: Option<i32>,
                vertical_attraction_radius: i32, vertical_attraction_bonus: i32,
                layer_costs: Option<Vec<i32>>, proximity_heuristic_cost: Option<i32>,
                layer_direction_preferences: Option<Vec<u8>>, direction_preference_cost: i32,
-               attraction_radius: i32, attraction_bonus: i32) -> Self {
+               attraction_radius: i32, attraction_bonus: i32,
+               attraction_cross_layer_pct: i32) -> Self {
         Self {
             via_cost,
             h_weight,
@@ -831,6 +847,7 @@ impl GridRouter {
             attraction_path: Vec::new(),
             attraction_radius,
             attraction_bonus,
+            attraction_cross_layer_pct,
             attraction_path_hash: FxHashSet::default(),
         }
     }
@@ -897,6 +914,11 @@ impl GridRouter {
                     let key = Self::pack_bucket_key(cell_bx, cell_by, layer);
                     // Store that this bucket has path points nearby
                     self.attraction_path_hash.insert(key);
+                    // Wildcard-layer key (255) for the cross-layer lookup
+                    // (#296 R9 phase B); only consulted when
+                    // attraction_cross_layer_pct > 0.
+                    self.attraction_path_hash.insert(
+                        Self::pack_bucket_key(cell_bx, cell_by, 255));
                 }
             }
         }
@@ -1287,29 +1309,46 @@ impl GridRouter {
         let bucket_size = (self.attraction_radius / 2).max(1);
         let bx = x / bucket_size;
         let by = y / bucket_size;
-        let key = Self::pack_bucket_key(bx, by, layer);
+        let same_hit = self.attraction_path_hash
+            .contains(&Self::pack_bucket_key(bx, by, layer));
+        let cross_hit = self.attraction_cross_layer_pct > 0
+            && self.attraction_path_hash
+                .contains(&Self::pack_bucket_key(bx, by, 255));
 
-        if !self.attraction_path_hash.contains(&key) {
+        if !same_hit && !cross_hit {
             return 0;
         }
 
-        // Find all nearby path points and accumulate direction-matching bonus
-        // Using the closest point's direction
-        let mut nearest_dist = i32::MAX;
-        let mut nearest_dir: Option<(i8, i8)> = None;
+        // Find the closest path point's direction. Same-layer points give the
+        // full bonus; when only OTHER-layer points are near, grant
+        // attraction_cross_layer_pct of it (the corridor survives via
+        // transitions instead of going silent, #296 R9 phase B).
+        let mut nearest_same = i32::MAX;
+        let mut dir_same: Option<(i8, i8)> = None;
+        let mut nearest_cross = i32::MAX;
+        let mut dir_cross: Option<(i8, i8)> = None;
 
         for &(px, py, pl, path_dx, path_dy) in &self.attraction_path {
-            if pl != layer {
+            let dist = (x - px).abs() + (y - py).abs();
+            if dist > self.attraction_radius {
                 continue;
             }
-
-            let dist = (x - px).abs() + (y - py).abs();
-            if dist <= self.attraction_radius && dist < nearest_dist {
-                nearest_dist = dist;
-                nearest_dir = Some((path_dx, path_dy));
+            if pl == layer {
+                if dist < nearest_same {
+                    nearest_same = dist;
+                    dir_same = Some((path_dx, path_dy));
+                }
+            } else if self.attraction_cross_layer_pct > 0 && dist < nearest_cross {
+                nearest_cross = dist;
+                dir_cross = Some((path_dx, path_dy));
             }
         }
 
+        let (nearest_dist, nearest_dir, layer_pct) = if dir_same.is_some() {
+            (nearest_same, dir_same, 100)
+        } else {
+            (nearest_cross, dir_cross, self.attraction_cross_layer_pct)
+        };
         let (path_dx, path_dy) = match nearest_dir {
             Some(d) => d,
             None => return 0,
@@ -1333,8 +1372,15 @@ impl GridRouter {
         let proximity_ratio = (self.attraction_radius - nearest_dist) as f32 / self.attraction_radius as f32;
         let proximity_pct = (proximity_ratio * proximity_ratio * 100.0) as i32;
 
-        // Calculate bonus: base * proximity% * alignment%
-        (self.attraction_bonus as i64 * proximity_pct as i64 * alignment as i64 / 10000) as i32
+        // Return a DISCOUNT PERCENT of the step cost (0-90), not cost units:
+        // a subtractive bonus larger than the move cost saturates into a
+        // negative/floored edge and every gradation (proximity, alignment,
+        // layer) collapses -- the soft-knobs review's finding #2. Strength
+        // mapping keeps legacy tuning meaningful: 50 bonus units = 1% max
+        // discount, so the default 5000 = full strength, capped at 90%.
+        let strength_pct = (self.attraction_bonus / 50).min(90);
+        (strength_pct as i64 * proximity_pct as i64 * alignment as i64
+            * layer_pct as i64 / 1_000_000) as i32
     }
 
     /// Convert RouteStats to a Python-friendly dictionary

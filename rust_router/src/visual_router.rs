@@ -83,6 +83,7 @@ impl VisualRouter {
             0,    // direction_preference_cost
             0,    // attraction_radius
             0,    // attraction_bonus
+            0,    // attraction_cross_layer_pct
         );
         Self {
             router,
