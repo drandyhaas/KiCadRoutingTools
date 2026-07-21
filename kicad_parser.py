@@ -575,15 +575,34 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
             c = _field(block, 'center', 2)
             e = _field(block, 'end', 2)
             if c and e:
-                # Solid disc out to the outer copper edge (centerline radius + half
-                # stroke); a filled circle has the same outer extent. The interior
-                # is modelled solid (the union has no holes) -- conservative, and
-                # exact for clearance to external copper, which is all that matters.
-                R = math.hypot(e[0] - c[0], e[1] - c[1]) + _width(block) / 2.0
+                r_mid = math.hypot(e[0] - c[0], e[1] - c[1])
+                hw = _width(block) / 2.0
+                R = r_mid + hw
+                # An UNFILLED gr_circle is a stroked RING: copper only in the
+                # annulus [r_mid-hw, r_mid+hw]. The old solid-disc model
+                # ("conservative, clearance to external copper is all that
+                # matters") entombed anything living INSIDE the ring --
+                # ottercast MK1: a bottom-port MEMS mic's signal pad sits in
+                # the opening (the human connects it with a via there) and the
+                # phantom disc made it unroutable even on an empty board.
+                # Model the annulus as a single SEAMED polygon (outer loop +
+                # radial seam + inner loop): even-odd crossing tests -- which
+                # every consumer of pad.polygons uses -- see the opening as
+                # outside, and the zero-width seam lies inside real copper.
+                filled = not re.search(r'\(fill\s+(?:no|none)\b', block)
+                r_in = 0.0 if filled else max(0.0, r_mid - hw)
                 if R > 0:
                     N = 32
-                    local = [(c[0] + R * math.cos(2 * math.pi * k / N),
-                              c[1] + R * math.sin(2 * math.pi * k / N)) for k in range(N)]
+                    outer = [(c[0] + R * math.cos(2 * math.pi * k / N),
+                              c[1] + R * math.sin(2 * math.pi * k / N))
+                             for k in range(N)]
+                    if r_in > 0.05:
+                        inner = [(c[0] + r_in * math.cos(-2 * math.pi * k / N),
+                                  c[1] + r_in * math.sin(-2 * math.pi * k / N))
+                                 for k in range(N)]
+                        local = outer + [outer[0], inner[0]] + inner[1:] + [inner[0]]
+                    else:
+                        local = outer
         elif kind == 'rect':
             s = _field(block, 'start', 2)
             e = _field(block, 'end', 2)
