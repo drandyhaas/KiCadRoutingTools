@@ -44,6 +44,12 @@ from obstacle_map import build_base_obstacle_map
 ROOM_WEIGHT = 40.0
 # Rung cap: k_max = min(ceil((N-1)/2), MAX_RUNG) sibling-rooms per side.
 MAX_RUNG = 3
+# Probe via-cost multiplier (#296 R9 phase C): the human routes a bus as a
+# river on ONE layer; a centerline probed at normal via cost hops layers
+# freely and then guides every member incoherently. Pricing vias up in the
+# PROBE ONLY makes the planned corridor layer-coherent; members still pay
+# normal via costs. Override with KICAD_BUS_CORRIDOR_VIA_MULT (1 = off).
+CORRIDOR_VIA_COST_MULT = 4.0
 
 
 def _sample_dense(path: List[Tuple[int, int, int]], step: int = 1
@@ -99,8 +105,15 @@ def plan_bus_corridors(pcb_data, config, bus_groups: List[BusGroup],
             # wider per side keeps that much margin from every obstacle on
             # the shared map. Neck-down is disabled so the rung fails
             # honestly instead of silently degrading to rung 0.
+            import os
+            try:
+                via_mult = float(os.environ.get('KICAD_BUS_CORRIDOR_VIA_MULT',
+                                                str(CORRIDOR_VIA_COST_MULT)))
+            except ValueError:
+                via_mult = CORRIDOR_VIA_COST_MULT
             cfg_k = replace(
                 config, power_tap_neckdown=False,
+                via_cost=int(round(config.via_cost * via_mult)),
                 power_net_widths={**config.power_net_widths,
                                   rep: config.track_width + 2 * k * room_mm})
             result = route_net_with_obstacles(
