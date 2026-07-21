@@ -150,6 +150,74 @@ def _swap_blocking_net_ids(pcb_data, stub, dest_layer, config, moved_segs):
     return hits
 
 
+def _tap_relocation_rescue(pcb_data, net_id, config, state, results,
+                           routed_net_ids, remaining_net_ids, routed_results,
+                           routed_net_paths, track_proximity_cache, layer_map,
+                           obstacle_cache, target_xy=None, source_xy=None,
+                           blamed_net_ids=None):
+    """Single-tap relocation rung (#424 planes-first): when the pocket is
+    walled by a PRE-EXISTING plane-net tap via, remove that one via (+ its
+    dogbone stub) via exact whole-net cache recompute, retry, and let the
+    plane-repair step re-tap the pad from the pour later in the chain.
+    Returns the successful route result or None (everything restored)."""
+    from tap_relocation import (find_relocation_candidate, relocate_tap,
+                                restore_tap, tap_relocation_enabled,
+                                tap_relocation_max)
+    if not tap_relocation_enabled():
+        return None
+    if state.working_obstacles is None or state.net_obstacles_cache is None:
+        return None
+    tried = set()
+    for _attempt in range(tap_relocation_max()):
+        via = None
+        for xy in (target_xy, source_xy):
+            via = find_relocation_candidate(
+                pcb_data, config, state.net_obstacles_cache, xy,
+                blamed_net_ids=blamed_net_ids, exclude_via_ids=tried)
+            if via is not None:
+                break
+        if via is None:
+            return None
+        tried.add(id(via))
+        token = relocate_tap(pcb_data, config, state.working_obstacles,
+                             state.net_obstacles_cache, via)
+        if token is None:
+            continue
+        result = route_net_with_obstacles(pcb_data, net_id, config,
+                                          state.working_obstacles)
+        if result and not result.get('failed'):
+            net = pcb_data.nets.get(net_id)
+            nname = net.name if net else str(net_id)
+            print(f"  TAP RELOCATION RESCUE: {nname} routed after relocating "
+                  f"1 plane tap ({len(result['new_segments'])} segments)")
+            record_net_event(state, net_id, "tap_relocation_rescue", {
+                "moved_net_id": token['net_id'],
+                "via_xy": (token['via'].x, token['via'].y)})
+            # Standard success bookkeeping (mirrors the stub-swap rescue).
+            result['route_length'] = calculate_route_length(
+                result['new_segments'], result.get('new_vias', []), pcb_data)
+            results.append(result)
+            add_route_to_pcb_data(pcb_data, result,
+                                  debug_lines=config.debug_lines)
+            if net_id in remaining_net_ids:
+                remaining_net_ids.remove(net_id)
+            routed_net_ids.append(net_id)
+            routed_results[net_id] = result
+            if result.get('path'):
+                routed_net_paths[net_id] = result['path']
+            track_proximity_cache[net_id] = compute_track_proximity_for_net(
+                pcb_data, net_id, config, layer_map)
+            update_net_obstacles_after_routing(
+                pcb_data, net_id, result, config, state.net_obstacles_cache)
+            add_net_obstacles_from_cache(
+                state.working_obstacles, state.net_obstacles_cache[net_id])
+            invalidate_obstacle_cache(obstacle_cache, net_id)
+            return result
+        restore_tap(pcb_data, state.working_obstacles,
+                    state.net_obstacles_cache, token)
+    return None
+
+
 def _stub_swap_rescue(pcb_data, net_id, config, state, results,
                       routed_net_ids, remaining_net_ids, routed_results,
                       routed_net_paths, track_proximity_cache, layer_map,
@@ -1150,15 +1218,27 @@ def route_single_ended_nets(
                     print(f"  {hint301}")
                     record_net_event(state, net_id, "preexisting_blockers", {
                         "hint": hint301, "blockers": blockers301})
-                # Final rung (#424): try re-layering the net's own stub(s).
-                _rescued = _stub_swap_rescue(
+                # Tap-relocation rung (#424 planes-first, env-gated): a
+                # walled-in pocket whose wall is a pre-existing plane TAP
+                # gets one-tap surgery before the stub-swap rung.
+                _rescued = _tap_relocation_rescue(
                     pcb_data, net_id, config, state, results,
                     routed_net_ids, remaining_net_ids, routed_results,
                     routed_net_paths, track_proximity_cache, layer_map,
                     obstacle_cache,
-                    diff_pair_by_net_id=diff_pair_by_net_id,
-                    reroute_queue=reroute_queue,
-                    queued_net_ids=queued_net_ids)
+                    target_xy=locals().get('single_target_xy'),
+                    source_xy=locals().get('single_source_xy'),
+                    blamed_net_ids=locals().get('blame_ids'))
+                # Final rung (#424): try re-layering the net's own stub(s).
+                if _rescued is None:
+                    _rescued = _stub_swap_rescue(
+                        pcb_data, net_id, config, state, results,
+                        routed_net_ids, remaining_net_ids, routed_results,
+                        routed_net_paths, track_proximity_cache, layer_map,
+                        obstacle_cache,
+                        diff_pair_by_net_id=diff_pair_by_net_id,
+                        reroute_queue=reroute_queue,
+                        queued_net_ids=queued_net_ids)
                 if _rescued is not None:
                     successful += 1
                     successful -= _rescued.pop('_rescue_rip_was_in_results', 0)

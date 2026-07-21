@@ -888,7 +888,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Use visualization-aware building if callback is provided
     base_vis_data = None
-    base_map_exclusions = all_net_ids_to_route + existing_rippable
+    # Tap relocation (#424): zone-backed plane nets become base-map-excluded
+    # and per-net cached so single-tap surgery is exact whole-net cache
+    # recompute (ref-count-balanced by construction); deliberately NOT in
+    # routed_results, so the whole-net rip ladder can never name them.
+    relocatable_plane_ids = []
+    from tap_relocation import tap_relocation_enabled as _tap_reloc_on
+    if _tap_reloc_on():
+        _zone_nids = {z.net_id for z in pcb_data.zones if z.net_id > 0}
+        relocatable_plane_ids = sorted(
+            n for n in _zone_nids
+            if n not in all_net_ids_to_route and n not in existing_rippable
+            and n in pcb_data.nets)
+        if relocatable_plane_ids:
+            print(f"Tap relocation armed: {len(relocatable_plane_ids)} plane "
+                  f"net(s) cached for single-tap surgery")
+    base_map_exclusions = all_net_ids_to_route + existing_rippable + relocatable_plane_ids
     # Cross-class clearance: install the per-net class map + routing-side floor on
     # config so BOTH the base map and every incremental in-run obstacle stamper
     # price foreign copper at KiCad's pairwise max(classA, classB). The floor is
@@ -958,9 +973,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     )
     # Rippable pre-existing nets need cache entries too: the working obstacle
     # map is base + cache, and their copper was excluded from base (issue #103).
-    if existing_rippable:
+    if existing_rippable or relocatable_plane_ids:
         from obstacle_cache import precompute_net_obstacles
-        for nid in existing_rippable:
+        for nid in existing_rippable + relocatable_plane_ids:
             net_obstacles_cache[nid] = precompute_net_obstacles(
                 pcb_data, nid, config, extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN)
 
@@ -1031,6 +1046,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # cell cost via the Rust via branch.
     from congestion_field import register_congestion_field
     register_congestion_field(pcb_data, config, track_proximity_cache)
+
+    # Plane-fragility soft costs (#424 planes-first): near-boundary pour
+    # cells cost extra so signal avoids BISECTING a plane at its necks;
+    # env-gated (KICAD_PLANE_FRAGILITY_COST=0 default off).
+    from plane_fragility import register_plane_fragility
+    register_plane_fragility(pcb_data, config, track_proximity_cache)
 
     # Register rippable pre-existing nets as already-routed (issue #103):
     # blocking analysis iterates routed_net_paths (cells are recomputed from

@@ -270,6 +270,9 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
     return arr
 
 
+_MERGE_MEMO: dict = {}
+
+
 def merge_track_proximity_costs(obstacles: GridObstacleMap,
                                  per_net_costs: Dict[int, np.ndarray]):
     """Merge pre-computed per-net track proximity costs into the obstacle map.
@@ -283,8 +286,34 @@ def merge_track_proximity_costs(obstacles: GridObstacleMap,
     if not arrays_to_merge:
         return
 
-    all_costs = np.vstack(arrays_to_merge)
+    # P5 (soft-knobs review): phase-3 and diff-pair paths re-prepare many
+    # times between cache changes; memoize the concatenation keyed on the
+    # cache's identity signature so unchanged caches skip the O(all-nets)
+    # vstack. Exact-behavior: any entry add/replace changes the signature.
+    key = id(per_net_costs)
+    sig = (len(arrays_to_merge),
+           sum(len(a) for a in arrays_to_merge),
+           sum(id(a) & 0xFFFFFFFF for a in arrays_to_merge))
+    memo = _MERGE_MEMO.get(key)
+    if memo is not None and memo[0] == sig:
+        all_costs = memo[1]
+    else:
+        all_costs = np.vstack(arrays_to_merge)
+        _MERGE_MEMO[key] = (sig, all_costs)
     obstacles.set_layer_proximity_batch(all_costs)
+
+
+def _maybe_build_attraction_field(obstacles, config):
+    """P3 (Rust 0.18.5): precompute the per-layer attraction field so the
+    hot path is an O(1) lookup. hasattr-guarded so an older .so (no method)
+    keeps the exact scan fallback."""
+    if getattr(config, 'vertical_attraction_cost', 0) and \
+            hasattr(obstacles, 'build_attraction_field'):
+        from routing_config import GridCoord
+        coord = GridCoord(config.grid_step)
+        radius = coord.to_grid_dist(config.vertical_attraction_radius)
+        bonus = config.scaled_cell_units(config.vertical_attraction_cost)
+        obstacles.build_attraction_field(radius, bonus)
 
 
 def add_cross_layer_tracks(obstacles: GridObstacleMap, pcb_data: PCBData,
