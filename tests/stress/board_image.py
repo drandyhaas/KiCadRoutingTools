@@ -103,8 +103,11 @@ def board_copper_layers(board_path):
 
 
 def render_board_png(board_path, out_png=None, layers=DEFAULT_LAYERS, size=2000,
-                     quiet=False):
-    """Render board -> PNG (or SVG fallback). Returns the path written, or None."""
+                     quiet=False, svg_post=None):
+    """Render board -> PNG (or SVG fallback). Returns the path written, or None.
+    svg_post: optional callable(svg_text) -> svg_text, applied to the exported
+    SVG before rasterization (e.g. zone-outline overlays for boards whose zone
+    fills are not stored in the file)."""
     kc = find_kicad_cli()
     if kc is None:
         if not quiet:
@@ -130,6 +133,12 @@ def render_board_png(board_path, out_png=None, layers=DEFAULT_LAYERS, size=2000,
     # to black and thicken so the outline and internal cutouts actually read.
     s = open(out_svg, encoding='utf-8', errors='replace').read()
     s = s.replace('#D0D2CD', '#000000').replace('#d0d2cd', '#000000')
+    if svg_post is not None:
+        try:
+            s = svg_post(s)
+        except Exception as e:
+            if not quiet:
+                print(f"board_image: svg_post skipped ({e})")
     with open(out_svg, 'w') as f:
         f.write(s)
     if _rasterize_svg(out_svg, out_png, size):
