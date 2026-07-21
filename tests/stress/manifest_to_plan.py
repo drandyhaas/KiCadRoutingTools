@@ -130,6 +130,13 @@ def parse_command(argv):
     step = {'action': action, 'params': {}}
     step['_files'] = []  # positional .kicad_pcb args (input/output), for pruning
     lists = {}
+    # Normalize `--flag=value` to `--flag value` (recorded manifests mix both
+    # forms; core64_logic's `--nets=-BATT` otherwise fell into the unknown-flag
+    # branch as a mangled param, left --nets empty, and cascaded into EMPTY
+    # plane assignments even though --plane-layers parsed fine).
+    argv = [t for a in argv
+            for t in (a.split('=', 1) if a.startswith('--') and '=' in a
+                      else (a,))]
     i = argv.index([a for a in argv if os.path.basename(a) == tool][0]) + 1
     positional = []
     aliases = TOOL_FLAG_ALIASES.get(tool, {})
