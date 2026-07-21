@@ -114,7 +114,8 @@ def _stub_subset(pcb_data: PCBData, net_id: int, segments, vias,
 
 
 def try_terminal_restore(pcb_data: PCBData, config: GridRouteConfig,
-                         net_id: int) -> Optional[str]:
+                         net_id: int, working_obstacles=None,
+                         net_obstacles_cache=None) -> Optional[str]:
     """At a rip victim's TERMINAL reroute failure: 'full' when the saved
     copper is conflict-free (caller must then run restore_net, which pops
     the registry and does all bookkeeping); 'stub' when only the escape
@@ -141,8 +142,27 @@ def try_terminal_restore(pcb_data: PCBData, config: GridRouteConfig,
               if not _copper_conflicts(pcb_data, config, own, [], [v])]
     if not kept_s and not kept_v:
         return None
-    pcb_data.segments.extend(kept_s)
-    pcb_data.vias.extend(kept_v)
+    # Mirror rip_up_net's own cache maintenance (remove entry -> mutate
+    # pcb_data -> recompute -> add entry): the restored stubs become map
+    # obstacles for every later net this run, the cache entry keeps
+    # mirroring the board, and every map op is a complete-entry add/remove
+    # -- #309 ref-counts balanced by construction.
+    if working_obstacles is not None and net_obstacles_cache is not None \
+            and net_id in net_obstacles_cache:
+        from obstacle_cache import (add_net_obstacles_from_cache,
+                                    precompute_net_obstacles,
+                                    remove_net_obstacles_from_cache)
+        remove_net_obstacles_from_cache(working_obstacles,
+                                        net_obstacles_cache[net_id])
+        pcb_data.segments.extend(kept_s)
+        pcb_data.vias.extend(kept_v)
+        net_obstacles_cache[net_id] = precompute_net_obstacles(
+            pcb_data, net_id, config)
+        add_net_obstacles_from_cache(working_obstacles,
+                                     net_obstacles_cache[net_id])
+    else:
+        pcb_data.segments.extend(kept_s)
+        pcb_data.vias.extend(kept_v)
     name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else str(net_id)
     print(f"  RIP-RESTORE (#468): {name} kept its escape stub "
           f"({len(kept_s)} seg(s), {len(kept_v)} via(s)) -- full restore "

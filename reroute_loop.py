@@ -538,7 +538,10 @@ def run_reroute_loop(
                     # copper -> FULL restore (the net returns to its pre-rip
                     # routed state); else at least the escape stub survives.
                     from rip_restore import try_terminal_restore
-                    _tr = try_terminal_restore(pcb_data, config, ripped_net_id)
+                    _tr = try_terminal_restore(
+                        pcb_data, config, ripped_net_id,
+                        working_obstacles=state.working_obstacles,
+                        net_obstacles_cache=state.net_obstacles_cache)
                     if _tr == 'full':
                         _sv, _rids, _wir = pcb_data._rip_saved[ripped_net_id]
                         restore_net(ripped_net_id, _sv, _rids, _wir,
@@ -1007,7 +1010,10 @@ def run_reroute_loop(
                     # payload is registered under both member ids; restore_net
                     # restores the whole pair from either).
                     from rip_restore import try_terminal_restore
-                    _tr = try_terminal_restore(pcb_data, config, ripped_pair.p_net_id)
+                    _tr = try_terminal_restore(
+                        pcb_data, config, ripped_pair.p_net_id,
+                        working_obstacles=state.working_obstacles,
+                        net_obstacles_cache=state.net_obstacles_cache)
                     if _tr == 'full':
                         _sv, _rids, _wir = pcb_data._rip_saved[ripped_pair.p_net_id]
                         restore_net(ripped_pair.p_net_id, _sv, _rids, _wir,
