@@ -124,3 +124,4 @@ To size the meanders, the required extra delay is converted to extra length usin
 - Meanders are added to one straight run per route; if no run can absorb the required extra length within clearance limits, the route may end outside tolerance (a warning is printed).
 - Very tight surroundings can force the amplitude to its 0.2mm minimum, limiting how much length a run can add.
 - Meanders are not placed across layer changes.
+- `--ac-couple-match` runs after `--length-match-group`; a pair that is both an XNet member and in a match group may be meandered again by the end-to-end pass, perturbing its group-matched length. Keep AC-coupled pairs out of match groups.

@@ -2891,9 +2891,11 @@ def apply_ac_coupled_length_matching(xnet, routed_results, config, pcb_data):
     time (never a concatenated list -- each half's own copper would otherwise read
     as a foreign net at zero clearance). Length-only, mirroring intra-pair.
 
-    Edits each member result's 'new_segments' in place. Returns the final
-    end-to-end skew in mm (or None if a member was not fully routed); degrades
-    gracefully on congestion and never falsely claims a match it could not make.
+    Edits each member result's 'new_segments' in place. Reverts all member
+    edits and returns the original delta when the end-to-end skew would not
+    improve (mirroring intra-pair's guard, #460). Returns the final end-to-end
+    skew in mm (or None if a member was not fully routed); degrades gracefully
+    on congestion and never falsely claims a match it could not make.
     """
     tol = config.length_match_tolerance
     name = "+".join(xnet.base_names)
@@ -2951,6 +2953,7 @@ def apply_ac_coupled_length_matching(xnet, routed_results, config, pcb_data):
 
     # Apply: lengthen each planned member's S net once (never re-meander a net).
     added_total = 0.0
+    snapshots = {}  # id(res) -> (res, pre-pass new_segments) for the #460 revert
     for i, want in enumerate(plan):
         if want <= tol:
             continue
@@ -2967,6 +2970,8 @@ def apply_ac_coupled_length_matching(xnet, routed_results, config, pcb_data):
             continue
         added = new_len - cur
         res = md['result']
+        if id(res) not in snapshots:
+            snapshots[id(res)] = (res, list(res['new_segments']))
         res['new_segments'] = [s for s in res['new_segments']
                                if s.net_id != s_id] + new_segs
         md[f'{S}_len'] = new_len
@@ -2976,6 +2981,15 @@ def apply_ac_coupled_length_matching(xnet, routed_results, config, pcb_data):
     new_total_s = (total_p if S == 'p' else total_n) + added_total
     new_total_l = total_n if S == 'p' else total_p
     new_delta = abs(new_total_l - new_total_s)
+    if added_total > tol and new_delta >= delta:
+        # Mirror intra-pair's guard: a matching pass never degrades the board.
+        # End-to-end compare only -- the phase-2 spill member is deliberately
+        # overshot locally, so a per-member guard would reject valid plans.
+        for res_obj, orig_segs in snapshots.values():
+            res_obj['new_segments'] = orig_segs
+        print(f"    AC-couple {name}: meanders would increase end-to-end delta "
+              f"({new_delta:.3f}mm >= {delta:.3f}mm), reverting")
+        return delta
     if added_total <= tol:
         print(f"    AC-couple {name}: could not fit end-to-end meanders "
               f"(residual delta={delta:.3f}mm)")
