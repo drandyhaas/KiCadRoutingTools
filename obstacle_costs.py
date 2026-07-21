@@ -131,6 +131,62 @@ def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig)
                     obstacles.set_stub_proximity(gx, gy, cost)
 
 
+# Reserved track_proximity_cache key for the BGA proximity cost cells
+# (soft-knobs review B1): real net ids are positive, so -1 can never collide
+# or be evicted by the per-net cache lifecycle.
+BGA_PROXIMITY_CACHE_KEY = -1
+
+
+def compute_bga_proximity_cost_cells(config: GridRouteConfig,
+                                     num_layers: int) -> np.ndarray:
+    """BGA proximity costs as an (N, 4) [layer, gx, gy, cost] array.
+
+    Same geometry and cost math as add_bga_proximity_costs, but emitted for
+    the LAYER proximity map via the track-proximity cache under
+    BGA_PROXIMITY_CACHE_KEY (soft-knobs review B1): the old base-map
+    stub_proximity stamp was wiped by prepare_obstacles_inplace's
+    clear_stub_proximity() before every single-ended net, silently no-op'ing
+    the knob in the most common path (and double-counting was the risk for
+    diff pairs, whose obstacle build merges the cache on top of the base).
+    Registered once; merge_track_proximity_costs re-applies it on every
+    prepare in every path. Rows are replicated per layer because the old
+    stub_proximity stamp was all-layer.
+    """
+    if config.bga_proximity_radius <= 0 or config.bga_proximity_cost <= 0 \
+            or not config.bga_exclusion_zones or num_layers <= 0:
+        return np.empty((0, 4), dtype=np.int32)
+
+    coord = GridCoord(config.grid_step)
+    radius_grid = coord.to_grid_dist(config.bga_proximity_radius)
+    cost_grid = config.cell_cost(config.bga_proximity_cost)
+    cells: Dict[Tuple[int, int], int] = {}
+
+    for zone in config.bga_exclusion_zones:
+        min_x, min_y, max_x, max_y = zone[:4]
+        gmin_x, gmin_y = coord.to_grid(min_x, min_y)
+        gmax_x, gmax_y = coord.to_grid(max_x, max_y)
+        for gx in range(gmin_x - radius_grid, gmax_x + radius_grid + 1):
+            for gy in range(gmin_y - radius_grid, gmax_y + radius_grid + 1):
+                cx = max(gmin_x, min(gx, gmax_x))
+                cy = max(gmin_y, min(gy, gmax_y))
+                dist = ((gx - cx) ** 2 + (gy - cy) ** 2) ** 0.5
+                if dist <= radius_grid:
+                    proximity = 1.0 - (dist / radius_grid) if radius_grid > 0 else 1.0
+                    cost = int(proximity * cost_grid)
+                    key = (gx, gy)
+                    if cost > cells.get(key, 0):
+                        cells[key] = cost
+
+    if not cells:
+        return np.empty((0, 4), dtype=np.int32)
+    base = np.array([[gx, gy, c] for (gx, gy), c in cells.items()], dtype=np.int32)
+    rows = []
+    for li in range(num_layers):
+        layer_col = np.full((base.shape[0], 1), li, dtype=np.int32)
+        rows.append(np.hstack([layer_col, base]))
+    return np.vstack(rows)
+
+
 def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                                      layer_map: Dict[str, int]) -> np.ndarray:
     """Compute track proximity costs for a single net's segments.
