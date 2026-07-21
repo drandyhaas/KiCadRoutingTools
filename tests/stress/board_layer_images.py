@@ -28,16 +28,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from board_image import render_board_png, board_copper_layers  # noqa: E402
 
 
-def _layer_zones(board_path):
-    """{layer: [(net_name, [(x,y),...]), ...]} for copper zones with a net.
+def _zones_and_bounds(board_path):
+    """({layer: [(net_name, [(x,y),...]), ...]}, board_bounds) from ONE parse.
     Router-chain outputs carry zones WITHOUT stored fills (KiCad refills at
     open), so kicad-cli renders nothing for them -- a solid GND plane looks
-    like empty space. Non-fatal: returns {} when the parser is unavailable."""
+    like empty space. Non-fatal: returns ({}, None) when the parser is
+    unavailable."""
     try:
         from kicad_parser import parse_kicad_pcb
         pcb = parse_kicad_pcb(board_path)
     except Exception:
-        return {}
+        return {}, None
     out = {}
     for z in getattr(pcb, 'zones', []) or []:
         net = getattr(z, 'net_name', None)
@@ -46,7 +47,7 @@ def _layer_zones(board_path):
         if not net or not layer or not pts or len(pts) < 3:
             continue
         out.setdefault(layer, []).append((net, list(pts)))
-    return out
+    return out, pcb.board_info.board_bounds
 
 
 _ZONE_HUES = ['#9C27B0', '#00838F', '#E65100', '#2E7D32', '#C2185B', '#5E35B1']
@@ -119,14 +120,6 @@ def _zone_overlay_post(zones, bounds):
     return post
 
 
-def _board_bounds(board_path):
-    try:
-        from kicad_parser import parse_kicad_pcb
-        return parse_kicad_pcb(board_path).board_info.board_bounds
-    except Exception:
-        return None
-
-
 def render_board_layer_pngs(board_path, out_png=None, size=2000, quiet=False,
                             combined=True, zone_outlines=True):
     """Render one PNG per copper layer (+ Edge.Cuts) and optionally the
@@ -138,8 +131,7 @@ def render_board_layer_pngs(board_path, out_png=None, size=2000, quiet=False,
     if out_png is None:
         out_png = os.path.splitext(board_path)[0] + '.png'
     base, ext = os.path.splitext(out_png)
-    zones = _layer_zones(board_path) if zone_outlines else {}
-    bounds = _board_bounds(board_path) if zones else None
+    zones, bounds = _zones_and_bounds(board_path) if zone_outlines else ({}, None)
     written = []
     for layer in board_copper_layers(board_path) or ['F.Cu', 'B.Cu']:
         post = (_zone_overlay_post(zones[layer], bounds)
