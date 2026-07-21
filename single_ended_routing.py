@@ -3231,12 +3231,52 @@ def _route_multipoint_taps_impl(
         # Use probe routing helper to detect stuck directions early
         tap_start_time = time.time()
 
+        # C5 parity for taps (#424): the tap edge's TARGET pad pays full stub
+        # proximity on its final approach cells if a foreign stub sits beside
+        # it -- single-ended routes got the endpoint exemption, tap edges
+        # never did. Replaced per edge; cleared after the loop.
+        obstacles.set_endpoint_exempt(
+            [(t[0], t[1]) for t in targets[:8]],
+            coord.to_grid_dist(config.track_width + config.clearance))
+
         (path, tap_iterations, forward_blocked, backward_blocked, reversed_tap_path,
          _, _, necked_down, uniform_width, unblock_vias) = _route_with_via_unblock(
             router, obstacles, config, sources, targets, track_margin,
             pcb_data, net_id, print_prefix="      ", direction_labels=("forward", "backward"),
             waypoints=waypoint_buckets.get(frozenset((src_idx, tgt_idx)), [])
         )
+
+        if path is None:
+            # Multipoint parity rung (#424): the #189 unblock inside the
+            # wrapper fires only on the walled-in signature (probe stuck
+            # BELOW its limit); a CONGESTION failure burns the full budget
+            # and is never offered the via a human would drop (ottercast
+            # R86: both pads of a series resistor stranded in the U1 pocket
+            # while the net routes fine alone). Place a validated fab-floor
+            # via in the target pad UNCONDITIONALLY and retry once at the
+            # probe budget; the memoisation cache in _place_shrunk_via_in_pad
+            # keeps repeated failures cheap.
+            _pad_obj = pad_info[tgt_idx][5] if len(pad_info[tgt_idx]) > 5 else None
+            _r189 = (_place_shrunk_via_in_pad(_pad_obj, obstacles, config,
+                                              pcb_data, net_id, coord, layer_names)
+                     if _pad_obj is not None and not getattr(_pad_obj, 'drill', 0)
+                     else None)
+            if _r189 is not None:
+                _via189, (_vgx, _vgy), _pli = _r189
+                _register_unblock_via(obstacles, _vgx, _vgy, layer_names)
+                _retry_cfg = replace(config, max_iterations=config.max_probe_iterations)
+                _tgts2 = list(targets) + [(_vgx, _vgy, li)
+                                          for li in range(len(layer_names))]
+                (path, _it2, _fb2, _bb2, reversed_tap_path, _, _,
+                 necked_down, uniform_width) = _route_main_connection(
+                    router, obstacles, _retry_cfg, sources, _tgts2, track_margin,
+                    pcb_data, net_id, print_prefix="      ")
+                total_iterations += _it2
+                if path is not None:
+                    unblock_vias = list(unblock_vias) + [_via189]
+                    print(f"      {GREEN}TAP PAD-VIA RESCUE: edge routed after "
+                          f"unconditional via-in-pad at "
+                          f"{_pad_obj.component_ref}.{_pad_obj.pad_number}{RESET}")
 
         # If path was found in reverse direction, reverse it so it goes sources -> targets
         if path is not None and reversed_tap_path:
@@ -3324,6 +3364,9 @@ def _route_multipoint_taps_impl(
             (e[0] == src_idx and e[1] == tgt_idx) or (e[0] == tgt_idx and e[1] == src_idx)
         )]
         edges_routed += 1
+
+    # C5 parity cleanup: no stale endpoint disks on the shared map.
+    obstacles.clear_endpoint_exempt()
 
     # Count pads that are effectively connected (either explicitly routed or zone-connected to a routed pad)
     pads_connected = sum(1 for i in range(len(pad_info))
