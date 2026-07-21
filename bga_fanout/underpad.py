@@ -271,7 +271,7 @@ def generate_underpad_escape(footprint: Footprint,
                              diff_pair_gap: float = 0.1,
                              res: float = None,
                              via_cost: float = 14.0,
-                             outer_rings: float = 2.0,
+                             outer_rings: float = math.inf,
                              keepout_margin: float = 0.0,
                              verbose: bool = True,
                              grid_step: float = 0.0,
@@ -906,16 +906,22 @@ def generate_underpad_escape(footprint: Footprint,
     nl = occ.nl
     inner_layers = set(i for i in range(nl) if i != top_idx) or {top_idx}
     pitch = (grid.pitch_x + grid.pitch_y) / 2
-    # KICAD_UNDERPAD_OUTER_RINGS overrides how many rings get a via-less
-    # top-layer escape attempt before falling to via-in-pad (large value =
-    # try EVERY ball top-first; failures still fall through). Experimental
-    # (#424: fewer under-package barrels = less congestion).
+    # KICAD_UNDERPAD_OUTER_RINGS caps how many rings get a via-less
+    # top-layer escape attempt before falling to via-in-pad. Default is
+    # UNLIMITED (#424): Phase A runs outside-in, so trying every ball is
+    # safe and fewer under-package barrels measured as better completion.
     import os as _os
     try:
         outer_rings = float(_os.environ.get('KICAD_UNDERPAD_OUTER_RINGS',
                                             str(outer_rings)))
     except ValueError:
         pass
+    if dogbone and math.isinf(outer_rings):
+        # Dog-bone (#128) WANTS its vias in the gaps -- an unlimited surface
+        # phase claims the diagonal gap sites and forces via-in-pad fallbacks
+        # (the #267 graze class it exists to kill). Keep its classic rim-only
+        # top phase; an explicit KICAD_UNDERPAD_OUTER_RINGS still overrides.
+        outer_rings = 2.0
     outer_depth = outer_rings * pitch
 
     signal_pads.sort(key=depth, reverse=True)
@@ -1334,27 +1340,6 @@ def generate_underpad_escape(footprint: Footprint,
                     return True
         return False
 
-    # Phase A: route the near-edge SINGLE balls on the BGA layer (no via).
-    # Whatever can't take a clean top-layer escape falls through to the inner
-    # phase. (Paired balls are handled coupled below.)
-    inner_pads = list(single_pads)
-    if nl > 1:
-        inner_pads = []
-        for p in single_pads:
-            if depth(p) > outer_depth:
-                inner_pads.append(p)
-                continue
-            sx, sy = occ.cell(p.global_x, p.global_y)
-            home = home_of(p)
-            carve = _carve_foreign([(p.global_x, p.global_y)], home, {p.net_id})
-            path = astar(sx, sy, home, {top_idx}, allow_via=False,
-                         net_id=p.net_id, carve=carve)
-            if path is not None:
-                commit(p, path, carve)
-                n_fcu += 1
-            else:
-                inner_pads.append(p)
-
     n_coupled = 0
     coupled_fail = []
 
@@ -1374,6 +1359,34 @@ def generate_underpad_escape(footprint: Footprint,
             escaped.update((id(pp), id(nn)))
         else:
             remaining_pairs.append((base, pp, nn))  # try an inner coupled escape
+
+    # Phase A: via-less escapes on the BGA layer, OUTSIDE-IN (#424): peel the
+    # onion -- ring 1 escapes straight out claiming minimal rim, ring 2
+    # threads between those stubs, and so on as deep as the surface allows.
+    # Outside-in ordering means a deep ball can never strand a shallow one,
+    # which is what makes trying EVERY ball (outer_rings default now
+    # unlimited) safe; each failure simply falls through to the inner
+    # (via-in-pad) phase, which keeps its deepest-first order. Fewer
+    # under-package barrels measured directly as completion on ottercast
+    # (via-in-pad 14 -> 11 final issues with only ~20 barrels).
+    # (Paired balls are handled coupled below.)
+    inner_pads = list(single_pads)
+    if nl > 1:
+        inner_pads = []
+        for p in sorted(single_pads, key=depth):
+            if depth(p) > outer_depth:
+                inner_pads.append(p)
+                continue
+            sx, sy = occ.cell(p.global_x, p.global_y)
+            home = home_of(p)
+            carve = _carve_foreign([(p.global_x, p.global_y)], home, {p.net_id})
+            path = astar(sx, sy, home, {top_idx}, allow_via=False,
+                         net_id=p.net_id, carve=carve)
+            if path is not None:
+                commit(p, path, carve)
+                n_fcu += 1
+            else:
+                inner_pads.append(p)
 
     # Phase B: reserve EVERY via-in-pad keepout BEFORE routing any inner track -
     # the inner single balls AND both balls of every pair that still needs an
