@@ -392,26 +392,7 @@ def analyze_frontier_blocking(
     # proved (via placement, swap validation) -- not inferred from the
     # frontier. Flagged to sort ahead of every inferred tier; a net the
     # frontier never touched still enters the candidate list.
-    if known_blockers:
-        by_id = {b.net_id: b for b in results}
-        for nid, n_cells in known_blockers:
-            if nid in exclude_net_ids:
-                # Never re-inject the failing net or a rip-chain ancestor
-                # (cycle guard parity with the frontier path).
-                continue
-            b = by_id.get(nid)
-            if b is not None:
-                b.validator_named = True
-            else:
-                net = pcb_data.nets.get(nid)
-                results.append(BlockingInfo(
-                    net_id=nid,
-                    net_name=net.name if net else f"Net {nid}",
-                    blocked_count=n_cells, track_cells=n_cells, via_cells=0,
-                    unique_cells=n_cells, near_target_cells=n_cells,
-                    near_source_cells=0,
-                    details=f"validator-named ({n_cells} conflict cells)",
-                    validator_named=True))
+    apply_known_blockers(results, known_blockers, exclude_net_ids, pcb_data)
 
     rank_blockers(results, getattr(config, 'ripup_blocker_select', 'count'))
 
@@ -419,6 +400,52 @@ def analyze_frontier_blocking(
     report.frontier_cells = int(blocked_keys.size)
     report.attributed_cells = n_attributed
     return report
+
+
+def apply_known_blockers(results, known_blockers, exclude_net_ids, pcb_data):
+    """Fold validator-asserted blocker identities into a BlockingInfo list
+    (audit #3): flag entries already attributed by the frontier, append
+    entries the frontier never touched. Shared by analyze_frontier_blocking
+    and the per-edge merge in the phase-3 tap cascade. Mutates `results`."""
+    if not known_blockers:
+        return
+    exclude_net_ids = exclude_net_ids or set()
+    by_id = {b.net_id: b for b in results}
+    for nid, n_cells in known_blockers:
+        if nid in exclude_net_ids:
+            # Never re-inject the failing net or a rip-chain ancestor
+            # (cycle guard parity with the frontier path).
+            continue
+        b = by_id.get(nid)
+        if b is not None:
+            b.validator_named = True
+        else:
+            net = pcb_data.nets.get(nid)
+            results.append(BlockingInfo(
+                net_id=nid,
+                net_name=net.name if net else f"Net {nid}",
+                blocked_count=n_cells, track_cells=n_cells, via_cells=0,
+                unique_cells=n_cells, near_target_cells=n_cells,
+                near_source_cells=0,
+                details=f"validator-named ({n_cells} conflict cells)",
+                validator_named=True))
+
+
+def merge_blocking_max(a: BlockingInfo, b: BlockingInfo) -> BlockingInfo:
+    """Merge two per-edge attributions of the SAME net by max of each
+    signal (audit #2, per-edge attribution): a net decisive at one failed
+    edge must not be diluted by edges it is irrelevant to, so counts take
+    the strongest edge rather than the sum over edges."""
+    return BlockingInfo(
+        net_id=a.net_id, net_name=a.net_name,
+        blocked_count=max(a.blocked_count, b.blocked_count),
+        track_cells=max(a.track_cells, b.track_cells),
+        via_cells=max(a.via_cells, b.via_cells),
+        unique_cells=max(a.unique_cells, b.unique_cells),
+        near_target_cells=max(a.near_target_cells, b.near_target_cells),
+        near_source_cells=max(a.near_source_cells, b.near_source_cells),
+        details=a.details if a.blocked_count >= b.blocked_count else b.details,
+        validator_named=a.validator_named or b.validator_named)
 
 
 def _count_sort_key(x):
@@ -508,6 +535,13 @@ def mincut_probe_order(pcb_data, config, working_obstacles, net_id,
         return [], True
 
     clone = working_obstacles.clone_fresh()
+    # In the phase-3 cascade the probed net's OWN phase-1 copper is already
+    # stamped in the working map (unlike the SE ladder, where the net has no
+    # copper yet); lift it or the probe collides with itself and reports a
+    # false infeasible.
+    own = net_obstacles_cache.get(net_id)
+    if own is not None:
+        remove_net_obstacles_from_cache(clone, own)
     cell_sets = {}
     soft_rows = []
     cost = config.cell_cost(5.0)   # ~5mm-equiv per cell: cross only if needed

@@ -641,10 +641,25 @@ def try_phase3_ripup(
     # thousands of far-wall cells).
     all_blocked_cells = []
     _tgt_for_rank = None
-    for edge_key, (blocked_cells, tgt_xy) in failed_edge_blocking.items():
+    _edge_entries = []  # (cells_for_attribution, tgt_xy) per failed edge
+    for edge_key, entry in failed_edge_blocking.items():
+        blocked_cells, tgt_xy = entry[0], entry[1]
         all_blocked_cells.extend(blocked_cells)
         if _tgt_for_rank is None:
             _tgt_for_rank = tgt_xy
+        # Direction-separated attribution (audit #2ii): when both probe
+        # directions reported walls, the TIGHTER side is the drained-pocket
+        # perimeter (the walled-in pad's wall, hugging track included); the
+        # broad side is the far flood that used to swamp it. The synthetic
+        # via-conflict cells ride along either way.
+        cells = blocked_cells
+        dirs = entry[2] if len(entry) > 2 else None
+        if dirs:
+            fwd, bwd = dirs.get('fwd') or [], dirs.get('bwd') or []
+            if fwd and bwd:
+                side = fwd if len(fwd) <= len(bwd) else bwd
+                cells = list(side) + list(dirs.get('extra') or [])
+        _edge_entries.append((cells, tgt_xy))
 
     if not all_blocked_cells:
         return None
@@ -677,14 +692,25 @@ def try_phase3_ripup(
     _blame_ids = _blame.pop(net_id, None) if _blame else None
     _known = [(nid, 1) for nid in _blame_ids] if _blame_ids else None
 
-    # Analyze blocking
-    blockers = analyze_frontier_blocking(
-        all_blocked_cells, pcb_data, config, routed_net_paths,
-        exclude_net_ids=exclude_ids,
-        target_xy=_tgt_for_rank,
-        obstacle_cache=obstacle_cache,
-        known_blockers=_known
-    )
+    # PER-EDGE attribution (audit #2i): three tap edges failing in three
+    # corners used to become one merged cell soup ranked by whichever net
+    # had the most total perimeter -- possibly relevant to none of them.
+    # Attribute each edge against ITS OWN target, then merge per net by MAX
+    # so the net decisive at one edge isn't diluted by the others.
+    from blocking_analysis import (apply_known_blockers, merge_blocking_max,
+                                   rank_blockers)
+    _merged = {}
+    for _cells, _tgt in _edge_entries:
+        for b in analyze_frontier_blocking(
+                _cells, pcb_data, config, routed_net_paths,
+                exclude_net_ids=exclude_ids,
+                target_xy=_tgt,
+                obstacle_cache=obstacle_cache):
+            m = _merged.get(b.net_id)
+            _merged[b.net_id] = b if m is None else merge_blocking_max(m, b)
+    blockers = list(_merged.values())
+    apply_known_blockers(blockers, _known, exclude_ids, pcb_data)
+    rank_blockers(blockers, getattr(config, 'ripup_blocker_select', 'count'))
 
     if not blockers:
         return None
@@ -696,6 +722,30 @@ def try_phase3_ripup(
 
     if not rippable_blockers:
         return None
+
+    # mincut probe in the cascade (advisory, like the SE ladder): NET-level
+    # approximation -- the probe routes the multipoint net's endpoint gap on
+    # a clone with rippable copper soft-costed, so its crossing set names
+    # the joint cut for the dominant gap (not per failed edge). Feasible
+    # probe reorders; infeasible or empty keeps the ranking above.
+    if (getattr(config, 'ripup_blocker_select', 'count') == 'mincut'
+            and getattr(state, 'working_obstacles', None) is not None
+            and getattr(state, 'net_obstacles_cache', None) is not None):
+        from blocking_analysis import mincut_probe_order
+        _mc_order, _mc_feasible = mincut_probe_order(
+            pcb_data, config, state.working_obstacles, net_id,
+            rippable_blockers, state.net_obstacles_cache)
+        if _mc_feasible and _mc_order:
+            _by_id = {b.net_id: b for b in rippable_blockers}
+            _front = [_by_id[n] for n in _mc_order if n in _by_id]
+            _rest = [b for b in rippable_blockers
+                     if b.net_id not in set(_mc_order)]
+            rippable_blockers = _front + _rest
+            print(f"    MINCUT probe (net-level): cut = "
+                  f"{[b.net_name for b in _front]}")
+        elif not _mc_feasible:
+            print(f"    MINCUT probe (net-level): no path with rippable "
+                  f"copper soft-costed -- keeping per-edge ranking")
 
     # Progressive rip-up: try N=1, then N=2, etc up to max_rip_up_count
     ripped_items = []  # Track nets ripped in this attempt
@@ -1019,8 +1069,8 @@ def try_phase3_ripup(
                 retry_blocking = retry_result.get('failed_edge_blocking', {})
                 if retry_blocking:
                     last_retry_blocked_cells = []
-                    for edge_key, (blocked_cells, tgt_xy) in retry_blocking.items():
-                        last_retry_blocked_cells.extend(blocked_cells)
+                    for edge_key, entry in retry_blocking.items():
+                        last_retry_blocked_cells.extend(entry[0])
                     if last_retry_blocked_cells:
                         print(f"      Retry had {len(last_retry_blocked_cells)} blocked cells")
         else:
@@ -1073,16 +1123,39 @@ def _retry_victim_main_with_ripup(
     on failure everything ripped here has been restored and [] is returned.
     """
     victim_name = pcb_data.nets[victim_id].name if victim_id in pcb_data.nets else f"net_{victim_id}"
-    blocked = list(dict.fromkeys(
-        (failed_result or {}).get('blocked_cells_forward', [])
-        + (failed_result or {}).get('blocked_cells_backward', [])))
+    # Fastest-failing direction first (audit #3b): the constrained side's
+    # frontier is the drained-pocket perimeter; pooling both directions let
+    # the broad flood swamp it. Mirror of the SE loop's selection.
+    _fr = failed_result or {}
+    _fwd, _bwd = _fr.get('blocked_cells_forward', []), _fr.get('blocked_cells_backward', [])
+    _fit, _bit = _fr.get('iterations_forward', 0), _fr.get('iterations_backward', 0)
+    if _fwd and _bwd and (_fit > 0 or _bit > 0):
+        blocked = list(dict.fromkeys(
+            _fwd if (_fit > 0 and (_bit == 0 or _fit <= _bit)) else _bwd))
+    else:
+        blocked = list(dict.fromkeys(list(_fwd) + list(_bwd)))
     if not blocked:
         return None, []
+
+    # Endpoint proximity for the ranking (audit #2i): the victim's own
+    # endpoints; without them every near_* count is zero and the sort
+    # degenerates to pure cell count.
+    from connectivity import get_net_endpoints as _gne
+    _v_src_xy = _v_tgt_xy = None
+    try:
+        _v_srcs, _v_tgts, _ = _gne(pcb_data, victim_id, config)
+        if _v_srcs:
+            _v_src_xy = (_v_srcs[0][3], _v_srcs[0][4])
+        if _v_tgts:
+            _v_tgt_xy = (_v_tgts[0][3], _v_tgts[0][4])
+    except Exception:
+        pass
 
     exclude_ids = {victim_id} | ancestor_net_ids
     blockers = analyze_frontier_blocking(
         blocked, pcb_data, config, routed_net_paths,
-        exclude_net_ids=exclude_ids)
+        exclude_net_ids=exclude_ids,
+        target_xy=_v_tgt_xy, source_xy=_v_src_xy)
     if not blockers:
         return None, []
     rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
@@ -1098,7 +1171,8 @@ def _retry_victim_main_with_ripup(
         if N > 1 and last_blocked:
             fresh = analyze_frontier_blocking(
                 last_blocked, pcb_data, config, routed_net_paths,
-                exclude_net_ids=exclude_ids)
+                exclude_net_ids=exclude_ids,
+                target_xy=_v_tgt_xy, source_xy=_v_src_xy)
             next_blocker = None
             for b in fresh:
                 if b.net_id in routed_results:
@@ -1363,8 +1437,8 @@ def _reroute_phase3_ripped_nets(
 
                     if failed_edge_blocking and original_failed_count > 0 and reroute_depth < config.max_rip_up_count and config.max_rip_up_count > 0:
                         all_blocked_cells = []
-                        for edge_key, (blocked_cells, tgt_xy) in failed_edge_blocking.items():
-                            all_blocked_cells.extend(blocked_cells)
+                        for edge_key, entry in failed_edge_blocking.items():
+                            all_blocked_cells.extend(entry[0])
 
                         if all_blocked_cells:
                             print(f"    {net_name}: Attempting rip-up retry for {original_failed_count} failed tap edge(s)...")

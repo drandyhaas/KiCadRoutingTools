@@ -775,8 +775,16 @@ def route_single_ended_nets(
                     if blame_ids:
                         from blocking_analysis import BlockingInfo
                         excluded = rip_exclude_set(state, net_id)
+                        _unrippable_blame = []
                         for bid in sorted(blame_ids):
-                            if bid not in routed_results or bid in excluded:
+                            if bid in excluded:
+                                continue
+                            if bid not in routed_results:
+                                # Validator-proved blocker that is PRE-EXISTING
+                                # copper: surface the rip-existing hint NOW
+                                # instead of only after the ladder exhausts.
+                                _n = pcb_data.nets.get(bid)
+                                _unrippable_blame.append(_n.name if _n else str(bid))
                                 continue
                             canonical = get_canonical_net_id(bid, diff_pair_by_net_id)
                             if canonical in seen_canonical_ids:
@@ -790,6 +798,10 @@ def route_single_ended_nets(
                                 track_cells=0, via_cells=0, unique_cells=0,
                                 near_target_cells=0, near_source_cells=0,
                                 details="via-in-pad decline blame (#331)"))
+                        if _unrippable_blame:
+                            print(f"  Via-in-pad decline blamed PRE-EXISTING net(s) "
+                                  f"{', '.join(repr(n) for n in _unrippable_blame)} - not rippable "
+                                  f"this run; retry with --rip-existing-nets to authorize")
 
                     # Progressive rip-up: try N=1, then N=2, etc up to max_rip_up_count
                     ripped_items = []
@@ -797,7 +809,12 @@ def route_single_ended_nets(
                     retry_succeeded = False
                     last_retry_blocked_cells = blocked_cells  # Start with initial failure's blocked cells
 
-                    for N in range(1, config.max_rip_up_count + 1):
+                    # while-form so the slot-0 guard can re-run N=1 once with
+                    # a promoted pick (audit, structural fix).
+                    slot0_guard_used = False
+                    N = 0
+                    while N < config.max_rip_up_count:
+                        N += 1
                         # For N > 1, re-analyze from the last retry's blocked cells
                         # to find the most blocking net from that specific failure
                         if N > 1 and last_retry_blocked_cells:
@@ -821,6 +838,39 @@ def route_single_ended_nets(
                             if next_blocker is None:
                                 print(f"  No additional rippable blockers from retry analysis")
                                 break
+                            # Slot-0 guard (audit, structural): the ladder only
+                            # grows a PREFIX around slot 0, so a wrong first
+                            # pick is a member of every combo it will ever try.
+                            # If the singleton just failed and the re-analysis
+                            # names a DIFFERENT top pick, restore the refuted
+                            # rip and try the fresh pick ALONE once before
+                            # extending to pairs.
+                            if (N == 2 and not slot0_guard_used
+                                    and len(ripped_items) == 1
+                                    and next_blocker.net_id in routed_results):
+                                _c_next = get_canonical_net_id(next_blocker.net_id, diff_pair_by_net_id)
+                                _c_slot0 = get_canonical_net_id(rippable_blockers[0].net_id, diff_pair_by_net_id)
+                                if _c_next != _c_slot0:
+                                    slot0_guard_used = True
+                                    print(f"  Slot-0 guard: re-analysis refutes {rippable_blockers[0].net_name} -> "
+                                          f"retrying {next_blocker.net_name} ALONE first")
+                                    for rid, saved_result, ripped_ids, was_in_results in reversed(ripped_items):
+                                        restore_net(rid, saved_result, ripped_ids, was_in_results,
+                                                   pcb_data, routed_net_ids, routed_net_paths,
+                                                   routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                                   results, config, track_proximity_cache, layer_map,
+                                                   state.working_obstacles, state.net_obstacles_cache,
+                                                   state.ripped_route_layer_costs, state.ripped_route_via_positions, refused_sink=state.collision_refused_net_ids)
+                                        if was_in_results:
+                                            successful += 1
+                                    ripped_items = []
+                                    ripped_canonical_ids.discard(_c_slot0)
+                                    seen_canonical_ids.add(_c_next)
+                                    rippable_blockers = ([next_blocker] +
+                                        [b for b in rippable_blockers
+                                         if get_canonical_net_id(b.net_id, diff_pair_by_net_id) != _c_next])
+                                    N = 0
+                                    continue
                             # Replace the Nth blocker with the one from retry analysis
                             next_canonical = get_canonical_net_id(next_blocker.net_id, diff_pair_by_net_id)
                             if next_canonical not in seen_canonical_ids:

@@ -3115,7 +3115,7 @@ def _route_multipoint_taps_impl(
     # Each edge connects a routed pad to an unrouted pad
     edges_routed = 0
     failed_edges = set()  # Track edges that failed to route
-    failed_edge_blocking = {}  # Track blocking info for failed edges: edge_key -> (blocked_cells, tgt_xy)
+    failed_edge_blocking = {}  # edge_key -> (blocked_cells, tgt_xy, {'fwd','bwd','extra'} dir split)
     fallback_attempted = set()  # Pads attempted directly after their MST edge chain failed
     max_passes = len(remaining_edges) * 2 + len(pad_info)  # Safety limit
 
@@ -3358,7 +3358,16 @@ def _route_multipoint_taps_impl(
             # pad-hugging copper the frontier never reaches (#424).
             blocked_cells = list(blocked_cells) + _via_conflict_extra
             if blocked_cells:
-                failed_edge_blocking[edge_key] = (blocked_cells, (tgt_x, tgt_y))
+                # Element 2 keeps the directions SEPARATE (audit #2ii): the
+                # backward probe from a walled-in pad drains in dozens of
+                # iterations and its frontier is precisely the pocket wall --
+                # pooling buried it under the forward flood. The cascade
+                # picks the tighter side per edge; 'extra' carries the
+                # synthetic via-conflict cells either way.
+                failed_edge_blocking[edge_key] = (
+                    blocked_cells, (tgt_x, tgt_y),
+                    {'fwd': list(forward_blocked), 'bwd': list(backward_blocked),
+                     'extra': list(_via_conflict_extra)})
             continue
 
         print(f"      Routed in {tap_iterations} iterations ({tap_elapsed:.2f}s)")

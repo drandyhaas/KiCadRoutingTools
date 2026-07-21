@@ -223,7 +223,18 @@ def run_reroute_loop(
                 if routed_net_paths and result:
                     fwd_cells = result.pop('blocked_cells_forward', [])
                     bwd_cells = result.pop('blocked_cells_backward', [])
-                    blocked_cells = list(set(fwd_cells + bwd_cells))
+                    # Fastest-failing direction only (audit #3b): pooling let
+                    # the broad flood's thousands of cells swamp the drained
+                    # pocket's dozens before attribution ran. Mirrors the SE
+                    # loop; falls back to the union when iterations are absent.
+                    fwd_it = result.get('iterations_forward', 0)
+                    bwd_it = result.get('iterations_backward', 0)
+                    if fwd_cells and bwd_cells and (fwd_it > 0 or bwd_it > 0):
+                        blocked_cells = list(set(
+                            fwd_cells if (fwd_it > 0 and (bwd_it == 0 or fwd_it <= bwd_it))
+                            else bwd_cells))
+                    else:
+                        blocked_cells = list(set(fwd_cells + bwd_cells))
                     del fwd_cells, bwd_cells  # Free memory immediately
 
                     if blocked_cells:
