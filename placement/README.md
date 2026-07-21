@@ -10,9 +10,9 @@ Two command-line tools sit on top of this module:
 ## place_optimize.py — greedy quench
 
 Small nudges (capped by `--max-displacement`), 90° rotations, and
-same-footprint swaps that reduce airwire length + crossings + a whitespace
-(halo) penalty scaled by pin count + a soft board-edge margin. Locked
-footprints never move.
+same-footprint swaps (capped by `--swap-max-displacement`, default: the same
+cap) that reduce airwire length + crossings + a whitespace (halo) penalty
+scaled by pin count + a soft board-edge margin. Locked footprints never move.
 
 ```bash
 # Conservative polish (recommended starting point)
@@ -27,7 +27,8 @@ Key options:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--max-displacement` | 10 mm | Max distance a part may move from its seed position (3 mm recommended; large values can destroy the placement's macro structure) |
+| `--max-displacement` | 10 mm | Max distance a part may move from its seed position; applies to nudges and swaps alike (3 mm recommended; large values can destroy the placement's macro structure) |
+| `--swap-max-displacement` | = max-displacement | Displacement cap for swap moves; must be ≤ `--max-displacement` |
 | `--ignore-nets` | – | Net patterns excluded from airwire scoring (plane-routed power nets) |
 | `--lock` | – | Reference patterns to pin in place (connectors, mounting-critical parts) |
 | `--halo-coef` | 0.25 | Extra whitespace per √(pin count); keep modest (~0.15) on dense boards |

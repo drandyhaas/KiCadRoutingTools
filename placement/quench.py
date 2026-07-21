@@ -5,7 +5,9 @@ Greedy quench placement optimizer: perturbative refinement of an existing
 Starts from the current placement and repeatedly tries, for each component,
 small moves within --max-displacement of its seed position plus 90-degree
 rotations and same-footprint swaps, accepting only improvements
-(zero-temperature anneal). Locked components never move.
+(zero-temperature anneal). Same-footprint swaps are accepted only if both
+parts land within swap_max_displacement (default: max_displacement) of
+their own seed positions. Locked components never move.
 
 Cost = total airwire length
      + crossing_penalty * airwire crossings
@@ -357,6 +359,7 @@ def _candidate_positions(part: _Part, max_disp: float, step: float,
 
 def quench(pcb_data: PCBData, pcb_file: str,
            max_displacement: float = 10.0,
+           swap_max_displacement: Optional[float] = None,
            step: float = 1.0,
            grid_step: float = 0.1,
            clearance: float = 0.25,
@@ -381,6 +384,16 @@ def quench(pcb_data: PCBData, pcb_file: str,
     Returns a list of placement dicts (reference/new_x/new_y/new_rotation)
     for every movable part, whether or not it moved.
     """
+    if swap_max_displacement is not None:
+        if swap_max_displacement < 0:
+            raise ValueError("swap_max_displacement must be >= 0")
+        if swap_max_displacement > max_displacement + 1e-9:
+            raise ValueError(
+                "swap_max_displacement must be <= max_displacement "
+                "(each part must stay within max_displacement of its seed)")
+    swap_cap = (max_displacement if swap_max_displacement is None
+                else swap_max_displacement)
+
     ignore_net_ids: Set[int] = set()
     if ignore_nets:
         import fnmatch
@@ -416,6 +429,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
     for pass_num in range(1, max_passes + 1):
         improved = 0.0
         moves = 0
+        swaps_skipped = 0
 
         # --- single-part moves (nudge + rotate) ---
         for ref in movable:
@@ -472,6 +486,23 @@ def quench(pcb_data: PCBData, pcb_file: str,
                     for j in range(i + 1, len(refs)):
                         ra, rb = refs[i], refs[j]
                         pa, pb = state.parts[ra], state.parts[rb]
+                        # Swapping must keep each part within swap_cap of
+                        # its OWN seed position
+                        if (math.hypot(pb.x - pa.seed_x, pb.y - pa.seed_y) > swap_cap + 1e-9
+                                or math.hypot(pa.x - pb.seed_x, pa.y - pb.seed_y) > swap_cap + 1e-9):
+                            swaps_skipped += 1
+                            continue
+                        # Courtyards are extracted per-ref, so the same
+                        # footprint_name doesn't guarantee identical bounds
+                        if pa.bounds_by_rot[0.0] != pb.bounds_by_rot[0.0]:
+                            continue
+                        # rect() falls back to rot-0 bounds for unknown
+                        # rotations; add the partner's rotation lazily so
+                        # non-90-degree swaps use correct geometry
+                        for p_dst, inherited in ((pa, pb.rot % 360), (pb, pa.rot % 360)):
+                            if inherited not in p_dst.bounds_by_rot:
+                                p_dst.bounds_by_rot[inherited] = _rotate_local_bounds(
+                                    *p_dst.bounds_by_rot[0.0], inherited)
                         involved = set(pa.nets) | set(pb.nets)
                         other_aw = state.airwires_excluding(involved)
 
@@ -515,13 +546,18 @@ def quench(pcb_data: PCBData, pcb_file: str,
                             state.apply_move(ra, pb.x, pb.y, pb.rot)
                             state.apply_move(rb, ax, ay, arot)
                             if verbose:
-                                print(f"  swap {ra} <-> {rb} gain={gain:.1f}")
+                                da = math.hypot(pa.x - pa.seed_x, pa.y - pa.seed_y)
+                                db = math.hypot(pb.x - pb.seed_x, pb.y - pb.seed_y)
+                                print(f"  swap {ra} <-> {rb} gain={gain:.1f}"
+                                      f" (d[{ra}]={da:.1f}mm, d[{rb}]={db:.1f}mm)")
 
         stats = state.total_cost()
+        swap_note = (f" swap-capped={swaps_skipped}"
+                     if verbose and swaps_skipped else "")
         print(f"Pass {pass_num}: {moves} moves, gain {improved:.1f} -> "
               f"length={stats['length']:.1f}mm crossings={stats['crossings']} "
               f"halo={stats['halo']:.1f} edge={stats['edge']:.1f} "
-              f"total={stats['total']:.1f}")
+              f"total={stats['total']:.1f}{swap_note}")
         if moves == 0:
             break
 

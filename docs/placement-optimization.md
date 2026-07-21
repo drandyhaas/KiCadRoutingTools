@@ -206,8 +206,9 @@ precedent), which is simpler and may capture most of the value:
   into the move generator so every perturbation is feasible, rather than
   penalizing violations):
   - respect `locked` flags (already parsed by `placement/parser.py`)
-  - `--max-displacement` radius from the seed position, so output reads as
-    "your placement, nudged" and inherited human constraints survive
+  - `--max-displacement` radius from the seed position — enforced for every
+    move type, swaps included — so output reads as "your placement, nudged"
+    and inherited human constraints survive
   - courtyard non-overlap via the existing rect machinery
   - decaps tethered to their IC (group membership or hard radius)
   - rotation disabled per-class where assembly conventions matter
@@ -273,7 +274,8 @@ that's the documented failure mode of wirelength-driven placement.
 
 Implemented as `place_optimize.py` + `placement/quench.py`: greedy quench
 (nudge within `--max-displacement` of the seed, 90° rotations with correct
-pad-angle rewriting, same-footprint swaps), cost = `length_weight`·airwire
+pad-angle rewriting, displacement-capped same-footprint swaps), cost =
+`length_weight`·airwire
 length + `crossing_penalty`·crossings + pin-count-scaled halo + soft edge
 margin. Test board: `interf_u` (25 parts, PGA120 + bus connectors, 2 layers),
 pipeline `route_planes` → `bga_fanout U9` → `route.py` with the
@@ -354,7 +356,10 @@ Refined conclusions:
 - `--max-displacement` is the dominant safety knob: small caps keep the
   human's macro structure (bus corridors, cluster geometry) intact by
   construction, which is the entire value of seeding from a human placement.
-  ~3 mm was the sweet spot on both boards tested.
+  ~3 mm was the sweet spot on both boards tested. The cap is now airtight:
+  no move type — swaps included — can take a part beyond it, and
+  `--swap-max-displacement` can tighten (never exceed) it for swaps
+  specifically.
 - The big halos backfire on dense boards: with `--halo-coef 0.5` the
   144-pin Xilinx demands a 6.5 mm halo that a dense board cannot satisfy, so
   the halo gradient dominates everything and scatters the layout. Modest
