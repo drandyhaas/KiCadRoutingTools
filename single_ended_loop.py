@@ -179,6 +179,7 @@ def route_single_ended_nets(
     # Also track bus membership for attraction during routing
     bus_net_to_group: Dict[int, BusGroup] = {}  # Maps net_id to its bus group
     bus_routed_paths: Dict[int, List[Tuple[int, int, int]]] = {}  # Stores routed paths for attraction
+    bus_corridors: Dict[str, List[Tuple[int, int, int]]] = {}  # group.name -> planned centerline
 
     if config.bus_enabled:
         net_ids_to_check = [net_id for _, net_id in single_ended_nets]
@@ -223,6 +224,16 @@ def route_single_ended_nets(
                 # Track bus membership
                 for nid in bus.net_ids:
                     bus_net_to_group[nid] = bus
+
+            # Corridor planning (#296 R9): probe-route each group's
+            # representative at a ladder of inflated clearances and attract
+            # EVERY member (including the guide) to the winning centerline,
+            # so the corridor is chosen with room for the whole group instead
+            # of being whatever the guide's solo path happened to be. Soft:
+            # groups with no routable rung keep neighbor attraction.
+            from bus_corridor import plan_bus_corridors
+            bus_corridors = plan_bus_corridors(pcb_data, config, bus_groups,
+                                               verbose=config.verbose)
 
             # Reorder nets: bus nets in routing order first, then non-bus nets
             bus_net_ids_set = set(bus_net_to_group.keys())
@@ -389,7 +400,12 @@ def route_single_ended_nets(
                 reverse_direction = False
                 if net_id in bus_net_to_group:
                     bus_group = bus_net_to_group[net_id]
-                    attraction_path = get_attraction_neighbor(bus_group, net_id, bus_routed_paths)
+                    # Planned corridor first (#296 R9) -- one shared
+                    # centerline for the whole group, guide included; the
+                    # routed-neighbor path is the fallback when planning
+                    # found no corridor.
+                    attraction_path = (bus_corridors.get(bus_group.name)
+                                       or get_attraction_neighbor(bus_group, net_id, bus_routed_paths))
                     # Route from clustered endpoints (targets if clique was target-based)
                     reverse_direction = (bus_group.clique_endpoint == "target")
                 result = route_net_with_obstacles(pcb_data, net_id, config, obstacles,
@@ -687,7 +703,8 @@ def route_single_ended_nets(
                             retry_reverse_direction = False
                             if net_id in bus_net_to_group:
                                 retry_bus_group = bus_net_to_group[net_id]
-                                retry_attraction_path = get_attraction_neighbor(retry_bus_group, net_id, bus_routed_paths)
+                                retry_attraction_path = (bus_corridors.get(retry_bus_group.name)
+                                                         or get_attraction_neighbor(retry_bus_group, net_id, bus_routed_paths))
                                 retry_reverse_direction = (retry_bus_group.clique_endpoint == "target")
                             retry_result = route_net_with_obstacles(pcb_data, net_id, config, retry_obstacles,
                                                                      attraction_path=retry_attraction_path,
