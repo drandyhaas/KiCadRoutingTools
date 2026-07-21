@@ -667,12 +667,23 @@ def try_phase3_ripup(
     subtree_ripped = {}
     child_sinks = rip_sinks + (subtree_ripped,)
 
+    # The shared via-placement decline records the micron-exact copper that
+    # boxes a pad (find_via_position_blocker) into pcb_data._via_unblock_blame;
+    # the SE ladder already consumes it, but the tap cascade only saw the
+    # synthetic conflict CELLS and re-inferred identity by rasterization.
+    # Feed the exact identities as validator-named blockers instead -- they
+    # sort ahead of every frontier-inferred tier under all select algorithms.
+    _blame = getattr(pcb_data, '_via_unblock_blame', None)
+    _blame_ids = _blame.pop(net_id, None) if _blame else None
+    _known = [(nid, 1) for nid in _blame_ids] if _blame_ids else None
+
     # Analyze blocking
     blockers = analyze_frontier_blocking(
         all_blocked_cells, pcb_data, config, routed_net_paths,
         exclude_net_ids=exclude_ids,
         target_xy=_tgt_for_rank,
-        obstacle_cache=obstacle_cache
+        obstacle_cache=obstacle_cache,
+        known_blockers=_known
     )
 
     if not blockers:

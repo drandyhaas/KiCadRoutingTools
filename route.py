@@ -309,6 +309,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 verbose: bool = False,
                 max_rip_up_count: int = 3,
                 ripup_abandon_metric: str = 'stranded',
+                ripup_blocker_select: str = 'count',
                 enable_layer_switch: bool = True,
                 crossing_layer_check: bool = True,
                 can_swap_to_top_layer: bool = False,
@@ -608,6 +609,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         bga_proximity_cost=bga_proximity_cost, track_proximity_distance=track_proximity_distance,
         track_proximity_cost=track_proximity_cost, debug_lines=debug_lines, verbose=verbose,
         max_rip_up_count=max_rip_up_count, ripup_abandon_metric=ripup_abandon_metric,
+        ripup_blocker_select=ripup_blocker_select,
         crossing_penalty=crossing_penalty,
         crossing_layer_check=crossing_layer_check, routing_clearance_margin=routing_clearance_margin,
         hole_to_hole_clearance=hole_to_hole_clearance, board_edge_clearance=board_edge_clearance,
@@ -631,6 +633,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if collect_stats:
         config_kwargs['collect_stats'] = collect_stats
     config = GridRouteConfig(**config_kwargs)
+
+    if config.ripup_blocker_select != 'count':
+        print(f"Rip-up blocker-select algorithm: {config.ripup_blocker_select}")
 
     # Build guide-corridor waypoints once (issue #7). These steer the per-segment
     # A* through a user-drawn polyline; empty when the feature is off / no guide.
@@ -2171,6 +2176,20 @@ For differential pair routing, use route_diff.py:
                         help="How a Phase 3 tap rip-up decides keep-retry vs abandon "
                              "(see docs/rip-up-reroute.md). Env override: "
                              f"KICAD_RIPUP_ABANDON_METRIC (default: {defaults.RIPUP_ABANDON_METRIC})")
+    parser.add_argument("--ripup-blocker-select",
+                        choices=list(defaults.RIPUP_BLOCKER_SELECT_CHOICES),
+                        default=os.environ.get('KICAD_RIPUP_BLOCKER_SELECT',
+                                               defaults.RIPUP_BLOCKER_SELECT),
+                        help="Blocker SELECTION algorithm for the rip-up ladder. "
+                             "'count' = historical weighted cell "
+                             "count; 'near-target' = endpoint-proximity first "
+                             "(the true last-mile blocker hugs the failing pad "
+                             "but has few cells); 'bidir' = boost nets blocking "
+                             "BOTH search directions (genuine separating walls); "
+                             "'mincut' = soft-cost probe on a map clone that "
+                             "reads the actual crossing set (names the true "
+                             "joint cut; also proves unroutability and skips "
+                             "doomed ladders). Default: count.")
     parser.add_argument("--routing-clearance-margin", type=float, default=defaults.ROUTING_CLEARANCE_MARGIN,
                         help=f"Multiplier on track-via clearance ({defaults.ROUTING_CLEARANCE_MARGIN} = minimum DRC)")
     parser.add_argument("--hole-to-hole-clearance", type=float, default=None,
@@ -2478,6 +2497,7 @@ For differential pair routing, use route_diff.py:
                 verbose=args.verbose,
                 max_rip_up_count=args.max_ripup,
                 ripup_abandon_metric=args.ripup_abandon_metric,
+                ripup_blocker_select=args.ripup_blocker_select,
                 enable_layer_switch=not args.no_stub_layer_swap,
                 crossing_layer_check=not args.no_crossing_layer_check,
                 can_swap_to_top_layer=args.can_swap_to_top_layer,

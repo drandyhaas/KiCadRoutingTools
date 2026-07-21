@@ -583,6 +583,20 @@ class RoutingDialog(wx.Dialog):
             "probe / weighted-probe (discount pads unroutable either way)")
         grid.Add(self.ripup_abandon_metric, 0, wx.EXPAND)
 
+        # Rip-up blocker SELECTION algorithm (#424 audit)
+        grid.Add(wx.StaticText(parent, label="Rip-up Blocker Select:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.ripup_blocker_select = wx.Choice(
+            parent, choices=list(defaults.RIPUP_BLOCKER_SELECT_CHOICES))
+        self.ripup_blocker_select.SetStringSelection(defaults.RIPUP_BLOCKER_SELECT)
+        self.ripup_blocker_select.SetToolTip(
+            "Which net the rip-up ladder targets first: count (default; "
+            "historical weighted cell count), near-target (endpoint-proximity "
+            "first -- the true last-mile blocker hugs the failing pad but has "
+            "few cells), bidir (boost nets blocking BOTH search directions), "
+            "mincut (soft-cost probe on a map clone reads the actual crossing "
+            "set: the true joint cut, plus unroutability fast-fail)")
+        grid.Add(self.ripup_blocker_select, 0, wx.EXPAND)
+
     def _on_obey_drc_changed(self, event):
         """Handle checkbox toggle - apply board minimums if enabled."""
         if self.obey_drc_check.GetValue():
@@ -1673,6 +1687,8 @@ class RoutingDialog(wx.Dialog):
                 'max_ripup': self.max_ripup.GetValue(),
                 'ripup_abandon_metric': self.ripup_abandon_metric.GetString(
                     self.ripup_abandon_metric.GetSelection()),
+                'ripup_blocker_select': self.ripup_blocker_select.GetString(
+                    self.ripup_blocker_select.GetSelection()),
                 'ordering_strategy': self.ordering_strategy.GetString(self.ordering_strategy.GetSelection()),
                 'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
@@ -2212,6 +2228,7 @@ class RoutingDialog(wx.Dialog):
         self.via_cost.SetValue(defaults.VIA_COST)
         self.max_ripup.SetValue(defaults.MAX_RIPUP)
         self.ripup_abandon_metric.SetStringSelection(defaults.RIPUP_ABANDON_METRIC)
+        self.ripup_blocker_select.SetStringSelection(defaults.RIPUP_BLOCKER_SELECT)
 
         # Reset layer selections (select all copper layers by default)
         for layer, cb in self.layer_checks.items():
@@ -2520,6 +2537,8 @@ class RoutingDialog(wx.Dialog):
             'max_ripup': self.max_ripup.GetValue(),
             'ripup_abandon_metric': self.ripup_abandon_metric.GetString(
                 self.ripup_abandon_metric.GetSelection()),
+            'ripup_blocker_select': self.ripup_blocker_select.GetString(
+                self.ripup_blocker_select.GetSelection()),
             'ordering_strategy': self.ordering_strategy.GetString(self.ordering_strategy.GetSelection()),
             'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
             'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
@@ -2956,6 +2975,7 @@ class RoutingDialog(wx.Dialog):
                     direction_preference_cost=config.get('direction_preference_cost', defaults.DIRECTION_PREFERENCE_COST),
                     max_rip_up_count=config['max_ripup'],
                     ripup_abandon_metric=config.get('ripup_abandon_metric', defaults.RIPUP_ABANDON_METRIC),
+                    ripup_blocker_select=config.get('ripup_blocker_select', defaults.RIPUP_BLOCKER_SELECT),
                     ordering_strategy=config['ordering_strategy'],
                     direction_order=config.get('direction'),
                     stub_proximity_radius=config['stub_proximity_radius'],

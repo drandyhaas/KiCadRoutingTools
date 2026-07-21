@@ -505,6 +505,7 @@ def get_common_config_kwargs(
     keepout_enabled: bool = False,
     keepout_layer: str = "User.2",
     ripup_abandon_metric: str = 'stranded',
+    ripup_blocker_select: str = 'count',
 ) -> Dict:
     """
     Build config kwargs dict from common parameters.
@@ -547,6 +548,7 @@ def get_common_config_kwargs(
         debug_lines=debug_lines,
         verbose=verbose,
         max_rip_up_count=max_rip_up_count,
+        ripup_blocker_select=ripup_blocker_select,
         ripup_abandon_metric=ripup_abandon_metric,
         target_swap_crossing_penalty=crossing_penalty,
         crossing_layer_check=crossing_layer_check,

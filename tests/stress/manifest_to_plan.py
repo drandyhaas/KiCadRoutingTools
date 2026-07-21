@@ -38,6 +38,7 @@ FLAG_PARAMS = {
     '--max-iterations': 'max_iterations',
     '--max-ripup': 'max_ripup',
     '--ripup-abandon-metric': 'ripup_abandon_metric',
+    '--ripup-blocker-select': 'ripup_blocker_select',
     '--hole-to-hole-clearance': 'hole_to_hole_clearance',
     '--board-edge-clearance': 'board_edge_clearance',
     '--via-cost': 'via_cost',

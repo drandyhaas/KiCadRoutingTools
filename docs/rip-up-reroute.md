@@ -10,6 +10,7 @@ Implementation: `rip_up_reroute.py` (rip/restore), `blocking_analysis.py` (who i
 |--------|---------|-------------|
 | `--max-ripup` | 3 | Maximum number of blockers ripped up at once for one failing net |
 | `--ripup-abandon-metric` | `stranded` | How a multipoint tap rip-up decides keep-retry vs abandon (see [Abandon metrics](#abandon-metrics)) |
+| `--ripup-blocker-select` | `count` | Which blocker the rip-up ladder targets first (see [Blocker selection algorithms](#blocker-selection-algorithms)) |
 | `--ripped-route-avoidance-radius` | 1.0 | Soft-penalty radius around a ripped net's former corridor (mm) |
 | `--ripped-route-avoidance-cost` | 0.1 | Soft-penalty cost in the former corridor (0 disables) |
 
@@ -29,7 +30,18 @@ Two mechanisms start a rip-up:
 
 `filter_rippable_blockers()` removes candidates that can't be ripped: nets not actually routed in this run (by default, pre-existing tracks are left untouched — see [Ripping Pre-Existing Routes](#ripping-pre-existing-routes) for the `--rip-existing-nets` exception), and diff pair members whose partner isn't routed. Differential pairs are treated as one unit — P and N are always ripped and restored together.
 
-The failure report printed to the console comes from this analysis ("Route stuck at (x, y) on F.Cu, blocked by: …").
+The failure report printed to the console comes from this analysis ("Route stuck at (x, y) on F.Cu, blocked by: …"). A coverage line reports how many frontier cells were attributed to routed nets; the remainder is static, unrippable copper (pads, planes, pre-existing tracks, the board edge) — when that share dominates, ripping cannot open the frontier at all.
+
+### Blocker selection algorithms
+
+`--ripup-blocker-select` chooses how the candidates from the blocking analysis are ordered before the ladder starts ripping. The frontier is the *perimeter* of the reachable pocket, not the wall that actually separates source from target, so per-net cell counts can be misleading — the alternatives re-rank the same candidate set using better evidence:
+
+- **`count`** (default) — the historical weighted-cell-count ranking described above.
+- **`near-target`** — endpoint proximity first. The decisive last-mile blocker often hugs the failing pad but contributes only a handful of frontier cells, so the count ranking buries it under large far walls. Sort key: near-endpoint-unique cells, then unique, then count.
+- **`bidir`** — both-directions boost. The search runs from both ends; a net attributed in BOTH directions' frontiers lies on a genuine separating wall, while a bystander boxed in behind one endpoint appears in only one. Both-direction nets get their weighted score doubled.
+- **`mincut`** — soft-cost probe. The failing net is re-routed once on a clone of the obstacle map with every rippable candidate's copper converted from hard-blocked to a high soft cost; the copper the resulting path crosses is the true joint cut, and those nets are ripped first. If even the all-soft probe finds no path, the net is unroutable at any rip depth and the ladder is skipped entirely (the rescue rungs still run). Costs roughly one extra A* search, on the failure path only.
+
+Validator-named blockers — identities proved by geometry validators such as via placement (the exact copper that vetoes a pad via) — sort ahead of every frontier-inferred tier under all four algorithms.
 
 ## Ripping Pre-Existing Routes
 

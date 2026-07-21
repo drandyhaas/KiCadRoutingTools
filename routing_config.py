@@ -84,6 +84,10 @@ class GridRouteConfig:
     # phase3_routing.ABANDON_METRICS: stranded | total-pads | complete-nets |
     # congestion | history | weighted | probe | weighted-probe
     ripup_abandon_metric: str = 'stranded'
+    # Blocker SELECTION algorithm for the rip-up ladders (#424 audit;
+    # blocking_analysis.rank_blockers / mincut_probe_order):
+    # count | near-target | bidir | mincut
+    ripup_blocker_select: str = 'count'
     max_setback_angle: float = 45.0  # Maximum angle (degrees) for setback position search
     track_proximity_distance: float = 2.0  # mm - radius around routed tracks to penalize (same layer)
     stub_layer_swap: bool = True  # Enable stub layer switching optimization

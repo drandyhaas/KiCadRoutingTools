@@ -720,6 +720,43 @@ def route_single_ended_nets(
                     rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
                         blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id
                     )
+                    # Blocker-selection algorithm (#424 audit; --ripup-blocker-select).
+                    _bsel = getattr(config, 'ripup_blocker_select', 'count')
+                    if _bsel == 'mincut' and rippable_blockers and \
+                            state.working_obstacles is not None and \
+                            state.net_obstacles_cache is not None:
+                        from blocking_analysis import mincut_probe_order
+                        _mc_order, _mc_feasible = mincut_probe_order(
+                            pcb_data, config, state.working_obstacles, net_id,
+                            rippable_blockers, state.net_obstacles_cache)
+                        if not _mc_feasible:
+                            print(f"  MINCUT probe: no path even with all rippable "
+                                  f"copper soft-costed -- unroutable at any rip "
+                                  f"depth, skipping the ladder")
+                            rippable_blockers = []
+                        elif _mc_order:
+                            _by_id = {b.net_id: b for b in rippable_blockers}
+                            _front = [_by_id[n] for n in _mc_order if n in _by_id]
+                            _rest = [b for b in rippable_blockers
+                                     if b.net_id not in set(_mc_order)]
+                            rippable_blockers = _front + _rest
+                            print(f"  MINCUT probe: true cut = "
+                                  f"{[b.net_name for b in _front]}")
+                    elif _bsel == 'bidir' and rippable_blockers and result:
+                        _fwd = result.get('blocked_cells_forward') or []
+                        _bwd = result.get('blocked_cells_backward') or []
+                        if _fwd and _bwd:
+                            from blocking_analysis import rank_blockers
+                            _f_ids = {b.net_id for b in analyze_frontier_blocking(
+                                _fwd, pcb_data, config, routed_net_paths,
+                                exclude_net_ids={net_id},
+                                obstacle_cache=obstacle_cache)}
+                            _b_ids = {b.net_id for b in analyze_frontier_blocking(
+                                _bwd, pcb_data, config, routed_net_paths,
+                                exclude_net_ids={net_id},
+                                obstacle_cache=obstacle_cache)}
+                            rank_blockers(rippable_blockers, 'bidir',
+                                          bidir_both_sets=_f_ids & _b_ids)
 
                     # #331 item 3: a via-in-pad unblock that DECLINED during
                     # this net's attempts recorded WHICH net's copper boxes

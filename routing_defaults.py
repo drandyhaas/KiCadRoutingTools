@@ -94,6 +94,12 @@ RIPUP_ABANDON_METRIC_CHOICES = ('stranded', 'total-pads', 'complete-nets',
                                 'congestion', 'history', 'weighted',
                                 'probe', 'weighted-probe')
 
+# Rip-up blocker SELECTION algorithm (#424 audit): which foreign net the
+# rip-up ladder targets first when a route fails. 'count' is the historical
+# weighted-cell-count ranking; the alternatives re-rank the same rippable set.
+RIPUP_BLOCKER_SELECT = 'count'
+RIPUP_BLOCKER_SELECT_CHOICES = ('count', 'near-target', 'bidir', 'mincut')
+
 # Layer direction preference (0=horizontal, 1=vertical, 255=none)
 # Alternates H/V starting with horizontal on top layer
 DIRECTION_PREFERENCE_COST = 5000  # Cost penalty for non-preferred direction (0 = disabled).

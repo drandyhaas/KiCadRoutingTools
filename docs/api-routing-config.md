@@ -179,6 +179,7 @@ assert config.obstacle_clearance(some_default_net) == 0.15  # not in the map -> 
 |-------|---------|---------|
 | `max_rip_up_count` | `3` | Max blocking routes ripped up at once (progressive 1..N) |
 | `ripup_abandon_metric` | `'stranded'` | Keep-retry vs abandon rule for multipoint tap rip-ups (see [rip-up-reroute.md](rip-up-reroute.md#abandon-metrics)) |
+| `ripup_blocker_select` | `'count'` | Blocker-ordering algorithm for the rip-up ladder: `'count'`, `'near-target'`, `'bidir'`, `'mincut'` (see [rip-up-reroute.md](rip-up-reroute.md#blocker-selection-algorithms)) |
 | `stub_layer_swap` | `True` | Allow moving stubs to other layers to resolve conflicts (never moves an SMD pad's stub off the one layer that pad lives on — that would orphan the pad) |
 | `target_swap_crossing_penalty` | `1000.0` | Penalty for crossing assignments during target swap |
 | `crossing_layer_check` | `True` | Only count crossings between routes sharing a layer |
