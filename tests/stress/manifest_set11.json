@@ -52,27 +52,6 @@
   },
   {
     "set": "set11",
-    "repo": "dpmj/masters-thesis-lora-gateway-compute-module-cubesat-payload-pcb",
-    "path": "lora-payload.kicad_pcb",
-    "branch": "master",
-    "file": "/Users/andy/Documents/kicad_stress_test/sources/local_set11/lora_cubesat_cm.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/dpmj/masters-thesis-lora-gateway-compute-module-cubesat-payload-pcb/master/lora-payload.kicad_pcb",
-    "github_url": "https://github.com/dpmj/masters-thesis-lora-gateway-compute-module-cubesat-payload-pcb/blob/master/lora-payload.kicad_pcb",
-    "size_kb": 9240,
-    "layers_est": 6,
-    "footprints": 403,
-    "routable_nets": 235,
-    "max_pads": 204,
-    "kicad_version": 20241229,
-    "has_kicad_pro": true,
-    "tier": "hard",
-    "lane": "sbc_carrier",
-    "license": "see repo",
-    "short_name": "lora_cubesat_cm",
-    "note": "CubeSat payload carrier hosting a compute module and LoRa gateway: stacked PC/104-style connectors, exact cubesat outline"
-  },
-  {
-    "set": "set11",
     "repo": "lynchaj/duodyne",
     "path": "03 processor.Z80, V1.1/processor.Z80.kicad_pcb",
     "branch": "main",
@@ -301,5 +280,25 @@
     "license": "see repo",
     "short_name": "rc2014_ym2149",
     "note": "RC2014 YM2149 sound card: card-edge bus fingers, DIP sound chip + TTL glue, 2-layer"
+  },
+  {
+    "set": "set11",
+    "repo": "m1geo/Pi5_PCIe",
+    "path": "Pi5_PCIe.kicad_pcb",
+    "branch": "main",
+    "file": "/Users/andy/Documents/kicad_stress_test/sources/local_set11/pi5_pcie_fpc.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/m1geo/Pi5_PCIe/main/Pi5_PCIe.kicad_pcb",
+    "github_url": "https://github.com/m1geo/Pi5_PCIe/blob/main/Pi5_PCIe.kicad_pcb",
+    "size_kb": 893,
+    "layers_est": 4,
+    "footprints": 54,
+    "routable_nets": 24,
+    "max_pads": 38,
+    "has_kicad_pro": true,
+    "tier": "medium",
+    "lane": "connectors_odd",
+    "license": "see repo (m1geo/Pi5_PCIe)",
+    "short_name": "pi5_pcie_fpc",
+    "note": "Raspberry Pi 5 PCIe breakout: PCIe card-edge gold fingers + FPC connector (connectors_odd). Added to set11 replacing lora_cubesat_cm (moved to set3monster as the 3h-cap monster); castor_pollux was rejected as an already-present set1 duplicate."
   }
 ]

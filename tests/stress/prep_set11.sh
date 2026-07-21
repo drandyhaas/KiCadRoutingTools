@@ -23,7 +23,7 @@ MAP=(
   # boards added to fill set 11 out to 15; these are raw-URL sources staged by
   # fetch_set11.py as <short-name>.kicad_pcb, so name == fragment.
   "zynthian_v5_main|zynthian_v5_main"
-  "lora_cubesat_cm|lora_cubesat_cm"
+  "pi5_pcie_fpc|pi5_pcie_fpc"
   "duodyne_z80_proc|duodyne_z80_proc"
   "fsae_custom_bms|fsae_custom_bms"
   "g474_power_charger|g474_power_charger"

@@ -1,0 +1,23 @@
+[
+  {
+    "set": "set3monster",
+    "repo": "dpmj/masters-thesis-lora-gateway-compute-module-cubesat-payload-pcb",
+    "path": "lora-payload.kicad_pcb",
+    "branch": "master",
+    "file": "/Users/andy/Documents/kicad_stress_test/sources/github_set3monster/lora_cubesat_cm.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/dpmj/masters-thesis-lora-gateway-compute-module-cubesat-payload-pcb/master/lora-payload.kicad_pcb",
+    "github_url": "https://github.com/dpmj/masters-thesis-lora-gateway-compute-module-cubesat-payload-pcb/blob/master/lora-payload.kicad_pcb",
+    "size_kb": 9240,
+    "layers_est": 6,
+    "footprints": 403,
+    "routable_nets": 235,
+    "max_pads": 204,
+    "kicad_version": 20241229,
+    "has_kicad_pro": true,
+    "tier": "hard",
+    "lane": "sbc_carrier",
+    "license": "see repo",
+    "short_name": "lora_cubesat_cm",
+    "note": "CubeSat payload carrier (compute module + LoRa gateway, PC/104 stack, exact cubesat outline). MONSTER: 485 nets / 6 layers -- the first corpus board whose single signal-route step exceeds the RUNBOOK 3h/command cap (got to 205/207 nets before the cap killed it). Moved here from set11."
+  }
+]
