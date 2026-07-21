@@ -154,10 +154,17 @@ def main():
         data = compare_board_data(fp, clearance=grade_clr, baseline=base)
         if not data or data.get("skip"):
             raise RuntimeError((data or {}).get("skip", "compare_board_data unavailable"))
-        grade["drc"] = data["check_drc"]                    # router-attributable (baseline-subtracted)
+        grade["drc"] = data["check_drc"]                    # router-attributable (baseline-subtracted) == ab_replay drc_real
         grade["drc_kicad"] = data["kicad"]                  # kicad-cli cross-check side
         grade["drc_preexisting"] = data["checkdrc_preexisting"]
         grade["drc_verdict"] = data["verdict"]
+        # Disagreement channels (same as ab_replay_grade surfaces), so a board
+        # where the two engines diverge is VISIBLE instead of hidden behind one
+        # number: kicad_only = KiCad found it, check_drc missed (under-model alarm
+        # -- e.g. a padstack pad's bigger layer); checkdrc_only = check_drc found
+        # it, KiCad refuted (edge/clearance near-miss KiCad clears, e.g. kirdy).
+        grade["drc_kicad_only"] = data["kicad_only"]
+        grade["drc_checkdrc_only"] = data["checkdrc_only"]
         # by_type + raw-final of the ROUTER-ATTRIBUTABLE items, via the same helpers
         cd = run_check_drc(fp, grade_clr)
         grade["drc_final_raw"] = len(cd)
