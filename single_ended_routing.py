@@ -3257,10 +3257,19 @@ def _route_multipoint_taps_impl(
             # probe budget; the memoisation cache in _place_shrunk_via_in_pad
             # keeps repeated failures cheap.
             _pad_obj = pad_info[tgt_idx][5] if len(pad_info[tgt_idx]) > 5 else None
+            # Real pads only: tap targets can be _EndpointStub pseudo-pads
+            # (mid-trace tap points) -- no copper of their own to via into.
+            if getattr(_pad_obj, 'component_ref', None) is None:
+                _pad_obj = None
             _r189 = (_place_shrunk_via_in_pad(_pad_obj, obstacles, config,
                                               pcb_data, net_id, coord, layer_names)
                      if _pad_obj is not None and not getattr(_pad_obj, 'drill', 0)
                      else None)
+            if _unblock_debug():
+                _pname = (f"{_pad_obj.component_ref}.{_pad_obj.pad_number}"
+                          if _pad_obj is not None else "NO-PAD-OBJ")
+                print(f"      TAP-RESCUE rung: tgt {_pname} -> "
+                      f"{'placed' if _r189 else 'DECLINED'}")
             if _r189 is not None:
                 _via189, (_vgx, _vgy), _pli = _r189
                 _register_unblock_via(obstacles, _vgx, _vgy, layer_names)
