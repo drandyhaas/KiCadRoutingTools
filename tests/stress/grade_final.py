@@ -107,8 +107,25 @@ def main():
     except Exception as e:
         grade["floor_writeback_err"] = str(e)[:120]
 
+    # Grade at the board's REAL design floor, not the raw route-step --clearance.
+    # `--clearance` is a #439 CEILING, so the clearance KiCad actually enforces is
+    # min(--clearance, netclass) -- exactly what fix_project_for_output just wrote
+    # into the sibling .kicad_pro. Grading at the bare chain-min ceiling (e.g. 0.15
+    # when the board's netclass is 0.10) manufactures phantom sub-ceiling grazes on
+    # copper that is legal at the real rule: KiCad grades at the netclass and shows
+    # 0 (nes_rom_vomitter 156->0, molekula_enc 133->0, pcie_test_edge 86->0).
+    grade_clr = clr
     try:
-        o = subprocess.run(["python3", "-X", "utf8", f"{REPO}/check_drc.py", fp, "-c", str(clr)],
+        from list_nets import board_default_netclass_clearance
+        ncl = board_default_netclass_clearance(fp)
+        if ncl and ncl > 0:
+            grade_clr = min(clr, ncl)
+    except Exception as e:
+        grade["netclass_read_err"] = str(e)[:100]
+    grade["clearance"] = grade_clr
+
+    try:
+        o = subprocess.run(["python3", "-X", "utf8", f"{REPO}/check_drc.py", fp, "-c", str(grade_clr)],
                            capture_output=True, text=True, timeout=1200).stdout
         m = re.search(r"FOUND (\d+) DRC", o)
         grade["drc"] = int(m.group(1)) if m else (0 if "NO DRC" in o else None)

@@ -26,7 +26,20 @@ board with no routed-floor `.kicad_pro`).
 **Important caveat to include in the report:** `check_drc.py` does not check zone copper, minimum trace width, or netclass compliance. If the board has copper zones/planes, recommend the zone-aware check:
 
 ```bash
-kicad-cli pcb drc board.kicad_pcb --refill-zones
+kicad-cli pcb drc board.kicad_pcb --refill-zones --format json -o /tmp/drc.json
+```
+
+**Ignore silk and dangling violations** when reading that report — they are not
+routing/connectivity defects and are excluded by the harness graders
+(`kicad_drc_compare.py`, `kicad_oracle.py`) for exactly this reason. Filter them
+out before counting:
+
+```bash
+python3 -c "import json;v=json.load(open('/tmp/drc.json'))['violations'];\
+drop={'via_dangling','track_dangling','silk_overlap','silk_over_copper',\
+'silk_edge_clearance','silk_mask_clearance'};\
+c=[x for x in v if x['type'] not in drop];\
+print(f'{len(c)} copper/connectivity violations ({len(v)-len(c)} silk/dangling ignored)')"
 ```
 
 The cross-check is one-directional (#260): kicad-cli can refute a borderline

@@ -63,6 +63,7 @@ _IGNORE_SEVERITIES = [
     "pth_inside_courtyard", "npth_inside_courtyard", "item_on_disabled_layer",
     "invalid_outline", "duplicate_footprints", "missing_footprint",
     "net_conflict", "unresolved_variable", "assertion_failure",
+    "via_dangling", "track_dangling",
     "copper_sliver", "silk_over_copper", "silk_overlap", "silk_edge_clearance",
     "text_height", "text_thickness", "length_out_of_range",
     "skew_out_of_range", "via_count_exceeded", "diff_pair_gap_out_of_range",
