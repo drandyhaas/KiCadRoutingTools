@@ -10,7 +10,7 @@ Implementation: `rip_up_reroute.py` (rip/restore), `blocking_analysis.py` (who i
 |--------|---------|-------------|
 | `--max-ripup` | 3 | Maximum number of blockers ripped up at once for one failing net |
 | `--ripup-abandon-metric` | `stranded` | How a multipoint tap rip-up decides keep-retry vs abandon (see [Abandon metrics](#abandon-metrics)) |
-| `--ripup-blocker-select` | `count` | Which blocker the rip-up ladder targets first (see [Blocker selection algorithms](#blocker-selection-algorithms)) |
+| `--ripup-blocker-select` | `count` | Which blocker the rip-up ladder targets first (see [Blocker selection algorithms](#blocker-selection-algorithms)). Env override: `KICAD_RIPUP_BLOCKER_SELECT` |
 | `--ripped-route-avoidance-radius` | 1.0 | Soft-penalty radius around a ripped net's former corridor (mm) |
 | `--ripped-route-avoidance-cost` | 0.1 | Soft-penalty cost in the former corridor (0 disables) |
 
@@ -31,6 +31,11 @@ Two mechanisms start a rip-up:
 `filter_rippable_blockers()` removes candidates that can't be ripped: nets not actually routed in this run (by default, pre-existing tracks are left untouched — see [Ripping Pre-Existing Routes](#ripping-pre-existing-routes) for the `--rip-existing-nets` exception), and diff pair members whose partner isn't routed. Differential pairs are treated as one unit — P and N are always ripped and restored together.
 
 The failure report printed to the console comes from this analysis ("Route stuck at (x, y) on F.Cu, blocked by: …"). A coverage line reports how many frontier cells were attributed to routed nets; the remainder is static, unrippable copper (pads, planes, pre-existing tracks, the board edge) — when that share dominates, ripping cannot open the frontier at all.
+
+Two refinements sharpen the signal before ranking:
+
+- **Fastest-failing direction.** The search runs from both ends; the side that died in fewer iterations is the constrained one, and its frontier is the drained pocket's perimeter (hugging track included). Attribution uses that side's cells rather than pooling both directions, so the broad flood cannot swamp the tight pocket. This applies in the single-ended, reroute, victim-retry, and multipoint tap paths.
+- **Per-edge attribution (multipoint).** When several tap edges of one net fail, each edge is attributed separately against its *own* target, and the per-net results merge by taking each net's strongest edge — a net decisive at one edge is not diluted by edges it is irrelevant to, and a pooled "cell soup" can no longer promote a net relevant to none of them.
 
 ### Blocker selection algorithms
 
@@ -53,9 +58,10 @@ For a failing net, the router escalates through rip-up rounds (`reroute_loop.py`
 
 1. **N=1**: rip the top-ranked blocker, rebuild obstacles, retry the route.
 2. If the retry fails, the *new* frontier is re-analyzed — the next blocker is chosen from fresh data, not the original ranking, since ripping one net changes what's in the way.
-3. **N=2**: rip the next blocker as well (now two are ripped), retry. And so on up to `--max-ripup`.
+3. **Slot-0 guard**: if the re-analysis names a *different* top pick than the ripped singleton, the refuted rip is restored and the fresh pick is tried **alone** once before extending to pairs. Without this, the ladder only ever grows a prefix around its first guess, so a wrong first pick contaminated every combination it would ever try.
+4. **N=2**: rip the next blocker as well (now two are ripped), retry. And so on up to `--max-ripup`.
 
-A history set of `(net, frozenset(ripped blockers))` combinations prevents retrying a combination that already failed, which (together with the N cap) guarantees termination. If all rounds fail, every ripped net is restored unchanged and the net is reported as failed.
+A history set of `(net, frozenset(ripped blockers))` combinations (recorded when a combination *succeeds*) prevents pointlessly re-ripping a combo that already worked once for this net; together with the N cap this guarantees termination. If all rounds fail, every ripped net is restored unchanged and the net is reported as failed.
 
 On success, the ripped nets are appended to the **reroute queue**.
 
