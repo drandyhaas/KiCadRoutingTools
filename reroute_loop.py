@@ -533,7 +533,30 @@ def run_reroute_loop(
                     # trying to route taps for a net with no main route.
                     if ripped_net_id in state.pending_multipoint_nets:
                         del state.pending_multipoint_nets[ripped_net_id]
-                    failed += 1
+                    # #468: a terminally-failed rip victim must not ship with
+                    # LESS copper than it started with. Conflict-free saved
+                    # copper -> FULL restore (the net returns to its pre-rip
+                    # routed state); else at least the escape stub survives.
+                    from rip_restore import try_terminal_restore
+                    _tr = try_terminal_restore(pcb_data, config, ripped_net_id)
+                    if _tr == 'full':
+                        _sv, _rids, _wir = pcb_data._rip_saved[ripped_net_id]
+                        restore_net(ripped_net_id, _sv, _rids, _wir,
+                                    pcb_data, routed_net_ids, routed_net_paths,
+                                    routed_results, diff_pair_by_net_id,
+                                    remaining_net_ids, results, config,
+                                    track_proximity_cache, layer_map,
+                                    state.working_obstacles, state.net_obstacles_cache,
+                                    state.ripped_route_layer_costs,
+                                    state.ripped_route_via_positions,
+                                    refused_sink=state.collision_refused_net_ids)
+                        print(f"  RIP-RESTORE (#468): {ripped_net_name} restored "
+                              f"to its pre-rip route (reroute failed, corridor "
+                              f"still clear)")
+                        if _wir:
+                            successful += 1
+                    else:
+                        failed += 1
 
         elif reroute_item[0] == 'diff_pair':
             # Handle diff pairs that were ripped during single-ended routing
@@ -980,6 +1003,27 @@ def run_reroute_loop(
                         del state.pending_multipoint_nets[ripped_pair.p_net_id]
                     if ripped_pair.n_net_id in state.pending_multipoint_nets:
                         del state.pending_multipoint_nets[ripped_pair.n_net_id]
-                    failed += 1
+                    # #468: same terminal-restore leg for pair victims (the
+                    # payload is registered under both member ids; restore_net
+                    # restores the whole pair from either).
+                    from rip_restore import try_terminal_restore
+                    _tr = try_terminal_restore(pcb_data, config, ripped_pair.p_net_id)
+                    if _tr == 'full':
+                        _sv, _rids, _wir = pcb_data._rip_saved[ripped_pair.p_net_id]
+                        restore_net(ripped_pair.p_net_id, _sv, _rids, _wir,
+                                    pcb_data, routed_net_ids, routed_net_paths,
+                                    routed_results, diff_pair_by_net_id,
+                                    remaining_net_ids, results, config,
+                                    track_proximity_cache, layer_map,
+                                    state.working_obstacles, state.net_obstacles_cache,
+                                    state.ripped_route_layer_costs,
+                                    state.ripped_route_via_positions,
+                                    refused_sink=state.collision_refused_net_ids)
+                        print(f"  RIP-RESTORE (#468): pair {ripped_pair_name} "
+                              f"restored to its pre-rip route")
+                        if _wir:
+                            successful += 1
+                    else:
+                        failed += 1
 
     return successful, failed, total_time, total_iterations, route_index
