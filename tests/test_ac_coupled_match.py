@@ -12,6 +12,9 @@ Covers:
     in JSON_SUMMARY, and both sides still route.
   * Control: without the flag there is no ac_coupled_xnets key (per-side behavior,
     so the routed board is unaffected).
+  * Guard (#460): the pass reverts member new_segments and reports the original
+    skew when meandering would grow the end-to-end delta; an exact-hit plan
+    still applies (board-free unit tests with a stubbed meander engine).
 
 Run with a Python that has the Rust router + numpy/scipy/shapely, e.g.:
     python3 tests/test_ac_coupled_match.py
@@ -31,6 +34,7 @@ sys.path.insert(0, os.path.join(ROOT_DIR, "rust_router"))
 from kicad_parser import Segment                       # noqa: E402
 from routing_config import DiffPairNet                 # noqa: E402
 from diff_xnet import find_ac_coupled_xnets            # noqa: E402
+import length_matching                                 # noqa: E402
 from length_matching import _ac_coupled_member_lengths  # noqa: E402
 
 BOARD = os.path.join(ROOT_DIR, "kicad_files", "cap_chain.kicad_pcb")
@@ -158,6 +162,16 @@ def run():
                     fails.append(f"integration: wrong bridges: {xnets[0].get('bridges')}")
                 elif not isinstance(xnets[0].get("skew_mm"), (int, float)):
                     fails.append(f"integration: skew_mm not reported: {xnets[0]}")
+                else:
+                    # Guard contract (#460): matching never degrades the board,
+                    # so the reported skew is bounded by the pre-match delta.
+                    mdelta = re.search(
+                        r"AC-couple DPA\+DPB: end-to-end P=[\d.]+mm, "
+                        r"N=[\d.]+mm, delta=([\d.]+)mm", r.stdout)
+                    if mdelta and xnets[0]["skew_mm"] > float(mdelta.group(1)) + 1e-6:
+                        fails.append(
+                            f"integration: skew_mm {xnets[0]['skew_mm']} exceeds "
+                            f"pre-match delta {mdelta.group(1)} (guard contract)")
 
             # 10. CONTROL: without the flag, no ac_coupled_xnets key (per-side behavior).
             r2, summary2 = _run_route(out, [])
@@ -170,6 +184,78 @@ def run():
             for ext in (".kicad_pcb", ".kicad_pro", ".kicad_prl"):
                 if os.path.exists(base + ext):
                     os.remove(base + ext)
+
+    # --------- guard (#460): end-to-end revert, unit (board-free) ---------
+    # Two member pairs: DPA P=10/N=12 (nets 1/2), DPB P=10/N=11 (nets 3/4)
+    # -> total P=20, N=23, delta=3.0, S='p'; phase-1 plan +2.0/+1.0, no spill.
+    def _ac_res(p_id, n_id, y, p_end, n_end):
+        return {"is_diff_pair": True, "p_net_id": p_id, "n_net_id": n_id,
+                "new_segments": [seg(0, y, p_end, y, p_id),
+                                 seg(0, y + 1, n_end, y + 1, n_id)],
+                "new_vias": [],
+                "p_src_stub_length": 0.0, "p_tgt_stub_length": 0.0,
+                "n_src_stub_length": 0.0, "n_tgt_stub_length": 0.0,
+                "polarity_fixed": False}
+
+    def _ac_fixture():
+        res_a = _ac_res(1, 2, 0, 10, 12)
+        res_b = _ac_res(3, 4, 2, 10, 11)
+        rr = {1: res_a, 2: res_a, 3: res_b, 4: res_b}
+        xnet = SimpleNamespace(
+            base_names=["DPA", "DPB"], bridge_refs=["C1", "C2"],
+            members=[SimpleNamespace(base_name="DPA", p_net_id=1, n_net_id=2),
+                     SimpleNamespace(base_name="DPB", p_net_id=3, n_net_id=4)])
+        return res_a, res_b, rr, xnet
+
+    cfg = SimpleNamespace(length_match_tolerance=0.1)
+
+    # 11. overshooting meanders (3x the ask -> added 9.0 >= 2*delta 6.0) are
+    # reverted: new_segments restored to the exact original objects and the
+    # ORIGINAL delta is returned so JSON skew_mm matches the restored board.
+    def _overshoot(segments, net_id, paired_net_id, vias, stub_length,
+                   current_length, target_length, delta, config, pcb_data):
+        extra = 3 * (target_length - current_length)
+        return (list(segments) + [seg(50, 50, 50 + extra, 50, net_id)],
+                current_length + extra, 2)
+
+    res_a, res_b, rr, xnet = _ac_fixture()
+    orig_a = list(res_a["new_segments"])
+    orig_b = list(res_b["new_segments"])
+    real_fn = length_matching._lengthen_net_with_meanders
+    length_matching._lengthen_net_with_meanders = _overshoot
+    try:
+        skew = length_matching.apply_ac_coupled_length_matching(
+            xnet, rr, cfg, fake_pcb)
+    finally:
+        length_matching._lengthen_net_with_meanders = real_fn
+    if not (isinstance(skew, float) and abs(skew - 3.0) < 1e-6):
+        fails.append(f"guard: expected original delta 3.0 returned, got {skew}")
+    if res_a["new_segments"] != orig_a or res_b["new_segments"] != orig_b:
+        fails.append("guard: new_segments not restored after revert")
+    elif not all(a is b for a, b in zip(res_a["new_segments"], orig_a)):
+        fails.append("guard: restored segments are copies, not the originals")
+
+    # 12. an exact-hit plan (added 3.0 -> delta 0.0 < 3.0) still applies:
+    # the guard must not over-trigger on the improving path.
+    def _exact(segments, net_id, paired_net_id, vias, stub_length,
+               current_length, target_length, delta, config, pcb_data):
+        extra = target_length - current_length
+        return (list(segments) + [seg(50, 50, 50 + extra, 50, net_id)],
+                target_length, 1)
+
+    res_a, res_b, rr, xnet = _ac_fixture()
+    length_matching._lengthen_net_with_meanders = _exact
+    try:
+        skew = length_matching.apply_ac_coupled_length_matching(
+            xnet, rr, cfg, fake_pcb)
+    finally:
+        length_matching._lengthen_net_with_meanders = real_fn
+    if not (isinstance(skew, float) and skew < 1e-6):
+        fails.append(f"guard-positive: expected matched skew ~0.0, got {skew}")
+    if len(res_a["new_segments"]) != 3 or len(res_b["new_segments"]) != 3:
+        fails.append(
+            f"guard-positive: meanders not applied "
+            f"({len(res_a['new_segments'])}/{len(res_b['new_segments'])} segs)")
 
     # ----------------------------------------------------------------------- report
     if fails:
