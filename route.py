@@ -634,6 +634,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         config_kwargs['collect_stats'] = collect_stats
     config = GridRouteConfig(**config_kwargs)
 
+    try:
+        config.bus_rip_resistance = float(
+            os.environ.get('KICAD_BUS_RIP_RESISTANCE',
+                           config.bus_rip_resistance))
+    except ValueError:
+        pass
+    if config.bus_rip_resistance != 1.0:
+        print(f"Bus rip resistance: {config.bus_rip_resistance}x "
+              f"(bus members deprioritized in the rip ladder)")
+    # The SE loop needs the strategy to apply the explicit 'bus' ordering.
+    config.ordering_strategy = ordering_strategy
     if config.ripup_blocker_select != 'count':
         print(f"Rip-up blocker-select algorithm: {config.ripup_blocker_select}")
 
@@ -769,7 +780,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # FILE_LEDGER audit on ottercast AP_WAKE_BT et al).
 
     # Apply net ordering strategy
-    if ordering_strategy == "mps":
+    if ordering_strategy in ("mps", "bus"):
+        # 'bus' = mps base order; the SE loop then moves bus groups to the
+        # front (members middle-out). Explicit form of what --bus implied.
         net_ids, mps_layer_swaps = order_nets_mps(
             pcb_data=pcb_data,
             net_ids=net_ids,
@@ -2007,9 +2020,12 @@ For differential pair routing, use route_diff.py:
                         help="Overwrite input file instead of creating _routed copy")
     parser.add_argument("--component", "-C", help="Route all nets connected to this component (e.g., U1). Excludes GND/VCC/VDD unless net patterns also specified.")
     # Ordering and strategy options
-    parser.add_argument("--ordering", "-o", choices=["inside_out", "mps", "original"],
+    parser.add_argument("--ordering", "-o", choices=["inside_out", "mps", "original", "bus"],
                         default=defaults.DEFAULT_ORDERING_STRATEGY,
-                        help="Net ordering strategy: mps (default, crossing conflicts), inside_out, or original")
+                        help="Net ordering strategy: mps (default, crossing conflicts), "
+                             "inside_out, original, or bus (detected bus groups first, "
+                             "members middle-out, rest by mps; ordering only -- "
+                             "corridor attraction still needs --bus)")
     parser.add_argument("--direction", "-d", choices=["forward", "backward"],
                         default=None,
                         help="Direction search order for each net route")

@@ -68,7 +68,8 @@ The final bonus is `attraction_bonus × proximity² × alignment`, subtracted fr
 - Increase `--bus-detection-radius` if a connector's pins span more than 5mm and aren't being grouped; decrease it if unrelated nets are being pulled into a bus.
 - Increase `--bus-attraction-bonus` (up to ~10000) if bus nets keep taking individual shortcuts instead of following the corridor; decrease it if they hug the corridor at the cost of unnecessary detours.
 - `--verbose` prints the detected groups and the middle-out routing order.
-- Experimental env knobs: `KICAD_BUS_XLAYER_PCT` (default 35 with `--bus`) sets how much of the attraction discount applies on layers other than the neighbor's — the corridor guides a member even while it travels a different layer; `KICAD_BUS_CORRIDOR_VIA_MULT` (default 4.0) scales via cost inside a planned corridor. Promotion to real flags is tracked in #465.
+- Experimental env knobs: `KICAD_BUS_XLAYER_PCT` (default 35 with `--bus`) sets how much of the attraction discount applies on layers other than the neighbor's — the corridor guides a member even while it travels a different layer; `KICAD_BUS_CORRIDOR_VIA_MULT` (default 4.0) scales via cost inside a planned corridor. `KICAD_BUS_RIP_RESISTANCE` (default 1.0 = off) makes the rip-up ladder reluctant to rip bus members: their blocker scores are divided by this factor, so later nets prefer ripping bystanders over tearing up a settled river (validator-proved blockers stay exempt). Promotion to real flags is tracked in #465.
+- Ripped bus members re-route *with* their corridor (or routed-neighbor) attraction: a rip no longer degrades the river by rerouting the member blind.
 
 ## Limitations
 

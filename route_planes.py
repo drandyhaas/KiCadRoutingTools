@@ -1984,6 +1984,7 @@ def create_plane(
     clearance: float = defaults.CLEARANCE,
     zone_clearance: float = defaults.PLANE_ZONE_CLEARANCE,
     min_thickness: float = defaults.PLANE_MIN_THICKNESS,
+    ripup_blocker_select: str = defaults.RIPUP_BLOCKER_SELECT,
     grid_step: float = defaults.GRID_STEP,
     max_search_radius: float = defaults.PLANE_MAX_SEARCH_RADIUS,
     max_via_reuse_radius: float = defaults.PLANE_MAX_VIA_REUSE_RADIUS,
@@ -2218,7 +2219,8 @@ def create_plane(
         hole_to_hole_clearance=hole_to_hole_clearance,
         board_edge_clearance=board_edge_clearance,
         layers=all_layers,
-        layer_costs=layer_costs
+        layer_costs=layer_costs,
+        ripup_blocker_select=ripup_blocker_select
     )
     # Cross-class clearance (#434, mirrors batch_route/repair): auto-read the
     # board's non-Default netclasses from the INPUT's sibling .kicad_pro when
@@ -3329,6 +3331,10 @@ Examples:
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")
     parser.add_argument("output_file", nargs="?", help="Output KiCad PCB file (default: input_routed.kicad_pcb)")
+    parser.add_argument("--ripup-blocker-select",
+                        choices=list(defaults.RIPUP_BLOCKER_SELECT_CHOICES),
+                        default=defaults.RIPUP_BLOCKER_SELECT,
+                        help="""Blocker SELECTION algorithm for the rip-up ladder (see route.py --help / docs/rip-up-reroute.md)""")
     # #381 D9: accept --output FILE like route.py / route_diff.py (flag form of the
     # positional output). Additive: default None, positional still works.
     parser.add_argument("--output", metavar="FILE",
@@ -3549,6 +3555,7 @@ Examples:
     create_plane(
         input_file=args.input_file,
         output_file=args.output_file,
+        ripup_blocker_select=args.ripup_blocker_select,
         net_names=net_names,
         plane_layers=plane_layers,
         via_size=args.via_size,

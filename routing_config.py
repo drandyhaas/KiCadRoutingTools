@@ -88,6 +88,11 @@ class GridRouteConfig:
     # blocking_analysis.rank_blockers / mincut_probe_order):
     # count | near-target | bidir | mincut
     ripup_blocker_select: str = 'count'
+    # Bus rip resistance: >1.0 divides bus-group members' blocker scores so
+    # the rip ladder prefers bystanders over tearing up a settled bus river;
+    # the mincut probe prices member cells higher by the same factor.
+    # 1.0 = off (legacy). bus_member_net_ids is attached by the SE loop.
+    bus_rip_resistance: float = 1.0
     max_setback_angle: float = 45.0  # Maximum angle (degrees) for setback position search
     track_proximity_distance: float = 2.0  # mm - radius around routed tracks to penalize (same layer)
     stub_layer_swap: bool = True  # Enable stub layer switching optimization

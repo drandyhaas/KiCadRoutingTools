@@ -883,9 +883,11 @@ class RoutingDialog(wx.Dialog):
 
         # Ordering strategy
         grid.Add(wx.StaticText(parent, label="Ordering Strategy:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.ordering_strategy = wx.Choice(parent, choices=["mps", "inside_out", "original"])
+        self.ordering_strategy = wx.Choice(parent, choices=["mps", "inside_out", "original", "bus"])
         self.ordering_strategy.SetSelection(0)
-        self.ordering_strategy.SetToolTip("Net ordering strategy: mps (minimum planar subset), inside_out, or original order")
+        self.ordering_strategy.SetToolTip("Net ordering strategy: mps (minimum planar subset), "
+                                          "inside_out, original order, or bus (detected bus groups "
+                                          "first, members middle-out, rest by mps)")
         grid.Add(self.ordering_strategy, 0, wx.EXPAND)
 
         # Direction dropdown

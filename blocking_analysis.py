@@ -394,7 +394,8 @@ def analyze_frontier_blocking(
     # frontier never touched still enters the candidate list.
     apply_known_blockers(results, known_blockers, exclude_net_ids, pcb_data)
 
-    rank_blockers(results, getattr(config, 'ripup_blocker_select', 'count'))
+    rank_blockers(results, getattr(config, 'ripup_blocker_select', 'count'),
+                  config=config)
 
     report = BlockingReport(results)
     report.frontier_cells = int(blocked_keys.size)
@@ -467,7 +468,7 @@ def _count_sort_key(x):
 
 
 def rank_blockers(results, algo: str = 'count',
-                  bidir_both_sets=None) -> None:
+                  bidir_both_sets=None, config=None) -> None:
     """Order BlockingInfo in place by the selected algorithm (#424 audit;
     --ripup-blocker-select).
 
@@ -486,12 +487,26 @@ def rank_blockers(results, algo: str = 'count',
     candidates by actual path crossings; after that reorder the list is
     already in rip order and this function is not called.
     """
+    # Bus rip resistance: members of a settled bus group score 1/res so
+    # the ladder prefers ripping bystanders over tearing up the river.
+    # Validator-named entries are exempt (micron-proof identity outranks
+    # protection).
+    _members = getattr(config, 'bus_member_net_ids', None) or set()
+    _res = float(getattr(config, 'bus_rip_resistance', 1.0) or 1.0)
+    if _res <= 1.0:
+        _members = set()
+
+    def _r(x):
+        return _res if (x.net_id in _members
+                        and not getattr(x, 'validator_named', False)) else 1.0
+
     if algo == 'near-target':
         def key(x):
             near = x.near_target_cells + x.near_source_cells
             named = 1 if getattr(x, 'validator_named', False) else 0
-            return (named, min(near, x.unique_cells), near, x.unique_cells,
-                    x.blocked_count)
+            r = _r(x)
+            return (named, min(near, x.unique_cells) / r, near / r,
+                    x.unique_cells / r, x.blocked_count / r)
         results.sort(key=key, reverse=True)
     elif algo == 'bidir':
         both = bidir_both_sets or set()
@@ -499,10 +514,13 @@ def rank_blockers(results, algo: str = 'count',
             base = _count_sort_key(x)
             boost = 2.0 if x.net_id in both else 1.0
             # scale the score component of the count key
-            return (base[0], base[1], base[2] * boost, base[3])
+            return (base[0], base[1], base[2] * boost / _r(x), base[3] / _r(x))
         results.sort(key=key, reverse=True)
     else:
-        results.sort(key=_count_sort_key, reverse=True)
+        def key(x):
+            base = _count_sort_key(x)
+            return (base[0], base[1], base[2] / _r(x), base[3] / _r(x))
+        results.sort(key=key, reverse=True)
 
 
 def mincut_probe_order(pcb_data, config, working_obstacles, net_id,
@@ -545,7 +563,10 @@ def mincut_probe_order(pcb_data, config, working_obstacles, net_id,
     cell_sets = {}
     soft_rows = []
     cost = config.cell_cost(5.0)   # ~5mm-equiv per cell: cross only if needed
+    _members = getattr(config, 'bus_member_net_ids', None) or set()
+    _res = float(getattr(config, 'bus_rip_resistance', 1.0) or 1.0)
     for nid in cand_ids:
+        n_cost = int(cost * _res) if (nid in _members and _res > 1.0) else cost
         data = net_obstacles_cache[nid]
         cells = getattr(data, 'blocked_cells', None)
         if cells is None or not len(cells):
@@ -555,7 +576,7 @@ def mincut_probe_order(pcb_data, config, working_obstacles, net_id,
         for i in range(len(cells)):
             gx, gy, li = cells[i]
             cs.add((int(gx), int(gy), int(li)))
-            soft_rows.append((int(li), int(gx), int(gy), cost))
+            soft_rows.append((int(li), int(gx), int(gy), n_cost))
         cell_sets[nid] = cs
     if not soft_rows:
         return [], True

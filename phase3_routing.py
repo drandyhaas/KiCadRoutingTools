@@ -710,7 +710,8 @@ def try_phase3_ripup(
             _merged[b.net_id] = b if m is None else merge_blocking_max(m, b)
     blockers = list(_merged.values())
     apply_known_blockers(blockers, _known, exclude_ids, pcb_data)
-    rank_blockers(blockers, getattr(config, 'ripup_blocker_select', 'count'))
+    rank_blockers(blockers, getattr(config, 'ripup_blocker_select', 'count'),
+                  config=config)
 
     if not blockers:
         return None

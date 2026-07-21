@@ -175,7 +175,21 @@ def run_reroute_loop(
                         if ripped_net_id in state.pending_multipoint_nets:
                             del state.pending_multipoint_nets[ripped_net_id]
             else:
-                result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles)
+                _b2g = getattr(state, 'bus_net_to_group', None) or {}
+                _attr = None
+                _rev = False
+                if ripped_net_id in _b2g:
+                    # A ripped bus member reroutes WITH its corridor (or a
+                    # routed neighbor); previously it rerouted blind, so
+                    # every rip degraded the river.
+                    from bus_detection import get_attraction_neighbor
+                    _bg = _b2g[ripped_net_id]
+                    _attr = ((getattr(state, 'bus_corridors', None) or {}).get(_bg.name)
+                             or get_attraction_neighbor(_bg, ripped_net_id, routed_net_paths))
+                    _rev = (_bg.clique_endpoint == "target")
+                result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles,
+                                                  attraction_path=_attr,
+                                                  reverse_direction=_rev)
             elapsed = time.time() - start_time
             total_time += elapsed
 
@@ -404,7 +418,18 @@ def run_reroute_loop(
                                         if ripped_net_id in state.pending_multipoint_nets:
                                             del state.pending_multipoint_nets[ripped_net_id]
                             else:
-                                retry_result = route_net_with_obstacles(pcb_data, ripped_net_id, config, retry_obstacles)
+                                _b2g = getattr(state, 'bus_net_to_group', None) or {}
+                                _attr = None
+                                _rev = False
+                                if ripped_net_id in _b2g:
+                                    from bus_detection import get_attraction_neighbor
+                                    _bg = _b2g[ripped_net_id]
+                                    _attr = ((getattr(state, 'bus_corridors', None) or {}).get(_bg.name)
+                                             or get_attraction_neighbor(_bg, ripped_net_id, routed_net_paths))
+                                    _rev = (_bg.clique_endpoint == "target")
+                                retry_result = route_net_with_obstacles(pcb_data, ripped_net_id, config, retry_obstacles,
+                                                                        attraction_path=_attr,
+                                                                        reverse_direction=_rev)
 
                             if retry_result and not retry_result.get('failed'):
                                 routed_length = calculate_route_length(retry_result['new_segments'], retry_result.get('new_vias', []), pcb_data)

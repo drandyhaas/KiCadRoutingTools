@@ -379,7 +379,9 @@ def route_single_ended_nets(
     bus_routed_paths: Dict[int, List[Tuple[int, int, int]]] = {}  # Stores routed paths for attraction
     bus_corridors: Dict[str, List[Tuple[int, int, int]]] = {}  # group.name -> planned centerline
 
-    if config.bus_enabled:
+    _bus_ordering = (config.bus_enabled or
+                     getattr(config, 'ordering_strategy', '') == 'bus')
+    if _bus_ordering:
         net_ids_to_check = [net_id for _, net_id in single_ended_nets]
         bus_groups = detect_bus_groups(
             pcb_data, net_ids_to_check,
@@ -419,9 +421,12 @@ def route_single_ended_nets(
                             attract_to = "none"
                         print(f"    {net_name} attracts to: {attract_to}")
 
-                # Track bus membership
-                for nid in bus.net_ids:
-                    bus_net_to_group[nid] = bus
+                # Track bus membership. Attraction reads bus_net_to_group,
+                # so it fills only under --bus; the 'bus' ORDERING strategy
+                # alone must not switch attraction on.
+                if config.bus_enabled:
+                    for nid in bus.net_ids:
+                        bus_net_to_group[nid] = bus
 
             # Corridor planning (#296 R9): probe-route each group's
             # representative at a ladder of inflated clearances and attract
@@ -429,12 +434,13 @@ def route_single_ended_nets(
             # so the corridor is chosen with room for the whole group instead
             # of being whatever the guide's solo path happened to be. Soft:
             # groups with no routable rung keep neighbor attraction.
-            from bus_corridor import plan_bus_corridors
-            bus_corridors = plan_bus_corridors(pcb_data, config, bus_groups,
-                                               verbose=config.verbose)
+            if config.bus_enabled:
+                from bus_corridor import plan_bus_corridors
+                bus_corridors = plan_bus_corridors(pcb_data, config, bus_groups,
+                                                   verbose=config.verbose)
 
             # Reorder nets: bus nets in routing order first, then non-bus nets
-            bus_net_ids_set = set(bus_net_to_group.keys())
+            bus_net_ids_set = {nid for bus in bus_groups for nid in bus.net_ids}
             reordered_nets = []
 
             # Add bus nets in proper routing order (middle first, then outward)
@@ -451,6 +457,14 @@ def route_single_ended_nets(
 
             single_ended_nets = reordered_nets
             print()
+
+            # Rip-resistance + reroute-attraction transport: the ladder rank
+            # (blocking_analysis) and the reroute loop run far from this
+            # scope, so carry membership on config/state (the
+            # corridor_waypoints precedent for config-attached data).
+            config.bus_member_net_ids = bus_net_ids_set
+            state.bus_net_to_group = bus_net_to_group
+            state.bus_corridors = bus_corridors
 
     for net_name, net_id in single_ended_nets:
         if user_quit:
@@ -762,7 +776,8 @@ def route_single_ended_nets(
                                 exclude_net_ids={net_id},
                                 obstacle_cache=obstacle_cache)}
                             rank_blockers(rippable_blockers, 'bidir',
-                                          bidir_both_sets=_f_ids & _b_ids)
+                                          bidir_both_sets=_f_ids & _b_ids,
+                                          config=config)
 
                     # #331 item 3: a via-in-pad unblock that DECLINED during
                     # this net's attempts recorded WHICH net's copper boxes

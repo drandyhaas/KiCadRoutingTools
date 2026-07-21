@@ -108,6 +108,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
                 direction_order: str = None,
                 ordering_strategy: str = "inside_out",
+                ripup_blocker_select: str = defaults.RIPUP_BLOCKER_SELECT,
                 disable_bga_zones: Optional[List[str]] = None,
                 track_width: float = defaults.TRACK_WIDTH,
                 impedance: Optional[float] = None,
@@ -381,6 +382,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         bga_proximity_cost=bga_proximity_cost, track_proximity_distance=track_proximity_distance,
         track_proximity_cost=track_proximity_cost, debug_lines=debug_lines, verbose=verbose,
         max_rip_up_count=max_rip_up_count, crossing_penalty=crossing_penalty,
+        ripup_blocker_select=ripup_blocker_select,
         crossing_layer_check=crossing_layer_check, routing_clearance_margin=routing_clearance_margin,
         hole_to_hole_clearance=hole_to_hole_clearance, board_edge_clearance=board_edge_clearance,
         vertical_attraction_radius=vertical_attraction_radius,
@@ -1581,6 +1583,10 @@ Examples:
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=3,
                         help="Maximum blockers to rip up at once during rip-up and retry (default: 3)")
+    parser.add_argument("--ripup-blocker-select",
+                        choices=list(defaults.RIPUP_BLOCKER_SELECT_CHOICES),
+                        default=defaults.RIPUP_BLOCKER_SELECT,
+                        help="""Blocker SELECTION algorithm for the rip-up ladder (see route.py --help / docs/rip-up-reroute.md)""")
     parser.add_argument("--max-setback-angle", type=float, default=45.0,
                         help="Maximum angle (degrees) for setback position search (default: 45.0)")
     parser.add_argument("--routing-clearance-margin", type=float, default=1.0,
@@ -1853,6 +1859,7 @@ Examples:
                 verbose=args.verbose,
                 polarity_swap_nets=args.polarity_swap_nets,
                 max_rip_up_count=args.max_ripup,
+                ripup_blocker_select=args.ripup_blocker_select,
                 max_setback_angle=args.max_setback_angle,
                 enable_layer_switch=not args.no_stub_layer_swap,
                 crossing_layer_check=not args.no_crossing_layer_check,

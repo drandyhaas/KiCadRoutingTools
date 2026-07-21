@@ -335,6 +335,7 @@ def route_planes(
     zone_clearance: float = defaults.PLANE_ZONE_CLEARANCE,
     grid_step: float = defaults.GRID_STEP,
     analysis_grid_step: float = defaults.REPAIR_ANALYSIS_GRID_STEP,
+    ripup_blocker_select: str = defaults.RIPUP_BLOCKER_SELECT,
     max_track_width: float = defaults.REPAIR_MAX_TRACK_WIDTH,
     min_track_width: float = defaults.REPAIR_MIN_TRACK_WIDTH,
     track_via_clearance: float = defaults.PLANE_TRACK_VIA_CLEARANCE,
@@ -458,7 +459,8 @@ def route_planes(
         via_size=via_size,
         via_drill=via_drill,
         grid_step=grid_step,
-        board_edge_clearance=board_edge_clearance
+        board_edge_clearance=board_edge_clearance,
+        ripup_blocker_select=ripup_blocker_select
     )
 
     # Cross-class clearance (#434): the repair step's own copper (region joins,
@@ -1521,6 +1523,10 @@ Examples:
     # Grid step
     parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP,
                         help="Routing grid step in mm (default: 0.1)")
+    parser.add_argument("--ripup-blocker-select",
+                        choices=list(defaults.RIPUP_BLOCKER_SELECT_CHOICES),
+                        default=defaults.RIPUP_BLOCKER_SELECT,
+                        help="""Blocker SELECTION algorithm for the rip-up ladder (see route.py --help / docs/rip-up-reroute.md)""")
     parser.add_argument("--analysis-grid-step", type=float, default=defaults.REPAIR_ANALYSIS_GRID_STEP,
                         help="Grid step for connectivity analysis in mm (coarser = faster, default: 0.5)")
 
@@ -1694,6 +1700,7 @@ Examples:
         zone_clearance=args.zone_clearance,
         grid_step=args.grid_step,
         analysis_grid_step=args.analysis_grid_step,
+        ripup_blocker_select=args.ripup_blocker_select,
         max_track_width=args.max_track_width,
         min_track_width=args.min_track_width,
         track_via_clearance=args.track_via_clearance,
