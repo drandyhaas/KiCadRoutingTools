@@ -702,13 +702,15 @@ def main():
         if not os.path.isfile(fb_path):
             fb_path = None
 
-    # At-a-glance PNG of the final routed board (#296): all copper layers +
-    # Edge.Cuts, written next to the board file, so a replay's routing can be
-    # eyeballed without opening KiCad. Non-fatal when kicad-cli is missing.
+    # At-a-glance PNGs of the final routed board (#296, #424): one per copper
+    # layer (+ Edge.Cuts) plus the combined all-copper image, written next to
+    # the board file, so a replay's layer roles (plane vs signal, bus rivers,
+    # pour islands) can be eyeballed without opening KiCad. Non-fatal when
+    # kicad-cli is missing.
     if fb_path:
         try:
-            from board_image import render_board_png
-            render_board_png(fb_path)
+            from board_layer_images import render_board_layer_pngs
+            render_board_layer_pngs(fb_path)
         except Exception as e:
             print(f"board image skipped ({e})")
 
