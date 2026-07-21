@@ -633,10 +633,18 @@ def try_phase3_ripup(
     """
     net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"net_{net_id}"
 
-    # Collect all blocked cells from failed edges
+    # Collect all blocked cells from failed edges. Keep the failing TARGET
+    # position (audit RIPUP_ATTRIBUTION_REVIEW: it was stored per edge and
+    # then DISCARDED here, so every phase-3 near_target count was zero and
+    # ranking degenerated to pure perimeter cell count -- burying the
+    # pad-hugging track, and the #424 synthetic conflict cells, under
+    # thousands of far-wall cells).
     all_blocked_cells = []
+    _tgt_for_rank = None
     for edge_key, (blocked_cells, tgt_xy) in failed_edge_blocking.items():
         all_blocked_cells.extend(blocked_cells)
+        if _tgt_for_rank is None:
+            _tgt_for_rank = tgt_xy
 
     if not all_blocked_cells:
         return None
@@ -663,6 +671,7 @@ def try_phase3_ripup(
     blockers = analyze_frontier_blocking(
         all_blocked_cells, pcb_data, config, routed_net_paths,
         exclude_net_ids=exclude_ids,
+        target_xy=_tgt_for_rank,
         obstacle_cache=obstacle_cache
     )
 
@@ -690,6 +699,7 @@ def try_phase3_ripup(
             fresh_blockers = analyze_frontier_blocking(
                 last_retry_blocked_cells, pcb_data, config, routed_net_paths,
                 exclude_net_ids=exclude_ids,
+                target_xy=_tgt_for_rank,
                 obstacle_cache=obstacle_cache
             )
             print_blocking_analysis(fresh_blockers, prefix="      ")
