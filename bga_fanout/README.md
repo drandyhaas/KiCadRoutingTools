@@ -77,7 +77,7 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 | `--rebalance-escape` | Rebalance escape directions | False |
 | `--check-for-previous` | Skip existing fanouts | False |
 | `--no-inner-top-layer` | Prevent inner pads from using F.Cu | False |
-| `--escape-method` | `channel` (default) or `underpad` (dense arrays) | channel |
+| `--escape-method` | `channel` (default), `underpad` (dense arrays) or `dogbone` (gap vias) | channel |
 
 ### Sizing the escape via to the pitch (issue #158)
 
@@ -115,6 +115,20 @@ computes this automatically.
   layer), jogging into a between-ball channel only to dodge a via. Near-edge
   balls escape via-less on the BGA's own layer, keeping the rim clear so the
   deeper balls can run underneath. Balls are routed deepest-first (inside-out).
+
+- **`dogbone`** - the under-pad engine with the escape via in the **diagonal
+  inter-ball gap** instead of in the pad (issue #128): ball → short 45° stub →
+  staggered gap via → inner-layer run starting at the via. This is the standard
+  hand-layout escape pattern (the human ulx3s board is 100% dog-bone): the
+  ball-grid positions stay free of barrels on the inner layers, opening the
+  routing streets a via-in-pad grid closes, and the via ring never bulges into
+  a small neighbouring ball (the #267 graze class -- daisho U2 went 31 → 1
+  pre-cap-opt violations, at identical 113/113 escapes). Every gap site is
+  validated against exact geometry (drill hole-to-hole, foreign rings, locked
+  pads, the stub itself); a ball with no free gap falls back to via-in-pad, so
+  dog-bone never escapes fewer balls than `underpad`. Coupled diff-pair escapes
+  use each ball's gap via the same way (partner legs are checked against the
+  partner's via explicitly).
 
   Notes / when to use it:
   - Use it when `channel` reports dropped balls (`failed > 0`) on a dense array.
