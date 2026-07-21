@@ -132,6 +132,17 @@ if fb and not os.path.isabs(fb) and not os.path.exists(fb): fb=os.path.join('$RU
 print(fb if fb and os.path.exists(fb) else '')" 2>/dev/null)
   if [ -n "$FB" ]; then
     python3 "$REPO/tests/stress/board_layer_images.py" "$FB" >> "$RUNDIR/worker.log" 2>&1 || true
+
+    # Parser-parity validation of the FINAL board (headless twin of the GUI's
+    # "Validate PCB Data" button): the pcbnew-built PCBData and the text parse
+    # must describe the same board, else the CLI and GUI route different worlds.
+    # Mirrors redo_stress_test.py; non-fatal -- a FAIL is a parser bug to file,
+    # not a routing failure. validate_pcb_data.py self-execs into KiCad's python.
+    if python3 "$REPO/validate_pcb_data.py" "$FB" > "$RUNDIR/validate_pcb_data.txt" 2>&1; then
+      :
+    else
+      echo "[run_board] PARSER-PARITY FAIL on $(basename "$FB") -- see validate_pcb_data.txt" >> "$RUNDIR/worker.log"
+    fi
   fi
 fi
 
