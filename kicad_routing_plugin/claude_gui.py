@@ -30,6 +30,7 @@ _CLAUDE_CANDIDATES = [
     os.path.expanduser("~/.local/bin/claude"),
     "/opt/homebrew/bin/claude",
     "/usr/local/bin/claude",
+    "/usr/bin/claude",
 ]
 
 # Read-only analysis tools: the skills never need write access to the board.
