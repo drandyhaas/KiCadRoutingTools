@@ -1273,7 +1273,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     bus_attraction_bonus = config.scaled_cell_units(config.bus_attraction_bonus) if config.bus_attraction_bonus > 0 else 0
 
     router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
-                        turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                        turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),
@@ -2276,7 +2276,7 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
 
     # Create visual router
     router = VisualRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
-                          turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                          turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
                           vertical_attraction_radius=attraction_radius_grid,
                           vertical_attraction_bonus=attraction_bonus,
                           layer_costs=config.get_layer_costs(),
@@ -2318,7 +2318,7 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
 
         # Try second direction
         router = VisualRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
-                          turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                          turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
                           vertical_attraction_radius=attraction_radius_grid,
                           vertical_attraction_bonus=attraction_bonus,
                           layer_costs=config.get_layer_costs(),
@@ -2589,7 +2589,7 @@ def route_multipoint_main(
 
     # Route farthest pair with probe routing (same as single-ended)
     router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
-                        turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                        turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),
@@ -3026,7 +3026,7 @@ def _route_multipoint_taps_impl(
     attraction_bonus = config.cell_cost(config.vertical_attraction_cost) if config.vertical_attraction_cost > 0 else 0
 
     router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
-                        turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                        turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),

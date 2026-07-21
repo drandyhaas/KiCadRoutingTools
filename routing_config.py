@@ -320,6 +320,17 @@ class GridRouteConfig:
         """
         return int(self.via_cost * 1000 * (REFERENCE_GRID_STEP / self.grid_step))
 
+    def via_proximity_cost_int(self) -> int:
+        """Rust-facing integer via-proximity multiplier.
+
+        0 stays 0 (its special meaning: BLOCK vias near obstacles instead of
+        penalizing); any positive fraction rounds to at least 1 (soft-knobs
+        review B3: a GUI value of 0.5 passed through bare int() became 0 --
+        neither blocked nor penalized, weaker than both settings around it).
+        """
+        c = self.via_proximity_cost
+        return 0 if c == 0 else max(1, int(round(c)))
+
     def get_proximity_heuristic_cost(self) -> int:
         """Get the maximum proximity heuristic cost for the Rust router.
 

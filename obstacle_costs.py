@@ -71,7 +71,7 @@ def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tu
     coord = GridCoord(config.grid_step)
     stub_radius_grid = coord.to_grid_dist(config.stub_proximity_radius)
     stub_cost_grid = config.cell_cost(config.stub_proximity_cost)
-    block_vias = (config.via_proximity_cost == 0)
+    block_vias = (config.via_proximity_cost_int() == 0)
 
     # Convert stub positions to grid coordinates
     stub_grid_positions = []
@@ -247,8 +247,13 @@ def add_cross_layer_tracks(obstacles: GridObstacleMap, pcb_data: PCBData,
         layer_map: Mapping of layer names to layer indices
         exclude_net_ids: Set of net IDs to exclude (typically the net being routed)
     """
-    if config.vertical_attraction_radius <= 0:
-        return  # Feature disabled
+    if config.vertical_attraction_radius <= 0 or config.vertical_attraction_cost <= 0:
+        # Feature disabled. The cost gate matters (soft-knobs review P1): the
+        # default radius is 1.0 with cost 0.0, so gating on radius alone
+        # walked every board segment with one FFI call per 0.5mm sample, on
+        # every prepare, to build a map the Rust lookup never reads
+        # (early-out on bonus <= 0).
+        return
 
     coord = GridCoord(config.grid_step)
     exclude_set = exclude_net_ids or set()

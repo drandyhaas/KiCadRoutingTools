@@ -57,7 +57,8 @@ def _add_free_via_positions(obstacles, pcb_data, net_ids: List[int], config):
 
 def merge_ripped_route_costs(obstacles, ripped_route_layer_costs: Dict[int, np.ndarray],
                               ripped_route_via_positions: Dict[int, List[Tuple[int, int]]],
-                              config: GridRouteConfig):
+                              config: GridRouteConfig,
+                              routed_net_ids=None):
     """Merge ripped route avoidance costs into the obstacle map.
 
     When a net is ripped up, we want to apply soft penalties to its former corridor
@@ -69,9 +70,23 @@ def merge_ripped_route_costs(obstacles, ripped_route_layer_costs: Dict[int, np.n
         ripped_route_layer_costs: Dict of net_id -> numpy array [layer, gx, gy, cost] for segments
         ripped_route_via_positions: Dict of net_id -> list of (gx, gy) for vias
         config: Routing configuration
+        routed_net_ids: Nets that have ROUTED again since being ripped -- their
+            ghosts are skipped (soft-knobs review C1): once the net has real
+            copper down, the reserved corridor is either re-occupied (the real
+            obstacles suffice) or empty and useful, and the ghost would repel
+            every remaining net from it for the rest of the run.
     """
     if config.ripped_route_avoidance_cost <= 0:
         return  # Feature disabled
+
+    if routed_net_ids:
+        done = set(routed_net_ids)
+        if ripped_route_layer_costs:
+            ripped_route_layer_costs = {nid: v for nid, v in ripped_route_layer_costs.items()
+                                        if nid not in done}
+        if ripped_route_via_positions:
+            ripped_route_via_positions = {nid: v for nid, v in ripped_route_via_positions.items()
+                                          if nid not in done}
 
     # Merge layer-specific costs (segments) - same as track proximity
     if ripped_route_layer_costs:
@@ -179,7 +194,7 @@ def build_diff_pair_obstacles(
         merge_ripped_route_costs(obstacles,
                                   ripped_route_layer_costs or {},
                                   ripped_route_via_positions or {},
-                                  config)
+                                  config, routed_net_ids=routed_net_ids)
 
     # Add cross-layer track data
     add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
@@ -310,7 +325,7 @@ def build_single_ended_obstacles(
         merge_ripped_route_costs(obstacles,
                                   ripped_route_layer_costs or {},
                                   ripped_route_via_positions or {},
-                                  config)
+                                  config, routed_net_ids=routed_net_ids)
 
     # Add cross-layer track data
     add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
@@ -478,7 +493,7 @@ def prepare_obstacles_inplace(
         merge_ripped_route_costs(working_obstacles,
                                   ripped_route_layer_costs or {},
                                   ripped_route_via_positions or {},
-                                  config)
+                                  config, routed_net_ids=routed_net_ids)
 
     # Add cross-layer track data
     add_cross_layer_tracks(working_obstacles, pcb_data, config, layer_map,
