@@ -144,7 +144,7 @@ class GridRouteConfig:
     # Heuristic tuning
     proximity_heuristic_factor: float = 0.02  # Factor for proximity heuristic (higher = tighter heuristic, faster but may overestimate)
     # Layer direction preference - alternates H/V starting with horizontal on top
-    direction_preference_cost: int = 50  # Cost penalty for non-preferred direction (0 = disabled)
+    direction_preference_cost: int = 5000  # Cost penalty for non-preferred direction (0 = disabled); see routing_defaults
     # Bus routing - auto-detection and parallel routing of grouped nets
     bus_enabled: bool = False  # Enable bus detection and routing
     bus_detection_radius: float = 5.0  # mm - max endpoint distance to form bus

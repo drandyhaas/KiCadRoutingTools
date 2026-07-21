@@ -2953,7 +2953,7 @@ class RoutingDialog(wx.Dialog):
                     heuristic_weight=config['heuristic_weight'],
                     proximity_heuristic_factor=config.get('proximity_heuristic_factor', 0.02),
                     turn_cost=config['turn_cost'],
-                    direction_preference_cost=config.get('direction_preference_cost', 50),
+                    direction_preference_cost=config.get('direction_preference_cost', defaults.DIRECTION_PREFERENCE_COST),
                     max_rip_up_count=config['max_ripup'],
                     ripup_abandon_metric=config.get('ripup_abandon_metric', defaults.RIPUP_ABANDON_METRIC),
                     ordering_strategy=config['ordering_strategy'],
