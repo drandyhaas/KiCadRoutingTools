@@ -86,20 +86,46 @@ def detect_bus_groups(
             clique_endpoint = "target"
 
         if len(best_bus_nets) >= min_nets:
-            bus_counter += 1
-            bus = BusGroup(name=f"bus_{bus_counter}", clique_endpoint=clique_endpoint)
+            # Both-end coherence (#296 R9): a one-ended clique at a BGA sweeps
+            # up EVERYTHING fanning out of the package (ottercast: a 21-net
+            # "bus" mixing the SDC0 river with power nets, local caps and LEDs
+            # bound for different corners -- one planned corridor for all of
+            # them is noise for most). Sub-cluster the clique by the OTHER
+            # endpoint (greedy centroid clustering at 2x the detection radius,
+            # destinations spread wider than sources along connectors) and
+            # emit only destination-coherent subgroups; the leftovers are not
+            # buses and route normally.
+            other = 1 if clique_endpoint == "source" else 0
+            clusters: List[List[int]] = []
+            for nid in best_bus_nets:
+                px, py = net_endpoints[nid][other]
+                placed = False
+                for cl in clusters:
+                    cx = sum(net_endpoints[m][other][0] for m in cl) / len(cl)
+                    cy = sum(net_endpoints[m][other][1] for m in cl) / len(cl)
+                    if math.hypot(px - cx, py - cy) <= 2.0 * detection_radius:
+                        cl.append(nid)
+                        placed = True
+                        break
+                if not placed:
+                    clusters.append([nid])
 
-            # Order nets by physical position
-            ordered_nets = _order_nets_by_position(best_bus_nets, net_endpoints)
+            for cl in clusters:
+                if len(cl) < min_nets:
+                    continue
+                bus_counter += 1
+                bus = BusGroup(name=f"bus_{bus_counter}",
+                               clique_endpoint=clique_endpoint)
+                # Order nets by physical position
+                ordered_nets = _order_nets_by_position(cl, net_endpoints)
+                for net_id in ordered_nets:
+                    bus.net_ids.append(net_id)
+                    bus.source_positions.append(net_endpoints[net_id][0])
+                    bus.target_positions.append(net_endpoints[net_id][1])
+                bus_groups.append(bus)
 
-            for net_id in ordered_nets:
-                bus.net_ids.append(net_id)
-                bus.source_positions.append(net_endpoints[net_id][0])
-                bus.target_positions.append(net_endpoints[net_id][1])
-
-            bus_groups.append(bus)
-
-            # Remove these nets from consideration
+            # Remove EVERY clique member from consideration (emitted or not:
+            # re-considering the leftovers would just re-form the same clique).
             for nid in best_bus_nets:
                 remaining.discard(nid)
         else:
