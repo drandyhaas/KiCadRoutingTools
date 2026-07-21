@@ -906,6 +906,16 @@ def generate_underpad_escape(footprint: Footprint,
     nl = occ.nl
     inner_layers = set(i for i in range(nl) if i != top_idx) or {top_idx}
     pitch = (grid.pitch_x + grid.pitch_y) / 2
+    # KICAD_UNDERPAD_OUTER_RINGS overrides how many rings get a via-less
+    # top-layer escape attempt before falling to via-in-pad (large value =
+    # try EVERY ball top-first; failures still fall through). Experimental
+    # (#424: fewer under-package barrels = less congestion).
+    import os as _os
+    try:
+        outer_rings = float(_os.environ.get('KICAD_UNDERPAD_OUTER_RINGS',
+                                            str(outer_rings)))
+    except ValueError:
+        pass
     outer_depth = outer_rings * pitch
 
     signal_pads.sort(key=depth, reverse=True)
