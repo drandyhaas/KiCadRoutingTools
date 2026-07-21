@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.18.4**
+**Current Version: 0.18.5**
 
 ## Features
 
@@ -306,6 +306,14 @@ src/
 
 ## Version History
 
+- **0.18.5**: **P3 attraction-field precompute** (soft-knobs review) -- new
+  `build_attraction_field(radius, bonus)` on `GridObstacleMap` precomputes the
+  per-layer max cross-layer attraction bonus once per net (entries x disk x
+  layers, <= 8 layers), turning `get_cross_layer_attraction` from an
+  O(radius^2)-per-candidate-move scan into an O(1) lookup with identical
+  falloff semantics; empty field = the scan fallback, so callers on an older
+  Python side (no build call) are unaffected. Cleared with
+  `clear_cross_layer_tracks`.
 - **0.18.4**: **cross-layer bus attraction** (#296 R9 phase B) — new
   `GridRouter` kwarg `attraction_cross_layer_pct` (default 0 = legacy): when
   > 0, the bus attraction-path bonus is granted at that percentage on layers
