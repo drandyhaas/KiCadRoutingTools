@@ -894,7 +894,13 @@ impl GridObstacleMap {
     /// Returns 0 if position is within endpoint_exempt_radius of any endpoint
     #[inline]
     pub fn get_stub_proximity_cost(&self, gx: i32, gy: i32) -> i32 {
-        // Check if exempt due to being near an endpoint (source/target)
+        // Lookup FIRST, exemption scan only on a nonzero hit (soft-knobs P4:
+        // the exempt loop ran per lookup even for cells with no stub cost --
+        // and the C5 single-ended exemptions made the list longer).
+        let cost = match self.stub_proximity.get(&pack_xy(gx, gy)) {
+            Some(&c) if c != 0 => c,
+            _ => return 0,
+        };
         if self.endpoint_exempt_radius > 0 {
             let radius_sq = self.endpoint_exempt_radius * self.endpoint_exempt_radius;
             for (ex, ey) in &self.endpoint_exempt_positions {
@@ -905,7 +911,7 @@ impl GridObstacleMap {
                 }
             }
         }
-        self.stub_proximity.get(&pack_xy(gx, gy)).copied().unwrap_or(0)
+        cost
     }
 
     /// Set layer-specific proximity cost (for track proximity on same layer)

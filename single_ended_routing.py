@@ -2292,7 +2292,9 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
                           vertical_attraction_radius=attraction_radius_grid,
                           vertical_attraction_bonus=attraction_bonus,
                           layer_costs=config.get_layer_costs(),
-                          proximity_heuristic_cost=prox_h_cost)
+                          proximity_heuristic_cost=prox_h_cost,
+                          layer_direction_preferences=config.get_layer_direction_preferences(),
+                          direction_preference_cost=config.direction_preference_cost)
 
     # Try first direction with visualization
     if config.verbose:
@@ -2334,7 +2336,9 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
                           vertical_attraction_radius=attraction_radius_grid,
                           vertical_attraction_bonus=attraction_bonus,
                           layer_costs=config.get_layer_costs(),
-                          proximity_heuristic_cost=prox_h_cost)
+                          proximity_heuristic_cost=prox_h_cost,
+                          layer_direction_preferences=config.get_layer_direction_preferences(),
+                          direction_preference_cost=config.direction_preference_cost)
         router.init(second_sources, second_targets, config.max_iterations)
         direction_used = second_label
 

@@ -818,9 +818,11 @@ pub struct GridRouter {
     // must survive a via transition -- with 0 the river loses all guidance
     // the moment a member changes layer). 0 = same-layer only (legacy).
     attraction_cross_layer_pct: i32,
-    // Spatial hash for efficient path distance lookup (C2: was a map whose
-    // values were never read; membership is all that matters)
-    attraction_path_hash: FxHashSet<u64>,  // buckets with path points nearby
+    // Spatial POINT index for the attraction path (soft-knobs P2): bucket
+    // (bx, by, layer=254 wildcard) -> indices into attraction_path. The old
+    // membership-only hash still forced a linear scan of the WHOLE path per
+    // candidate move; the index bounds each lookup to the nearby points.
+    attraction_path_buckets: FxHashMap<u64, Vec<u32>>,
 }
 
 #[pymethods]
@@ -848,7 +850,7 @@ impl GridRouter {
             attraction_radius,
             attraction_bonus,
             attraction_cross_layer_pct,
-            attraction_path_hash: FxHashSet::default(),
+            attraction_path_buckets: FxHashMap::default(),
         }
     }
 
@@ -865,7 +867,7 @@ impl GridRouter {
     /// Call this before routing each subsequent bus member with the previously routed path.
     /// Pass an empty Vec to clear the attraction.
     pub fn set_attraction_path(&mut self, path: Vec<(i32, i32, u8)>) {
-        self.attraction_path_hash.clear();
+        self.attraction_path_buckets.clear();
         self.attraction_path.clear();
 
         if path.is_empty() || self.attraction_radius <= 0 {
@@ -895,32 +897,14 @@ impl GridRouter {
             (gx, gy, layer, dx, dy)
         }).collect();
 
-        // Build spatial hash for efficient distance lookups
-        // Key: (gx / bucket_size, gy / bucket_size, layer) packed into u64
+        // Build the spatial POINT index (soft-knobs P2): each point goes in
+        // its OWN bucket; lookups scan the neighborhood of buckets within the
+        // radius. Layer-blind (254 wildcard key) -- the lookup filters layers
+        // itself for the cross-layer fraction (#296 R9 phase B).
         let bucket_size = (self.attraction_radius / 2).max(1);
-
-        for &(px, py, layer, _, _) in &path_with_directions {
-            // Add this path point to its bucket and neighboring buckets within radius
-            let bx = px / bucket_size;
-            let by = py / bucket_size;
-
-            // Mark cells within attraction radius
-            let cells_to_check = (self.attraction_radius / bucket_size) + 1;
-            for dbx in -cells_to_check..=cells_to_check {
-                for dby in -cells_to_check..=cells_to_check {
-                    let cell_bx = bx + dbx;
-                    let cell_by = by + dby;
-                    // Pack bucket coords + layer into key
-                    let key = Self::pack_bucket_key(cell_bx, cell_by, layer);
-                    // Store that this bucket has path points nearby
-                    self.attraction_path_hash.insert(key);
-                    // Wildcard-layer key (255) for the cross-layer lookup
-                    // (#296 R9 phase B); only consulted when
-                    // attraction_cross_layer_pct > 0.
-                    self.attraction_path_hash.insert(
-                        Self::pack_bucket_key(cell_bx, cell_by, 255));
-                }
-            }
+        for (i, &(px, py, _layer, _, _)) in path_with_directions.iter().enumerate() {
+            let key = Self::pack_bucket_key(px / bucket_size, py / bucket_size, 254);
+            self.attraction_path_buckets.entry(key).or_default().push(i as u32);
         }
 
         self.attraction_path = path_with_directions;
@@ -929,7 +913,7 @@ impl GridRouter {
     /// Clear the attraction path
     pub fn clear_attraction_path(&mut self) {
         self.attraction_path.clear();
-        self.attraction_path_hash.clear();
+        self.attraction_path_buckets.clear();
     }
 
     /// Route from multiple source points to multiple target points.
@@ -1305,54 +1289,60 @@ impl GridRouter {
             return 0;
         }
 
-        // Quick check: is this position potentially near the path?
-        let bucket_size = (self.attraction_radius / 2).max(1);
-        let bx = x / bucket_size;
-        let by = y / bucket_size;
-        let same_hit = self.attraction_path_hash
-            .contains(&Self::pack_bucket_key(bx, by, layer));
-        let cross_hit = self.attraction_cross_layer_pct > 0
-            && self.attraction_path_hash
-                .contains(&Self::pack_bucket_key(bx, by, 255));
-
-        if !same_hit && !cross_hit {
-            return 0;
-        }
-
-        // Find the closest path point's direction. Same-layer points give the
-        // full bonus; when only OTHER-layer points are near, grant
-        // attraction_cross_layer_pct of it (the corridor survives via
+        // Scan only the point-index buckets within reach (soft-knobs P2: the
+        // old membership hash still linear-scanned the WHOLE path per move).
+        // Distance is EUCLIDEAN (soft-knobs N4: the old Manhattan test against
+        // a Euclidean-derived radius halved the diagonal reach). Same-layer
+        // points give the full bonus; when only OTHER-layer points are near,
+        // grant attraction_cross_layer_pct of it (the corridor survives via
         // transitions instead of going silent, #296 R9 phase B).
-        let mut nearest_same = i32::MAX;
+        let bucket_size = (self.attraction_radius / 2).max(1);
+        let r2 = self.attraction_radius * self.attraction_radius;
+        let bx0 = (x - self.attraction_radius) / bucket_size - 1;
+        let bx1 = (x + self.attraction_radius) / bucket_size + 1;
+        let by0 = (y - self.attraction_radius) / bucket_size - 1;
+        let by1 = (y + self.attraction_radius) / bucket_size + 1;
+
+        let mut d2_same = i64::MAX;
         let mut dir_same: Option<(i8, i8)> = None;
-        let mut nearest_cross = i32::MAX;
+        let mut d2_cross = i64::MAX;
         let mut dir_cross: Option<(i8, i8)> = None;
 
-        for &(px, py, pl, path_dx, path_dy) in &self.attraction_path {
-            let dist = (x - px).abs() + (y - py).abs();
-            if dist > self.attraction_radius {
-                continue;
-            }
-            if pl == layer {
-                if dist < nearest_same {
-                    nearest_same = dist;
-                    dir_same = Some((path_dx, path_dy));
+        for bx in bx0..=bx1 {
+            for by in by0..=by1 {
+                let Some(idxs) = self.attraction_path_buckets
+                    .get(&Self::pack_bucket_key(bx, by, 254)) else { continue };
+                for &i in idxs {
+                    let (px, py, pl, path_dx, path_dy) = self.attraction_path[i as usize];
+                    let ddx = (x - px) as i64;
+                    let ddy = (y - py) as i64;
+                    let d2 = ddx * ddx + ddy * ddy;
+                    if d2 > r2 as i64 {
+                        continue;
+                    }
+                    if pl == layer {
+                        if d2 < d2_same {
+                            d2_same = d2;
+                            dir_same = Some((path_dx, path_dy));
+                        }
+                    } else if self.attraction_cross_layer_pct > 0 && d2 < d2_cross {
+                        d2_cross = d2;
+                        dir_cross = Some((path_dx, path_dy));
+                    }
                 }
-            } else if self.attraction_cross_layer_pct > 0 && dist < nearest_cross {
-                nearest_cross = dist;
-                dir_cross = Some((path_dx, path_dy));
             }
         }
 
-        let (nearest_dist, nearest_dir, layer_pct) = if dir_same.is_some() {
-            (nearest_same, dir_same, 100)
+        let (nearest_d2, nearest_dir, layer_pct) = if dir_same.is_some() {
+            (d2_same, dir_same, 100)
         } else {
-            (nearest_cross, dir_cross, self.attraction_cross_layer_pct)
+            (d2_cross, dir_cross, self.attraction_cross_layer_pct)
         };
         let (path_dx, path_dy) = match nearest_dir {
             Some(d) => d,
             None => return 0,
         };
+        let nearest_dist = (nearest_d2 as f32).sqrt() as i32;
 
         // Check direction alignment using dot product
         let dot = move_dx * (path_dx as i32) + move_dy * (path_dy as i32);

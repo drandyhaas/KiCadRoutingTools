@@ -321,7 +321,13 @@ src/
   alignment/layer gradation (soft-knobs review finding #2). The vertical
   (cross-layer copper) attraction stays subtractive but is now capped so a
   step can never go below a tenth of the base move cost (router.rs +
-  pose_router.rs).
+  pose_router.rs). Riders from the soft-knobs audit: the attraction path
+  lookup now uses a spatial POINT index instead of a whole-path linear scan
+  per candidate move (P2); attraction distance is Euclidean instead of
+  Manhattan-vs-Euclidean-radius, which halved diagonal reach (N4); the
+  stub-proximity endpoint-exemption scan runs only on a nonzero cost hit
+  (P4); and VisualRouter now passes layer direction preferences through, so
+  --visualize replays the production cost model (C2).
 
 - **0.18.3**: **#452 direction preference no longer bypassed by diagonals** — the
   per-layer H/V preference penalty (`direction_preference_cost`, applied via
