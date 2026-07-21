@@ -1825,6 +1825,48 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
     return via, (vgx, vgy), layer_names.index(pad_layer)
 
 
+def _pad_via_conflict_cells(pcb_data, pad, config, coord, layer_names):
+    """Frontier-style blocked cells ON the foreign copper that vetoes a
+    fab-floor via in `pad` (#424 rip-integrated terminal access).
+
+    The placement validator computes exactly which copper conflicts with the
+    via ring -- micron-accurate -- then throws the identity away and returns
+    None. Emit synthetic (gx, gy, layer) cells on that copper so the EXISTING
+    tap rip-up attribution names and rips the hugging net; the retry re-runs
+    the pad-via rung, where placement then succeeds in the freed space. The
+    frontier report can't provide this: in a saturated pocket the search dies
+    against the first wall, not the copper touching the pad."""
+    from list_nets import fab_floor_min
+    li_of = {l: i for i, l in enumerate(layer_names)}
+    ncu = (len(pcb_data.board_info.copper_layers)
+           if pcb_data.board_info.copper_layers else len(layer_names))
+    try:
+        vmin = fab_floor_min(ncu)['via_diameter']
+    except Exception:
+        vmin = config.via_size
+    need = vmin / 2.0 + config.clearance
+    px, py = pad.global_x, pad.global_y
+    cells = []
+    for s in pcb_data.segments:
+        if s.net_id == pad.net_id or s.layer not in li_of:
+            continue
+        dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+        L2 = dx * dx + dy * dy
+        t = 0.0 if L2 <= 0 else max(0.0, min(1.0, ((px - s.start_x) * dx
+                                                   + (py - s.start_y) * dy) / L2))
+        cx, cy = s.start_x + dx * t, s.start_y + dy * t
+        if math.hypot(px - cx, py - cy) < need + (s.width or 0.0) / 2.0:
+            g = coord.to_grid(cx, cy)
+            cells.append((g[0], g[1], li_of[s.layer]))
+    for v in pcb_data.vias:
+        if v.net_id == pad.net_id:
+            continue
+        if math.hypot(v.x - px, v.y - py) < need + v.size / 2.0:
+            g = coord.to_grid(v.x, v.y)
+            cells.extend((g[0], g[1], li) for li in range(len(layer_names)))
+    return cells
+
+
 def _net_pad_near(pcb_data, net_id, cells, coord):
     """The net's SMD pad that one of the grid `cells` sits inside (a boxed
     endpoint), or None. Tight in-pad test so a tap source on a mid-trace point
@@ -3231,6 +3273,7 @@ def _route_multipoint_taps_impl(
         # Use probe routing helper to detect stuck directions early
         tap_start_time = time.time()
 
+        _via_conflict_extra = []
         # C5 parity for taps (#424): the tap edge's TARGET pad pays full stub
         # proximity on its final approach cells if a foreign stub sits beside
         # it -- single-ended routes got the endpoint exemption, tap edges
@@ -3270,6 +3313,15 @@ def _route_multipoint_taps_impl(
                           if _pad_obj is not None else "NO-PAD-OBJ")
                 print(f"      TAP-RESCUE rung: tgt {_pname} -> "
                       f"{'placed' if _r189 else 'DECLINED'}")
+            if _r189 is None and _pad_obj is not None:
+                # Rip-integrated terminal access (#424): name the copper the
+                # validator saw and feed it to the rip cascade as synthetic
+                # frontier cells (see _pad_via_conflict_cells).
+                _via_conflict_extra = _pad_via_conflict_cells(
+                    pcb_data, _pad_obj, config, coord, layer_names)
+                if _unblock_debug() and _via_conflict_extra:
+                    print(f"      TAP-RESCUE rung: {len(_via_conflict_extra)} "
+                          f"conflict cell(s) fed to rip attribution")
             if _r189 is not None:
                 _via189, (_vgx, _vgy), _pli = _r189
                 _register_unblock_via(obstacles, _vgx, _vgy, layer_names)
@@ -3301,7 +3353,10 @@ def _route_multipoint_taps_impl(
             print(f"      {YELLOW}Failed to route MST edge after {tap_iterations} iterations ({tap_elapsed:.2f}s){RESET}")
             edge_key = (min(src_idx, tgt_idx), max(src_idx, tgt_idx))
             failed_edges.add(edge_key)
-            # Store blocking info for potential rip-up analysis
+            # Store blocking info for potential rip-up analysis; the synthetic
+            # via-conflict cells ride along so the cascade can name the
+            # pad-hugging copper the frontier never reaches (#424).
+            blocked_cells = list(blocked_cells) + _via_conflict_extra
             if blocked_cells:
                 failed_edge_blocking[edge_key] = (blocked_cells, (tgt_x, tgt_y))
             continue
