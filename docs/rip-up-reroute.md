@@ -52,6 +52,8 @@ Validator-named blockers — identities proved by geometry validators such as vi
 
 By default only nets routed **in the current run** are rip-up candidates; tracks and vias already committed on the input board are left untouched, so re-running the router never disturbs existing routing. `route.py --rip-existing-nets PATTERN [PATTERN …]` opts specific pre-existing routed nets into the rip-up machinery: when one of them blocks a net the router is trying to route, it may be ripped up and re-routed like an in-run net. Use it on a board that a previous run (or another tool) already routed and that now needs a new net threaded through congested copper. Pass `'*'` to allow any non-plane net. Without the flag the default holds — pre-existing committed tracks are never ripped.
 
+One exception: the end-of-run oracle-reconnect pass may auto-grant `--rip-existing-nets` authority over pre-existing blockers that earlier failure hints named (capped at 12). That escalation always respects the run's own net filter — a net the caller excluded by pattern (`'!GND'` while planes pour in a later step) is excluded *by plan* and is never auto-ripped; only an explicit operator `--rip-existing-nets` can override that.
+
 ## Progressive N+1 Escalation
 
 For a failing net, the router escalates through rip-up rounds (`reroute_loop.py`):

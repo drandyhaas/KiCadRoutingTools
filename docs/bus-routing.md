@@ -26,7 +26,9 @@ python route.py board.kicad_pcb --nets "DATA*" --bus
 
 `detect_bus_groups()` looks for *cliques* of nets whose endpoints cluster: a group qualifies if either all of its **source** endpoints or all of its **target** endpoints lie pairwise within `--bus-detection-radius` of each other. Endpoints are stub free-ends where stubs exist, otherwise pad positions.
 
-The clique search (`_find_largest_clique()`) is greedy: candidate pairs are sorted closest-first, and each seed pair is grown by adding nets within radius of *every* current member. The largest clique (≥ `--bus-min-nets`) becomes a bus; its nets are removed and detection repeats until no further group can be formed. Only proximity matters — there is no name- or direction-based grouping.
+The clique search (`_find_largest_clique()`) is greedy: candidate pairs are sorted closest-first, and each seed pair is grown by adding nets within radius of *every* current member. The largest clique (≥ `--bus-min-nets`) becomes a bus; its nets are removed and detection repeats until no further group can be formed.
+
+**Both-end coherence:** a clique found at one end is then sub-clustered by where its members' *other* endpoints go (greedy centroid clustering at 2× the detection radius). A 20-net grab-bag at a BGA corner splits into the real rivers — the SD-card group, the SDIO group, the PCM group — because members of a true bus travel together at both ends. Sub-groups below `--bus-min-nets` fall back to individual routing.
 
 ## Routing Order: Middle-Out
 
@@ -38,6 +40,10 @@ Routing order:    C, B, D, A, E
 ```
 
 The middle net routes freely and defines the corridor; each subsequent net hugs the previously routed neighbor on its side. Bus members are reordered within the overall net order produced by the ordering strategy (MPS etc.) — non-bus nets are unaffected.
+
+## Corridor Planning
+
+Before any member routes, each group's representative is probe-routed at a ladder of inflated clearances (the wide-power `track_margin` mechanism — per-net inflation on the shared map, no extra map builds). Each rung that succeeds is scored by `length + ROOM_WEIGHT x missing sibling-rooms`: a centerline that fits the representative at (n-1) track pitches of extra clearance has room for the whole group beside it. The winning centerline becomes the attraction path for **every** member, the guide included — so the corridor is chosen with room for the group instead of being whatever the guide's solo path happened to be. Selection is soft: groups with no routable rung keep plain neighbor attraction. Vias inside a planned corridor cost extra (`KICAD_BUS_CORRIDOR_VIA_MULT`, default 4.0) so members stay in the river instead of hopping layers out of it.
 
 ## Neighbor Attraction
 
@@ -62,9 +68,10 @@ The final bonus is `attraction_bonus × proximity² × alignment`, subtracted fr
 - Increase `--bus-detection-radius` if a connector's pins span more than 5mm and aren't being grouped; decrease it if unrelated nets are being pulled into a bus.
 - Increase `--bus-attraction-bonus` (up to ~10000) if bus nets keep taking individual shortcuts instead of following the corridor; decrease it if they hug the corridor at the cost of unnecessary detours.
 - `--verbose` prints the detected groups and the middle-out routing order.
+- Experimental env knobs: `KICAD_BUS_XLAYER_PCT` (default 35 with `--bus`) sets how much of the attraction discount applies on layers other than the neighbor's — the corridor guides a member even while it travels a different layer; `KICAD_BUS_CORRIDOR_VIA_MULT` (default 4.0) scales via cost inside a planned corridor. Promotion to real flags is tracked in #465.
 
 ## Limitations
 
 - Grouping is purely geometric: nets that happen to cluster (e.g. two unrelated buses on the same connector edge) can be grouped together.
-- Attraction only acts on the neighbor's layer; routes that change layers get no guidance through the via transition.
+- Attraction is strongest on the neighbor's layer; other layers receive `KICAD_BUS_XLAYER_PCT` (35%) of the discount, so cross-layer guidance exists but is weaker.
 - A bus member with no routed neighbor (e.g. all earlier members failed) routes without attraction.
