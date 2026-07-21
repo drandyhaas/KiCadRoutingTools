@@ -1213,6 +1213,15 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             return None
 
     coord = GridCoord(config.grid_step)
+
+    # Endpoint stub-proximity exemption (soft-knobs C5): a target that sits
+    # beside ANOTHER net's stub paid full stub cost on the final approach
+    # cells; exempt a one-track disk around each endpoint, mirroring the
+    # diff-pair caller. Cleared per net in prepare/restore_obstacles_inplace.
+    _exempt_r = coord.to_grid_dist(config.track_width + config.clearance)
+    obstacles.set_endpoint_exempt(
+        [(s0[0], s0[1]) for s0 in sources] + [(t0[0], t0[1]) for t0 in targets],
+        _exempt_r)
     layer_names = config.layers
 
     sources_grid = [(s[0], s[1], s[2]) for s in sources]

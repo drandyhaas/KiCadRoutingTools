@@ -452,6 +452,7 @@ def prepare_obstacles_inplace(
 
     # Clear per-route data from previous route
     working_obstacles.clear_stub_proximity()
+    working_obstacles.clear_endpoint_exempt()   # C5: previous net's endpoint disks
     working_obstacles.clear_layer_proximity()
     working_obstacles.clear_cross_layer_tracks()
     working_obstacles.clear_free_vias()
@@ -584,6 +585,7 @@ def restore_obstacles_inplace(
     """
     # Clear per-route data
     working_obstacles.clear_stub_proximity()
+    working_obstacles.clear_endpoint_exempt()   # C5 hygiene: no stale disks for Phase-3 clones
     working_obstacles.clear_layer_proximity()
     working_obstacles.clear_cross_layer_tracks()
     working_obstacles.clear_free_vias()
