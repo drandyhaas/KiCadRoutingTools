@@ -304,7 +304,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 bga_proximity_radius: float = 7.0,
                 bga_proximity_cost: float = 0.2,
                 track_proximity_distance: float = 2.0,
-                track_proximity_cost: float = 0.2,
+                track_proximity_cost: float = defaults.TRACK_PROXIMITY_COST,
                 debug_lines: bool = False,
                 verbose: bool = False,
                 max_rip_up_count: int = 3,
@@ -995,6 +995,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     routed_results = state.routed_results
     track_proximity_cache = state.track_proximity_cache
     layer_map = state.layer_map
+
+    # BGA proximity costs live in the track-proximity cache under a reserved
+    # key (soft-knobs review B1): stamped into the base map they were wiped
+    # by prepare_obstacles_inplace's clear_stub_proximity before EVERY
+    # single-ended net, so the knob silently no-op'd in the most common path.
+    # The cache is re-merged on every prepare in every path (single-ended,
+    # diff pair, Phase 3 via the working-map clone).
+    from obstacle_costs import compute_bga_proximity_cost_cells, BGA_PROXIMITY_CACHE_KEY
+    _bga_cells = compute_bga_proximity_cost_cells(config, len(config.layers))
+    if len(_bga_cells):
+        track_proximity_cache[BGA_PROXIMITY_CACHE_KEY] = _bga_cells
 
     # Register rippable pre-existing nets as already-routed (issue #103):
     # blocking analysis iterates routed_net_paths (cells are recomputed from
@@ -2165,7 +2176,7 @@ For differential pair routing, use route_diff.py:
     add_drc_fix_args(parser)
 
     # Vertical alignment attraction options
-    parser.add_argument("--vertical-attraction-radius", type=float, default=1.0,
+    parser.add_argument("--vertical-attraction-radius", type=float, default=defaults.VERTICAL_ATTRACTION_RADIUS,
                         help="Radius in mm for cross-layer track attraction (0 = disabled, default: 1.0)")
     parser.add_argument("--vertical-attraction-cost", type=float, default=defaults.VERTICAL_ATTRACTION_COST,
                         help=f"Cost bonus for aligning with tracks on other layers (0 = disabled, default: {defaults.VERTICAL_ATTRACTION_COST})")

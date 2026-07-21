@@ -1213,6 +1213,15 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             return None
 
     coord = GridCoord(config.grid_step)
+
+    # Endpoint stub-proximity exemption (soft-knobs C5): a target that sits
+    # beside ANOTHER net's stub paid full stub cost on the final approach
+    # cells; exempt a one-track disk around each endpoint, mirroring the
+    # diff-pair caller. Cleared per net in prepare/restore_obstacles_inplace.
+    _exempt_r = coord.to_grid_dist(config.track_width + config.clearance)
+    obstacles.set_endpoint_exempt(
+        [(s0[0], s0[1]) for s0 in sources] + [(t0[0], t0[1]) for t0 in targets],
+        _exempt_r)
     layer_names = config.layers
 
     sources_grid = [(s[0], s[1], s[2]) for s in sources]
@@ -1284,7 +1293,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             bus_xlayer_pct = 35
 
     router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
-                        turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                        turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),
@@ -2288,7 +2297,7 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
 
     # Create visual router
     router = VisualRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
-                          turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                          turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
                           vertical_attraction_radius=attraction_radius_grid,
                           vertical_attraction_bonus=attraction_bonus,
                           layer_costs=config.get_layer_costs(),
@@ -2332,7 +2341,7 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
 
         # Try second direction
         router = VisualRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
-                          turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                          turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
                           vertical_attraction_radius=attraction_radius_grid,
                           vertical_attraction_bonus=attraction_bonus,
                           layer_costs=config.get_layer_costs(),
@@ -2605,7 +2614,7 @@ def route_multipoint_main(
 
     # Route farthest pair with probe routing (same as single-ended)
     router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
-                        turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                        turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),
@@ -3042,7 +3051,7 @@ def _route_multipoint_taps_impl(
     attraction_bonus = config.cell_cost(config.vertical_attraction_cost) if config.vertical_attraction_cost > 0 else 0
 
     router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
-                        turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                        turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),

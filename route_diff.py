@@ -903,6 +903,17 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     routed_results = state.routed_results
     diff_pair_by_net_id = state.diff_pair_by_net_id
     track_proximity_cache = state.track_proximity_cache
+
+    # BGA proximity costs live in the track-proximity cache under a reserved
+    # key (soft-knobs review B1): stamped into the base map they were wiped
+    # by prepare_obstacles_inplace's clear_stub_proximity before EVERY
+    # single-ended net, so the knob silently no-op'd in the most common path.
+    # The cache is re-merged on every prepare in every path (single-ended,
+    # diff pair, Phase 3 via the working-map clone).
+    from obstacle_costs import compute_bga_proximity_cost_cells, BGA_PROXIMITY_CACHE_KEY
+    _bga_cells = compute_bga_proximity_cost_cells(config, len(config.layers))
+    if len(_bga_cells):
+        track_proximity_cache[BGA_PROXIMITY_CACHE_KEY] = _bga_cells
     layer_map = state.layer_map
     reroute_queue = state.reroute_queue
     polarity_swapped_pairs = state.polarity_swapped_pairs

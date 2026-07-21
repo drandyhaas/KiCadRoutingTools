@@ -55,6 +55,9 @@ class GridRouteConfig:
     bga_exclusion_zones: List[Tuple[float, float, float, float]] = field(default_factory=list)
     stub_proximity_radius: float = 2.0  # mm - radius around stubs to penalize
     stub_proximity_cost: float = 0.2  # mm equivalent cost at stub center
+    # NOTE (soft-knobs C6): in the Rust via branch this also MULTIPLIES the
+    # summed stub+layer proximity at the via site (track-proximity and
+    # ripped-corridor soft costs included), not just stub/BGA-zone costs.
     via_proximity_cost: float = 10.0  # via cost multiplier in stub/BGA proximity zones (0 = block vias)
     bga_proximity_radius: float = 7.0  # mm - distance from BGA edges to penalize
     bga_proximity_cost: float = 0.2  # mm equivalent cost at BGA edge
@@ -102,7 +105,7 @@ class GridRouteConfig:
     neckdown_taper_length: float = 0.5  # mm narrow->wide taper (0 = abrupt width step)
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias
     # Vertical alignment attraction - encourages tracks on different layers to stack
-    vertical_attraction_radius: float = 0.2  # mm - radius for attraction lookup (0 = disabled)
+    vertical_attraction_radius: float = 1.0  # mm - radius for attraction lookup (0 = disabled); matches routing_defaults.VERTICAL_ATTRACTION_RADIUS (N1)
     vertical_attraction_cost: float = 0.0  # mm equivalent bonus for aligned positions
     # Ripped route avoidance - soft penalty for routing through a ripped net's former corridor
     ripped_route_avoidance_radius: float = 1.0  # mm - radius around ripped route segments/vias
@@ -319,6 +322,17 @@ class GridRouteConfig:
         same mm-equivalent detour at any --grid-step.
         """
         return int(self.via_cost * 1000 * (REFERENCE_GRID_STEP / self.grid_step))
+
+    def via_proximity_cost_int(self) -> int:
+        """Rust-facing integer via-proximity multiplier.
+
+        0 stays 0 (its special meaning: BLOCK vias near obstacles instead of
+        penalizing); any positive fraction rounds to at least 1 (soft-knobs
+        review B3: a GUI value of 0.5 passed through bare int() became 0 --
+        neither blocked nor penalized, weaker than both settings around it).
+        """
+        c = self.via_proximity_cost
+        return 0 if c == 0 else max(1, int(round(c)))
 
     def get_proximity_heuristic_cost(self) -> int:
         """Get the maximum proximity heuristic cost for the Rust router.

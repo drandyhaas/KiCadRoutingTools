@@ -1922,7 +1922,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         h_weight=config.heuristic_weight,
         turn_cost=turn_cost,
         min_radius_grid=min_radius_grid,
-        via_proximity_cost=int(config.via_proximity_cost),
+        via_proximity_cost=config.via_proximity_cost_int(),
         diff_pair_spacing=diff_pair_spacing_grid,
         max_turn_units=max_turn_units,
         gnd_via_perp_offset=gnd_via_perp_grid,
@@ -2503,7 +2503,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     pose_kwargs = dict(
         via_cost=config.via_cost_units() * 2, h_weight=config.heuristic_weight,
         turn_cost=turn_cost, min_radius_grid=min_radius_grid,
-        via_proximity_cost=int(config.via_proximity_cost),
+        via_proximity_cost=config.via_proximity_cost_int(),
         diff_pair_spacing=diff_pair_spacing_grid, max_turn_units=max_turn_units)
     _lc = config.get_layer_costs()
     if any(c != 1000 for c in _lc):
@@ -3145,7 +3145,7 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
     partner_pads = partner_pads or []
     router = GridRouter(
         via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
-        turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+        turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
         layer_costs=config.get_layer_costs())
     nlayers = len(config.layers)
     own_tol = _launch_assoc_tol(config)

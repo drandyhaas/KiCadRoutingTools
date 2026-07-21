@@ -117,6 +117,33 @@ MIS=""
 if [ -f "$RESULT" ]; then
   python3 "$REPO/tests/stress/grade_final.py" "$RUNDIR" "$RESULT" >> "$RUNDIR/worker.log" 2>&1 || true
   MIS=$(python3 -c "import json; print('MISGRADE' if json.load(open('$RUNDIR/authoritative_grade.json')).get('misgrade') else '')" 2>/dev/null)
+
+  # Per-layer PNG renders of the FINAL board (issue #424 layer-role study): one
+  # <board>_<layer>.png per copper layer + the combined <board>.png, so plane vs
+  # signal layers / bus rivers / pour islands read at a glance. This MIRRORS the
+  # no-LLM replay path (redo_stress_test.py's render_board_layer_pngs); the live
+  # LLM worker path had no render at all, so ongoing runs produced no images.
+  # grade_final just resolved the final board into authoritative_grade.json.
+  # Non-fatal; board_image skips cleanly when kicad-cli is absent.
+  FB=$(python3 -c "import json,os,sys
+d=json.load(open('$RUNDIR/authoritative_grade.json'))
+fb=d.get('final_board') or ''
+if fb and not os.path.isabs(fb) and not os.path.exists(fb): fb=os.path.join('$RUNDIR', fb)
+print(fb if fb and os.path.exists(fb) else '')" 2>/dev/null)
+  if [ -n "$FB" ]; then
+    python3 "$REPO/tests/stress/board_layer_images.py" "$FB" >> "$RUNDIR/worker.log" 2>&1 || true
+
+    # Parser-parity validation of the FINAL board (headless twin of the GUI's
+    # "Validate PCB Data" button): the pcbnew-built PCBData and the text parse
+    # must describe the same board, else the CLI and GUI route different worlds.
+    # Mirrors redo_stress_test.py; non-fatal -- a FAIL is a parser bug to file,
+    # not a routing failure. validate_pcb_data.py self-execs into KiCad's python.
+    if python3 "$REPO/validate_pcb_data.py" "$FB" > "$RUNDIR/validate_pcb_data.txt" 2>&1; then
+      :
+    else
+      echo "[run_board] PARSER-PARITY FAIL on $(basename "$FB") -- see validate_pcb_data.txt" >> "$RUNDIR/worker.log"
+    fi
+  fi
 fi
 
 # GUI-loadable plan JSON from the recorded manifest (non-fatal). Lets this board's
