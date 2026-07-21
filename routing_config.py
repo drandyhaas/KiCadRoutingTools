@@ -307,12 +307,20 @@ class GridRouteConfig:
         independent of --grid-step (a finer grid visits proportionally more
         cells). At 0.1mm this reproduces the historical values exactly.
         """
-        return int(cost_mm * 1000 / REFERENCE_GRID_STEP * (self.grid_step / REFERENCE_GRID_STEP))
+        # soft-knobs B5: per-cell units are CONSTANT per cell (no grid_step
+        # factor). The old extra (grid_step/REFERENCE) factor made every
+        # per-cell knob relatively 2x/4x weaker at fine grids (0.05/0.025 --
+        # exactly the fine-pitch ladder and net_rescue grids) and 2x stronger
+        # at 0.2, because the base move cost per mm is 1000/grid_step, not
+        # constant. Identical to the old value at the 0.1 reference grid.
+        return int(cost_mm * 1000 / REFERENCE_GRID_STEP)
 
     def scaled_cell_units(self, units: float) -> int:
-        """Grid-invariant scaling for per-cell cost knobs given in raw cost
-        units calibrated at REFERENCE_GRID_STEP (e.g. bus_attraction_bonus)."""
-        return int(units * (self.grid_step / REFERENCE_GRID_STEP))
+        """Per-cell cost knobs in raw units calibrated at REFERENCE_GRID_STEP
+        (e.g. bus_attraction_bonus). soft-knobs B5: constant per cell -- the
+        old (grid_step/REFERENCE) factor broke relative strength vs the move
+        cost at non-reference grids. Identical at 0.1."""
+        return int(units)
 
     def via_cost_units(self) -> int:
         """Per-via penalty in cost units.

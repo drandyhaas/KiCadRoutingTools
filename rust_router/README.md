@@ -326,8 +326,11 @@ src/
   per candidate move (P2); attraction distance is Euclidean instead of
   Manhattan-vs-Euclidean-radius, which halved diagonal reach (N4); the
   stub-proximity endpoint-exemption scan runs only on a nonzero cost hit
-  (P4); and VisualRouter now passes layer direction preferences through, so
-  --visualize replays the production cost model (C2).
+  (P4); VisualRouter now passes layer direction preferences through, so
+  --visualize replays the production cost model (C2); and the turn cost is
+  ANGLE-PROPORTIONAL (N5): the knob is the 90-degree anchor -- 45-degree
+  kinks cost half, 135-degree hairpins 1.5x, reversals 2x (was a flat
+  charge that priced a gentle jog like a hairpin).
 
 - **0.18.3**: **#452 direction preference no longer bypassed by diagonals** — the
   per-layer H/V preference penalty (`direction_preference_cost`, applied via

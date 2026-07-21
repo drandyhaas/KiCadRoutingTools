@@ -7,6 +7,23 @@ use std::collections::BinaryHeap;
 use crate::obstacle_map::GridObstacleMap;
 use crate::types::{GridState, OpenEntry, RouteStats, SearchSink, StatsSink, FrontierSink, DIRECTIONS, ORTHO_COST, DIAG_COST, DEFAULT_TURN_COST};
 
+/// Direction octant 0-7 for a unit step (soft-knobs N5: angle-proportional
+/// turn cost -- octant delta * 45 degrees is the turn angle).
+#[inline]
+fn octant_index(dx: i32, dy: i32) -> i32 {
+    match (dx.signum(), dy.signum()) {
+        (1, 0) => 0,
+        (1, 1) => 1,
+        (0, 1) => 2,
+        (-1, 1) => 3,
+        (-1, 0) => 4,
+        (-1, -1) => 5,
+        (0, -1) => 6,
+        (1, -1) => 7,
+        _ => 0,
+    }
+}
+
 /// S1-B (issue #384): tiled flat-array node store. Replaces the per-node
 /// FxHashMap<u64, NodeState> (S1-A) with 64x64-cell tiles per layer: a node
 /// lookup is one SMALL hashmap probe per tile plus direct array indexing, and
@@ -593,10 +610,22 @@ impl GridSearch {
                 // Apply layer cost multiplier (1000 = 1.0x, 1500 = 1.5x, etc.)
                 let layer_multiplier = router.layer_cost_or_default(current.layer as usize);
                 let move_cost = (base_move_cost as i64 * layer_multiplier as i64 / 1000) as i32;
-                // Turn cost if direction changes (encourages straighter paths)
+                // Turn cost proportional to the turn ANGLE (soft-knobs N5):
+                // the knob is the 90-degree anchor; a 45-degree kink costs
+                // half, a 135-degree hairpin 1.5x, a reversal 2x. The old
+                // flat charge priced a gentle jog like a hairpin -- part of
+                // why grid paths zigzag where human routes flow.
                 let turn_cost = match prev_direction {
                     Some((pdx, pdy)) if pdx != 0 || pdy != 0 => {
-                        if dx != pdx || dy != pdy { router.turn_cost } else { 0 }
+                        if dx != pdx || dy != pdy {
+                            let di = octant_index(dx, dy);
+                            let pi = octant_index(pdx, pdy);
+                            let delta = (di - pi).rem_euclid(8);
+                            let angle_units = delta.min(8 - delta); // 1=45deg .. 4=180deg
+                            (router.turn_cost as i64 * angle_units as i64 / 2) as i32
+                        } else {
+                            0
+                        }
                     }
                     _ => 0, // No previous direction (source node or via)
                 };
