@@ -124,6 +124,7 @@ def test_swap_beyond_cap_rejected():
     result = quench(pcb, path, max_displacement=5.0, **SWAP_ONLY)
     assert result == [], \
         f"swap beyond max_displacement must be rejected, got {result}"
+    os.unlink(path)
 
 
 def test_swap_within_cap_accepted_and_reported():
@@ -137,6 +138,7 @@ def test_swap_within_cap_accepted_and_reported():
     assert by_ref['C1']['new_y'] == 100.0
     assert by_ref['C2']['new_x'] == 150.0
     assert by_ref['C2']['new_y'] == 100.0
+    os.unlink(path)
 
 
 def test_swap_cap_flag_tightens():
@@ -147,6 +149,7 @@ def test_swap_cap_flag_tightens():
                     swap_max_displacement=2.0, **SWAP_ONLY)
     assert result == [], \
         f"swap beyond swap_max_displacement must be rejected, got {result}"
+    os.unlink(path)
 
 
 def test_locked_parts_never_swap():
@@ -159,6 +162,7 @@ def test_locked_parts_never_swap():
     # With its only same-footprint partner locked, C1 has nothing to swap
     # with and the nudge phase is frozen, so nothing moves at all.
     assert result == []
+    os.unlink(path)
 
 
 def test_swap_cap_validation():
@@ -170,6 +174,7 @@ def test_swap_cap_validation():
     with pytest.raises(ValueError):
         quench(pcb, path, max_displacement=5.0, swap_max_displacement=-1.0,
                **SWAP_ONLY)
+    os.unlink(path)
 
 
 def test_no_stranding_after_full_run():
