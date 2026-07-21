@@ -914,6 +914,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     _bga_cells = compute_bga_proximity_cost_cells(config, len(config.layers))
     if len(_bga_cells):
         track_proximity_cache[BGA_PROXIMITY_CACHE_KEY] = _bga_cells
+
+    # Congestion-aware soft costs (#424 Phase D): all-layer copper-density
+    # field under a second reserved cache key; env-gated (KICAD_CONGESTION_
+    # COST=0 default off). Vias in hot cells pay via_proximity_cost x the
+    # cell cost via the Rust via branch.
+    from congestion_field import register_congestion_field
+    register_congestion_field(pcb_data, config, track_proximity_cache)
     layer_map = state.layer_map
     reroute_queue = state.reroute_queue
     polarity_swapped_pairs = state.polarity_swapped_pairs
