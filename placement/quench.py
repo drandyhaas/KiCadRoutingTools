@@ -213,6 +213,9 @@ class QuenchState:
         for net_id in self.net_refs:
             self.net_airwires[net_id] = self._build_net_airwires(net_id)
 
+        # Optional pruned neighbour lists (see build_neighbor_lists)
+        self._neighbors = None
+
     # ----- airwire helpers -------------------------------------------------
 
     def _net_points(self, net_id, override_ref=None, override_pads=None):
@@ -262,7 +265,11 @@ class QuenchState:
         part = self.parts[ref]
         rect = part.rect(x, y, rot)
         pen = self._edge_penalty(rect)
-        for other_ref, other in self.parts.items():
+        if self._neighbors is not None and ref in self._neighbors:
+            others = ((o, self.parts[o]) for o in self._neighbors[ref])
+        else:
+            others = self.parts.items()
+        for other_ref, other in others:
             if other_ref == ref or (exclude and other_ref in exclude):
                 continue
             pen += self._halo_pair_penalty(part, rect, other, other.rect())
@@ -274,7 +281,11 @@ class QuenchState:
         if (rect[0] < self.usable[0] or rect[1] < self.usable[1]
                 or rect[2] > self.usable[2] or rect[3] > self.usable[3]):
             return False
-        for other_ref, other in self.parts.items():
+        if self._neighbors is not None and ref in self._neighbors:
+            others = ((o, self.parts[o]) for o in self._neighbors[ref])
+        else:
+            others = self.parts.items()
+        for other_ref, other in others:
             if other_ref == ref or (exclude and other_ref in exclude):
                 continue
             r = other.rect()
@@ -334,6 +345,44 @@ class QuenchState:
         part.x, part.y, part.rot = x, y, rot
         for net_id in part.nets:
             self.net_airwires[net_id] = self._build_net_airwires(net_id)
+
+    def build_neighbor_lists(self, travel_budget):
+        """Per-movable-part pruned neighbour lists (perf, mirrors the
+        fanout_clearance pattern from #213 profiling). A movable part's live
+        position stays within travel_budget of its seed (nudge candidates are
+        radius-checked against the seed; swaps are capped by swap_cap <=
+        max_displacement), and rect() only ever reads bounds_by_rot, so the
+        union-of-rotations box at the seed inflated by the budget contains
+        every rect the part can ever occupy. Any pair whose per-axis seed gap
+        exceeds both budgets plus the largest interaction reach (hard
+        clearance / summed halos) can NEVER interact -- excluding it is exact
+        for candidate_valid AND part_geometry_cost, not an approximation."""
+        geom = {}
+        for ref, p in self.parts.items():
+            if p.locked:
+                geom[ref] = (p.rect(), 0.0)
+            else:
+                u0 = min(b[0] for b in p.bounds_by_rot.values())
+                u1 = min(b[1] for b in p.bounds_by_rot.values())
+                u2 = max(b[2] for b in p.bounds_by_rot.values())
+                u3 = max(b[3] for b in p.bounds_by_rot.values())
+                geom[ref] = ((p.seed_x + u0, p.seed_y + u1,
+                              p.seed_x + u2, p.seed_y + u3), travel_budget)
+        self._neighbors = {}
+        for ref, p in self.parts.items():
+            if p.locked:
+                continue
+            ra, ba = geom[ref]
+            lst = []
+            for oref, (rb, bb) in geom.items():
+                if oref == ref:
+                    continue
+                m = ba + bb + max(self.clearance,
+                                  p.halo + self.parts[oref].halo) + 1e-9
+                if (ra[2] + m >= rb[0] and rb[2] + m >= ra[0]
+                        and ra[3] + m >= rb[1] and rb[3] + m >= ra[1]):
+                    lst.append(oref)
+            self._neighbors[ref] = lst
 
 
 def _candidate_positions(part: _Part, max_disp: float, step: float,
@@ -417,6 +466,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         extra_locked_refs=extra_locked,
                         move_refs=move_refs,
                         net_weights=net_weights)
+    state.build_neighbor_lists(max_displacement + grid_step)
 
     before = state.total_cost()
     print(f"Initial: length={before['length']:.1f}mm "
