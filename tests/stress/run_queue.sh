@@ -25,10 +25,15 @@ STATUS="$ROOT/QUEUE_STATUS.txt"
 
 # Build "board:set" pairs across every set N (boards_unrouted_setN/) discovered
 # on disk, so new sets need no edit here (set 1 = boards_unrouted_set1).
+# Optional scope: QUEUE_SETS="11 12 .. 25" (space-separated) restricts the run to
+# those sets; empty/unset = the whole corpus (the default, backward-compatible).
+QUEUE_SETS="${QUEUE_SETS:-}"
+in_scope(){ [ -z "$QUEUE_SETS" ] && return 0; for x in $QUEUE_SETS; do [ "$x" = "$1" ] && return 0; done; return 1; }
 pairs=""
 for d in "$ROOT"/boards_unrouted_set*; do
   [ -d "$d" ] || continue
   s="${d##*_set}"
+  in_scope "$s" || continue
   for f in "$d"/*.kicad_pcb; do
     [ -e "$f" ] || continue
     b=$(basename "$f" .kicad_pcb); pairs="$pairs $b:$s"
@@ -43,6 +48,14 @@ is_done(){ [ -f "$(resfile "$1" "$2")" ]; }
 is_running(){  # our worker, any tool writing the run dir, or run dir touched <180min
   pgrep -f "run_board.sh $1 $2" >/dev/null 2>&1 && return 0
   local d; d=$(rundir "$1" "$2")
+  # A worker that wrote .worker_done has EXITED (ok OR NORESULT). run_board.sh
+  # rm's this at start (line ~24), so its PRESENCE means "no live worker here".
+  # Without this, a NORESULT worker whose orphaned background route step kept
+  # touching the run dir false-positives the mtime window below and freezes the
+  # slot for the full 180 min while the watchdog (needs 3 launches) can't yet
+  # stub it -- a ~2 h per-stall deadlock. Checked AFTER the live-worker pgrep so
+  # a fresh relaunch (which removes the file first thing) can't be double-run.
+  [ -f "$d/.worker_done" ] && return 1
   pgrep -f "$d" >/dev/null 2>&1 && return 0
   # 180 min, not 15: a big board (FPGA/USB3-class) can spend up to the 3-hour
   # per-command cap in one signal-route step writing no intermediate files; a
