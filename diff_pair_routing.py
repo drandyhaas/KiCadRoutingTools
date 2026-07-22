@@ -2851,24 +2851,40 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             ok = False
             leg_iters = 0
             leg_segs, leg_vias = [], []
+            # Escape coupling (#444 follow-up, KICAD_HYBRID_COUPLE=0 disables):
+            # the second leg of a side is strongly attracted to its partner's
+            # just-routed leg (same layer only); the FIRST leg of a side routes
+            # with sibling-room margin so the lane it claims can actually hold
+            # both tracks -- the bus corridor trick. Prevents the P/N
+            # split-around-the-keepout class (EPHY_TX shipped 13% coupled).
+            _couple = os.environ.get('KICAD_HYBRID_COUPLE', '') not in ('0', 'off', 'false')
+            _sib_margin = int(math.ceil(max(
+                0.0, config.track_width + config.diff_pair_gap - config.clearance)
+                / config.grid_step)) if _couple else 0
             for plan in leg_plans:
                 leg_state['s'] = {p_net_id: [], n_net_id: []}
                 leg_state['v'] = {p_net_id: [], n_net_id: []}
+                leg_state['path'] = {}
                 plan_iters = 0
                 good = True
                 for net_id, _side in plan:
                     term, mid_pt = term_by[(net_id, _side)]
                     pseg, pvia, ppads = _leg_partner_copper(net_id)
-                    ls, lv, it = _route_hybrid_leg(
+                    _partner = n_net_id if net_id == p_net_id else p_net_id
+                    _apath = leg_state['path'].get((_partner, _side)) if _couple else None
+                    ls, lv, it, lpath = _route_hybrid_leg(
                         pcb_data, net_id, config, leg_obs, layer_names, coord,
                         mid_pt, term, pseg, pvia, pair_vias, partner_pads=ppads,
-                        mid_vias=mid_vias_by_net[net_id] + leg_state['v'][net_id])
+                        mid_vias=mid_vias_by_net[net_id] + leg_state['v'][net_id],
+                        attract_path=_apath,
+                        sibling_margin=0 if _apath else _sib_margin)
                     plan_iters += it
                     if ls is None:
                         good = False
                         break
                     leg_state['s'][net_id] += ls
                     leg_state['v'][net_id] += lv
+                    leg_state['path'][(net_id, _side)] = lpath or []
                 if good:
                     ok = True
                     leg_iters = plan_iters
@@ -3113,7 +3129,8 @@ def _collapse_leg_attach_join(leg_segs, attach_xy, config, pcb_data, net_id, par
 
 def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
                       mid_pt, term, partner_segs, partner_vias, pair_vias,
-                      partner_pads=None, mid_vias=None):
+                      partner_pads=None, mid_vias=None,
+                      attract_path=None, sibling_margin=0):
     """Route ONE point-to-point single-ended leg joining a terminal to the coupled
     middle's near end (term -> mid_pt), routing around partner copper. Returns
     (segs, vias, iters), ([], [], 0) when the terminal already coincides with the
@@ -3136,17 +3153,44 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
     both pair nets, so without re-adding them as a VIA keep-out the leg would drop
     its layer-transition via on top of a partner pad (issue #241). Track passage
     is left open (the coupled trace legitimately runs close); only via drops are
-    kept clear."""
+    kept clear.
+
+    Escape coupling (#444 seam follow-up): the two nets' same-side escape legs
+    used to be routed fully independently -- on ottercast EPHY_TX they split
+    around opposite sides of the U1 keepout, shipping a 13%-coupled "pair".
+    `attract_path` (the partner's already-routed same-side leg, grid path)
+    pulls this leg alongside it with a strong same-layer-only attraction (the
+    bus-member mechanism); `sibling_margin` (grid cells) makes the FIRST leg
+    of a side route with room reserved for its sibling (the bus corridor
+    wide-probe trick), retried without the margin if it fails outright."""
     from single_ended_routing import _route_leg, _path_to_segments_vias
     from obstacle_map import (add_segments_list_as_obstacles, remove_segments_list_from_obstacles,
                               add_vias_list_as_obstacles, remove_vias_list_from_obstacles,
                               add_pads_via_keepout, remove_pads_via_keepout,
                               get_same_net_through_hole_positions)
     partner_pads = partner_pads or []
+    _att_radius = 0
+    _att_bonus = 0
+    if attract_path:
+        # Tight radius (the pair's own lane width plus slack) and a bonus well
+        # above the bus default: the sibling lane must win against everything
+        # short of a hard obstacle -- "almost forced", same layer only
+        # (attraction_cross_layer_pct=0 never rewards a different layer).
+        _att_radius = max(2, int(math.ceil(
+            (config.track_width + config.diff_pair_gap) / config.grid_step)) + 2)
+        import routing_defaults as _rd
+        _att_bonus = 3 * _rd.BUS_ATTRACTION_BONUS
     router = GridRouter(
         via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
         turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
-        layer_costs=config.get_layer_costs())
+        layer_costs=config.get_layer_costs(),
+        attraction_radius=_att_radius, attraction_bonus=_att_bonus,
+        attraction_cross_layer_pct=0)
+    if attract_path:
+        router.set_attraction_path([(int(p[0]), int(p[1]), int(p[2]))
+                                    for p in attract_path])
+        print(f"      leg couple: net {net_id} attracted to partner leg "
+              f"({len(attract_path)} pts, radius {_att_radius}, bonus {_att_bonus})")
     nlayers = len(config.layers)
     own_tol = _launch_assoc_tol(config)
     # An existing same-net through-hole (the net's THT pads + any pre-placed via,
@@ -3253,7 +3297,7 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
             # cell coincides but the LAYERS differ (a bare F.Cu escape end vs an
             # inner-layer middle), do NOT skip -- the leg must still drop the
             # F.Cu->inner transition via, or the terminal is left orphaned (#215).
-            return [], [], 0
+            return [], [], 0, []
         # On a through-via the leg may leave on any layer; off a bare pad it must
         # start on the pad's own layer.
         sources = ([(tgx, tgy, l) for l in range(nlayers)] if on_via
@@ -3273,7 +3317,16 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
             obstacles.add_source_target_cell(sgx, sgy, slayer)
         for tgt_l in (mid_target_layers or [mid_pt[2]]):
             obstacles.add_source_target_cell(mgx, mgy, tgt_l)
-        path, it = _route_leg(router, obstacles, config, sources, targets, 0, pcb_data, net_id)
+        path, it = _route_leg(router, obstacles, config, sources, targets,
+                              sibling_margin, pcb_data, net_id)
+        if path is None and sibling_margin:
+            # Reserved sibling room doesn't fit here -- route at normal width
+            # (the sibling leg then finds its own way; completion beats room).
+            print(f"      leg couple: sibling-room margin ({sibling_margin} cells) "
+                  f"unroutable for net {net_id}; retrying without")
+            path, _it2 = _route_leg(router, obstacles, config, sources, targets,
+                                    0, pcb_data, net_id)
+            it += _it2
         obstacles.clear_allowed_cells()
         obstacles.clear_source_target_cells()
         if path is None:
@@ -3293,14 +3346,14 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
                                  '#' if obstacles.is_blocked(gx2, gy2, lyr) else '.')
                                 for gx2 in range(tgx - 20, tgx + 21))
                             print(f"          {gy2:5d} {row}")
-            return None, None, 0
+            return None, None, 0, None
         ps, pv = _path_to_segments_vias(
             path, coord, layer_names, net_id, config,
             (ax, ay, layer_names[path[0][2]]),
             (mid_pt[0], mid_pt[1], layer_names[mid_pt[2]]),
             through_hole_positions=reuse_holes, pcb_data=pcb_data)
         _collapse_leg_attach_join(ps, (mid_pt[0], mid_pt[1]), config, pcb_data, net_id, partner_segs)
-        return ps, pv, it
+        return ps, pv, it, path
     finally:
         remove_segments_list_from_obstacles(obstacles, partner_segs, config)
         remove_vias_list_from_obstacles(obstacles, partner_vias, config)
