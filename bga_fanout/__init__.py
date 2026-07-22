@@ -1832,26 +1832,14 @@ def generate_bga_fanout(footprint: Footprint,
     # bare-ball zone exemption (setup_bga_exclusion_zones) keeps the deferred
     # balls routable.
     global _direct_route_nets
-    _fd_mode = os.environ.get('KICAD_FANOUT_DIRECT', '')
     if (_pad_filter is None and not _single_pass
-            and _fd_mode in ('1', 'true', 'on', 'pairs')):
+            and os.environ.get('KICAD_FANOUT_DIRECT', '') in ('1', 'true', 'on')):
         from bga_fanout.escape import direct_route_candidates
         _dp_probe = (find_differential_pairs(footprint, diff_pair_patterns)
                      if diff_pair_patterns else None)
         _names, _notes = direct_route_candidates(
             pcb_data, footprint, net_filter=net_filter,
             diff_pairs=_dp_probe, clearance=clearance)
-        if _fd_mode == 'pairs':
-            # pairs-only mode: defer ONLY diff-pair nets (the motivating
-            # pocket case); SE balls keep their stubs -- deferring SE
-            # clusters reshuffled corridors net-negative on ottercast.
-            _pair_names = set()
-            for _pr in (_dp_probe or {}).values():
-                for _pp in (_pr.p_pad, _pr.n_pad):
-                    if _pp and _pp.net_name:
-                        _pair_names.add(_pp.net_name)
-            _names &= _pair_names
-            _notes = [n for n in _notes if n[0] in _names]
         if _names:
             print(f"  #472 direct-route deferral: {len(_names)} net(s) skip "
                   f"fanout (surface-reachable):")
