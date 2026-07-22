@@ -385,6 +385,79 @@ def _commit_net_result(results, routed_results, net_id, new_result,
         _reconcile_multipoint_connectivity(new_result, pcb_data, config, net_id)
 
 
+def _phase3_tap_relocation_retry(net_id, completed_result, pcb_data, config,
+                                 state, all_unrouted_net_ids, routed_net_ids,
+                                 track_proximity_cache, layer_map,
+                                 global_tap_offset, total_tap_edges,
+                                 global_tap_failed):
+    """Tap relocation for terminally-failed tap pads (env-gated,
+    KICAD_TAP_RELOCATION=1): Phase-3 ball-tap pockets are walled by
+    PRE-EXISTING plane dogbones on planes-first chains (SYNC's wall
+    inventory: the GND In2 pour feed, the +3V3 dogbone) -- unrippable by
+    every ladder rung. Remove ONE such via (+ its short stub) per failed
+    pad via exact whole-net cache recompute on the WORKING map, rebuild a
+    fresh per-net clone (the tap loop routes against clones, and the stale
+    clone still carries the removed via's cells), re-run the tap pass, and
+    RE-TAP each detached pad as the commit condition; everything restores
+    on no-gain. Mirrors the initial-loop _tap_relocation_rescue rung,
+    which multipoint nets never reach."""
+    from tap_relocation import (find_relocation_candidate, relocate_tap,
+                                restore_tap, retap_pad,
+                                tap_relocation_enabled, tap_relocation_max)
+    if not tap_relocation_enabled():
+        return None
+    failed_pads = completed_result.get('failed_pads_info') or []
+    if not failed_pads:
+        return None
+    working = state.working_obstacles
+    cache = state.net_obstacles_cache
+    if working is None or not cache:
+        return None
+    from single_ended_routing import route_multipoint_taps
+    from routing_context import build_incremental_obstacles
+
+    tokens = []
+    tried = set()
+    for fp in failed_pads[:tap_relocation_max()]:
+        fx, fy = fp.get('x'), fp.get('y')
+        if fx is None:
+            continue
+        via = find_relocation_candidate(pcb_data, config, cache, (fx, fy),
+                                        exclude_via_ids=tried)
+        if via is None:
+            continue
+        tried.add(id(via))
+        token = relocate_tap(pcb_data, config, working, cache, via)
+        if token is not None:
+            tokens.append(token)
+    if not tokens:
+        return None
+
+    retry_obstacles, _ = build_incremental_obstacles(
+        working, pcb_data, config, net_id, all_unrouted_net_ids,
+        routed_net_ids, track_proximity_cache, layer_map, cache)
+    retry = route_multipoint_taps(
+        pcb_data, net_id, config, retry_obstacles, dict(completed_result),
+        global_offset=global_tap_offset, global_total=total_tap_edges,
+        global_failed=global_tap_failed)
+    after = len((retry or {}).get('failed_pads_info') or []) \
+        if retry else len(failed_pads)
+    if retry and after < len(failed_pads):
+        # Commit condition: every detached pad gets its replacement tap NOW
+        # (relying on a later repair step shipped detached pads in the
+        # finisher steps -- the c1 defect).
+        if all(retap_pad(pcb_data, config, working, cache, t) for t in tokens):
+            print(f"  PHASE-3 TAP RELOCATION: {len(failed_pads) - after} "
+                  f"pad(s) reconnected after relocating {len(tokens)} "
+                  f"plane tap(s)")
+            return retry
+        print(f"  PHASE-3 TAP RELOCATION: re-tap declined -> reverting "
+              f"(retry discarded)")
+    for token in reversed(tokens):
+        restore_tap(pcb_data, working, cache, token)
+    return None
+
+
 def _phase3_stub_switch_retry(net_id, completed_result, pcb_data, config,
                               state, obstacles, global_tap_offset,
                               total_tap_edges, global_tap_failed):
@@ -591,9 +664,19 @@ def run_phase3_tap_routing(
                 if retry_result is not None:
                     completed_result = retry_result
 
-            # Stub layer switch for pads still failed after the rip ladder
-            # (the walls are usually pre-existing and unrippable; moving the
-            # pad's own stub to an open layer is the remaining move).
+            # Tap relocation first (matches the initial-loop rung order:
+            # one-tap surgery before moving the net's own stub), then the
+            # stub layer switch, for pads still failed after the rip ladder
+            # (the walls are usually pre-existing and unrippable).
+            if completed_result.get('failed_pads_info') \
+                    and not length_matching_active:
+                _tr = _phase3_tap_relocation_retry(
+                    net_id, completed_result, pcb_data, config, state,
+                    all_unrouted_net_ids, routed_net_ids,
+                    track_proximity_cache, layer_map,
+                    global_tap_offset, total_tap_edges, global_tap_failed)
+                if _tr is not None:
+                    completed_result = _tr
             if completed_result.get('failed_pads_info'):
                 _sw = _phase3_stub_switch_retry(
                     net_id, completed_result, pcb_data, config, state,
