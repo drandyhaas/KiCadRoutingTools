@@ -58,7 +58,7 @@ def _sample_path(path: List[Tuple[int, int, int]], step: int = 1) -> List[Tuple[
     return sampled
 
 from routing_state import RoutingState, record_net_event, record_rip_ancestry, rip_exclude_set
-from bus_detection import detect_bus_groups, get_bus_routing_order, get_attraction_neighbor, bus_attraction_context, BusGroup
+from bus_detection import detect_bus_groups, get_bus_routing_order, get_attraction_neighbor, bus_attraction_context, bus_stick_config, BusGroup
 from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_mb
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
@@ -741,17 +741,21 @@ def route_single_ended_nets(
             # main-edge selection + attraction too (they used to route blind).
             attraction_path, reverse_direction = bus_attraction_context(
                 net_id, bus_net_to_group, bus_corridors, bus_routed_paths)
+            # Off-lane surcharge (the stick): members with a corridor pay
+            # scaled step costs everywhere EXCEPT near the lane, where the
+            # attraction discount compensates -- defection costs real money.
+            cfg_route = bus_stick_config(config, attraction_path)
             # Check for multi-point net (3+ pads, no existing segments)
             multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
             if multipoint_pads:
                 print(f"  Detected multi-point net with {len(multipoint_pads)} pads (Phase 1: main route only)")
-                result = route_multipoint_main(pcb_data, net_id, config, obstacles, multipoint_pads,
+                result = route_multipoint_main(pcb_data, net_id, cfg_route, obstacles, multipoint_pads,
                                                attraction_path=attraction_path, state=state)
                 # Track for Phase 3 completion after length matching
                 if result and not result.get('failed') and result.get('is_multipoint'):
                     state.pending_multipoint_nets[net_id] = result
             else:
-                result = route_net_with_obstacles(pcb_data, net_id, config, obstacles,
+                result = route_net_with_obstacles(pcb_data, net_id, cfg_route, obstacles,
                                                   attraction_path=attraction_path,
                                                   reverse_direction=reverse_direction)
 
@@ -1138,16 +1142,17 @@ def route_single_ended_nets(
                         # Bus attraction for the retry, multipoint included
                         retry_attraction_path, retry_reverse_direction = bus_attraction_context(
                             net_id, bus_net_to_group, bus_corridors, bus_routed_paths)
+                        retry_cfg = bus_stick_config(config, retry_attraction_path)
                         # Check for multi-point net in retry as well
                         retry_multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
                         if retry_multipoint_pads:
-                            retry_result = route_multipoint_main(pcb_data, net_id, config, retry_obstacles, retry_multipoint_pads,
+                            retry_result = route_multipoint_main(pcb_data, net_id, retry_cfg, retry_obstacles, retry_multipoint_pads,
                                                                  attraction_path=retry_attraction_path, state=state)
                             # Track for Phase 3 completion after length matching
                             if retry_result and not retry_result.get('failed') and retry_result.get('is_multipoint'):
                                 state.pending_multipoint_nets[net_id] = retry_result
                         else:
-                            retry_result = route_net_with_obstacles(pcb_data, net_id, config, retry_obstacles,
+                            retry_result = route_net_with_obstacles(pcb_data, net_id, retry_cfg, retry_obstacles,
                                                                      attraction_path=retry_attraction_path,
                                                                      reverse_direction=retry_reverse_direction)
 

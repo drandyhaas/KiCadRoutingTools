@@ -368,6 +368,32 @@ def filter_bus_groups_geometric(pcb_data, bus_groups, config,
     return out
 
 
+def bus_stick_config(config, attraction_path):
+    """Off-lane surcharge (the STICK, KICAD_BUS_OFFLANE_MULT, default 1.0
+    = off): a bus member with a planned corridor routes with every layer's
+    step cost scaled by the multiplier; the corridor attraction discount
+    then makes the LANE the only normal-priced place on the board. Without
+    this the attraction is carrot-only -- a member whose direct area is
+    congested hops outside the attraction radius, where the corridor
+    exerts zero pull, and defects to a lone detour for free (WL_SDIO_D1's
+    8mm northern flight while its lane ran direct at y~94). Forbidden
+    layers (cost -1) stay forbidden; the member's config is otherwise
+    untouched (via cost, clearances, caches all nominal)."""
+    import os as _os
+    try:
+        m = float(_os.environ.get('KICAD_BUS_OFFLANE_MULT', '1.0'))
+    except ValueError:
+        m = 1.0
+    if m == 1.0 or not attraction_path:
+        return config
+    from dataclasses import replace as _replace
+    base = list(config.layer_costs or []) or [1.0] * len(config.layers)
+    while len(base) < len(config.layers):
+        base.append(1.0)
+    scaled = [c if c < 0 else c * m for c in base]
+    return _replace(config, layer_costs=scaled)
+
+
 def bus_attraction_context(
     net_id: int,
     bus_net_to_group: Optional[Dict[int, BusGroup]],
