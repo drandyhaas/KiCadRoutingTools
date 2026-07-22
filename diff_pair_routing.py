@@ -2955,6 +2955,87 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             if not _hybrid_route_connects(pcb_data, p_net_id, n_net_id, all_segs, all_vias,
                                           terminal_pads=terminal_pads):
                 return None, "assembled route leaves a terminal unconnected"
+            # #444 seam dissolution (KICAD_SEAM_REASK=0 disables): each net's
+            # assembled copper is a 3-piece composition (escape -> middle ->
+            # escape) welded at seeded handoff points; the composition carries
+            # detours no single A* would emit (EPHY_TX_P's climb to the
+            # handoff). Re-ask each net's WHOLE connection with ONE A* --
+            # partner's final copper as obstacle AND attractor -- and swap it
+            # in only when strictly better and every assembly gate passes.
+            if os.environ.get('KICAD_SEAM_REASK', '') not in ('0', 'off', 'false'):
+                def _reask_net(_net, _partner, _cur_segs, _cur_vias):
+                    """One whole-connection A* for _net against _partner's
+                    CURRENT copper (obstacle + attractor). Returns (segs,
+                    vias) or None."""
+                    _par_s = [s for s in _cur_segs if s.net_id == _partner]
+                    _par_v = [v for v in _cur_vias if v.net_id == _partner]
+                    _own_v = [v for v in _cur_vias if v.net_id == _net]
+                    _src_t, _ = term_by[(_net, 'src')]
+                    _tgt_t, _ = term_by[(_net, 'tgt')]
+                    _attract = _ordered_grid_path(
+                        _par_s, (_src_t[0], _src_t[1]), coord, layer_names)
+                    _ppads = pads_by_net.get(_partner, [])
+                    _obs_s = (_par_s + [s for s in board_segs if s.net_id == _partner]
+                              + [seg for pad in _ppads
+                                 for seg in _pad_obstacle_segments(pad, layer_names)])
+                    _obs_v = _par_v + [v for v in pair_vias if v.net_id == _partner]
+                    _rs, _rv, _rit, _rp = _route_hybrid_leg(
+                        pcb_data, _net, config, leg_obs, layer_names, coord,
+                        (_tgt_t[0], _tgt_t[1], _tgt_t[2]), _src_t,
+                        _obs_s, _obs_v, pair_vias, partner_pads=_ppads,
+                        mid_vias=_own_v,
+                        attract_path=_attract if _attract else None)
+                    if _rs is None:
+                        return None
+                    return _rs, _rv
+
+                def _joint_score(_segs, _vias):
+                    _pl = [s for s in _segs if s.net_id == p_net_id]
+                    _nl = [s for s in _segs if s.net_id == n_net_id]
+                    _len = sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                               for s in _segs)
+                    return _len + 2.0 * len(_vias) + 3.0 * _split_len(_pl, _nl)
+
+                # JOINT re-ask: each net re-asked in turn, the second against
+                # the first's NEW copper -- then the pair result is accepted or
+                # reverted as a unit under the coupledness-priced metric. A
+                # per-net accept deadlocks (the shorter joint corridor looks
+                # "decoupled" until BOTH nets move into it); a raw-length
+                # accept undoes the coupling. Both orders are tried.
+                _base_score = _joint_score(all_segs, all_vias)
+                _other_v = [v for v in all_vias
+                            if v.net_id not in (p_net_id, n_net_id)]
+                _best_joint = None
+                for _first, _second in ((p_net_id, n_net_id), (n_net_id, p_net_id)):
+                    _cur_s, _cur_v = list(all_segs), list(all_vias)
+                    for _net in (_first, _second):
+                        _partner = n_net_id if _net == p_net_id else p_net_id
+                        _got = _reask_net(_net, _partner, _cur_s, _cur_v)
+                        if _got is None:
+                            continue
+                        _cur_s = [s for s in _cur_s if s.net_id != _net] + _got[0]
+                        _cur_v = ([v for v in _cur_v
+                                   if v.net_id != _net] + _got[1])
+                    if _cur_s is all_segs:
+                        continue
+                    if _pn_tracks_cross_full(_cur_s, pcb_data, p_net_id, n_net_id):
+                        continue
+                    if _connector_grazes_foreign_copper(_cur_s, pcb_data,
+                                                        p_net_id, n_net_id, config):
+                        continue
+                    if not _hybrid_route_connects(pcb_data, p_net_id, n_net_id,
+                                                  _cur_s, _cur_v,
+                                                  terminal_pads=terminal_pads):
+                        continue
+                    _sc = _joint_score(_cur_s, _cur_v)
+                    if _best_joint is None or _sc < _best_joint[0]:
+                        _best_joint = (_sc, _cur_s, _cur_v)
+                if _best_joint is not None and _best_joint[0] < _base_score - 0.2:
+                    print(f"      #444 seam re-ask: joint whole-connection A* "
+                          f"replaces composed pair (score {_base_score:.1f} -> "
+                          f"{_best_joint[0]:.1f})")
+                    all_segs = _best_joint[1]
+                    all_vias = _best_joint[2]
             length = sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y) for s in all_segs)
             return {'p_sign': ps, 'all_segs': all_segs, 'all_vias': all_vias,
                     'leg_segs': leg_segs, 'iters': iters + leg_iters,
@@ -3166,6 +3247,50 @@ def _collapse_leg_attach_join(leg_segs, attach_xy, config, pcb_data, net_id, par
     pen.end_x, pen.end_y = ax, ay
     del leg_segs[-1]
     return leg_segs
+
+
+def _ordered_grid_path(segs, start_xy, coord, layer_names):
+    """Order a net's segment copper into one polyline of (gx, gy, layer_idx)
+    points, walking adjacency from the endpoint nearest start_xy. Used as the
+    seam re-ask's attraction path (direction gating needs travel order).
+    Branches: follows the longest continuation greedily."""
+    if not segs:
+        return []
+    lmap = {n: i for i, n in enumerate(layer_names)}
+    def k(x, y):
+        return (round(x, 2), round(y, 2))
+    from collections import defaultdict
+    adj = defaultdict(list)
+    for s in segs:
+        adj[k(s.start_x, s.start_y)].append((s, k(s.end_x, s.end_y)))
+        adj[k(s.end_x, s.end_y)].append((s, k(s.start_x, s.start_y)))
+    start = min(adj, key=lambda n: (n[0] - start_xy[0]) ** 2 + (n[1] - start_xy[1]) ** 2)
+    out, seen, node = [], set(), start
+    while True:
+        nxt = None
+        for s, other in adj[node]:
+            if id(s) in seen:
+                continue
+            if nxt is None:
+                nxt = (s, other)
+        if nxt is None:
+            break
+        s, other = nxt
+        seen.add(id(s))
+        li = lmap.get(s.layer, 0)
+        L = math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+        n = max(1, int(L / coord.grid_step))
+        # orient the sample run from `node` toward `other`
+        if k(s.start_x, s.start_y) == node:
+            x0, y0, x1, y1 = s.start_x, s.start_y, s.end_x, s.end_y
+        else:
+            x0, y0, x1, y1 = s.end_x, s.end_y, s.start_x, s.start_y
+        for t in range(n + 1):
+            gx, gy = coord.to_grid(x0 + (x1 - x0) * t / n, y0 + (y1 - y0) * t / n)
+            if not out or out[-1] != (gx, gy, li):
+                out.append((gx, gy, li))
+        node = other
+    return out
 
 
 def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
