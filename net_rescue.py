@@ -132,7 +132,12 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
     """The scoped retry ladder for one net (see module docstring)."""
     from plane_pad_tap import _clearance_ladder, fab_floor_clearance_track
 
-    max_iters = min(config.max_iterations, defaults.RESCUE_MAX_ITERATIONS)
+    # Rescue runs at ITS OWN budget, not the step's: the windowed scope
+    # bounds the search spatially, and min()-ing with a 200k step default
+    # throttled the fine-grid rungs into false negatives (SDC0_CMD's
+    # human-obvious path needs ~1.4M cumulative iterations at 0.025 --
+    # found instantly once uncapped; 'no route' at 200k for years of runs).
+    max_iters = max(config.max_iterations, defaults.RESCUE_MAX_ITERATIONS)
     rungs = []
     # Rung 0: nominal geometry at the finer grid only. Skipped when the run
     # already routes at (or below) the rescue grid - identical to what failed.
@@ -224,6 +229,16 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances):
     fine_grid = _choose_grid(config, half)
     window = make_local_window(pcb_data, cx, cy, half)
 
+    # BGA exclusion zones are ADVISORY router policy, not DRC geometry -- and
+    # the last-resort rescue is exactly where they turn self-defeating: the
+    # human-routable SDC0_CMD path skirts U1's top ball row and crosses U7's
+    # sparse 0.9mm field on F.Cu, DRC-clean, but every zoned retry frontier-
+    # exhausted in ~6k iterations because we walled the only corridor west
+    # ourselves. Rescue routes are windowed, connectivity-verified, and
+    # DRC-graded afterwards, so drop the zones here (real copper/clearance
+    # obstacles still apply in full).
+    if config.bga_exclusion_zones:
+        config = replace(config, bga_exclusion_zones=[])
     for cfg in _rescue_rungs(config, fine_grid, pcb_data, net_id):
         # Rung 0 keeps the run's exact clearance semantics (incl. per-netclass
         # spacing). The neck-down rungs' whole point is spacing below nominal
@@ -453,10 +468,9 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None):
             'iterations': sum(r.get('iterations', 0) for r in edge_results),
             'is_rescue': True,
         }
-        state.results.append(merged)
-
         fully = num <= 1
         if kind == 'failed':
+            state.results.append(merged)
             if not fully:
                 merged['failed_pads_info'] = _unconnected_pads_info(comp_pads)
             routed_results[net_id] = merged
@@ -465,9 +479,19 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None):
             if net_id not in state.routed_net_ids:
                 state.routed_net_ids.append(net_id)
         else:
-            # Partial multipoint net: patch ITS result's accounting; the
-            # rescue copper ships via `merged` in state.results.
+            # Partial multipoint net: fold the rescue copper INTO the net's
+            # AUTHORITATIVE result. A separate `merged` entry in
+            # state.results is dropped by route.py's #87 superseded-result
+            # filter (only routed_results survive) and the phantom pass then
+            # orphan-strips its copper from the board -- successful partial
+            # rescues shipped BROKEN (the k_seam SDC0_CMD netstory shows
+            # rescue_succeeded fully_connected=True while the file stayed
+            # open; reproduced deterministically on the parity board).
             prev = routed_results[net_id]
+            prev['new_segments'] = (list(prev.get('new_segments') or [])
+                                    + list(merged['new_segments']))
+            prev['new_vias'] = (list(prev.get('new_vias') or [])
+                                + list(merged['new_vias']))
             prev_failed = prev.get('failed_pads_info') or []
             still = ({} if fully else
                      {(p['component_ref'], p['pad_number'])
