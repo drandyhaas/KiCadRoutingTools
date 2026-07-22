@@ -799,6 +799,26 @@ def route_multipoint_diff_pair(state, pair: DiffPairNet, pair_name: str,
             if leg_results is not None:
                 return leg_results, merged, uncoupled + se
 
+    # Last resort before deferring: MOVE the blocked terminals' escape stubs
+    # to a more-open layer. The switch's pad via sizes itself down the fab
+    # ladder (fitting_pad_via) -- the nominal via never fits a dense ball
+    # field, the smaller rungs do -- and moving a stub also REMOVES the
+    # copper that walls its twin (each USB twin's F.Cu escape is the other's
+    # nearest wall, so the pair unboxes itself). Endpoint derivation finds
+    # the moved tips naturally: the old-layer copper is gone.
+    switched = _switch_blocked_terminal_stubs(state, pair, terminals)
+    if switched:
+        leg_results, merged, se = _route_terminal_set(state, pair, pair_name,
+                                                      terminals)
+        if leg_results is not None:
+            print(f"  STUB LAYER SWITCH SUCCESS: coupled chain routed after "
+                  f"moving {len(switched)} terminal stub pair(s)")
+            return leg_results, merged, se
+        from stub_layer_switching import revert_stub_layer_switch
+        for mods, vias in reversed(switched):
+            revert_stub_layer_switch(pcb_data, mods, vias)
+        print(f"  Stub layer switch bought nothing - reverted")
+
     # No coupled chain could be routed and relocation didn't help (e.g. a dense
     # connector fan-out whose pads are too tightly pitched to drop relocation
     # vias - tigard /USB_D on a congested F.Cu). Rather than leave the pair
@@ -809,6 +829,57 @@ def route_multipoint_diff_pair(state, pair: DiffPairNet, pair_name: str,
     print(f"  Coupled routing failed and relocation unavailable - deferring the "
           f"whole pair to single-ended")
     return [], None, list(terminals)
+
+
+def _switch_blocked_terminal_stubs(state, pair: DiffPairNet, terminals):
+    """Move the escape stubs of blocked terminals (own layer >=45% walled)
+    onto the most-open other layer, validate_swap-checked; the pad vias size
+    themselves via fitting_pad_via. Returns [(segment_mods, new_vias)] undo
+    tokens, empty when nothing switched. Bare-pad terminals (no stub) are
+    left to the relocation path."""
+    from stub_layer_switching import (get_stub_info, apply_stub_layer_switch,
+                                      validate_swap)
+    config = state.config
+    pcb_data = state.pcb_data
+    obstacles = state.diff_pair_base_obstacles
+    switched = []
+    for term in terminals:
+        pp, nn = term
+        cx, cy = _terminal_center(term)
+        own_layer = _pad_layer(pp, config)
+        own_idx = config.layers.index(own_layer)
+        if obstacles is None or _blocked_fraction(config, obstacles, cx, cy,
+                                                  own_idx) < 0.45:
+            continue
+        ep = _terminal_stub_endpoint(pcb_data, term, config)
+        if ep is None:
+            continue
+        stub_layer = config.layers[ep[4]]
+        stub_p = get_stub_info(pcb_data, pp.net_id, ep[5], ep[6], stub_layer)
+        stub_n = get_stub_info(pcb_data, nn.net_id, ep[7], ep[8], stub_layer)
+        if stub_p is None or stub_n is None:
+            continue
+        ranked = sorted(
+            (l for l in config.layers if l != stub_layer),
+            key=lambda l: _blocked_fraction(config, obstacles, cx, cy,
+                                            config.layers.index(l)))
+        for dest in ranked:
+            ok, reason = validate_swap(
+                stub_p, stub_n, dest, {}, pcb_data, config,
+                swap_partner_net_ids={pp.net_id, nn.net_id})
+            if not ok:
+                continue
+            mods_all, vias_all = [], []
+            for st in (stub_p, stub_n):
+                vias, mods = apply_stub_layer_switch(pcb_data, st, dest,
+                                                     config, debug=False)
+                vias_all += vias
+                mods_all += mods
+            print(f"  Stub layer switch: {pp.component_ref}:"
+                  f"{pp.pad_number}/{nn.pad_number} {stub_layer} -> {dest}")
+            switched.append((mods_all, vias_all))
+            break
+    return switched
 
 
 def _route_terminal_set(state, pair: DiffPairNet, pair_name: str,
