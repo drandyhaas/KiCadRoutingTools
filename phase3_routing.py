@@ -584,8 +584,14 @@ def run_phase3_tap_routing(
 
     total_multipoint_nets = len(state.pending_multipoint_nets)
     net_index = 0
-    for net_id, main_result in _order_nets_by_boxed_in_risk(
-            state.pending_multipoint_nets, pcb_data):
+    _p3_pairs = list(_order_nets_by_boxed_in_risk(
+        state.pending_multipoint_nets, pcb_data))
+    # Net-story recording: the tap-routing order is part of every deferred
+    # terminal's story (which siblings sealed a ball first, and why).
+    state.story_phase3_order = [
+        (pcb_data.nets[nid].name if nid in pcb_data.nets else str(nid))
+        for nid, _ in _p3_pairs]
+    for net_id, main_result in _p3_pairs:
         # Check for cancellation at start of each phase 3 iteration
         if cancel_check and cancel_check():
             print("\nPhase 3 cancelled by user")

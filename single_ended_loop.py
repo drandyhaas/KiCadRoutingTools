@@ -543,6 +543,14 @@ def route_single_ended_nets(
             config.bus_member_net_ids = bus_net_ids_set
             state.bus_net_to_group = bus_net_to_group
             state.bus_corridors = bus_corridors
+            # Net-story recording: each member's group/position/corridor.
+            for _bnid, _bg in bus_net_to_group.items():
+                record_net_event(state, _bnid, "bus_member", {
+                    "group": _bg.name,
+                    "position": (_bg.net_ids.index(_bnid)
+                                 if _bnid in _bg.net_ids else None),
+                    "members": len(_bg.net_ids),
+                    "corridor_planned": _bg.name in bus_corridors})
 
     for net_name, net_id in single_ended_nets:
         if user_quit:
@@ -797,6 +805,14 @@ def route_single_ended_nets(
                         source_xy=single_source_xy,
                         obstacle_cache=obstacle_cache
                     )
+                    # Net-story recording: the named wall at this failure.
+                    record_net_event(state, net_id, "blocked_by", {
+                        "blockers": [
+                            {"net": b.net_name, "cells": b.blocked_count,
+                             "unique": b.unique_cells,
+                             "near_target": b.near_target_cells,
+                             "validator_named": b.validator_named}
+                            for b in (blockers or [])[:6]]})
                     print_blocking_analysis(blockers, blocked_cells=blocked_cells,
                                            pcb_data=pcb_data, config=config,
                                            nets_to_route=remaining_net_ids)

@@ -2786,9 +2786,20 @@ def route_multipoint_main(
     # dense-first overrides pick which edge Phase 1 actually routes now
     # (everything else waits for Phase 3, AFTER all other nets' mains).
     mst_edges = sorted(mst_edges, key=lambda e: -e[2])
+    _edges_before = list(mst_edges)
     mst_edges = _select_multipoint_main_edge(pcb_data, pad_info,
                                              pad_components, mst_edges,
                                              attraction_path)
+    # Net-story note: how the main edge was chosen (longest-first default,
+    # corridor-span re-realization/promotion, or dense-first reorder).
+    if mst_edges and _edges_before and mst_edges[0] != _edges_before[0]:
+        _sel_note = {'mode': ('corridor-span' if attraction_path
+                              else 'dense-first'),
+                     'main_edge': list(mst_edges[0][:2]),
+                     'displaced_longest': list(_edges_before[0][:2])}
+    else:
+        _sel_note = {'mode': 'longest-first',
+                     'main_edge': list(mst_edges[0][:2]) if mst_edges else None}
 
     # Distribute guide-corridor waypoints across the MST edges: each waypoint
     # steers the edge it's nearest to, so the net follows the drawn line across
@@ -3029,6 +3040,7 @@ def route_multipoint_main(
                     'pad_components': pad_components,
                     'original_segments': [],
                     'mst_edges': [_dummy] + mst_edges,
+                    'edge_selection_note': _sel_note,
                     'waypoint_buckets': waypoint_buckets,
                     'phase1_exhausted': True,
                     'tap_edges_routed': 0,
@@ -3100,6 +3112,7 @@ def route_multipoint_main(
         'original_segments': segments,
         # Store MST edges for Phase 3 (sorted longest first)
         'mst_edges': mst_edges,
+        'edge_selection_note': _sel_note,
         # Per-edge guide-corridor waypoint buckets (issue #7), for Phase 3 taps
         'waypoint_buckets': waypoint_buckets,
         # Initial tap stats (Phase 1 connects 2 pads via 1 edge)

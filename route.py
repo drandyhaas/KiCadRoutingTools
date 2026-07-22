@@ -2007,6 +2007,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print(f"{RED}  final reconciliation pass failed: {_e}{RESET}")
 
 
+    # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
+    # net -- bus membership, ordering, failures with named blockers, rips,
+    # rescues, Phase-3 tap order, costs -- assembled from state.
+    from net_story import net_story_enabled, dump_net_story
+    if net_story_enabled():
+        try:
+            dump_net_story(state, output_file or input_file)
+        except Exception as _e:
+            print(f"  net story dump failed: {_e}")
+
     if return_results:
         return successful, failed, total_time, results_data
     return successful, failed, total_time
