@@ -916,7 +916,13 @@ def get_unit_routing_info(
         if len(net_segments) < 2:
             continue
 
-        groups = find_connected_groups(net_segments)
+        # Via-AWARE grouping: without vias= a route that changes layers
+        # falls apart into per-layer fragments, and a fully-routed coupled
+        # net then warns "Could not find pads for both stub groups" and
+        # loses its MPS unit info (ordering-only impact, but noisy and
+        # wrong). Same call shape as get_net_endpoints Case 1.
+        net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+        groups = find_connected_groups(net_segments, vias=net_vias)
         if len(groups) < 2:
             continue
 

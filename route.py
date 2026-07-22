@@ -1404,6 +1404,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _committed_seg_ids.update(id(s) for s in pcb_data.segments)
         _committed_via_ids.update(id(v) for v in pcb_data.vias)
 
+    # Checkpoint stop skips the cleanup pipeline, but the FREEZE must still
+    # happen: the #220/#284 stale-input strip below grades any input copper
+    # absent from the committed snapshot as stale -- with an empty snapshot
+    # it stripped EVERY routed net's input copper from the written file
+    # (checkpoint boards shipped bus nets consisting only of their new tap
+    # segments; 31-segment trunks vanished). The board at this point IS what
+    # routing committed, which is exactly the freeze semantics.
+    if _ckpt_stop:
+        _freeze_committed()
     _cleanup = None if _ckpt_stop else run_post_route_cleanup(
         results, pcb_data, sweep_scope_ids, config,
         freeze_hook=_freeze_committed,
