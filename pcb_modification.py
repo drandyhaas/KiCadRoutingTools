@@ -520,6 +520,68 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                     used.add(i); used.add(j)
                     break
 
+    # Via->pad graze bridge (#470 class 1): a same-net via whose barrel edge
+    # sits within a graze of an SMD pad's copper -- a rescue/late-pass
+    # terminal via parked BESIDE the ball it serves, barrel microns short of
+    # the pad, electrically credited only through other copper. Neither party
+    # is a segment dangle (the via anchors its own termini; the pad has no
+    # free end), so the cap-overlap pass above never sees this joint class.
+    # Firm it the soft-joint way: a short stub from via center to pad center
+    # (both ends deep inside own copper), same clears() gate, never moving
+    # the via. Joints already served by a DIRECT stub (an existing segment
+    # with one endpoint on the barrel and the other inside the pad -- every
+    # healthy dogbone) are skipped.
+    via_pad_conns = []
+    for vp_net, vlist in via_by_net.items():
+        if scope_net_ids is not None and vp_net not in scope_net_ids:
+            continue
+        vp_pads = [p for p in pcb_data.pads_by_net.get(vp_net, [])
+                   if not getattr(p, 'drill', 0) and p.size_x and p.size_y]
+        if not vp_pads:
+            continue
+        vp_segs = [s for s in pcb_data.segments
+                   if s.net_id == vp_net and not getattr(s, 'graphic', False)]
+        for vx, vy, vr in vlist:
+            if vr <= 0:
+                continue
+            for p in vp_pads:
+                if (abs(vx - p.global_x) > p.size_x / 2 + vr + 0.2 or
+                        abs(vy - p.global_y) > p.size_y / 2 + vr + 0.2):
+                    continue
+                g = point_to_pad_distance(vx, vy, p) - vr
+                # Graze class only: barrel edge within (-0.05, +track_width)
+                # of the pad copper edge. Deeper bites are genuine joints;
+                # farther apart is a route's business, not a joint's.
+                if g < -0.05 or g >= config.track_width:
+                    continue
+                vp_layers = [L for L in p.layers if L.endswith('.Cu')]
+                if not vp_layers:
+                    continue
+                vp_layer = vp_layers[0]
+                served = False
+                for s2 in vp_segs:
+                    if s2.layer != vp_layer:
+                        continue
+                    for (ax, ay, bx2, by2) in (
+                            (s2.start_x, s2.start_y, s2.end_x, s2.end_y),
+                            (s2.end_x, s2.end_y, s2.start_x, s2.start_y)):
+                        if (math.hypot(ax - vx, ay - vy) <= vr + 1e-6 and
+                                point_to_pad_distance(bx2, by2, p) <= 1e-3):
+                            served = True
+                            break
+                    if served:
+                        break
+                if served:
+                    continue
+                w2 = min(config.track_width, p.size_x, p.size_y, 2 * vr)
+                if not clears(vp_net, vx, vy, p.global_x, p.global_y,
+                              vp_layer, w2):
+                    continue  # bridge would graze foreign copper: leave for DRC
+                via_pad_conns.append(Segment(
+                    start_x=vx, start_y=vy,
+                    end_x=p.global_x, end_y=p.global_y,
+                    width=w2, layer=vp_layer, net_id=vp_net))
+
     # Terminal corner-graze web (issue #416): a degree-1 free end whose cap
     # overlaps a same-net pad only near a CORNER joins through a sub-floor copper
     # web -- connected and DRC-clean, but a fab hazard. Firm it the soft-joint
@@ -589,8 +651,8 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                                      width=w, layer=s.layer, net_id=s.net_id))
             break  # one connector firms the joint; move to the next segment
 
-    if new_conns or web_conns:
-        for c in new_conns + web_conns:
+    if new_conns or web_conns or via_pad_conns:
+        for c in new_conns + web_conns + via_pad_conns:
             pcb_data.segments.append(c)
         # Tagged so accounting/summary code can tell this cleanup copper from a
         # net's routed result (it has no net-level identity of its own).
@@ -600,7 +662,10 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
         if web_conns:
             results.append({'new_segments': web_conns, 'new_vias': [],
                             'cleanup': 'terminal_web_connector'})
-    return len(new_conns) + len(web_conns)
+        if via_pad_conns:
+            results.append({'new_segments': via_pad_conns, 'new_vias': [],
+                            'cleanup': 'via_pad_bridge'})
+    return len(new_conns) + len(web_conns) + len(via_pad_conns)
 
 
 # ---------------------------------------------------------------------------
