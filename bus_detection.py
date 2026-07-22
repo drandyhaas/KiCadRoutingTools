@@ -303,3 +303,26 @@ def get_attraction_neighbor(
             return routed_paths[right_neighbor]
 
     return None
+
+
+def bus_attraction_context(
+    net_id: int,
+    bus_net_to_group: Optional[Dict[int, BusGroup]],
+    bus_corridors: Optional[Dict[str, List[Tuple[int, int, int]]]],
+    routed_paths: Optional[Dict[int, List[Tuple[int, int, int]]]] = None
+) -> Tuple[Optional[List[Tuple[int, int, int]]], bool]:
+    """(attraction_path, reverse_direction) for a bus member.
+
+    The one place that encodes the priority every routing site must share:
+    the group's PLANNED corridor first (one centerline for the whole group,
+    guide included), else an already-routed neighbor's path; route from the
+    clustered endpoints when the clique was target-based. Non-members get
+    (None, False). Callers pass whatever paths dict they track (the main
+    loop's sampled bus paths, the reroute loop's routed_net_paths) or None.
+    """
+    bg = (bus_net_to_group or {}).get(net_id)
+    if bg is None:
+        return None, False
+    attr = ((bus_corridors or {}).get(bg.name)
+            or get_attraction_neighbor(bg, net_id, routed_paths or {}))
+    return attr, (bg.clique_endpoint == "target")

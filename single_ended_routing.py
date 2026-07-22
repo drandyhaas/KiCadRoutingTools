@@ -2522,12 +2522,147 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
     }
 
 
+def _dense_fanout_refs(pcb_data: PCBData) -> set:
+    """References of high-density fanned-out packages (BGA/QFN/QFP with a
+    real ball/pin field). Computed once per board and cached on pcb_data --
+    package classification walks every footprint's pads."""
+    refs = getattr(pcb_data, '_dense_fanout_refs', None)
+    if refs is None:
+        from kicad_parser import detect_package_type
+        refs = {ref for ref, fp in pcb_data.footprints.items()
+                if len(fp.pads) >= 16
+                and detect_package_type(fp) in ('BGA', 'QFN', 'QFP')}
+        pcb_data._dense_fanout_refs = refs
+    return refs
+
+
+def _select_multipoint_main_edge(pcb_data, pad_info, pad_components,
+                                 mst_edges, attraction_path):
+    """Pick which MST edge Phase 1 routes NOW; the rest defer to Phase 3.
+
+    Phase 3 runs after every other net's main route, so the deferred
+    terminals route into whatever copper the neighbors left -- WHICH edge
+    goes first decides which terminal still has open ground around it.
+    Longest-first is the historical default. Two overrides, in priority
+    order:
+
+    1. Bus members with an attraction path: the main edge must SPAN the
+       corridor. The spanning terminal pair is re-realized from the
+       corridor's two endpoints (the MST realizes each component link by
+       its CLOSEST pair, which for a BGA-to-chip bus net is typically
+       pull-up-resistor-to-trunk -- leaving the dense-ball tap deferred
+       until its own siblings seal the ball field). Only off-corridor
+       taps stay in Phase 3. Disable with KICAD_BUS_MULTIPOINT_SPAN=0.
+    2. KICAD_MULTIPOINT_DENSE_FIRST=1 (experimental): edges landing on a
+       fanned-out high-density package (BGA/QFN/QFP) go first -- the same
+       seal risk exists without a bus corridor.
+
+    Returns the reordered edge list; element 0 is the main-edge candidate.
+    """
+    if not mst_edges:
+        return mst_edges
+
+    def comp(i):
+        return pad_components.get(i, i)
+
+    if attraction_path and os.environ.get(
+            'KICAD_BUS_MULTIPOINT_SPAN', '1') not in ('0', 'off', 'false'):
+        p0 = attraction_path[0]
+        p1 = attraction_path[-1]
+        # Best cross-component terminal pair bridging the corridor's ends
+        # (orientation-free score, grid Manhattan like the MST itself).
+        best = None
+        n = len(pad_info)
+        for i in range(n):
+            gxi, gyi = pad_info[i][0], pad_info[i][1]
+            di0 = abs(gxi - p0[0]) + abs(gyi - p0[1])
+            di1 = abs(gxi - p1[0]) + abs(gyi - p1[1])
+            for j in range(i + 1, n):
+                if comp(j) == comp(i):
+                    continue
+                gxj, gyj = pad_info[j][0], pad_info[j][1]
+                dj0 = abs(gxj - p0[0]) + abs(gyj - p0[1])
+                dj1 = abs(gxj - p1[0]) + abs(gyj - p1[1])
+                score = min(di0 + dj1, di1 + dj0)
+                if best is None or score < best[0]:
+                    best = (score, i, j)
+        if best is not None:
+            _, si, sj = best
+            span_comps = {comp(si), comp(sj)}
+            for pos, (a, b, _d) in enumerate(mst_edges):
+                if {comp(a), comp(b)} != span_comps:
+                    continue
+                dist = (abs(pad_info[si][3] - pad_info[sj][3])
+                        + abs(pad_info[si][4] - pad_info[sj][4]))
+                if {a, b} != {si, sj}:
+                    pa = pad_info[si][5] if len(pad_info[si]) > 5 else None
+                    pb = pad_info[sj][5] if len(pad_info[sj]) > 5 else None
+
+                    def _nm(p, k):
+                        # Terminal may be a Pad or an _EndpointStub free end
+                        ref = getattr(p, 'component_ref', None)
+                        return (f"{ref}.{getattr(p, 'pad_number', '?')}"
+                                if ref else f"terminal {k}")
+                    print(f"  Bus corridor: main edge re-realized to span the"
+                          f" corridor ({_nm(pa, si)} <-> {_nm(pb, sj)},"
+                          f" length={dist:.2f}mm); off-corridor taps deferred")
+                    # The ORIGINAL closest-pair realization stays behind the
+                    # span edge as the Phase-1 ladder's next candidate (a
+                    # boxed span terminal must not forfeit the trunk route
+                    # the closest pair could still win -- USB_D_P). The
+                    # duplicate component link is inert in Phase 3: the tap
+                    # loop only picks edges with exactly one routed side.
+                    return ([(si, sj, dist), (a, b, _d)] + mst_edges[:pos]
+                            + mst_edges[pos + 1:])
+                if pos != 0:
+                    print(f"  Bus corridor: corridor-spanning MST edge"
+                          f" promoted to main (was #{pos + 1} by length)")
+                return ([(si, sj, dist)] + mst_edges[:pos]
+                        + mst_edges[pos + 1:])
+            # The spanning components join through intermediates: no single
+            # edge to re-realize; promote the best corridor-scoring edge.
+            def span_score(e):
+                a, b = e[0], e[1]
+                da0 = abs(pad_info[a][0] - p0[0]) + abs(pad_info[a][1] - p0[1])
+                da1 = abs(pad_info[a][0] - p1[0]) + abs(pad_info[a][1] - p1[1])
+                db0 = abs(pad_info[b][0] - p0[0]) + abs(pad_info[b][1] - p0[1])
+                db1 = abs(pad_info[b][0] - p1[0]) + abs(pad_info[b][1] - p1[1])
+                return min(da0 + db1, da1 + db0)
+            pos = min(range(len(mst_edges)), key=lambda k: span_score(mst_edges[k]))
+            if pos != 0:
+                print(f"  Bus corridor: promoted corridor-nearest MST edge"
+                      f" to main (was #{pos + 1} by length)")
+                return ([mst_edges[pos]] + mst_edges[:pos]
+                        + mst_edges[pos + 1:])
+            return mst_edges
+
+    if os.environ.get('KICAD_MULTIPOINT_DENSE_FIRST', '') in ('1', 'true', 'on'):
+        dense_refs = _dense_fanout_refs(pcb_data)
+        if dense_refs:
+            def on_dense(i):
+                p = pad_info[i][5] if len(pad_info[i]) > 5 else None
+                return (p is not None
+                        and getattr(p, 'component_ref', None) in dense_refs)
+            dense_edges, other = [], []
+            for e in mst_edges:
+                (dense_edges if on_dense(e[0]) or on_dense(e[1])
+                 else other).append(e)
+            if dense_edges and other and mst_edges[0] is not dense_edges[0]:
+                print(f"  Dense-first: {len(dense_edges)} MST edge(s) on a"
+                      f" fanned-out package promoted ahead of {len(other)}")
+            if dense_edges:
+                return dense_edges + other
+
+    return mst_edges
+
+
 def route_multipoint_main(
     pcb_data: PCBData,
     net_id: int,
     config: GridRouteConfig,
     obstacles: 'GridObstacleMap',
-    pad_info: List[Tuple]
+    pad_info: List[Tuple],
+    attraction_path: Optional[List[Tuple[int, int, int]]] = None
 ) -> Optional[dict]:
     """
     Route only the main (longest MST segment) connection of a multi-point net.
@@ -2545,6 +2680,11 @@ def route_multipoint_main(
         config: Grid routing configuration
         obstacles: Pre-built obstacle map
         pad_info: List of (gx, gy, layer_idx, orig_x, orig_y, pad) from get_multipoint_net_pads()
+        attraction_path: Optional bus-corridor centerline (grid coords). The
+            main edge is chosen to SPAN it (see _select_multipoint_main_edge)
+            and the router attracts toward it, exactly as in
+            route_net_with_obstacles -- multipoint bus members used to route
+            their main edge blind.
 
     Returns:
         Routing result dict with:
@@ -2607,8 +2747,13 @@ def route_multipoint_main(
             'tap_pads_total': len(pad_info),
         }
 
-    # Sort MST edges by length (longest first)
+    # Sort MST edges by length (longest first), then let the corridor /
+    # dense-first overrides pick which edge Phase 1 actually routes now
+    # (everything else waits for Phase 3, AFTER all other nets' mains).
     mst_edges = sorted(mst_edges, key=lambda e: -e[2])
+    mst_edges = _select_multipoint_main_edge(pcb_data, pad_info,
+                                             pad_components, mst_edges,
+                                             attraction_path)
 
     # Distribute guide-corridor waypoints across the MST edges: each waypoint
     # steers the edge it's nearest to, so the net follows the drawn line across
@@ -2654,6 +2799,18 @@ def route_multipoint_main(
         if tgt_in_bga: zones.append("tgt:bga")
         print(f"  proximity_heuristic_cost={prox_h_cost} zones=[{', '.join(zones) if zones else 'none'}]")
 
+    # Bus attraction parameters -- same math as route_net_with_obstacles
+    # (multipoint members' mains used to skip this entirely, so a bus net
+    # whose topology was multipoint routed its trunk OFF the corridor).
+    bus_attraction_radius_grid = coord.to_grid_dist(config.bus_attraction_radius) if config.bus_attraction_radius > 0 else 0
+    bus_attraction_bonus = config.scaled_cell_units(config.bus_attraction_bonus) if config.bus_attraction_bonus > 0 else 0
+    bus_xlayer_pct = 0
+    if getattr(config, 'bus_enabled', False) and bus_attraction_bonus > 0:
+        try:
+            bus_xlayer_pct = int(os.environ.get('KICAD_BUS_XLAYER_PCT', '35'))
+        except ValueError:
+            bus_xlayer_pct = 35
+
     # Route farthest pair with probe routing (same as single-ended)
     router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
@@ -2662,7 +2819,16 @@ def route_multipoint_main(
                         layer_costs=config.get_layer_costs(),
                         proximity_heuristic_cost=prox_h_cost,
                         layer_direction_preferences=config.get_layer_direction_preferences(),
-                        direction_preference_cost=config.direction_preference_cost)
+                        direction_preference_cost=config.direction_preference_cost,
+                        attraction_radius=bus_attraction_radius_grid,
+                        attraction_bonus=bus_attraction_bonus,
+                        attraction_cross_layer_pct=bus_xlayer_pct)
+
+    if attraction_path:
+        router.set_attraction_path(attraction_path)
+        if config.verbose:
+            layers_in_path = set(p[2] for p in attraction_path)
+            print(f"    Bus attraction: {len(attraction_path)} path points, layers={layers_in_path}, radius={bus_attraction_radius_grid} grid, bonus={bus_attraction_bonus}")
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches

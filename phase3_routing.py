@@ -1231,14 +1231,24 @@ def _retry_victim_main_with_ripup(
                 ripped_route_layer_costs=state.ripped_route_layer_costs,
                 ripped_route_via_positions=state.ripped_route_via_positions)
 
+        # A bus-member victim re-routes with its corridor (no routed-paths
+        # dict tracked at Phase-3 depth; the planned corridor is the stable
+        # artifact and the usual hit).
+        from bus_detection import bus_attraction_context
+        _attr, _rev = bus_attraction_context(
+            victim_id, getattr(state, 'bus_net_to_group', None),
+            getattr(state, 'bus_corridors', None))
         if was_multipoint:
             multipoint_pads = get_multipoint_net_pads(pcb_data, victim_id, config)
             if multipoint_pads:
-                result = route_multipoint_main(pcb_data, victim_id, config, obstacles, multipoint_pads)
+                result = route_multipoint_main(pcb_data, victim_id, config, obstacles, multipoint_pads,
+                                               attraction_path=_attr)
             else:
-                result = route_net_with_obstacles(pcb_data, victim_id, config, obstacles)
+                result = route_net_with_obstacles(pcb_data, victim_id, config, obstacles,
+                                                  attraction_path=_attr, reverse_direction=_rev)
         else:
-            result = route_net_with_obstacles(pcb_data, victim_id, config, obstacles)
+            result = route_net_with_obstacles(pcb_data, victim_id, config, obstacles,
+                                              attraction_path=_attr, reverse_direction=_rev)
 
         if result and not result.get('failed') \
                 and (result.get('path') or result.get('phase1_exhausted')):
@@ -1323,16 +1333,24 @@ def _reroute_phase3_ripped_nets(
         # Check if this was originally a multi-point net (from saved_result)
         was_multipoint = saved_result and saved_result.get('mst_edges') and len(saved_result.get('mst_edges', [])) > 1
 
+        # Ripped bus members reroute with their corridor here too
+        from bus_detection import bus_attraction_context
+        _attr, _rev = bus_attraction_context(
+            ripped_net_id, getattr(state, 'bus_net_to_group', None),
+            getattr(state, 'bus_corridors', None))
         if was_multipoint:
             # Use multipoint routing for multi-point nets
             multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
             if multipoint_pads:
-                result = route_multipoint_main(pcb_data, ripped_net_id, config, obstacles, multipoint_pads)
+                result = route_multipoint_main(pcb_data, ripped_net_id, config, obstacles, multipoint_pads,
+                                               attraction_path=_attr)
             else:
-                result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles)
+                result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles,
+                                                  attraction_path=_attr, reverse_direction=_rev)
         else:
             # Route the main path for simple nets
-            result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles)
+            result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles,
+                                              attraction_path=_attr, reverse_direction=_rev)
 
         # A victim whose main re-route fails BARE strands, and the #85
         # arbitration then abandons the (successful) tap rip-up that ripped

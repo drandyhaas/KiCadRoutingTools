@@ -149,11 +149,20 @@ def run_reroute_loop(
                     ripped_route_via_positions=state.ripped_route_via_positions
                 )
 
+            # A ripped bus member reroutes WITH its corridor (or a routed
+            # neighbor); previously it rerouted blind, so every rip degraded
+            # the river. Hoisted above the multipoint split so multipoint
+            # members get corridor-spanning main-edge selection + attraction.
+            from bus_detection import bus_attraction_context
+            _attr, _rev = bus_attraction_context(
+                ripped_net_id, getattr(state, 'bus_net_to_group', None),
+                getattr(state, 'bus_corridors', None), routed_net_paths)
             # Check for multi-point net (3+ pads, no existing segments since they were ripped)
             multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
             if multipoint_pads:
                 print(f"  Multi-point net with {len(multipoint_pads)} pads - routing main + taps")
-                result = route_multipoint_main(pcb_data, ripped_net_id, config, obstacles, multipoint_pads)
+                result = route_multipoint_main(pcb_data, ripped_net_id, config, obstacles, multipoint_pads,
+                                               attraction_path=_attr)
                 # If Phase 1 succeeded, immediately do Phase 3 (tap routing)
                 if result and not result.get('failed') and result.get('is_multipoint'):
                     main_segments_count = len(result['new_segments'])
@@ -175,18 +184,6 @@ def run_reroute_loop(
                         if ripped_net_id in state.pending_multipoint_nets:
                             del state.pending_multipoint_nets[ripped_net_id]
             else:
-                _b2g = getattr(state, 'bus_net_to_group', None) or {}
-                _attr = None
-                _rev = False
-                if ripped_net_id in _b2g:
-                    # A ripped bus member reroutes WITH its corridor (or a
-                    # routed neighbor); previously it rerouted blind, so
-                    # every rip degraded the river.
-                    from bus_detection import get_attraction_neighbor
-                    _bg = _b2g[ripped_net_id]
-                    _attr = ((getattr(state, 'bus_corridors', None) or {}).get(_bg.name)
-                             or get_attraction_neighbor(_bg, ripped_net_id, routed_net_paths))
-                    _rev = (_bg.clique_endpoint == "target")
                 result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles,
                                                   attraction_path=_attr,
                                                   reverse_direction=_rev)
@@ -399,10 +396,16 @@ def run_reroute_loop(
                                     ripped_route_via_positions=state.ripped_route_via_positions
                                 )
 
+                            # Bus attraction for the retry (multipoint too)
+                            from bus_detection import bus_attraction_context
+                            _attr, _rev = bus_attraction_context(
+                                ripped_net_id, getattr(state, 'bus_net_to_group', None),
+                                getattr(state, 'bus_corridors', None), routed_net_paths)
                             # Check for multi-point net in retry as well
                             retry_multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
                             if retry_multipoint_pads:
-                                retry_result = route_multipoint_main(pcb_data, ripped_net_id, config, retry_obstacles, retry_multipoint_pads)
+                                retry_result = route_multipoint_main(pcb_data, ripped_net_id, config, retry_obstacles, retry_multipoint_pads,
+                                                                     attraction_path=_attr)
                                 if retry_result and not retry_result.get('failed') and retry_result.get('is_multipoint'):
                                     tap_result = route_multipoint_taps(pcb_data, ripped_net_id, config, retry_obstacles, retry_result)
                                     if tap_result:
@@ -418,15 +421,6 @@ def run_reroute_loop(
                                         if ripped_net_id in state.pending_multipoint_nets:
                                             del state.pending_multipoint_nets[ripped_net_id]
                             else:
-                                _b2g = getattr(state, 'bus_net_to_group', None) or {}
-                                _attr = None
-                                _rev = False
-                                if ripped_net_id in _b2g:
-                                    from bus_detection import get_attraction_neighbor
-                                    _bg = _b2g[ripped_net_id]
-                                    _attr = ((getattr(state, 'bus_corridors', None) or {}).get(_bg.name)
-                                             or get_attraction_neighbor(_bg, ripped_net_id, routed_net_paths))
-                                    _rev = (_bg.clique_endpoint == "target")
                                 retry_result = route_net_with_obstacles(pcb_data, ripped_net_id, config, retry_obstacles,
                                                                         attraction_path=_attr,
                                                                         reverse_direction=_rev)
