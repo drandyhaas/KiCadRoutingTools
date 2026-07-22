@@ -813,6 +813,15 @@ def route_multipoint_diff_pair(state, pair: DiffPairNet, pair_name: str,
         if leg_results is not None:
             print(f"  STUB LAYER SWITCH SUCCESS: coupled chain routed after "
                   f"moving {len(switched)} terminal stub pair(s)")
+            # Persist the switch for the output writer: the moved stubs are
+            # PRE-EXISTING file segments (relabeled in memory only) and the
+            # pad vias live outside any route result -- without these the
+            # written file keeps the stubs on the old layer and drops the
+            # vias, shipping a board whose coupled route floats (the
+            # in-memory board and the file silently diverge).
+            for mods, vias in switched:
+                state.all_segment_modifications.extend(mods)
+                state.all_swap_vias.extend(vias)
             return leg_results, merged, se
         from stub_layer_switching import revert_stub_layer_switch
         for mods, vias in reversed(switched):
