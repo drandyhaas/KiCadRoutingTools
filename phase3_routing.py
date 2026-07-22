@@ -745,6 +745,14 @@ def run_phase3_tap_routing(
             stats.tap_edges_routed += completed_result.get('tap_edges_routed', 0) - 1  # -1 for Phase 1
             stats.tap_edges_failed += completed_result.get('tap_edges_failed', 0)
 
+        # #444 in-loop seam re-ask: polish THIS net's completed tree now,
+        # so the reclaimed copper frees room for every net tapped after it.
+        seam_reask_one_net(net_id, pcb_data, config, state, base_obstacles,
+                           gnd_net_id, all_unrouted_net_ids, routed_net_ids,
+                           remaining_net_ids, routed_net_paths, routed_results,
+                           diff_pair_by_net_id, results, track_proximity_cache,
+                           layer_map)
+
         net_elapsed = time.time() - net_start_time
         net_iterations = completed_result.get('iterations', 0) if completed_result else 0
         print(f"  Net total time: {net_elapsed:.2f}s, {net_iterations} iterations")
@@ -1706,3 +1714,251 @@ def _reroute_phase3_ripped_nets(
             stranded.append((item, pads_lost))
 
     return stranded
+
+
+def _seam_ratio_floor():
+    try:
+        return float(os.environ.get('KICAD_SEAM_SE_RATIO', '1.3'))
+    except ValueError:
+        return 1.3
+
+
+def seam_reask_one_net(net_id, pcb_data, config, state, base_obstacles,
+                       gnd_net_id, all_unrouted_net_ids, routed_net_ids,
+                       remaining_net_ids, routed_net_paths, routed_results,
+                       diff_pair_by_net_id, results, track_proximity_cache,
+                       layer_map):
+    """#444 SE seam dissolution for ONE net, run IN-LOOP right after the
+    net's Phase-3 taps complete -- so the reclaimed copper frees room for
+    every net tapped after it, not just for the final board. The net's
+    composed tree (main edge + taps welded across the run) is ripped through
+    the custody primitives and re-routed WHOLE against the current board
+    (rip-up disabled: the polish never churns other nets); the better tree
+    (length + 2/via) ships, else the original is restored. Candidates:
+    fully-connected composed trees whose length exceeds KICAD_SEAM_SE_RATIO
+    (default 1.3) times the straight-line MST bound over their pads.
+    Returns True when the tree was replaced."""
+    import math
+    if os.environ.get('KICAD_SEAM_REASK', '') in ('0', 'off', 'false'):
+        return False
+    r_old = routed_results.get(net_id)
+    if (not r_old or r_old.get('failed') or r_old.get('failed_pads_info')
+            or not r_old.get('is_multipoint')):
+        return False
+    if diff_pair_by_net_id and net_id in diff_pair_by_net_id:
+        return False
+    if r_old.get('tap_edges_routed', 1) <= 1:
+        return False  # single-edge tree: one A* already, nothing composed
+    segs = r_old.get('new_segments') or []
+    if not segs:
+        return False
+
+    def _len_of(_ss):
+        return sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                   for s in _ss)
+
+    pts = [(p.global_x, p.global_y)
+           for p in pcb_data.pads_by_net.get(net_id, [])]
+    if len(pts) < 2:
+        return False
+    in_tree = [pts[0]]
+    rest = pts[1:]
+    bound = 0.0
+    while rest:
+        best = None
+        for q in rest:
+            d = min(math.hypot(q[0] - t[0], q[1] - t[1]) for t in in_tree)
+            if best is None or d < best[0]:
+                best = (d, q)
+        bound += best[0]
+        in_tree.append(best[1])
+        rest.remove(best[1])
+    if bound <= 0.5:
+        return False
+    old_len = _len_of(segs)
+    if old_len / bound < _seam_ratio_floor():
+        return False
+
+    from dataclasses import replace as _dc_replace
+    name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else str(net_id)
+    old_score = old_len + 2.0 * len(r_old.get('new_vias') or [])
+    print(f"  #444 seam re-ask: {name} tree is {old_len / bound:.2f}x its MST "
+          f"bound -- re-asking whole")
+    saved, ripped_ids, was_in = rip_up_net(
+        net_id, pcb_data, routed_net_ids, routed_net_paths, routed_results,
+        diff_pair_by_net_id or {}, remaining_net_ids, results, config,
+        track_proximity_cache, state.working_obstacles,
+        state.net_obstacles_cache, state.ripped_route_layer_costs,
+        state.ripped_route_via_positions, layer_map)
+    if saved is None:
+        return False
+    cfg_polish = _dc_replace(config, max_rip_up_count=0)
+    _reroute_phase3_ripped_nets(
+        [(net_id, saved, ripped_ids, was_in)], pcb_data, cfg_polish, state,
+        routed_net_ids, remaining_net_ids, all_unrouted_net_ids,
+        routed_net_paths, routed_results, diff_pair_by_net_id, results,
+        track_proximity_cache, layer_map, base_obstacles, gnd_net_id)
+    r_new = routed_results.get(net_id)
+    new_segs = (r_new or {}).get('new_segments') or []
+    new_ok = bool(r_new and not r_new.get('failed')
+                  and not r_new.get('failed_pads_info') and new_segs)
+    new_score = (_len_of(new_segs)
+                 + 2.0 * len((r_new or {}).get('new_vias') or []))
+    if new_ok and new_score < old_score - 0.2:
+        print(f"  #444 seam re-ask: {name} tree replaced "
+              f"({old_score:.1f} -> {new_score:.1f} score)")
+        record_net_event(state, net_id, 'seam_reask',
+                         {'old_score': round(old_score, 2),
+                          'new_score': round(new_score, 2)})
+        return True
+    if net_id in routed_results:
+        rip_up_net(
+            net_id, pcb_data, routed_net_ids, routed_net_paths,
+            routed_results, diff_pair_by_net_id or {}, remaining_net_ids,
+            results, config, track_proximity_cache, state.working_obstacles,
+            state.net_obstacles_cache, state.ripped_route_layer_costs,
+            state.ripped_route_via_positions, layer_map)
+    restore_net(net_id, saved, ripped_ids, was_in, pcb_data, routed_net_ids,
+                routed_net_paths, routed_results, diff_pair_by_net_id or {},
+                remaining_net_ids, results, config, track_proximity_cache,
+                layer_map, state.working_obstacles, state.net_obstacles_cache,
+                state.ripped_route_layer_costs,
+                state.ripped_route_via_positions,
+                refused_sink=state.collision_refused_net_ids)
+    return False
+
+
+def se_seam_reask(state, pcb_data, config, base_obstacles, gnd_net_id,
+                  all_unrouted_net_ids, routed_net_ids, remaining_net_ids,
+                  routed_net_paths, routed_results, diff_pair_by_net_id,
+                  results, track_proximity_cache, layer_map):
+    """#444 SE seam dissolution (KICAD_SEAM_REASK=0 disables).
+
+    After Phase 3, a fully-connected multipoint net is a COMPOSITION: a main
+    edge routed early in the loop plus taps welded on across the run, each
+    piece optimal at its own moment against a board that no longer exists.
+    Re-ask each suspect tree WHOLE: rip it (custody primitives keep the map/
+    caches/ledgers consistent), route it once against the FINAL board through
+    the same machinery ripped victims use (main + taps, rip-up disabled so
+    the polish never churns other nets), and keep whichever tree scores
+    better (length + 2/via). Candidates: composed nets whose routed length
+    exceeds KICAD_SEAM_SE_RATIO (default 1.3) times the straight-line MST
+    lower bound over their pads, worst first, capped at KICAD_SEAM_SE_MAX
+    (default 16)."""
+    import math
+    if os.environ.get('KICAD_SEAM_REASK', '') in ('0', 'off', 'false'):
+        return 0
+    from dataclasses import replace as _dc_replace
+    try:
+        ratio_floor = float(os.environ.get('KICAD_SEAM_SE_RATIO', '1.3'))
+    except ValueError:
+        ratio_floor = 1.3
+    try:
+        cap = int(os.environ.get('KICAD_SEAM_SE_MAX', '16'))
+    except ValueError:
+        cap = 16
+
+    def _len_of(segs):
+        return sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                   for s in segs)
+
+    def _mst_bound(nid):
+        pts = [(p.global_x, p.global_y)
+               for p in pcb_data.pads_by_net.get(nid, [])]
+        if len(pts) < 2:
+            return 0.0
+        in_tree = [pts[0]]
+        rest = pts[1:]
+        total = 0.0
+        while rest:
+            best = None
+            for q in rest:
+                d = min(math.hypot(q[0] - t[0], q[1] - t[1]) for t in in_tree)
+                if best is None or d < best[0]:
+                    best = (d, q)
+            total += best[0]
+            in_tree.append(best[1])
+            rest.remove(best[1])
+        return total
+
+    candidates = []
+    for nid, r in routed_results.items():
+        if not r or r.get('failed') or r.get('failed_pads_info'):
+            continue
+        if diff_pair_by_net_id and nid in diff_pair_by_net_id:
+            continue
+        if not r.get('is_multipoint'):
+            continue
+        segs = r.get('new_segments') or []
+        if not segs:
+            continue
+        bound = _mst_bound(nid)
+        if bound <= 0.5:
+            continue
+        L = _len_of(segs)
+        if L / bound < ratio_floor:
+            continue
+        candidates.append((L / bound, L, nid))
+    candidates.sort(reverse=True)
+    candidates = candidates[:cap]
+    if not candidates:
+        return 0
+    print(f"\n=== #444 SE seam re-ask: {len(candidates)} composed tree(s) "
+          f"above {ratio_floor:.2f}x MST bound ===")
+    cfg_polish = _dc_replace(config, max_rip_up_count=0)
+    improved = 0
+    for _ratio, _old_len, nid in candidates:
+        name = pcb_data.nets[nid].name if nid in pcb_data.nets else str(nid)
+        r_old = routed_results.get(nid)
+        if not r_old:
+            continue
+        old_score = _old_len + 2.0 * len(r_old.get('new_vias') or [])
+        saved, ripped_ids, was_in = rip_up_net(
+            nid, pcb_data, routed_net_ids, routed_net_paths, routed_results,
+            diff_pair_by_net_id or {}, remaining_net_ids, results, config,
+            track_proximity_cache, state.working_obstacles,
+            state.net_obstacles_cache, state.ripped_route_layer_costs,
+            state.ripped_route_via_positions, layer_map)
+        if saved is None:
+            continue
+        _reroute_phase3_ripped_nets(
+            [(nid, saved, ripped_ids, was_in)], pcb_data, cfg_polish, state,
+            routed_net_ids, remaining_net_ids, all_unrouted_net_ids,
+            routed_net_paths, routed_results, diff_pair_by_net_id, results,
+            track_proximity_cache, layer_map, base_obstacles, gnd_net_id)
+        r_new = routed_results.get(nid)
+        new_segs = (r_new or {}).get('new_segments') or []
+        new_ok = bool(r_new and not r_new.get('failed')
+                      and not r_new.get('failed_pads_info') and new_segs)
+        new_score = (_len_of(new_segs)
+                     + 2.0 * len((r_new or {}).get('new_vias') or []))
+        if new_ok and new_score < old_score - 0.2:
+            improved += 1
+            print(f"  {name}: tree re-ask kept "
+                  f"({old_score:.1f} -> {new_score:.1f} score)")
+            record_net_event(state, nid, 'seam_reask',
+                             {'old_score': round(old_score, 2),
+                              'new_score': round(new_score, 2)})
+            continue
+        # Not better (or incomplete): rip whatever the re-ask left and
+        # restore the original tree through the same custody primitives.
+        if nid in routed_results:
+            rip_up_net(
+                nid, pcb_data, routed_net_ids, routed_net_paths,
+                routed_results, diff_pair_by_net_id or {}, remaining_net_ids,
+                results, config, track_proximity_cache,
+                state.working_obstacles, state.net_obstacles_cache,
+                state.ripped_route_layer_costs,
+                state.ripped_route_via_positions, layer_map)
+        restore_net(nid, saved, ripped_ids, was_in, pcb_data, routed_net_ids,
+                    routed_net_paths, routed_results,
+                    diff_pair_by_net_id or {}, remaining_net_ids, results,
+                    config, track_proximity_cache, layer_map,
+                    state.working_obstacles, state.net_obstacles_cache,
+                    state.ripped_route_layer_costs,
+                    state.ripped_route_via_positions,
+                    refused_sink=state.collision_refused_net_ids)
+    print(f"=== SE seam re-ask: {improved}/{len(candidates)} tree(s) "
+          f"improved ===")
+    return improved
+
