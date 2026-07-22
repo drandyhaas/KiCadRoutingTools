@@ -1053,6 +1053,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     from plane_fragility import register_plane_fragility
     register_plane_fragility(pcb_data, config, track_proximity_cache)
 
+    # Congestion v2 (#424): demand/capacity bins + owner terminals; per-net
+    # stamping happens at prepare (routing_context.stamp_congestion2).
+    from congestion_field import build_congestion2
+    config._congestion2 = build_congestion2(pcb_data, config,
+                                            list(all_net_ids_to_route))
+
     # Register rippable pre-existing nets as already-routed (issue #103):
     # blocking analysis iterates routed_net_paths (cells are recomputed from
     # pcb_data, so an empty path is fine), filter_rippable_blockers requires

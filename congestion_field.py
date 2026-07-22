@@ -147,3 +147,123 @@ def register_congestion_field(pcb_data: PCBData, config: GridRouteConfig,
     cells = compute_congestion_cells(pcb_data, config, len(config.layers))
     if len(cells):
         track_proximity_cache[CONGESTION_CACHE_KEY] = cells
+
+
+# ======================= Congestion v2 (#424) =======================
+# demand / capacity with owner exemption: congestion(bin) =
+# |distinct UNROUTED nets with a terminal in bin| / free_area(bin).
+# Demand decays by set arithmetic as nets complete (no copper rescan);
+# a net pays NOTHING within KICAD_CONGESTION2_EXEMPT_R (default 1.0mm)
+# of its own terminals -- the C5 disk-exemption pattern applied to the
+# congestion family, so owners' last-mile approach is never taxed.
+# Built once at batch start (build_congestion2 -> attach to config);
+# stamped per-net at prepare (stamp_congestion2). Off unless
+# KICAD_CONGESTION2_COST > 0.
+
+def congestion2_knobs():
+    def _f(name, dflt):
+        try:
+            return float(os.environ.get(name, str(dflt)) or dflt)
+        except ValueError:
+            return dflt
+    return {
+        'cost': _f('KICAD_CONGESTION2_COST', 0.0),
+        'thresh': _f('KICAD_CONGESTION2_THRESHOLD', 0.5),   # nets per mm^2 free
+        'bin': _f('KICAD_CONGESTION2_BIN', 1.0),
+        'exempt_r': _f('KICAD_CONGESTION2_EXEMPT_R', 1.0),
+        'ramp_top': _f('KICAD_CONGESTION2_RAMP_TOP', 2.0),  # ratio at full cost
+    }
+
+
+def build_congestion2(pcb_data, config, net_ids_to_route):
+    """Precompute bins {(bx,by): (free_area_mm2, owners frozenset)} plus
+    per-net terminal coords. Returns None when disabled."""
+    k = congestion2_knobs()
+    if k['cost'] <= 0:
+        return None
+    bin_mm = max(0.25, k['bin'])
+    num_layers = max(1, len(config.layers))
+    to_route = set(net_ids_to_route)
+
+    copper = {}
+    for s in pcb_data.segments:
+        cx, cy = (s.start_x + s.end_x) / 2, (s.start_y + s.end_y) / 2
+        b = (int(cx // bin_mm), int(cy // bin_mm))
+        ln = math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+        copper[b] = copper.get(b, 0.0) + ln * s.width
+    for v in pcb_data.vias:
+        b = (int(v.x // bin_mm), int(v.y // bin_mm))
+        copper[b] = copper.get(b, 0.0) + num_layers * math.pi * (v.size / 2) ** 2
+    terminals = {}
+    owners = {}
+    for nid in to_route:
+        pts = []
+        for p in pcb_data.pads_by_net.get(nid, []):
+            pts.append((p.global_x, p.global_y))
+        for s in pcb_data.segments:
+            if s.net_id == nid:
+                pts.append((s.start_x, s.start_y))
+                pts.append((s.end_x, s.end_y))
+        for v in pcb_data.vias:
+            if v.net_id == nid:
+                pts.append((v.x, v.y))
+        terminals[nid] = pts
+        for (x, y) in pts:
+            owners.setdefault((int(x // bin_mm), int(y // bin_mm)), set()).add(nid)
+    for p in getattr(pcb_data, 'pads', []) or []:
+        pass  # pad copper folded via per-net pads below
+    for nid, plist in getattr(pcb_data, 'pads_by_net', {}).items():
+        for p in plist:
+            b = (int(p.global_x // bin_mm), int(p.global_y // bin_mm))
+            copper[b] = copper.get(b, 0.0) + p.size_x * p.size_y
+    bin_area_total = bin_mm * bin_mm * num_layers
+    bins = {}
+    for b, own in owners.items():
+        used = copper.get(b, 0.0)
+        free = max(bin_area_total * 0.05, bin_area_total - used)
+        bins[b] = (free, frozenset(own))
+    n_hot = sum(1 for b, (fa, ow) in bins.items()
+                if len(ow) / fa > k['thresh'])
+    print(f"Congestion2 field: {len(bins)} demand bins, {n_hot} above "
+          f"threshold at batch start (cost={k['cost']}mm-equiv, "
+          f"thresh={k['thresh']}/mm2, exempt_r={k['exempt_r']}mm)")
+    return {'bins': bins, 'bin_mm': bin_mm, 'terminals': terminals, 'k': k}
+
+
+def stamp_congestion2(obstacles, config, net_id, routed_net_ids):
+    """Per-net prepare stamp: demand recomputed by set arithmetic, owner
+    disks exempted, rows applied as layer-proximity costs."""
+    d2 = getattr(config, '_congestion2', None)
+    if d2 is None:
+        return
+    k = d2['k']
+    bin_mm = d2['bin_mm']
+    routed = set(routed_net_ids)
+    own_pts = d2['terminals'].get(net_id, [])
+    coord = GridCoord(config.grid_step)
+    cell_cost = config.cell_cost(k['cost'])
+    num_layers = len(config.layers)
+    span = max(1, int(round(bin_mm / config.grid_step)))
+    r2 = k['exempt_r'] ** 2
+    rows = []
+    for (bx, by), (free, own) in d2['bins'].items():
+        demand = len(own - routed) - (1 if net_id in own else 0)
+        ratio = demand / free
+        if ratio <= k['thresh']:
+            continue
+        frac = min(1.0, (ratio - k['thresh']) / max(1e-9, k['ramp_top'] - k['thresh']))
+        c = int(cell_cost * frac)
+        if c <= 0:
+            continue
+        gx0, gy0 = coord.to_grid(bx * bin_mm, by * bin_mm)
+        for dx in range(span):
+            for dy in range(span):
+                x_mm = (bx + (dx + 0.5) / span) * bin_mm
+                y_mm = (by + (dy + 0.5) / span) * bin_mm
+                if any((x_mm - px) ** 2 + (y_mm - py) ** 2 <= r2
+                       for (px, py) in own_pts):
+                    continue
+                for li in range(num_layers):
+                    rows.append((li, gx0 + dx, gy0 + dy, c))
+    if rows:
+        obstacles.set_layer_proximity_batch(np.array(rows, dtype=np.int32))

@@ -319,6 +319,10 @@ def build_single_ended_obstacles(
 
     # Add track proximity costs
     merge_track_proximity_costs(obstacles, track_proximity_cache)
+    # Congestion v2 (#424): demand/capacity field, owner-exempt (no-op
+    # unless KICAD_CONGESTION2_COST > 0 and the field was built).
+    from congestion_field import stamp_congestion2
+    stamp_congestion2(obstacles, config, net_id, routed_net_ids)
 
     # Add ripped route avoidance costs
     if ripped_route_layer_costs is not None or ripped_route_via_positions is not None:
@@ -488,6 +492,8 @@ def prepare_obstacles_inplace(
 
     # Add track proximity costs
     merge_track_proximity_costs(working_obstacles, track_proximity_cache)
+    from congestion_field import stamp_congestion2
+    stamp_congestion2(working_obstacles, config, net_id, routed_net_ids)
 
     # Add ripped route avoidance costs (soft penalty for routing through ripped corridors)
     if ripped_route_layer_costs is not None or ripped_route_via_positions is not None:
