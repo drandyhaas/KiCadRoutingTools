@@ -385,6 +385,60 @@ def _commit_net_result(results, routed_results, net_id, new_result,
         _reconcile_multipoint_connectivity(new_result, pcb_data, config, net_id)
 
 
+def _phase3_stub_switch_retry(net_id, completed_result, pcb_data, config,
+                              state, obstacles, global_tap_offset,
+                              total_tap_edges, global_tap_failed):
+    """Stub layer switch for terminally-failed tap pads: a ball-field pad
+    whose escape stub is walled in on its own layer cannot be tapped by any
+    rip-up rung when the walls are pre-existing. MOVE the failed pads'
+    stubs to an open layer (the pad via sizes itself down the fab ladder,
+    so it drops even inside a dense field) and re-run the tap pass. Kept on
+    improvement (fewer failed pads), reverted exactly otherwise. The
+    multipoint twin of the initial-loop _stub_swap_rescue rung, which
+    multipoint nets never reach (their failures land here)."""
+    failed_pads = completed_result.get('failed_pads_info') or []
+    if not failed_pads:
+        return None
+    from stub_layer_switching import (switch_boxed_stub_near,
+                                      foreign_stub_registry,
+                                      revert_stub_layer_switch)
+    from single_ended_routing import route_multipoint_taps
+
+    registry = None
+    switched = []
+    moved_tips = set()
+    for fp in failed_pads[:3]:
+        fx, fy = fp.get('x'), fp.get('y')
+        if fx is None:
+            continue
+        if registry is None:
+            registry = foreign_stub_registry(pcb_data, net_id)
+        sw = switch_boxed_stub_near(pcb_data, net_id, config, fx, fy,
+                                    all_stubs_by_layer=registry,
+                                    moved_tips=moved_tips)
+        if sw is not None:
+            switched.append(sw)
+    if not switched:
+        return None
+
+    retry = route_multipoint_taps(
+        pcb_data, net_id, config, obstacles, dict(completed_result),
+        global_offset=global_tap_offset, global_total=total_tap_edges,
+        global_failed=global_tap_failed)
+    after = len((retry or {}).get('failed_pads_info') or []) \
+        if retry else len(failed_pads)
+    if retry and after < len(failed_pads):
+        print(f"  PHASE-3 STUB SWITCH: {len(failed_pads) - after} pad(s) "
+              f"reconnected after moving {len(switched)} stub(s)")
+        for seg_mods, new_vias, _from, _dest in switched:
+            state.all_segment_modifications.extend(seg_mods)
+            state.all_swap_vias.extend(new_vias)
+        return retry
+    for seg_mods, new_vias, _from, _dest in reversed(switched):
+        revert_stub_layer_switch(pcb_data, seg_mods, new_vias)
+    return None
+
+
 def run_phase3_tap_routing(
     state: RoutingState,
     pcb_data: PCBData,
@@ -536,6 +590,17 @@ def run_phase3_tap_routing(
                 )
                 if retry_result is not None:
                     completed_result = retry_result
+
+            # Stub layer switch for pads still failed after the rip ladder
+            # (the walls are usually pre-existing and unrippable; moving the
+            # pad's own stub to an open layer is the remaining move).
+            if completed_result.get('failed_pads_info'):
+                _sw = _phase3_stub_switch_retry(
+                    net_id, completed_result, pcb_data, config, state,
+                    obstacles, global_tap_offset, total_tap_edges,
+                    global_tap_failed)
+                if _sw is not None:
+                    completed_result = _sw
 
             # Flag pads still unconnected after this net's rip-up attempts. This
             # is a MID-RUN state, not a verdict: a later retry/fallback can still
@@ -1242,7 +1307,7 @@ def _retry_victim_main_with_ripup(
             multipoint_pads = get_multipoint_net_pads(pcb_data, victim_id, config)
             if multipoint_pads:
                 result = route_multipoint_main(pcb_data, victim_id, config, obstacles, multipoint_pads,
-                                               attraction_path=_attr)
+                                               attraction_path=_attr, state=state)
             else:
                 result = route_net_with_obstacles(pcb_data, victim_id, config, obstacles,
                                                   attraction_path=_attr, reverse_direction=_rev)
@@ -1343,7 +1408,7 @@ def _reroute_phase3_ripped_nets(
             multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
             if multipoint_pads:
                 result = route_multipoint_main(pcb_data, ripped_net_id, config, obstacles, multipoint_pads,
-                                               attraction_path=_attr)
+                                               attraction_path=_attr, state=state)
             else:
                 result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles,
                                                   attraction_path=_attr, reverse_direction=_rev)

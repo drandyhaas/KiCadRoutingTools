@@ -162,7 +162,7 @@ def run_reroute_loop(
             if multipoint_pads:
                 print(f"  Multi-point net with {len(multipoint_pads)} pads - routing main + taps")
                 result = route_multipoint_main(pcb_data, ripped_net_id, config, obstacles, multipoint_pads,
-                                               attraction_path=_attr)
+                                               attraction_path=_attr, state=state)
                 # If Phase 1 succeeded, immediately do Phase 3 (tap routing)
                 if result and not result.get('failed') and result.get('is_multipoint'):
                     main_segments_count = len(result['new_segments'])
@@ -405,7 +405,7 @@ def run_reroute_loop(
                             retry_multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
                             if retry_multipoint_pads:
                                 retry_result = route_multipoint_main(pcb_data, ripped_net_id, config, retry_obstacles, retry_multipoint_pads,
-                                                                     attraction_path=_attr)
+                                                                     attraction_path=_attr, state=state)
                                 if retry_result and not retry_result.get('failed') and retry_result.get('is_multipoint'):
                                     tap_result = route_multipoint_taps(pcb_data, ripped_net_id, config, retry_obstacles, retry_result)
                                     if tap_result:

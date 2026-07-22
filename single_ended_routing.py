@@ -2673,7 +2673,9 @@ def route_multipoint_main(
     config: GridRouteConfig,
     obstacles: 'GridObstacleMap',
     pad_info: List[Tuple],
-    attraction_path: Optional[List[Tuple[int, int, int]]] = None
+    attraction_path: Optional[List[Tuple[int, int, int]]] = None,
+    state=None,
+    _stub_switch_round: bool = False
 ) -> Optional[dict]:
     """
     Route only the main (longest MST segment) connection of a multi-point net.
@@ -2913,6 +2915,55 @@ def route_multipoint_main(
             'iterations_forward': fwd_iters,
             'iterations_backward': bwd_iters,
         }
+
+    if path is None and state is not None and not _stub_switch_round \
+            and os.environ.get('KICAD_MULTIPOINT_STUB_SWITCH', '') in ('1', 'true', 'on'):
+        # EXPERIMENTAL (default off): stub layer switch retry for the main
+        # edge (for a bus member, the corridor-SPANNING edge -- the leg
+        # that must route first) when a terminal's escape stub is walled in
+        # on its own layer. Move the stubs at the first edges' endpoints to
+        # an open layer (the pad via sizes itself down the fab ladder) and
+        # re-run Phase 1 once on freshly-derived terminals. Kept only when
+        # the retry routes real main copper; reverted exactly otherwise.
+        # Gated off: on the ottercast USB solo test the routed retry left
+        # the BALL terminal outside the connected set (accounting defect)
+        # and preempted the Phase-3/rescue path that connects it -- enable
+        # only for investigation until that is fixed.
+        from stub_layer_switching import (switch_boxed_stub_near,
+                                          revert_stub_layer_switch)
+        from connectivity import get_multipoint_net_pads
+        switched = []
+        seen_xy = set()
+        moved_tips = set()
+        for (ia, ib, _elen) in mst_edges[:2]:
+            for idx in (ia, ib):
+                x, y = pad_info[idx][3], pad_info[idx][4]
+                key = (round(x, 2), round(y, 2))
+                if key in seen_xy:
+                    continue
+                seen_xy.add(key)
+                sw = switch_boxed_stub_near(pcb_data, net_id, config, x, y,
+                                            moved_tips=moved_tips)
+                if sw is not None:
+                    switched.append(sw)
+        if switched:
+            new_pad_info = get_multipoint_net_pads(pcb_data, net_id, config)
+            retry = None
+            if new_pad_info:
+                retry = route_multipoint_main(
+                    pcb_data, net_id, config, obstacles, new_pad_info,
+                    attraction_path=attraction_path, state=state,
+                    _stub_switch_round=True)
+            if retry and not retry.get('failed') and retry.get('path'):
+                print(f"  MULTIPOINT STUB SWITCH: main edge routed after "
+                      f"moving {len(switched)} stub(s)")
+                for _mods, _vias, _f, _d in switched:
+                    state.all_segment_modifications.extend(_mods)
+                    state.all_swap_vias.extend(_vias)
+                retry['iterations'] = retry.get('iterations', 0) + cumulative_iterations
+                return retry
+            for _mods, _vias, _f, _d in reversed(switched):
+                revert_stub_layer_switch(pcb_data, _mods, _vias)
 
     if path is None:
         # #348 (ottercast RESETn): every main-edge attempt launches from PAD

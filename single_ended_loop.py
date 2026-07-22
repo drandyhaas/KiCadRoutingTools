@@ -687,7 +687,7 @@ def route_single_ended_nets(
             if multipoint_pads:
                 print(f"  Detected multi-point net with {len(multipoint_pads)} pads (Phase 1: main route only)")
                 result = route_multipoint_main(pcb_data, net_id, config, obstacles, multipoint_pads,
-                                               attraction_path=attraction_path)
+                                               attraction_path=attraction_path, state=state)
                 # Track for Phase 3 completion after length matching
                 if result and not result.get('failed') and result.get('is_multipoint'):
                     state.pending_multipoint_nets[net_id] = result
@@ -1075,7 +1075,7 @@ def route_single_ended_nets(
                         retry_multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
                         if retry_multipoint_pads:
                             retry_result = route_multipoint_main(pcb_data, net_id, config, retry_obstacles, retry_multipoint_pads,
-                                                                 attraction_path=retry_attraction_path)
+                                                                 attraction_path=retry_attraction_path, state=state)
                             # Track for Phase 3 completion after length matching
                             if retry_result and not retry_result.get('failed') and retry_result.get('is_multipoint'):
                                 state.pending_multipoint_nets[net_id] = retry_result
