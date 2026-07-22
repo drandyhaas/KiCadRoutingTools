@@ -395,7 +395,8 @@ def find_diff_pair_escape(p_pad_x: float, p_pad_y: float,
                           n_pad_x: float, n_pad_y: float,
                           grid: BGAGrid,
                           channels: List[Channel],
-                          preferred_orientation: str = 'auto') -> Tuple[Optional[Channel], str]:
+                          preferred_orientation: str = 'auto',
+                          preferred_dir: str = None) -> Tuple[Optional[Channel], str]:
     """
     Find the best escape channel for a differential pair.
 
@@ -426,7 +427,8 @@ def find_diff_pair_escape(p_pad_x: float, p_pad_y: float,
         return None, f'half_edge_{edge_dir}'
 
     # Get all escape options
-    options = get_pair_escape_options(p_pad_x, p_pad_y, n_pad_x, n_pad_y, grid, channels)
+    options = get_pair_escape_options(p_pad_x, p_pad_y, n_pad_x, n_pad_y, grid,
+                                      channels, preferred_dir=preferred_dir)
 
     if not options:
         # Fallback - shouldn't happen for inner pairs

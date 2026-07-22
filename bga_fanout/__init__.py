@@ -2232,6 +2232,7 @@ def generate_bga_fanout(footprint: Footprint,
     # Find differential pairs if patterns specified
     diff_pairs: Dict[str, DiffPairPads] = {}
     pair_escape_assignments: Dict[str, Tuple[Optional[Channel], str]] = {}
+    _pair_toward: Dict[str, str] = {}  # #469 pair target-side preference
     if diff_pair_patterns:
         diff_pairs = find_differential_pairs(footprint, diff_pair_patterns)
         original_pair_count = len(diff_pairs)
@@ -2408,10 +2409,14 @@ def generate_bga_fanout(footprint: Footprint,
             cur_orientation = 'horizontal' if cur_dir in ('left', 'right') else 'vertical'
             secondary_orientation = 'vertical' if cur_orientation == 'horizontal' else 'horizontal'
             fpair = diff_pairs[fp]
+            # The forced-orientation retry picks the SIDE within the
+            # orthogonal orientation; the target-side preference (#469 v3)
+            # chooses it when the preference lies in that orientation.
             new_ch, new_dir = find_diff_pair_escape(
                 fpair.p_pad.global_x, fpair.p_pad.global_y,
                 fpair.n_pad.global_x, fpair.n_pad.global_y,
-                grid, channels, secondary_orientation
+                grid, channels, secondary_orientation,
+                preferred_dir=_pair_toward.get(fp)
             )
             # Only overwrite if we actually got a usable orthogonal direction.
             new_orientation = None
