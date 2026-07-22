@@ -522,12 +522,17 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         # model cannot answer (no scipy, oversize zone, out of bbox) keep the
         # legacy blob credit.
         _zm = None
-        if pcb_data is not None:
-            try:
+        try:
+            if pcb_data is not None:
                 from plane_fill_model import get_zone_model
                 _zm = get_zone_model(pcb_data, zone)
-            except Exception:
-                _zm = None
+            else:
+                # No pcb_data (removal-pass call sites): a model built
+                # earlier for this same zone OBJECT still applies.
+                from plane_fill_model import lookup_zone_model
+                _zm = lookup_zone_model(zone)
+        except Exception:
+            _zm = None
         # Find all points on this zone's layer
         points_on_layer = [(x, y, layer, pid, size) for x, y, layer, pid, size in all_points
                            if layer == zone_layer]

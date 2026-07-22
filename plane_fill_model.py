@@ -42,6 +42,14 @@ except ImportError:
 
 _CACHE_ATTR = '_plane_fill_models'
 
+# Zone-identity lookup: models built via get_zone_model/get_fill_models are
+# ALSO registered here, so consumers that only have the zone object (the
+# ~20 removal-pass call sites in pcb_modification that never carried
+# pcb_data) still get component-aware credit once any primary consumer
+# (grader, oracle, skip gate, repair) has built the model for that board.
+# Bounded: cleared when it grows past 64 zones (a board has ~10).
+_MODELS_BY_ZONE_ID = {}
+
 
 def _label_components(free):
     """4-connected component labeling of a boolean grid, scipy-free.
@@ -292,4 +300,13 @@ def get_zone_model(pcb_data, zone):
     if m is None:
         m = ZoneFillModel(pcb_data, zone)
         cache[key] = m
+        if len(_MODELS_BY_ZONE_ID) > 64:
+            _MODELS_BY_ZONE_ID.clear()
+        _MODELS_BY_ZONE_ID[id(zone)] = m
     return m if m.ok else None
+
+def lookup_zone_model(zone):
+    """Prebuilt model for this zone OBJECT, or None. No pcb_data needed --
+    for call sites that only carry the zone (build happens elsewhere)."""
+    m = _MODELS_BY_ZONE_ID.get(id(zone))
+    return m if (m is not None and m.ok) else None

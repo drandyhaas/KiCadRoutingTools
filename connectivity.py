@@ -304,7 +304,8 @@ def get_terminal_component_info(
     net_pads = pcb_data.pads_by_net.get(net_id, [])
 
     res = check_net_connectivity(net_id, net_segments, net_vias, net_pads,
-                                 net_zones, return_graph=True)
+                                 net_zones, return_graph=True,
+                                 pcb_data=pcb_data)
     graph = res.get('graph') or {}
     uf = UnionFind()
     for a, b in graph.get('edges', []):

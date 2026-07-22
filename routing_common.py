@@ -348,9 +348,12 @@ def filter_already_routed(
             continue
 
         # Use check_net_connectivity for robust connectivity check
+        # pcb_data => fill-component-aware zone credit: without it a net
+        # whose only "connection" is a pinched pour island graded already-
+        # routed and was SKIPPED by every later step (validator parity).
         result = check_net_connectivity(
             net_id, net_segments, net_vias, net_pads, net_zones,
-            tolerance=0.02
+            tolerance=0.02, pcb_data=pcb_data
         )
 
         if result['connected']:
