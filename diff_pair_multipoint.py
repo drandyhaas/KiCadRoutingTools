@@ -913,6 +913,25 @@ def _route_terminal_set(state, pair: DiffPairNet, pair_name: str,
                 # Every leg was electrically short - nothing coupled to merge,
                 # but this is success: the whole pair goes to single-ended.
                 return leg_results, None, se_terminals
+            # #444 chain-completion seam re-ask: every committed leg (pose,
+            # hybrid, or relocated) gets the island-aware joint whole-
+            # connection polish against the FINAL chain state -- the
+            # per-assembly re-ask only reaches hybrid candidates, and the
+            # winning construction is often the pose leg.
+            import os as _os
+            if _os.environ.get('KICAD_SEAM_REASK', '') not in ('0', 'off', 'false'):
+                from diff_pair_routing import seam_reask_chain_leg
+                _pcb = state.pcb_data
+                _cfg = state.config
+                _leg_obs = build_diff_pair_leg_obstacles(
+                    state.base_obstacles, _pcb, _cfg,
+                    state.routed_net_ids, state.remaining_net_ids,
+                    state.all_unrouted_net_ids, pair.p_net_id, pair.n_net_id,
+                    state.gnd_net_id, state.track_proximity_cache,
+                    state.layer_map)
+                for _lr in leg_results:
+                    seam_reask_chain_leg(_pcb, pair, _cfg, _leg_obs,
+                                         _cfg.layers, _lr)
             # Merge legs into a single result for bookkeeping (rip-up, sync,
             # caches). Segments/vias are already in pcb_data - the merged
             # result must NOT be passed to add_route_to_pcb_data again.
@@ -1091,6 +1110,7 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
                     not _pn_tracks_cross(hyb.get('new_segments', []), pair.p_net_id, pair.n_net_id) and
                     not _crosses_committed_legs(hyb.get('new_segments', []), committed_segments)):
                 print(f"  Leg {i + 1} via hybrid (coupled middle + single-ended escapes)")
+                hyb['_leg_terms'] = (term_a, term_b)  # #444 chain seam re-ask
                 add_route_to_pcb_data(pcb_data, hyb, debug_lines=config.debug_lines)
                 leg_results.append(hyb)
                 committed_segments.extend(hyb.get('new_segments', []))
@@ -1114,6 +1134,7 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
                 return None, []
 
         # Commit this leg so the next leg sees it (as obstacle and topology)
+        result['_leg_terms'] = (term_a, term_b)  # #444 chain seam re-ask
         add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
         leg_results.append(result)
         committed_segments.extend(result.get('new_segments', []))

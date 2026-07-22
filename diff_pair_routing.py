@@ -3612,6 +3612,143 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
             obstacles.remove_blocked_vias_batch(np.array(ring_cells, dtype=np.int32))
 
 
+def seam_reask_chain_leg(pcb_data, pair, config, leg_obstacles, layer_names,
+                         leg_result):
+    """#444 chain-completion seam re-ask for ONE committed chain leg.
+
+    Runs after the whole chain routed (pose, hybrid, or relocated legs alike):
+    each net's leg copper is re-asked as ONE island-aware A* against the
+    partner's CURRENT copper (obstacle + attractor), and the pair of
+    replacements is accepted or reverted JOINTLY under the coupledness-priced
+    score. Mutates pcb_data and leg_result in place on accept. Returns True
+    when the leg was replaced."""
+    import os as _os
+    if _os.environ.get('KICAD_SEAM_REASK', '') in ('0', 'off', 'false'):
+        return False
+    terms = leg_result.get('_leg_terms')
+    if not terms:
+        return False
+    term_a, term_b = terms
+    coord = GridCoord(config.grid_step)
+    nlayers = len(config.layers)
+    p_id, n_id = pair.p_net_id, pair.n_net_id
+
+    def _pad_layer_idx(pad):
+        for i, l in enumerate(config.layers):
+            if l in pad.layers:
+                return i
+        return 0
+
+    _term_pt = {
+        (p_id, 'src'): (term_a[0].global_x, term_a[0].global_y, _pad_layer_idx(term_a[0])),
+        (p_id, 'tgt'): (term_b[0].global_x, term_b[0].global_y, _pad_layer_idx(term_b[0])),
+        (n_id, 'src'): (term_a[1].global_x, term_a[1].global_y, _pad_layer_idx(term_a[1])),
+        (n_id, 'tgt'): (term_b[1].global_x, term_b[1].global_y, _pad_layer_idx(term_b[1])),
+    }
+    _leg_pads = {p_id: [term_a[0], term_b[0]], n_id: [term_a[1], term_b[1]]}
+    _leg_seg_ids = {id(s) for s in leg_result.get('new_segments') or []}
+    _leg_via_ids = {id(v) for v in leg_result.get('new_vias') or []}
+
+    def _split_len(a_list, b_list):
+        out = 0.0
+        for own, other in ((a_list, b_list), (b_list, a_list)):
+            for s in own:
+                L = math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                if L < 1e-9:
+                    continue
+                n = max(1, int(L / 0.2))
+                far = 0
+                for t in range(n + 1):
+                    px = s.start_x + (s.end_x - s.start_x) * t / n
+                    py = s.start_y + (s.end_y - s.start_y) * t / n
+                    if _seg_to_seglist_min_edge(px, py, px, py, 0.0,
+                                                s.layer, other) > 1.0:
+                        far += 1
+                out += L * far / (n + 1)
+        return out
+
+    def _score(segs, vias):
+        _pl = [s for s in segs if s.net_id == p_id]
+        _nl = [s for s in segs if s.net_id == n_id]
+        _len = sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                   for s in segs)
+        return _len + 2.0 * len(vias) + 3.0 * _split_len(_pl, _nl)
+
+    def _reask(net, cur_segs, cur_vias):
+        partner = n_id if net == p_id else p_id
+        par_leg = [s for s in cur_segs if s.net_id == partner]
+        par_all = par_leg + [s for s in pcb_data.segments
+                             if s.net_id == partner and id(s) not in _leg_seg_ids]
+        par_v = ([v for v in cur_vias if v.net_id == partner]
+                 + [v for v in pcb_data.vias
+                    if v.net_id == partner and id(v) not in _leg_via_ids])
+        own_v = [v for v in cur_vias if v.net_id == net]
+        src_t = _term_pt[(net, 'src')]
+        tgt_t = _term_pt[(net, 'tgt')]
+        own_isl_s = [s for s in pcb_data.segments
+                     if s.net_id == net and id(s) not in _leg_seg_ids
+                     and id(s) not in {id(x) for x in cur_segs}]
+        own_isl_v = [v for v in pcb_data.vias
+                     if v.net_id == net and id(v) not in _leg_via_ids]
+        staps = _terminal_island_taps((src_t[0], src_t[1]), own_isl_s, own_isl_v,
+                                      coord, layer_names)
+        ttaps = _terminal_island_taps((tgt_t[0], tgt_t[1]), own_isl_s, own_isl_v,
+                                      coord, layer_names)
+        attract = _ordered_grid_path(par_leg or par_all, (src_t[0], src_t[1]),
+                                     coord, layer_names)
+        ppads = pcb_data.pads_by_net.get(partner, [])
+        obs_s = par_all + [seg for pad in ppads
+                           for seg in _pad_obstacle_segments(pad, layer_names)]
+        pair_vias_all = [v for v in pcb_data.vias if v.net_id in (p_id, n_id)]
+        got = _route_hybrid_leg(
+            pcb_data, net, config, leg_obstacles, layer_names, coord,
+            tgt_t, src_t, obs_s, par_v, pair_vias_all, partner_pads=ppads,
+            mid_vias=own_v,
+            attract_path=attract if attract else None,
+            source_taps=staps or None, target_taps=ttaps or None)
+        if got[0] is None:
+            return None
+        return got[0], got[1]
+
+    old_segs = list(leg_result.get('new_segments') or [])
+    old_vias = list(leg_result.get('new_vias') or [])
+    base = _score(old_segs, old_vias)
+    best = None
+    for first, second in ((p_id, n_id), (n_id, p_id)):
+        cur_s, cur_v = list(old_segs), list(old_vias)
+        moved = False
+        for net in (first, second):
+            got = _reask(net, cur_s, cur_v)
+            if got is None:
+                continue
+            cur_s = [s for s in cur_s if s.net_id != net] + got[0]
+            cur_v = [v for v in cur_v if v.net_id != net] + got[1]
+            moved = True
+        if not moved:
+            continue
+        if _pn_tracks_cross_full(cur_s, pcb_data, p_id, n_id):
+            continue
+        if _connector_grazes_foreign_copper(cur_s, pcb_data, p_id, n_id, config):
+            continue
+        if not _hybrid_route_connects(pcb_data, p_id, n_id, cur_s, cur_v,
+                                      terminal_pads=_leg_pads):
+            continue
+        sc = _score(cur_s, cur_v)
+        if best is None or sc < best[0]:
+            best = (sc, cur_s, cur_v)
+    if best is None or best[0] >= base - 0.2:
+        return False
+    print(f"      #444 chain seam re-ask: leg replaced "
+          f"(score {base:.1f} -> {best[0]:.1f})")
+    from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
+    remove_route_from_pcb_data(pcb_data, {'new_segments': old_segs,
+                                          'new_vias': old_vias})
+    leg_result['new_segments'] = best[1]
+    leg_result['new_vias'] = best[2]
+    add_route_to_pcb_data(pcb_data, leg_result, debug_lines=config.debug_lines)
+    return True
+
+
 def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                                     config: GridRouteConfig,
                                     obstacles: GridObstacleMap,
