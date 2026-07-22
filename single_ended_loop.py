@@ -186,6 +186,16 @@ def _tap_relocation_rescue(pcb_data, net_id, config, state, results,
         result = route_net_with_obstacles(pcb_data, net_id, config,
                                           state.working_obstacles)
         if result and not result.get('failed'):
+            from tap_relocation import retap_pad
+            if not retap_pad(pcb_data, config, state.working_obstacles,
+                             state.net_obstacles_cache, token):
+                # No legal replacement tap -> the relocation is not
+                # allowed to stand; drop the route and put the tap back.
+                print(f"  TAP RELOCATION: re-tap declined -> reverting "
+                      f"(route discarded)")
+                restore_tap(pcb_data, state.working_obstacles,
+                            state.net_obstacles_cache, token)
+                continue
             net = pcb_data.nets.get(net_id)
             nname = net.name if net else str(net_id)
             print(f"  TAP RELOCATION RESCUE: {nname} routed after relocating "

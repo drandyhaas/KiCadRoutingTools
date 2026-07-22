@@ -138,11 +138,61 @@ def relocate_tap(pcb_data: PCBData, config: GridRouteConfig,
     net_obstacles_cache[nid] = new_data
     add_net_obstacles_from_cache(working_obstacles, new_data)
 
+    # The pad this tap served (nearest same-net pad): the re-tap
+    # obligation travels in the token -- commit is CONDITIONAL on
+    # re-tapping it (c1 defect: relying on a later repair step detached
+    # pads permanently in the finisher steps and shipped DRC grazes).
+    pad = None
+    best_d = 2.0
+    for p in pcb_data.pads_by_net.get(nid, []):
+        d = math.hypot(p.global_x - via.x, p.global_y - via.y)
+        if d < best_d:
+            pad, best_d = p, d
     name = pcb_data.nets[nid].name if nid in pcb_data.nets else str(nid)
     print(f"  TAP RELOCATION: removed {name} via at ({via.x:.2f}, {via.y:.2f})"
-          f" + {len(stubs)} stub seg(s); plane repair re-taps the pad later")
+          f" + {len(stubs)} stub seg(s); re-tap required before commit")
     return {'via': via, 'stubs': stubs, 'old_data': old_data,
-            'new_data': new_data, 'net_id': nid}
+            'new_data': new_data, 'net_id': nid, 'pad': pad}
+
+
+def retap_pad(pcb_data: PCBData, config: GridRouteConfig,
+              working_obstacles, net_obstacles_cache: dict,
+              token: dict, coord=None, layer_names=None) -> bool:
+    """Place a replacement tap via in/at the detached pad (the ae2069
+    plane-tap machinery via _place_shrunk_via_in_pad). Success mutates
+    pcb_data + swaps the net's cache entry (the balanced pattern) and
+    returns True; a token with no pad (stitching via) is vacuously True."""
+    pad = token.get('pad')
+    if pad is None:
+        return True
+    from routing_config import GridCoord
+    from single_ended_routing import _place_shrunk_via_in_pad
+    from obstacle_cache import (add_net_obstacles_from_cache,
+                                precompute_net_obstacles,
+                                remove_net_obstacles_from_cache)
+    import routing_defaults as defaults
+    nid = token['net_id']
+    coord = coord or GridCoord(config.grid_step)
+    layer_names = layer_names or config.layers
+    placed = _place_shrunk_via_in_pad(pad, working_obstacles, config,
+                                      pcb_data, nid, coord, layer_names)
+    if placed is None:
+        return False
+    new_via = placed[0]
+    entry = net_obstacles_cache.get(nid)
+    if working_obstacles is not None and entry is not None:
+        remove_net_obstacles_from_cache(working_obstacles, entry)
+        pcb_data.vias.append(new_via)
+        net_obstacles_cache[nid] = precompute_net_obstacles(
+            pcb_data, nid, config, extra_clearance=0.0,
+            diagonal_margin=defaults.DIAGONAL_MARGIN)
+        add_net_obstacles_from_cache(working_obstacles,
+                                     net_obstacles_cache[nid])
+    else:
+        pcb_data.vias.append(new_via)
+    print(f"  TAP RELOCATION: re-tapped {pad.component_ref}.{pad.pad_number} "
+          f"with a fresh via at ({new_via.x:.2f}, {new_via.y:.2f})")
+    return True
 
 
 def restore_tap(pcb_data: PCBData, working_obstacles,
