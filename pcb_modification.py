@@ -532,6 +532,9 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
     # with one endpoint on the barrel and the other inside the pad -- every
     # healthy dogbone) are skipped.
     via_pad_conns = []
+    # Some plane-flow callers pass a minimal namespace config with no
+    # track_width (only clearance); fall back to the stock default.
+    _vp_tw = getattr(config, 'track_width', 0) or 0.127
     for vp_net, vlist in via_by_net.items():
         if scope_net_ids is not None and vp_net not in scope_net_ids:
             continue
@@ -552,7 +555,7 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 # Graze class only: barrel edge within (-0.05, +track_width)
                 # of the pad copper edge. Deeper bites are genuine joints;
                 # farther apart is a route's business, not a joint's.
-                if g < -0.05 or g >= config.track_width:
+                if g < -0.05 or g >= _vp_tw:
                     continue
                 vp_layers = [L for L in p.layers if L.endswith('.Cu')]
                 if not vp_layers:
@@ -573,7 +576,7 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                         break
                 if served:
                     continue
-                w2 = min(config.track_width, p.size_x, p.size_y, 2 * vr)
+                w2 = min(_vp_tw, p.size_x, p.size_y, 2 * vr)
                 if not clears(vp_net, vx, vy, p.global_x, p.global_y,
                               vp_layer, w2):
                     continue  # bridge would graze foreign copper: leave for DRC
