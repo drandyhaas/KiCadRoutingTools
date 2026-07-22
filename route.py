@@ -814,6 +814,45 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     elif ordering_strategy == "original":
         print("\nUsing original net order (no sorting)")
 
+    # #472 direct-first ordering (KICAD_DIRECT_FIRST=0 disables): nets with a
+    # BARE BGA ball (>=2 pads, no attached copper -- the fanout-deferred
+    # direct-route class) move to the FRONT of the order, keeping relative
+    # order within each partition. Their short natural surface lanes get
+    # claimed before the long nets and bus corridors contend for the same
+    # space (the human's sequence: nearby connections first). Inert on
+    # boards with no bare balls -- stubs/vias at every ball leave the order
+    # untouched. Board-state-driven and engine-level (GUI parity).
+    if (net_ids and os.environ.get('KICAD_DIRECT_FIRST', '1')
+            not in ('0', 'off', 'false')):
+        _bga_refs = set()
+        from kicad_parser import find_components_by_type
+        _sel_set = {nid for _nm, nid in net_ids}
+        _pts_by = {}
+        for _s in pcb_data.segments:
+            if _s.net_id in _sel_set:
+                _pts_by.setdefault(_s.net_id, []).append((_s.start_x, _s.start_y))
+                _pts_by[_s.net_id].append((_s.end_x, _s.end_y))
+        for _v in pcb_data.vias:
+            if _v.net_id in _sel_set:
+                _pts_by.setdefault(_v.net_id, []).append((_v.x, _v.y))
+        _direct_ids = set()
+        for _fp in find_components_by_type(pcb_data, 'BGA'):
+            for _p in _fp.pads:
+                if (_p.net_id in _sel_set and not _p.drill
+                        and len(pcb_data.pads_by_net.get(_p.net_id, [])) >= 2
+                        and not any(abs(_x - _p.global_x) < 0.05
+                                    and abs(_y - _p.global_y) < 0.05
+                                    for (_x, _y) in _pts_by.get(_p.net_id, ()))):
+                    _direct_ids.add(_p.net_id)
+        if _direct_ids:
+            _front = [t for t in net_ids if t[1] in _direct_ids]
+            _rest = [t for t in net_ids if t[1] not in _direct_ids]
+            net_ids = _front + _rest
+            print(f"Direct-first ordering (#472): {len(_front)} bare-ball "
+                  f"net(s) moved to the front: "
+                  f"{', '.join(nm for nm, _ in _front[:8])}"
+                  f"{', ...' if len(_front) > 8 else ''}")
+
     # All nets are single-ended in this tool
     single_ended_nets = net_ids
     total_routes = len(single_ended_nets)
