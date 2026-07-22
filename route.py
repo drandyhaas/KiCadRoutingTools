@@ -1411,7 +1411,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # (checkpoint boards shipped bus nets consisting only of their new tap
     # segments; 31-segment trunks vanished). The board at this point IS what
     # routing committed, which is exactly the freeze semantics.
-    if _ckpt_stop:
+    # KICAD_STOP_CLEANUP=1: run the cleanup pipeline ON the checkpoint
+    # snapshot (dead-end sweep, grazes, etc.) before writing -- shows what
+    # cleanup would retire (e.g. a stale escape stub the island-launch
+    # route no longer uses). The freeze then fires inside the pipeline.
+    _ckpt_cleanup = _ckpt_stop and os.environ.get(
+        'KICAD_STOP_CLEANUP', '') in ('1', 'true', 'on')
+    if _ckpt_stop and not _ckpt_cleanup:
         _freeze_committed()
     # #473: nets still carrying unfinished pads keep ALL their copper
     # through the dead-end sweep -- their spurs are the landing sites the
@@ -1421,7 +1427,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                            if _r.get('failed_pads_info')}
     _protect_unfinished |= {nid for _nm, nid in single_ended_nets
                             if nid not in routed_results}
-    _cleanup = None if _ckpt_stop else run_post_route_cleanup(
+    _cleanup = None if (_ckpt_stop and not _ckpt_cleanup) else run_post_route_cleanup(
         results, pcb_data, sweep_scope_ids, config,
         protect_net_ids=_protect_unfinished,
         freeze_hook=_freeze_committed,

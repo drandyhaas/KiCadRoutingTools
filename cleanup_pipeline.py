@@ -275,9 +275,23 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             print(f"{label}Via nudge: moved {_vn_moved} grazing via(s) on "
                   f"{_vn_nets} net(s) by their sub-grid clearance shortfall (#280)")
 
+    # #473 (extended): protected nets keep ALL their copper through EVERY
+    # subtractive pass, not just the dead-end sweep. Cycle prune / strict
+    # collapse / orphan islands / dangle trim on an unfinished net is the
+    # same landing-site erosion the sweep guard exists for (a fragment
+    # graded "redundant"/"orphan" today is the copper the next chain step
+    # welds to). Restrict their scope instead of threading a new parameter
+    # through each pass.
+    _sub_scope = scope_net_ids
+    if protect_net_ids:
+        if scope_net_ids is None:
+            _sub_scope = ({s.net_id for s in pcb_data.segments}
+                          | {v.net_id for v in pcb_data.vias}) - set(protect_net_ids)
+        else:
+            _sub_scope = set(scope_net_ids) - set(protect_net_ids)
     if cycles:
         _cy_segs, _cy_nets, _cy_strip = prune_redundant_cycles(
-            results, pcb_data, scope_net_ids, clearance=config.clearance,
+            results, pcb_data, _sub_scope, clearance=config.clearance,
             keep_input_copper=keep_input_copper)
         counts['cycles_pruned'] = _cy_segs
         _trace('cycles')
@@ -289,7 +303,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # Strict-redundant collapse (#217 classes 1-2): superseded parallel
     # chains and pad/via-buried tails that are redundant under the strict
     # width-clamped graph. Before the sweep so freed this-run vias drop.
-    _sc_n, _sc_strip = collapse_strict_redundant(results, pcb_data, scope_net_ids,
+    _sc_n, _sc_strip = collapse_strict_redundant(results, pcb_data, _sub_scope,
                                                  keep_input_copper=keep_input_copper)
     counts['strict_collapsed'] = _sc_n
     _trace('strict_collapse')
@@ -303,7 +317,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # the dead-end sweep so the sweep's unsupported-via pass drops the
     # islands' freed this-run vias.
     _oi_n, _oi_segs, _oi_strip, _oi_via_strip = remove_orphan_islands(
-        results, pcb_data, scope_net_ids, keep_input_copper=keep_input_copper)
+        results, pcb_data, _sub_scope, keep_input_copper=keep_input_copper)
     out.input_strip_vias.extend(_oi_via_strip)
     counts['orphan_islands'] = _oi_n
     _trace('orphan_islands')
@@ -327,7 +341,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # a dead-end segment T-anchored mid-BODY (a via ON the trace, or a tee) is
     # load-bearing through the anchor, so the whole-segment prune keeps it and
     # the copper past the anchor ships as an antenna. Split-trim to the anchor.
-    _dt_n, _dt_strip = trim_dangles_past_body_anchor(results, pcb_data, scope_net_ids,
+    _dt_n, _dt_strip = trim_dangles_past_body_anchor(results, pcb_data, _sub_scope,
                                                      keep_input_copper=keep_input_copper)
     counts['dangles_trimmed'] = _dt_n
     _trace('dangle_trim')
