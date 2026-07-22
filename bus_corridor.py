@@ -75,17 +75,22 @@ def _sample_dense(path: List[Tuple[int, int, int]], step: int = 1
 
 def plan_bus_corridors(pcb_data, config, bus_groups: List[BusGroup],
                        verbose: bool = False
-                       ) -> Dict[str, List[Tuple[int, int, int]]]:
-    """Plan a corridor centerline per bus group. Returns {group.name: dense
-    (gx, gy, layer) path}. Groups whose every probe rung fails are absent
-    (callers fall back to neighbor attraction)."""
+                       ) -> Tuple[Dict[str, List[Tuple[int, int, int]]], List[str]]:
+    """Plan a corridor centerline per bus group. Returns (corridors,
+    demoted_group_names): corridors is {group.name: dense (gx, gy, layer)
+    path}; demoted lists groups whose centerline needs more than the
+    allowed layer changes even at the laminar probe price -- the caller
+    must strip their bus treatment (members route as plain nets). Groups
+    whose every probe rung fails are in neither (callers fall back to
+    neighbor attraction)."""
     # Deferred import: single_ended_routing must not import this module.
     from single_ended_routing import route_net_with_obstacles
     from net_queries import calculate_route_length
 
     corridors: Dict[str, List[Tuple[int, int, int]]] = {}
+    demoted: List[str] = []
     if not bus_groups:
-        return corridors
+        return corridors, demoted
 
     all_member_ids = [nid for g in bus_groups for nid in g.net_ids]
     room_mm = config.track_width + config.clearance
@@ -106,11 +111,18 @@ def plan_bus_corridors(pcb_data, config, bus_groups: List[BusGroup],
             # the shared map. Neck-down is disabled so the rung fails
             # honestly instead of silently degrading to rung 0.
             import os
+            # LAMINAR probe: the corridor centerline is the reference every
+            # member is attracted to -- if the probe itself wanders layers,
+            # "same-layer attraction" chases a different layer every span
+            # and no river can form (observed: SDC0's corridor spanned all
+            # four layers at the old 4x). The probe pays a much stiffer
+            # layer-change price than member routing, so the skeleton stays
+            # on one layer unless a change is genuinely unavoidable.
             try:
-                via_mult = float(os.environ.get('KICAD_BUS_CORRIDOR_VIA_MULT',
-                                                str(CORRIDOR_VIA_COST_MULT)))
+                via_mult = float(os.environ.get(
+                    'KICAD_BUS_CORRIDOR_PROBE_VIA_MULT', '20'))
             except ValueError:
-                via_mult = CORRIDOR_VIA_COST_MULT
+                via_mult = 20.0
             cfg_k = replace(
                 config, power_tap_neckdown=False,
                 via_cost=int(round(config.via_cost * via_mult)),
@@ -137,9 +149,44 @@ def plan_bus_corridors(pcb_data, config, bus_groups: List[BusGroup],
                   f"neighbor attraction")
             continue
         _score, k, length, result = best
+        # Demotion rule: a bus whose CENTERLINE still needs more than
+        # KICAD_BUS_MAX_CORRIDOR_LAYER_CHANGES (default 1) layer changes at
+        # the stiff probe price has no laminar lane to offer -- routing it
+        # "as a bus" would just attract members to a wandering skeleton.
+        # Such a group is DEMOTED: no corridor, and the caller strips its
+        # bus treatment entirely (members route as plain nets).
+        # Count MID-PATH layer changes only: a transition within ~3mm of
+        # either endpoint is the river's on-ramp (the dogbone dive from a
+        # surface stub into the lane and back out -- the human's exact PCM
+        # topology), not wander. Only changes in the middle demote. The
+        # path is simplified waypoints, so measure geometric distance.
+        import math as _math
+        _path = result['path']
+        _cum = [0.0]
+        for i in range(1, len(_path)):
+            _cum.append(_cum[-1] + _math.hypot(
+                _path[i][0] - _path[i - 1][0], _path[i][1] - _path[i - 1][1]))
+        _total = _cum[-1] or 1.0
+        _ramp = 3.0 / config.grid_step
+        _changes = sum(
+            1 for i in range(1, len(_path))
+            if _path[i][2] != _path[i - 1][2]
+            and _ramp < _cum[i] < _total - _ramp)
+        try:
+            _max_changes = int(os.environ.get(
+                'KICAD_BUS_MAX_CORRIDOR_LAYER_CHANGES', '1'))
+        except ValueError:
+            _max_changes = 1
+        if _changes > _max_changes:
+            demoted.append(g.name)
+            print(f"  {g.name}: corridor needs {_changes} layer change(s) "
+                  f"(> {_max_changes}) even at the laminar probe price -- "
+                  f"DEMOTED, members route as plain nets")
+            continue
         corridors[g.name] = _sample_dense(result['path'], step=1)
         lay = sorted({p[2] for p in result['path']})
         print(f"  {g.name}: corridor via {rep_name} at rung {k} "
               f"(room for {k} sibling(s)/side), {length:.1f}mm, "
-              f"layers {lay}, {len(corridors[g.name])} pts")
-    return corridors
+              f"{_changes} layer change(s), layers {lay}, "
+              f"{len(corridors[g.name])} pts")
+    return corridors, demoted

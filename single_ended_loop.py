@@ -524,8 +524,18 @@ def route_single_ended_nets(
             # groups with no routable rung keep neighbor attraction.
             if config.bus_enabled:
                 from bus_corridor import plan_bus_corridors
-                bus_corridors = plan_bus_corridors(pcb_data, config, bus_groups,
-                                                   verbose=config.verbose)
+                bus_corridors, _demoted = plan_bus_corridors(
+                    pcb_data, config, bus_groups, verbose=config.verbose)
+                # Demoted groups (corridor needs too many layer changes even
+                # at the laminar probe price) lose bus treatment entirely:
+                # no corridor, no attraction, no bus ordering -- their
+                # members route as plain nets.
+                if _demoted:
+                    _dset = set(_demoted)
+                    for bus in [b for b in bus_groups if b.name in _dset]:
+                        for _nid in bus.net_ids:
+                            bus_net_to_group.pop(_nid, None)
+                    bus_groups = [b for b in bus_groups if b.name not in _dset]
 
             # Reorder nets: bus nets in routing order first, then non-bus nets
             bus_net_ids_set = {nid for bus in bus_groups for nid in bus.net_ids}
