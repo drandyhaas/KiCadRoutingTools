@@ -2861,6 +2861,33 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             _sib_margin = int(math.ceil(max(
                 0.0, config.track_width + config.diff_pair_gap - config.clearance)
                 / config.grid_step)) if _couple else 0
+            def _split_len(legs_p, legs_n):
+                # Length of leg copper farther than the coupling radius from
+                # every same-layer partner leg -- the "shipped uncoupled" mm.
+                out = 0.0
+                for own, other in ((legs_p, legs_n), (legs_n, legs_p)):
+                    for s in own:
+                        L = math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                        if L < 1e-9:
+                            continue
+                        n = max(1, int(L / 0.2))
+                        far = 0
+                        for t in range(n + 1):
+                            px = s.start_x + (s.end_x - s.start_x) * t / n
+                            py = s.start_y + (s.end_y - s.start_y) * t / n
+                            if _seg_to_seglist_min_edge(px, py, px, py, 0.0,
+                                                        s.layer, other) > 1.0:
+                                far += 1
+                        out += L * far / (n + 1)
+                return out
+            # Best-of over leg plans (accept-first-success shipped the
+            # EPHY_TX split: the P-leads plan succeeds with N forced around
+            # the other side of the keepout, and the N-leads plans -- where
+            # the sibling CAN follow, hand-verified DRC-clean -- never ran).
+            # Legs are not committed to pcb_data here, so trying every plan
+            # is cheap; score = length + heavy weight on uncoupled mm. A
+            # plan with essentially no uncoupled copper is taken on the spot.
+            best_plan = None  # (score, legs, vias, iters, split)
             for plan in leg_plans:
                 leg_state['s'] = {p_net_id: [], n_net_id: []}
                 leg_state['v'] = {p_net_id: [], n_net_id: []}
@@ -2885,12 +2912,26 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                     leg_state['s'][net_id] += ls
                     leg_state['v'][net_id] += lv
                     leg_state['path'][(net_id, _side)] = lpath or []
-                if good:
-                    ok = True
-                    leg_iters = plan_iters
-                    leg_segs = leg_state['s'][p_net_id] + leg_state['s'][n_net_id]
-                    leg_vias = leg_state['v'][p_net_id] + leg_state['v'][n_net_id]
-                    break
+                if not good:
+                    continue
+                _lp = leg_state['s'][p_net_id]
+                _ln = leg_state['s'][n_net_id]
+                _len = sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                           for s in _lp + _ln)
+                _split = _split_len(_lp, _ln) if _couple else 0.0
+                _score = _len + 3.0 * _split
+                if best_plan is None or _score < best_plan[0]:
+                    best_plan = (_score, _lp + _ln,
+                                 leg_state['v'][p_net_id] + leg_state['v'][n_net_id],
+                                 plan_iters, _split)
+                if not _couple or _split < 1.0:
+                    break  # fully coupled (or coupling off): no need to try more
+            if best_plan is not None:
+                ok = True
+                _score, leg_segs, leg_vias, leg_iters, _split = best_plan
+                if _couple and _split >= 1.0:
+                    print(f"      leg couple: best plan still ships "
+                          f"{_split:.1f}mm uncoupled leg copper")
             if not ok:
                 return None, "terminal legs could not attach to the coupled middle"
             all_segs = mid_segs + leg_segs
@@ -3176,8 +3217,11 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
         # above the bus default: the sibling lane must win against everything
         # short of a hard obstacle -- "almost forced", same layer only
         # (attraction_cross_layer_pct=0 never rewards a different layer).
-        _att_radius = max(2, int(math.ceil(
-            (config.track_width + config.diff_pair_gap) / config.grid_step)) + 2)
+        try:
+            _att_mm = float(os.environ.get('KICAD_HYBRID_COUPLE_RADIUS', '1.0'))
+        except ValueError:
+            _att_mm = 1.0
+        _att_radius = max(2, int(round(_att_mm / config.grid_step)))
         import routing_defaults as _rd
         _att_bonus = 3 * _rd.BUS_ATTRACTION_BONUS
     router = GridRouter(
