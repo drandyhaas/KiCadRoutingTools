@@ -2144,12 +2144,14 @@ class RoutingDialog(wx.Dialog):
         # state (and the plan-side absent-means-off rules still apply).
         try:
             _po = self.planes_tab.create_options
-            if hasattr(_po, 'zone_clearance_follow'):
-                # Default = follow routed clearance (the ottercast sealed-
-                # field fix); explicit zone_clearance params uncheck it.
-                _po.zone_clearance_follow.SetValue(True)
+            if hasattr(_po, 'zone_clearance_check'):
+                # Default = unchecked = follow routed clearance (the
+                # ottercast sealed-field fix); a plan's explicit
+                # zone_clearance param checks it (override convention).
+                _po.zone_clearance_check.SetValue(False)
                 if hasattr(_po, 'zone_clearance'):
                     _po.zone_clearance.SetValue(defaults.PLANE_ZONE_CLEARANCE)
+                    _po.zone_clearance.Enable(False)
             if hasattr(_po, 'add_gnd_vias_check'):
                 _po.add_gnd_vias_check.SetValue(False)
             if hasattr(_po, 'gnd_via_distance'):

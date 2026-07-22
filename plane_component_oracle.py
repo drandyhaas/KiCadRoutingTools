@@ -95,8 +95,12 @@ class PlaneComponentOracle:
         if self.inert:
             return
 
+        # pcb_data enables the validator-parity fill model: components
+        # split per FILL component, so a pinched island's items grade
+        # floating and the repair machinery actually repairs them.
         res = check_net_connectivity(net_id, segments, vias, pads, zones,
-                                     return_graph=True)
+                                     return_graph=True,
+                                     pcb_data=self.pcb_data)
         graph = res.get('graph') or {}
         uf = UnionFind()
         for a, b in graph.get('edges', ()):

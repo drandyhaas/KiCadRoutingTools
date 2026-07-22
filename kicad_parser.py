@@ -147,6 +147,8 @@ class Zone:
     island_removal_mode: int = 0  # 0 = always remove isolated islands (KiCad default,
     # token absent from the file), 1 = never remove, 2 = remove below island_area_min
     island_area_min: float = 0.0  # mm^2 floor for mode 2 (KiCad file units are mm^2)
+    clearance: float = None  # zone fill clearance (connect_pads (clearance X)); None = unknown
+    min_thickness: float = None  # minimum fill width; None = unknown
 
 
 @dataclass
@@ -2571,6 +2573,14 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
         island_removal_mode = int(irm_match.group(1)) if irm_match else 0
         iam_match = re.search(r'\(island_area_min\s+([\d.]+)\)', zone_header)
         island_area_min = float(iam_match.group(1)) if iam_match else 0.0
+        # Fill-model inputs (#validator-parity): the pour's own clearance
+        # lives under (connect_pads ... (clearance X)); min_thickness is a
+        # direct child. Absent (older files) -> None; the fill model then
+        # falls back to routing_defaults.
+        zcl_match = re.search(r'\(clearance\s+([\d.]+)\)', zone_header)
+        zone_clearance_val = float(zcl_match.group(1)) if zcl_match else None
+        mth_match = re.search(r'\(min_thickness\s+([\d.]+)\)', zone_header)
+        zone_min_th = float(mth_match.group(1)) if mth_match else None
 
         # Extract polygon points - find (pts ...) and extract xy coordinates
         pts_start = zone_content.find('(pts')
@@ -2607,7 +2617,9 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
                 uuid=uuid,
                 priority=priority,
                 island_removal_mode=island_removal_mode,
-                island_area_min=island_area_min
+                island_area_min=island_area_min,
+                clearance=zone_clearance_val,
+                min_thickness=zone_min_th
             ))
 
     return zones
@@ -3720,6 +3732,14 @@ def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
             if not polygon:
                 continue
 
+            try:
+                _zcl = to_mm(zone.GetLocalClearance())
+            except Exception:
+                _zcl = None
+            try:
+                _mth = to_mm(zone.GetMinThickness())
+            except Exception:
+                _mth = None
             for zl in zone_layers:
                 zones.append(Zone(
                     net_id=net_id,
@@ -3728,7 +3748,9 @@ def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
                     polygon=polygon,
                     priority=priority,
                     island_removal_mode=island_removal_mode,
-                    island_area_min=island_area_min
+                    island_area_min=island_area_min,
+                    clearance=_zcl,
+                    min_thickness=_mth
                 ))
     except Exception:
         pass
