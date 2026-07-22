@@ -67,6 +67,9 @@ from obstacle_map import build_base_obstacle_map, build_layer_map
 from routing_config import GridRouteConfig
 from bga_fanout.collision import check_segment_collision
 from bga_fanout.diff_pair import find_differential_pairs
+
+# #472: nets deferred from fanout by the last generate_bga_fanout entry call
+_direct_route_nets: Set[str] = set()
 from bga_fanout.tracks import (
     detect_collisions,
     convert_segments_to_tracks,
@@ -1820,6 +1823,33 @@ def generate_bga_fanout(footprint: Footprint,
         back_transform_results(tracks, vias_to_add, vias_to_remove, back)
         return tracks, vias_to_add, vias_to_remove, failed_nets
 
+    # #472 direct-route deferral (KICAD_FANOUT_DIRECT=1): balls whose nearest
+    # target is surface-reachable get NO stub -- the stub carpet is itself the
+    # wall that seals the pocket (human ottercast: USB_D pure F.Cu, 0 vias).
+    # Applied ONCE at entry as '!' net-filter exclusions so both engines and
+    # both escape-priority passes inherit; qualifying diff pairs are dropped
+    # at the pair-discovery sites via _direct_route_nets. The route steps'
+    # bare-ball zone exemption (setup_bga_exclusion_zones) keeps the deferred
+    # balls routable.
+    global _direct_route_nets
+    if (_pad_filter is None and not _single_pass
+            and os.environ.get('KICAD_FANOUT_DIRECT', '') in ('1', 'true', 'on')):
+        from bga_fanout.escape import direct_route_candidates
+        _dp_probe = (find_differential_pairs(footprint, diff_pair_patterns)
+                     if diff_pair_patterns else None)
+        _names, _notes = direct_route_candidates(
+            pcb_data, footprint, net_filter=net_filter,
+            diff_pairs=_dp_probe, clearance=clearance)
+        if _names:
+            print(f"  #472 direct-route deferral: {len(_names)} net(s) skip "
+                  f"fanout (surface-reachable):")
+            for _nm, _pn, _why in _notes:
+                print(f"    {_nm} (ball {_pn}): {_why}")
+            net_filter = list(net_filter or ['*']) + ['!' + n for n in _names]
+            _direct_route_nets = set(_names)
+    elif _pad_filter is None and not _single_pass:
+        _direct_route_nets = set()
+
     # Escape priority for multi-ball nets (issue #129). Escape channels are
     # the scarce resource on a dense array (#122), and a net only NEEDS one
     # escape -- later routing can pick up its other balls inside the BGA
@@ -2197,6 +2227,10 @@ def generate_bga_fanout(footprint: Footprint,
         # can pick the two halves up (without this they go single-ended).
         up_diff_pairs = (find_differential_pairs(footprint, diff_pair_patterns)
                          if diff_pair_patterns else {})
+        if _direct_route_nets:
+            up_diff_pairs = {k: v for k, v in up_diff_pairs.items()
+                             if not ((v.p_pad and v.p_pad.net_name in _direct_route_nets)
+                                     or (v.n_pad and v.n_pad.net_name in _direct_route_nets))}
         if up_diff_pairs:
             print(f"  Found {len(up_diff_pairs)} differential pair(s) to escape coupled")
         tracks, vias_to_add, failed_nets = generate_underpad_escape(
@@ -2235,6 +2269,10 @@ def generate_bga_fanout(footprint: Footprint,
     _pair_toward: Dict[str, str] = {}  # #469 pair target-side preference
     if diff_pair_patterns:
         diff_pairs = find_differential_pairs(footprint, diff_pair_patterns)
+        if _direct_route_nets:
+            diff_pairs = {k: v for k, v in diff_pairs.items()
+                          if not ((v.p_pad and v.p_pad.net_name in _direct_route_nets)
+                                  or (v.n_pad and v.n_pad.net_name in _direct_route_nets))}
         original_pair_count = len(diff_pairs)
 
         # Filter out pairs that already have fanouts
@@ -3024,6 +3062,10 @@ def main():
         # Smallest copper clearance any step actually routed at; downstream steps
         # and check_drc grade the board at this floor.
         'min_clearance_used': eff_clearance,
+        # #472: nets deliberately DEFERRED from fanout (surface-reachable,
+        # direct-routed by a later step). Not failures. The route steps'
+        # bare-ball zone exemption keeps them routable automatically.
+        'deferred_fanout_nets': sorted(_direct_route_nets),
     }
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
 

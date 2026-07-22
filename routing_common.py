@@ -34,7 +34,8 @@ from length_matching import (
 def setup_bga_exclusion_zones(
     pcb_data: PCBData,
     disable_bga_zones: Optional[List[str]],
-    existing_zones: Optional[List[Tuple[float, float, float, float]]] = None
+    existing_zones: Optional[List[Tuple[float, float, float, float]]] = None,
+    selected_net_ids: Optional[List[int]] = None
 ) -> List[Tuple[float, float, float, float, float]]:
     """
     Handle --no-bga-zones argument and auto-detect BGA exclusion zones.
@@ -84,10 +85,48 @@ def setup_bga_exclusion_zones(
         bga_exclusion_zones = auto_detect_bga_exclusion_zones(pcb_data, margin=0.0)
         if bga_exclusion_zones:
             bga_components = find_components_by_type(pcb_data, 'BGA')
-            print(f"Auto-detected {len(bga_exclusion_zones)} BGA exclusion zone(s):")
-            for i, (fp, zone) in enumerate(zip(bga_components, bga_exclusion_zones)):
-                edge_tol = zone[4] if len(zone) > 4 else 1.6
-                print(f"  {fp.reference}: ({zone[0]:.1f}, {zone[1]:.1f}) to ({zone[2]:.1f}, {zone[3]:.1f}), edge_tol={edge_tol:.2f}mm")
+            # #472 bare-ball exemption: a zone that entombs a BARE ball (no
+            # attached copper) of a net THIS run must route makes that net
+            # unroutable -- the deferred-fanout (direct-route) balls, and any
+            # net whose fanout dropped it. Auto-disable that component's zone.
+            # Engine-level (batch_route/batch_route_diff_pairs), so the GUI
+            # inherits; board-state-driven, so no sidecar file is load-bearing.
+            if selected_net_ids:
+                _sel = set(selected_net_ids)
+                _pts_by_net = {}
+                for _s in pcb_data.segments:
+                    if _s.net_id in _sel:
+                        _pts_by_net.setdefault(_s.net_id, []).append(
+                            (_s.start_x, _s.start_y))
+                        _pts_by_net[_s.net_id].append((_s.end_x, _s.end_y))
+                for _v in pcb_data.vias:
+                    if _v.net_id in _sel:
+                        _pts_by_net.setdefault(_v.net_id, []).append((_v.x, _v.y))
+
+                def _ball_bare(_p):
+                    for (_x, _y) in _pts_by_net.get(_p.net_id, ()):
+                        if abs(_x - _p.global_x) < 0.05 and abs(_y - _p.global_y) < 0.05:
+                            return False
+                    return True
+                _keep, _keep_fps = [], []
+                for fp, zone in zip(bga_components, bga_exclusion_zones):
+                    _bare = sorted({_p.net_name for _p in fp.pads
+                                    if _p.net_id in _sel and not _p.drill
+                                    and _ball_bare(_p)})
+                    if _bare:
+                        print(f"  {fp.reference}: zone DISABLED -- bare ball(s) of "
+                              f"selected net(s) inside it ({', '.join(_bare[:6])}"
+                              f"{', ...' if len(_bare) > 6 else ''}) (#472)")
+                    else:
+                        _keep.append(zone)
+                        _keep_fps.append(fp)
+                bga_exclusion_zones = _keep
+                bga_components = _keep_fps
+            if bga_exclusion_zones:
+                print(f"Auto-detected {len(bga_exclusion_zones)} BGA exclusion zone(s):")
+                for i, (fp, zone) in enumerate(zip(bga_components, bga_exclusion_zones)):
+                    edge_tol = zone[4] if len(zone) > 4 else 1.6
+                    print(f"  {fp.reference}: ({zone[0]:.1f}, {zone[1]:.1f}) to ({zone[2]:.1f}, {zone[3]:.1f}), edge_tol={edge_tol:.2f}mm")
         else:
             print("No BGA components detected - no exclusion zones needed")
         return bga_exclusion_zones

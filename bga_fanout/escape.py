@@ -901,3 +901,134 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
             pair_layers[pair_id] = edge_layer
 
     return assignments, pair_layers
+
+
+import math
+
+
+def direct_route_candidates(pcb_data, footprint, net_filter=None,
+                            diff_pairs=None, clearance: float = 0.1):
+    """#472: nets to DEFER from fanout entirely -- their balls are surface-
+    reachable and near their targets, so the escape stub would only build the
+    wall that seals the pocket (the human routes these point-to-point on the
+    surface: ottercast USB_D pure F.Cu, 0 vias, vs our stubbed 45mm chase).
+
+    A ball qualifies when ALL of:
+      * its nearest same-net pad OFF this footprint is within
+        KICAD_FANOUT_DIRECT_DIST mm (default 8.0);
+      * the ball sits in the outer KICAD_FANOUT_DIRECT_RINGS rings (default
+        2) of the field ON THE SIDE facing that target (surface-reachable
+        without crossing the interior);
+      * OR (congestion criterion, any ring): the target is within the
+        distance bound and the ball's own escape landing zone just outside
+        the chip edge already carries 3+ foreign SMD pads within 1.5mm of
+        the ball's outward edge exit -- a stub into a crowded pocket is
+        worse than none. (Congestion path still requires outer 2 rings+1.)
+
+    A NET qualifies only when every one of its balls on this footprint
+    qualifies (avoids half-stubbed nets); diff pairs qualify only when both
+    members do. Returns (net_names_set, per_ball_notes). Purely advisory --
+    the caller applies the skip and reports."""
+    import os
+    from bga_fanout.grid import analyze_bga_grid
+    try:
+        max_dist = float(os.environ.get('KICAD_FANOUT_DIRECT_DIST', '8.0'))
+    except ValueError:
+        max_dist = 8.0
+    try:
+        max_ring = int(os.environ.get('KICAD_FANOUT_DIRECT_RINGS', '2'))
+    except ValueError:
+        max_ring = 2
+    grid = analyze_bga_grid(footprint)
+    if grid is None:
+        return set(), []
+    cols, rows = list(grid.cols), list(grid.rows)
+    ref = footprint.reference
+    by_net = {}
+    for fp in pcb_data.footprints.values():
+        if fp.reference == ref:
+            continue
+        for p in fp.pads:
+            if p.net_id > 0:
+                by_net.setdefault(p.net_id, []).append(p)
+    # Foreign SMD pads near the chip, for the congestion criterion.
+    cx0, cy0, cx1, cy1 = (min(cols), min(rows), max(cols), max(rows))
+    near_pads = [p for fp in pcb_data.footprints.values()
+                 if fp.reference != ref
+                 for p in fp.pads
+                 if not p.drill
+                 and cx0 - 4 < p.global_x < cx1 + 4
+                 and cy0 - 4 < p.global_y < cy1 + 4]
+
+    def _ring(v, axis):
+        idx = min(range(len(axis)), key=lambda i: abs(axis[i] - v))
+        return min(idx, len(axis) - 1 - idx)
+
+    notes = []
+    ball_ok = {}   # net_id -> all-balls verdict
+    for pad in footprint.pads:
+        if pad.net_id <= 0 or pad.drill:
+            continue
+        if pad.net_name and pad.net_name.lower().startswith('unconnected-'):
+            continue
+        targets = by_net.get(pad.net_id)
+        if not targets:
+            ball_ok[pad.net_id] = False
+            continue
+        px, py = pad.global_x, pad.global_y
+        tp = min(targets, key=lambda t: (t.global_x - px) ** 2 + (t.global_y - py) ** 2)
+        d = math.hypot(tp.global_x - px, tp.global_y - py)
+        if d > max_dist:
+            ball_ok[pad.net_id] = False
+            continue
+        rx, ry = _ring(px, cols), _ring(py, rows)
+        dx, dy = tp.global_x - px, tp.global_y - py
+        # Ring depth along the axis the target lies on: a ball 1 ring from
+        # the east edge with an east target is surface-reachable regardless
+        # of its north-south depth.
+        ring_toward = rx if abs(dx) >= abs(dy) else ry
+        # The ball must actually FACE the target side of the field on that
+        # axis (its nearest edge on the axis is the target-side edge).
+        if abs(dx) >= abs(dy):
+            edge_side = 1 if px > (cols[0] + cols[-1]) / 2 else -1
+            faces = (edge_side > 0) == (dx > 0)
+        else:
+            edge_side = 1 if py > (rows[0] + rows[-1]) / 2 else -1
+            faces = (edge_side > 0) == (dy > 0)
+        ok = faces and ring_toward < max_ring
+        why = f"ring {ring_toward}, target {d:.1f}mm"
+        if not ok and faces and ring_toward < max_ring + 1:
+            # Congestion escape hatch: the landing zone outside the ball's
+            # edge exit is already crowded -- a stub there is a wall.
+            if abs(dx) >= abs(dy):
+                ex, ey = (cx1 + 0.5 if dx > 0 else cx0 - 0.5), py
+            else:
+                ex, ey = px, (cy1 + 0.5 if dy > 0 else cy0 - 0.5)
+            crowd = sum(1 for p in near_pads
+                        if math.hypot(p.global_x - ex, p.global_y - ey) < 1.5)
+            if crowd >= 3:
+                ok = True
+                why += f", congested exit ({crowd} foreign pads)"
+        if ball_ok.get(pad.net_id, True):
+            ball_ok[pad.net_id] = ok
+        if ok:
+            notes.append((pad.net_name, pad.pad_number, why))
+    qualified = {nid for nid, ok in ball_ok.items() if ok}
+    # Diff pairs: both members or neither.
+    if diff_pairs:
+        for pair in diff_pairs.values():
+            ids = {p.net_id for p in (pair.p_pad, pair.n_pad) if p}
+            if ids and not ids.issubset(qualified):
+                qualified -= ids
+    names = set()
+    id_to_name = {}
+    for pad in footprint.pads:
+        if pad.net_id in qualified and pad.net_name:
+            id_to_name[pad.net_id] = pad.net_name
+    from net_queries import matches_net_filter
+    for nid, nm in id_to_name.items():
+        if net_filter and not matches_net_filter(nm, net_filter):
+            continue
+        names.add(nm)
+    notes = [n for n in notes if n[0] in names]
+    return names, notes

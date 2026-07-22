@@ -89,7 +89,7 @@ from reroute_loop import run_reroute_loop
 from length_matching import apply_intra_pair_length_matching
 from net_ordering import order_nets_mps, order_nets_inside_out, separate_nets_by_type
 from routing_common import (
-    setup_bga_exclusion_zones, filter_already_routed,
+    setup_bga_exclusion_zones, resolve_net_ids, filter_already_routed,
     run_length_matching, sync_pcb_data_segments, get_common_config_kwargs,
     warn_targets_outside_board
 )
@@ -363,7 +363,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                                         min_width=track_width)
 
     # Auto-detect BGA exclusion zones if not specified
-    bga_exclusion_zones = setup_bga_exclusion_zones(pcb_data, disable_bga_zones, bga_exclusion_zones)
+    _sel_ids = [nid for _nm, nid in resolve_net_ids(pcb_data, net_names)] \
+        if net_names else []
+    bga_exclusion_zones = setup_bga_exclusion_zones(
+        pcb_data, disable_bga_zones, bga_exclusion_zones,
+        selected_net_ids=_sel_ids)
 
     # Build config kwargs from common parameters plus diff-pair specific options
     config_kwargs = get_common_config_kwargs(
