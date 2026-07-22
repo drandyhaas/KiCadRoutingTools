@@ -248,11 +248,24 @@ class CreatePlanesOptionsPanel(wx.Panel):
         # Zone clearance
         grid.Add(wx.StaticText(self, label="Zone Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         r = defaults.PARAM_RANGES['plane_zone_clearance']
+        _zrow = wx.BoxSizer(wx.HORIZONTAL)
         self.zone_clearance = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
                                                  initial=defaults.PLANE_ZONE_CLEARANCE, inc=r['inc'])
         self.zone_clearance.SetDigits(r['digits'])
         self.zone_clearance.SetToolTip("Clearance from zone fill to other copper")
-        grid.Add(self.zone_clearance, 0, wx.EXPAND)
+        # Follow-min-clearance (CLI parity: --zone-clearance omitted -> the
+        # pour follows the routed clearance, auto-stepping toward the fab
+        # floor when a dense BGA lattice can't be threaded -- the ottercast
+        # sealed-field fix). Checked = follow (spin ignored).
+        self.zone_clearance_follow = wx.CheckBox(self, label="auto")
+        self.zone_clearance_follow.SetValue(True)
+        self.zone_clearance_follow.SetToolTip(
+            "Follow Min Clearance (recommended): pour clearance = routed "
+            "clearance, auto-reduced to thread dense BGA fields. Uncheck to "
+            "use the explicit value.")
+        _zrow.Add(self.zone_clearance, 1, wx.EXPAND)
+        _zrow.Add(self.zone_clearance_follow, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
+        grid.Add(_zrow, 0, wx.EXPAND)
 
         # Max search radius
         grid.Add(wx.StaticText(self, label="Max Search Radius (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -361,7 +374,8 @@ class CreatePlanesOptionsPanel(wx.Panel):
         else:
             same_net_clr = self.same_net_pad_clearance.GetValue()
         return {
-            'zone_clearance': self.zone_clearance.GetValue(),
+            'zone_clearance': (None if self.zone_clearance_follow.GetValue()
+                               else self.zone_clearance.GetValue()),
             'max_search_radius': self.max_search_radius.GetValue(),
             'rip_blocker_nets': self.rip_blocker_check.GetValue(),            'add_gnd_vias': self.add_gnd_vias_check.GetValue(),
             'gnd_via_distance': self.gnd_via_distance.GetValue(),
@@ -1021,7 +1035,7 @@ class PlanesTab(wx.Panel):
                 via_drill=config.get('via_drill', defaults.VIA_DRILL),
                 track_width=config.get('track_width', defaults.TRACK_WIDTH),
                 clearance=config.get('clearance', defaults.CLEARANCE),
-                zone_clearance=config.get('zone_clearance', defaults.PLANE_ZONE_CLEARANCE),
+                zone_clearance=config.get('zone_clearance'),
                 min_thickness=config.get('min_thickness', defaults.PLANE_MIN_THICKNESS),
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
                 max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
@@ -1239,7 +1253,7 @@ class PlanesTab(wx.Panel):
                 # clearance) threads but the GUI repair dropped. Config-driven,
                 # defaulting to the same PLANE_* values the CLI uses, so current
                 # behavior is unchanged unless a plan sets them.
-                zone_clearance=config.get('zone_clearance', defaults.PLANE_ZONE_CLEARANCE),
+                zone_clearance=config.get('zone_clearance'),
                 track_via_clearance=config.get('track_via_clearance',
                                                defaults.PLANE_TRACK_VIA_CLEARANCE),
                 reroute_ripped_nets=config.get('reroute_ripped_nets', False),

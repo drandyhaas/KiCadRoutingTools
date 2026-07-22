@@ -496,6 +496,11 @@ def apply_step_params(step, dialog):
             except (TypeError, ValueError):
                 notes.append(f"ignored non-numeric layer_costs={costs!r}")
     elif action == "route_planes":
+        if "zone_clearance" in params and params["zone_clearance"] is not None:
+            _pop = getattr(dialog.planes_tab, "create_options", None)
+            if _pop is not None and hasattr(_pop, "zone_clearance_follow"):
+                # explicit plan value overrides follow-clearance mode
+                _pop.zone_clearance_follow.SetValue(False)
         opts = dialog.planes_tab.create_options
         # A plan step is a COMPLETE spec of feature toggles: absent means
         # OFF. Leaving the persisted/panel state in place let a previously
