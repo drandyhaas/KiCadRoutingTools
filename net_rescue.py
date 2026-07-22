@@ -208,6 +208,66 @@ def _fence_window(obstacles, window, cfg):
                                     track_expand, via_expand)
 
 
+def _snap_rescue_vias_to_pads(result, pcb_data, net_id, config):
+    """#470 class 1: a rescue via that lands BESIDE the pad it serves -- barrel
+    edge microns short of the pad copper, electrically credited only through
+    the escape stub beneath it -- snaps to the pad center when a via genuinely
+    fits there. Validation is fitting_pad_via (barrel clear of foreign copper
+    at FULL-board scope, fab-ladder step-down allowed), the same contract the
+    stub layer switch uses; the route's segments touching the old via position
+    are re-welded to the center. Returns the number snapped."""
+    from stub_layer_switching import fitting_pad_via
+    vias = result.get('new_vias') or []
+    if not vias:
+        return 0
+    pads = [p for p in pcb_data.pads_by_net.get(net_id, [])
+            if not getattr(p, 'drill', 0)]
+    existing = [v for v in pcb_data.vias if v.net_id == net_id]
+    snapped = 0
+    for v in vias:
+        best = None
+        for p in pads:
+            hx, hy = p.size_x / 2, p.size_y / 2
+            dx, dy = abs(v.x - p.global_x), abs(v.y - p.global_y)
+            if dx > hx + v.size / 2 + 0.05 or dy > hy + v.size / 2 + 0.05:
+                continue  # not serving this pad
+            # Barrel already genuinely inside the pad copper (>=50um bite):
+            # nothing to fix. The graze class is edge_gap in (-0.05, +0.05].
+            ex, ey = max(0.0, dx - hx), max(0.0, dy - hy)
+            edge_gap = math.hypot(ex, ey) - v.size / 2
+            if edge_gap < -0.05:
+                continue
+            d = math.hypot(v.x - p.global_x, v.y - p.global_y)
+            if best is None or d < best[0]:
+                best = (d, p)
+        if best is None:
+            continue
+        p = best[1]
+        # A same-net via already at/near the pad center means the transition
+        # exists -- moving this one onto it would stack drills. Leave as-is
+        # (the free-via registration upstream should have reused it).
+        if any(math.hypot(ev.x - p.global_x, ev.y - p.global_y) < 0.2
+               for ev in existing):
+            continue
+        fit = fitting_pad_via(p.global_x, p.global_y, net_id, pcb_data,
+                              config, set())
+        if not fit:
+            continue
+        old_x, old_y = v.x, v.y
+        v.x, v.y = p.global_x, p.global_y
+        v.size, v.drill = fit
+        for s in result.get('new_segments') or []:
+            if abs(s.start_x - old_x) < 1e-6 and abs(s.start_y - old_y) < 1e-6:
+                s.start_x, s.start_y = v.x, v.y
+            if abs(s.end_x - old_x) < 1e-6 and abs(s.end_y - old_y) < 1e-6:
+                s.end_x, s.end_y = v.x, v.y
+        snapped += 1
+        print(f"    #470: rescue via snapped from ({old_x:.3f},{old_y:.3f}) to "
+              f"pad {p.component_ref}.{p.pad_number} center "
+              f"({v.x:.3f},{v.y:.3f}), size {v.size:g}")
+    return snapped
+
+
 def _attempt_edge(pcb_data, net_id, gap, config, net_clearances):
     """Try to route one gap inside a scoped window. Returns (result, cfg_used)
     or (None, None). Routes through free space only - no rip-up."""
@@ -241,6 +301,15 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances):
             window, cfg, [net_id],
             net_clearances=rung_clearances)
         _fence_window(obstacles, window, cfg)
+        # #470: existing same-net vias/through-holes in the window are FREE
+        # layer transitions. The rescue map never registered them (unlike the
+        # main-loop working map), so a rescue route paid full via cost
+        # everywhere, felt no pull toward the net's own barrels, and dropped a
+        # fresh via sub-mm from an existing one (USB_D_P's 0.94mm pair).
+        # Conversion suppresses the duplicate emit at these cells
+        # (get_same_net_through_hole_positions), completing the reuse.
+        from routing_context import _add_free_via_positions
+        _add_free_via_positions(obstacles, window, [net_id], cfg)
         # Constrain the route to the window: drop endpoints outside it and keep the
         # source/target overrides from punching the fence, so the A* can never leave
         # the stamped region and cross foreign copper the window never modelled (#396).
@@ -405,6 +474,9 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None):
             if result is None:
                 failed_gaps.add(key)
                 continue
+            # #470 class 1: snap a served-pad graze via to the pad center
+            # BEFORE committing, so board and write model stay identical.
+            _snap_rescue_vias_to_pads(result, pcb_data, net_id, used_cfg)
             add_route_to_pcb_data(pcb_data, result,
                                   debug_lines=config.debug_lines)
             num_after, comp_points, comp_pads = _net_component_info(pcb_data,
