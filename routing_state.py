@@ -206,14 +206,25 @@ def create_routing_state(
         total_routes=total_routes,
         enable_layer_switch=enable_layer_switch,
         debug_lines=debug_lines,
-        target_swaps=target_swaps or {},
-        target_swap_info=target_swap_info or [],
-        single_ended_target_swaps=single_ended_target_swaps or {},
-        single_ended_target_swap_info=single_ended_target_swap_info or [],
-        all_segment_modifications=all_segment_modifications or [],
-        all_swap_vias=all_swap_vias or [],
+        # `x if x is not None else ...`, NEVER `x or ...`: the caller's lists
+        # are ALIASES the engine appends into (stub-swap/relocation mods and
+        # vias flow to the output writer through them). `or` silently breaks
+        # the alias whenever the caller's list is EMPTY at creation time --
+        # a run with no upfront layer swaps then drops every engine-side
+        # swap from the written file (the phase-1 stub-switch keeps landed
+        # in state while the writer saw a different, empty list).
+        target_swaps=target_swaps if target_swaps is not None else {},
+        target_swap_info=target_swap_info if target_swap_info is not None else [],
+        single_ended_target_swaps=(single_ended_target_swaps
+                                   if single_ended_target_swaps is not None else {}),
+        single_ended_target_swap_info=(single_ended_target_swap_info
+                                       if single_ended_target_swap_info is not None else []),
+        all_segment_modifications=(all_segment_modifications
+                                   if all_segment_modifications is not None else []),
+        all_swap_vias=all_swap_vias if all_swap_vias is not None else [],
         total_layer_swaps=total_layer_swaps,
-        net_obstacles_cache=net_obstacles_cache or {},
+        net_obstacles_cache=(net_obstacles_cache
+                             if net_obstacles_cache is not None else {}),
         working_obstacles=working_obstacles,
         cancel_check=cancel_check,
         progress_callback=progress_callback,

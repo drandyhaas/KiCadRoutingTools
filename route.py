@@ -1989,6 +1989,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     results_data.setdefault('vias_to_remove', []).extend(
                         _rdata['vias_to_remove'])
                 for _key in ('all_swap_vias', 'all_swap_segments',
+                             'all_segment_modifications',
                              'exclusion_zone_lines', 'boundary_debug_labels'):
                     if _rdata.get(_key):
                         results_data.setdefault(_key, []).extend(_rdata[_key])

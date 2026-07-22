@@ -2939,18 +2939,17 @@ def route_multipoint_main(
         }
 
     if path is None and state is not None and not _stub_switch_round \
-            and os.environ.get('KICAD_MULTIPOINT_STUB_SWITCH', '') in ('1', 'true', 'on'):
-        # EXPERIMENTAL (default off): stub layer switch retry for the main
-        # edge (for a bus member, the corridor-SPANNING edge -- the leg
-        # that must route first) when a terminal's escape stub is walled in
-        # on its own layer. Move the stubs at the first edges' endpoints to
-        # an open layer (the pad via sizes itself down the fab ladder) and
-        # re-run Phase 1 once on freshly-derived terminals. Kept only when
-        # the retry routes real main copper; reverted exactly otherwise.
-        # Gated off: on the ottercast USB solo test the routed retry left
-        # the BALL terminal outside the connected set (accounting defect)
-        # and preempted the Phase-3/rescue path that connects it -- enable
-        # only for investigation until that is fixed.
+            and os.environ.get('KICAD_MULTIPOINT_STUB_SWITCH', '1') not in ('0', 'off', 'false'):
+        # Stub layer switch retry for the main edge (for a bus member, the
+        # corridor-SPANNING edge -- the leg that must route first) when a
+        # terminal's escape stub is walled in on its own layer. Move the
+        # stubs at the first edges' endpoints to an open layer (the pad via
+        # sizes itself down the fab ladder) and re-run Phase 1 once on
+        # freshly-derived terminals. Kept only when the retry routes real
+        # main copper; reverted exactly otherwise. Default ON
+        # (KICAD_MULTIPOINT_STUB_SWITCH=0 disables); the original gate-off
+        # defect was the create_routing_state `or []` alias break dropping
+        # the kept switch from the written file, not this retry itself.
         from stub_layer_switching import (switch_boxed_stub_near,
                                           revert_stub_layer_switch)
         from connectivity import get_multipoint_net_pads
