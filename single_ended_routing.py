@@ -2777,7 +2777,14 @@ def route_multipoint_main(
                    if (round(v.x, 2), round(v.y, 2)) in _ends]
             _pts = get_all_segment_tap_points(_segs, coord, layer_names,
                                               vias=_vs)
-            _island_cells[_cid] = list({(p[0], p[1], p[2]) for p in _pts})
+            # Keyed by cell, valued by the OWNER float point of that cell --
+            # the conversion below welds the route to the owner of the cell
+            # the router actually launched from (Phase 3's tap_point_map
+            # contract). Discarding the owners and welding to the terminal
+            # anchor drew a 1.5mm any-angle slash from the anchor to a route
+            # that started elsewhere on the island (SDC0_CMD, busstop7).
+            _island_cells[_cid] = {(p[0], p[1], p[2]): (p[3], p[4])
+                                   for p in _pts}
     num_components = len(set(pad_components.values()))
     if num_components < len(pad_info):
         print(f"  Existing copper joins {len(pad_info)} terminals into "
@@ -3103,11 +3110,24 @@ def route_multipoint_main(
     # Get through-hole pad positions for this net (layer transitions without via)
     through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
 
-    # Convert path to segments/vias
+    # Convert path to segments/vias. The originals default to the terminal
+    # anchors, but with island-wide launch the route may begin/end at ANY
+    # cell of the terminal's island -- weld to the owner point of the cell
+    # actually used (Phase 3's tap_point_map contract), never across the
+    # island back to the anchor.
+    _start_orig = (pad_a[3], pad_a[4], layer_names[pad_a[2]])
+    _end_orig = (pad_b[3], pad_b[4], layer_names[pad_b[2]])
+    if _island_cells is not None and path:
+        _own = _island_cells.get(pad_components.get(idx_a, idx_a), {}).get(tuple(path[0]))
+        if _own is not None:
+            _start_orig = (_own[0], _own[1], layer_names[path[0][2]])
+        _own = _island_cells.get(pad_components.get(idx_b, idx_b), {}).get(tuple(path[-1]))
+        if _own is not None:
+            _end_orig = (_own[0], _own[1], layer_names[path[-1][2]])
     segments, vias = _path_to_segments_vias(
         path, coord, layer_names, net_id, config,
-        (pad_a[3], pad_a[4], layer_names[pad_a[2]]),  # start_original
-        (pad_b[3], pad_b[4], layer_names[pad_b[2]]),  # end_original
+        _start_orig,
+        _end_orig,
         through_hole_positions,
         pcb_data
     )
@@ -3124,7 +3144,7 @@ def route_multipoint_main(
     # passes above rebuild widths and would otherwise restore a grazing terminal leg
     # to base/power width, undoing the graze-neck applied during conversion.
     _neck_route_terminal_grazes(segments, path, coord,
-                                (pad_a[3], pad_a[4]), (pad_b[3], pad_b[4]),
+                                _start_orig[:2], _end_orig[:2],
                                 pcb_data, net_id, config)
     # Fab-floor via dropped inside a boxed main-edge pad to unblock it (#189).
     vias = list(vias) + main_unblock_vias
