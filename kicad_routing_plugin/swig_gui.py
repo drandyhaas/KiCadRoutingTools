@@ -2022,9 +2022,13 @@ class RoutingDialog(wx.Dialog):
             if len(net_segments) == 0 and len(net_zones) == 0:
                 return False
 
+            # pcb_data enables the fill-COMPONENT-aware zone credit
+            # (validator parity): without it a pinched pour island graded
+            # plane-connected here while KiCad DRC showed it open, so
+            # "hide connected" hid a genuinely broken net.
             result = check_net_connectivity(
                 net_id, net_segments, net_vias, net_pads, net_zones,
-                tolerance=0.02
+                tolerance=0.02, pcb_data=self.pcb_data
             )
 
             return result['connected']
