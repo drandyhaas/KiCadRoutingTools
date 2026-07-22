@@ -305,6 +305,69 @@ def get_attraction_neighbor(
     return None
 
 
+def filter_bus_groups_geometric(pcb_data, bus_groups, config,
+                                min_members: int = 3,
+                                min_run_mm: float = 5.0,
+                                cos_cone: float = 0.9,
+                                max_len_ratio: float = 1.5):
+    """Strict geometric bus definition (default on; KICAD_BUS_STRICT=0
+    reverts to raw clique detection): a group is a bus only if its members
+    genuinely TRAVEL TOGETHER. Five rules, no names, no component identity:
+
+      1. >=3 members (pairs belong to the diff router or aren't worth
+         bundling),
+      2. parallel travel: member displacement vectors within a cos>0.9
+         cone at length ratio <=1.5 (largest coherent subset kept --
+         clustered sources + this cone geometrically imply clustered
+         destinations, subsuming any shared-component test),
+      3. run length >= 5mm (local hops gain nothing; also retires the
+         decoupling-cap clusters without a passive-component carve-out),
+      4. no power nets (config.power_net_widths),
+      5. no diff-pair members (config-independent: *_P/*_N by pair map is
+         the caller's concern; here power/width classes only).
+
+    Raw clique detection on ottercast declared 31 groups/118 members and
+    planned corridors for decoupling clusters and power rails; these rules
+    yield 6 groups/27 members -- the four real buses (SDC0, WL_SDIO,
+    BT_PCM, BT_UART) plus small co-traveling GPIO/cap bundles a human
+    would also lane together.
+    """
+    import os as _os
+    if _os.environ.get('KICAD_BUS_STRICT', '1') in ('0', 'off', 'false'):
+        return bus_groups
+    import math as _math
+    power_ids = set(getattr(config, 'power_net_widths', {}) or {})
+    out = []
+    for bus in bus_groups:
+        vecs = {}
+        for nid in bus.net_ids:
+            if nid in power_ids:
+                continue
+            pads = pcb_data.pads_by_net.get(nid, [])
+            if len(pads) < 2:
+                continue
+            a = min(pads, key=lambda p: p.global_x + p.global_y)
+            b = max(pads, key=lambda p: p.global_x + p.global_y)
+            dx, dy = b.global_x - a.global_x, b.global_y - a.global_y
+            L = _math.hypot(dx, dy)
+            if L >= min_run_mm:
+                vecs[nid] = (dx / L, dy / L, L)
+        best = []
+        for nid, (ux, uy, L) in vecs.items():
+            cone = [m for m, (vx, vy, M) in vecs.items()
+                    if ux * vx + uy * vy > cos_cone
+                    and max(L, M) / min(L, M) <= max_len_ratio]
+            if len(cone) > len(best):
+                best = cone
+        if len(best) < min_members:
+            continue
+        if len(best) < len(bus.net_ids):
+            kept = [nid for nid in bus.net_ids if nid in set(best)]
+            bus.net_ids = kept
+        out.append(bus)
+    return out
+
+
 def bus_attraction_context(
     net_id: int,
     bus_net_to_group: Optional[Dict[int, BusGroup]],

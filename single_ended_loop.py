@@ -466,6 +466,16 @@ def route_single_ended_nets(
             detection_radius=config.bus_detection_radius,
             min_nets=config.bus_min_nets
         )
+        # Strict geometric bus definition (see filter_bus_groups_geometric):
+        # only groups that genuinely travel together survive; raw cliques
+        # bundled decoupling clusters and power rails and planned corridors
+        # for all of them. KICAD_BUS_STRICT=0 reverts.
+        from bus_detection import filter_bus_groups_geometric
+        _raw_n = len(bus_groups)
+        bus_groups = filter_bus_groups_geometric(pcb_data, bus_groups, config)
+        if _raw_n != len(bus_groups):
+            print(f"  Bus filter: {_raw_n} raw clique group(s) -> "
+                  f"{len(bus_groups)} geometric bus(es)")
 
         if bus_groups:
             print(f"\n=== Bus Detection: Found {len(bus_groups)} bus group(s) ===")
