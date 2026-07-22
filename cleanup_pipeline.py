@@ -65,6 +65,7 @@ class CleanupOutcome:
 
 
 def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
+                           protect_net_ids=None,
                            label: str = '',
                            snap: bool = True,
                            phantom: bool = True,
@@ -312,6 +313,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
               f"island(s) ({_oi_segs} segment(s))")
 
     _de_segs, _de_vias, _de_strip = sweep_dead_ends(results, pcb_data, scope_net_ids,
+                                                    protect_net_ids=protect_net_ids,
                                                     keep_input_copper=keep_input_copper)
     counts['dead_ends_swept'] = _de_segs
     counts['dead_end_vias'] = _de_vias

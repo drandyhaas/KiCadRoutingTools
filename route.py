@@ -1413,8 +1413,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # routing committed, which is exactly the freeze semantics.
     if _ckpt_stop:
         _freeze_committed()
+    # #473: nets still carrying unfinished pads keep ALL their copper
+    # through the dead-end sweep -- their spurs are the landing sites the
+    # next chain step / rescue needs, and sweeping them each step eroded
+    # failed nets across chains.
+    _protect_unfinished = {nid for nid, _r in routed_results.items()
+                           if _r.get('failed_pads_info')}
+    _protect_unfinished |= {nid for _nm, nid in single_ended_nets
+                            if nid not in routed_results}
     _cleanup = None if _ckpt_stop else run_post_route_cleanup(
         results, pcb_data, sweep_scope_ids, config,
+        protect_net_ids=_protect_unfinished,
         freeze_hook=_freeze_committed,
         # Lets the phantom step also remove ORPHAN routed copper from pcb_data
         # (rip/reroute slivers no surviving result references), so board ==

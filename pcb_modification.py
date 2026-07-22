@@ -1191,6 +1191,7 @@ def _restore_soft_joint_bridges(kept, removed, vias, pads):
 
 
 def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
+                    protect_net_ids=None,
                     tol: float = None,
                     keep_input_copper: bool = False) -> Tuple[int, int, List[Segment]]:
     """Final whole-net dead-end sweep, after routing has settled (issue #84).
@@ -1240,6 +1241,17 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
     original_to_remove = []
     kept_segs_by_net = {}
     for net_id, net_segs in segs_by_net.items():
+        # Nets with UNFINISHED pads keep everything: their "dead ends" are
+        # the landing sites the next chain step (or the #468 restore, or a
+        # rescue) routes to. The sweep's own docstring says it prunes stubs
+        # a net "never completed" -- for a net still failed this run that is
+        # exactly the copper a later pass needs, and sweeping it each step
+        # ERODED failed nets across a chain (the #473 USB_D_N trunk decay:
+        # rip gaps -> fragments graded dead -> swept -> next step starts
+        # with less copper, repeat).
+        if protect_net_ids and net_id in protect_net_ids:
+            kept_segs_by_net[net_id] = net_segs
+            continue
         vias = [v for v in pcb_data.vias if v.net_id == net_id]
         pads = pcb_data.pads_by_net.get(net_id, [])
         zones = [z for z in all_zones if z.net_id == net_id]
