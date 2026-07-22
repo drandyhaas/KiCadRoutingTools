@@ -247,24 +247,28 @@ class CreatePlanesOptionsPanel(wx.Panel):
 
         # Zone clearance
         grid.Add(wx.StaticText(self, label="Zone Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        # Checkbox + spin row, SAME convention as the basic tab's geometry
+        # floors (track width etc.): UNCHECKED = automatic (pour follows the
+        # routed Min Clearance, auto-stepping toward the fab floor when a
+        # dense BGA lattice can't be threaded -- the ottercast sealed-field
+        # fix); CHECKING the box overrides with the typed value.
         r = defaults.PARAM_RANGES['plane_zone_clearance']
         _zrow = wx.BoxSizer(wx.HORIZONTAL)
+        self.zone_clearance_check = wx.CheckBox(self, label="")
+        self.zone_clearance_check.SetValue(False)
+        self.zone_clearance_check.SetToolTip(
+            "Override the zone (pour) clearance (unchecked = follow Min "
+            "Clearance, auto-reduced to thread dense BGA fields).")
         self.zone_clearance = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
                                                  initial=defaults.PLANE_ZONE_CLEARANCE, inc=r['inc'])
         self.zone_clearance.SetDigits(r['digits'])
         self.zone_clearance.SetToolTip("Clearance from zone fill to other copper")
-        # Follow-min-clearance (CLI parity: --zone-clearance omitted -> the
-        # pour follows the routed clearance, auto-stepping toward the fab
-        # floor when a dense BGA lattice can't be threaded -- the ottercast
-        # sealed-field fix). Checked = follow (spin ignored).
-        self.zone_clearance_follow = wx.CheckBox(self, label="auto")
-        self.zone_clearance_follow.SetValue(True)
-        self.zone_clearance_follow.SetToolTip(
-            "Follow Min Clearance (recommended): pour clearance = routed "
-            "clearance, auto-reduced to thread dense BGA fields. Uncheck to "
-            "use the explicit value.")
+        self.zone_clearance.Enable(False)
+        self.zone_clearance_check.Bind(
+            wx.EVT_CHECKBOX,
+            lambda evt: self.zone_clearance.Enable(evt.IsChecked()))
+        _zrow.Add(self.zone_clearance_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         _zrow.Add(self.zone_clearance, 1, wx.EXPAND)
-        _zrow.Add(self.zone_clearance_follow, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
         grid.Add(_zrow, 0, wx.EXPAND)
 
         # Max search radius
@@ -374,8 +378,8 @@ class CreatePlanesOptionsPanel(wx.Panel):
         else:
             same_net_clr = self.same_net_pad_clearance.GetValue()
         return {
-            'zone_clearance': (None if self.zone_clearance_follow.GetValue()
-                               else self.zone_clearance.GetValue()),
+            'zone_clearance': (self.zone_clearance.GetValue()
+                               if self.zone_clearance_check.GetValue() else None),
             'max_search_radius': self.max_search_radius.GetValue(),
             'rip_blocker_nets': self.rip_blocker_check.GetValue(),            'add_gnd_vias': self.add_gnd_vias_check.GetValue(),
             'gnd_via_distance': self.gnd_via_distance.GetValue(),

@@ -854,7 +854,8 @@ def route_planes(
             net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
             net_pads = pcb_data.pads_by_net.get(net_id, [])
             res = check_net_connectivity(net_id, net_segs, net_vias, net_pads,
-                                         zones_by_net.get(net_id, []))
+                                         zones_by_net.get(net_id, []),
+                                         pcb_data=pcb_data)
             if res.get('connected'):
                 continue
             pad_by_key = {}
@@ -952,7 +953,8 @@ def route_planes(
                     _v_segs = [s for s in pcb_data.segments if s.net_id == net_id]
                     _v_vias = [v for v in pcb_data.vias if v.net_id == net_id]
                     _v_res = check_net_connectivity(net_id, _v_segs, _v_vias, net_pads,
-                                                    zones_by_net.get(net_id, []))
+                                                    zones_by_net.get(net_id, []),
+                                                    pcb_data=pcb_data)
                     _pad_key = (round(pad.global_x, 3), round(pad.global_y, 3),
                                 pad.component_ref)
                     _still = {(round(x, 3), round(y, 3), ref)
@@ -1015,7 +1017,8 @@ def route_planes(
                         _t_segs = [s for s in pcb_data.segments if s.net_id == net_id]
                         _t_vias = [v for v in pcb_data.vias if v.net_id == net_id]
                         _t_res = check_net_connectivity(net_id, _t_segs, _t_vias, net_pads,
-                                                        zones_by_net.get(net_id, []))
+                                                        zones_by_net.get(net_id, []),
+                                                        pcb_data=pcb_data)
                         _pad_key = (round(pad.global_x, 3), round(pad.global_y, 3),
                                     pad.component_ref)
                         _still = {(round(x, 3), round(y, 3), ref)

@@ -1664,7 +1664,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             continue
         _r = check_net_connectivity(
             _nid, _segs_by_net.get(_nid, []), _vias_by_net.get(_nid, []),
-            _pads, _zones_by_net.get(_nid, []), tolerance=0.02)
+            _pads, _zones_by_net.get(_nid, []), tolerance=0.02,
+            pcb_data=pcb_data)
         _dp = _r.get('disconnected_pads') or []
         if _dp:
             _res['failed_pads_info'] = [
@@ -1737,7 +1738,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             continue
         _r = check_net_connectivity(
             _nid, _segs_by_net.get(_nid, []), _vias_by_net.get(_nid, []),
-            _pads, _zones_by_net.get(_nid, []), tolerance=0.02)
+            _pads, _zones_by_net.get(_nid, []), tolerance=0.02,
+            pcb_data=pcb_data)
         _dp = _r.get('disconnected_pads') or []
         if not _dp:
             continue

@@ -498,9 +498,12 @@ def apply_step_params(step, dialog):
     elif action == "route_planes":
         if "zone_clearance" in params and params["zone_clearance"] is not None:
             _pop = getattr(dialog.planes_tab, "create_options", None)
-            if _pop is not None and hasattr(_pop, "zone_clearance_follow"):
-                # explicit plan value overrides follow-clearance mode
-                _pop.zone_clearance_follow.SetValue(False)
+            if _pop is not None and hasattr(_pop, "zone_clearance_check"):
+                # explicit plan value checks the override box (basic-tab
+                # convention: checked = use the typed value)
+                _pop.zone_clearance_check.SetValue(True)
+                if hasattr(_pop, "zone_clearance"):
+                    _pop.zone_clearance.Enable(True)
         opts = dialog.planes_tab.create_options
         # A plan step is a COMPLETE spec of feature toggles: absent means
         # OFF. Leaving the persisted/panel state in place let a previously

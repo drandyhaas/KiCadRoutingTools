@@ -1357,6 +1357,52 @@ def find_unconnected_plane_pads(
                for zl in zone_layers):
             continue
         unconnected.append((pad, pad_layer))
+
+    # Validator-parity second opinion: the geometric test above credits a pad
+    # whose via merely REACHES a zone layer -- but a via landing in a pinched
+    # fill island (the ottercast dogbone class: pour physically cannot thread
+    # to the barrel) is NOT plane-connected, and the island repair pass's
+    # coarse raster cannot see a 0.2mm ring either, so those balls shipped
+    # open at fab with no repair attempted. The fill-component-aware
+    # connectivity check (check_net_connectivity + plane_fill_model) grades
+    # exactly like KiCad; any pad it reports disconnected joins the repair
+    # list. Additive only -- it never removes a geometrically-found pad.
+    try:
+        from check_connected import check_net_connectivity
+        _segs = [s for s in pcb_data.segments if s.net_id == net_id]
+        _vias = [v for v in pcb_data.vias if v.net_id == net_id]
+        _pads = pcb_data.pads_by_net.get(net_id, [])
+        _zones = [z for z in (getattr(pcb_data, 'zones', None) or [])
+                  if z.net_id == net_id]
+        if _zones:
+            _res = check_net_connectivity(net_id, _segs, _vias, _pads, _zones,
+                                          tolerance=0.02, pcb_data=pcb_data)
+            _have = {(round(p.global_x, 3), round(p.global_y, 3))
+                     for p, _l in unconnected}
+            for _dp in (_res.get('disconnected_pads') or []):
+                # entries are (x, y, layer, component_ref) tuples
+                _dx_, _dy_ = _dp[0], _dp[1]
+                _key = (round(_dx_, 3), round(_dy_, 3))
+                if _key in _have:
+                    continue
+                _pad = next((p for p in _pads
+                             if abs(p.global_x - _dx_) < 1e-3
+                             and abs(p.global_y - _dy_) < 1e-3), None)
+                if _pad is None or pad_is_plated_through(_pad):
+                    continue
+                if off_board is not None and off_board(_pad.global_x, _pad.global_y):
+                    continue
+                _pl = next((l for l in _pad.layers
+                            if l.endswith('.Cu') and not l.startswith('*')),
+                           None)
+                if _pl is None:
+                    continue
+                print(f"    fill-model: pad {_pad.component_ref}.{_pad.pad_number} "
+                      f"reaches only a pinched fill island -- queued for repair")
+                unconnected.append((_pad, _pl))
+                _have.add(_key)
+    except Exception as _e:
+        print(f"    (fill-model pad check skipped: {_e})")
     if skipped_off_board:
         print(f"  Skipped {skipped_off_board} pad(s) OUTSIDE the board outline "
               f"(unreachable, no repair copper drawn, #291)")
