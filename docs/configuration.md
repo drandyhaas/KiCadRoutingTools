@@ -369,6 +369,17 @@ These options control stub layer switching, which moves stubs to different layer
   layer; bare SMD pads fix their copper layers; already-connected pad-to-pad copper never
   moves), picking the destination layer that needs the fewest new pad vias. Nets with no
   feasible common layer are left unchanged
+- The **pad via sizes itself to fit**: a switch leaving the pad's layer drops a
+  through-via at the pad, at the run's nominal via size when it clears the
+  surrounding copper, else the first smaller via from the fab-tier ladder that
+  does (with the standard fab-escalation warning). A nominal 0.5mm via never
+  fits a 0.65mm-pitch ball field boxed by neighboring fanout vias; the 0.3/0.25
+  rungs do — so a stub walled in on its own layer can still switch to an open
+  layer and escape. Applies everywhere the switch machinery is used: the
+  routing-failure rescue rungs (single-ended and diff-pair fallback swaps), and
+  the diff-pair multipoint chain, which moves blocked terminals' stubs to the
+  most-open layer as its last resort before deferring the pair to single-ended
+  (moving a stub also removes the copper that walls its coupled twin)
 
 ### Length Matching Options
 
