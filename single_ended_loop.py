@@ -552,7 +552,38 @@ def route_single_ended_nets(
                     "members": len(_bg.net_ids),
                     "corridor_planned": _bg.name in bus_corridors})
 
+    # Checkpoint abort (KICAD_STOP_AFTER / KICAD_STOP_FILE): stop routing at
+    # a defined point, skip every later pass, and WRITE the partial board --
+    # for inspecting intermediate states (e.g. "the board right after the
+    # bus members routed") with the run's exact configuration.
+    #   KICAD_STOP_AFTER=bus  -> stop once the last bus-member net has been
+    #     attempted (the routing order interleaves, so non-bus nets that come
+    #     earlier are included -- that IS the real board state at that
+    #     moment).
+    #   KICAD_STOP_FILE=path  -> stop before the next net once the file
+    #     exists (manual abort: `touch path`).
+    _stop_after = os.environ.get('KICAD_STOP_AFTER', '')
+    _stop_file = os.environ.get('KICAD_STOP_FILE', '')
+    _stop_after_idx = None
+    if _stop_after == 'bus' and bus_net_to_group:
+        _members = set(bus_net_to_group)
+        for _i, (_nm, _nid) in enumerate(single_ended_nets):
+            if _nid in _members:
+                _stop_after_idx = _i
+    _pos = -1
     for net_name, net_id in single_ended_nets:
+        _pos += 1
+        if _stop_after_idx is not None and _pos > _stop_after_idx:
+            print(f"\nCHECKPOINT STOP (KICAD_STOP_AFTER=bus): all "
+                  f"{len(bus_net_to_group)} bus members attempted; writing "
+                  f"partial board")
+            state.checkpoint_stop = True
+            break
+        if _stop_file and os.path.exists(_stop_file):
+            print(f"\nCHECKPOINT STOP (KICAD_STOP_FILE): {_stop_file} exists; "
+                  f"writing partial board")
+            state.checkpoint_stop = True
+            break
         if user_quit:
             break
 

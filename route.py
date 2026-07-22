@@ -1094,8 +1094,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     total_time += se_time
     total_iterations += se_iterations
 
+    # Checkpoint abort (KICAD_STOP_AFTER / KICAD_STOP_FILE, set by the SE
+    # loop): skip every later routing/repair pass and fall through to the
+    # WRITE, so the partial board ships exactly as it stood at the stop.
+    _ckpt_stop = getattr(state, 'checkpoint_stop', False)
+    if _ckpt_stop:
+        print("Checkpoint stop: skipping reroute/length-match/Phase 3/rescue/"
+              "cleanup/reconciliation; writing the board as-is")
+
     # Run reroute loop for nets that were ripped during diff pair or single-ended routing
-    rq_successful, rq_failed, rq_time, rq_iterations, route_index = run_reroute_loop(
+    rq_successful, rq_failed, rq_time, rq_iterations, route_index = (0, 0, 0.0, 0, route_index) if _ckpt_stop else run_reroute_loop(
         state, route_index_start=route_index,
         cancel_check=cancel_check, progress_callback=progress_callback,
         failed_so_far=failed
@@ -1106,7 +1114,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     total_iterations += rq_iterations
 
     # Apply length matching if configured
-    if length_match_groups:
+    if length_match_groups and not _ckpt_stop:
         run_length_matching(routed_results, length_match_groups, config, pcb_data)
 
     # Sync pcb_data with length-matched segments before Phase 3
@@ -1124,7 +1132,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if progress_callback:
             progress_callback(current, num_multipoint_nets, f"Multi-point: {net_name}")
 
-    run_phase3_tap_routing(
+    if not _ckpt_stop:
+      run_phase3_tap_routing(
         state=state,
         pcb_data=pcb_data,
         config=config,
@@ -1170,7 +1179,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 state.reroute_queue.append(('single', pcb_data.nets[nid].name, nid))
                 state.queued_net_ids.add(nid)
                 recover.append(pcb_data.nets[nid].name)
-        if recover:
+        if recover and not _ckpt_stop:
             print(f"Issue #134 recovery: re-routing {len(recover)} net(s) left ripped "
                   f"to avoid a short: {', '.join(recover)}")
             run_reroute_loop(state, route_index_start=route_index,
@@ -1223,7 +1232,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # restored copper colliding with newly routed copper); honest 'unrecovered'
     # when nothing safe can be re-instated. Engine-side, so the GUI inherits.
     from diff_pair_custody import run_casualty_reconcile
-    casualty_summary = run_casualty_reconcile(state)
+    casualty_summary = None if _ckpt_stop else run_casualty_reconcile(state)
 
     # Issues #331/#371: last-chance scoped fine-parameter rescue for nets the
     # whole pipeline (main loop, rip-up ladder, reroute loop, Phase 3, #134
@@ -1235,8 +1244,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if progress_callback:
         progress_callback(0, 0, "Rescuing failed nets...")
     from net_rescue import rescue_failed_nets
-    rescue_summary = rescue_failed_nets(state, single_ended_nets,
-                                        net_clearances=net_clearances)
+    rescue_summary = None if _ckpt_stop else rescue_failed_nets(
+        state, single_ended_nets, net_clearances=net_clearances)
 
     # Final progress update
     if progress_callback:
@@ -1395,7 +1404,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _committed_seg_ids.update(id(s) for s in pcb_data.segments)
         _committed_via_ids.update(id(v) for v in pcb_data.vias)
 
-    _cleanup = run_post_route_cleanup(
+    _cleanup = None if _ckpt_stop else run_post_route_cleanup(
         results, pcb_data, sweep_scope_ids, config,
         freeze_hook=_freeze_committed,
         # Lets the phantom step also remove ORPHAN routed copper from pcb_data
@@ -1409,7 +1418,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         original_via_ids=({id(v) for lst in _orig_via_by_net.values() for v in lst}
                           | {id(v) for v in all_swap_vias}),
         keep_input_copper=keep_input_copper)
-    dead_end_input_segments = _cleanup.input_strip_segments
+    dead_end_input_segments = _cleanup.input_strip_segments if _cleanup is not None else []
 
     # Issue #220: the output writer copies the INPUT FILE verbatim, then adds the
     # write-list results and strips `segments_to_remove`. So an in-scope net's
@@ -1789,7 +1798,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # #331/#371 rescue pass outcome (key absent when nothing was rescued,
         # so pre-rescue JSON_SUMMARY consumers/diffs are unaffected).
         summary['rescue'] = rescue_summary
-    if casualty_summary.get('attempted'):
+    if casualty_summary and casualty_summary.get('attempted'):
         # T5 custody: casualties-only reconcile tally (additive; key absent
         # when no rip casualty occurred -- the common case).
         summary['casualty_reconcile'] = casualty_summary
@@ -1910,7 +1919,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # still-open set. Runs on BOTH fronts: CLI re-invokes on the written
     # file; GUI (return_results) re-invokes on the in-memory board and
     # merges the sub-run's results (claude-tab/stress parity gap closure).
-    if (final_reconcile and not skip_routing
+    if (final_reconcile and not skip_routing and not _ckpt_stop
             and (output_file or return_results)
             and (failed_single or failed_multipoint)):
         _rec_names = list(dict.fromkeys(
