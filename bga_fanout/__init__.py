@@ -2256,6 +2256,16 @@ def generate_bga_fanout(footprint: Footprint,
         # Pre-assign escape directions for all pairs to avoid overlaps
         force_str = " (forced)" if force_escape_direction else ""
         print(f"  Assigning escape directions (primary: {primary_escape}{force_str})...")
+        # Target-side preference for PAIRS (#469): one shared direction per
+        # pair (coupling untouched), biasing which direction the assigner
+        # tries first. Same env gate as the single-ended preference.
+        _pair_toward = {}
+        if os.environ.get('KICAD_FANOUT_TOWARD_TARGETS', '') in ('1', 'true', 'on'):
+            from bga_fanout.escape import preferred_pair_dirs
+            _pair_toward = preferred_pair_dirs(pcb_data, footprint, diff_pairs)
+            if _pair_toward:
+                print(f"  Target-side pair escape preference active for "
+                      f"{len(_pair_toward)} pair(s)")
         pair_escape_assignments, pair_layer_assignments = assign_pair_escapes(
             diff_pairs, grid, channels, layers,
             primary_orientation=primary_escape,
@@ -2265,7 +2275,8 @@ def generate_bga_fanout(footprint: Footprint,
             via_size=via_size,
             rebalance=rebalance_escape,
             pre_occupied=pre_occupied_exits,
-            force_escape_direction=force_escape_direction
+            force_escape_direction=force_escape_direction,
+            pair_preferred=_pair_toward
         )
 
     # Build lookup from net_name to pair info

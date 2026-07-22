@@ -46,6 +46,36 @@ def preferred_escape_dirs(pcb_data, footprint) -> Dict[Tuple[float, float], str]
     return prefs
 
 
+def preferred_pair_dirs(pcb_data, footprint, diff_pairs) -> Dict[str, str]:
+    """Pair-level target-side preference (#469): one direction per pair,
+    from the pair's midpoint toward the nearest off-footprint pad of either
+    polarity -- the pair stays COUPLED and escapes as a unit, this only
+    biases WHICH shared direction the assigner tries first."""
+    prefs: Dict[str, str] = {}
+    ref = footprint.reference
+    by_net: Dict[int, list] = {}
+    for fp in pcb_data.footprints.values():
+        if fp.reference == ref:
+            continue
+        for p in fp.pads:
+            if p.net_id > 0:
+                by_net.setdefault(p.net_id, []).append((p.global_x, p.global_y))
+    for pair_id, pair in diff_pairs.items():
+        targets = (by_net.get(pair.p_pad.net_id, [])
+                   + by_net.get(pair.n_pad.net_id, []))
+        if not targets:
+            continue
+        cx = (pair.p_pad.global_x + pair.n_pad.global_x) / 2
+        cy = (pair.p_pad.global_y + pair.n_pad.global_y) / 2
+        tx, ty = min(targets, key=lambda t: (t[0] - cx) ** 2 + (t[1] - cy) ** 2)
+        dx, dy = tx - cx, ty - cy
+        if abs(dx) >= abs(dy):
+            prefs[pair_id] = 'right' if dx > 0 else 'left'
+        else:
+            prefs[pair_id] = 'down' if dy > 0 else 'up'
+    return prefs
+
+
 def find_escape_channel(pad_x: float, pad_y: float,
                         grid: BGAGrid,
                         channels: List[Channel],
@@ -126,7 +156,8 @@ def get_pair_escape_options(p_pad_x: float, p_pad_y: float,
                              n_pad_x: float, n_pad_y: float,
                              grid: BGAGrid,
                              channels: List[Channel],
-                             include_alternate_channels: bool = False) -> List[Tuple[Optional[Channel], str]]:
+                             include_alternate_channels: bool = False,
+                             preferred_dir: str = None) -> List[Tuple[Optional[Channel], str]]:
     """
     Get all valid escape options for a differential pair, ordered by preference.
 
@@ -198,8 +229,29 @@ def get_pair_escape_options(p_pad_x: float, p_pad_y: float,
         v_dist = min(dist_up, dist_down)
         options.append((v_channel, v_dir, v_dist))
 
-    # Sort by distance (closest edge first)
-    options.sort(key=lambda x: x[2])
+    # Target-side preference (#469): the builder above only offers the
+    # NEAREST side per orientation, so a preferred direction on the farther
+    # side would never appear -- swap that orientation's option to the
+    # preferred side (its true distance), then order preferred-first. The
+    # pair stays coupled either way: one option = one shared direction for
+    # both polarities, and every downstream conflict check is unchanged.
+    if preferred_dir:
+        swapped = []
+        for ch, d, dist in options:
+            if preferred_dir in ('left', 'right') and d in ('left', 'right') \
+                    and d != preferred_dir:
+                dist = dist_left if preferred_dir == 'left' else dist_right
+                d = preferred_dir
+            elif preferred_dir in ('up', 'down') and d in ('up', 'down') \
+                    and d != preferred_dir:
+                dist = dist_up if preferred_dir == 'up' else dist_down
+                d = preferred_dir
+            swapped.append((ch, d, dist))
+        options = swapped
+        options.sort(key=lambda x: (0 if x[1] == preferred_dir else 1, x[2]))
+    else:
+        # Sort by distance (closest edge first)
+        options.sort(key=lambda x: x[2])
 
     # Build result list
     result = [(ch, d) for ch, d, _ in options]
@@ -410,7 +462,8 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
                         via_size: float = 0.5,
                         rebalance: bool = False,
                         pre_occupied: Dict[Tuple[str, str, float], str] = None,
-                        force_escape_direction: bool = False) -> Dict[str, Tuple[Optional[Channel], str]]:
+                        force_escape_direction: bool = False,
+                        pair_preferred: Dict[str, str] = None) -> Dict[str, Tuple[Optional[Channel], str]]:
     """
     Assign escape directions to all differential pairs, avoiding overlaps.
 
@@ -615,7 +668,8 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
         all_options = get_pair_escape_options(
             pair.p_pad.global_x, pair.p_pad.global_y,
             pair.n_pad.global_x, pair.n_pad.global_y,
-            grid, channels, include_alternate_channels=True
+            grid, channels, include_alternate_channels=True,
+            preferred_dir=(pair_preferred or {}).get(pair_id)
         )
 
         primary_dirs = ['up', 'down'] if primary_orientation == 'vertical' else ['left', 'right']
@@ -661,7 +715,8 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
             all_options = get_pair_escape_options(
                 pair.p_pad.global_x, pair.p_pad.global_y,
                 pair.n_pad.global_x, pair.n_pad.global_y,
-                grid, channels, include_alternate_channels=True
+                grid, channels, include_alternate_channels=True,
+                preferred_dir=(pair_preferred or {}).get(pair_id)
             )
 
             # Filter to secondary orientation options
