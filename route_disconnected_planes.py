@@ -404,6 +404,16 @@ def route_planes(
     Returns:
         Tuple of (total_routes_added, total_regions_connected)
     """
+    # zone_clearance=None means "follow the routed clearance": the GUI planes
+    # tab's zone-clearance "auto" checkbox (ON by default) passes None, as does
+    # any caller that leaves it unset. create_plane resolves this (via
+    # _resolve_zone_clearance); the repair path did NOT, so None threaded down
+    # into find_disconnected_zone_regions' layer_clearance and detonated
+    # pad_rect_halfspan as `float + None` on the first foreign pad/segment/via
+    # (issue #475). Resolve it here in the shared engine so BOTH fronts get it;
+    # the CLI passes a real default (never None), so this is a no-op there.
+    if zone_clearance is None:
+        zone_clearance = clearance if clearance is not None else defaults.PLANE_ZONE_CLEARANCE
     from route import _dump_engine_config
     _dump_engine_config('repair_planes', dict(locals()))
     # Board-setup copper-to-edge rule (#338): engine-side so the GUI planes

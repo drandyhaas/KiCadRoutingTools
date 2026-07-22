@@ -258,9 +258,14 @@ def warn_targets_outside_board(pcb_data: PCBData,
             if not inside:
                 # Distinguish pads the router will actually SKIP (clearly
                 # outside, issue #291) from pads grazing the outline (kept
-                # routable -- castellated / edge-connector pads).
-                out_dist = (_dist_point_to_polygon(x, y, outline) if has_poly
-                            else -dist)
+                # routable -- castellated / edge-connector pads). Measure to the
+                # NEAREST outer ring (multi-outline boards, #304); `outline`
+                # (singular) is only bound on the bbox-fallback path, so use the
+                # `outlines` list that `has_poly`/`inside` were computed from --
+                # referencing `outline` here was an unbound-local crash whenever
+                # a pad fell outside a real polygon outline (issue #475).
+                out_dist = (min(_dist_point_to_polygon(x, y, o) for o in outlines)
+                            if has_poly else -dist)
                 kind = 'outside' if out_dist > OFF_BOARD_TOLERANCE else 'near-edge'
                 flagged.append((net_name, where, x, y, kind))
             elif edge_margin > 0 and dist < edge_margin:

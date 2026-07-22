@@ -3553,6 +3553,25 @@ def _extract_board_contours_from_pcbnew(board, to_mm):
             segs.extend(_bezier_to_segments(
                 (to_mm(p0.x), to_mm(p0.y)), (to_mm(c1.x), to_mm(c1.y)),
                 (to_mm(c2.x), to_mm(c2.y)), (to_mm(p3.x), to_mm(p3.y))))
+        elif shape_type == getattr(pcbnew, 'SHAPE_T_POLY', getattr(pcbnew, 'S_POLYGON', -2)):
+            # A free-form (gr_poly) board outline loads as a polygon PCB_SHAPE.
+            # Without this branch it contributes ZERO segments, so the GUI/pcbnew
+            # builder loses a curved/organic board edge entirely -- while the text
+            # parser reads it fine (extract_board_contours' gr_poly reader). That
+            # asymmetry crashed route/route_planes on a gr_poly-outlined board:
+            # the outline vanished, only a stray mounting-hole Edge.Cuts shape
+            # survived, and pads fell "outside" the spurious ring (issue #475).
+            # Walk every outline ring and emit closing segments so the contour
+            # chainer sees closed loops (OutlineCount() > 1 for multi-body edges).
+            poly = drawing.GetPolyShape()
+            for oi in range(poly.OutlineCount()):
+                ring = poly.Outline(oi)
+                pts = [(to_mm(ring.CPoint(i).x), to_mm(ring.CPoint(i).y))
+                       for i in range(ring.PointCount())]
+                for i in range(len(pts)):
+                    a, b = pts[i], pts[(i + 1) % len(pts)]  # close the ring
+                    if abs(b[0] - a[0]) >= 0.001 or abs(b[1] - a[1]) >= 0.001:
+                        segs.append((a, b))
         return segs
 
     segments = []
