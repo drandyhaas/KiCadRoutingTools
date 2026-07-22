@@ -2753,7 +2753,31 @@ def route_multipoint_main(
     # connected is never re-tapped (the old pad-position MST + 0.02mm
     # coincidence filter routed redundant loops between overlap-joined
     # escapes -- butterstick DQ5).
-    pad_components = get_copper_connected_terminal_groups(pcb_data, net_id, pad_info)
+    # Island-wide launch sets (KICAD_ISLAND_LAUNCH=0 disables): Phase 1 used
+    # to launch each edge from TERMINAL cells only (pad centers / stub free
+    # ends), so a route needing its own via 0.9mm behind the launch point
+    # paid for fresh copper alongside its own stub to physically reach it
+    # (WL_SDIO_D1 retraced its In1 escape with a parallel twin to get to the
+    # ball via). Seeding each component's launch set with ALL of its copper
+    # -- sampled segment points plus the island's vias on every layer, the
+    # same machinery Phase 3 taps already use -- lets the route start at the
+    # best point of the island (e.g. directly at the via on B.Cu), and the
+    # dead-end sweep then retires whatever stub the route no longer uses.
+    from connectivity import get_terminal_component_info
+    pad_components, _isl_copper, _segs_by_comp = get_terminal_component_info(
+        pcb_data, net_id, pad_info)
+    _island_cells = None
+    if os.environ.get('KICAD_ISLAND_LAUNCH', '1') not in ('0', 'off', 'false'):
+        _net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+        _island_cells = {}
+        for _cid, _segs in _segs_by_comp.items():
+            _ends = {(round(s.start_x, 2), round(s.start_y, 2)) for s in _segs} | \
+                    {(round(s.end_x, 2), round(s.end_y, 2)) for s in _segs}
+            _vs = [v for v in _net_vias
+                   if (round(v.x, 2), round(v.y, 2)) in _ends]
+            _pts = get_all_segment_tap_points(_segs, coord, layer_names,
+                                              vias=_vs)
+            _island_cells[_cid] = list({(p[0], p[1], p[2]) for p in _pts})
     num_components = len(set(pad_components.values()))
     if num_components < len(pad_info):
         print(f"  Existing copper joins {len(pad_info)} terminals into "
@@ -2920,6 +2944,18 @@ def route_multipoint_main(
             targets = [(pad_b[0], pad_b[1], layer_idx) for layer_idx in range(len(layer_names))]
         else:
             targets = [(pad_b[0], pad_b[1], pad_b[2])]
+
+        # Island-wide launch: every cell of each endpoint's copper island is
+        # a legal start/land (its stubs, trunks, and vias on all layers) --
+        # the route begins at the island's best point instead of paying
+        # duplicate copper to walk back to its own via.
+        if _island_cells is not None:
+            _isl = _island_cells.get(pad_components.get(idx_a, idx_a))
+            if _isl:
+                sources = list({*sources, *_isl})
+            _isl = _island_cells.get(pad_components.get(idx_b, idx_b))
+            if _isl:
+                targets = list({*targets, *_isl})
 
         # Mark source/target cells (same-net pad cells; safe to accumulate)
         for gx, gy, layer in sources + targets:
