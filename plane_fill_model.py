@@ -43,6 +43,58 @@ except ImportError:
 _CACHE_ATTR = '_plane_fill_models'
 
 
+def _label_components(free):
+    """4-connected component labeling of a boolean grid, scipy-free.
+    Returns (labels int32 array, n_components) matching ndimage.label
+    semantics (labels 1..n, 0 = background)."""
+    nx, ny = free.shape
+    labels = np.zeros((nx, ny), dtype=np.int32)
+    parent = [0]  # union-find; parent[i] == i for roots
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    prev_row_labels = None
+    for j in range(ny):
+        col = free[:, j]
+        if not col.any():
+            prev_row_labels = None
+            continue
+        # maximal free runs in this column-slice (along x)
+        padded = np.concatenate(([False], col, [False]))
+        d = np.diff(padded.astype(np.int8))
+        starts = np.nonzero(d == 1)[0]
+        ends = np.nonzero(d == -1)[0]
+        row_labels = np.zeros(nx, dtype=np.int32)
+        for s, e in zip(starts, ends):
+            parent.append(len(parent))
+            lab = len(parent) - 1
+            row_labels[s:e] = lab
+            if prev_row_labels is not None:
+                overlap = prev_row_labels[s:e]
+                for prev_lab in np.unique(overlap[overlap > 0]):
+                    union(lab, int(prev_lab))
+        labels[:, j] = row_labels
+        prev_row_labels = row_labels
+    # resolve to canonical roots, compact to 1..n
+    if len(parent) > 1:
+        roots = np.array([find(i) for i in range(len(parent))], dtype=np.int32)
+        uniq = np.unique(roots[1:])
+        remap = np.zeros(len(parent), dtype=np.int32)
+        remap[uniq] = np.arange(1, len(uniq) + 1)
+        flat = remap[roots[labels]]
+        return flat, len(uniq)
+    return labels, 0
+
+
 class ZoneFillModel:
     """Reached-fill bitmap for one zone (net + layer + outline)."""
 
@@ -154,9 +206,17 @@ class ZoneFillModel:
         # fill-connected iff they touch the SAME component -- the whole
         # parity fix. (No anchor/flood step: seeding from the net's own
         # copper is circular -- an isolated via's island contains the via.)
-        if not _HAS_SCIPY:
-            return  # fallback: caller keeps the old permissive behavior
-        self.labels, self._n = _ndi.label(free)
+        if _HAS_SCIPY:
+            self.labels, self._n = _ndi.label(free)
+        else:
+            # Pure-numpy connected-component labeling (KiCad's bundled
+            # Python has no scipy -- without this the GUI's grader kept the
+            # legacy blob credit and showed N5-class islands as connected
+            # while KiCad DRC reported them open). Row-run labeling with
+            # union-find: label maximal free runs per row, union with
+            # overlapping runs of the previous row. O(cells), ~ny python
+            # iterations of vectorized row work.
+            self.labels, self._n = _label_components(free)
         self.ok = True
 
     def largest_component(self) -> int:
