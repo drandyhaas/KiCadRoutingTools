@@ -2979,12 +2979,26 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                               + [seg for pad in _ppads
                                  for seg in _pad_obstacle_segments(pad, layer_names)])
                     _obs_v = _par_v + [v for v in pair_vias if v.net_id == _partner]
+                    # Multipoint awareness: launch/land anywhere on each
+                    # terminal's pre-existing copper island (stub/via/pad),
+                    # so passing through a terminal's via serves it instead
+                    # of forcing a separate spur.
+                    _oband_s = [s for s in board_segs if s.net_id == _net]
+                    _oband_v = ([v for v in pair_vias if v.net_id == _net]
+                                + [v for v in (getattr(pcb_data, 'vias', None) or [])
+                                   if v.net_id == _net])
+                    _staps = _terminal_island_taps(
+                        (_src_t[0], _src_t[1]), _oband_s, _oband_v, coord, layer_names)
+                    _ttaps = _terminal_island_taps(
+                        (_tgt_t[0], _tgt_t[1]), _oband_s, _oband_v, coord, layer_names)
                     _rs, _rv, _rit, _rp = _route_hybrid_leg(
                         pcb_data, _net, config, leg_obs, layer_names, coord,
                         (_tgt_t[0], _tgt_t[1], _tgt_t[2]), _src_t,
                         _obs_s, _obs_v, pair_vias, partner_pads=_ppads,
                         mid_vias=_own_v,
-                        attract_path=_attract if _attract else None)
+                        attract_path=_attract if _attract else None,
+                        source_taps=_staps or None,
+                        target_taps=_ttaps or None)
                     if _rs is None:
                         return None
                     return _rs, _rv
@@ -3293,10 +3307,50 @@ def _ordered_grid_path(segs, start_xy, coord, layer_names):
     return out
 
 
+def _terminal_island_taps(term_xy, own_segs, own_vias, coord, layer_names):
+    """Island tap set for a terminal: BFS over the net's PRE-EXISTING copper
+    (endpoint adjacency + via jumps) from the terminal point, then sample
+    every island cell -- (gx, gy, layer, owner_x, owner_y) tuples, vias on
+    every layer. Gives the seam re-ask multipoint awareness: any island cell
+    is a legal launch/land, so wiring through a terminal's via serves it."""
+    TOL = 0.06
+    def _touch(x0, y0, x1, y1):
+        return math.hypot(x0 - x1, y0 - y1) <= TOL
+    in_s = [False] * len(own_segs)
+    in_v = [False] * len(own_vias)
+    pts = [term_xy]
+    changed = True
+    while changed:
+        changed = False
+        for i, s in enumerate(own_segs):
+            if in_s[i]:
+                continue
+            if any(_touch(s.start_x, s.start_y, px, py)
+                   or _touch(s.end_x, s.end_y, px, py) for px, py in pts):
+                in_s[i] = True
+                changed = True
+                pts.append((s.start_x, s.start_y))
+                pts.append((s.end_x, s.end_y))
+        for i, v in enumerate(own_vias):
+            if in_v[i]:
+                continue
+            if any(_touch(v.x, v.y, px, py) for px, py in pts):
+                in_v[i] = True
+                changed = True
+                pts.append((v.x, v.y))
+    isl_s = [s for i, s in enumerate(own_segs) if in_s[i]]
+    isl_v = [v for i, v in enumerate(own_vias) if in_v[i]]
+    if not isl_s and not isl_v:
+        return []
+    from single_ended_routing import get_all_segment_tap_points
+    return get_all_segment_tap_points(isl_s, coord, layer_names, vias=isl_v)
+
+
 def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
                       mid_pt, term, partner_segs, partner_vias, pair_vias,
                       partner_pads=None, mid_vias=None,
-                      attract_path=None, sibling_margin=0):
+                      attract_path=None, sibling_margin=0,
+                      source_taps=None, target_taps=None):
     """Route ONE point-to-point single-ended leg joining a terminal to the coupled
     middle's near end (term -> mid_pt), routing around partner copper. Returns
     (segs, vias, iters), ([], [], 0) when the terminal already coincides with the
@@ -3471,8 +3525,26 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
         # start on the pad's own layer.
         sources = ([(tgx, tgy, l) for l in range(nlayers)] if on_via
                    else [(tgx, tgy, alayer)])
+        # Multipoint awareness (#444): island tap sets replace the single
+        # anchor -- the route may launch from / land on ANY cell of the
+        # terminal's existing copper island (its stub, pad, or via on every
+        # layer it spans), so wiring THROUGH a terminal's via in passing
+        # serves the terminal instead of forcing a separate spur. Taps are
+        # (gx, gy, layer, owner_x, owner_y); the weld below uses the OWNER
+        # of the cell actually chosen (never a distant anchor).
+        _src_own = {}
+        _tgt_own = {}
+        if source_taps:
+            for _t in source_taps:
+                _src_own[(int(_t[0]), int(_t[1]), int(_t[2]))] = (_t[3], _t[4])
+            sources = list({*sources, *_src_own.keys()})
+        if target_taps:
+            for _t in target_taps:
+                _tgt_own[(int(_t[0]), int(_t[1]), int(_t[2]))] = (_t[3], _t[4])
         targets = ([(mgx, mgy, l) for l in mid_target_layers] if mid_target_layers
                    else [(mgx, mgy, mid_pt[2])])
+        if target_taps:
+            targets = list({*targets, *_tgt_own.keys()})
         obstacles.clear_allowed_cells()
         obstacles.clear_source_target_cells()
         # Mark ONLY the exact endpoint cells as source/target so the A* can start/end
@@ -3486,6 +3558,8 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
             obstacles.add_source_target_cell(sgx, sgy, slayer)
         for tgt_l in (mid_target_layers or [mid_pt[2]]):
             obstacles.add_source_target_cell(mgx, mgy, tgt_l)
+        for _tgx, _tgy, _tl in (_tgt_own or {}):
+            obstacles.add_source_target_cell(_tgx, _tgy, _tl)
         path, it = _route_leg(router, obstacles, config, sources, targets,
                               sibling_margin, pcb_data, net_id)
         if path is None and sibling_margin:
@@ -3516,10 +3590,17 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
                                 for gx2 in range(tgx - 20, tgx + 21))
                             print(f"          {gy2:5d} {row}")
             return None, None, 0, None
+        _start_orig = (ax, ay, layer_names[path[0][2]])
+        _own = _src_own.get(tuple(path[0]))
+        if _own is not None:
+            _start_orig = (_own[0], _own[1], layer_names[path[0][2]])
+        _end_orig = (mid_pt[0], mid_pt[1], layer_names[mid_pt[2]])
+        _own = _tgt_own.get(tuple(path[-1]))
+        if _own is not None:
+            _end_orig = (_own[0], _own[1], layer_names[path[-1][2]])
         ps, pv = _path_to_segments_vias(
             path, coord, layer_names, net_id, config,
-            (ax, ay, layer_names[path[0][2]]),
-            (mid_pt[0], mid_pt[1], layer_names[mid_pt[2]]),
+            _start_orig, _end_orig,
             through_hole_positions=reuse_holes, pcb_data=pcb_data)
         _collapse_leg_attach_join(ps, (mid_pt[0], mid_pt[1]), config, pcb_data, net_id, partner_segs)
         return ps, pv, it, path
