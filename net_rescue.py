@@ -266,7 +266,20 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances):
                       f"segs_in_window={len(window.segments)}")
             except Exception as _e:
                 print(f"    RESCUE-DEBUG failed: {_e}")
-        result = route_net_with_obstacles(window, net_id, cfg, obstacles, bounds=bounds)
+        # Aim the route at THIS gap's two islands. The window crop severs
+        # copper, and get_net_endpoints' largest-two-groups split then picks
+        # two fragments of the same trunk as the route's sides, dropping the
+        # island the gap analysis chose (USB_D_P: target set was the far
+        # trunk half parked in the fence ring; the BGA ball was never aimed
+        # at, so the small-via rungs never even pointed at the pocket).
+        from connectivity import get_net_endpoints_anchor_split
+        src_over, tgt_over, split_err = get_net_endpoints_anchor_split(
+            window, net_id, cfg, (ax, ay), (bx, by))
+        if split_err:
+            src_over = tgt_over = None
+        result = route_net_with_obstacles(window, net_id, cfg, obstacles, bounds=bounds,
+                                          sources_override=src_over,
+                                          targets_override=tgt_over)
         if result and not result.get('failed'):
             if _result_escapes_window(result, window, cfg):
                 print(f"    rescue rung rejected: route escaped the window "

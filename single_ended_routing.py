@@ -1169,7 +1169,9 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                               obstacles: GridObstacleMap,
                               attraction_path: Optional[List[Tuple[int, int, int]]] = None,
                               reverse_direction: bool = False,
-                              bounds: Optional[Tuple[int, int, int, int]] = None) -> Optional[dict]:
+                              bounds: Optional[Tuple[int, int, int, int]] = None,
+                              sources_override: Optional[List[Tuple]] = None,
+                              targets_override: Optional[List[Tuple]] = None) -> Optional[dict]:
     """Route a single net using pre-built obstacles (for incremental routing).
 
     Args:
@@ -1188,9 +1190,18 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                 routing to it drags the A* through the un-modelled exterior), and the
                 source/target overrides below are never stamped outside it -- so the
                 window fence stays SOLID instead of being punched at the exempt cell.
+        sources_override/targets_override: When BOTH are given, use them as the
+                route's two sides instead of deriving them (get_net_endpoints
+                row shape). The scoped rescue passes an anchor split here: the
+                window crop severs copper, and the standard largest-two-groups
+                derivation then aims at two fragments of the same trunk while
+                the rescued island is dropped entirely.
     """
     # Find endpoints (segments or pads)
-    sources, targets, error = get_net_endpoints(pcb_data, net_id, config)
+    if sources_override is not None and targets_override is not None:
+        sources, targets, error = list(sources_override), list(targets_override), None
+    else:
+        sources, targets, error = get_net_endpoints(pcb_data, net_id, config)
     if error:
         print(f"  {error}")
         return None

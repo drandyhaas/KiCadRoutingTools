@@ -719,6 +719,74 @@ def drop_off_board_pads(pcb_data: PCBData, pads: List[Pad]) -> List[Pad]:
     return [p for p in pads if not off_board(p.global_x, p.global_y)]
 
 
+def get_net_endpoints_anchor_split(pcb_data: PCBData, net_id: int,
+                                   config: GridRouteConfig,
+                                   anchor_a: Tuple[float, float],
+                                   anchor_b: Tuple[float, float]
+                                   ) -> Tuple[List, List, Optional[str]]:
+    """Endpoint derivation for a KNOWN gap (the scoped net_rescue window).
+
+    get_net_endpoints keeps only the two LARGEST copper groups as the
+    route's two sides -- correct on a whole board, wrong inside a cropped
+    rescue window: the crop can sever the main trunk into two large
+    fragments that then win both slots, silently dropping the small island
+    the rescue was aimed at (USB_D_P: the window cut the trunk at the USB
+    connector, the A* tried to re-join trunk-to-trunk with its target
+    parked in the fence ring, and the BGA ball island was never a target).
+
+    Here the caller knows the gap: every copper endpoint, pad, and via of
+    the net is assigned to the nearer of the two anchor points (the gap's
+    ends, board mm). Trunk fragments land together on the trunk side no
+    matter where the crop cut them; the rescued island lands opposite.
+    Rows are get_net_endpoints-shaped: (gx, gy, layer_idx, orig_x, orig_y).
+    A sloppy mid-gap assignment is tolerable -- net_rescue verifies the
+    component count actually dropped and undoes the copper otherwise.
+    """
+    from net_queries import expand_pad_layers
+
+    coord = GridCoord(config.grid_step)
+    layer_map = build_layer_map(config.layers)
+    ax, ay = anchor_a
+    bx, by = anchor_b
+    side_a: List = []
+    side_b: List = []
+
+    def _add(x, y, layer_idx, gx, gy):
+        da = (x - ax) ** 2 + (y - ay) ** 2
+        db = (x - bx) ** 2 + (y - by) ** 2
+        (side_a if da <= db else side_b).append((gx, gy, layer_idx, x, y))
+
+    for seg in pcb_data.segments:
+        if seg.net_id != net_id:
+            continue
+        layer_idx = layer_map.get(seg.layer)
+        if layer_idx is None:
+            continue
+        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+        _add(seg.start_x, seg.start_y, layer_idx, gx1, gy1)
+        if (gx1, gy1) != (gx2, gy2):
+            _add(seg.end_x, seg.end_y, layer_idx, gx2, gy2)
+    for pad in drop_off_board_pads(pcb_data, pcb_data.pads_by_net.get(net_id, [])):
+        gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+        for layer in expand_pad_layers(pad.layers, config.layers):
+            layer_idx = layer_map.get(layer)
+            if layer_idx is not None:
+                _add(pad.global_x, pad.global_y, layer_idx, gx, gy)
+    for via in pcb_data.vias:
+        if via.net_id != net_id:
+            continue
+        gx, gy = coord.to_grid(via.x, via.y)
+        for layer in config.layers:
+            layer_idx = layer_map.get(layer)
+            if layer_idx is not None:
+                _add(via.x, via.y, layer_idx, gx, gy)
+
+    if not side_a or not side_b:
+        return side_a, side_b, "anchor split produced an empty side"
+    return side_a, side_b, None
+
+
 def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                       use_stub_free_ends: bool = False) -> Tuple[List, List, str]:
     """
