@@ -91,8 +91,15 @@ def setup_bga_exclusion_zones(
             # net whose fanout dropped it. Auto-disable that component's zone.
             # Engine-level (batch_route/batch_route_diff_pairs), so the GUI
             # inherits; board-state-driven, so no sidecar file is load-bearing.
-            if selected_net_ids:
+            import os as _os
+            if (selected_net_ids and _os.environ.get(
+                    'KICAD_BARE_BALL_ZONE_EXEMPT', '1') not in ('0', 'off', 'false')):
                 _sel = set(selected_net_ids)
+                # Only nets that can actually be ROUTED (>=2 pads): a
+                # single-pad net's ball is trivially bare and disabled
+                # U6/U7's zones spuriously on ottercast.
+                _sel = {n for n in _sel
+                        if len(pcb_data.pads_by_net.get(n, [])) >= 2}
                 _pts_by_net = {}
                 for _s in pcb_data.segments:
                     if _s.net_id in _sel:
@@ -110,8 +117,17 @@ def setup_bga_exclusion_zones(
                     return True
                 _keep, _keep_fps = [], []
                 for fp, zone in zip(bga_components, bga_exclusion_zones):
+                    # Only balls ENTOMBED beyond the zone's edge-tolerance
+                    # band trigger: outer-ring bare balls (the #472 deferral
+                    # targets) are reachable through the band + the endpoint
+                    # exemption machinery (MIPI has routed bare-ball for the
+                    # whole record history with zones ON).
+                    _x0, _y0, _x1, _y1, _tol = zone
                     _bare = sorted({_p.net_name for _p in fp.pads
                                     if _p.net_id in _sel and not _p.drill
+                                    and min(_p.global_x - _x0, _x1 - _p.global_x,
+                                            _p.global_y - _y0, _y1 - _p.global_y)
+                                    > _tol + 0.65
                                     and _ball_bare(_p)})
                     if _bare:
                         print(f"  {fp.reference}: zone DISABLED -- bare ball(s) of "
