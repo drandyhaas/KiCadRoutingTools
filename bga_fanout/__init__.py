@@ -547,7 +547,8 @@ def create_single_ended_route(
     channels: List[Channel],
     layers: List[str],
     exit_margin: float,
-    force_orientation: Optional[str] = None
+    force_orientation: Optional[str] = None,
+    preferred_dir: Optional[str] = None
 ) -> FanoutRoute:
     """
     Create a route for a single-ended (non-differential) signal.
@@ -565,7 +566,8 @@ def create_single_ended_route(
     """
     channel, escape_dir = find_escape_channel(
         pad.global_x, pad.global_y, grid, channels,
-        force_orientation=force_orientation
+        force_orientation=force_orientation,
+        preferred_dir=preferred_dir
     )
     is_edge = channel is None
 
@@ -2412,6 +2414,18 @@ def generate_bga_fanout(footprint: Footprint,
         routes: List[FanoutRoute] = []
         processed_pairs: Set[str] = set()
 
+        # Target-side escape preference (#469, KICAD_FANOUT_TOWARD_TARGETS=1):
+        # each pad's escape direction biases toward its net's nearest
+        # off-footprint pad; the smart layer assignment then spreads the
+        # extra same-direction competition across layers.
+        _toward_targets = {}
+        if os.environ.get('KICAD_FANOUT_TOWARD_TARGETS', '') in ('1', 'true', 'on'):
+            from bga_fanout.escape import preferred_escape_dirs
+            _toward_targets = preferred_escape_dirs(pcb_data, footprint)
+            if _toward_targets:
+                print(f"  Target-side escape preference active for "
+                      f"{len(_toward_targets)} pad(s)")
+
         for pad in footprint.pads:
             if not pad.net_name or pad.net_id == 0:
                 continue
@@ -2463,7 +2477,9 @@ def generate_bga_fanout(footprint: Footprint,
                 # Single-ended signal (not part of a pair)
                 force_orient = primary_escape if force_escape_direction else None
                 route = create_single_ended_route(
-                    pad, grid, channels, layers, exit_margin, force_orient
+                    pad, grid, channels, layers, exit_margin, force_orient,
+                    preferred_dir=_toward_targets.get(
+                        (round(pad.global_x, 3), round(pad.global_y, 3)))
                 )
                 routes.append(route)
 

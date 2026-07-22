@@ -12,10 +12,45 @@ from bga_fanout.types import Channel, BGAGrid, DiffPairPads
 from bga_fanout.grid import is_edge_pad
 
 
+def preferred_escape_dirs(pcb_data, footprint) -> Dict[Tuple[float, float], str]:
+    """Per-pad preferred escape direction: toward the net's nearest same-net
+    pad OFF this footprint (the side the net must ultimately go). A stub
+    already pointing at its destination side launches trivially and avoids
+    walling in its neighbors' escapes (the ottercast USB pocket). Keys are
+    (round(x,3), round(y,3)) pad positions; nets with no off-footprint pad
+    (or net_id 0) get no entry. Empty dict unless
+    KICAD_FANOUT_TOWARD_TARGETS=1 -- the caller gates on that env."""
+    prefs: Dict[Tuple[float, float], str] = {}
+    ref = footprint.reference
+    by_net: Dict[int, list] = {}
+    for fp in pcb_data.footprints.values():
+        if fp.reference == ref:
+            continue
+        for p in fp.pads:
+            if p.net_id > 0:
+                by_net.setdefault(p.net_id, []).append((p.global_x, p.global_y))
+    for pad in footprint.pads:
+        if pad.net_id <= 0:
+            continue
+        targets = by_net.get(pad.net_id)
+        if not targets:
+            continue
+        px, py = pad.global_x, pad.global_y
+        tx, ty = min(targets, key=lambda t: (t[0] - px) ** 2 + (t[1] - py) ** 2)
+        dx, dy = tx - px, ty - py
+        if abs(dx) >= abs(dy):
+            d = 'right' if dx > 0 else 'left'
+        else:
+            d = 'down' if dy > 0 else 'up'
+        prefs[(round(px, 3), round(py, 3))] = d
+    return prefs
+
+
 def find_escape_channel(pad_x: float, pad_y: float,
                         grid: BGAGrid,
                         channels: List[Channel],
-                        force_orientation: str = None) -> Tuple[Optional[Channel], str]:
+                        force_orientation: str = None,
+                        preferred_dir: str = None) -> Tuple[Optional[Channel], str]:
     """
     Find the best channel for a pad to escape through.
     Returns (channel, direction). Channel is None for edge pads.
@@ -26,9 +61,16 @@ def find_escape_channel(pad_x: float, pad_y: float,
         channels: Available routing channels
         force_orientation: If set to 'horizontal' or 'vertical', only allow
                           escapes in that orientation (left/right or up/down)
+        preferred_dir: Optional target-side direction (#469): sorts first
+                      among the options (distance breaks ties within each
+                      class), so an escape goes toward the net's destination
+                      whenever a channel exists that way. Layer assignment
+                      later spreads the extra same-direction competition
+                      across layers.
     """
-    # Check if this is an edge pad first
-    is_edge, edge_dir = is_edge_pad(pad_x, pad_y, grid)
+    # Check if this is an edge pad first (corner pads honor the preference)
+    is_edge, edge_dir = is_edge_pad(pad_x, pad_y, grid,
+                                    preferred_dir=preferred_dir)
     if is_edge:
         return None, edge_dir
 
@@ -49,8 +91,11 @@ def find_escape_channel(pad_x: float, pad_y: float,
     if force_orientation:
         options = [(d, dir, o) for d, dir, o in options if o == force_orientation]
 
-    # Sort by distance (closest first)
-    options.sort(key=lambda x: x[0])
+    # Sort by distance (closest first); target-side preference first (#469)
+    if preferred_dir:
+        options.sort(key=lambda x: (0 if x[1] == preferred_dir else 1, x[0]))
+    else:
+        options.sort(key=lambda x: x[0])
 
     # Pick the best option
     for dist, escape_dir, orientation in options:
