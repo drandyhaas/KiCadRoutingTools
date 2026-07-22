@@ -3712,8 +3712,18 @@ Examples:
     import json as _json, clearance_ledger as _cl
     _summary = {
         "min_clearance_used": _cl.effective(args.clearance),
+        "plane_nets": sorted(set(args.nets)),
     }
     print("JSON_SUMMARY: " + _json.dumps(_summary))
+    # Plane-net manifest sidecar: persist the summary next to the output so
+    # downstream route/diff/fanout steps auto-exclude the planed nets from
+    # wildcard selection (chain consistency -- see plane_io helpers).
+    try:
+        from plane_io import record_plane_manifest
+        record_plane_manifest(args.output_file, args.nets, 'route_planes',
+                              input_board_path=args.input_file, summary=_summary)
+    except Exception as e:
+        print(f"  (plane manifest not written: {e})")
 
 
 if __name__ == "__main__":

@@ -2458,6 +2458,17 @@ For differential pair routing, use route_diff.py:
     # Get nets from patterns and/or component
     if all_patterns:
         net_names = expand_net_patterns(pcb_data, all_patterns)
+        # Plane-net manifest (chain consistency): nets an earlier plane step
+        # declared are excluded from WILDCARD selection -- routing them as
+        # normal signals here would fight the pour. Naming one verbatim in
+        # --nets still includes it (explicit override).
+        from plane_io import apply_plane_manifest_exclusions
+        net_names, _plane_excl = apply_plane_manifest_exclusions(
+            args.input_file, all_patterns, net_names)
+        if _plane_excl:
+            print(f"Plane manifest: excluded {len(_plane_excl)} plane net(s) "
+                  f"from wildcard selection: {', '.join(sorted(_plane_excl))} "
+                  f"(name one explicitly in --nets to include it)")
     else:
         net_names = []  # Will be populated by component filter below
 
@@ -2644,3 +2655,13 @@ For differential pair routing, use route_diff.py:
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+
+    # Plane-net manifest carry-forward (chain consistency): the input board's
+    # sidecar (written by an earlier plane step) propagates to the output, so
+    # every later chain step keeps auto-excluding the planed nets.
+    if args.output_file and os.path.isfile(args.output_file):
+        try:
+            from plane_io import carry_plane_manifest
+            carry_plane_manifest(args.input_file, args.output_file)
+        except Exception as e:
+            print(f"  (plane manifest not carried: {e})")

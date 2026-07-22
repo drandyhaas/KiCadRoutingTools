@@ -1777,6 +1777,15 @@ Examples:
     # Expand patterns to net names
     net_names = expand_net_patterns(pcb_data, all_patterns)
 
+    # Plane-net manifest (chain consistency): wildcard-matched plane nets are
+    # excluded; a verbatim pattern still includes one (see plane_io helpers).
+    from plane_io import apply_plane_manifest_exclusions
+    net_names, _plane_excl = apply_plane_manifest_exclusions(
+        args.input_file, all_patterns, net_names)
+    if _plane_excl:
+        print(f"Plane manifest: excluded {len(_plane_excl)} plane net(s) "
+              f"from wildcard selection: {', '.join(sorted(_plane_excl))}")
+
     if not net_names:
         print("No nets matched the given patterns!")
         sys.exit(1)
@@ -1913,3 +1922,11 @@ Examples:
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+
+    # Plane-net manifest carry-forward (chain consistency; see plane_io).
+    if args.output_file and os.path.isfile(args.output_file):
+        try:
+            from plane_io import carry_plane_manifest
+            carry_plane_manifest(args.input_file, args.output_file)
+        except Exception as e:
+            print(f"  (plane manifest not carried: {e})")

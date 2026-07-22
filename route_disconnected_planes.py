@@ -1807,14 +1807,24 @@ Examples:
     import json as _json, clearance_ledger as _cl
     _routes, _regions = (_rdp_result if isinstance(_rdp_result, tuple)
                          and len(_rdp_result) >= 2 else (0, 0))
+    _plane_nets = sorted(set((args.nets or []) + (args.power_nets or [])))
     _summary = {
         "total_routes": _routes,
         "total_regions": _regions,
         "min_clearance_used": _cl.effective(args.clearance),
+        "plane_nets": _plane_nets,
     }
     if LAST_RIPPED_RECONNECT is not None:
         _summary["ripped_reconnect"] = LAST_RIPPED_RECONNECT
     print("JSON_SUMMARY: " + _json.dumps(_summary))
+    # Plane-net manifest sidecar (see route_planes.py / plane_io helpers).
+    try:
+        from plane_io import record_plane_manifest
+        record_plane_manifest(args.output_file, _plane_nets,
+                              'route_disconnected_planes',
+                              input_board_path=args.input_file, summary=_summary)
+    except Exception as e:
+        print(f"  (plane manifest not written: {e})")
 
 
 if __name__ == "__main__":
