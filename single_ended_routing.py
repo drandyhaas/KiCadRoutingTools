@@ -2533,6 +2533,28 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
     }
 
 
+def _pad_all_layer_reach(pcb_data: PCBData, pad_obj) -> bool:
+    """True when the pad is reachable on EVERY routing layer: a through-hole
+    pad ('*.Cu'), or an SMD pad with a same-net via whose barrel covers the
+    pad center (a stub-layer-switch or via-in-pad escape via). Arriving at
+    that cell on ANY layer lands the connection -- if the target set does
+    not say so, a route ending on the via under the pad reads as a miss and
+    the pad stays 'failed' with its own escape sitting right there."""
+    if pad_obj is None or not hasattr(pad_obj, 'layers'):
+        return False
+    if '*.Cu' in pad_obj.layers:
+        return True
+    nid = getattr(pad_obj, 'net_id', None)
+    if not nid:
+        return False
+    px, py = pad_obj.global_x, pad_obj.global_y
+    for v in pcb_data.vias:
+        if v.net_id == nid and \
+                math.hypot(v.x - px, v.y - py) <= (v.size or 0) / 2 + 1e-3:
+            return True
+    return False
+
+
 def _dense_fanout_refs(pcb_data: PCBData) -> set:
     """References of high-density fanned-out packages (BGA/QFN/QFP with a
     real ball/pin field). Computed once per board and cached on pcb_data --
@@ -2878,12 +2900,12 @@ def route_multipoint_main(
         pad_a_obj = pad_a[5] if len(pad_a) > 5 else None
         pad_b_obj = pad_b[5] if len(pad_b) > 5 else None
 
-        if pad_a_obj and hasattr(pad_a_obj, 'layers') and '*.Cu' in pad_a_obj.layers:
+        if _pad_all_layer_reach(pcb_data, pad_a_obj):
             sources = [(pad_a[0], pad_a[1], layer_idx) for layer_idx in range(len(layer_names))]
         else:
             sources = [(pad_a[0], pad_a[1], pad_a[2])]  # (gx, gy, layer_idx)
 
-        if pad_b_obj and hasattr(pad_b_obj, 'layers') and '*.Cu' in pad_b_obj.layers:
+        if _pad_all_layer_reach(pcb_data, pad_b_obj):
             targets = [(pad_b[0], pad_b[1], layer_idx) for layer_idx in range(len(layer_names))]
         else:
             targets = [(pad_b[0], pad_b[1], pad_b[2])]
@@ -3442,9 +3464,10 @@ def _route_multipoint_taps_impl(
             sources = []
             tap_point_map = {}
 
-        # Add source pad position as a valid source (on all layers for through-hole)
-        if hasattr(src_pad_obj, 'layers') and '*.Cu' in src_pad_obj.layers:
-            # Through-hole pad - can connect on any copper layer
+        # Add source pad position as a valid source (on all layers for
+        # through-hole pads and pads with a same-net via at their center)
+        if _pad_all_layer_reach(pcb_data, src_pad_obj):
+            # Reaches any copper layer
             for layer_idx in range(len(layer_names)):
                 key = (src_gx, src_gy, layer_idx)
                 if key not in tap_point_map:
@@ -3461,11 +3484,11 @@ def _route_multipoint_taps_impl(
             print(f"      ERROR: No sources available for routing")
             continue
 
-        # For through-hole pads, create targets on ALL layers (router can reach any layer)
+        # Targets on ALL layers for through-hole pads AND pads with a
+        # same-net via at their center (the router can land on any layer)
         tgt_gx, tgt_gy = tgt_pad[0], tgt_pad[1]
         tgt_pad_obj = tgt_pad[5]
-        if hasattr(tgt_pad_obj, 'layers') and '*.Cu' in tgt_pad_obj.layers:
-            # Through-hole pad - can connect on any copper layer
+        if _pad_all_layer_reach(pcb_data, tgt_pad_obj):
             targets = [(tgt_gx, tgt_gy, layer_idx) for layer_idx in range(len(layer_names))]
         else:
             # SMD pad or specific layer - use the layer from pad_info
