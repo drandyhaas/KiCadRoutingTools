@@ -13,7 +13,8 @@ repair, trusting the same validator, skipped all of them).
 
 This model answers the flow question: rasterize the zone at cell =
 min_thickness/2, block cells within (zone_clearance + min_thickness/2) of
-foreign copper (the cell-center eroded fill), label connected components
+foreign copper (the cell-center eroded fill) and cells inside
+copperpour-banned keep-out rule areas (#477), label connected components
 (scipy when available; BFS fallback), and mark REACHED the components
 touching the net's own anchor copper. A query point is fill-credited iff
 its cell lies in a reached component.
@@ -191,6 +192,72 @@ class ZoneFillModel:
                     continue
                 _stamp_rect(p.global_x, p.global_y,
                             p.size_x / 2.0, p.size_y / 2.0)
+
+        # Copperpour keep-out areas (#477): KiCad's filler subtracts rule
+        # areas marked (copperpour not_allowed) from the fill, so a keep-out
+        # crossing a plane splits it into real islands (mokya's antenna
+        # keep-outs cut the In1 GND plane) -- invisible here before this
+        # stamp, so region repair never saw the splits and only the
+        # kicad-oracle caught the resulting opens. Block cells whose center
+        # falls inside such an area on this layer (even-odd over outline +
+        # holes, KiCad's rule), plus an mth/2 rim for the min-thickness
+        # opening at the boundary. No clearance term: fill lawfully touches
+        # a keep-out edge.
+        rim = mth / 2.0
+        for ko in (getattr(pcb_data.board_info, 'keepouts', None) or []):
+            if ko.get('copper_pour_allowed', True):
+                continue
+            kls = ko.get('layers') or set()
+            # #369 A5 layer tokens: literal name, '*.Cu', 'F&B.Cu'/'F&B';
+            # an empty list means every layer.
+            if kls and layer not in kls and '*.Cu' not in kls and \
+                    not (layer in ('F.Cu', 'B.Cu') and
+                         ({'F&B.Cu', 'F&B'} & kls)):
+                continue
+            rings = [ko.get('polygon') or []] + list(ko.get('holes') or [])
+            rings = [r for r in rings if len(r) >= 3]
+            if not rings:
+                continue
+            kxs = [p[0] for r in rings for p in r]
+            kys = [p[1] for r in rings for p in r]
+            i0 = max(0, _gi(min(kxs) - rim, x0))
+            i1 = min(nx, _gi(max(kxs) + rim, x0) + 2)
+            j0 = max(0, _gi(min(kys) - rim, y0))
+            j1 = min(ny, _gi(max(kys) + rim, y0) + 2)
+            if i0 >= i1 or j0 >= j1:
+                continue
+            sub_x = cxs[i0:i1]
+            for j in range(j0, j1):
+                yv = cys[j]
+                crossings = np.zeros(i1 - i0, dtype=np.int32)
+                for r in rings:
+                    for k in range(len(r)):
+                        rx1, ry1 = r[k]
+                        rx2, ry2 = r[(k + 1) % len(r)]
+                        if (ry1 > yv) == (ry2 > yv):
+                            continue
+                        xc = rx1 + (yv - ry1) * (rx2 - rx1) / (ry2 - ry1)
+                        crossings += (sub_x < xc)
+                free[i0:i1, j] &= (crossings % 2) == 0
+            for r in rings:
+                for k in range(len(r)):
+                    rx1, ry1 = r[k]
+                    rx2, ry2 = r[(k + 1) % len(r)]
+                    L = math.hypot(rx2 - rx1, ry2 - ry1)
+                    n = max(1, int(L / (cell * 0.9)))
+                    for t in range(n + 1):
+                        px = rx1 + (rx2 - rx1) * t / n
+                        py = ry1 + (ry2 - ry1) * t / n
+                        ii0 = max(0, _gi(px - rim, x0))
+                        ii1 = min(nx, _gi(px + rim, x0) + 2)
+                        jj0 = max(0, _gi(py - rim, y0))
+                        jj1 = min(ny, _gi(py + rim, y0) + 2)
+                        if ii0 >= ii1 or jj0 >= jj1:
+                            continue
+                        ddx = cxs[ii0:ii1, None] - px
+                        ddy = cys[None, jj0:jj1] - py
+                        free[ii0:ii1, jj0:jj1] &= \
+                            (ddx * ddx + ddy * ddy) >= rim * rim
 
         # Outline clip (polygon test, vectorized ray cast per row).
         poly = zone.polygon

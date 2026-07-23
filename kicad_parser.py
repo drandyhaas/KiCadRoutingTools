@@ -225,7 +225,7 @@ class BoardInfo:
     # holds every outer ring. Empty on single-outline/rectangular boards means
     # "use board_outline".
     board_outlines: List[List[Tuple[float, float]]] = field(default_factory=list)
-    keepouts: List[dict] = field(default_factory=list)  # Keep-out rule areas: {polygon, layers:set, tracks_allowed, vias_allowed}
+    keepouts: List[dict] = field(default_factory=list)  # Keep-out rule areas: {polygon, layers:set, tracks_allowed, vias_allowed, copper_pour_allowed}
     # Smallest copper clearance any routing step actually used on this board this
     # run -- e.g. a fine-pitch tap that escalated below the nominal --clearance.
     # None until a step records one. Routers fold this into the .kicad_pro DRC
@@ -2638,10 +2638,10 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
 def extract_keepouts(content: str) -> List[dict]:
     """Extract keep-out rule areas (zones with a (keepout ...) clause and no net fill).
 
-    These define regions where tracks and/or vias are not allowed — e.g. an
-    antenna-flange RF clearance. Returns a list of dicts:
+    These define regions where tracks, vias and/or zone fill are not allowed
+    — e.g. an antenna-flange RF clearance. Returns a list of dicts:
         {polygon: [(x,y),...], layers: set(layer_names),
-         tracks_allowed: bool, vias_allowed: bool}
+         tracks_allowed: bool, vias_allowed: bool, copper_pour_allowed: bool}
     """
     keepouts = []
     for zc in _iter_zone_blocks(content):
@@ -2664,6 +2664,10 @@ def extract_keepouts(content: str) -> List[dict]:
         ko_body = zc[ko_start:ko_end + 1]
         tracks_allowed = 'tracks not_allowed' not in ko_body
         vias_allowed = 'vias not_allowed' not in ko_body
+        # #477: KiCad's filler subtracts (copperpour not_allowed) areas from
+        # zone fill, splitting planes into islands -- the fill model must see
+        # them or it grades keep-out-split planes as one piece.
+        copper_pour_allowed = 'copperpour not_allowed' not in ko_body
 
         # Layers: (layers "F.Cu" "In1.Cu" ...) or single (layer "F.Cu").
         # v5/v6 write tokens UNQUOTED ((layers F&B.Cu)) -- accept both (#369 A5).
@@ -2700,7 +2704,8 @@ def extract_keepouts(content: str) -> List[dict]:
         if not polys:
             continue
         keepouts.append({'polygon': polys[0], 'holes': polys[1:], 'layers': layers,
-                         'tracks_allowed': tracks_allowed, 'vias_allowed': vias_allowed})
+                         'tracks_allowed': tracks_allowed, 'vias_allowed': vias_allowed,
+                         'copper_pour_allowed': copper_pour_allowed})
     return keepouts
 
 

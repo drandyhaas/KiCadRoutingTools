@@ -192,7 +192,7 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `board_outline` | List[Tuple[float, float]] | Outline polygon for non-rectangular boards (empty if rectangular) |
 | `board_cutouts` | List[List[Tuple]] | Interior cutout polygons |
 | `stackup` | List[StackupLayer] | Physical stackup, top to bottom (empty if the board has none) |
-| `keepouts` | List[dict] | KiCad keepout rule areas: `{'polygon': [...], 'layers': set, 'tracks_allowed': bool, 'vias_allowed': bool}` |
+| `keepouts` | List[dict] | KiCad keepout rule areas: `{'polygon': [...], 'holes': [...], 'layers': set, 'tracks_allowed': bool, 'vias_allowed': bool, 'copper_pour_allowed': bool}` |
 
 ### `StackupLayer`
 
