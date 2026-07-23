@@ -175,6 +175,95 @@ def calculate_via_barrel_length(vias: List[Via], pcb_data) -> float:
     return total
 
 
+def routable_pad_count(pcb_data: PCBData, net_id: int, off_board=None) -> int:
+    """Number of the net's pads that sit ON the board -- the pads the router can
+    actually reach as endpoints. Off-board pads (#291) are dropped before
+    routing, so they don't count. Pass a shared `off_board` predicate
+    (check_drc.make_off_board_test) to avoid rebuilding it per net."""
+    pads = pcb_data.pads_by_net.get(net_id, ())
+    if off_board is None:
+        return len(pads)
+    return sum(1 for p in pads if not off_board(p.global_x, p.global_y))
+
+
+def filter_routable_nets(pcb_data: PCBData, net_ids: List[Tuple[str, int]]
+                         ) -> List[Tuple[str, int]]:
+    """Drop nets with <2 ON-BOARD pads from a [(name, id), ...] routing list and
+    warn LOUDLY, listing them -- a 0/1-endpoint net can never complete a
+    connection, so attempting it only wastes the router (bus_pirate5 ground for
+    ~3h on nets whose pads were all read as off-board). Counts on-board pads so
+    it catches BOTH genuinely <2-pad nets AND nets whose pads are off-board /
+    outside a mis-parsed outline. Returns the kept list."""
+    from check_drc import make_off_board_test
+    off_board = make_off_board_test(pcb_data.board_info)
+    skipped = [(nm, nid) for (nm, nid) in net_ids
+               if routable_pad_count(pcb_data, nid, off_board) < 2]
+    if skipped:
+        print("\n" + "=" * 64)
+        print(f"WARNING: {len(skipped)} net(s) have fewer than 2 routable (on-board) "
+              f"pads and CANNOT be routed -- skipping them (a connection needs "
+              f">=2 endpoints):")
+        for nm, nid in skipped:
+            total = len(pcb_data.pads_by_net.get(nid, ()))
+            onb = routable_pad_count(pcb_data, nid, off_board)
+            extra = f" ({total-onb} off-board)" if onb < total else ""
+            print(f"    - {nm} (net {nid}): {onb} on-board pad(s){extra}")
+        print("  If a net you expected to route is here, its pads may be off-board "
+              "or the Edge.Cuts outline mis-parsed -- check the board outline.")
+        print("=" * 64)
+        skip_ids = {nid for _nm, nid in skipped}
+        return [(nm, nid) for (nm, nid) in net_ids if nid not in skip_ids]
+    return net_ids
+
+
+def log_net_health(pcb_data: PCBData, log=print) -> Tuple[int, int, int]:
+    """Emit one warning line per problematic net -- for the GUI Log tab (and CLI).
+
+    Flags, per net (skipping KiCad's `unconnected-*` single-pin nets):
+      * fewer than 2 ON-BOARD pads  -> unroutable (a route needs >=2 endpoints);
+      * some (but not all) pads off the board edge -> likely a placement mistake.
+    Also emits board-level parse warnings first: no Edge.Cuts outline, or an
+    outline so mis-parsed that most pads read as off-board (the bus_pirate5 class,
+    where a bad inner contour made every pad look off-board). Call at board load
+    so issues surface before routing. Returns (n_unroutable, n_offboard, n_parse).
+    """
+    from check_drc import make_off_board_test
+    bi = pcb_data.board_info
+    n_parse = 0
+    if not getattr(bi, 'board_bounds', None):
+        n_parse += 1
+        log("WARNING: board outline (Edge.Cuts) did not parse -- board bounds "
+            "unknown; off-board / edge checks unavailable.")
+    off_board = make_off_board_test(bi)
+    all_pads = [(p.global_x, p.global_y)
+                for pads in pcb_data.pads_by_net.values() for p in pads]
+    if off_board and all_pads:
+        frac = sum(1 for x, y in all_pads if off_board(x, y)) / len(all_pads)
+        if frac > 0.4:
+            n_parse += 1
+            log(f"WARNING: {frac*100:.0f}% of pads read as OFF-BOARD -- the Edge.Cuts "
+                f"outline is probably mis-parsed (bad cutout / open contour); the "
+                f"per-net warnings below may be spurious until the outline is fixed.")
+
+    n_unroutable = n_offboard = 0
+    for nid, net in pcb_data.nets.items():
+        if nid <= 0 or not net.name or net.name.lower().startswith('unconnected-'):
+            continue
+        pads = pcb_data.pads_by_net.get(nid, [])
+        n_off = sum(1 for p in pads if off_board(p.global_x, p.global_y)) if off_board else 0
+        n_on = len(pads) - n_off
+        if n_on < 2:
+            n_unroutable += 1
+            extra = f" ({n_off} off-board)" if n_off else ""
+            log(f"WARNING: net '{net.name}' has {n_on} on-board pad(s) of "
+                f"{len(pads)}{extra} -- cannot be routed (needs >=2 endpoints).")
+        elif n_off:
+            n_offboard += 1
+            log(f"WARNING: net '{net.name}' has {n_off}/{len(pads)} pad(s) off the "
+                f"board edge.")
+    return n_unroutable, n_offboard, n_parse
+
+
 def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
                         exclude_unconnected: bool = True) -> List[str]:
     """

@@ -2004,6 +2004,21 @@ class RoutingDialog(wx.Dialog):
         # Update status bar and progress text
         self._update_status_bar()
 
+        # Log per-net health warnings (bad outline parse / off-board pads / <2
+        # on-board pads) to the LOG TAB at load time. stdout isn't redirected to
+        # the log here (only during routing), so write via _append_log directly;
+        # \033[93m renders yellow.
+        try:
+            from net_queries import log_net_health
+            def _log(msg):
+                self._append_log("\033[93m" + msg + "\033[0m\n")
+            nu, no, npars = log_net_health(self.pcb_data, log=_log)
+            if nu or no or npars:
+                _log(f"[NET HEALTH] {nu} unroutable (<2 on-board pads), "
+                     f"{no} net(s) with off-board pads, {npars} parse warning(s).")
+        except Exception as _e:
+            self._append_log(f"[NET HEALTH] check failed: {_e}\n")
+
     def _is_net_connected(self, net_id):
         """Check if a net is already fully connected using check_connected logic."""
         try:

@@ -1759,6 +1759,47 @@ def _pt_in_ring(x: float, y: float, ring) -> bool:
     return inside
 
 
+def drop_pad_containing_cutouts(board_info, pads_by_net):
+    """Drop bogus board cutouts -- a genuine cutout is a HOLE in the copper and
+    contains no pads.
+
+    _classify_contours marks ANY Edge.Cuts ring nested inside the outline as a
+    cutout (by containment). That over-classifies: a large inner Edge.Cuts
+    contour -- a frame line, an internal keep-out drawn on Edge.Cuts, a milled
+    pocket that isn't a through hole -- then swallows the board interior, so
+    make_off_board_test/_point_on_board reports every enclosed pad as off-board
+    and drop_off_board_pads (#291) removes it. bus_pirate5: a 60.8x80.2mm inner
+    contour dropped all 870 pads, every net lost its endpoints, and the router
+    ground for ~3h on 0-endpoint nets before the run's time cap killed it (no
+    output -> chain break). A real cutout encloses no pad centres, so a "cutout"
+    that contains >=2 of them is a mis-classified inner contour: drop it.
+    """
+    cutouts = getattr(board_info, 'board_cutouts', None)
+    if not cutouts or not pads_by_net:
+        return
+    pad_xy = [(p.global_x, p.global_y)
+              for pads in pads_by_net.values() for p in pads]
+    if not pad_xy:
+        return
+    kept, dropped = [], []
+    for c in cutouts:
+        if len(c) < 3:
+            kept.append(c)
+            continue
+        n_inside = 0
+        for (px, py) in pad_xy:
+            if _pt_in_ring(px, py, c):
+                n_inside += 1
+                if n_inside >= 2:
+                    break
+        (dropped if n_inside >= 2 else kept).append(c)
+    if dropped:
+        board_info.board_cutouts = kept
+        print(f"WARNING: dropped {len(dropped)} Edge.Cuts contour(s) mis-read as "
+              f"board cutout(s) -- each encloses pads, so it is an inner outline / "
+              f"keep-out, not a hole (would have marked enclosed pads off-board).")
+
+
 def _classify_contours(contours):
     """Split closed Edge.Cuts contours into (outers, cutouts) by CONTAINMENT.
 
@@ -2757,6 +2798,9 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
     # Build net_id_to_name mapping for writer output
     net_id_to_name = {net_id: net.name for net_id, net in nets.items()}
 
+    # Drop Edge.Cuts contours mis-classified as cutouts (they enclose pads).
+    drop_pad_containing_cutouts(board_info, pads_by_net)
+
     return PCBData(
         board_info=board_info,
         nets=nets,
@@ -3524,6 +3568,9 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 board_info.keepouts = extract_keepouts(f.read())
     except Exception:
         pass
+
+    # Drop Edge.Cuts contours mis-classified as cutouts (they enclose pads).
+    drop_pad_containing_cutouts(board_info, pads_by_net)
 
     return PCBData(
         board_info=board_info,

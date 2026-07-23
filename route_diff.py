@@ -49,7 +49,7 @@ from net_queries import (
     find_differential_pairs, get_all_unrouted_net_ids, get_chip_pad_positions,
     compute_mps_net_ordering, find_pad_nearest_to_position,
     expand_net_patterns, matches_diff_pair_patterns,
-    resolve_gnd_net_id, gnd_candidate_names
+    resolve_gnd_net_id, gnd_candidate_names, filter_routable_nets
 )
 from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
 from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
@@ -659,6 +659,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Add stub swap vias to pcb_data so routing and length matching see them as obstacles
     for via in all_swap_vias:
         pcb_data.vias.append(via)
+
+    # Skip (and loudly list) nets with <2 pads -- unroutable; do it before ordering.
+    net_ids = filter_routable_nets(pcb_data, net_ids)
 
     # Apply net ordering strategy
     if ordering_strategy == "mps":

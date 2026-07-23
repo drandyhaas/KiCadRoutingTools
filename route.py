@@ -46,7 +46,8 @@ from connectivity import (
 from net_queries import (
     get_all_unrouted_net_ids, get_chip_pad_positions,
     compute_mps_net_ordering, find_pad_nearest_to_position,
-    expand_net_patterns, find_single_ended_nets, identify_power_nets
+    expand_net_patterns, find_single_ended_nets, identify_power_nets,
+    filter_routable_nets
 )
 from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
 from obstacle_map import (
@@ -782,6 +783,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # pad swap via on the board TWICE (double obstacle stamp, and the
         # board carried one more via than the written file; found by the
         # FILE_LEDGER audit on ottercast AP_WAKE_BT et al).
+
+    # Skip (and loudly list) nets with <2 pads -- unroutable, and attempting
+    # them wastes the router/ordering. Do this BEFORE ordering so MPS never
+    # sees them.
+    net_ids = filter_routable_nets(pcb_data, net_ids)
 
     # Apply net ordering strategy
     if ordering_strategy in ("mps", "bus"):
