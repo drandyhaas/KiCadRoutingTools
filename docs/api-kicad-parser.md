@@ -181,6 +181,7 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `priority` | int | `(priority N)`; higher-priority zones win where outlines overlap (0 when absent) |
 | `island_removal_mode` | int | 0 = always remove isolated islands (KiCad default), 1 = never, 2 = below `island_area_min` |
 | `island_area_min` | float | mm² floor for mode 2 (0.0 when absent) |
+| `in_footprint` | bool | Zone is owned by a footprint (nested in its `(footprint ...)` block); points are still board coordinates. Plane creation neither replaces nor aborts on these |
 
 ### `BoardInfo`
 
@@ -192,7 +193,7 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `board_outline` | List[Tuple[float, float]] | Outline polygon for non-rectangular boards (empty if rectangular) |
 | `board_cutouts` | List[List[Tuple]] | Interior cutout polygons |
 | `stackup` | List[StackupLayer] | Physical stackup, top to bottom (empty if the board has none) |
-| `keepouts` | List[dict] | KiCad keepout rule areas: `{'polygon': [...], 'holes': [...], 'layers': set, 'tracks_allowed': bool, 'vias_allowed': bool, 'copper_pour_allowed': bool}` |
+| `keepouts` | List[dict] | KiCad keepout rule areas (board-level AND footprint-owned): `{'polygon': [...], 'holes': [...], 'layers': set, 'tracks_allowed': bool, 'vias_allowed': bool, 'copper_pour_allowed': bool, 'in_footprint': bool}` |
 
 ### `StackupLayer`
 

@@ -149,6 +149,9 @@ class Zone:
     island_area_min: float = 0.0  # mm^2 floor for mode 2 (KiCad file units are mm^2)
     clearance: float = None  # zone fill clearance (connect_pads (clearance X)); None = unknown
     min_thickness: float = None  # minimum fill width; None = unknown
+    in_footprint: bool = False  # #478: zone is owned by a footprint (nested in its
+    # (footprint ...) block). Points are still BOARD coordinates. Consumers treat it
+    # as normal copper/keep-out; plane creation must not replace or abort on it.
 
 
 @dataclass
@@ -2478,8 +2481,18 @@ def _iter_zone_blocks(content: str):
     # KiCad v5/v6 write zones single-line ("(zone (net 0) (layer F.Cu) ...")
     # and the newline-anchored pattern parsed ZERO zones/keepouts from those
     # files (every pour and rule area silently dropped).
-    zone_start_pattern = r'\r?\n\t\(zone(?=[\s(])'
+    # #478: accept ANY indentation, not exactly one tab -- KiCad 7+ footprints
+    # can own zones (keep-outs AND copper pours), written at two tabs, and the
+    # single-tab anchor dropped every one of them (router routed through
+    # footprint keep-outs; fill model over-credited across them). Yields
+    # (body, in_footprint): >= 2 tabs (or a deep space indent in legacy
+    # space-indented files) marks a footprint-nested zone. Footprint-zone
+    # polygon points are stored in BOARD coordinates, so no transform applies.
+    zone_start_pattern = r'\r?\n([\t ]*)\(zone(?=[\s(])'
     for start_match in re.finditer(zone_start_pattern, content):
+        indent = start_match.group(1)
+        in_footprint = indent.count('\t') >= 2 or \
+            ('\t' not in indent and len(indent) >= 4)
         # Find the matching closing paren (string-aware, so a lone paren inside
         # a quoted token cannot run the scan past the zone end — see issue #113).
         # start_match begins at the newline before "(zone"; locate that "(".
@@ -2488,7 +2501,7 @@ def _iter_zone_blocks(content: str):
         body_start = open_idx + len('(zone')
         if zone_end <= body_start:
             continue
-        yield content[body_start:zone_end]
+        yield content[body_start:zone_end], in_footprint
 
 
 def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]:
@@ -2499,7 +2512,7 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
     """
     zones = []
 
-    for zone_content in _iter_zone_blocks(content):
+    for zone_content, in_footprint in _iter_zone_blocks(content):
         # Rule areas are routing restrictions, not copper -- skip regardless
         # of net clause. v5/v6 keepouts DO carry (net 0), so the old skip
         # (inside the no-numeric-net branch only) would have modeled them as
@@ -2629,7 +2642,8 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
                 island_removal_mode=island_removal_mode,
                 island_area_min=island_area_min,
                 clearance=zone_clearance_val,
-                min_thickness=zone_min_th
+                min_thickness=zone_min_th,
+                in_footprint=in_footprint
             ))
 
     return zones
@@ -2641,10 +2655,11 @@ def extract_keepouts(content: str) -> List[dict]:
     These define regions where tracks, vias and/or zone fill are not allowed
     — e.g. an antenna-flange RF clearance. Returns a list of dicts:
         {polygon: [(x,y),...], layers: set(layer_names),
-         tracks_allowed: bool, vias_allowed: bool, copper_pour_allowed: bool}
+         tracks_allowed: bool, vias_allowed: bool, copper_pour_allowed: bool,
+         in_footprint: bool}
     """
     keepouts = []
-    for zc in _iter_zone_blocks(content):
+    for zc, in_footprint in _iter_zone_blocks(content):
         # The keepout clause holds nested sub-clauses, e.g.
         #   (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) ...)
         # so capture its full balanced-paren body rather than just the first ).
@@ -2705,7 +2720,8 @@ def extract_keepouts(content: str) -> List[dict]:
             continue
         keepouts.append({'polygon': polys[0], 'holes': polys[1:], 'layers': layers,
                          'tracks_allowed': tracks_allowed, 'vias_allowed': vias_allowed,
-                         'copper_pour_allowed': copper_pour_allowed})
+                         'copper_pour_allowed': copper_pour_allowed,
+                         'in_footprint': in_footprint})
     return keepouts
 
 
@@ -3721,7 +3737,26 @@ def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
     zones = []
 
     try:
-        for zone in board.Zones():
+        # #478: footprints can own zones too (KiCad 7+), and board.Zones()
+        # enumerates only board-level ones -- walk footprint zones as well,
+        # mirroring the text parser's footprint-nested coverage. UUID dedup
+        # guards against a pcbnew build that lists them in both places.
+        _zone_sources = [(board.Zones(), False)]
+        try:
+            for _fp in board.GetFootprints():
+                _zone_sources.append((_fp.Zones(), True))
+        except Exception:
+            pass
+        _seen_zone_uuids = set()
+        for _zone_iter, _in_fp in _zone_sources:
+          for zone in _zone_iter:
+            try:
+                _zu = zone.m_Uuid.AsString()
+                if _zu in _seen_zone_uuids:
+                    continue
+                _seen_zone_uuids.add(_zu)
+            except Exception:
+                pass
             # Keepout / rule areas are routing restrictions, NOT copper. The
             # text parser's zones are filled copper only (a rule area has no
             # (net ...) clause and is skipped there), and every zone consumer
@@ -3799,7 +3834,8 @@ def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
                     island_removal_mode=island_removal_mode,
                     island_area_min=island_area_min,
                     clearance=_zcl,
-                    min_thickness=_mth
+                    min_thickness=_mth,
+                    in_footprint=_in_fp
                 ))
     except Exception:
         pass

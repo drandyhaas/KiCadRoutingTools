@@ -22,6 +22,7 @@ class ZoneInfo:
     net_id: int
     net_name: str
     layer: str
+    in_footprint: bool = False  # #478: owned by a footprint, not the board
 
 
 def extract_zones(pcb_file: str) -> List[ZoneInfo]:
@@ -47,7 +48,8 @@ def extract_zones(pcb_file: str) -> List[ZoneInfo]:
     from kicad_parser import extract_zones as _parser_extract_zones
     from kicad_parser import extract_nets, detect_kicad_version
     _, name_to_id = extract_nets(content, detect_kicad_version(content))
-    return [ZoneInfo(net_id=z.net_id, net_name=z.net_name, layer=z.layer)
+    return [ZoneInfo(net_id=z.net_id, net_name=z.net_name, layer=z.layer,
+                     in_footprint=z.in_footprint)
             for z in _parser_extract_zones(content, name_to_id)]
 
 
@@ -69,6 +71,12 @@ def check_existing_zones(zones: List[ZoneInfo], target_layer: str, target_net_na
         - zone_to_replace: ZoneInfo of existing zone to replace, or None
     """
     for zone in zones:
+        # #478: footprint-owned pours are the footprint's business -- a small
+        # shield/thermal pour must neither veto a whole plane layer nor be
+        # "replaced" (deleted out of its footprint) by plane creation. KiCad
+        # fills both; zone priority + clearance arbitrate the overlap.
+        if getattr(zone, 'in_footprint', False):
+            continue
         if zone.layer == target_layer:
             if zone.net_id == target_net_id or zone.net_name == target_net_name:
                 # Same net - replace existing zone with our parameters
@@ -207,6 +215,10 @@ def filter_zones_from_content(content: str, zones_to_remove: List[Tuple[int, str
 
         # Check if this starts a zone (may be multi-line)
         if stripped == '(zone' or stripped.startswith('(zone '):
+            # #478: never remove a footprint-owned zone (nested >= 2 tabs) --
+            # replacing a board plane must not excise a same-net pour out of a
+            # footprint's own block.
+            _fp_nested = line[:len(line) - len(stripped)].count('\t') >= 2
             # Collect all lines of this zone element
             element_lines = [line]
             open_parens = line.count('(') - line.count(')')
@@ -224,7 +236,7 @@ def filter_zones_from_content(content: str, zones_to_remove: List[Tuple[int, str
             if net_match and layer_match:
                 zone_net_id = int(net_match.group(1))
                 zone_layer = layer_match.group(1)
-                if (zone_net_id, zone_layer) in remove_set:
+                if (zone_net_id, zone_layer) in remove_set and not _fp_nested:
                     # Skip this zone entirely
                     i += 1
                     continue
@@ -235,7 +247,8 @@ def filter_zones_from_content(content: str, zones_to_remove: List[Tuple[int, str
                     # Unescape: remove_name_set holds parser display names.
                     zone_net_name = _unescape_kicad_string(net_match_v10.group(1))
                     zone_layer = layer_match.group(1)
-                    if (zone_net_name, zone_layer) in remove_name_set:
+                    if (zone_net_name, zone_layer) in remove_name_set \
+                            and not _fp_nested:
                         i += 1
                         continue
 
