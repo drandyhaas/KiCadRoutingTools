@@ -1665,6 +1665,17 @@ def assign_waypoints_to_mst_edges(waypoints, pad_grid, mst_edges):
 SHORT_POWER_EDGE_MM = 10.0
 
 
+def _impedance_neckdown_allowed():
+    """#156 follow-up: may an impedance-width net neck down to the NOMINAL
+    track width when its full-width route fails? Completion-first default:
+    ALLOW (a nominal-width segment with slightly-off impedance beats a failed
+    net). Set KICAD_IMPEDANCE_NECKDOWN=0 to forbid (strict impedance: the net
+    fails instead of narrowing). Env-gated experiment -- flag promotion is
+    tracked on #465."""
+    return os.environ.get('KICAD_IMPEDANCE_NECKDOWN', '1').strip().lower() \
+        not in ('0', 'false', 'no', 'off')
+
+
 def _track_margin_for_width(width, layer_width, grid_step):
     """Extra FRACTIONAL grid-cell margin the A* needs for a track of `width`
     over the map's reserved `layer_width` (#156): the exact extra half-width,
@@ -2077,50 +2088,66 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
                            waypoints=None):
     """Route sources->targets; wide routes that fail retry narrow (issue #72/#180).
 
+    "Wide" covers POWER-configured nets (neck floor = the layer routing width)
+    and, when KICAD_IMPEDANCE_NECKDOWN allows (default yes, #465),
+    IMPEDANCE-width nets (neck floor = the nominal track width).
+
     Same return shape as _route_connection_at_margin plus a trailing
     (necked_down, uniform_width):
       - necked_down=True (long trunk): the wide route failed and it re-routed at the
-        layer width; the caller necks down the segments near the pad.
-      - uniform_width=W (short edge, necked_down=False): a short power edge routed
-        at width W (full -> /2 -> ... -> fab floor); the caller sets EVERY segment to
-        W so the trace -- and the obstacle map (which reads seg.width) and the written
-        output -- is genuinely that width, not the power width.
-      - both None/False: full power width, no rewidthing.
+        neck floor; the caller necks down the segments near the pad
+        (_neck_width_for_net picks the floor per net class).
+      - uniform_width=W (short edge, necked_down=False): a short wide edge routed
+        at width W (full -> /2 -> ... -> neck floor); the caller sets EVERY segment
+        to W so the trace -- and the obstacle map (which reads seg.width) and the
+        written output -- is genuinely that width, not the configured width.
+      - both None/False: full width, no rewidthing.
     """
     result = _route_connection_at_margin(
         router, obstacles, config, sources, targets, track_margin,
         pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
-    # The neck-down ladder is for POWER-wide nets only: nets configured wider
-    # than the layer's own routing width. Impedance-width nets now carry a
-    # nonzero track_margin too (#156 unification) but must NEVER neck down --
-    # their width IS the spec -- so gate on the width comparison, not margin>0
-    # (identical to the old margin>0 test for power nets).
+    # Two net classes may enter the neck-down ladder when the full-width route
+    # fails (#156):
+    #   - POWER-wide nets (configured wider than the layer's routing width):
+    #     neck toward the LAYER width, exactly as before.
+    #   - IMPEDANCE-width nets (layer width above the nominal track_width):
+    #     neck toward the NOMINAL width -- completion over strict impedance;
+    #     default ALLOW, forbid with KICAD_IMPEDANCE_NECKDOWN=0 (#465).
+    # Gate on width comparisons, not margin>0 (#156 gives impedance nets a
+    # nonzero track_margin too).
     net_w = config.get_net_track_width(net_id, config.layers[0])
     layer_w = config.get_track_width(config.layers[0])
-    if result[0] is not None or net_w <= layer_w + 1e-9 or not config.power_tap_neckdown:
+    power_wide = net_w > layer_w + 1e-9
+    imp_wide = (not power_wide and net_w > config.track_width + 1e-9
+                and _impedance_neckdown_allowed())
+    if result[0] is not None or not (power_wide or imp_wide) or not config.power_tap_neckdown:
         return result + (False, None)
+    neck_floor = layer_w if power_wide else config.track_width
 
     if _edge_span_mm(sources, targets, config.grid_step) <= SHORT_POWER_EDGE_MM:
         # Short edge: step the width down, widest-that-fits wins; segments use it.
         total_iters = result[1]
-        for w in _power_width_ladder(net_w, layer_w):
+        for w in _power_width_ladder(net_w, neck_floor):
             tm = config.track_margins_for_width(w)
             r = _route_connection_at_margin(
                 router, obstacles, config, sources, targets, tm,
                 pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
             total_iters += r[1]
             if r[0] is not None:
-                print(f"{print_prefix}{YELLOW}Wide power route blocked - routed short edge at "
+                print(f"{print_prefix}{YELLOW}Wide {'power' if power_wide else 'impedance'} route blocked - routed short edge at "
                       f"{w:.4f}mm (down from {net_w:.4f}){RESET}")
                 return (r[0], total_iters) + r[2:] + (False, w)
         return (result[0], total_iters) + result[2:] + (False, None)
 
-    # Long trunk: keep the existing single wide->base retry + neck-down. "Base"
-    # is the LAYER width (impedance width on impedance runs), which under #156
-    # carries its own margin over the stamps' reserve -- 0 on plain runs.
+    # Long trunk: keep the existing single wide->narrow retry + neck-down.
+    # Power necks to the LAYER width (base_track_margins: the impedance extra
+    # on impedance runs, 0 on plain runs); an impedance net necks to the
+    # NOMINAL width (its margins vs the stamps' reserve, usually all-zero).
     print(f"{print_prefix}{YELLOW}Wide route blocked - retrying at default track width (neck-down){RESET}")
+    retry_margins = (config.base_track_margins() if power_wide
+                     else config.track_margins_for_width(config.track_width))
     retry = _route_connection_at_margin(
-        router, obstacles, config, sources, targets, config.base_track_margins(),
+        router, obstacles, config, sources, targets, retry_margins,
         pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
     if retry[0] is None:
         # Keep the WIDE attempt's frontier for rip-up analysis: blockers found
@@ -4024,8 +4051,19 @@ def _flip_segments(segments):
             for s in reversed(segments)]
 
 
+def _neck_width_for_net(config: GridRouteConfig, net_id: int, layer: str) -> float:
+    """The width a neck-down narrows to on `layer` for this net: a POWER net
+    (configured wider than the layer routing width) necks to the LAYER width,
+    exactly as always; an IMPEDANCE-width net (layer width above nominal,
+    KICAD_IMPEDANCE_NECKDOWN allow, #465) necks to the NOMINAL track width."""
+    lw = config.get_track_width(layer)
+    if config.get_net_track_width(net_id, layer) > lw + 1e-9:
+        return lw
+    return min(lw, config.track_width)
+
+
 def _neck_pass(segments, config: GridRouteConfig, obstacles, coord: GridCoord,
-               layer_map: Dict[str, int], track_margin):
+               layer_map: Dict[str, int], track_margin, net_id: int):
     """Narrow the last neckdown_length mm of the run (the pad is at the list
     END); beyond that, keep the wide width only where the wide clearance
     fits. Never re-widens an already-narrow segment (so a second pass from
@@ -4038,7 +4076,7 @@ def _neck_pass(segments, config: GridRouteConfig, obstacles, coord: GridCoord,
     out = []  # built in reverse (pad-first)
     cum = 0.0
     for seg in reversed(segments):
-        narrow_w = config.get_track_width(seg.layer)
+        narrow_w = _neck_width_for_net(config, net_id, seg.layer)
         length = _seg_length(seg)
         if seg.width <= narrow_w:
             out.append(seg)
@@ -4078,11 +4116,11 @@ def _apply_neckdown_widths(segments, config: GridRouteConfig, net_id: int,
     Returns a new segment list (segments may be split for the taper).
     """
     layer_map = {name: i for i, name in enumerate(layer_names)}
-    out = _neck_pass(segments, config, obstacles, coord, layer_map, track_margin)
+    out = _neck_pass(segments, config, obstacles, coord, layer_map, track_margin, net_id)
     if neck_start:
         out = _flip_segments(_neck_pass(_flip_segments(out), config, obstacles,
-                                        coord, layer_map, track_margin))
-    wide_flags = [s.width > config.get_track_width(s.layer) for s in out]
+                                        coord, layer_map, track_margin, net_id))
+    wide_flags = [s.width > _neck_width_for_net(config, net_id, s.layer) for s in out]
 
     # Suppress short wide islands (a wide run between narrow pinches that is
     # barely longer than its tapers just adds notch noise)
@@ -4100,7 +4138,7 @@ def _apply_neckdown_widths(segments, config: GridRouteConfig, net_id: int,
         is_island = i > 0 and j < len(out)  # narrow (or pad) on both sides
         if is_island and run_len <= min_island:
             for k in range(i, j):
-                out[k].width = config.get_track_width(out[k].layer)
+                out[k].width = _neck_width_for_net(config, net_id, out[k].layer)
                 wide_flags[k] = False
         i = j
 
@@ -4113,7 +4151,7 @@ def _apply_neckdown_widths(segments, config: GridRouteConfig, net_id: int,
 
     def _taper_pieces(seg, narrow_end: str):
         """Split seg into [body + taper steps]; narrow_end is 'start' or 'end'."""
-        narrow_w = config.get_track_width(seg.layer)
+        narrow_w = _neck_width_for_net(config, net_id, seg.layer)
         wide_w = seg.width
         taper_len = min(config.neckdown_taper_length, _seg_length(seg) / 3)
         if taper_len <= 0:
