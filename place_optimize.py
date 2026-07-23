@@ -6,10 +6,12 @@ Usage:
 
 Starts from the current (hand- or AI-made) placement and applies a greedy
 quench: small nudges, 90-degree rotations, and same-footprint swaps that
-reduce airwire length + crossings + a whitespace (halo) penalty. Each part
-stays within --max-displacement of its original position, so the output is
-"your placement, nudged" - implicit constraints encoded in the original
-placement survive. Locked footprints never move.
+reduce airwire length + crossings + a whitespace (halo) penalty. Every move
+type keeps each part within --max-displacement of its original position -
+same-footprint swaps obey the same cap (or the tighter
+--swap-max-displacement) - so the output is "your placement, nudged" and
+implicit constraints encoded in the original placement survive. Locked
+footprints never move.
 
 See docs/placement-optimization.md for the background research.
 """
@@ -40,6 +42,10 @@ Examples:
     parser.add_argument("--max-displacement", type=float, default=10.0,
                         help="Max distance a part may move from its original "
                              "position in mm (default: 10)")
+    parser.add_argument("--swap-max-displacement", type=float, default=None,
+                        help="Max distance a swap may move each part from its "
+                             "original position in mm; must not exceed "
+                             "--max-displacement (default: equal to it)")
     parser.add_argument("--step", type=float, default=1.0,
                         help="Candidate grid step in mm (default: 1.0)")
     parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP,
@@ -85,6 +91,13 @@ Examples:
 
     args = parser.parse_args()
 
+    if args.swap_max_displacement is not None:
+        if args.swap_max_displacement < 0:
+            parser.error("--swap-max-displacement must be >= 0")
+        if args.swap_max_displacement > args.max_displacement:
+            parser.error("--swap-max-displacement must not exceed "
+                         "--max-displacement")
+
     if args.output_file is None:
         base, ext = os.path.splitext(args.input_file)
         args.output_file = base + '_optimized' + ext
@@ -97,6 +110,7 @@ Examples:
         pcb_data,
         pcb_file=args.input_file,
         max_displacement=args.max_displacement,
+        swap_max_displacement=args.swap_max_displacement,
         step=args.step,
         grid_step=args.grid_step,
         clearance=args.clearance,

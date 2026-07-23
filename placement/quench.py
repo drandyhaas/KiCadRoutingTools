@@ -5,7 +5,9 @@ Greedy quench placement optimizer: perturbative refinement of an existing
 Starts from the current placement and repeatedly tries, for each component,
 small moves within --max-displacement of its seed position plus 90-degree
 rotations and same-footprint swaps, accepting only improvements
-(zero-temperature anneal). Locked components never move.
+(zero-temperature anneal). Same-footprint swaps are accepted only if both
+parts land within swap_max_displacement (default: max_displacement) of
+their own seed positions. Locked components never move.
 
 Cost = total airwire length
      + crossing_penalty * airwire crossings
@@ -211,6 +213,9 @@ class QuenchState:
         for net_id in self.net_refs:
             self.net_airwires[net_id] = self._build_net_airwires(net_id)
 
+        # Optional pruned neighbour lists (see build_neighbor_lists)
+        self._neighbors = None
+
     # ----- airwire helpers -------------------------------------------------
 
     def _net_points(self, net_id, override_ref=None, override_pads=None):
@@ -260,7 +265,11 @@ class QuenchState:
         part = self.parts[ref]
         rect = part.rect(x, y, rot)
         pen = self._edge_penalty(rect)
-        for other_ref, other in self.parts.items():
+        if self._neighbors is not None and ref in self._neighbors:
+            others = ((o, self.parts[o]) for o in self._neighbors[ref])
+        else:
+            others = self.parts.items()
+        for other_ref, other in others:
             if other_ref == ref or (exclude and other_ref in exclude):
                 continue
             pen += self._halo_pair_penalty(part, rect, other, other.rect())
@@ -272,7 +281,11 @@ class QuenchState:
         if (rect[0] < self.usable[0] or rect[1] < self.usable[1]
                 or rect[2] > self.usable[2] or rect[3] > self.usable[3]):
             return False
-        for other_ref, other in self.parts.items():
+        if self._neighbors is not None and ref in self._neighbors:
+            others = ((o, self.parts[o]) for o in self._neighbors[ref])
+        else:
+            others = self.parts.items()
+        for other_ref, other in others:
             if other_ref == ref or (exclude and other_ref in exclude):
                 continue
             r = other.rect()
@@ -333,6 +346,56 @@ class QuenchState:
         for net_id in part.nets:
             self.net_airwires[net_id] = self._build_net_airwires(net_id)
 
+    def build_neighbor_lists(self, travel_budget):
+        """Per-movable-part pruned neighbour lists (perf, mirrors the
+        fanout_clearance pattern from #213 profiling). A movable part's live
+        position stays within travel_budget of its seed (nudge candidates are
+        radius-checked against the seed; swaps are capped by swap_cap <=
+        max_displacement), and rect() only ever reads bounds_by_rot, so the
+        union-of-rotations box at the seed inflated by the budget contains
+        every rect the part can ever occupy. Any pair whose per-axis seed gap
+        exceeds both budgets plus the largest interaction reach (hard
+        clearance / summed halos) can NEVER interact -- excluding it is exact
+        for candidate_valid AND part_geometry_cost, not an approximation."""
+        # A swap can hand a part any rotation currently held by a movable
+        # same-footprint partner (the swap path adds the bounds entry lazily,
+        # after this build), so each part's union box must cover its whole
+        # group's rotation set, not just its own bounds_by_rot entries.
+        group_rots: Dict[str, set] = {}
+        for p in self.parts.values():
+            if not p.locked:
+                group_rots.setdefault(p.footprint_name, set()).update(
+                    p.bounds_by_rot)
+        geom = {}
+        for ref, p in self.parts.items():
+            if p.locked:
+                geom[ref] = (p.rect(), 0.0)
+            else:
+                boxes = [p.bounds_by_rot[r] if r in p.bounds_by_rot
+                         else _rotate_local_bounds(*p.bounds_by_rot[0.0], r)
+                         for r in group_rots[p.footprint_name]]
+                u0 = min(b[0] for b in boxes)
+                u1 = min(b[1] for b in boxes)
+                u2 = max(b[2] for b in boxes)
+                u3 = max(b[3] for b in boxes)
+                geom[ref] = ((p.seed_x + u0, p.seed_y + u1,
+                              p.seed_x + u2, p.seed_y + u3), travel_budget)
+        self._neighbors = {}
+        for ref, p in self.parts.items():
+            if p.locked:
+                continue
+            ra, ba = geom[ref]
+            lst = []
+            for oref, (rb, bb) in geom.items():
+                if oref == ref:
+                    continue
+                m = ba + bb + max(self.clearance,
+                                  p.halo + self.parts[oref].halo) + 1e-9
+                if (ra[2] + m >= rb[0] and rb[2] + m >= ra[0]
+                        and ra[3] + m >= rb[1] and rb[3] + m >= ra[1]):
+                    lst.append(oref)
+            self._neighbors[ref] = lst
+
 
 def _candidate_positions(part: _Part, max_disp: float, step: float,
                          grid_step: float):
@@ -357,6 +420,7 @@ def _candidate_positions(part: _Part, max_disp: float, step: float,
 
 def quench(pcb_data: PCBData, pcb_file: str,
            max_displacement: float = 10.0,
+           swap_max_displacement: Optional[float] = None,
            step: float = 1.0,
            grid_step: float = 0.1,
            clearance: float = 0.25,
@@ -381,6 +445,16 @@ def quench(pcb_data: PCBData, pcb_file: str,
     Returns a list of placement dicts (reference/new_x/new_y/new_rotation)
     for every movable part, whether or not it moved.
     """
+    if swap_max_displacement is not None:
+        if swap_max_displacement < 0:
+            raise ValueError("swap_max_displacement must be >= 0")
+        if swap_max_displacement > max_displacement + 1e-9:
+            raise ValueError(
+                "swap_max_displacement must be <= max_displacement "
+                "(each part must stay within max_displacement of its seed)")
+    swap_cap = (max_displacement if swap_max_displacement is None
+                else swap_max_displacement)
+
     ignore_net_ids: Set[int] = set()
     if ignore_nets:
         import fnmatch
@@ -404,6 +478,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         extra_locked_refs=extra_locked,
                         move_refs=move_refs,
                         net_weights=net_weights)
+    state.build_neighbor_lists(max_displacement + grid_step)
 
     before = state.total_cost()
     print(f"Initial: length={before['length']:.1f}mm "
@@ -416,6 +491,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
     for pass_num in range(1, max_passes + 1):
         improved = 0.0
         moves = 0
+        swaps_skipped = 0
 
         # --- single-part moves (nudge + rotate) ---
         for ref in movable:
@@ -472,6 +548,23 @@ def quench(pcb_data: PCBData, pcb_file: str,
                     for j in range(i + 1, len(refs)):
                         ra, rb = refs[i], refs[j]
                         pa, pb = state.parts[ra], state.parts[rb]
+                        # Swapping must keep each part within swap_cap of
+                        # its OWN seed position
+                        if (math.hypot(pb.x - pa.seed_x, pb.y - pa.seed_y) > swap_cap + 1e-9
+                                or math.hypot(pa.x - pb.seed_x, pa.y - pb.seed_y) > swap_cap + 1e-9):
+                            swaps_skipped += 1
+                            continue
+                        # Courtyards are extracted per-ref, so the same
+                        # footprint_name doesn't guarantee identical bounds
+                        if pa.bounds_by_rot[0.0] != pb.bounds_by_rot[0.0]:
+                            continue
+                        # rect() falls back to rot-0 bounds for unknown
+                        # rotations; add the partner's rotation lazily so
+                        # non-90-degree swaps use correct geometry
+                        for p_dst, inherited in ((pa, pb.rot % 360), (pb, pa.rot % 360)):
+                            if inherited not in p_dst.bounds_by_rot:
+                                p_dst.bounds_by_rot[inherited] = _rotate_local_bounds(
+                                    *p_dst.bounds_by_rot[0.0], inherited)
                         involved = set(pa.nets) | set(pb.nets)
                         other_aw = state.airwires_excluding(involved)
 
@@ -515,13 +608,18 @@ def quench(pcb_data: PCBData, pcb_file: str,
                             state.apply_move(ra, pb.x, pb.y, pb.rot)
                             state.apply_move(rb, ax, ay, arot)
                             if verbose:
-                                print(f"  swap {ra} <-> {rb} gain={gain:.1f}")
+                                da = math.hypot(pa.x - pa.seed_x, pa.y - pa.seed_y)
+                                db = math.hypot(pb.x - pb.seed_x, pb.y - pb.seed_y)
+                                print(f"  swap {ra} <-> {rb} gain={gain:.1f}"
+                                      f" (d[{ra}]={da:.1f}mm, d[{rb}]={db:.1f}mm)")
 
         stats = state.total_cost()
+        swap_note = (f" swap-capped={swaps_skipped}"
+                     if verbose and swaps_skipped else "")
         print(f"Pass {pass_num}: {moves} moves, gain {improved:.1f} -> "
               f"length={stats['length']:.1f}mm crossings={stats['crossings']} "
               f"halo={stats['halo']:.1f} edge={stats['edge']:.1f} "
-              f"total={stats['total']:.1f}")
+              f"total={stats['total']:.1f}{swap_note}")
         if moves == 0:
             break
 
