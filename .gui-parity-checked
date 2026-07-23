@@ -1,3 +1,56 @@
+b9f56e4 2026-07-23 parity sweep f445d6b..b9f56e4 (the 0.19.0 release range:
+#156 fractional per-layer track_margin / Rust 0.19.0, #465 env-gated impedance
+neck-down, #477 copperpour keep-outs in the plane fill model, #478 footprint-
+nested zone parsing, and the direction-preference default 5000->250 routability
+fix). Outcome: parity CONFIRMED via both no-wx gates + a per-commit code audit;
+NO gaps found, NO batch_route*/create_plane/generate_*_fanout kwarg added or
+removed (the 77-key param set is UNCHANGED). Release: v0.19.0.
+
+  * #156 track_margin (dab9168, Rust 0.19.0): INTERNAL engine change --
+    route_multi/route_with_frontier take a fractional track_margin computed
+    inside the shared config (route_reserve_width / _phase_exact_margin /
+    track_margins_for_net) from EXISTING params (track_width, per-net widths,
+    impedance). No new CLI flag (route*/route_diff argparse unchanged this
+    range), no new batch_route kwarg; both fronts inherit. reserve_layer_widths
+    is an internal diff-engine stamp policy, not user-facing.
+  * #465 impedance neck-down (a6461a4): ENV-GATED (KICAD_IMPEDANCE_NECKDOWN,
+    default '1' = allow). No add_argument, no dialog control -- per the env-knob
+    convention (inert unless set, default = prior behavior, no front divergence).
+  * #477 copperpour keep-outs -> plane fill model (44fd129): extract_keepouts
+    records copper_pour_allowed; the pcbnew builder reads keepouts through the
+    SAME extract_keepouts(file text) (kicad_parser build_pcb_data_from_board
+    ~L3519), so the field flows to the GUI for free (per the commit's own note).
+    ZoneFillModel (plane_fill_model, consumed by the shared check_net_
+    connectivity that both the CLI grader and swig_gui import) blocks copperpour-
+    banned cells on both fronts. No gap.
+  * #478 footprint-nested zones (9de56d2): TEXT-parser catch-up -- footprint-
+    owned zones (KiCad 7+) were invisible to extract_zones/extract_keepouts,
+    but pcbnew loads them NATIVELY, so this brings the text parser UP to the
+    pcbnew path's behavior (the CLAUDE.md parser-parity direction that needs no
+    mirror). The GUI keepout read (extract_keepouts on the file) also benefits.
+  * direction-preference 5000->250 (b9f56e4): value-only default change in
+    routing_defaults + the GridRouteConfig dataclass; swig_gui reads the default
+    SYMBOLICALLY (control default L832, reset L2270, config fallbacks L2990 /
+    differential_gui L1001), so the GUI inherits 250 with no literal 5000
+    anywhere. Doc table updated. Fixes the sets-6-11 dp=5000 routability
+    regression (+104 incomplete nets, kbic65 98.9%->15.1%).
+
+GATES RUN GREEN AT HEAD:
+  * test_manifest_plan_parity.py: 11736 flag-checks across 307 manifests, 0
+    mismatches; param->control 12/12, 0 unresolved.
+  * test_cli_postpass_coverage.py: 4 registered, 10 in active CLI use, 0
+    failures, 0 warnings (bga/qfn run_drc the acknowledged CLI-only report-only
+    pass).
+
+NOT RUN THIS PASS: tests/gui_parity/test_gui_engine_parity.py (no wx/pcbnew in
+this session) -- carried over. The 77-key batch_route param set is UNCHANGED
+this range, so the prior marker's wx VERDICT still covers the engine signature.
+Still pending a KiCad-python session (carried from prior markers) PLUS new this
+sweep: a GUI net-list/plane check on a copperpour-keepout / footprint-nested-
+zone board (e.g. the #217 oracle board) to confirm the pcbnew build_pcb_data
+keepout read matches the CLI fill-model split.
+
+--- prior sweeps ---
 9466342 2026-07-22 parity sweep 143d097..9473bf8 (the bus-corridor-planning +
 dogbone-escape-128 merges and the fill-model / rescue / tap-relocation wave --
 93 files, +8067 lines: #128 dog-bone escape, #296-R9 bus corridor planning,
