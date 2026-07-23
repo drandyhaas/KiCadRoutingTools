@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.18.5**
+**Current Version: 0.19.0**
 
 ## Features
 
@@ -306,6 +306,15 @@ src/
 
 ## Version History
 
+- **0.19.0**: **#156 fractional per-layer track_margin** — `route_multi` /
+  `route_with_frontier` accept `track_margin` as a FLOAT (scalar) or a
+  per-layer `list[float]`, in fractional grid cells, instead of an integer
+  Chebyshev cell count. The margin feeds the existing swept-capsule
+  `segment_blocked` check per destination layer, so wide (power) and
+  impedance-width nets reserve their exact extra half-width — no `ceil`,
+  no blunt `+1` cell of over-blocking. Integer arguments still coerce
+  (backward compatible). Python side now computes
+  `(net_width(layer) - reserved_width(layer)) / 2 / grid_step` per layer.
 - **0.18.5**: **P3 attraction-field precompute** (soft-knobs review) -- new
   `build_attraction_field(radius, bonus)` on `GridObstacleMap` precomputes the
   per-layer max cross-layer attraction bonus once per net (entries x disk x

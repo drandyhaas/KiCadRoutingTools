@@ -10,7 +10,7 @@
 use pyo3::prelude::*;
 
 use crate::obstacle_map::GridObstacleMap;
-use crate::router::{GridRouter, GridSearch, SearchOptions, SearchStep};
+use crate::router::{GridRouter, GridSearch, SearchOptions, SearchStep, TrackMarginArg};
 use crate::types::{GridState, StatsSink, DEFAULT_TURN_COST};
 
 /// Search state snapshot for visualization
@@ -111,7 +111,7 @@ impl VisualRouter {
         self.last_current = None;
         // Production defaults: no collinear-via constraint, no via exclusion,
         // no start/end direction constraints, base track margin.
-        let opts = SearchOptions::new(false, 0, None, None, 2, 0);
+        let opts = SearchOptions::new(false, 0, None, None, 2, TrackMarginArg::Scalar(0.0));
         self.search = Some(GridSearch::new(
             &self.router, sources, targets, max_iterations, opts, &mut self.sink));
     }

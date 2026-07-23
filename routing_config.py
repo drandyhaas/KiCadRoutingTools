@@ -139,6 +139,14 @@ class GridRouteConfig:
     # Impedance-controlled routing
     impedance_target: Optional[float] = None  # Target impedance in ohms (None = use fixed track_width)
     layer_widths: Dict[str, float] = field(default_factory=dict)  # Per-layer widths for impedance control
+    # Obstacle-stamp reserve policy (#156). False (single-ended engine): stamps
+    # reserve the NOMINAL track_width around obstacles and every net's extra
+    # width (power override OR impedance layer width) rides its own fractional
+    # per-layer track_margin -- exact, per-net, no over-block. True (diff-pair
+    # engine): stamps bake the full per-layer impedance width into the map
+    # (the pose router has no track_margin channel), margins then compute 0
+    # for impedance-width nets -- today's mm-exact behaviour, unchanged.
+    reserve_layer_widths: bool = False
     # Power net routing - per-net width overrides
     power_net_widths: Dict[int, float] = field(default_factory=dict)  # net_id -> width in mm
     # Per-net netclass track width (auto-read from the .kicad_pro when --track-width
@@ -220,6 +228,87 @@ class GridRouteConfig:
         if self.layer_widths and layer in self.layer_widths:
             return self.layer_widths[layer]
         return self.track_width
+
+    def route_reserve_width(self, layer: str) -> float:
+        """Routing-side track width (mm) the obstacle stamps reserve on `layer`
+        for the FUTURE routed track (#156). This is the single source of truth
+        for the stamp side of the margin mechanism: per-net track_margins are
+        always computed AGAINST this value, so stamps and margins cannot drift.
+
+        - reserve_layer_widths=False (single-ended engine): the NOMINAL
+          track_width, floored to the layer width when the impedance width is
+          narrower (never reserve more than the widest narrow case needs);
+          any net routing wider -- power override or impedance layer width --
+          covers its extra half-width via its own fractional track_margin.
+        - reserve_layer_widths=True (diff-pair engine): the full per-layer
+          impedance width, baked mm-exact into the map (pose router has no
+          margin channel)."""
+        lw = self.get_track_width(layer)
+        if self.reserve_layer_widths:
+            return lw
+        return lw if lw < self.track_width else self.track_width
+
+    def _phase_exact_margin(self, layer: str, net_width: float) -> float:
+        """Fractional A* track margin (grid cells) on `layer` for a track of
+        `net_width` (#156).
+
+        Base value: the exact extra half-width over the stamps' reserve,
+        e = (net_width - route_reserve_width)/2/grid -- no ceil, no +1.
+
+        Phase correction: a margin measures to the outermost BLOCKED CELL
+        (the stamp's shell), which sits up to one cell inside the true
+        keep-out radius, so a bare `e` can sit fractionally below the
+        integer row distance that must be rejected (berkeley In2: e=0.988
+        vs a violating row at n=1 -> 77um grazes between same-run tracks).
+        mm-exact baking never has this problem because its stamp radius IS
+        the requirement. For each dominant obstacle class -- a foreign
+        track at the reserve width (narrow stubs), the layer's routing
+        width (same-run impedance peers), or this track's own width (power
+        peers) -- compute the margin that rejects EXACTLY the grid rows
+        baking at the true requirement would reject, and take the largest.
+        Result is always in [e, e+1): the targeted point between bare `e`
+        (slips) and the blunt +1 (over-blocks) -- e.g. 1.0 on a 0.988
+        layer but still 0.596 where the phase already works out."""
+        reserve = self.route_reserve_width(layer)
+        e = (net_width - reserve) / 2.0 / self.grid_step
+        if e <= 1e-9:
+            return 0.0
+        # Predict the stamp shell with the same clearance most stamps price
+        # obstacles at: the cross-class routing-side floor when one is active
+        # (obstacle_clearance() maxes it per obstacle), else the base clearance.
+        clr = self.net_clearance_floor if self.net_clearance_floor is not None else self.clearance
+        margin = e
+        for w_obs in (reserve, self.get_track_width(layer), net_width):
+            # Stamped keep-out and true requirement around this obstacle
+            # class, in grid cells (both measured from the track CENTER).
+            r_stamp = (w_obs / 2.0 + clr + reserve / 2.0) / self.grid_step
+            r_need = r_stamp + e
+            shell = math.ceil(r_stamp - 1e-9) - 1     # outermost blocked row
+            n_max = math.ceil(r_need - 1e-9) - 1 - shell  # last row to reject
+            if n_max > margin:
+                margin = float(n_max)
+        return margin
+
+    def track_margins_for_net(self, net_id: int) -> List[float]:
+        """Per-layer FRACTIONAL A* track margins (grid cells) for `net_id`
+        (#156): the net's extra half-width over what the obstacle stamps
+        already reserve on each layer, phase-corrected per obstacle class
+        (see _phase_exact_margin). Uniform for power nets, per-layer for
+        impedance widths, all-zero for base-width nets."""
+        return [self._phase_exact_margin(layer, self.get_net_track_width(net_id, layer))
+                for layer in self.layers]
+
+    def track_margins_for_width(self, width: float) -> List[float]:
+        """Per-layer track margins (grid cells) for a track of uniform `width`
+        (the power neck-down ladder's reduced widths, #156)."""
+        return [self._phase_exact_margin(layer, width) for layer in self.layers]
+
+    def base_track_margins(self) -> List[float]:
+        """Per-layer track margins (grid cells) for a route at each layer's OWN
+        base routing width (a necked-down power trunk, #156): zero on plain
+        runs, the impedance extra on impedance runs."""
+        return [self._phase_exact_margin(layer, self.get_track_width(layer))
+                for layer in self.layers]
 
     def get_max_track_width(self) -> float:
         """Get the maximum track width across all layers.

@@ -82,6 +82,7 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 |-------|---------|---------|
 | `impedance_target` | `None` | Target Z0 in Ω; when set, per-layer widths come from `layer_widths` |
 | `layer_widths` | `{}` | Layer name → width (filled by `impedance.calculate_layer_widths_for_impedance`) |
+| `reserve_layer_widths` | `False` | Obstacle-stamp reserve policy (#156): `False` = stamps reserve nominal `track_width`, wide/impedance nets ride per-net fractional `track_margin`; `True` (diff engine) = stamps bake the full per-layer width |
 | `power_net_widths` | `{}` | net_id → width override for power nets (never below `track_width`) |
 | `net_track_widths` | `{}` | net_id → the net's OWN netclass width (mm, #435), used EXACTLY (may be *narrower* than `track_width`); auto-read from the `.kicad_pro` only when `--track-width` is omitted, floored at the fab minimum by the caller. Lower priority than a manual `power_net_widths` override |
 | `net_clearances` | `{}` | net_id → netclass clearance (mm, #326): each net's own copper is stamped as an obstacle at `max(clearance, its value)` so same-run nets keep the class spacing to it; `get_net_clearance(net_id)` resolves it (never below `clearance`) |
@@ -237,6 +238,29 @@ expansion uses.
 config.get_max_track_width() -> float
 ```
 Maximum width across layers (for worst-case via clearance).
+
+```python
+config.route_reserve_width(layer) -> float
+```
+Routing-side width the obstacle stamps reserve for the *future* routed track
+(#156). With `reserve_layer_widths=False` (single-ended engine, the default)
+this is the nominal `track_width` (floored to a narrower impedance layer
+width), and any net routing wider — power override or impedance layer width —
+covers its extra half-width through its own fractional `track_margin`. With
+`reserve_layer_widths=True` (the diff-pair engine) it is the full
+`get_track_width(layer)`, baked mm-exact into the maps. Track margins are
+always computed against this value, so stamps and margins cannot drift.
+
+```python
+config.track_margins_for_net(net_id) -> List[float]   # grid cells, per layer
+config.track_margins_for_width(width) -> List[float]  # for a uniform width
+config.base_track_margins() -> List[float]            # each layer's own base width
+```
+Per-layer **fractional** A* track margins (#156): the exact extra half-width
+over `route_reserve_width(layer)`, in grid cells — no ceil, no `+1` (the Rust
+swept-capsule `segment_blocked` covers diagonals precisely). Passed to
+`route_multi` / `route_with_frontier`, which accept a float or a per-layer
+`list[float]`.
 
 ```python
 config.get_layer_costs() -> List[int]            # ×1000 for the Rust router

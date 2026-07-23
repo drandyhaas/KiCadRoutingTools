@@ -416,6 +416,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         config_kwargs['layer_widths'] = layer_widths
         config_kwargs['impedance_target'] = impedance
     config_kwargs['layer_costs'] = layer_costs  # per-layer bias for coupled diff routing (#193)
+    # #156: the diff engine keeps the mm-exact obstacle maps (per-layer
+    # impedance width baked into every stamp) -- the pose router has no
+    # track_margin channel to ride instead. Margin helpers computed against
+    # this reserve are then 0 for impedance-width legs, i.e. today's behaviour.
+    config_kwargs['reserve_layer_widths'] = True
     config = GridRouteConfig(**config_kwargs)
 
     # Find differential pairs from all provided nets

@@ -83,7 +83,7 @@ def _net_geometry_signature(net_id, path, segments, vias, config, extra_clearanc
     """
     params = (config.grid_step, config.clearance, config.track_width,
               config.via_size, tuple(config.layers),
-              tuple(config.get_track_width(l) for l in config.layers),
+              tuple(config.route_reserve_width(l) for l in config.layers),
               extra_clearance)
     if path:
         path_arr = np.asarray(path)
@@ -163,12 +163,12 @@ def compute_net_obstacle_cells(
         # and shifted off-grid endpoints, so a frontier cell blocked by one net's
         # real capsule also fell inside another net's square over-reach and the
         # wrong net got ripped (#203). Distances are measured from the real segment.
-        layer_track_width = config.get_track_width(config.layers[layer_idx])
+        reserve_width = config.route_reserve_width(config.layers[layer_idx])
         # PR392 parity (audit #5): expand at the obstacle net's pairwise
         # clearance, not the flat base -- on multi-class boards the flat
         # value under-attributes wide-clearance nets' real blocking reach.
         _clr = config.obstacle_clearance(net_id) if hasattr(config, 'obstacle_clearance') else config.clearance
-        expansion_mm = layer_track_width / 2 + seg_width / 2 + _clr + extra_clearance
+        expansion_mm = reserve_width / 2 + seg_width / 2 + _clr + extra_clearance
         cells = segment_blocked_cells_array(x1, y1, x2, y2, expansion_mm, grid_step)
         if len(cells):
             track_parts.append(_pack_cells(cells, layer_idx))

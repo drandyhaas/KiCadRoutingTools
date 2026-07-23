@@ -149,8 +149,12 @@ def test_base_cache_parity(verbose, config):
         vs = via.size
         via_track_per_layer = _via_track_expansion_per_layer(vs, config, coord, config.clearance)
         via_via_grid = max(1.0, (vs / 2 + config.via_size / 2 + config.clearance) * inv)
+        # #156: the via->track ring reserves the routing-side RESERVE width per
+        # layer (nominal for the single-ended engine; the impedance/power extra
+        # rides the routed net's own track_margin), mirroring the cache's
+        # layer_widths input in precompute_net_obstacles.
         via_track_list = [max(1, coord.to_grid_dist_safe(vs / 2 + lw / 2 + config.clearance))
-                          for lw in [config.get_net_track_width(via.net_id, l) for l in LAYERS]]
+                          for lw in [config.route_reserve_width(l) for l in LAYERS]]
 
         mb = GridObstacleMap(len(LAYERS))
         _add_via_obstacle(mb, via, coord, len(LAYERS), via_track_per_layer, via_via_grid, diagonal_margin=0.25)

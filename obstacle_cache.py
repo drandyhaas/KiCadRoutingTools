@@ -299,14 +299,16 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         layer_width = config.get_net_track_width(net_id, layer_name)
         # Routing-side width for the via->track ring: the FUTURE track that must
         # clear this net's vias belongs to whatever net routes next, so its
-        # half-width is the LAYER's routing width (impedance/base) -- never this
-        # net's own configured (power) width, which the routed net's track_margin
-        # already covers. Matches _via_track_expansion_per_layer (obstacle_map),
-        # whose docstring calls the wider variant out as double-counting.
+        # half-width is the routing-side RESERVE width (#156: nominal for the
+        # single-ended engine, the impedance layer width for the diff engine) --
+        # never this net's own configured (power) width, which the routed net's
+        # track_margin already covers. Matches _via_track_expansion_per_layer
+        # (obstacle_map), whose docstring calls the wider variant out as
+        # double-counting.
         # KICAD_OBSCACHE_LEGACY_WIDTH=1 restores the pre-fix stamps (A/B only).
         layer_widths.append(layer_width if _LEGACY_CACHE_WIDTH
-                            else config.get_track_width(layer_name))
-        expansion_mm = layer_width / 2 + obs_clearance + config.track_width / 2 + extra_clearance
+                            else config.route_reserve_width(layer_name))
+        expansion_mm = layer_width / 2 + obs_clearance + config.route_reserve_width(layer_name) / 2 + extra_clearance
         # Float keep-out half-width for the capsule segment stamp (no floor): the
         # true perpendicular clearance, so off-grid / diagonal tracks are covered.
         expansion_mm_by_layer[layer_name] = max(coord.grid_step, expansion_mm)
@@ -352,7 +354,8 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             via_block_mm = via_block_mm_by_layer.get(seg.layer)
         else:
             expansion_mm = max(coord.grid_step,
-                               own_half + obs_clearance + config.track_width / 2 + extra_clearance)
+                               own_half + obs_clearance
+                               + config.route_reserve_width(seg.layer) / 2 + extra_clearance)
             via_block_mm = config.via_size / 2 + own_half + obs_clearance + extra_clearance
         _collect_segment_obstacles(seg, coord, layer_idx, expansion_mm,
                                    blocked_cells_set, blocked_vias_set, via_block_mm)

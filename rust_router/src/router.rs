@@ -255,6 +255,29 @@ pub(crate) enum SearchStep {
     Exhausted,
 }
 
+/// Wide-track search margin (issue #156): the extra half-width, in FRACTIONAL
+/// grid cells, that the swept-capsule check reserves beyond what the obstacle
+/// map already stamped. Accepted from Python as a scalar (int/float, uniform
+/// across layers -- power nets) or a per-layer list of floats (impedance
+/// routing, where the layer stackup gives each layer its own width).
+#[derive(FromPyObject, Clone)]
+pub enum TrackMarginArg {
+    Scalar(f64),
+    PerLayer(Vec<f64>),
+}
+
+impl TrackMarginArg {
+    /// Margin (grid cells) to reserve on `layer`. A per-layer list that is
+    /// shorter than the layer count yields 0.0 for the missing layers.
+    #[inline]
+    pub(crate) fn at(&self, layer: usize) -> f64 {
+        match self {
+            TrackMarginArg::Scalar(m) => *m,
+            TrackMarginArg::PerLayer(v) => v.get(layer).copied().unwrap_or(0.0),
+        }
+    }
+}
+
 /// Per-search options (route_multi's optional arguments, pre-normalized).
 pub(crate) struct SearchOptions {
     collinear_vias: bool,
@@ -262,7 +285,7 @@ pub(crate) struct SearchOptions {
     norm_start_dir: Option<(i32, i32)>,
     norm_end_dir: Option<(f64, f64)>,
     direction_steps: i32,
-    track_margin: f64,
+    track_margin: TrackMarginArg,
 }
 
 impl SearchOptions {
@@ -272,7 +295,7 @@ impl SearchOptions {
         start_direction: Option<(i32, i32)>,
         end_direction: Option<(f64, f64)>,
         direction_steps: i32,
-        track_margin: i32,
+        track_margin: TrackMarginArg,
     ) -> Self {
         // Normalize start direction if provided
         let norm_start_dir = start_direction.map(|(dx, dy)| (dx.signum(), dy.signum()));
@@ -288,7 +311,7 @@ impl SearchOptions {
             norm_start_dir,
             norm_end_dir,
             direction_steps,
-            track_margin: track_margin as f64,
+            track_margin,
         }
     }
 }
@@ -587,7 +610,8 @@ impl GridSearch {
                 let ngy = current.gy + dy;
 
                 if obstacles.segment_blocked(current.gx, current.gy, ngx, ngy,
-                                             current.layer as usize, self.opts.track_margin) {
+                                             current.layer as usize,
+                                             self.opts.track_margin.at(current.layer as usize)) {
                     sink.on_blocked(ngx, ngy, current.layer);
                     continue;
                 }
@@ -763,7 +787,8 @@ impl GridSearch {
 
                 // Check if destination layer is blocked at this position
                 if obstacles.segment_blocked(current.gx, current.gy, current.gx, current.gy,
-                                             layer as usize, self.opts.track_margin) {
+                                             layer as usize,
+                                             self.opts.track_margin.at(layer as usize)) {
                     sink.on_blocked(current.gx, current.gy, layer);
                     continue;
                 }
@@ -959,11 +984,13 @@ impl GridRouter {
     /// end_direction: Optional (dx, dy) continuous direction for final moves to target.
     /// If specified, checks arrival direction is within ±60° of this direction.
     /// direction_steps: Number of steps to constrain at start (default 2).
-    /// track_margin: Extra margin in grid cells for wide tracks (e.g., power nets).
-    /// When > 0, checks cells within this radius for obstacles.
+    /// track_margin: Extra margin in FRACTIONAL grid cells for wide tracks
+    /// (power nets / impedance-width nets). Scalar (uniform) or per-layer
+    /// list of floats (#156). When > 0 on a layer, the swept-capsule check
+    /// reserves that Euclidean radius along every move on that layer.
     ///
     /// C1: thin wrapper over the shared GridSearch core with a StatsSink.
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=0))]
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0)))]
     #[allow(clippy::too_many_arguments)]
     pub fn route_multi(
         &self,
@@ -976,7 +1003,7 @@ impl GridRouter {
         start_direction: Option<(i32, i32)>,
         end_direction: Option<(f64, f64)>,
         direction_steps: i32,
-        track_margin: i32,
+        track_margin: TrackMarginArg,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, std::collections::HashMap<String, f64>) {
         let opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
                                       start_direction, end_direction,
@@ -1027,7 +1054,7 @@ impl GridRouter {
     /// - On failure: path is None, blocked_cells contains cells that blocked expansion
     ///
     /// C1: thin wrapper over the shared GridSearch core with a FrontierSink.
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=0))]
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0)))]
     #[allow(clippy::too_many_arguments)]
     pub fn route_with_frontier(
         &self,
@@ -1040,7 +1067,7 @@ impl GridRouter {
         start_direction: Option<(i32, i32)>,
         end_direction: Option<(f64, f64)>,
         direction_steps: i32,
-        track_margin: i32,
+        track_margin: TrackMarginArg,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, Vec<(i32, i32, u8)>) {
         let opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
                                       start_direction, end_direction,

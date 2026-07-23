@@ -182,11 +182,14 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                     via_block_mm, coord.grid_step)
                 _batch_vias(obstacles, vias_arr)
             continue
-        # Compute expansion: routing track half-width (for this layer) + obstacle half-width + clearance
-        layer_track_width = config.get_track_width(seg.layer)
-        seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
+        # Compute expansion: routing-side reserve half-width (#156: nominal for
+        # the single-ended engine -- impedance/power extra rides the per-net
+        # track_margin; full layer width when reserve_layer_widths, diff engine)
+        # + obstacle half-width + clearance
+        reserve_width = config.route_reserve_width(seg.layer)
+        seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
         seg_clearance = _obstacle_clearance(seg.net_id)
-        expansion_mm = layer_track_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
+        expansion_mm = reserve_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
         # For via blocking by segments: via half-size + segment half-width + clearance
         via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
         _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm)
@@ -1363,17 +1366,16 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # floor isn't elevated), so a foreign routed net keeps max(classA, classB).
     obs_clearance = config.obstacle_clearance(net_id)
 
-    # Add segments - use actual segment width and layer-specific routing track width
+    # Add segments - use actual segment width and the routing-side reserve width (#156)
     for seg in pcb_data.segments:
         if seg.net_id != net_id:
             continue
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
-        # Use layer-specific track width for routing track portion
-        layer_track_width = config.get_track_width(seg.layer)
-        seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
-        expansion_mm = layer_track_width / 2 + seg_width / 2 + obs_clearance + extra_clearance
+        reserve_width = config.route_reserve_width(seg.layer)
+        seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
+        expansion_mm = reserve_width / 2 + seg_width / 2 + obs_clearance + extra_clearance
         via_block_mm = config.via_size / 2 + seg_width / 2 + obs_clearance + extra_clearance
         _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm)
 
@@ -1426,10 +1428,10 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
         if layer_idx is None:
             continue
 
-        # Compute expansion based on actual segment width and layer-specific track width
-        layer_track_width = config.get_track_width(seg.layer)
-        seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
-        expansion_mm = layer_track_width / 2 + seg_width / 2 + config.clearance + extra_clearance
+        # Compute expansion based on actual segment width and the routing-side reserve (#156)
+        reserve_width = config.route_reserve_width(seg.layer)
+        seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
+        expansion_mm = reserve_width / 2 + seg_width / 2 + config.clearance + extra_clearance
         via_block_mm = config.via_size / 2 + seg_width / 2 + config.clearance + extra_clearance
         _add_segment_obstacle_with_exclusion(
             obstacles, seg, coord, layer_idx, exclude_grid_cells, expansion_mm, via_block_mm
@@ -1688,11 +1690,11 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
     for seg in segments:
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is not None:
-            # Use layer-specific track width for routing track portion
-            layer_track_width = config.get_track_width(seg.layer)
-            seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
+            # Routing-side reserve width for the future track (#156)
+            reserve_width = config.route_reserve_width(seg.layer)
+            seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
             seg_clearance = config.obstacle_clearance(getattr(seg, 'net_id', 0))
-            expansion_mm = layer_track_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
+            expansion_mm = reserve_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
             via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance
             _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm)
     _ledger_close(obstacles, _pre, "add_segments_list")
@@ -1727,12 +1729,12 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
             continue
 
         # Must match the ADD shape exactly (same capsule from the true float
-        # segment, same per-net cross-class clearance) or the Rust ref-counts
-        # desync on rip-up.
-        layer_track_width = config.get_track_width(seg.layer)
-        seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
+        # segment, same per-net cross-class clearance, same #156 reserve width)
+        # or the Rust ref-counts desync on rip-up.
+        reserve_width = config.route_reserve_width(seg.layer)
+        seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
         seg_clearance = config.obstacle_clearance(getattr(seg, 'net_id', 0))
-        expansion_mm = layer_track_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
+        expansion_mm = reserve_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
         via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance
 
         for cgx, cgy in segment_blocked_cells_array(
@@ -2026,12 +2028,14 @@ def _via_track_expansion_per_layer(via_size: float, config: GridRouteConfig,
                                    coord: GridCoord, clearance: float,
                                    extra_clearance: float = 0.0):
     """Per-layer via->track keep-out radius (cells): a via blocks tracks on EACH
-    layer at THAT layer's routing width. Replaces a single max_track_width value,
-    which over-covered thinner layers and double-counted the router's per-net
-    track_margin for wide nets. Matches the cache (_collect_via_obstacles) and the
-    segment stamp (which already key off the per-layer width)."""
+    layer at THAT layer's routing-side reserve width (#156: nominal for the
+    single-ended engine, where impedance/power extra width rides the routed
+    net's own track_margin; the full layer width for the diff engine). Replaces
+    a single max_track_width value, which over-covered thinner layers and
+    double-counted the router's per-net track_margin for wide nets. Matches the
+    cache (_collect_via_obstacles) and the segment stamp."""
     return [max(1, coord.to_grid_dist_safe(
-                via_size / 2 + config.get_track_width(layer) / 2 + clearance + extra_clearance))
+                via_size / 2 + config.route_reserve_width(layer) / 2 + clearance + extra_clearance))
             for layer in config.layers]
 
 
@@ -2538,11 +2542,11 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
-        # Compute expansion: layer-specific routing track half-width + obstacle half-width + clearance
-        layer_track_width = config.get_track_width(seg.layer)
-        seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
+        # Compute expansion: routing-side reserve half-width (#156) + obstacle half-width + clearance
+        reserve_width = config.route_reserve_width(seg.layer)
+        seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
         seg_clearance = _obstacle_clearance(seg.net_id)
-        expansion_mm = layer_track_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
+        expansion_mm = reserve_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
         via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
         _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm,
                               blocked_cells, blocked_vias)

@@ -839,7 +839,7 @@ def _identify_blocking_obstacles(
     return blockers
 
 
-def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: str, print_prefix: str = "", track_margin: int = 0,
+def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: str, print_prefix: str = "", track_margin=0,
                             pcb_data: PCBData = None, config: GridRouteConfig = None, current_net_id: int = -1):
     """
     Diagnose why routing couldn't start from the given cells.
@@ -855,6 +855,10 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
     sample_cells = cells[:3] if len(cells) > 3 else cells
 
     for gx, gy, layer in sample_cells:
+        # Diagnostic sweep radius: the layer's margin, rounded UP to whole cells
+        # (#156 margins are fractional and possibly per-layer; ceil is fine for
+        # a why-blocked report)
+        cell_margin = int(math.ceil(_margin_at(track_margin, layer)))
         # Check if the cell itself is blocked
         cell_blocked = obstacles.is_blocked(gx, gy, layer)
 
@@ -868,10 +872,10 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
                     continue
                 total_neighbors += 1
                 # Check with margin if specified
-                if track_margin > 0:
+                if cell_margin > 0:
                     neighbor_blocked = False
-                    for mx in range(-track_margin, track_margin + 1):
-                        for my in range(-track_margin, track_margin + 1):
+                    for mx in range(-cell_margin, cell_margin + 1):
+                        for my in range(-cell_margin, cell_margin + 1):
                             if obstacles.is_blocked(gx + dx + mx, gy + dy + my, layer):
                                 neighbor_blocked = True
                                 break
@@ -884,7 +888,7 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
                     blocked_details.append(f"({gx+dx},{gy+dy})")
 
         status = "BLOCKED" if cell_blocked else "ok"
-        margin_str = f" (margin={track_margin})" if track_margin > 0 else ""
+        margin_str = f" (margin={cell_margin})" if cell_margin > 0 else ""
         print(f"{print_prefix}  {label} cell ({gx}, {gy}, layer={layer}): {status}, {blocked_neighbors}/{total_neighbors} neighbors blocked{margin_str}")
         # Show which specific neighbors are blocked for debugging
         if blocked_neighbors == total_neighbors and blocked_neighbors > 0:
@@ -898,9 +902,9 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
                 for dy in [-1, 0, 1]:
                     if dx == 0 and dy == 0:
                         continue
-                    if track_margin > 0:
-                        for mx in range(-track_margin, track_margin + 1):
-                            for my in range(-track_margin, track_margin + 1):
+                    if cell_margin > 0:
+                        for mx in range(-cell_margin, cell_margin + 1):
+                            for my in range(-cell_margin, cell_margin + 1):
                                 if obstacles.is_blocked(gx + dx + mx, gy + dy + my, layer):
                                     blocked_positions.append((gx + dx + mx, gy + dy + my, layer))
                     else:
@@ -960,7 +964,7 @@ def _probe_route_with_frontier(
     config: 'GridRouteConfig',
     print_prefix: str = "",
     direction_labels: Tuple[str, str] = ("forward", "backward"),
-    track_margin: int = 0,
+    track_margin=0,
     pcb_data: PCBData = None,
     current_net_id: int = -1,
     single_direction: bool = False
@@ -996,7 +1000,7 @@ def _probe_route_with_frontier_once(
     config: 'GridRouteConfig',
     print_prefix: str = "",
     direction_labels: Tuple[str, str] = ("forward", "backward"),
-    track_margin: int = 0,
+    track_margin=0,
     pcb_data: PCBData = None,
     current_net_id: int = -1,
     single_direction: bool = False,
@@ -1016,7 +1020,8 @@ def _probe_route_with_frontier_once(
         config: Routing configuration
         print_prefix: Prefix for print messages (e.g., "  " or "      ")
         direction_labels: Names for forward/backward directions
-        track_margin: Extra margin in grid cells for wide tracks (power nets)
+        track_margin: Extra FRACTIONAL margin in grid cells for wide tracks
+            (power/impedance widths); scalar or per-layer list (#156)
         pcb_data: Optional PCB data for blocking obstacle identification
         current_net_id: Current net ID (for excluding from blocking analysis)
         single_direction: If True, only try forward direction (for bus routing)
@@ -1322,13 +1327,10 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             layers_in_path = set(p[2] for p in attraction_path)
             print(f"    Bus attraction: {len(attraction_path)} path points, layers={layers_in_path}, radius={bus_attraction_radius_grid} grid, bonus={bus_attraction_bonus}")
 
-    # Calculate track margin for wide power tracks
-    # Use ceiling + 1 to account for grid quantization and diagonal track approaches
-    # Compare against layer-specific width (not base track_width) to handle impedance routing
-    net_track_width = config.get_net_track_width(net_id, config.layers[0])
-    layer_track_width = config.get_track_width(config.layers[0])
-    extra_half_width = (net_track_width - layer_track_width) / 2
-    track_margin = (int(math.ceil(extra_half_width / config.grid_step)) + 1) if extra_half_width > 0 else 0
+    # Per-layer fractional track margins (#156): the net's extra half-width --
+    # power override OR impedance layer width -- over what the obstacle stamps
+    # reserved, exact (no ceil, no +1; the swept capsule covers diagonals).
+    track_margin = config.track_margins_for_net(net_id)
 
     # Determine direction order (always deterministic)
     start_backwards = config.direction_order in ("backwards", "backward")
@@ -1664,10 +1666,20 @@ SHORT_POWER_EDGE_MM = 10.0
 
 
 def _track_margin_for_width(width, layer_width, grid_step):
-    """Extra grid-cell margin the A* needs for a track of `width` over the layer's
-    base width (mirrors the inline computation at the route_* entry points)."""
+    """Extra FRACTIONAL grid-cell margin the A* needs for a track of `width`
+    over the map's reserved `layer_width` (#156): the exact extra half-width,
+    no ceil, no +1 -- the Rust swept-capsule check covers diagonals and the
+    swept body of each move precisely, so integer padding only over-blocked."""
     extra_half = (width - layer_width) / 2
-    return (int(math.ceil(extra_half / grid_step)) + 1) if extra_half > 0 else 0
+    return extra_half / grid_step if extra_half > 0 else 0.0
+
+
+def _margin_at(track_margin, layer_idx):
+    """Per-layer value of a track margin that may be a scalar (uniform) or a
+    per-layer list (#156 impedance widths)."""
+    if isinstance(track_margin, (list, tuple)):
+        return track_margin[layer_idx] if 0 <= layer_idx < len(track_margin) else 0.0
+    return float(track_margin)
 
 
 def _power_width_ladder(net_width, layer_width):
@@ -2078,17 +2090,21 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
     result = _route_connection_at_margin(
         router, obstacles, config, sources, targets, track_margin,
         pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
-    if result[0] is not None or track_margin == 0 or not config.power_tap_neckdown:
-        return result + (False, None)
-
+    # The neck-down ladder is for POWER-wide nets only: nets configured wider
+    # than the layer's own routing width. Impedance-width nets now carry a
+    # nonzero track_margin too (#156 unification) but must NEVER neck down --
+    # their width IS the spec -- so gate on the width comparison, not margin>0
+    # (identical to the old margin>0 test for power nets).
     net_w = config.get_net_track_width(net_id, config.layers[0])
     layer_w = config.get_track_width(config.layers[0])
+    if result[0] is not None or net_w <= layer_w + 1e-9 or not config.power_tap_neckdown:
+        return result + (False, None)
 
     if _edge_span_mm(sources, targets, config.grid_step) <= SHORT_POWER_EDGE_MM:
         # Short edge: step the width down, widest-that-fits wins; segments use it.
         total_iters = result[1]
         for w in _power_width_ladder(net_w, layer_w):
-            tm = _track_margin_for_width(w, layer_w, config.grid_step)
+            tm = config.track_margins_for_width(w)
             r = _route_connection_at_margin(
                 router, obstacles, config, sources, targets, tm,
                 pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
@@ -2099,10 +2115,12 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
                 return (r[0], total_iters) + r[2:] + (False, w)
         return (result[0], total_iters) + result[2:] + (False, None)
 
-    # Long trunk: keep the existing single wide->base retry + neck-down.
+    # Long trunk: keep the existing single wide->base retry + neck-down. "Base"
+    # is the LAYER width (impedance width on impedance runs), which under #156
+    # carries its own margin over the stamps' reserve -- 0 on plain runs.
     print(f"{print_prefix}{YELLOW}Wide route blocked - retrying at default track width (neck-down){RESET}")
     retry = _route_connection_at_margin(
-        router, obstacles, config, sources, targets, 0,
+        router, obstacles, config, sources, targets, config.base_track_margins(),
         pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
     if retry[0] is None:
         # Keep the WIDE attempt's frontier for rip-up analysis: blockers found
@@ -2907,13 +2925,9 @@ def route_multipoint_main(
             layers_in_path = set(p[2] for p in attraction_path)
             print(f"    Bus attraction: {len(attraction_path)} path points, layers={layers_in_path}, radius={bus_attraction_radius_grid} grid, bonus={bus_attraction_bonus}")
 
-    # Calculate track margin for wide power tracks
-    # Use ceiling + 1 to account for grid quantization and diagonal track approaches
-    # Compare against layer-specific width (not base track_width) to handle impedance routing
-    net_track_width = config.get_net_track_width(net_id, config.layers[0])
-    layer_track_width = config.get_track_width(config.layers[0])
-    extra_half_width = (net_track_width - layer_track_width) / 2
-    track_margin = (int(math.ceil(extra_half_width / config.grid_step)) + 1) if extra_half_width > 0 else 0
+    # Per-layer fractional track margins (#156): exact extra half-width over
+    # the stamps' reserve, no ceil, no +1 (see track_margins_for_net).
+    track_margin = config.track_margins_for_net(net_id)
 
     # Route the main edge: try MST edges longest-first until one routes.
     # Issue #101: one boxed pad must not abandon the whole net - the old code
@@ -3419,13 +3433,9 @@ def _route_multipoint_taps_impl(
                         layer_direction_preferences=config.get_layer_direction_preferences(),
                         direction_preference_cost=config.direction_preference_cost)
 
-    # Calculate track margin for wide power tracks
-    # Use ceiling + 1 to account for grid quantization and diagonal track approaches
-    # Compare against layer-specific width (not base track_width) to handle impedance routing
-    net_track_width = config.get_net_track_width(net_id, config.layers[0])
-    layer_track_width = config.get_track_width(config.layers[0])
-    extra_half_width = (net_track_width - layer_track_width) / 2
-    track_margin = (int(math.ceil(extra_half_width / config.grid_step)) + 1) if extra_half_width > 0 else 0
+    # Per-layer fractional track margins (#156): exact extra half-width over
+    # the stamps' reserve, no ceil, no +1 (see track_margins_for_net).
+    track_margin = config.track_margins_for_net(net_id)
 
     total_iterations = 0
 
@@ -3990,12 +4000,19 @@ def _split_segment_at(seg, dist_from_end: float):
     return near, far
 
 
-def _segment_fits_wide(seg, obstacles, coord: GridCoord, layer_idx: int, margin: int) -> bool:
-    """True if every grid cell along the segment clears the wide-track margin."""
+def _segment_fits_wide(seg, obstacles, coord: GridCoord, layer_idx: int, margin: float) -> bool:
+    """True if the segment's swept body clears the wide-track margin (#156:
+    fractional, checked with the same Euclidean capsule the A* uses -- the old
+    per-cell Chebyshev walk both over-covered corners and missed the swept
+    body of diagonal segments)."""
     gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
     gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+    if margin > 0:
+        return not obstacles.segment_blocked(gx1, gy1, gx2, gy2, layer_idx, float(margin))
+    # Zero margin (base-width): segment_blocked's r<=0 fast path only checks the
+    # endpoint, so keep the per-cell walk for whole-line coverage.
     for gx, gy in walk_line(gx1, gy1, gx2, gy2):
-        if obstacles.is_blocked_with_margin(gx, gy, layer_idx, margin):
+        if obstacles.is_blocked(gx, gy, layer_idx):
             return False
     return True
 
@@ -4008,13 +4025,15 @@ def _flip_segments(segments):
 
 
 def _neck_pass(segments, config: GridRouteConfig, obstacles, coord: GridCoord,
-               layer_map: Dict[str, int], track_margin: int):
+               layer_map: Dict[str, int], track_margin):
     """Narrow the last neckdown_length mm of the run (the pad is at the list
     END); beyond that, keep the wide width only where the wide clearance
     fits. Never re-widens an already-narrow segment (so a second pass from
-    the other end preserves the first pass's neck)."""
+    the other end preserves the first pass's neck). track_margin may be a
+    scalar or a per-layer list (#156)."""
     def fits(s):
-        return _segment_fits_wide(s, obstacles, coord, layer_map.get(s.layer, 0), track_margin)
+        li = layer_map.get(s.layer, 0)
+        return _segment_fits_wide(s, obstacles, coord, li, _margin_at(track_margin, li))
 
     out = []  # built in reverse (pad-first)
     cum = 0.0
@@ -4046,7 +4065,7 @@ def _neck_pass(segments, config: GridRouteConfig, obstacles, coord: GridCoord,
 
 def _apply_neckdown_widths(segments, config: GridRouteConfig, net_id: int,
                            obstacles, coord: GridCoord, layer_names: List[str],
-                           track_margin: int, neck_start: bool = False):
+                           track_margin, neck_start: bool = False):
     """Assign widths to a neck-down route (issue #72).
 
     The path was routed at the layer's default width because the power width

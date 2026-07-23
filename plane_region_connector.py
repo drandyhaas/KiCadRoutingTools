@@ -1300,12 +1300,16 @@ def _try_route_between_regions(
 
         # Try wider widths (skip min_track_width which we already did)
         for try_width in track_widths_narrow_first[1:]:
-            # Same +1 quantization guard as route.py's _track_margin_for_width
-            # (issue #268): the obstacle stamp blocks cell CENTERS strictly inside
-            # the keep-out radius, so the outermost blocked cell sits up to ~one
-            # cell inside it; a bare ceil margin measured from that shell lets a
-            # widened trunk land tens of um inside the NPTH/copper floor.
-            track_margin = _track_margin_for_width(
+            # +1.0 cell quantization guard (issue #268): the obstacle stamp
+            # blocks cell CENTERS strictly inside the keep-out radius, so the
+            # outermost blocked cell sits up to ~one cell inside it; a bare
+            # margin measured from that shell lets a widened trunk land tens of
+            # um inside the NPTH/copper floor. #156 made the base margin the
+            # exact FRACTIONAL extra half-width (no ceil); one full extra cell
+            # on top is provably sufficient for any obstacle phase, and a
+            # widened plane join is upgrade-only copper in open space, so the
+            # cushion costs nothing that matters here.
+            track_margin = 1.0 + _track_margin_for_width(
                 try_width, min_track_width, config.grid_step)
 
             wider, _ = _try_route(
@@ -2061,7 +2065,7 @@ def route_plane_connection_wide(
     base_obstacles: GridObstacleMap,
     config: GridRouteConfig,
     net_vias: List[Tuple[float, float]],
-    track_margin: int = 0,
+    track_margin: float = 0.0,
     max_iterations: int = 200000,
     verbose: bool = False,
     router: Optional[GridRouter] = None
