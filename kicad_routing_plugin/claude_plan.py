@@ -740,6 +740,11 @@ def _match_net_names(pcb_data, globs):
     for net in pcb_data.nets.values():
         if not net.net_id or not net.name:
             continue
+        # CLI parity: expand_net_patterns drops KiCad no-connect nets
+        # ('unconnected-*') from every selection; the plan executor must not
+        # hand the net panel nets the CLI would never route.
+        if net.name.lower().startswith('unconnected-'):
+            continue
         if any(fnmatch.fnmatch(net.name, g) for g in includes) and \
                 not any(fnmatch.fnmatch(net.name, g) for g in excludes):
             names.append(net.name)

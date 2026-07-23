@@ -1092,6 +1092,7 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
 
     # Find unrouted nets (pads but no segments) unless routed_only
     unrouted_nets = []
+    skipped_noconnect = 0
     if not routed_only:
         copper_layers = pcb_data.board_info.copper_layers or ['F.Cu', 'B.Cu']
         for net_id, net_info in pcb_data.nets.items():
@@ -1122,6 +1123,16 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                 # co-located TH+SMD pad pairs) is already connected (issue #92).
                 if _net_pads_connected_by_overlap(pads_by_net[net_id], copper_layers):
                     continue
+                # KiCad auto-named no-connects sharing one net (USB shield
+                # tabs: 'unconnected-(J1-SHIELD-PadS1)' spanning 4 pads).
+                # Wildcard routing skips them (net_queries.expand_net_patterns)
+                # and human-routed references leave them unrouted (the
+                # connector shell joins them mechanically), so grading them
+                # manufactures phantom incompleteness (#479 ch32v003_usb /
+                # ch32v006_dev). An explicit --nets pattern still checks them.
+                if not net_patterns and net_info.name.lower().startswith('unconnected-'):
+                    skipped_noconnect += 1
+                    continue
                 unrouted_nets.append((net_id, net_info.name, len(pads_by_net[net_id])))
 
     if not quiet:
@@ -1133,6 +1144,9 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
             print(f"Checking {len(nets_to_check)} nets on component {component}")
         else:
             print(f"Checking {len(nets_to_check)} routed nets")
+        if skipped_noconnect:
+            print(f"  Skipped {skipped_noconnect} unrouted no-connect net(s) "
+                  f"('unconnected-*'); pass --nets to check them")
 
     issues = []
 
