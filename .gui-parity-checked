@@ -1,3 +1,113 @@
+9466342 2026-07-22 parity sweep 143d097..9473bf8 (the bus-corridor-planning +
+dogbone-escape-128 merges and the fill-model / rescue / tap-relocation wave --
+93 files, +8067 lines: #128 dog-bone escape, #296-R9 bus corridor planning,
+#424 tap relocation / congestion field, #444 SE seam re-ask, #470 via->pad
+graze class, #472 direct-first ordering, #473 checkpoint/dead-end hardening,
+#475 gr_poly outline, the plane-net manifest sidecar, and the fill-COMPONENT-
+aware zone credit). Outcome: parity CONFIRMED via both no-wx gates + a
+per-commit code audit, with ONE gap found and fixed (9466342, below). The
+recorded SHA (9466342) is the fix commit -- one commit past merge HEAD 9473bf8.
+
+  * GAP FOUND + FIXED (9466342): route_planes' --zone-clearance is `type=float`
+    (a NEW flag this range, 0efffb2) but was placed in manifest_to_plan
+    BOOL_FLAGS. A recorded `--zone-clearance 0.12` converted to
+    `zone_clearance: True`, dropping the value; the plan executor's generic
+    param->control loop then set the plane zone-clearance SpinCtrlDouble to
+    float(True)=1.0 (range max 2.0, unclamped) and the route_planes block
+    checked the override box -- replaying a 0.12 mm pour clearance at 1.0 mm.
+    Moved to FLAG_PARAMS. The GUI value path (planes_gui checkbox+spin,
+    claude_plan route_planes block, swig_gui reset) was already correct; only
+    the converter classification was wrong. The manifest_plan_parity gate
+    structurally could not catch this -- no corpus manifest yet uses the new
+    flag, and its 12-param control-resolution set doesn't include it.
+
+  * ONE NEW batch_route KWARG -> 76-key set becomes 77:
+    - ripup_blocker_select (--ripup-blocker-select, #424 audit; routing_config
+      field default 'count'). Threaded through ALL FOUR route mains
+      (route/route_diff/route_planes/route_disconnected_planes) AND fully GUI-
+      wired: swig_gui wx.Choice (defaults.RIPUP_BLOCKER_SELECT_CHOICES) + config
+      dict + reset_params_to_defaults + the batch_route call site;
+      settings_persistence save/restore; manifest_to_plan FLAG_PARAMS
+      (--ripup-blocker-select); test_gui_engine_parity config map. Default
+      'count' matches on both fronts (byte-identical when unset).
+  * NEW GUI-VISIBLE CHOICES / CONTROLS, all wired:
+    - --ordering gains a `bus` choice (ec8e21a) -> ordering_strategy: swig_gui
+      dropdown adds "bus"; manifest_to_plan maps --ordering -> ordering_strategy
+      (121fb40, was carried as the no-match 'ordering'); wx test now step-drives
+      ordering_strategy.
+    - --escape-method gains `dogbone` (#128, 27b35b4): fanout_gui BGA panel
+      ESCAPE_METHODS tuple + dropdown entry + tooltip; claude_plan _apply_special
+      reads opts.ESCAPE_METHODS dynamically so 'dogbone' round-trips; converter
+      carries it via the generic unknown-flag fallthrough (verified 'dogbone').
+    - --zone-clearance override: planes_gui CreatePlanesOptionsPanel gets a
+      checkbox+spin row (unchecked = follow routed clearance auto-stepping to
+      the fab floor; checked = typed value); get_config returns None when
+      unchecked; PlanesTab create_plane / repair passes config.get('zone_
+      clearance') (no default -> None); swig_gui reset unchecks + disables;
+      claude_plan checks the box when a plan value is present.
+    - --vertical-attraction-radius (new route.py argparse exposure of the
+      existing net-agnostic cross-layer stacking radius): existing swig_gui
+      control + generic fallthrough (verified 0.6 round-trips); tooltips
+      reworded on both fronts to the net-agnostic meaning.
+  * SHARED-FUNCTION features -> both fronts inherit, no per-front wiring:
+    - Plane-net manifest sidecar (075d1bf/d1cca2f/8bc7ba7): CLI mains write via
+      plane_io.record_plane_manifest / carry_plane_manifest and pre-filter net
+      selection via apply_plane_manifest_exclusions (a PRE-engine selection
+      filter, correctly NOT a post-pass). GUI mirror: claude_plan._plan_plane_
+      nets (whole-plan plane steps UNION the on-disk manifest -- covers steps
+      that run before the plane step, the CLI's fanout-before-planes hole) +
+      _drop_plane_nets on route/fanout selection; planes_gui writes the manifest
+      after a plane run. Both fronts wired.
+    - Fill-COMPONENT-aware zone credit (607f856/8779b70/d5b2aea/f9c703c/
+      9473bf8): check_net_connectivity (defined in check_connected.py, imported
+      by BOTH the CLI grader and swig_gui) gained a pcb_data param + the
+      plane_fill_model component-labeling credit. GUI-parity fix: swig_gui's
+      net-list "hide connected" now passes pcb_data=self.pcb_data (without it a
+      pinched pour island graded connected here while KiCad DRC showed it open).
+    - #444 SE seam re-ask, #470 via->pad graze close_soft_joints class, #424 tap
+      relocation / congestion field / fragility field, #472 direct-first
+      ordering, #473 dead-end/checkpoint protection, rip_restore, stub layer
+      switching, bus_corridor/bus_detection, congestion_field: all inside the
+      shared engine (single_ended_*, phase3_routing, diff_pair_routing,
+      batch_route path) -> both fronts inherit. Rust 0.18.4/0.18.5 (cross-layer
+      bus attraction, P2/P3 precompute) below the Python API, front-agnostic.
+    - #475 gr_poly free-form outline crash fix + zone_clearance=None repair
+      (741bfe8): parser/engine + planes path; the GUI crash fix is in the shared
+      planes flow.
+  * ENV-GATED DEBUG KNOBS (inert unless set, default = prior behavior, no
+    dialog control by convention): KICAD_BUS_STRICT/OFFLANE_MULT/RIP_RESISTANCE,
+    KICAD_DIRECT_FIRST (default '1', inside the shared engine ordering),
+    KICAD_FANOUT_DIRECT / _TOWARD_TARGETS, KICAD_ISLAND_LAUNCH,
+    KICAD_UNDERPAD_OUTER_RINGS, KICAD_STOP_AFTER/_FILE/_CLEANUP (checkpoint
+    abort; only conditionally SKIPS the shared run_post_route_cleanup, off by
+    default so both fronts run cleanup identically), KICAD_NET_STORY. None
+    change a default that diverges between fronts.
+  * CLI-only, no GUI surface (grading/corpus/debug): grade_final honest-DRC,
+    kicad_unconnected authoritative count, net_forensics/net_story debug dumps,
+    stress harness (run_board/run_queue/board_layer_images, set3monster corpus).
+
+GATES RUN GREEN AT HEAD (post-fix):
+  * test_manifest_plan_parity.py: 11736 flag-checks across 307 manifests, 0
+    mismatches; param->control resolution 12/12, 0 unresolved.
+  * test_cli_postpass_coverage.py: 4 registered, 10 in active CLI use, 0
+    failures, 0 warnings (bga/qfn run_drc the one acknowledged CLI-only
+    report-only pass).
+
+NOT RUN THIS PASS: tests/gui_parity/test_gui_engine_parity.py (no wx/pcbnew in
+this session) -- carried over. NOTE the batch_route param set GREW this range
+(76 -> 77: +ripup_blocker_select), so the prior marker's wx VERDICT no longer
+covers the exact signature; the config map IS updated and both fronts pass the
+new kwarg with matching 'count' default, but a KiCad-python session should
+re-run the wx engine-parity test to reconfirm. Still pending a KiCad-python
+session (carried): multi-class net_clearances convergence, a GUI-engine diff
+route, a QFN GUI fanout on zynq_ad9364 U11 (#446 tips on-grid), a slotted-board
+(sofle) GUI plane vs the CLI copperpour keepout sexprs -- and NEW this sweep:
+(1) a GUI route_planes with an explicit --zone-clearance to confirm the fixed
+converter value reaches create_plane; (2) a dog-bone (#128) GUI BGA fanout;
+(3) a GUI net-list check on a fill-COMPONENT board to confirm the pcb_data zone
+credit matches check_connected.
+
+--- prior sweeps ---
 143d097 2026-07-20 parity sweep a92ccec..143d097 (the #446 QFN fan-tip
 re-snap, #452 Rust diagonal direction cost / rust_router 0.18.3, the corpus
 expansion to sets 11-25, and a self-reverted bga_fanout experiment). Outcome:
