@@ -366,6 +366,27 @@ def find_disconnected_zone_regions(
     if zone_layers is None:
         zone_layers = {plane_layer}
 
+    # Fill-COMPONENT gate (#region-joiner upgrade): the coarse analysis grid
+    # cannot represent a sub-cell pour pinch, so the floods below POURED
+    # THROUGH it and falsely merged a pinched island's anchors into the main
+    # region -- no join was ever attempted for exactly the islands that need
+    # one (ottercast N4/R5 GND balls). When the validator-parity fill model
+    # is available, a flood step on a zone layer may only enter fill cells
+    # of the SAME component it started on (own segment cells stay exempt --
+    # tracks are real copper regardless of fill).
+    try:
+        from plane_fill_model import get_fill_models
+        _models_by_layer = get_fill_models(pcb_data, net_id)
+    except Exception:
+        _models_by_layer = {}
+
+    def _comp_at(_layer, _x, _y, _size=0.0):
+        for _m in _models_by_layer.get(_layer, []):
+            _c = _m.query_component(_x, _y, size=_size)
+            if _c is not None and _c > 0:
+                return (id(_m), _c)
+        return None
+
     # Collect anchor points using helper function
     anchor_points, anchor_grid_points = _collect_anchor_points(
         net_id, zone_bounds, pcb_data, coord, zone_layers, routing_layers
@@ -478,6 +499,8 @@ def find_disconnected_zone_regions(
         for start_cl_idx in layer_cls:
             x, y, _ = cross_layer_points[start_cl_idx]
             start_gx, start_gy = coord.to_grid(x, y)
+            _start_comp = (_comp_at(layer, x, y, _size=0.7)
+                           if layer in zone_layers else None)
 
             if (start_gx, start_gy) in layer_visited:
                 # Already visited by a previous flood fill - that flood fill
@@ -542,6 +565,14 @@ def find_disconnected_zone_regions(
                                     and (nx, ny) not in inside_zone)):
                             if (nx, ny) not in net_segment_cells:
                                 continue
+                        elif (_start_comp is not None
+                              and (nx, ny) not in net_segment_cells):
+                            # Component gate: fill continuity only within the
+                            # start's fill component (the pinch the coarse
+                            # grid can't see).
+                            _fx, _fy = coord.to_float(nx, ny)
+                            if _comp_at(layer, _fx, _fy) != _start_comp:
+                                continue
                     else:
                         # Layer has no zone: only traverse along same-net segments
                         if (nx, ny) not in net_segment_cells:
@@ -588,6 +619,9 @@ def find_disconnected_zone_regions(
     flood_cells_by_start: Dict[int, Set[Tuple[int, int]]] = {}
     for start_anchor_idx in range(len(anchor_points)):
         start_gx, start_gy = anchor_grid_points[start_anchor_idx]
+        _ax, _ay = anchor_points[start_anchor_idx]
+        _a_start_comp = (_comp_at(plane_layer, _ax, _ay, _size=0.7)
+                         if plane_layer in zone_layers else None)
 
         if (start_gx, start_gy) in plane_visited:
             # Already visited by a previous flood fill - skip this anchor.
@@ -624,6 +658,11 @@ def find_disconnected_zone_regions(
                         or (inside_plane is not None
                             and (nx, ny) not in inside_plane)):
                     if (nx, ny) not in net_plane_segment_cells:
+                        continue
+                elif (_a_start_comp is not None
+                      and (nx, ny) not in net_plane_segment_cells):
+                    _fx, _fy = coord.to_float(nx, ny)
+                    if _comp_at(plane_layer, _fx, _fy) != _a_start_comp:
                         continue
                 plane_visited.add((nx, ny))
                 queue.append((nx, ny))
