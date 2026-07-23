@@ -1820,7 +1820,12 @@ Examples:
     import json as _json, clearance_ledger as _cl
     _routes, _regions = (_rdp_result if isinstance(_rdp_result, tuple)
                          and len(_rdp_result) >= 2 else (0, 0))
-    _plane_nets = sorted(set((args.nets or []) + (args.power_nets or [])))
+    # Record only nets whose ZONES this step actually processed (net_names) --
+    # never args.power_nets, which is a track-width hint, not a plane
+    # declaration. Recording power nets here poisoned the sidecar and locked
+    # real rails out of every later wildcard route step (#479: ch32v203_ev's
+    # +5V ended the chain with zero copper).
+    _plane_nets = sorted(set(net_names))
     _summary = {
         "total_routes": _routes,
         "total_regions": _regions,

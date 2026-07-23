@@ -14,7 +14,8 @@ Use this instead of ``cp`` whenever you rename/duplicate a board mid-chain:
     python3 copy_board.py src.kicad_pcb dst.kicad_pcb
 
 It copies ``.kicad_pcb`` and every sibling that exists (``.kicad_pro``,
-``.kicad_prl``), so the DRC floor travels with the board. It also self-records into
+``.kicad_prl``, the ``_planes.json`` plane-net manifest), so the DRC floor and
+the plane declaration travel with the board. It also self-records into
 the stress redo manifest (``REDO_MANIFEST``) like the routing tools, so a replayed
 manifest reproduces the full copy (not just the board) -- no more floor drop.
 """
@@ -22,9 +23,12 @@ import os
 import shutil
 import sys
 
-# Sibling extensions that must travel with a board. .kicad_pro is the DRC floor
-# (the whole point); .kicad_prl is per-board local state (harmless to carry).
-SIBLING_EXTS = (".kicad_pro", ".kicad_prl")
+# Sibling suffixes that must travel with a board (each appended to the board's
+# stem). .kicad_pro is the DRC floor (the whole point); .kicad_prl is per-board
+# local state (harmless to carry); _planes.json is the plane-net manifest
+# sidecar (plane_io) -- dropping it makes later wildcard route steps re-route
+# plane nets as signals (#479).
+SIBLING_EXTS = (".kicad_pro", ".kicad_prl", "_planes.json")
 
 
 def copy_board(src_pcb: str, dst_pcb: str) -> list:
