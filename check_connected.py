@@ -712,6 +712,43 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         seg_start_id = seg_idx * 2
         seg_index.add(seg, seg_start_id)
 
+    # A track that passes THROUGH a pad mid-span connects it even though
+    # neither endpoint lands anywhere near the pad -- e.g. a fanout tap
+    # threading a capacitor pad on its way out (steppenprobe C7, #479): both
+    # endpoints sat >1mm outside, the endpoint rule above missed it, and the
+    # pad graded as a phantom disconnect while the router's terminal selector
+    # (correctly) dropped it as already connected -- so every retry did
+    # nothing and the board could never grade complete. Mirror
+    # connectivity._pad_on_group's conservative gate exactly: credit only when
+    # the centreline reaches well inside the pad (segment half-width plus a
+    # quarter of the smaller pad dimension from the pad CENTRE), so a track
+    # merely grazing the pad outline still grades as disconnected.
+    if pad_repr_id and segments:
+        for pad_idx in pad_repr_id:
+            pad = pads[pad_idx]
+            if pad.size_x and pad.size_y:
+                reach_pad = min(pad.size_x, pad.size_y) / 4
+            else:
+                reach_pad = 0.05
+            px, py = pad.global_x, pad.global_y
+            for layer in pad_copper_layers[pad_idx]:
+                for seg, seg_start_id in seg_index.query_near(
+                        px, py, layer, radius=max_seg_width / 2 + reach_pad):
+                    dx = seg.end_x - seg.start_x
+                    dy = seg.end_y - seg.start_y
+                    seg_len_sq = dx * dx + dy * dy
+                    if seg_len_sq < 1e-8:
+                        cx, cy = seg.start_x, seg.start_y
+                    else:
+                        t = ((px - seg.start_x) * dx
+                             + (py - seg.start_y) * dy) / seg_len_sq
+                        t = max(0.0, min(1.0, t))
+                        cx = seg.start_x + t * dx
+                        cy = seg.start_y + t * dy
+                    if math.sqrt((px - cx) ** 2 + (py - cy) ** 2) \
+                            <= seg.width / 2 + reach_pad:
+                        _union(pad_repr_id[pad_idx], seg_start_id)
+
     # Check for T-junctions: points that lie on the middle of a segment (same layer)
     # Use spatial index for O(n) average instead of O(n × m)
     for px, py, player, pid, psize in all_points:
