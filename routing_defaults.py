@@ -102,10 +102,12 @@ RIPUP_BLOCKER_SELECT_CHOICES = ('count', 'near-target', 'bidir', 'mincut')
 
 # Layer direction preference (0=horizontal, 1=vertical, 255=none)
 # Alternates H/V starting with horizontal on top layer
-DIRECTION_PREFERENCE_COST = 5000  # Cost penalty for non-preferred direction (0 = disabled).
-# 5000 (5x a move) is the measured lane-discipline value: post-#452 it
-# reproduces human H/V style and the urchin cross-under; the old 50 was
-# ~5% of a move -- functionally inert. Completion effect is corpus-judged.
+DIRECTION_PREFERENCE_COST = 250  # Cost penalty for non-preferred direction (0 = disabled).
+# 250 is a compromise: 5000 (5x a move) reproduced human H/V lane style but
+# starved routability on dense boards (sets 6-11 A/B: +104 incomplete nets,
+# kbic65 98.9%->15.1%, route.py ~2x slower); the old 50 (~5% of a move) was
+# functionally inert. 250 (~25% of a move) keeps a real lane nudge without the
+# cost-5000 wall that made short diagonal diode/matrix hops unroutable.
 
 # Bus routing - auto-detection and parallel routing of grouped nets
 BUS_DETECTION_RADIUS = 5.0  # mm - max endpoint distance to form bus

@@ -66,7 +66,7 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | Field | Default | Meaning |
 |-------|---------|---------|
 | `layer_costs` | `[]` | Per-layer cost multipliers (1.0 = neutral), parallel to `layers` |
-| `direction_preference_cost` | `5000` | Penalty for off-direction moves; layers alternate H/V starting horizontal on top (0 = off). 5000 = 5x a move: measured lane-discipline value; diagonal moves charge the wrong-axis component |
+| `direction_preference_cost` | `250` | Penalty for off-direction moves; layers alternate H/V starting horizontal on top (0 = off). 250 (~25% of a move) nudges toward H/V lanes without starving routability; diagonal moves charge the wrong-axis component. Higher values (e.g. 5000 = 5x a move) enforce strict human-style lanes but make dense boards' short diagonal hops unroutable (sets 6-11 A/B regression) |
 | `vertical_attraction_radius` | `0.2` | Radius for cross-layer alignment bonus (0 = off) |
 | `vertical_attraction_cost` | `0.0` | Bonus (negative cost) for vertically aligned positions |
 
