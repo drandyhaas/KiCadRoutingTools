@@ -58,7 +58,7 @@ def _sample_path(path: List[Tuple[int, int, int]], step: int = 1) -> List[Tuple[
     return sampled
 
 from routing_state import RoutingState, record_net_event, record_rip_ancestry, rip_exclude_set
-from bus_detection import detect_bus_groups, get_bus_routing_order, get_attraction_neighbor, BusGroup
+from bus_detection import detect_bus_groups, get_bus_routing_order, get_attraction_neighbor, bus_attraction_context, bus_stick_config, BusGroup
 from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_mb
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
@@ -117,6 +117,282 @@ def _populate_vis_data_from_cache(vis_data, net_obstacles_cache, exclude_net_id:
         for i in range(len(obstacle_data.blocked_vias)):
             gx, gy = obstacle_data.blocked_vias[i]
             vis_data.blocked_vias.add((gx, gy))
+
+
+def _swap_blocking_net_ids(pcb_data, stub, dest_layer, config, moved_segs):
+    """Foreign nets whose copper on dest_layer conflicts with the moved stub
+    footprint (the identities behind a validate_single_swap failure). Pads
+    are excluded -- they are never rippable; only track/via owners return."""
+    from geometry_utils import point_to_segment_distance
+    need = config.track_width + config.clearance
+    hits = set()
+    pts = []
+    for ms in moved_segs:
+        n = max(2, int(((ms.start_x - ms.end_x) ** 2 +
+                        (ms.start_y - ms.end_y) ** 2) ** 0.5 / 0.2) + 1)
+        for i in range(n + 1):
+            t = i / n
+            pts.append((ms.start_x + (ms.end_x - ms.start_x) * t,
+                        ms.start_y + (ms.end_y - ms.start_y) * t))
+    for s in pcb_data.segments:
+        if s.net_id == stub.net_id or s.layer != dest_layer:
+            continue
+        if any(point_to_segment_distance(px, py, s.start_x, s.start_y,
+                                         s.end_x, s.end_y) < need
+               for px, py in pts):
+            hits.add(s.net_id)
+    for v in pcb_data.vias:
+        if v.net_id == stub.net_id:
+            continue
+        r = v.size / 2.0 + config.track_width / 2.0 + config.clearance
+        if any((px - v.x) ** 2 + (py - v.y) ** 2 < r * r for px, py in pts):
+            hits.add(v.net_id)
+    return hits
+
+
+def _tap_relocation_rescue(pcb_data, net_id, config, state, results,
+                           routed_net_ids, remaining_net_ids, routed_results,
+                           routed_net_paths, track_proximity_cache, layer_map,
+                           obstacle_cache, target_xy=None, source_xy=None,
+                           blamed_net_ids=None):
+    """Single-tap relocation rung (#424 planes-first): when the pocket is
+    walled by a PRE-EXISTING plane-net tap via, remove that one via (+ its
+    dogbone stub) via exact whole-net cache recompute, retry, and let the
+    plane-repair step re-tap the pad from the pour later in the chain.
+    Returns the successful route result or None (everything restored)."""
+    from tap_relocation import (find_relocation_candidate, relocate_tap,
+                                restore_tap, tap_relocation_enabled,
+                                tap_relocation_max)
+    if not tap_relocation_enabled():
+        return None
+    if state.working_obstacles is None or state.net_obstacles_cache is None:
+        return None
+    tried = set()
+    for _attempt in range(tap_relocation_max()):
+        via = None
+        for xy in (target_xy, source_xy):
+            via = find_relocation_candidate(
+                pcb_data, config, state.net_obstacles_cache, xy,
+                blamed_net_ids=blamed_net_ids, exclude_via_ids=tried)
+            if via is not None:
+                break
+        if via is None:
+            return None
+        tried.add(id(via))
+        token = relocate_tap(pcb_data, config, state.working_obstacles,
+                             state.net_obstacles_cache, via)
+        if token is None:
+            continue
+        result = route_net_with_obstacles(pcb_data, net_id, config,
+                                          state.working_obstacles)
+        if result and not result.get('failed'):
+            from tap_relocation import retap_pad
+            if not retap_pad(pcb_data, config, state.working_obstacles,
+                             state.net_obstacles_cache, token):
+                # No legal replacement tap -> the relocation is not
+                # allowed to stand; drop the route and put the tap back.
+                print(f"  TAP RELOCATION: re-tap declined -> reverting "
+                      f"(route discarded)")
+                restore_tap(pcb_data, state.working_obstacles,
+                            state.net_obstacles_cache, token)
+                continue
+            net = pcb_data.nets.get(net_id)
+            nname = net.name if net else str(net_id)
+            print(f"  TAP RELOCATION RESCUE: {nname} routed after relocating "
+                  f"1 plane tap ({len(result['new_segments'])} segments)")
+            record_net_event(state, net_id, "tap_relocation_rescue", {
+                "moved_net_id": token['net_id'],
+                "via_xy": (token['via'].x, token['via'].y)})
+            # Standard success bookkeeping (mirrors the stub-swap rescue).
+            result['route_length'] = calculate_route_length(
+                result['new_segments'], result.get('new_vias', []), pcb_data)
+            results.append(result)
+            add_route_to_pcb_data(pcb_data, result,
+                                  debug_lines=config.debug_lines)
+            if net_id in remaining_net_ids:
+                remaining_net_ids.remove(net_id)
+            routed_net_ids.append(net_id)
+            routed_results[net_id] = result
+            if result.get('path'):
+                routed_net_paths[net_id] = result['path']
+            track_proximity_cache[net_id] = compute_track_proximity_for_net(
+                pcb_data, net_id, config, layer_map)
+            update_net_obstacles_after_routing(
+                pcb_data, net_id, result, config, state.net_obstacles_cache)
+            add_net_obstacles_from_cache(
+                state.working_obstacles, state.net_obstacles_cache[net_id])
+            invalidate_obstacle_cache(obstacle_cache, net_id)
+            return result
+        restore_tap(pcb_data, state.working_obstacles,
+                    state.net_obstacles_cache, token)
+    return None
+
+
+def _stub_swap_rescue(pcb_data, net_id, config, state, results,
+                      routed_net_ids, remaining_net_ids, routed_results,
+                      routed_net_paths, track_proximity_cache, layer_map,
+                      obstacle_cache, diff_pair_by_net_id=None,
+                      reroute_queue=None, queued_net_ids=None):
+    """Final rung of the SE failure ladder (#424): re-layer the net's OWN
+    stub(s) and re-route.
+
+    The upfront optimizer (layer_swap_optimization) swaps stubs BEFORE
+    routing; diff pairs additionally get a failure-driven swap in the reroute
+    loop (layer_swap_fallback). Single-ended nets had neither once routing
+    started: a stub pinned to a congested layer stayed there through every
+    rip-up rung. This rung tries each stub on each other routable layer
+    (validated: no orphaned SMD pad, no stub overlap, pad-via inserted when
+    leaving the pad's layer), re-routes through free space, and keeps the
+    first success -- else reverts copper exactly.
+
+    Returns the successful route result, or None. On success all standard
+    bookkeeping is done here (results/caches/working map/segment mods for
+    the writer)."""
+    if not getattr(config, 'stub_layer_swap', True) or len(config.layers) < 2:
+        return None
+    from connectivity import get_stub_endpoints
+    from stub_layer_switching import (get_stub_info, validate_single_swap,
+                                      apply_stub_layer_switch,
+                                      revert_stub_layer_switch)
+    from single_ended_routing import route_net_with_obstacles
+
+    ends = get_stub_endpoints(pcb_data, [net_id])
+    if not ends:
+        return None
+    # Stub-vs-stub overlap registry for the validator: every OTHER net's
+    # segments grouped by layer (rescues are rare; a linear scan is fine).
+    all_stubs_by_layer = {}
+    by_net_layer = {}
+    for s in pcb_data.segments:
+        if s.net_id == net_id:
+            continue
+        by_net_layer.setdefault((s.net_id, s.layer), []).append(s)
+    for (nid, layer), segs in by_net_layer.items():
+        nname = pcb_data.nets[nid].name if nid in pcb_data.nets else str(nid)
+        all_stubs_by_layer.setdefault(layer, []).append((nname, segs))
+
+    # Candidate layers cheapest-first, skipping forbidden (negative cost).
+    costs = config.get_layer_costs() or [1000] * len(config.layers)
+    cand_layers = [l for l, c in sorted(zip(config.layers, costs),
+                                        key=lambda lc: lc[1]) if c >= 0]
+
+    from stub_layer_switching import connected_stub_segments_on_layer
+    from rip_up_reroute import rip_up_net, restore_net
+
+    def _rip_blocker(bnid):
+        """Rip a routed blocker through the custody primitives. Returns the
+        restore record or None if not rippable."""
+        if bnid not in routed_results or bnid in rip_exclude_set(state, net_id):
+            return None
+        if diff_pair_by_net_id and bnid in diff_pair_by_net_id:
+            return None    # v1: leave diff pairs alone
+        saved, ripped_ids, was_in = rip_up_net(
+            bnid, pcb_data, routed_net_ids, routed_net_paths,
+            routed_results, diff_pair_by_net_id or {}, remaining_net_ids,
+            results, config, track_proximity_cache,
+            state.working_obstacles, state.net_obstacles_cache,
+            state.ripped_route_layer_costs, state.ripped_route_via_positions,
+            layer_map)
+        if saved is None:
+            return None
+        return (bnid, saved, ripped_ids, was_in)
+
+    def _restore_rips(rips):
+        for bnid, saved, ripped_ids, was_in in reversed(rips):
+            restore_net(bnid, saved, ripped_ids, was_in,
+                        pcb_data, routed_net_ids, routed_net_paths,
+                        routed_results, diff_pair_by_net_id or {},
+                        remaining_net_ids, results, config,
+                        track_proximity_cache, layer_map,
+                        state.working_obstacles, state.net_obstacles_cache,
+                        state.ripped_route_layer_costs,
+                        state.ripped_route_via_positions,
+                        refused_sink=state.collision_refused_net_ids)
+
+    for (sx, sy, slayer) in ends[:2]:
+        stub = get_stub_info(pcb_data, net_id, sx, sy, slayer)
+        if stub is None:
+            continue
+        for dest in cand_layers:
+            if dest == slayer:
+                continue
+            rips = []
+            ok, _why = validate_single_swap(stub, dest, all_stubs_by_layer,
+                                            pcb_data, config)
+            if not ok and reroute_queue is not None:
+                # The swap itself is blocked (#424): identify the blocking
+                # nets and rip the rippable ones (custody primitives only --
+                # rip_up_net/restore_net keep the working map, caches and
+                # ripped-cost ledgers consistent), then re-validate. Victims
+                # are queued for reroute on success, restored on failure.
+                moved = connected_stub_segments_on_layer(
+                    pcb_data, stub.net_id, stub.layer, stub.segments)
+                for bnid in list(_swap_blocking_net_ids(
+                        pcb_data, stub, dest, config, moved))[:2]:
+                    rec = _rip_blocker(bnid)
+                    if rec is not None:
+                        rips.append(rec)
+                if rips:
+                    ok, _why = validate_single_swap(
+                        stub, dest, all_stubs_by_layer, pcb_data, config)
+            if not ok:
+                _restore_rips(rips)
+                continue
+            new_vias, seg_mods = apply_stub_layer_switch(
+                pcb_data, stub, dest, config, debug=False)
+            result = route_net_with_obstacles(pcb_data, net_id, config,
+                                              state.working_obstacles)
+            if result and not result.get('failed'):
+                net = pcb_data.nets.get(net_id)
+                nname = net.name if net else str(net_id)
+                print(f"  STUB-SWAP RESCUE: {nname} stub {slayer} -> {dest} "
+                      f"routed ({len(result['new_segments'])} segments, "
+                      f"{len(result['new_vias'])} vias)")
+                record_net_event(state, net_id, "stub_swap_rescue", {
+                    "from_layer": slayer, "to_layer": dest,
+                    "pad_vias": len(new_vias)})
+                # Persist the swap for the output writer.
+                state.all_segment_modifications.extend(seg_mods)
+                state.all_swap_vias.extend(new_vias)
+                # Standard success bookkeeping (mirrors the retry-success path).
+                result['route_length'] = calculate_route_length(
+                    result['new_segments'], result.get('new_vias', []), pcb_data)
+                results.append(result)
+                add_route_to_pcb_data(pcb_data, result,
+                                      debug_lines=config.debug_lines)
+                if net_id in remaining_net_ids:
+                    remaining_net_ids.remove(net_id)
+                routed_net_ids.append(net_id)
+                routed_results[net_id] = result
+                if result.get('path'):
+                    routed_net_paths[net_id] = result['path']
+                track_proximity_cache[net_id] = compute_track_proximity_for_net(
+                    pcb_data, net_id, config, layer_map)
+                if state.working_obstacles is not None and \
+                        state.net_obstacles_cache is not None:
+                    update_net_obstacles_after_routing(
+                        pcb_data, net_id, result, config,
+                        state.net_obstacles_cache)
+                    add_net_obstacles_from_cache(
+                        state.working_obstacles,
+                        state.net_obstacles_cache[net_id])
+                invalidate_obstacle_cache(obstacle_cache, net_id)
+                # Ripped swap-blockers: custody + reroute queue (T5 pattern,
+                # same as the rip ladder's success path).
+                for bnid, saved, ripped_ids, was_in in rips:
+                    record_casualty(state, bnid, saved, ripped_ids, was_in)
+                    if queued_net_ids is not None and bnid not in queued_net_ids:
+                        bnet = pcb_data.nets.get(bnid)
+                        reroute_queue.append(
+                            ('single', bnet.name if bnet else str(bnid), bnid))
+                        queued_net_ids.add(bnid)
+                    if was_in:
+                        result['_rescue_rip_was_in_results'] = \
+                            result.get('_rescue_rip_was_in_results', 0) + 1
+                return result
+            revert_stub_layer_switch(pcb_data, seg_mods, new_vias)
+            _restore_rips(rips)
+    return None
 
 
 def route_single_ended_nets(
@@ -179,14 +455,27 @@ def route_single_ended_nets(
     # Also track bus membership for attraction during routing
     bus_net_to_group: Dict[int, BusGroup] = {}  # Maps net_id to its bus group
     bus_routed_paths: Dict[int, List[Tuple[int, int, int]]] = {}  # Stores routed paths for attraction
+    bus_corridors: Dict[str, List[Tuple[int, int, int]]] = {}  # group.name -> planned centerline
 
-    if config.bus_enabled:
+    _bus_ordering = (config.bus_enabled or
+                     getattr(config, 'ordering_strategy', '') == 'bus')
+    if _bus_ordering:
         net_ids_to_check = [net_id for _, net_id in single_ended_nets]
         bus_groups = detect_bus_groups(
             pcb_data, net_ids_to_check,
             detection_radius=config.bus_detection_radius,
             min_nets=config.bus_min_nets
         )
+        # Strict geometric bus definition (see filter_bus_groups_geometric):
+        # only groups that genuinely travel together survive; raw cliques
+        # bundled decoupling clusters and power rails and planned corridors
+        # for all of them. KICAD_BUS_STRICT=0 reverts.
+        from bus_detection import filter_bus_groups_geometric
+        _raw_n = len(bus_groups)
+        bus_groups = filter_bus_groups_geometric(pcb_data, bus_groups, config)
+        if _raw_n != len(bus_groups):
+            print(f"  Bus filter: {_raw_n} raw clique group(s) -> "
+                  f"{len(bus_groups)} geometric bus(es)")
 
         if bus_groups:
             print(f"\n=== Bus Detection: Found {len(bus_groups)} bus group(s) ===")
@@ -220,12 +509,36 @@ def route_single_ended_nets(
                             attract_to = "none"
                         print(f"    {net_name} attracts to: {attract_to}")
 
-                # Track bus membership
-                for nid in bus.net_ids:
-                    bus_net_to_group[nid] = bus
+                # Track bus membership. Attraction reads bus_net_to_group,
+                # so it fills only under --bus; the 'bus' ORDERING strategy
+                # alone must not switch attraction on.
+                if config.bus_enabled:
+                    for nid in bus.net_ids:
+                        bus_net_to_group[nid] = bus
+
+            # Corridor planning (#296 R9): probe-route each group's
+            # representative at a ladder of inflated clearances and attract
+            # EVERY member (including the guide) to the winning centerline,
+            # so the corridor is chosen with room for the whole group instead
+            # of being whatever the guide's solo path happened to be. Soft:
+            # groups with no routable rung keep neighbor attraction.
+            if config.bus_enabled:
+                from bus_corridor import plan_bus_corridors
+                bus_corridors, _demoted = plan_bus_corridors(
+                    pcb_data, config, bus_groups, verbose=config.verbose)
+                # Demoted groups (corridor needs too many layer changes even
+                # at the laminar probe price) lose bus treatment entirely:
+                # no corridor, no attraction, no bus ordering -- their
+                # members route as plain nets.
+                if _demoted:
+                    _dset = set(_demoted)
+                    for bus in [b for b in bus_groups if b.name in _dset]:
+                        for _nid in bus.net_ids:
+                            bus_net_to_group.pop(_nid, None)
+                    bus_groups = [b for b in bus_groups if b.name not in _dset]
 
             # Reorder nets: bus nets in routing order first, then non-bus nets
-            bus_net_ids_set = set(bus_net_to_group.keys())
+            bus_net_ids_set = {nid for bus in bus_groups for nid in bus.net_ids}
             reordered_nets = []
 
             # Add bus nets in proper routing order (middle first, then outward)
@@ -243,7 +556,54 @@ def route_single_ended_nets(
             single_ended_nets = reordered_nets
             print()
 
+            # Rip-resistance + reroute-attraction transport: the ladder rank
+            # (blocking_analysis) and the reroute loop run far from this
+            # scope, so carry membership on config/state (the
+            # corridor_waypoints precedent for config-attached data).
+            config.bus_member_net_ids = bus_net_ids_set
+            state.bus_net_to_group = bus_net_to_group
+            state.bus_corridors = bus_corridors
+            # Net-story recording: each member's group/position/corridor.
+            for _bnid, _bg in bus_net_to_group.items():
+                record_net_event(state, _bnid, "bus_member", {
+                    "group": _bg.name,
+                    "position": (_bg.net_ids.index(_bnid)
+                                 if _bnid in _bg.net_ids else None),
+                    "members": len(_bg.net_ids),
+                    "corridor_planned": _bg.name in bus_corridors})
+
+    # Checkpoint abort (KICAD_STOP_AFTER / KICAD_STOP_FILE): stop routing at
+    # a defined point, skip every later pass, and WRITE the partial board --
+    # for inspecting intermediate states (e.g. "the board right after the
+    # bus members routed") with the run's exact configuration.
+    #   KICAD_STOP_AFTER=bus  -> stop once the last bus-member net has been
+    #     attempted (the routing order interleaves, so non-bus nets that come
+    #     earlier are included -- that IS the real board state at that
+    #     moment).
+    #   KICAD_STOP_FILE=path  -> stop before the next net once the file
+    #     exists (manual abort: `touch path`).
+    _stop_after = os.environ.get('KICAD_STOP_AFTER', '')
+    _stop_file = os.environ.get('KICAD_STOP_FILE', '')
+    _stop_after_idx = None
+    if _stop_after == 'bus' and bus_net_to_group:
+        _members = set(bus_net_to_group)
+        for _i, (_nm, _nid) in enumerate(single_ended_nets):
+            if _nid in _members:
+                _stop_after_idx = _i
+    _pos = -1
     for net_name, net_id in single_ended_nets:
+        _pos += 1
+        if _stop_after_idx is not None and _pos > _stop_after_idx:
+            print(f"\nCHECKPOINT STOP (KICAD_STOP_AFTER=bus): all "
+                  f"{len(bus_net_to_group)} bus members attempted; writing "
+                  f"partial board")
+            state.checkpoint_stop = True
+            break
+        if _stop_file and os.path.exists(_stop_file):
+            print(f"\nCHECKPOINT STOP (KICAD_STOP_FILE): {_stop_file} exists; "
+                  f"writing partial board")
+            state.checkpoint_stop = True
+            break
         if user_quit:
             break
 
@@ -375,24 +735,27 @@ def route_single_ended_nets(
                 user_quit = True
                 break
         else:
+            # Bus attraction context, computed BEFORE the multipoint split:
+            # planned corridor first (#296 R9), routed-neighbor fallback,
+            # clustered-endpoint direction. Multipoint members use it for
+            # main-edge selection + attraction too (they used to route blind).
+            attraction_path, reverse_direction = bus_attraction_context(
+                net_id, bus_net_to_group, bus_corridors, bus_routed_paths)
+            # Off-lane surcharge (the stick): members with a corridor pay
+            # scaled step costs everywhere EXCEPT near the lane, where the
+            # attraction discount compensates -- defection costs real money.
+            cfg_route = bus_stick_config(config, attraction_path)
             # Check for multi-point net (3+ pads, no existing segments)
             multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
             if multipoint_pads:
                 print(f"  Detected multi-point net with {len(multipoint_pads)} pads (Phase 1: main route only)")
-                result = route_multipoint_main(pcb_data, net_id, config, obstacles, multipoint_pads)
+                result = route_multipoint_main(pcb_data, net_id, cfg_route, obstacles, multipoint_pads,
+                                               attraction_path=attraction_path, state=state)
                 # Track for Phase 3 completion after length matching
                 if result and not result.get('failed') and result.get('is_multipoint'):
                     state.pending_multipoint_nets[net_id] = result
             else:
-                # Check for bus attraction and routing direction
-                attraction_path = None
-                reverse_direction = False
-                if net_id in bus_net_to_group:
-                    bus_group = bus_net_to_group[net_id]
-                    attraction_path = get_attraction_neighbor(bus_group, net_id, bus_routed_paths)
-                    # Route from clustered endpoints (targets if clique was target-based)
-                    reverse_direction = (bus_group.clique_endpoint == "target")
-                result = route_net_with_obstacles(pcb_data, net_id, config, obstacles,
+                result = route_net_with_obstacles(pcb_data, net_id, cfg_route, obstacles,
                                                   attraction_path=attraction_path,
                                                   reverse_direction=reverse_direction)
 
@@ -497,6 +860,14 @@ def route_single_ended_nets(
                         source_xy=single_source_xy,
                         obstacle_cache=obstacle_cache
                     )
+                    # Net-story recording: the named wall at this failure.
+                    record_net_event(state, net_id, "blocked_by", {
+                        "blockers": [
+                            {"net": b.net_name, "cells": b.blocked_count,
+                             "unique": b.unique_cells,
+                             "near_target": b.near_target_cells,
+                             "validator_named": b.validator_named}
+                            for b in (blockers or [])[:6]]})
                     print_blocking_analysis(blockers, blocked_cells=blocked_cells,
                                            pcb_data=pcb_data, config=config,
                                            nets_to_route=remaining_net_ids)
@@ -506,6 +877,50 @@ def route_single_ended_nets(
                     rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
                         blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id
                     )
+                    # Blocker-selection algorithm (#424 audit; --ripup-blocker-select).
+                    _bsel = getattr(config, 'ripup_blocker_select', 'count')
+                    if _bsel == 'mincut' and rippable_blockers and \
+                            state.working_obstacles is not None and \
+                            state.net_obstacles_cache is not None:
+                        from blocking_analysis import mincut_probe_order
+                        _mc_order, _mc_feasible = mincut_probe_order(
+                            pcb_data, config, state.working_obstacles, net_id,
+                            rippable_blockers, state.net_obstacles_cache)
+                        if not _mc_feasible:
+                            # No PATH even with rippable copper soft-costed --
+                            # but a ladder retry is more than a re-search:
+                            # ripping frees space that lets the pad-via and
+                            # swap rescues change the topology, which the
+                            # probe does not model. Keep the ladder, legacy
+                            # order (measured: skipping here lost nets the
+                            # count ladder's side-mechanisms recovered).
+                            print(f"  MINCUT probe: no path with rippable "
+                                  f"copper soft-costed (wall is static) -- "
+                                  f"falling back to count order")
+                        elif _mc_order:
+                            _by_id = {b.net_id: b for b in rippable_blockers}
+                            _front = [_by_id[n] for n in _mc_order if n in _by_id]
+                            _rest = [b for b in rippable_blockers
+                                     if b.net_id not in set(_mc_order)]
+                            rippable_blockers = _front + _rest
+                            print(f"  MINCUT probe: true cut = "
+                                  f"{[b.net_name for b in _front]}")
+                    elif _bsel == 'bidir' and rippable_blockers and result:
+                        _fwd = result.get('blocked_cells_forward') or []
+                        _bwd = result.get('blocked_cells_backward') or []
+                        if _fwd and _bwd:
+                            from blocking_analysis import rank_blockers
+                            _f_ids = {b.net_id for b in analyze_frontier_blocking(
+                                _fwd, pcb_data, config, routed_net_paths,
+                                exclude_net_ids={net_id},
+                                obstacle_cache=obstacle_cache)}
+                            _b_ids = {b.net_id for b in analyze_frontier_blocking(
+                                _bwd, pcb_data, config, routed_net_paths,
+                                exclude_net_ids={net_id},
+                                obstacle_cache=obstacle_cache)}
+                            rank_blockers(rippable_blockers, 'bidir',
+                                          bidir_both_sets=_f_ids & _b_ids,
+                                          config=config)
 
                     # #331 item 3: a via-in-pad unblock that DECLINED during
                     # this net's attempts recorded WHICH net's copper boxes
@@ -518,8 +933,16 @@ def route_single_ended_nets(
                     if blame_ids:
                         from blocking_analysis import BlockingInfo
                         excluded = rip_exclude_set(state, net_id)
+                        _unrippable_blame = []
                         for bid in sorted(blame_ids):
-                            if bid not in routed_results or bid in excluded:
+                            if bid in excluded:
+                                continue
+                            if bid not in routed_results:
+                                # Validator-proved blocker that is PRE-EXISTING
+                                # copper: surface the rip-existing hint NOW
+                                # instead of only after the ladder exhausts.
+                                _n = pcb_data.nets.get(bid)
+                                _unrippable_blame.append(_n.name if _n else str(bid))
                                 continue
                             canonical = get_canonical_net_id(bid, diff_pair_by_net_id)
                             if canonical in seen_canonical_ids:
@@ -533,6 +956,10 @@ def route_single_ended_nets(
                                 track_cells=0, via_cells=0, unique_cells=0,
                                 near_target_cells=0, near_source_cells=0,
                                 details="via-in-pad decline blame (#331)"))
+                        if _unrippable_blame:
+                            print(f"  Via-in-pad decline blamed PRE-EXISTING net(s) "
+                                  f"{', '.join(repr(n) for n in _unrippable_blame)} - not rippable "
+                                  f"this run; retry with --rip-existing-nets to authorize")
 
                     # Progressive rip-up: try N=1, then N=2, etc up to max_rip_up_count
                     ripped_items = []
@@ -540,7 +967,12 @@ def route_single_ended_nets(
                     retry_succeeded = False
                     last_retry_blocked_cells = blocked_cells  # Start with initial failure's blocked cells
 
-                    for N in range(1, config.max_rip_up_count + 1):
+                    # while-form so the slot-0 guard can re-run N=1 once with
+                    # a promoted pick (audit, structural fix).
+                    slot0_guard_used = False
+                    N = 0
+                    while N < config.max_rip_up_count:
+                        N += 1
                         # For N > 1, re-analyze from the last retry's blocked cells
                         # to find the most blocking net from that specific failure
                         if N > 1 and last_retry_blocked_cells:
@@ -564,6 +996,39 @@ def route_single_ended_nets(
                             if next_blocker is None:
                                 print(f"  No additional rippable blockers from retry analysis")
                                 break
+                            # Slot-0 guard (audit, structural): the ladder only
+                            # grows a PREFIX around slot 0, so a wrong first
+                            # pick is a member of every combo it will ever try.
+                            # If the singleton just failed and the re-analysis
+                            # names a DIFFERENT top pick, restore the refuted
+                            # rip and try the fresh pick ALONE once before
+                            # extending to pairs.
+                            if (N == 2 and not slot0_guard_used
+                                    and len(ripped_items) == 1
+                                    and next_blocker.net_id in routed_results):
+                                _c_next = get_canonical_net_id(next_blocker.net_id, diff_pair_by_net_id)
+                                _c_slot0 = get_canonical_net_id(rippable_blockers[0].net_id, diff_pair_by_net_id)
+                                if _c_next != _c_slot0:
+                                    slot0_guard_used = True
+                                    print(f"  Slot-0 guard: re-analysis refutes {rippable_blockers[0].net_name} -> "
+                                          f"retrying {next_blocker.net_name} ALONE first")
+                                    for rid, saved_result, ripped_ids, was_in_results in reversed(ripped_items):
+                                        restore_net(rid, saved_result, ripped_ids, was_in_results,
+                                                   pcb_data, routed_net_ids, routed_net_paths,
+                                                   routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                                   results, config, track_proximity_cache, layer_map,
+                                                   state.working_obstacles, state.net_obstacles_cache,
+                                                   state.ripped_route_layer_costs, state.ripped_route_via_positions, refused_sink=state.collision_refused_net_ids)
+                                        if was_in_results:
+                                            successful += 1
+                                    ripped_items = []
+                                    ripped_canonical_ids.discard(_c_slot0)
+                                    seen_canonical_ids.add(_c_next)
+                                    rippable_blockers = ([next_blocker] +
+                                        [b for b in rippable_blockers
+                                         if get_canonical_net_id(b.net_id, diff_pair_by_net_id) != _c_next])
+                                    N = 0
+                                    continue
                             # Replace the Nth blocker with the one from retry analysis
                             next_canonical = get_canonical_net_id(next_blocker.net_id, diff_pair_by_net_id)
                             if next_canonical not in seen_canonical_ids:
@@ -674,22 +1139,20 @@ def route_single_ended_nets(
                                 ripped_route_via_positions=state.ripped_route_via_positions
                             )
 
+                        # Bus attraction for the retry, multipoint included
+                        retry_attraction_path, retry_reverse_direction = bus_attraction_context(
+                            net_id, bus_net_to_group, bus_corridors, bus_routed_paths)
+                        retry_cfg = bus_stick_config(config, retry_attraction_path)
                         # Check for multi-point net in retry as well
                         retry_multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
                         if retry_multipoint_pads:
-                            retry_result = route_multipoint_main(pcb_data, net_id, config, retry_obstacles, retry_multipoint_pads)
+                            retry_result = route_multipoint_main(pcb_data, net_id, retry_cfg, retry_obstacles, retry_multipoint_pads,
+                                                                 attraction_path=retry_attraction_path, state=state)
                             # Track for Phase 3 completion after length matching
                             if retry_result and not retry_result.get('failed') and retry_result.get('is_multipoint'):
                                 state.pending_multipoint_nets[net_id] = retry_result
                         else:
-                            # Check for bus attraction in retry
-                            retry_attraction_path = None
-                            retry_reverse_direction = False
-                            if net_id in bus_net_to_group:
-                                retry_bus_group = bus_net_to_group[net_id]
-                                retry_attraction_path = get_attraction_neighbor(retry_bus_group, net_id, bus_routed_paths)
-                                retry_reverse_direction = (retry_bus_group.clique_endpoint == "target")
-                            retry_result = route_net_with_obstacles(pcb_data, net_id, config, retry_obstacles,
+                            retry_result = route_net_with_obstacles(pcb_data, net_id, retry_cfg, retry_obstacles,
                                                                      attraction_path=retry_attraction_path,
                                                                      reverse_direction=retry_reverse_direction)
 
@@ -827,6 +1290,32 @@ def route_single_ended_nets(
                     print(f"  {hint301}")
                     record_net_event(state, net_id, "preexisting_blockers", {
                         "hint": hint301, "blockers": blockers301})
-                failed += 1
+                # Tap-relocation rung (#424 planes-first, env-gated): a
+                # walled-in pocket whose wall is a pre-existing plane TAP
+                # gets one-tap surgery before the stub-swap rung.
+                _rescued = _tap_relocation_rescue(
+                    pcb_data, net_id, config, state, results,
+                    routed_net_ids, remaining_net_ids, routed_results,
+                    routed_net_paths, track_proximity_cache, layer_map,
+                    obstacle_cache,
+                    target_xy=locals().get('single_target_xy'),
+                    source_xy=locals().get('single_source_xy'),
+                    blamed_net_ids=locals().get('blame_ids'))
+                # Final rung (#424): try re-layering the net's own stub(s).
+                if _rescued is None:
+                    _rescued = _stub_swap_rescue(
+                        pcb_data, net_id, config, state, results,
+                        routed_net_ids, remaining_net_ids, routed_results,
+                        routed_net_paths, track_proximity_cache, layer_map,
+                        obstacle_cache,
+                        diff_pair_by_net_id=diff_pair_by_net_id,
+                        reroute_queue=reroute_queue,
+                        queued_net_ids=queued_net_ids)
+                if _rescued is not None:
+                    successful += 1
+                    successful -= _rescued.pop('_rescue_rip_was_in_results', 0)
+                    total_iterations += _rescued['iterations']
+                else:
+                    failed += 1
 
     return successful, failed, total_time, total_iterations, route_index, user_quit

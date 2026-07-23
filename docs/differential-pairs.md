@@ -178,6 +178,21 @@ routed as a **chain** of 2-point legs (`diff_pair_multipoint.py`):
    constraints depend on routing order, so a reversed chain can succeed
    where the forward one wraps itself into a corner.
 
+### Blocked-Terminal Stub Switch (Last Resort)
+
+A multipoint chain whose terminal sits in a dense ball field can fail every
+chain ordering: the terminal's escape stubs are walled in on their own layer,
+and no coupled launch swath exists there. Before the pair is deferred to
+single-ended, the router MOVES such terminals' escape stubs (own layer ≥45%
+blocked nearby) onto the most-open other layer with the standard stub layer
+switch, validated by `validate_swap`. The switch's pad via sizes itself down
+the fab-tier ladder when the nominal via doesn't fit the field (see
+[Configuration](configuration.md), "Layer Optimization Options"). Moving a
+stub also removes the copper that boxed its coupled twin — the two USB twins'
+F.Cu escapes are each other's nearest walls, so switching the pair's stubs
+unboxes both at once. If the chain retry still fails, the switch is reverted
+exactly.
+
 ### Electrically-Short Pairs (Single-Ended Deferral)
 
 A coupled pair only earns its keep over an *electrically long* run. A leg

@@ -86,20 +86,46 @@ def detect_bus_groups(
             clique_endpoint = "target"
 
         if len(best_bus_nets) >= min_nets:
-            bus_counter += 1
-            bus = BusGroup(name=f"bus_{bus_counter}", clique_endpoint=clique_endpoint)
+            # Both-end coherence (#296 R9): a one-ended clique at a BGA sweeps
+            # up EVERYTHING fanning out of the package (ottercast: a 21-net
+            # "bus" mixing the SDC0 river with power nets, local caps and LEDs
+            # bound for different corners -- one planned corridor for all of
+            # them is noise for most). Sub-cluster the clique by the OTHER
+            # endpoint (greedy centroid clustering at 2x the detection radius,
+            # destinations spread wider than sources along connectors) and
+            # emit only destination-coherent subgroups; the leftovers are not
+            # buses and route normally.
+            other = 1 if clique_endpoint == "source" else 0
+            clusters: List[List[int]] = []
+            for nid in best_bus_nets:
+                px, py = net_endpoints[nid][other]
+                placed = False
+                for cl in clusters:
+                    cx = sum(net_endpoints[m][other][0] for m in cl) / len(cl)
+                    cy = sum(net_endpoints[m][other][1] for m in cl) / len(cl)
+                    if math.hypot(px - cx, py - cy) <= 2.0 * detection_radius:
+                        cl.append(nid)
+                        placed = True
+                        break
+                if not placed:
+                    clusters.append([nid])
 
-            # Order nets by physical position
-            ordered_nets = _order_nets_by_position(best_bus_nets, net_endpoints)
+            for cl in clusters:
+                if len(cl) < min_nets:
+                    continue
+                bus_counter += 1
+                bus = BusGroup(name=f"bus_{bus_counter}",
+                               clique_endpoint=clique_endpoint)
+                # Order nets by physical position
+                ordered_nets = _order_nets_by_position(cl, net_endpoints)
+                for net_id in ordered_nets:
+                    bus.net_ids.append(net_id)
+                    bus.source_positions.append(net_endpoints[net_id][0])
+                    bus.target_positions.append(net_endpoints[net_id][1])
+                bus_groups.append(bus)
 
-            for net_id in ordered_nets:
-                bus.net_ids.append(net_id)
-                bus.source_positions.append(net_endpoints[net_id][0])
-                bus.target_positions.append(net_endpoints[net_id][1])
-
-            bus_groups.append(bus)
-
-            # Remove these nets from consideration
+            # Remove EVERY clique member from consideration (emitted or not:
+            # re-considering the leftovers would just re-form the same clique).
             for nid in best_bus_nets:
                 remaining.discard(nid)
         else:
@@ -277,3 +303,115 @@ def get_attraction_neighbor(
             return routed_paths[right_neighbor]
 
     return None
+
+
+def filter_bus_groups_geometric(pcb_data, bus_groups, config,
+                                min_members: int = 3,
+                                min_run_mm: float = 5.0,
+                                cos_cone: float = 0.9,
+                                max_len_ratio: float = 1.5):
+    """Strict geometric bus definition (default on; KICAD_BUS_STRICT=0
+    reverts to raw clique detection): a group is a bus only if its members
+    genuinely TRAVEL TOGETHER. Five rules, no names, no component identity:
+
+      1. >=3 members (pairs belong to the diff router or aren't worth
+         bundling),
+      2. parallel travel: member displacement vectors within a cos>0.9
+         cone at length ratio <=1.5 (largest coherent subset kept --
+         clustered sources + this cone geometrically imply clustered
+         destinations, subsuming any shared-component test),
+      3. run length >= 5mm (local hops gain nothing; also retires the
+         decoupling-cap clusters without a passive-component carve-out),
+      4. no power nets (config.power_net_widths),
+      5. no diff-pair members (config-independent: *_P/*_N by pair map is
+         the caller's concern; here power/width classes only).
+
+    Raw clique detection on ottercast declared 31 groups/118 members and
+    planned corridors for decoupling clusters and power rails; these rules
+    yield 6 groups/27 members -- the four real buses (SDC0, WL_SDIO,
+    BT_PCM, BT_UART) plus small co-traveling GPIO/cap bundles a human
+    would also lane together.
+    """
+    import os as _os
+    if _os.environ.get('KICAD_BUS_STRICT', '1') in ('0', 'off', 'false'):
+        return bus_groups
+    import math as _math
+    power_ids = set(getattr(config, 'power_net_widths', {}) or {})
+    out = []
+    for bus in bus_groups:
+        vecs = {}
+        for nid in bus.net_ids:
+            if nid in power_ids:
+                continue
+            pads = pcb_data.pads_by_net.get(nid, [])
+            if len(pads) < 2:
+                continue
+            a = min(pads, key=lambda p: p.global_x + p.global_y)
+            b = max(pads, key=lambda p: p.global_x + p.global_y)
+            dx, dy = b.global_x - a.global_x, b.global_y - a.global_y
+            L = _math.hypot(dx, dy)
+            if L >= min_run_mm:
+                vecs[nid] = (dx / L, dy / L, L)
+        best = []
+        for nid, (ux, uy, L) in vecs.items():
+            cone = [m for m, (vx, vy, M) in vecs.items()
+                    if ux * vx + uy * vy > cos_cone
+                    and max(L, M) / min(L, M) <= max_len_ratio]
+            if len(cone) > len(best):
+                best = cone
+        if len(best) < min_members:
+            continue
+        if len(best) < len(bus.net_ids):
+            kept = [nid for nid in bus.net_ids if nid in set(best)]
+            bus.net_ids = kept
+        out.append(bus)
+    return out
+
+
+def bus_stick_config(config, attraction_path):
+    """Off-lane surcharge (the STICK, KICAD_BUS_OFFLANE_MULT, default 1.0
+    = off): a bus member with a planned corridor routes with every layer's
+    step cost scaled by the multiplier; the corridor attraction discount
+    then makes the LANE the only normal-priced place on the board. Without
+    this the attraction is carrot-only -- a member whose direct area is
+    congested hops outside the attraction radius, where the corridor
+    exerts zero pull, and defects to a lone detour for free (WL_SDIO_D1's
+    8mm northern flight while its lane ran direct at y~94). Forbidden
+    layers (cost -1) stay forbidden; the member's config is otherwise
+    untouched (via cost, clearances, caches all nominal)."""
+    import os as _os
+    try:
+        m = float(_os.environ.get('KICAD_BUS_OFFLANE_MULT', '1.0'))
+    except ValueError:
+        m = 1.0
+    if m == 1.0 or not attraction_path:
+        return config
+    from dataclasses import replace as _replace
+    base = list(config.layer_costs or []) or [1.0] * len(config.layers)
+    while len(base) < len(config.layers):
+        base.append(1.0)
+    scaled = [c if c < 0 else c * m for c in base]
+    return _replace(config, layer_costs=scaled)
+
+
+def bus_attraction_context(
+    net_id: int,
+    bus_net_to_group: Optional[Dict[int, BusGroup]],
+    bus_corridors: Optional[Dict[str, List[Tuple[int, int, int]]]],
+    routed_paths: Optional[Dict[int, List[Tuple[int, int, int]]]] = None
+) -> Tuple[Optional[List[Tuple[int, int, int]]], bool]:
+    """(attraction_path, reverse_direction) for a bus member.
+
+    The one place that encodes the priority every routing site must share:
+    the group's PLANNED corridor first (one centerline for the whole group,
+    guide included), else an already-routed neighbor's path; route from the
+    clustered endpoints when the clique was target-based. Non-members get
+    (None, False). Callers pass whatever paths dict they track (the main
+    loop's sampled bus paths, the reroute loop's routed_net_paths) or None.
+    """
+    bg = (bus_net_to_group or {}).get(net_id)
+    if bg is None:
+        return None, False
+    attr = ((bus_corridors or {}).get(bg.name)
+            or get_attraction_neighbor(bg, net_id, routed_paths or {}))
+    return attr, (bg.clique_endpoint == "target")

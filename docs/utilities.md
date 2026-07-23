@@ -520,11 +520,17 @@ Options:
   --grid-step         Routing grid step in mm (default: 0.1). Escape stub ends
                       are snapped to this grid so the router gets on-grid
                       terminals; MATCH the --grid-step you pass to route.py
-  --escape-method     auto (default), channel, or underpad. "channel" is the
-                      45-stub + channel router; "underpad" vias each ball in
-                      its pad and routes under the pad field (dense arrays);
-                      "auto" runs channel and, if it drops any ball, retries
-                      with underpad and keeps whichever escapes more
+  --escape-method     auto (default), channel, underpad, or dogbone.
+                      "channel" is the 45-stub + channel router; "underpad"
+                      vias each ball in its pad and routes under the pad
+                      field (dense arrays), working outside-in: outer rings
+                      first escape as deep as possible on the pad layer, and
+                      only the balls that cannot reach the edge via out;
+                      "dogbone" places the classic offset via on the channel
+                      diagonal beside each ball (opt-in, human-style; never
+                      chosen by auto); "auto" runs channel and, if it drops
+                      any ball, retries with underpad and keeps whichever
+                      escapes more
   --layer-costs       One value per --layers entry, matching route.py semantics:
                       negative = forbidden (no escape copper there, e.g. a
                       soon-to-be-plane inner layer), otherwise a weight in

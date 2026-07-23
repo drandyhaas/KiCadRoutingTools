@@ -1169,7 +1169,9 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                               obstacles: GridObstacleMap,
                               attraction_path: Optional[List[Tuple[int, int, int]]] = None,
                               reverse_direction: bool = False,
-                              bounds: Optional[Tuple[int, int, int, int]] = None) -> Optional[dict]:
+                              bounds: Optional[Tuple[int, int, int, int]] = None,
+                              sources_override: Optional[List[Tuple]] = None,
+                              targets_override: Optional[List[Tuple]] = None) -> Optional[dict]:
     """Route a single net using pre-built obstacles (for incremental routing).
 
     Args:
@@ -1188,9 +1190,18 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                 routing to it drags the A* through the un-modelled exterior), and the
                 source/target overrides below are never stamped outside it -- so the
                 window fence stays SOLID instead of being punched at the exempt cell.
+        sources_override/targets_override: When BOTH are given, use them as the
+                route's two sides instead of deriving them (get_net_endpoints
+                row shape). The scoped rescue passes an anchor split here: the
+                window crop severs copper, and the standard largest-two-groups
+                derivation then aims at two fragments of the same trunk while
+                the rescued island is dropped entirely.
     """
     # Find endpoints (segments or pads)
-    sources, targets, error = get_net_endpoints(pcb_data, net_id, config)
+    if sources_override is not None and targets_override is not None:
+        sources, targets, error = list(sources_override), list(targets_override), None
+    else:
+        sources, targets, error = get_net_endpoints(pcb_data, net_id, config)
     if error:
         print(f"  {error}")
         return None
@@ -1213,6 +1224,15 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             return None
 
     coord = GridCoord(config.grid_step)
+
+    # Endpoint stub-proximity exemption (soft-knobs C5): a target that sits
+    # beside ANOTHER net's stub paid full stub cost on the final approach
+    # cells; exempt a one-track disk around each endpoint, mirroring the
+    # diff-pair caller. Cleared per net in prepare/restore_obstacles_inplace.
+    _exempt_r = coord.to_grid_dist(config.track_width + config.clearance)
+    obstacles.set_endpoint_exempt(
+        [(s0[0], s0[1]) for s0 in sources] + [(t0[0], t0[1]) for t0 in targets],
+        _exempt_r)
     layer_names = config.layers
 
     sources_grid = [(s[0], s[1], s[2]) for s in sources]
@@ -1272,8 +1292,19 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     bus_attraction_radius_grid = coord.to_grid_dist(config.bus_attraction_radius) if config.bus_attraction_radius > 0 else 0
     bus_attraction_bonus = config.scaled_cell_units(config.bus_attraction_bonus) if config.bus_attraction_bonus > 0 else 0
 
+    # Cross-layer fraction of the bus attraction bonus (#296 R9 phase B):
+    # keeps a planned corridor guiding a member across via transitions.
+    # Experimental default 35% when bus routing is on; override with
+    # KICAD_BUS_XLAYER_PCT (0 = legacy same-layer-only attraction).
+    bus_xlayer_pct = 0
+    if getattr(config, 'bus_enabled', False) and bus_attraction_bonus > 0:
+        try:
+            bus_xlayer_pct = int(os.environ.get('KICAD_BUS_XLAYER_PCT', '35'))
+        except ValueError:
+            bus_xlayer_pct = 35
+
     router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
-                        turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                        turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),
@@ -1281,7 +1312,8 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                         layer_direction_preferences=config.get_layer_direction_preferences(),
                         direction_preference_cost=config.direction_preference_cost,
                         attraction_radius=bus_attraction_radius_grid,
-                        attraction_bonus=bus_attraction_bonus)
+                        attraction_bonus=bus_attraction_bonus,
+                        attraction_cross_layer_pct=bus_xlayer_pct)
 
     # Set attraction path for bus routing (if provided)
     if attraction_path:
@@ -1804,6 +1836,48 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
     return via, (vgx, vgy), layer_names.index(pad_layer)
 
 
+def _pad_via_conflict_cells(pcb_data, pad, config, coord, layer_names):
+    """Frontier-style blocked cells ON the foreign copper that vetoes a
+    fab-floor via in `pad` (#424 rip-integrated terminal access).
+
+    The placement validator computes exactly which copper conflicts with the
+    via ring -- micron-accurate -- then throws the identity away and returns
+    None. Emit synthetic (gx, gy, layer) cells on that copper so the EXISTING
+    tap rip-up attribution names and rips the hugging net; the retry re-runs
+    the pad-via rung, where placement then succeeds in the freed space. The
+    frontier report can't provide this: in a saturated pocket the search dies
+    against the first wall, not the copper touching the pad."""
+    from list_nets import fab_floor_min
+    li_of = {l: i for i, l in enumerate(layer_names)}
+    ncu = (len(pcb_data.board_info.copper_layers)
+           if pcb_data.board_info.copper_layers else len(layer_names))
+    try:
+        vmin = fab_floor_min(ncu)['via_diameter']
+    except Exception:
+        vmin = config.via_size
+    need = vmin / 2.0 + config.clearance
+    px, py = pad.global_x, pad.global_y
+    cells = []
+    for s in pcb_data.segments:
+        if s.net_id == pad.net_id or s.layer not in li_of:
+            continue
+        dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+        L2 = dx * dx + dy * dy
+        t = 0.0 if L2 <= 0 else max(0.0, min(1.0, ((px - s.start_x) * dx
+                                                   + (py - s.start_y) * dy) / L2))
+        cx, cy = s.start_x + dx * t, s.start_y + dy * t
+        if math.hypot(px - cx, py - cy) < need + (s.width or 0.0) / 2.0:
+            g = coord.to_grid(cx, cy)
+            cells.append((g[0], g[1], li_of[s.layer]))
+    for v in pcb_data.vias:
+        if v.net_id == pad.net_id:
+            continue
+        if math.hypot(v.x - px, v.y - py) < need + v.size / 2.0:
+            g = coord.to_grid(v.x, v.y)
+            cells.extend((g[0], g[1], li) for li in range(len(layer_names)))
+    return cells
+
+
 def _net_pad_near(pcb_data, net_id, cells, coord):
     """The net's SMD pad that one of the grid `cells` sits inside (a boxed
     endpoint), or None. Tight in-pad test so a tap source on a mid-trace point
@@ -2276,11 +2350,13 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
 
     # Create visual router
     router = VisualRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
-                          turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                          turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
                           vertical_attraction_radius=attraction_radius_grid,
                           vertical_attraction_bonus=attraction_bonus,
                           layer_costs=config.get_layer_costs(),
-                          proximity_heuristic_cost=prox_h_cost)
+                          proximity_heuristic_cost=prox_h_cost,
+                          layer_direction_preferences=config.get_layer_direction_preferences(),
+                          direction_preference_cost=config.direction_preference_cost)
 
     # Try first direction with visualization
     if config.verbose:
@@ -2318,11 +2394,13 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
 
         # Try second direction
         router = VisualRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
-                          turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                          turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
                           vertical_attraction_radius=attraction_radius_grid,
                           vertical_attraction_bonus=attraction_bonus,
                           layer_costs=config.get_layer_costs(),
-                          proximity_heuristic_cost=prox_h_cost)
+                          proximity_heuristic_cost=prox_h_cost,
+                          layer_direction_preferences=config.get_layer_direction_preferences(),
+                          direction_preference_cost=config.direction_preference_cost)
         router.init(second_sources, second_targets, config.max_iterations)
         direction_used = second_label
 
@@ -2455,12 +2533,171 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
     }
 
 
+def _pad_all_layer_reach(pcb_data: PCBData, pad_obj) -> bool:
+    """True when the pad is reachable on EVERY routing layer: a through-hole
+    pad ('*.Cu'), or an SMD pad with a same-net via whose barrel covers the
+    pad center (a stub-layer-switch or via-in-pad escape via). Arriving at
+    that cell on ANY layer lands the connection -- if the target set does
+    not say so, a route ending on the via under the pad reads as a miss and
+    the pad stays 'failed' with its own escape sitting right there."""
+    if pad_obj is None or not hasattr(pad_obj, 'layers'):
+        return False
+    if '*.Cu' in pad_obj.layers:
+        return True
+    nid = getattr(pad_obj, 'net_id', None)
+    if not nid:
+        return False
+    px, py = pad_obj.global_x, pad_obj.global_y
+    for v in pcb_data.vias:
+        if v.net_id == nid and \
+                math.hypot(v.x - px, v.y - py) <= (v.size or 0) / 2 + 1e-3:
+            return True
+    return False
+
+
+def _dense_fanout_refs(pcb_data: PCBData) -> set:
+    """References of high-density fanned-out packages (BGA/QFN/QFP with a
+    real ball/pin field). Computed once per board and cached on pcb_data --
+    package classification walks every footprint's pads."""
+    refs = getattr(pcb_data, '_dense_fanout_refs', None)
+    if refs is None:
+        from kicad_parser import detect_package_type
+        refs = {ref for ref, fp in pcb_data.footprints.items()
+                if len(fp.pads) >= 16
+                and detect_package_type(fp) in ('BGA', 'QFN', 'QFP')}
+        pcb_data._dense_fanout_refs = refs
+    return refs
+
+
+def _select_multipoint_main_edge(pcb_data, pad_info, pad_components,
+                                 mst_edges, attraction_path):
+    """Pick which MST edge Phase 1 routes NOW; the rest defer to Phase 3.
+
+    Phase 3 runs after every other net's main route, so the deferred
+    terminals route into whatever copper the neighbors left -- WHICH edge
+    goes first decides which terminal still has open ground around it.
+    Longest-first is the historical default. Two overrides, in priority
+    order:
+
+    1. Bus members with an attraction path: the main edge must SPAN the
+       corridor. The spanning terminal pair is re-realized from the
+       corridor's two endpoints (the MST realizes each component link by
+       its CLOSEST pair, which for a BGA-to-chip bus net is typically
+       pull-up-resistor-to-trunk -- leaving the dense-ball tap deferred
+       until its own siblings seal the ball field). Only off-corridor
+       taps stay in Phase 3. Disable with KICAD_BUS_MULTIPOINT_SPAN=0.
+    2. KICAD_MULTIPOINT_DENSE_FIRST=1 (experimental): edges landing on a
+       fanned-out high-density package (BGA/QFN/QFP) go first -- the same
+       seal risk exists without a bus corridor.
+
+    Returns the reordered edge list; element 0 is the main-edge candidate.
+    """
+    if not mst_edges:
+        return mst_edges
+
+    def comp(i):
+        return pad_components.get(i, i)
+
+    if attraction_path and os.environ.get(
+            'KICAD_BUS_MULTIPOINT_SPAN', '1') not in ('0', 'off', 'false'):
+        p0 = attraction_path[0]
+        p1 = attraction_path[-1]
+        # Best cross-component terminal pair bridging the corridor's ends
+        # (orientation-free score, grid Manhattan like the MST itself).
+        best = None
+        n = len(pad_info)
+        for i in range(n):
+            gxi, gyi = pad_info[i][0], pad_info[i][1]
+            di0 = abs(gxi - p0[0]) + abs(gyi - p0[1])
+            di1 = abs(gxi - p1[0]) + abs(gyi - p1[1])
+            for j in range(i + 1, n):
+                if comp(j) == comp(i):
+                    continue
+                gxj, gyj = pad_info[j][0], pad_info[j][1]
+                dj0 = abs(gxj - p0[0]) + abs(gyj - p0[1])
+                dj1 = abs(gxj - p1[0]) + abs(gyj - p1[1])
+                score = min(di0 + dj1, di1 + dj0)
+                if best is None or score < best[0]:
+                    best = (score, i, j)
+        if best is not None:
+            _, si, sj = best
+            span_comps = {comp(si), comp(sj)}
+            for pos, (a, b, _d) in enumerate(mst_edges):
+                if {comp(a), comp(b)} != span_comps:
+                    continue
+                dist = (abs(pad_info[si][3] - pad_info[sj][3])
+                        + abs(pad_info[si][4] - pad_info[sj][4]))
+                if {a, b} != {si, sj}:
+                    pa = pad_info[si][5] if len(pad_info[si]) > 5 else None
+                    pb = pad_info[sj][5] if len(pad_info[sj]) > 5 else None
+
+                    def _nm(p, k):
+                        # Terminal may be a Pad or an _EndpointStub free end
+                        ref = getattr(p, 'component_ref', None)
+                        return (f"{ref}.{getattr(p, 'pad_number', '?')}"
+                                if ref else f"terminal {k}")
+                    print(f"  Bus corridor: main edge re-realized to span the"
+                          f" corridor ({_nm(pa, si)} <-> {_nm(pb, sj)},"
+                          f" length={dist:.2f}mm); off-corridor taps deferred")
+                    # The ORIGINAL closest-pair realization stays behind the
+                    # span edge as the Phase-1 ladder's next candidate (a
+                    # boxed span terminal must not forfeit the trunk route
+                    # the closest pair could still win -- USB_D_P). The
+                    # duplicate component link is inert in Phase 3: the tap
+                    # loop only picks edges with exactly one routed side.
+                    return ([(si, sj, dist), (a, b, _d)] + mst_edges[:pos]
+                            + mst_edges[pos + 1:])
+                if pos != 0:
+                    print(f"  Bus corridor: corridor-spanning MST edge"
+                          f" promoted to main (was #{pos + 1} by length)")
+                return ([(si, sj, dist)] + mst_edges[:pos]
+                        + mst_edges[pos + 1:])
+            # The spanning components join through intermediates: no single
+            # edge to re-realize; promote the best corridor-scoring edge.
+            def span_score(e):
+                a, b = e[0], e[1]
+                da0 = abs(pad_info[a][0] - p0[0]) + abs(pad_info[a][1] - p0[1])
+                da1 = abs(pad_info[a][0] - p1[0]) + abs(pad_info[a][1] - p1[1])
+                db0 = abs(pad_info[b][0] - p0[0]) + abs(pad_info[b][1] - p0[1])
+                db1 = abs(pad_info[b][0] - p1[0]) + abs(pad_info[b][1] - p1[1])
+                return min(da0 + db1, da1 + db0)
+            pos = min(range(len(mst_edges)), key=lambda k: span_score(mst_edges[k]))
+            if pos != 0:
+                print(f"  Bus corridor: promoted corridor-nearest MST edge"
+                      f" to main (was #{pos + 1} by length)")
+                return ([mst_edges[pos]] + mst_edges[:pos]
+                        + mst_edges[pos + 1:])
+            return mst_edges
+
+    if os.environ.get('KICAD_MULTIPOINT_DENSE_FIRST', '') in ('1', 'true', 'on'):
+        dense_refs = _dense_fanout_refs(pcb_data)
+        if dense_refs:
+            def on_dense(i):
+                p = pad_info[i][5] if len(pad_info[i]) > 5 else None
+                return (p is not None
+                        and getattr(p, 'component_ref', None) in dense_refs)
+            dense_edges, other = [], []
+            for e in mst_edges:
+                (dense_edges if on_dense(e[0]) or on_dense(e[1])
+                 else other).append(e)
+            if dense_edges and other and mst_edges[0] is not dense_edges[0]:
+                print(f"  Dense-first: {len(dense_edges)} MST edge(s) on a"
+                      f" fanned-out package promoted ahead of {len(other)}")
+            if dense_edges:
+                return dense_edges + other
+
+    return mst_edges
+
+
 def route_multipoint_main(
     pcb_data: PCBData,
     net_id: int,
     config: GridRouteConfig,
     obstacles: 'GridObstacleMap',
-    pad_info: List[Tuple]
+    pad_info: List[Tuple],
+    attraction_path: Optional[List[Tuple[int, int, int]]] = None,
+    state=None,
+    _stub_switch_round: bool = False
 ) -> Optional[dict]:
     """
     Route only the main (longest MST segment) connection of a multi-point net.
@@ -2478,6 +2715,11 @@ def route_multipoint_main(
         config: Grid routing configuration
         obstacles: Pre-built obstacle map
         pad_info: List of (gx, gy, layer_idx, orig_x, orig_y, pad) from get_multipoint_net_pads()
+        attraction_path: Optional bus-corridor centerline (grid coords). The
+            main edge is chosen to SPAN it (see _select_multipoint_main_edge)
+            and the router attracts toward it, exactly as in
+            route_net_with_obstacles -- multipoint bus members used to route
+            their main edge blind.
 
     Returns:
         Routing result dict with:
@@ -2511,7 +2753,38 @@ def route_multipoint_main(
     # connected is never re-tapped (the old pad-position MST + 0.02mm
     # coincidence filter routed redundant loops between overlap-joined
     # escapes -- butterstick DQ5).
-    pad_components = get_copper_connected_terminal_groups(pcb_data, net_id, pad_info)
+    # Island-wide launch sets (KICAD_ISLAND_LAUNCH=0 disables): Phase 1 used
+    # to launch each edge from TERMINAL cells only (pad centers / stub free
+    # ends), so a route needing its own via 0.9mm behind the launch point
+    # paid for fresh copper alongside its own stub to physically reach it
+    # (WL_SDIO_D1 retraced its In1 escape with a parallel twin to get to the
+    # ball via). Seeding each component's launch set with ALL of its copper
+    # -- sampled segment points plus the island's vias on every layer, the
+    # same machinery Phase 3 taps already use -- lets the route start at the
+    # best point of the island (e.g. directly at the via on B.Cu), and the
+    # dead-end sweep then retires whatever stub the route no longer uses.
+    from connectivity import get_terminal_component_info
+    pad_components, _isl_copper, _segs_by_comp = get_terminal_component_info(
+        pcb_data, net_id, pad_info)
+    _island_cells = None
+    if os.environ.get('KICAD_ISLAND_LAUNCH', '1') not in ('0', 'off', 'false'):
+        _net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+        _island_cells = {}
+        for _cid, _segs in _segs_by_comp.items():
+            _ends = {(round(s.start_x, 2), round(s.start_y, 2)) for s in _segs} | \
+                    {(round(s.end_x, 2), round(s.end_y, 2)) for s in _segs}
+            _vs = [v for v in _net_vias
+                   if (round(v.x, 2), round(v.y, 2)) in _ends]
+            _pts = get_all_segment_tap_points(_segs, coord, layer_names,
+                                              vias=_vs)
+            # Keyed by cell, valued by the OWNER float point of that cell --
+            # the conversion below welds the route to the owner of the cell
+            # the router actually launched from (Phase 3's tap_point_map
+            # contract). Discarding the owners and welding to the terminal
+            # anchor drew a 1.5mm any-angle slash from the anchor to a route
+            # that started elsewhere on the island (SDC0_CMD, busstop7).
+            _island_cells[_cid] = {(p[0], p[1], p[2]): (p[3], p[4])
+                                   for p in _pts}
     num_components = len(set(pad_components.values()))
     if num_components < len(pad_info):
         print(f"  Existing copper joins {len(pad_info)} terminals into "
@@ -2540,8 +2813,24 @@ def route_multipoint_main(
             'tap_pads_total': len(pad_info),
         }
 
-    # Sort MST edges by length (longest first)
+    # Sort MST edges by length (longest first), then let the corridor /
+    # dense-first overrides pick which edge Phase 1 actually routes now
+    # (everything else waits for Phase 3, AFTER all other nets' mains).
     mst_edges = sorted(mst_edges, key=lambda e: -e[2])
+    _edges_before = list(mst_edges)
+    mst_edges = _select_multipoint_main_edge(pcb_data, pad_info,
+                                             pad_components, mst_edges,
+                                             attraction_path)
+    # Net-story note: how the main edge was chosen (longest-first default,
+    # corridor-span re-realization/promotion, or dense-first reorder).
+    if mst_edges and _edges_before and mst_edges[0] != _edges_before[0]:
+        _sel_note = {'mode': ('corridor-span' if attraction_path
+                              else 'dense-first'),
+                     'main_edge': list(mst_edges[0][:2]),
+                     'displaced_longest': list(_edges_before[0][:2])}
+    else:
+        _sel_note = {'mode': 'longest-first',
+                     'main_edge': list(mst_edges[0][:2]) if mst_edges else None}
 
     # Distribute guide-corridor waypoints across the MST edges: each waypoint
     # steers the edge it's nearest to, so the net follows the drawn line across
@@ -2587,15 +2876,36 @@ def route_multipoint_main(
         if tgt_in_bga: zones.append("tgt:bga")
         print(f"  proximity_heuristic_cost={prox_h_cost} zones=[{', '.join(zones) if zones else 'none'}]")
 
+    # Bus attraction parameters -- same math as route_net_with_obstacles
+    # (multipoint members' mains used to skip this entirely, so a bus net
+    # whose topology was multipoint routed its trunk OFF the corridor).
+    bus_attraction_radius_grid = coord.to_grid_dist(config.bus_attraction_radius) if config.bus_attraction_radius > 0 else 0
+    bus_attraction_bonus = config.scaled_cell_units(config.bus_attraction_bonus) if config.bus_attraction_bonus > 0 else 0
+    bus_xlayer_pct = 0
+    if getattr(config, 'bus_enabled', False) and bus_attraction_bonus > 0:
+        try:
+            bus_xlayer_pct = int(os.environ.get('KICAD_BUS_XLAYER_PCT', '35'))
+        except ValueError:
+            bus_xlayer_pct = 35
+
     # Route farthest pair with probe routing (same as single-ended)
     router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
-                        turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                        turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),
                         proximity_heuristic_cost=prox_h_cost,
                         layer_direction_preferences=config.get_layer_direction_preferences(),
-                        direction_preference_cost=config.direction_preference_cost)
+                        direction_preference_cost=config.direction_preference_cost,
+                        attraction_radius=bus_attraction_radius_grid,
+                        attraction_bonus=bus_attraction_bonus,
+                        attraction_cross_layer_pct=bus_xlayer_pct)
+
+    if attraction_path:
+        router.set_attraction_path(attraction_path)
+        if config.verbose:
+            layers_in_path = set(p[2] for p in attraction_path)
+            print(f"    Bus attraction: {len(attraction_path)} path points, layers={layers_in_path}, radius={bus_attraction_radius_grid} grid, bonus={bus_attraction_bonus}")
 
     # Calculate track margin for wide power tracks
     # Use ceiling + 1 to account for grid quantization and diagonal track approaches
@@ -2632,15 +2942,27 @@ def route_multipoint_main(
         pad_a_obj = pad_a[5] if len(pad_a) > 5 else None
         pad_b_obj = pad_b[5] if len(pad_b) > 5 else None
 
-        if pad_a_obj and hasattr(pad_a_obj, 'layers') and '*.Cu' in pad_a_obj.layers:
+        if _pad_all_layer_reach(pcb_data, pad_a_obj):
             sources = [(pad_a[0], pad_a[1], layer_idx) for layer_idx in range(len(layer_names))]
         else:
             sources = [(pad_a[0], pad_a[1], pad_a[2])]  # (gx, gy, layer_idx)
 
-        if pad_b_obj and hasattr(pad_b_obj, 'layers') and '*.Cu' in pad_b_obj.layers:
+        if _pad_all_layer_reach(pcb_data, pad_b_obj):
             targets = [(pad_b[0], pad_b[1], layer_idx) for layer_idx in range(len(layer_names))]
         else:
             targets = [(pad_b[0], pad_b[1], pad_b[2])]
+
+        # Island-wide launch: every cell of each endpoint's copper island is
+        # a legal start/land (its stubs, trunks, and vias on all layers) --
+        # the route begins at the island's best point instead of paying
+        # duplicate copper to walk back to its own via.
+        if _island_cells is not None:
+            _isl = _island_cells.get(pad_components.get(idx_a, idx_a))
+            if _isl:
+                sources = list({*sources, *_isl})
+            _isl = _island_cells.get(pad_components.get(idx_b, idx_b))
+            if _isl:
+                targets = list({*targets, *_isl})
 
         # Mark source/target cells (same-net pad cells; safe to accumulate)
         for gx, gy, layer in sources + targets:
@@ -2669,6 +2991,54 @@ def route_multipoint_main(
             'iterations_forward': fwd_iters,
             'iterations_backward': bwd_iters,
         }
+
+    if path is None and state is not None and not _stub_switch_round \
+            and os.environ.get('KICAD_MULTIPOINT_STUB_SWITCH', '1') not in ('0', 'off', 'false'):
+        # Stub layer switch retry for the main edge (for a bus member, the
+        # corridor-SPANNING edge -- the leg that must route first) when a
+        # terminal's escape stub is walled in on its own layer. Move the
+        # stubs at the first edges' endpoints to an open layer (the pad via
+        # sizes itself down the fab ladder) and re-run Phase 1 once on
+        # freshly-derived terminals. Kept only when the retry routes real
+        # main copper; reverted exactly otherwise. Default ON
+        # (KICAD_MULTIPOINT_STUB_SWITCH=0 disables); the original gate-off
+        # defect was the create_routing_state `or []` alias break dropping
+        # the kept switch from the written file, not this retry itself.
+        from stub_layer_switching import (switch_boxed_stub_near,
+                                          revert_stub_layer_switch)
+        from connectivity import get_multipoint_net_pads
+        switched = []
+        seen_xy = set()
+        moved_tips = set()
+        for (ia, ib, _elen) in mst_edges[:2]:
+            for idx in (ia, ib):
+                x, y = pad_info[idx][3], pad_info[idx][4]
+                key = (round(x, 2), round(y, 2))
+                if key in seen_xy:
+                    continue
+                seen_xy.add(key)
+                sw = switch_boxed_stub_near(pcb_data, net_id, config, x, y,
+                                            moved_tips=moved_tips)
+                if sw is not None:
+                    switched.append(sw)
+        if switched:
+            new_pad_info = get_multipoint_net_pads(pcb_data, net_id, config)
+            retry = None
+            if new_pad_info:
+                retry = route_multipoint_main(
+                    pcb_data, net_id, config, obstacles, new_pad_info,
+                    attraction_path=attraction_path, state=state,
+                    _stub_switch_round=True)
+            if retry and not retry.get('failed') and retry.get('path'):
+                print(f"  MULTIPOINT STUB SWITCH: main edge routed after "
+                      f"moving {len(switched)} stub(s)")
+                for _mods, _vias, _f, _d in switched:
+                    state.all_segment_modifications.extend(_mods)
+                    state.all_swap_vias.extend(_vias)
+                retry['iterations'] = retry.get('iterations', 0) + cumulative_iterations
+                return retry
+            for _mods, _vias, _f, _d in reversed(switched):
+                revert_stub_layer_switch(pcb_data, _mods, _vias)
 
     if path is None:
         # #348 (ottercast RESETn): every main-edge attempt launches from PAD
@@ -2713,6 +3083,7 @@ def route_multipoint_main(
                     'pad_components': pad_components,
                     'original_segments': [],
                     'mst_edges': [_dummy] + mst_edges,
+                    'edge_selection_note': _sel_note,
                     'waypoint_buckets': waypoint_buckets,
                     'phase1_exhausted': True,
                     'tap_edges_routed': 0,
@@ -2739,11 +3110,24 @@ def route_multipoint_main(
     # Get through-hole pad positions for this net (layer transitions without via)
     through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
 
-    # Convert path to segments/vias
+    # Convert path to segments/vias. The originals default to the terminal
+    # anchors, but with island-wide launch the route may begin/end at ANY
+    # cell of the terminal's island -- weld to the owner point of the cell
+    # actually used (Phase 3's tap_point_map contract), never across the
+    # island back to the anchor.
+    _start_orig = (pad_a[3], pad_a[4], layer_names[pad_a[2]])
+    _end_orig = (pad_b[3], pad_b[4], layer_names[pad_b[2]])
+    if _island_cells is not None and path:
+        _own = _island_cells.get(pad_components.get(idx_a, idx_a), {}).get(tuple(path[0]))
+        if _own is not None:
+            _start_orig = (_own[0], _own[1], layer_names[path[0][2]])
+        _own = _island_cells.get(pad_components.get(idx_b, idx_b), {}).get(tuple(path[-1]))
+        if _own is not None:
+            _end_orig = (_own[0], _own[1], layer_names[path[-1][2]])
     segments, vias = _path_to_segments_vias(
         path, coord, layer_names, net_id, config,
-        (pad_a[3], pad_a[4], layer_names[pad_a[2]]),  # start_original
-        (pad_b[3], pad_b[4], layer_names[pad_b[2]]),  # end_original
+        _start_orig,
+        _end_orig,
         through_hole_positions,
         pcb_data
     )
@@ -2760,7 +3144,7 @@ def route_multipoint_main(
     # passes above rebuild widths and would otherwise restore a grazing terminal leg
     # to base/power width, undoing the graze-neck applied during conversion.
     _neck_route_terminal_grazes(segments, path, coord,
-                                (pad_a[3], pad_a[4]), (pad_b[3], pad_b[4]),
+                                _start_orig[:2], _end_orig[:2],
                                 pcb_data, net_id, config)
     # Fab-floor via dropped inside a boxed main-edge pad to unblock it (#189).
     vias = list(vias) + main_unblock_vias
@@ -2784,6 +3168,7 @@ def route_multipoint_main(
         'original_segments': segments,
         # Store MST edges for Phase 3 (sorted longest first)
         'mst_edges': mst_edges,
+        'edge_selection_note': _sel_note,
         # Per-edge guide-corridor waypoint buckets (issue #7), for Phase 3 taps
         'waypoint_buckets': waypoint_buckets,
         # Initial tap stats (Phase 1 connects 2 pads via 1 edge)
@@ -3026,7 +3411,7 @@ def _route_multipoint_taps_impl(
     attraction_bonus = config.cell_cost(config.vertical_attraction_cost) if config.vertical_attraction_cost > 0 else 0
 
     router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
-                        turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+                        turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
                         vertical_attraction_radius=attraction_radius_grid,
                         vertical_attraction_bonus=attraction_bonus,
                         layer_costs=config.get_layer_costs(),
@@ -3048,7 +3433,7 @@ def _route_multipoint_taps_impl(
     # Each edge connects a routed pad to an unrouted pad
     edges_routed = 0
     failed_edges = set()  # Track edges that failed to route
-    failed_edge_blocking = {}  # Track blocking info for failed edges: edge_key -> (blocked_cells, tgt_xy)
+    failed_edge_blocking = {}  # edge_key -> (blocked_cells, tgt_xy, {'fwd','bwd','extra'} dir split)
     fallback_attempted = set()  # Pads attempted directly after their MST edge chain failed
     max_passes = len(remaining_edges) * 2 + len(pad_info)  # Safety limit
 
@@ -3147,9 +3532,10 @@ def _route_multipoint_taps_impl(
             sources = []
             tap_point_map = {}
 
-        # Add source pad position as a valid source (on all layers for through-hole)
-        if hasattr(src_pad_obj, 'layers') and '*.Cu' in src_pad_obj.layers:
-            # Through-hole pad - can connect on any copper layer
+        # Add source pad position as a valid source (on all layers for
+        # through-hole pads and pads with a same-net via at their center)
+        if _pad_all_layer_reach(pcb_data, src_pad_obj):
+            # Reaches any copper layer
             for layer_idx in range(len(layer_names)):
                 key = (src_gx, src_gy, layer_idx)
                 if key not in tap_point_map:
@@ -3166,11 +3552,11 @@ def _route_multipoint_taps_impl(
             print(f"      ERROR: No sources available for routing")
             continue
 
-        # For through-hole pads, create targets on ALL layers (router can reach any layer)
+        # Targets on ALL layers for through-hole pads AND pads with a
+        # same-net via at their center (the router can land on any layer)
         tgt_gx, tgt_gy = tgt_pad[0], tgt_pad[1]
         tgt_pad_obj = tgt_pad[5]
-        if hasattr(tgt_pad_obj, 'layers') and '*.Cu' in tgt_pad_obj.layers:
-            # Through-hole pad - can connect on any copper layer
+        if _pad_all_layer_reach(pcb_data, tgt_pad_obj):
             targets = [(tgt_gx, tgt_gy, layer_idx) for layer_idx in range(len(layer_names))]
         else:
             # SMD pad or specific layer - use the layer from pad_info
@@ -3206,12 +3592,71 @@ def _route_multipoint_taps_impl(
         # Use probe routing helper to detect stuck directions early
         tap_start_time = time.time()
 
+        _via_conflict_extra = []
+        # C5 parity for taps (#424): the tap edge's TARGET pad pays full stub
+        # proximity on its final approach cells if a foreign stub sits beside
+        # it -- single-ended routes got the endpoint exemption, tap edges
+        # never did. Replaced per edge; cleared after the loop.
+        obstacles.set_endpoint_exempt(
+            [(t[0], t[1]) for t in targets[:8]],
+            coord.to_grid_dist(config.track_width + config.clearance))
+
         (path, tap_iterations, forward_blocked, backward_blocked, reversed_tap_path,
          _, _, necked_down, uniform_width, unblock_vias) = _route_with_via_unblock(
             router, obstacles, config, sources, targets, track_margin,
             pcb_data, net_id, print_prefix="      ", direction_labels=("forward", "backward"),
             waypoints=waypoint_buckets.get(frozenset((src_idx, tgt_idx)), [])
         )
+
+        if path is None:
+            # Multipoint parity rung (#424): the #189 unblock inside the
+            # wrapper fires only on the walled-in signature (probe stuck
+            # BELOW its limit); a CONGESTION failure burns the full budget
+            # and is never offered the via a human would drop (ottercast
+            # R86: both pads of a series resistor stranded in the U1 pocket
+            # while the net routes fine alone). Place a validated fab-floor
+            # via in the target pad UNCONDITIONALLY and retry once at the
+            # probe budget; the memoisation cache in _place_shrunk_via_in_pad
+            # keeps repeated failures cheap.
+            _pad_obj = pad_info[tgt_idx][5] if len(pad_info[tgt_idx]) > 5 else None
+            # Real pads only: tap targets can be _EndpointStub pseudo-pads
+            # (mid-trace tap points) -- no copper of their own to via into.
+            if getattr(_pad_obj, 'component_ref', None) is None:
+                _pad_obj = None
+            _r189 = (_place_shrunk_via_in_pad(_pad_obj, obstacles, config,
+                                              pcb_data, net_id, coord, layer_names)
+                     if _pad_obj is not None and not getattr(_pad_obj, 'drill', 0)
+                     else None)
+            if _unblock_debug():
+                _pname = (f"{_pad_obj.component_ref}.{_pad_obj.pad_number}"
+                          if _pad_obj is not None else "NO-PAD-OBJ")
+                print(f"      TAP-RESCUE rung: tgt {_pname} -> "
+                      f"{'placed' if _r189 else 'DECLINED'}")
+            if _r189 is None and _pad_obj is not None:
+                # Rip-integrated terminal access (#424): name the copper the
+                # validator saw and feed it to the rip cascade as synthetic
+                # frontier cells (see _pad_via_conflict_cells).
+                _via_conflict_extra = _pad_via_conflict_cells(
+                    pcb_data, _pad_obj, config, coord, layer_names)
+                if _unblock_debug() and _via_conflict_extra:
+                    print(f"      TAP-RESCUE rung: {len(_via_conflict_extra)} "
+                          f"conflict cell(s) fed to rip attribution")
+            if _r189 is not None:
+                _via189, (_vgx, _vgy), _pli = _r189
+                _register_unblock_via(obstacles, _vgx, _vgy, layer_names)
+                _retry_cfg = replace(config, max_iterations=config.max_probe_iterations)
+                _tgts2 = list(targets) + [(_vgx, _vgy, li)
+                                          for li in range(len(layer_names))]
+                (path, _it2, _fb2, _bb2, reversed_tap_path, _, _,
+                 necked_down, uniform_width) = _route_main_connection(
+                    router, obstacles, _retry_cfg, sources, _tgts2, track_margin,
+                    pcb_data, net_id, print_prefix="      ")
+                total_iterations += _it2
+                if path is not None:
+                    unblock_vias = list(unblock_vias) + [_via189]
+                    print(f"      {GREEN}TAP PAD-VIA RESCUE: edge routed after "
+                          f"unconditional via-in-pad at "
+                          f"{_pad_obj.component_ref}.{_pad_obj.pad_number}{RESET}")
 
         # If path was found in reverse direction, reverse it so it goes sources -> targets
         if path is not None and reversed_tap_path:
@@ -3227,9 +3672,21 @@ def _route_multipoint_taps_impl(
             print(f"      {YELLOW}Failed to route MST edge after {tap_iterations} iterations ({tap_elapsed:.2f}s){RESET}")
             edge_key = (min(src_idx, tgt_idx), max(src_idx, tgt_idx))
             failed_edges.add(edge_key)
-            # Store blocking info for potential rip-up analysis
+            # Store blocking info for potential rip-up analysis; the synthetic
+            # via-conflict cells ride along so the cascade can name the
+            # pad-hugging copper the frontier never reaches (#424).
+            blocked_cells = list(blocked_cells) + _via_conflict_extra
             if blocked_cells:
-                failed_edge_blocking[edge_key] = (blocked_cells, (tgt_x, tgt_y))
+                # Element 2 keeps the directions SEPARATE (audit #2ii): the
+                # backward probe from a walled-in pad drains in dozens of
+                # iterations and its frontier is precisely the pocket wall --
+                # pooling buried it under the forward flood. The cascade
+                # picks the tighter side per edge; 'extra' carries the
+                # synthetic via-conflict cells either way.
+                failed_edge_blocking[edge_key] = (
+                    blocked_cells, (tgt_x, tgt_y),
+                    {'fwd': list(forward_blocked), 'bwd': list(backward_blocked),
+                     'extra': list(_via_conflict_extra)})
             continue
 
         print(f"      Routed in {tap_iterations} iterations ({tap_elapsed:.2f}s)")
@@ -3299,6 +3756,9 @@ def _route_multipoint_taps_impl(
             (e[0] == src_idx and e[1] == tgt_idx) or (e[0] == tgt_idx and e[1] == src_idx)
         )]
         edges_routed += 1
+
+    # C5 parity cleanup: no stale endpoint disks on the shared map.
+    obstacles.clear_endpoint_exempt()
 
     # Count pads that are effectively connected (either explicitly routed or zone-connected to a routed pad)
     pads_connected = sum(1 for i in range(len(pad_info))

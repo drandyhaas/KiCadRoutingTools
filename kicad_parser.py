@@ -147,6 +147,8 @@ class Zone:
     island_removal_mode: int = 0  # 0 = always remove isolated islands (KiCad default,
     # token absent from the file), 1 = never remove, 2 = remove below island_area_min
     island_area_min: float = 0.0  # mm^2 floor for mode 2 (KiCad file units are mm^2)
+    clearance: float = None  # zone fill clearance (connect_pads (clearance X)); None = unknown
+    min_thickness: float = None  # minimum fill width; None = unknown
 
 
 @dataclass
@@ -575,15 +577,34 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
             c = _field(block, 'center', 2)
             e = _field(block, 'end', 2)
             if c and e:
-                # Solid disc out to the outer copper edge (centerline radius + half
-                # stroke); a filled circle has the same outer extent. The interior
-                # is modelled solid (the union has no holes) -- conservative, and
-                # exact for clearance to external copper, which is all that matters.
-                R = math.hypot(e[0] - c[0], e[1] - c[1]) + _width(block) / 2.0
+                r_mid = math.hypot(e[0] - c[0], e[1] - c[1])
+                hw = _width(block) / 2.0
+                R = r_mid + hw
+                # An UNFILLED gr_circle is a stroked RING: copper only in the
+                # annulus [r_mid-hw, r_mid+hw]. The old solid-disc model
+                # ("conservative, clearance to external copper is all that
+                # matters") entombed anything living INSIDE the ring --
+                # ottercast MK1: a bottom-port MEMS mic's signal pad sits in
+                # the opening (the human connects it with a via there) and the
+                # phantom disc made it unroutable even on an empty board.
+                # Model the annulus as a single SEAMED polygon (outer loop +
+                # radial seam + inner loop): even-odd crossing tests -- which
+                # every consumer of pad.polygons uses -- see the opening as
+                # outside, and the zero-width seam lies inside real copper.
+                filled = not re.search(r'\(fill\s+(?:no|none)\b', block)
+                r_in = 0.0 if filled else max(0.0, r_mid - hw)
                 if R > 0:
                     N = 32
-                    local = [(c[0] + R * math.cos(2 * math.pi * k / N),
-                              c[1] + R * math.sin(2 * math.pi * k / N)) for k in range(N)]
+                    outer = [(c[0] + R * math.cos(2 * math.pi * k / N),
+                              c[1] + R * math.sin(2 * math.pi * k / N))
+                             for k in range(N)]
+                    if r_in > 0.05:
+                        inner = [(c[0] + r_in * math.cos(-2 * math.pi * k / N),
+                                  c[1] + r_in * math.sin(-2 * math.pi * k / N))
+                                 for k in range(N)]
+                        local = outer + [outer[0], inner[0]] + inner[1:] + [inner[0]]
+                    else:
+                        local = outer
         elif kind == 'rect':
             s = _field(block, 'start', 2)
             e = _field(block, 'end', 2)
@@ -2562,6 +2583,14 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
         island_removal_mode = int(irm_match.group(1)) if irm_match else 0
         iam_match = re.search(r'\(island_area_min\s+([\d.]+)\)', zone_header)
         island_area_min = float(iam_match.group(1)) if iam_match else 0.0
+        # Fill-model inputs (#validator-parity): the pour's own clearance
+        # lives under (connect_pads ... (clearance X)); min_thickness is a
+        # direct child. Absent (older files) -> None; the fill model then
+        # falls back to routing_defaults.
+        zcl_match = re.search(r'\(clearance\s+([\d.]+)\)', zone_header)
+        zone_clearance_val = float(zcl_match.group(1)) if zcl_match else None
+        mth_match = re.search(r'\(min_thickness\s+([\d.]+)\)', zone_header)
+        zone_min_th = float(mth_match.group(1)) if mth_match else None
 
         # Extract polygon points - find (pts ...) and extract xy coordinates
         pts_start = zone_content.find('(pts')
@@ -2598,7 +2627,9 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
                 uuid=uuid,
                 priority=priority,
                 island_removal_mode=island_removal_mode,
-                island_area_min=island_area_min
+                island_area_min=island_area_min,
+                clearance=zone_clearance_val,
+                min_thickness=zone_min_th
             ))
 
     return zones
@@ -3559,6 +3590,25 @@ def _extract_board_contours_from_pcbnew(board, to_mm):
             segs.extend(_bezier_to_segments(
                 (to_mm(p0.x), to_mm(p0.y)), (to_mm(c1.x), to_mm(c1.y)),
                 (to_mm(c2.x), to_mm(c2.y)), (to_mm(p3.x), to_mm(p3.y))))
+        elif shape_type == getattr(pcbnew, 'SHAPE_T_POLY', getattr(pcbnew, 'S_POLYGON', -2)):
+            # A free-form (gr_poly) board outline loads as a polygon PCB_SHAPE.
+            # Without this branch it contributes ZERO segments, so the GUI/pcbnew
+            # builder loses a curved/organic board edge entirely -- while the text
+            # parser reads it fine (extract_board_contours' gr_poly reader). That
+            # asymmetry crashed route/route_planes on a gr_poly-outlined board:
+            # the outline vanished, only a stray mounting-hole Edge.Cuts shape
+            # survived, and pads fell "outside" the spurious ring (issue #475).
+            # Walk every outline ring and emit closing segments so the contour
+            # chainer sees closed loops (OutlineCount() > 1 for multi-body edges).
+            poly = drawing.GetPolyShape()
+            for oi in range(poly.OutlineCount()):
+                ring = poly.Outline(oi)
+                pts = [(to_mm(ring.CPoint(i).x), to_mm(ring.CPoint(i).y))
+                       for i in range(ring.PointCount())]
+                for i in range(len(pts)):
+                    a, b = pts[i], pts[(i + 1) % len(pts)]  # close the ring
+                    if abs(b[0] - a[0]) >= 0.001 or abs(b[1] - a[1]) >= 0.001:
+                        segs.append((a, b))
         return segs
 
     segments = []
@@ -3726,6 +3776,14 @@ def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
             if not polygon:
                 continue
 
+            try:
+                _zcl = to_mm(zone.GetLocalClearance())
+            except Exception:
+                _zcl = None
+            try:
+                _mth = to_mm(zone.GetMinThickness())
+            except Exception:
+                _mth = None
             for zl in zone_layers:
                 zones.append(Zone(
                     net_id=net_id,
@@ -3734,7 +3792,9 @@ def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
                     polygon=polygon,
                     priority=priority,
                     island_removal_mode=island_removal_mode,
-                    island_area_min=island_area_min
+                    island_area_min=island_area_min,
+                    clearance=_zcl,
+                    min_thickness=_mth
                 ))
     except Exception:
         pass

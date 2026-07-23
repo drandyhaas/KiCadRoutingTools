@@ -496,6 +496,14 @@ def apply_step_params(step, dialog):
             except (TypeError, ValueError):
                 notes.append(f"ignored non-numeric layer_costs={costs!r}")
     elif action == "route_planes":
+        if "zone_clearance" in params and params["zone_clearance"] is not None:
+            _pop = getattr(dialog.planes_tab, "create_options", None)
+            if _pop is not None and hasattr(_pop, "zone_clearance_check"):
+                # explicit plan value checks the override box (basic-tab
+                # convention: checked = use the typed value)
+                _pop.zone_clearance_check.SetValue(True)
+                if hasattr(_pop, "zone_clearance"):
+                    _pop.zone_clearance.Enable(True)
         opts = dialog.planes_tab.create_options
         # A plan step is a COMPLETE spec of feature toggles: absent means
         # OFF. Leaving the persisted/panel state in place let a previously
@@ -570,15 +578,53 @@ def apply_step_params(step, dialog):
     return notes
 
 
-def apply_step_selection(step, dialog):
+def _plan_plane_nets(steps, dialog):
+    """Plane nets this GUI run must not route/fan out as signals: the union of
+    every route_planes/repair_planes step's exact assignment net names in the
+    PLAN (works even for steps that run BEFORE the planes step -- the plan is
+    a whole-chain declaration, the CLI's fanout-before-planes hole) plus the
+    on-disk plane manifest next to the board file (a chain that started in
+    the CLI and continues here). Mirrors the CLI's plane_io semantics."""
+    nets = set()
+    for s in steps or []:
+        if s.get("action") in ("route_planes", "repair_planes"):
+            for a in s.get("assignments") or []:
+                nets.update(n for n in a.get("nets") or [] if n)
+            nets.update(n for n in s.get("nets") or [] if n)
+    try:
+        from plane_io import read_plane_manifest
+        board_file = getattr(dialog, 'board_filename', None)
+        if board_file:
+            nets.update(read_plane_manifest(board_file).get('plane_nets', []))
+    except Exception:
+        pass
+    return nets
+
+
+def _drop_plane_nets(names, globs, plane_nets, notes, label):
+    """CLI-parity exclusion: a plane net leaves a WILDCARD-matched selection;
+    a glob naming it verbatim keeps it (explicit override)."""
+    if not plane_nets:
+        return names
+    literal = {g for g in (globs or []) if g in plane_nets}
+    excluded = sorted(n for n in names if n in plane_nets and n not in literal)
+    if excluded:
+        notes.append(f"{label}: plane manifest excluded {', '.join(excluded)}")
+        return [n for n in names if n not in set(excluded)]
+    return names
+
+
+def apply_step_selection(step, dialog, all_steps=None):
     """Apply the step's net/pair/component/assignment selection (also re-run
     right before executing the step, since consecutive steps of the same
     action share one tab's selection state). Returns notes."""
     notes = []
     action = step["action"]
+    plane_nets = _plan_plane_nets(all_steps, dialog)
     if action == "route":
         globs = step.get("nets") or ["*"]
         names = _match_net_names(dialog.pcb_data, globs)
+        names = _drop_plane_nets(names, globs, plane_nets, notes, "route")
         if not names:
             notes.append(f"route: no nets match {globs}")
         dialog.net_panel.set_selected_nets(names)
@@ -612,6 +658,7 @@ def apply_step_selection(step, dialog):
             notes.append(f"fanout: component {ref} not in dropdown")
         globs = step.get("nets") or ["*"]
         names = _component_net_names(dialog.pcb_data, ref, globs)
+        names = _drop_plane_nets(names, globs, plane_nets, notes, "fanout")
         if not names:
             notes.append(f"fanout: no nets match {globs} on {ref}")
         tab.net_panel.set_selected_nets(names)
@@ -856,7 +903,8 @@ class PlanExecutor:
                 if hasattr(self.dialog, 'reset_params_to_defaults'):
                     self.dialog.reset_params_to_defaults()
                 apply_step_params(self.steps[nxt], self.dialog)
-                apply_step_selection(self.steps[nxt], self.dialog)
+                apply_step_selection(self.steps[nxt], self.dialog,
+                                     all_steps=self.steps)
                 self.log(f"Claude plan: GUI prepped for step {nxt + 1} "
                          f"({self.steps[nxt]['action']})")
             except Exception as e:
@@ -1012,7 +1060,7 @@ class PlanExecutor:
             # re-apply, e.g. a fine-pitch route step and a general route step
             # would both run at whichever was applied last.
             notes = apply_step_params(step, self.dialog)
-            notes += apply_step_selection(step, self.dialog)
+            notes += apply_step_selection(step, self.dialog, all_steps=self.steps)
             for note in notes:
                 self.log(f"Claude plan: {note}")
             invoke, busy = self._action_parts(step["action"])

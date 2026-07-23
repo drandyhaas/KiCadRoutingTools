@@ -34,6 +34,8 @@ def get_dialog_settings(dialog):
         'max_ripup': dialog.max_ripup.GetValue(),
         'ripup_abandon_metric': dialog.ripup_abandon_metric.GetString(
             dialog.ripup_abandon_metric.GetSelection()),
+        'ripup_blocker_select': dialog.ripup_blocker_select.GetString(
+            dialog.ripup_blocker_select.GetSelection()),
         'obey_design_rules': dialog.obey_drc_check.GetValue(),
 
         # Layer selections
@@ -275,6 +277,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.max_ripup.SetValue(settings['max_ripup'])
     if 'ripup_abandon_metric' in settings:
         dialog.ripup_abandon_metric.SetStringSelection(settings['ripup_abandon_metric'])
+    if 'ripup_blocker_select' in settings:
+        dialog.ripup_blocker_select.SetStringSelection(settings['ripup_blocker_select'])
     if 'obey_design_rules' in settings:
         dialog.obey_drc_check.SetValue(settings['obey_design_rules'])
 

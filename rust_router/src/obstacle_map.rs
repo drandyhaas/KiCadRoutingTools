@@ -240,6 +240,11 @@ pub struct GridObstacleMap {
     /// Key: packed (gx, gy), Value: bitmask of layers that have tracks here
     /// (B3, issue #386: u32 -- the old u8 wrapped/panicked on layers >= 8)
     pub cross_layer_tracks: FxHashMap<u64, u32>,
+    /// P3 (#424 soft-knobs review): per-layer precomputed max attraction
+    /// bonus, built once per net by build_attraction_field(); empty = the
+    /// O(radius^2)-per-move scan fallback. attraction_field[L] answers
+    /// "max falloff bonus at this cell from tracks on any layer != L".
+    pub attraction_field: Vec<FxHashMap<u64, i32>>,
     /// Endpoint positions exempt from stub proximity costs (source and target)
     pub endpoint_exempt_positions: Vec<(i32, i32)>,
     /// Radius around endpoints to exempt from stub proximity costs
@@ -273,6 +278,7 @@ impl GridObstacleMap {
             allowed_cells: FxHashSet::default(),
             source_target_cells: (0..num_layers).map(|_| FxHashSet::default()).collect(),
             cross_layer_tracks: FxHashMap::default(),
+            attraction_field: Vec::new(),
             endpoint_exempt_positions: Vec::new(),
             endpoint_exempt_radius: 0,
             free_via_positions: FxHashSet::default(),
@@ -329,6 +335,7 @@ impl GridObstacleMap {
             allowed_cells: self.allowed_cells.clone(),
             source_target_cells: self.source_target_cells.clone(),
             cross_layer_tracks: self.cross_layer_tracks.clone(),
+            attraction_field: self.attraction_field.clone(),
             endpoint_exempt_positions: self.endpoint_exempt_positions.clone(),
             endpoint_exempt_radius: self.endpoint_exempt_radius,
             free_via_positions: self.free_via_positions.clone(),
@@ -355,6 +362,7 @@ impl GridObstacleMap {
             allowed_cells: self.allowed_cells.clone(),
             source_target_cells: (0..self.num_layers).map(|_| FxHashSet::default()).collect(),
             cross_layer_tracks: self.cross_layer_tracks.clone(),
+            attraction_field: self.attraction_field.clone(),
             endpoint_exempt_positions: self.endpoint_exempt_positions.clone(),
             endpoint_exempt_radius: self.endpoint_exempt_radius,
             free_via_positions: self.free_via_positions.clone(),
@@ -894,7 +902,13 @@ impl GridObstacleMap {
     /// Returns 0 if position is within endpoint_exempt_radius of any endpoint
     #[inline]
     pub fn get_stub_proximity_cost(&self, gx: i32, gy: i32) -> i32 {
-        // Check if exempt due to being near an endpoint (source/target)
+        // Lookup FIRST, exemption scan only on a nonzero hit (soft-knobs P4:
+        // the exempt loop ran per lookup even for cells with no stub cost --
+        // and the C5 single-ended exemptions made the list longer).
+        let cost = match self.stub_proximity.get(&pack_xy(gx, gy)) {
+            Some(&c) if c != 0 => c,
+            _ => return 0,
+        };
         if self.endpoint_exempt_radius > 0 {
             let radius_sq = self.endpoint_exempt_radius * self.endpoint_exempt_radius;
             for (ex, ey) in &self.endpoint_exempt_positions {
@@ -905,7 +919,7 @@ impl GridObstacleMap {
                 }
             }
         }
-        self.stub_proximity.get(&pack_xy(gx, gy)).copied().unwrap_or(0)
+        cost
     }
 
     /// Set layer-specific proximity cost (for track proximity on same layer)
@@ -994,6 +1008,16 @@ impl GridObstacleMap {
             return 0;
         }
 
+        // P3: precomputed field short-circuit (exact same semantics as the
+        // scan below; the field was built with identical falloff math).
+        if !self.attraction_field.is_empty() {
+            if current_layer < self.attraction_field.len() {
+                return *self.attraction_field[current_layer]
+                    .get(&pack_xy(gx, gy)).unwrap_or(&0);
+            }
+            return 0;
+        }
+
         let radius_sq = attraction_radius * attraction_radius;
         let mut max_bonus = 0;
 
@@ -1027,6 +1051,51 @@ impl GridObstacleMap {
     /// Clear cross-layer track data
     pub fn clear_cross_layer_tracks(&mut self) {
         self.cross_layer_tracks.clear();
+        self.attraction_field.clear();
+    }
+
+    /// P3: precompute the per-layer attraction field so the hot path is an
+    /// O(1) lookup instead of an O(radius^2) scan per candidate move. Call
+    /// after the per-net add_cross_layer_track loop; cleared with the
+    /// tracks. Gated to <= 8 layers (field memory is entries x disk x
+    /// layers); more layers keep the scan fallback.
+    pub fn build_attraction_field(&mut self, attraction_radius: i32, attraction_bonus: i32) {
+        self.attraction_field.clear();
+        if attraction_radius <= 0 || attraction_bonus <= 0 || self.num_layers > 8
+            || self.cross_layer_tracks.is_empty() {
+            return;
+        }
+        let radius_sq = attraction_radius * attraction_radius;
+        let mut field: Vec<FxHashMap<u64, i32>> =
+            (0..self.num_layers).map(|_| FxHashMap::default()).collect();
+        for (&key, &mask) in self.cross_layer_tracks.iter() {
+            let (cx, cy) = unpack_xy(key);
+            for dx in -attraction_radius..=attraction_radius {
+                for dy in -attraction_radius..=attraction_radius {
+                    let dist_sq = dx * dx + dy * dy;
+                    if dist_sq > radius_sq {
+                        continue;
+                    }
+                    let dist = (dist_sq as f32).sqrt();
+                    let falloff = 1.0 - (dist / attraction_radius as f32);
+                    let bonus = (falloff * attraction_bonus as f32) as i32;
+                    if bonus <= 0 {
+                        continue;
+                    }
+                    let ckey = pack_xy(cx + dx, cy + dy);
+                    for l in 0..self.num_layers {
+                        let own_bit = if l < 32 { 1u32 << l } else { 0 };
+                        if mask & !own_bit != 0 {
+                            let e = field[l].entry(ckey).or_insert(0);
+                            if bonus > *e {
+                                *e = bonus;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.attraction_field = field;
     }
 
     /// Add a free via position (layer change here has zero cost)

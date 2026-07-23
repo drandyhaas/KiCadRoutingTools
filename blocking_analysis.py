@@ -101,6 +101,16 @@ def _net_geometry_signature(net_id, path, segments, vias, config, extra_clearanc
     return (params, path_sig, seg_sig, via_sig)
 
 
+class BlockingReport(list):
+    """analyze_frontier_blocking's result: a list of BlockingInfo plus
+    frontier coverage accounting (audit #5). attributed_cells counts the
+    unique frontier cells matched to at least one ROUTED net; the remainder
+    is static/unrippable copper (pads, planes, pre-existing tracks, edge)
+    that no amount of ripping can clear. Old consumers see a plain list."""
+    frontier_cells: int = 0
+    attributed_cells: int = 0
+
+
 @dataclass
 class BlockingInfo:
     """Information about how much a net blocks a route."""
@@ -113,6 +123,10 @@ class BlockingInfo:
     near_target_cells: int  # Cells within proximity of target (more critical)
     near_source_cells: int  # Cells within proximity of source
     details: str        # Human-readable details
+    # Asserted by a geometry VALIDATOR (via placement, swap validation) rather
+    # than inferred from the frontier -- micron-exact identity, sorts first
+    # (audit RIPUP_ATTRIBUTION_REVIEW improvement 3).
+    validator_named: bool = False
 
 
 def compute_net_obstacle_cells(
@@ -150,7 +164,11 @@ def compute_net_obstacle_cells(
         # real capsule also fell inside another net's square over-reach and the
         # wrong net got ripped (#203). Distances are measured from the real segment.
         layer_track_width = config.get_track_width(config.layers[layer_idx])
-        expansion_mm = layer_track_width / 2 + seg_width / 2 + config.clearance + extra_clearance
+        # PR392 parity (audit #5): expand at the obstacle net's pairwise
+        # clearance, not the flat base -- on multi-class boards the flat
+        # value under-attributes wide-clearance nets' real blocking reach.
+        _clr = config.obstacle_clearance(net_id) if hasattr(config, 'obstacle_clearance') else config.clearance
+        expansion_mm = layer_track_width / 2 + seg_width / 2 + _clr + extra_clearance
         cells = segment_blocked_cells_array(x1, y1, x2, y2, expansion_mm, grid_step)
         if len(cells):
             track_parts.append(_pack_cells(cells, layer_idx))
@@ -159,7 +177,8 @@ def compute_net_obstacle_cells(
         # A via blocks tracks on EVERY layer within its via->track keep-out radius.
         # A zero-length capsule is a disc, measured from the true float via centre
         # (so an off-grid via is covered without the old floored-circle drift).
-        via_margin = via_size / 2 + config.track_width / 2 + config.clearance + extra_clearance
+        _clr = config.obstacle_clearance(net_id) if hasattr(config, 'obstacle_clearance') else config.clearance
+        via_margin = via_size / 2 + config.track_width / 2 + _clr + extra_clearance
         cells = segment_blocked_cells_array(x, y, x, y, via_margin, grid_step)
         if len(cells):
             base = _pack_cells(cells, 0)
@@ -211,6 +230,7 @@ def analyze_frontier_blocking(
     target_xy: Optional[Tuple[float, float]] = None,
     source_xy: Optional[Tuple[float, float]] = None,
     obstacle_cache: Optional[Dict[int, Tuple[Set, Set]]] = None,
+    known_blockers: Optional[List[Tuple[int, int]]] = None,
 ) -> List[BlockingInfo]:
     """
     Analyze which nets are blocking based on frontier data.
@@ -330,8 +350,10 @@ def analyze_frontier_blocking(
         all_blocking = np.concatenate([d[2] for d in net_blocking_data.values()])
         cells, counts = np.unique(all_blocking, return_counts=True)
         solo_cells = cells[counts == 1]
+        n_attributed = int(cells.size)
     else:
         solo_cells = np.empty(0, dtype=np.int64)
+        n_attributed = 0
 
     # Second pass: count unique blocking and near-source/target blocking
     results = []
@@ -366,28 +388,227 @@ def analyze_frontier_blocking(
             details=details
         ))
 
-    # Sort to prioritize nets that will actually open up routing:
-    # 1. Nets with 100% unique blocking are top priority (guaranteed to help)
-    # 2. For others, use weighted score that considers:
-    #    - unique_cells (guaranteed to open up)
-    #    - near_target_cells and near_source_cells (blocking critical areas)
-    #    - shared blocking (partial credit)
-    def sort_key(x):
-        near_endpoint = x.near_target_cells + x.near_source_cells
-        if x.blocked_count > 0 and x.unique_cells == x.blocked_count:
-            # 100% unique - highest priority, use near_endpoint as tiebreaker
-            return (2, x.unique_cells, near_endpoint)
+    # Validator-asserted blockers (audit #3): identities a geometry validator
+    # proved (via placement, swap validation) -- not inferred from the
+    # frontier. Flagged to sort ahead of every inferred tier; a net the
+    # frontier never touched still enters the candidate list.
+    apply_known_blockers(results, known_blockers, exclude_net_ids, pcb_data)
+
+    rank_blockers(results, getattr(config, 'ripup_blocker_select', 'count'),
+                  config=config)
+
+    report = BlockingReport(results)
+    report.frontier_cells = int(blocked_keys.size)
+    report.attributed_cells = n_attributed
+    return report
+
+
+def apply_known_blockers(results, known_blockers, exclude_net_ids, pcb_data):
+    """Fold validator-asserted blocker identities into a BlockingInfo list
+    (audit #3): flag entries already attributed by the frontier, append
+    entries the frontier never touched. Shared by analyze_frontier_blocking
+    and the per-edge merge in the phase-3 tap cascade. Mutates `results`."""
+    if not known_blockers:
+        return
+    exclude_net_ids = exclude_net_ids or set()
+    by_id = {b.net_id: b for b in results}
+    for nid, n_cells in known_blockers:
+        if nid in exclude_net_ids:
+            # Never re-inject the failing net or a rip-chain ancestor
+            # (cycle guard parity with the frontier path).
+            continue
+        b = by_id.get(nid)
+        if b is not None:
+            b.validator_named = True
         else:
-            # Weighted score: unique counts full, near-endpoint unique counts extra, shared counts half
-            shared = x.blocked_count - x.unique_cells
-            # Near-endpoint unique cells are extra valuable
-            near_endpoint_unique = min(near_endpoint, x.unique_cells)
-            score = x.unique_cells + near_endpoint_unique + 0.5 * shared
-            return (1, score, near_endpoint)
+            net = pcb_data.nets.get(nid)
+            results.append(BlockingInfo(
+                net_id=nid,
+                net_name=net.name if net else f"Net {nid}",
+                blocked_count=n_cells, track_cells=n_cells, via_cells=0,
+                unique_cells=n_cells, near_target_cells=n_cells,
+                near_source_cells=0,
+                details=f"validator-named ({n_cells} conflict cells)",
+                validator_named=True))
 
-    results.sort(key=sort_key, reverse=True)
 
-    return results
+def merge_blocking_max(a: BlockingInfo, b: BlockingInfo) -> BlockingInfo:
+    """Merge two per-edge attributions of the SAME net by max of each
+    signal (audit #2, per-edge attribution): a net decisive at one failed
+    edge must not be diluted by edges it is irrelevant to, so counts take
+    the strongest edge rather than the sum over edges."""
+    return BlockingInfo(
+        net_id=a.net_id, net_name=a.net_name,
+        blocked_count=max(a.blocked_count, b.blocked_count),
+        track_cells=max(a.track_cells, b.track_cells),
+        via_cells=max(a.via_cells, b.via_cells),
+        unique_cells=max(a.unique_cells, b.unique_cells),
+        near_target_cells=max(a.near_target_cells, b.near_target_cells),
+        near_source_cells=max(a.near_source_cells, b.near_source_cells),
+        details=a.details if a.blocked_count >= b.blocked_count else b.details,
+        validator_named=a.validator_named or b.validator_named)
+
+
+def _count_sort_key(x):
+    """The historical default ranking ('count'): 100%-unique blockers in a
+    top tier, then a weighted score (unique full, near-endpoint-unique extra,
+    shared half). validator_named entries always sort first (audit #3)."""
+    near_endpoint = x.near_target_cells + x.near_source_cells
+    named = 1 if getattr(x, 'validator_named', False) else 0
+    if x.blocked_count > 0 and x.unique_cells == x.blocked_count:
+        # 100% unique - highest priority, use near_endpoint as tiebreaker
+        return (named, 2, x.unique_cells, near_endpoint)
+    else:
+        # Weighted score: unique counts full, near-endpoint unique counts extra, shared counts half
+        shared = x.blocked_count - x.unique_cells
+        # Near-endpoint unique cells are extra valuable
+        near_endpoint_unique = min(near_endpoint, x.unique_cells)
+        score = x.unique_cells + near_endpoint_unique + 0.5 * shared
+        return (named, 1, score, near_endpoint)
+
+
+def rank_blockers(results, algo: str = 'count',
+                  bidir_both_sets=None, config=None) -> None:
+    """Order BlockingInfo in place by the selected algorithm (#424 audit;
+    --ripup-blocker-select).
+
+    'count'       - the historical weighted-count ranking (default; exact
+                    legacy ordering modulo the validator_named-first rule).
+    'near-target' - endpoint-proximity first (audit improvement 2): the true
+                    last-mile blocker hugs the failing endpoint but has FEW
+                    cells; count ranking buries it under big far walls.
+                    Key: near-endpoint-unique, then unique, then count.
+    'bidir'       - both-directions boost (audit improvement 4): a net
+                    attributed in BOTH search directions' frontiers lies on a
+                    genuine separating wall; bystanders behind one endpoint
+                    appear in only one. Weighted-count score doubled for
+                    both-direction nets (bidir_both_sets = set of net_ids).
+    'mincut' ranking is not a sort: the probe (mincut_probe_order) reorders
+    candidates by actual path crossings; after that reorder the list is
+    already in rip order and this function is not called.
+    """
+    # Bus rip resistance: members of a settled bus group score 1/res so
+    # the ladder prefers ripping bystanders over tearing up the river.
+    # Validator-named entries are exempt (micron-proof identity outranks
+    # protection).
+    _members = getattr(config, 'bus_member_net_ids', None) or set()
+    _res = float(getattr(config, 'bus_rip_resistance', 1.0) or 1.0)
+    if _res <= 1.0:
+        _members = set()
+
+    def _r(x):
+        return _res if (x.net_id in _members
+                        and not getattr(x, 'validator_named', False)) else 1.0
+
+    if algo == 'near-target':
+        def key(x):
+            near = x.near_target_cells + x.near_source_cells
+            named = 1 if getattr(x, 'validator_named', False) else 0
+            r = _r(x)
+            return (named, min(near, x.unique_cells) / r, near / r,
+                    x.unique_cells / r, x.blocked_count / r)
+        results.sort(key=key, reverse=True)
+    elif algo == 'bidir':
+        both = bidir_both_sets or set()
+        def key(x):
+            base = _count_sort_key(x)
+            boost = 2.0 if x.net_id in both else 1.0
+            # scale the score component of the count key
+            return (base[0], base[1], base[2] * boost / _r(x), base[3] / _r(x))
+        results.sort(key=key, reverse=True)
+    else:
+        def key(x):
+            base = _count_sort_key(x)
+            return (base[0], base[1], base[2] / _r(x), base[3] / _r(x))
+        results.sort(key=key, reverse=True)
+
+
+def mincut_probe_order(pcb_data, config, working_obstacles, net_id,
+                       rippable_blockers, net_obstacles_cache):
+    """Min-cut probe (#424 audit improvement 1; --ripup-blocker-select=mincut).
+
+    The frontier report is the PERIMETER of the reachable pocket -- per-net
+    cell counts measure exposure, not cut-ness, so ranking guesses. This
+    replaces the guess with a measurement: on a CLONE of the working map
+    (zero mutation risk), lift every rippable candidate's hard blocks, stamp
+    its cells as a large soft cost instead, and run the failed search once.
+    A path now always exists if the net is routable at ANY rip depth -- and
+    because A* minimizes cost, it threads the CHEAPEST crossing set: the
+    (near-)minimal set of nets separating source from target, jointly.
+
+    Returns (ordered_net_ids, feasible): candidates the probe path actually
+    crosses, in first-crossing order (rip these, in this order); feasible
+    False means even the soft-cost search failed -- the separating wall is
+    static (unrippable) copper. Callers should treat that as ADVISORY, not
+    proof the ladder is useless: rip retries also unlock pad-via placement
+    and swaps, topology changes this path probe does not model.
+    """
+    from dataclasses import replace as _replace
+    from obstacle_cache import remove_net_obstacles_from_cache
+    import numpy as np
+
+    cand_ids = [b.net_id for b in rippable_blockers
+                if b.net_id in net_obstacles_cache]
+    if not cand_ids:
+        return [], True
+
+    clone = working_obstacles.clone_fresh()
+    # In the phase-3 cascade the probed net's OWN phase-1 copper is already
+    # stamped in the working map (unlike the SE ladder, where the net has no
+    # copper yet); lift it or the probe collides with itself and reports a
+    # false infeasible.
+    own = net_obstacles_cache.get(net_id)
+    if own is not None:
+        remove_net_obstacles_from_cache(clone, own)
+    cell_sets = {}
+    soft_rows = []
+    cost = config.cell_cost(5.0)   # ~5mm-equiv per cell: cross only if needed
+    _members = getattr(config, 'bus_member_net_ids', None) or set()
+    _res = float(getattr(config, 'bus_rip_resistance', 1.0) or 1.0)
+    for nid in cand_ids:
+        n_cost = int(cost * _res) if (nid in _members and _res > 1.0) else cost
+        data = net_obstacles_cache[nid]
+        cells = getattr(data, 'blocked_cells', None)
+        if cells is None or not len(cells):
+            continue
+        remove_net_obstacles_from_cache(clone, data)
+        cs = set()
+        for i in range(len(cells)):
+            gx, gy, li = cells[i]
+            cs.add((int(gx), int(gy), int(li)))
+            soft_rows.append((int(li), int(gx), int(gy), n_cost))
+        cell_sets[nid] = cs
+    if not soft_rows:
+        return [], True
+    clone.set_layer_proximity_batch(np.array(soft_rows, dtype=np.int32))
+
+    from single_ended_routing import route_net_with_obstacles
+    probe_cfg = _replace(config, max_rip_up_count=0) \
+        if hasattr(config, 'max_rip_up_count') else config
+    result = route_net_with_obstacles(pcb_data, net_id, probe_cfg, clone)
+    if not result or result.get('failed') or not result.get('path'):
+        return [], False
+
+    # Densify the path so cells between waypoints register crossings.
+    path = result['path']
+    dense = []
+    for (x1, y1, l1), (x2, y2, l2) in zip(path, path[1:]):
+        dense.append((x1, y1, l1))
+        if l1 == l2:
+            n = max(abs(x2 - x1), abs(y2 - y1))
+            for k in range(1, n):
+                dense.append((x1 + round((x2 - x1) * k / n),
+                              y1 + round((y2 - y1) * k / n), l1))
+    dense.append(path[-1])
+
+    order = []
+    seen = set()
+    for cell in dense:
+        for nid, cs in cell_sets.items():
+            if nid not in seen and cell in cs:
+                seen.add(nid)
+                order.append(nid)
+    return order, True
 
 
 def analyze_static_blockers(
@@ -553,6 +774,17 @@ def print_blocking_analysis(
         summary += f"; near: {total_near_source} src, {total_near_target} tgt"
     summary += ")"
     print(summary)
+
+    # Coverage line (audit #5): frontier cells NO routed net matched are
+    # static/unrippable copper -- when that share dominates, the ladder is
+    # ripping bystanders and the real wall is not rippable at all.
+    frontier_total = getattr(blockers, 'frontier_cells', 0)
+    if frontier_total:
+        attributed = getattr(blockers, 'attributed_cells', 0)
+        unmatched = frontier_total - attributed
+        if unmatched > 0:
+            print(f"{prefix}Coverage: {attributed}/{frontier_total} frontier cells "
+                  f"attributed to routed nets; {unmatched} static/unrippable")
 
     print(f"{prefix}Top blockers:")
     for i, info in enumerate(blockers[:max_display]):

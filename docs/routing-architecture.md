@@ -361,9 +361,18 @@ A---+  (longest edge A-C)          A~~~+~~~C                   A~~~+~~~C
 #### Phase 1: Main Route
 - Compute MST between all pads using Manhattan distance
 - Sort MST edges by length (longest first)
-- Route the **longest** MST edge using standard A* routing
+- Route the **longest** MST edge using standard A* routing — unless a
+  selection override picks a different main edge: bus members with a
+  planned corridor route the corridor-spanning terminal pair first
+  (re-realized from the corridor's endpoints), and
+  `KICAD_MULTIPOINT_DENSE_FIRST=1` prefers edges landing on a fanned-out
+  dense package (see [Bus Routing](bus-routing.md), "Multi-Point Bus
+  Members"). Which edge goes first matters because the deferred edges wait
+  for Phase 3, after every other net's main route.
+- Bus members' main edges route with corridor/neighbor attraction, like
+  point-to-point members
 - Track pending multi-point nets in `state.pending_multipoint_nets`
-- Result includes `mst_edges` (sorted longest-first) for Phase 3
+- Result includes `mst_edges` (routed edge first) for Phase 3
 
 #### Phase 2: Length Matching
 - Apply meanders to the clean 2-point main routes

@@ -12,10 +12,75 @@ from bga_fanout.types import Channel, BGAGrid, DiffPairPads
 from bga_fanout.grid import is_edge_pad
 
 
+def preferred_escape_dirs(pcb_data, footprint) -> Dict[Tuple[float, float], str]:
+    """Per-pad preferred escape direction: toward the net's nearest same-net
+    pad OFF this footprint (the side the net must ultimately go). A stub
+    already pointing at its destination side launches trivially and avoids
+    walling in its neighbors' escapes (the ottercast USB pocket). Keys are
+    (round(x,3), round(y,3)) pad positions; nets with no off-footprint pad
+    (or net_id 0) get no entry. Empty dict unless
+    KICAD_FANOUT_TOWARD_TARGETS=1 -- the caller gates on that env."""
+    prefs: Dict[Tuple[float, float], str] = {}
+    ref = footprint.reference
+    by_net: Dict[int, list] = {}
+    for fp in pcb_data.footprints.values():
+        if fp.reference == ref:
+            continue
+        for p in fp.pads:
+            if p.net_id > 0:
+                by_net.setdefault(p.net_id, []).append((p.global_x, p.global_y))
+    for pad in footprint.pads:
+        if pad.net_id <= 0:
+            continue
+        targets = by_net.get(pad.net_id)
+        if not targets:
+            continue
+        px, py = pad.global_x, pad.global_y
+        tx, ty = min(targets, key=lambda t: (t[0] - px) ** 2 + (t[1] - py) ** 2)
+        dx, dy = tx - px, ty - py
+        if abs(dx) >= abs(dy):
+            d = 'right' if dx > 0 else 'left'
+        else:
+            d = 'down' if dy > 0 else 'up'
+        prefs[(round(px, 3), round(py, 3))] = d
+    return prefs
+
+
+def preferred_pair_dirs(pcb_data, footprint, diff_pairs) -> Dict[str, str]:
+    """Pair-level target-side preference (#469): one direction per pair,
+    from the pair's midpoint toward the nearest off-footprint pad of either
+    polarity -- the pair stays COUPLED and escapes as a unit, this only
+    biases WHICH shared direction the assigner tries first."""
+    prefs: Dict[str, str] = {}
+    ref = footprint.reference
+    by_net: Dict[int, list] = {}
+    for fp in pcb_data.footprints.values():
+        if fp.reference == ref:
+            continue
+        for p in fp.pads:
+            if p.net_id > 0:
+                by_net.setdefault(p.net_id, []).append((p.global_x, p.global_y))
+    for pair_id, pair in diff_pairs.items():
+        targets = (by_net.get(pair.p_pad.net_id, [])
+                   + by_net.get(pair.n_pad.net_id, []))
+        if not targets:
+            continue
+        cx = (pair.p_pad.global_x + pair.n_pad.global_x) / 2
+        cy = (pair.p_pad.global_y + pair.n_pad.global_y) / 2
+        tx, ty = min(targets, key=lambda t: (t[0] - cx) ** 2 + (t[1] - cy) ** 2)
+        dx, dy = tx - cx, ty - cy
+        if abs(dx) >= abs(dy):
+            prefs[pair_id] = 'right' if dx > 0 else 'left'
+        else:
+            prefs[pair_id] = 'down' if dy > 0 else 'up'
+    return prefs
+
+
 def find_escape_channel(pad_x: float, pad_y: float,
                         grid: BGAGrid,
                         channels: List[Channel],
-                        force_orientation: str = None) -> Tuple[Optional[Channel], str]:
+                        force_orientation: str = None,
+                        preferred_dir: str = None) -> Tuple[Optional[Channel], str]:
     """
     Find the best channel for a pad to escape through.
     Returns (channel, direction). Channel is None for edge pads.
@@ -26,9 +91,16 @@ def find_escape_channel(pad_x: float, pad_y: float,
         channels: Available routing channels
         force_orientation: If set to 'horizontal' or 'vertical', only allow
                           escapes in that orientation (left/right or up/down)
+        preferred_dir: Optional target-side direction (#469): sorts first
+                      among the options (distance breaks ties within each
+                      class), so an escape goes toward the net's destination
+                      whenever a channel exists that way. Layer assignment
+                      later spreads the extra same-direction competition
+                      across layers.
     """
-    # Check if this is an edge pad first
-    is_edge, edge_dir = is_edge_pad(pad_x, pad_y, grid)
+    # Check if this is an edge pad first (corner pads honor the preference)
+    is_edge, edge_dir = is_edge_pad(pad_x, pad_y, grid,
+                                    preferred_dir=preferred_dir)
     if is_edge:
         return None, edge_dir
 
@@ -49,8 +121,11 @@ def find_escape_channel(pad_x: float, pad_y: float,
     if force_orientation:
         options = [(d, dir, o) for d, dir, o in options if o == force_orientation]
 
-    # Sort by distance (closest first)
-    options.sort(key=lambda x: x[0])
+    # Sort by distance (closest first); target-side preference first (#469)
+    if preferred_dir:
+        options.sort(key=lambda x: (0 if x[1] == preferred_dir else 1, x[0]))
+    else:
+        options.sort(key=lambda x: x[0])
 
     # Pick the best option
     for dist, escape_dir, orientation in options:
@@ -81,7 +156,8 @@ def get_pair_escape_options(p_pad_x: float, p_pad_y: float,
                              n_pad_x: float, n_pad_y: float,
                              grid: BGAGrid,
                              channels: List[Channel],
-                             include_alternate_channels: bool = False) -> List[Tuple[Optional[Channel], str]]:
+                             include_alternate_channels: bool = False,
+                             preferred_dir: str = None) -> List[Tuple[Optional[Channel], str]]:
     """
     Get all valid escape options for a differential pair, ordered by preference.
 
@@ -153,8 +229,29 @@ def get_pair_escape_options(p_pad_x: float, p_pad_y: float,
         v_dist = min(dist_up, dist_down)
         options.append((v_channel, v_dir, v_dist))
 
-    # Sort by distance (closest edge first)
-    options.sort(key=lambda x: x[2])
+    # Target-side preference (#469): the builder above only offers the
+    # NEAREST side per orientation, so a preferred direction on the farther
+    # side would never appear -- swap that orientation's option to the
+    # preferred side (its true distance), then order preferred-first. The
+    # pair stays coupled either way: one option = one shared direction for
+    # both polarities, and every downstream conflict check is unchanged.
+    if preferred_dir:
+        swapped = []
+        for ch, d, dist in options:
+            if preferred_dir in ('left', 'right') and d in ('left', 'right') \
+                    and d != preferred_dir:
+                dist = dist_left if preferred_dir == 'left' else dist_right
+                d = preferred_dir
+            elif preferred_dir in ('up', 'down') and d in ('up', 'down') \
+                    and d != preferred_dir:
+                dist = dist_up if preferred_dir == 'up' else dist_down
+                d = preferred_dir
+            swapped.append((ch, d, dist))
+        options = swapped
+        options.sort(key=lambda x: (0 if x[1] == preferred_dir else 1, x[2]))
+    else:
+        # Sort by distance (closest edge first)
+        options.sort(key=lambda x: x[2])
 
     # Build result list
     result = [(ch, d) for ch, d, _ in options]
@@ -298,7 +395,8 @@ def find_diff_pair_escape(p_pad_x: float, p_pad_y: float,
                           n_pad_x: float, n_pad_y: float,
                           grid: BGAGrid,
                           channels: List[Channel],
-                          preferred_orientation: str = 'auto') -> Tuple[Optional[Channel], str]:
+                          preferred_orientation: str = 'auto',
+                          preferred_dir: str = None) -> Tuple[Optional[Channel], str]:
     """
     Find the best escape channel for a differential pair.
 
@@ -329,7 +427,8 @@ def find_diff_pair_escape(p_pad_x: float, p_pad_y: float,
         return None, f'half_edge_{edge_dir}'
 
     # Get all escape options
-    options = get_pair_escape_options(p_pad_x, p_pad_y, n_pad_x, n_pad_y, grid, channels)
+    options = get_pair_escape_options(p_pad_x, p_pad_y, n_pad_x, n_pad_y, grid,
+                                      channels, preferred_dir=preferred_dir)
 
     if not options:
         # Fallback - shouldn't happen for inner pairs
@@ -365,7 +464,8 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
                         via_size: float = 0.5,
                         rebalance: bool = False,
                         pre_occupied: Dict[Tuple[str, str, float], str] = None,
-                        force_escape_direction: bool = False) -> Dict[str, Tuple[Optional[Channel], str]]:
+                        force_escape_direction: bool = False,
+                        pair_preferred: Dict[str, str] = None) -> Dict[str, Tuple[Optional[Channel], str]]:
     """
     Assign escape directions to all differential pairs, avoiding overlaps.
 
@@ -570,7 +670,8 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
         all_options = get_pair_escape_options(
             pair.p_pad.global_x, pair.p_pad.global_y,
             pair.n_pad.global_x, pair.n_pad.global_y,
-            grid, channels, include_alternate_channels=True
+            grid, channels, include_alternate_channels=True,
+            preferred_dir=(pair_preferred or {}).get(pair_id)
         )
 
         primary_dirs = ['up', 'down'] if primary_orientation == 'vertical' else ['left', 'right']
@@ -616,7 +717,8 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
             all_options = get_pair_escape_options(
                 pair.p_pad.global_x, pair.p_pad.global_y,
                 pair.n_pad.global_x, pair.n_pad.global_y,
-                grid, channels, include_alternate_channels=True
+                grid, channels, include_alternate_channels=True,
+                preferred_dir=(pair_preferred or {}).get(pair_id)
             )
 
             # Filter to secondary orientation options
@@ -799,3 +901,134 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
             pair_layers[pair_id] = edge_layer
 
     return assignments, pair_layers
+
+
+import math
+
+
+def direct_route_candidates(pcb_data, footprint, net_filter=None,
+                            diff_pairs=None, clearance: float = 0.1):
+    """#472: nets to DEFER from fanout entirely -- their balls are surface-
+    reachable and near their targets, so the escape stub would only build the
+    wall that seals the pocket (the human routes these point-to-point on the
+    surface: ottercast USB_D pure F.Cu, 0 vias, vs our stubbed 45mm chase).
+
+    A ball qualifies when ALL of:
+      * its nearest same-net pad OFF this footprint is within
+        KICAD_FANOUT_DIRECT_DIST mm (default 8.0);
+      * the ball sits in the outer KICAD_FANOUT_DIRECT_RINGS rings (default
+        2) of the field ON THE SIDE facing that target (surface-reachable
+        without crossing the interior);
+      * OR (congestion criterion, any ring): the target is within the
+        distance bound and the ball's own escape landing zone just outside
+        the chip edge already carries 3+ foreign SMD pads within 1.5mm of
+        the ball's outward edge exit -- a stub into a crowded pocket is
+        worse than none. (Congestion path still requires outer 2 rings+1.)
+
+    A NET qualifies only when every one of its balls on this footprint
+    qualifies (avoids half-stubbed nets); diff pairs qualify only when both
+    members do. Returns (net_names_set, per_ball_notes). Purely advisory --
+    the caller applies the skip and reports."""
+    import os
+    from bga_fanout.grid import analyze_bga_grid
+    try:
+        max_dist = float(os.environ.get('KICAD_FANOUT_DIRECT_DIST', '8.0'))
+    except ValueError:
+        max_dist = 8.0
+    try:
+        max_ring = int(os.environ.get('KICAD_FANOUT_DIRECT_RINGS', '2'))
+    except ValueError:
+        max_ring = 2
+    grid = analyze_bga_grid(footprint)
+    if grid is None:
+        return set(), []
+    cols, rows = list(grid.cols), list(grid.rows)
+    ref = footprint.reference
+    by_net = {}
+    for fp in pcb_data.footprints.values():
+        if fp.reference == ref:
+            continue
+        for p in fp.pads:
+            if p.net_id > 0:
+                by_net.setdefault(p.net_id, []).append(p)
+    # Foreign SMD pads near the chip, for the congestion criterion.
+    cx0, cy0, cx1, cy1 = (min(cols), min(rows), max(cols), max(rows))
+    near_pads = [p for fp in pcb_data.footprints.values()
+                 if fp.reference != ref
+                 for p in fp.pads
+                 if not p.drill
+                 and cx0 - 4 < p.global_x < cx1 + 4
+                 and cy0 - 4 < p.global_y < cy1 + 4]
+
+    def _ring(v, axis):
+        idx = min(range(len(axis)), key=lambda i: abs(axis[i] - v))
+        return min(idx, len(axis) - 1 - idx)
+
+    notes = []
+    ball_ok = {}   # net_id -> all-balls verdict
+    for pad in footprint.pads:
+        if pad.net_id <= 0 or pad.drill:
+            continue
+        if pad.net_name and pad.net_name.lower().startswith('unconnected-'):
+            continue
+        targets = by_net.get(pad.net_id)
+        if not targets:
+            ball_ok[pad.net_id] = False
+            continue
+        px, py = pad.global_x, pad.global_y
+        tp = min(targets, key=lambda t: (t.global_x - px) ** 2 + (t.global_y - py) ** 2)
+        d = math.hypot(tp.global_x - px, tp.global_y - py)
+        if d > max_dist:
+            ball_ok[pad.net_id] = False
+            continue
+        rx, ry = _ring(px, cols), _ring(py, rows)
+        dx, dy = tp.global_x - px, tp.global_y - py
+        # Ring depth along the axis the target lies on: a ball 1 ring from
+        # the east edge with an east target is surface-reachable regardless
+        # of its north-south depth.
+        ring_toward = rx if abs(dx) >= abs(dy) else ry
+        # The ball must actually FACE the target side of the field on that
+        # axis (its nearest edge on the axis is the target-side edge).
+        if abs(dx) >= abs(dy):
+            edge_side = 1 if px > (cols[0] + cols[-1]) / 2 else -1
+            faces = (edge_side > 0) == (dx > 0)
+        else:
+            edge_side = 1 if py > (rows[0] + rows[-1]) / 2 else -1
+            faces = (edge_side > 0) == (dy > 0)
+        ok = faces and ring_toward < max_ring
+        why = f"ring {ring_toward}, target {d:.1f}mm"
+        if not ok and faces and ring_toward < max_ring + 1:
+            # Congestion escape hatch: the landing zone outside the ball's
+            # edge exit is already crowded -- a stub there is a wall.
+            if abs(dx) >= abs(dy):
+                ex, ey = (cx1 + 0.5 if dx > 0 else cx0 - 0.5), py
+            else:
+                ex, ey = px, (cy1 + 0.5 if dy > 0 else cy0 - 0.5)
+            crowd = sum(1 for p in near_pads
+                        if math.hypot(p.global_x - ex, p.global_y - ey) < 1.5)
+            if crowd >= 3:
+                ok = True
+                why += f", congested exit ({crowd} foreign pads)"
+        if ball_ok.get(pad.net_id, True):
+            ball_ok[pad.net_id] = ok
+        if ok:
+            notes.append((pad.net_name, pad.pad_number, why))
+    qualified = {nid for nid, ok in ball_ok.items() if ok}
+    # Diff pairs: both members or neither.
+    if diff_pairs:
+        for pair in diff_pairs.values():
+            ids = {p.net_id for p in (pair.p_pad, pair.n_pad) if p}
+            if ids and not ids.issubset(qualified):
+                qualified -= ids
+    names = set()
+    id_to_name = {}
+    for pad in footprint.pads:
+        if pad.net_id in qualified and pad.net_name:
+            id_to_name[pad.net_id] = pad.net_name
+    from net_queries import matches_net_filter
+    for nid, nm in id_to_name.items():
+        if net_filter and not matches_net_filter(nm, net_filter):
+            continue
+        names.add(nm)
+    notes = [n for n in notes if n[0] in names]
+    return names, notes

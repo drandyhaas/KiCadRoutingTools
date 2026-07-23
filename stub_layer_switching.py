@@ -263,11 +263,16 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
                 pcb_data, stub, new_layer, config, segment_mods,
                 new_segments_out, debug)
         if not reused:
+            # The pad via sizes itself to fit (fab-ladder step-down when the
+            # nominal via can't drop here -- dense ball/pin fields).
+            fit = fitting_pad_via(stub.pad_x, stub.pad_y, stub.net_id,
+                                  pcb_data, config, set())
+            v_size, v_drill = fit if fit else (config.via_size, config.via_drill)
             via = Via(
                 x=stub.pad_x,
                 y=stub.pad_y,
-                size=config.via_size,
-                drill=config.via_drill,
+                size=v_size,
+                drill=v_drill,
                 layers=['F.Cu', 'B.Cu'],  # Through-hole via
                 net_id=stub.net_id
             )
@@ -388,9 +393,12 @@ def apply_bare_pad_target_via(pcb_data: PCBData, net_id: int, pad_x: float, pad_
     if best is not None:
         anchor_x, anchor_y = best[1].x, best[1].y
     else:
+        # Size the launch via to fit (fab-ladder step-down in dense fields).
+        fit = fitting_pad_via(pad_x, pad_y, net_id, pcb_data, config, set())
+        v_size, v_drill = fit if fit else (config.via_size, config.via_drill)
         via = Via(
             x=pad_x, y=pad_y,
-            size=config.via_size, drill=config.via_drill,
+            size=v_size, drill=v_drill,
             layers=['F.Cu', 'B.Cu'],  # through-hole
             net_id=net_id,
         )
@@ -696,7 +704,8 @@ def swap_would_orphan_smd_pad(pcb_data: PCBData, stub: StubInfo,
 
 def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
                                        pcb_data: PCBData, config: GridRouteConfig,
-                                       exclude_net_ids: Set[int]) -> Tuple[bool, str]:
+                                       exclude_net_ids: Set[int],
+                                       via_size: Optional[float] = None) -> Tuple[bool, str]:
     """Check a through-via dropped at (pad_x, pad_y) clears other-net copper.
 
     A layer-switch pad via is a through-hole (F.Cu..B.Cu), so its barrel spans
@@ -710,7 +719,7 @@ def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
     Returns (clear, reason).
     """
     exclude = set(exclude_net_ids) | {net_id}
-    via_r = config.via_size / 2
+    via_r = (via_size if via_size is not None else config.via_size) / 2
     # Foreign tracks on ANY layer - the barrel passes through all of them.
     for seg in pcb_data.segments:
         if seg.net_id in exclude:
@@ -752,6 +761,115 @@ def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
                 return False, (f"pad via at ({pad_x:.2f},{pad_y:.2f}) would clash with "
                                f"{nm} pad {pad.component_ref}.{pad.pad_number} (gap {d:.3f}mm)")
     return True, ""
+
+
+def foreign_stub_registry(pcb_data: PCBData, net_id: int) -> Dict:
+    """all_stubs_by_layer registry for the single-swap validator: every
+    OTHER net's segments grouped by layer (rescues are rare; linear scan)."""
+    all_stubs_by_layer: Dict = {}
+    by_net_layer: Dict = {}
+    for s in pcb_data.segments:
+        if s.net_id == net_id:
+            continue
+        by_net_layer.setdefault((s.net_id, s.layer), []).append(s)
+    for (nid, layer), segs in by_net_layer.items():
+        nname = pcb_data.nets[nid].name if nid in pcb_data.nets else str(nid)
+        all_stubs_by_layer.setdefault(layer, []).append((nname, segs))
+    return all_stubs_by_layer
+
+
+def switch_boxed_stub_near(pcb_data: PCBData, net_id: int,
+                           config: GridRouteConfig,
+                           near_x: float, near_y: float,
+                           radius_mm: float = 2.5,
+                           all_stubs_by_layer: Optional[Dict] = None,
+                           moved_tips: Optional[set] = None):
+    """Move the net's stub free end nearest (near_x, near_y) onto the
+    cheapest other layer that validates. The switch's pad via sizes itself
+    down the fab ladder (fitting_pad_via), so a stub walled inside a dense
+    ball field can still leave its layer. The shared last-resort move for
+    every routing stage (Phase-1 multipoint mains, Phase-3 taps, the
+    initial-loop rescue rung): the terminal's escape stub is usually the
+    only copper the router owns near a boxed pad, and moving it both opens
+    a launch on a free layer and removes a wall its neighbors are boxed by.
+
+    Returns (segment_mods, new_vias, from_layer, dest_layer) or None. The
+    CALLER retries its route and reverts with revert_stub_layer_switch when
+    the retry buys nothing. moved_tips (shared per rescue round) prevents
+    re-switching a stub this round already moved: two failed pads served by
+    the SAME escape stub would otherwise ping-pong it between layers --
+    each move is individually sound (layer relabels compose, the original
+    F.Cu-departure via is reused, undo tokens revert LIFO), just wasted."""
+    if not getattr(config, 'stub_layer_swap', True) or len(config.layers) < 2:
+        return None
+    from connectivity import get_stub_endpoints
+    ends = get_stub_endpoints(pcb_data, [net_id])
+    best = None
+    for (sx, sy, slayer) in ends or []:
+        if moved_tips is not None and (round(sx, 2), round(sy, 2)) in moved_tips:
+            continue
+        d = math.hypot(sx - near_x, sy - near_y)
+        if d < radius_mm and (best is None or d < best[0]):
+            best = (d, sx, sy, slayer)
+    if best is None:
+        return None
+    _, sx, sy, slayer = best
+    if moved_tips is not None:
+        moved_tips.add((round(sx, 2), round(sy, 2)))
+    stub = get_stub_info(pcb_data, net_id, sx, sy, slayer)
+    if stub is None:
+        return None
+    if all_stubs_by_layer is None:
+        all_stubs_by_layer = foreign_stub_registry(pcb_data, net_id)
+    costs = config.get_layer_costs() or [1000] * len(config.layers)
+    for dest, cost in sorted(zip(config.layers, costs), key=lambda lc: lc[1]):
+        if dest == slayer or cost < 0:
+            continue
+        ok, _why = validate_single_swap(stub, dest, all_stubs_by_layer,
+                                        pcb_data, config)
+        if not ok:
+            continue
+        new_vias, seg_mods = apply_stub_layer_switch(pcb_data, stub, dest,
+                                                     config, debug=False)
+        nname = pcb_data.nets[net_id].name if net_id in pcb_data.nets else str(net_id)
+        print(f"  Stub layer switch: {nname} stub at ({sx:.2f},{sy:.2f}) "
+              f"{slayer} -> {dest}")
+        return seg_mods, new_vias, slayer, dest
+    return None
+
+
+def fitting_pad_via(pad_x: float, pad_y: float, net_id: int, pcb_data: PCBData,
+                    config: GridRouteConfig, exclude_net_ids: Set[int]
+                    ) -> Optional[Tuple[float, float]]:
+    """(via_size, via_drill) for a layer-switch pad via at (pad_x, pad_y):
+    the run's nominal via when it clears foreign copper, else the FIRST
+    smaller fab-ladder via that does. A nominal 0.5 via never fits a
+    0.65mm-pitch ball field boxed by the neighbors' fanout vias; the
+    0.3/0.25 rungs do -- and a stub that can layer-switch with a small via
+    escapes a pocket the nominal via walls it into. Returns None when no
+    size fits (the swap is then genuinely invalid).
+
+    Deterministic pure function of board state: validate_swap and
+    apply_stub_layer_switch both call it and get the same answer."""
+    from fab_tiers import fab_floor_ladder, warn_fab_escalation
+    n_layers = len(pcb_data.board_info.copper_layers) or 2
+    ladder = fab_floor_ladder(n_layers)
+    candidates = [(config.via_size, config.via_drill)]
+    candidates += [(f['via_diameter'], f['via_drill']) for f in ladder
+                   if f['via_diameter'] < config.via_size - 1e-9]
+    for i, (v_dia, v_drill) in enumerate(candidates):
+        clear, _ = via_barrel_clear_of_foreign_copper(
+            pad_x, pad_y, net_id, pcb_data, config, exclude_net_ids,
+            via_size=v_dia)
+        if clear:
+            if i > 0:
+                if v_dia < ladder[0]['via_diameter'] - 1e-9:
+                    warn_fab_escalation(f"layer-switch pad via (net {net_id})")
+                print(f"      layer-switch via stepped down to "
+                      f"{v_dia:g}/{v_drill:g} at ({pad_x:.2f},{pad_y:.2f}) "
+                      f"(nominal {config.via_size:g} does not fit)")
+            return v_dia, v_drill
+    return None
 
 
 def stub_clear_of_foreign_pads(segments: List[Segment], dest_layer: str, net_id: int,
@@ -971,10 +1089,13 @@ def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
     via_exclude = set(swap_partner_net_ids or set()) | {stub_p.net_id, stub_n.net_id}
     for stub in (stub_p, stub_n):
         if needs_pad_via_for_switch(stub):
-            via_clear, via_reason = via_barrel_clear_of_foreign_copper(
-                stub.pad_x, stub.pad_y, stub.net_id, pcb_data, config, via_exclude)
-            if not via_clear:
-                return False, via_reason
+            # Valid if ANY fab-ladder via size fits (apply_stub_layer_switch
+            # sizes the via with the same helper).
+            if fitting_pad_via(stub.pad_x, stub.pad_y, stub.net_id,
+                               pcb_data, config, via_exclude) is None:
+                _, via_reason = via_barrel_clear_of_foreign_copper(
+                    stub.pad_x, stub.pad_y, stub.net_id, pcb_data, config, via_exclude)
+                return False, via_reason or "no via size fits at the pad"
 
     # Check 5: the stub copper moved onto dest_layer must clear other-net pads
     # living on that layer (issue #123: escape stub swapped onto a cap pad's
@@ -1275,13 +1396,17 @@ def validate_single_swap(stub: StubInfo, dest_layer: str,
     if not setback_valid:
         return False, setback_reason
 
-    # Check 3: pad-via barrel must clear other-net under-pad copper (issue #123)
+    # Check 3: pad-via barrel must clear other-net under-pad copper (issue #123).
+    # Valid if ANY fab-ladder via size fits -- apply_stub_layer_switch sizes
+    # the via with the same helper (a nominal 0.5 via never fits a dense
+    # ball field; the smaller rungs do).
     if needs_pad_via_for_switch(stub):
-        via_clear, via_reason = via_barrel_clear_of_foreign_copper(
-            stub.pad_x, stub.pad_y, stub.net_id, pcb_data, config,
-            set(swap_partner_net_ids or set()))
-        if not via_clear:
-            return False, via_reason
+        if fitting_pad_via(stub.pad_x, stub.pad_y, stub.net_id, pcb_data,
+                           config, set(swap_partner_net_ids or set())) is None:
+            _, via_reason = via_barrel_clear_of_foreign_copper(
+                stub.pad_x, stub.pad_y, stub.net_id, pcb_data, config,
+                set(swap_partner_net_ids or set()))
+            return False, via_reason or "no via size fits at the pad"
 
     # Checks 4+5 validate the WHOLE connected source-side trace, not just the
     # pad nub get_stub_info returns -- a source switch re-routes that whole

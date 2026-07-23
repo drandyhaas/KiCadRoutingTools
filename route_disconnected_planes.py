@@ -335,6 +335,7 @@ def route_planes(
     zone_clearance: float = defaults.PLANE_ZONE_CLEARANCE,
     grid_step: float = defaults.GRID_STEP,
     analysis_grid_step: float = defaults.REPAIR_ANALYSIS_GRID_STEP,
+    ripup_blocker_select: str = defaults.RIPUP_BLOCKER_SELECT,
     max_track_width: float = defaults.REPAIR_MAX_TRACK_WIDTH,
     min_track_width: float = defaults.REPAIR_MIN_TRACK_WIDTH,
     track_via_clearance: float = defaults.PLANE_TRACK_VIA_CLEARANCE,
@@ -403,6 +404,16 @@ def route_planes(
     Returns:
         Tuple of (total_routes_added, total_regions_connected)
     """
+    # zone_clearance=None means "follow the routed clearance": the GUI planes
+    # tab's zone-clearance "auto" checkbox (ON by default) passes None, as does
+    # any caller that leaves it unset. create_plane resolves this (via
+    # _resolve_zone_clearance); the repair path did NOT, so None threaded down
+    # into find_disconnected_zone_regions' layer_clearance and detonated
+    # pad_rect_halfspan as `float + None` on the first foreign pad/segment/via
+    # (issue #475). Resolve it here in the shared engine so BOTH fronts get it;
+    # the CLI passes a real default (never None), so this is a no-op there.
+    if zone_clearance is None:
+        zone_clearance = clearance if clearance is not None else defaults.PLANE_ZONE_CLEARANCE
     from route import _dump_engine_config
     _dump_engine_config('repair_planes', dict(locals()))
     # Board-setup copper-to-edge rule (#338): engine-side so the GUI planes
@@ -458,7 +469,8 @@ def route_planes(
         via_size=via_size,
         via_drill=via_drill,
         grid_step=grid_step,
-        board_edge_clearance=board_edge_clearance
+        board_edge_clearance=board_edge_clearance,
+        ripup_blocker_select=ripup_blocker_select
     )
 
     # Cross-class clearance (#434): the repair step's own copper (region joins,
@@ -842,7 +854,8 @@ def route_planes(
             net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
             net_pads = pcb_data.pads_by_net.get(net_id, [])
             res = check_net_connectivity(net_id, net_segs, net_vias, net_pads,
-                                         zones_by_net.get(net_id, []))
+                                         zones_by_net.get(net_id, []),
+                                         pcb_data=pcb_data)
             if res.get('connected'):
                 continue
             pad_by_key = {}
@@ -940,7 +953,8 @@ def route_planes(
                     _v_segs = [s for s in pcb_data.segments if s.net_id == net_id]
                     _v_vias = [v for v in pcb_data.vias if v.net_id == net_id]
                     _v_res = check_net_connectivity(net_id, _v_segs, _v_vias, net_pads,
-                                                    zones_by_net.get(net_id, []))
+                                                    zones_by_net.get(net_id, []),
+                                                    pcb_data=pcb_data)
                     _pad_key = (round(pad.global_x, 3), round(pad.global_y, 3),
                                 pad.component_ref)
                     _still = {(round(x, 3), round(y, 3), ref)
@@ -1003,7 +1017,8 @@ def route_planes(
                         _t_segs = [s for s in pcb_data.segments if s.net_id == net_id]
                         _t_vias = [v for v in pcb_data.vias if v.net_id == net_id]
                         _t_res = check_net_connectivity(net_id, _t_segs, _t_vias, net_pads,
-                                                        zones_by_net.get(net_id, []))
+                                                        zones_by_net.get(net_id, []),
+                                                        pcb_data=pcb_data)
                         _pad_key = (round(pad.global_x, 3), round(pad.global_y, 3),
                                     pad.component_ref)
                         _still = {(round(x, 3), round(y, 3), ref)
@@ -1521,6 +1536,10 @@ Examples:
     # Grid step
     parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP,
                         help="Routing grid step in mm (default: 0.1)")
+    parser.add_argument("--ripup-blocker-select",
+                        choices=list(defaults.RIPUP_BLOCKER_SELECT_CHOICES),
+                        default=defaults.RIPUP_BLOCKER_SELECT,
+                        help="""Blocker SELECTION algorithm for the rip-up ladder (see route.py --help / docs/rip-up-reroute.md)""")
     parser.add_argument("--analysis-grid-step", type=float, default=defaults.REPAIR_ANALYSIS_GRID_STEP,
                         help="Grid step for connectivity analysis in mm (coarser = faster, default: 0.5)")
 
@@ -1694,6 +1713,7 @@ Examples:
         zone_clearance=args.zone_clearance,
         grid_step=args.grid_step,
         analysis_grid_step=args.analysis_grid_step,
+        ripup_blocker_select=args.ripup_blocker_select,
         max_track_width=args.max_track_width,
         min_track_width=args.min_track_width,
         track_via_clearance=args.track_via_clearance,
@@ -1800,14 +1820,24 @@ Examples:
     import json as _json, clearance_ledger as _cl
     _routes, _regions = (_rdp_result if isinstance(_rdp_result, tuple)
                          and len(_rdp_result) >= 2 else (0, 0))
+    _plane_nets = sorted(set((args.nets or []) + (args.power_nets or [])))
     _summary = {
         "total_routes": _routes,
         "total_regions": _regions,
         "min_clearance_used": _cl.effective(args.clearance),
+        "plane_nets": _plane_nets,
     }
     if LAST_RIPPED_RECONNECT is not None:
         _summary["ripped_reconnect"] = LAST_RIPPED_RECONNECT
     print("JSON_SUMMARY: " + _json.dumps(_summary))
+    # Plane-net manifest sidecar (see route_planes.py / plane_io helpers).
+    try:
+        from plane_io import record_plane_manifest
+        record_plane_manifest(args.output_file, _plane_nets,
+                              'route_disconnected_planes',
+                              input_board_path=args.input_file, summary=_summary)
+    except Exception as e:
+        print(f"  (plane manifest not written: {e})")
 
 
 if __name__ == "__main__":

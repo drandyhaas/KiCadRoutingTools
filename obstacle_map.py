@@ -17,7 +17,6 @@ import routing_defaults as defaults
 from routing_utils import build_layer_map, iter_pad_blocked_cells, pad_blocked_cells_array, \
     circle_offsets, segment_blocked_cells_array
 from net_queries import expand_pad_layers
-from obstacle_costs import add_bga_proximity_costs
 
 # Import Rust router
 import sys
@@ -139,7 +138,11 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         obstacles.set_bga_zone(gmin_x, gmin_y, gmax_x, gmax_y)
 
     # Add BGA proximity costs (penalize routing near BGA edges)
-    add_bga_proximity_costs(obstacles, config)
+    # BGA proximity costs are NOT stamped here anymore (soft-knobs review
+    # B1): the base-map stub_proximity stamp was wiped by
+    # prepare_obstacles_inplace before every single-ended net. They now
+    # live in track_proximity_cache[BGA_PROXIMITY_CACHE_KEY] (registered
+    # by the batch flows) and re-merge on every prepare in every path.
 
     # Net-tie corridors (Kelvin shunts / net-tie parts, see
     # _compute_net_tie_corridors): per tied net, the cells where the tied
@@ -2521,7 +2524,11 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
         bga_zones_grid.append((gmin_x, gmin_y, gmax_x, gmax_y))
 
     # Add BGA proximity costs (penalize routing near BGA edges)
-    add_bga_proximity_costs(obstacles, config)
+    # BGA proximity costs are NOT stamped here anymore (soft-knobs review
+    # B1): the base-map stub_proximity stamp was wiped by
+    # prepare_obstacles_inplace before every single-ended net. They now
+    # live in track_proximity_cache[BGA_PROXIMITY_CACHE_KEY] (registered
+    # by the batch flows) and re-merge on every prepare in every path.
 
     # Add segments as obstacles (excluding nets we'll route)
     # Use actual segment width and layer-specific routing track width for proper clearance

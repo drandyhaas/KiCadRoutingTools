@@ -34,7 +34,8 @@ from length_matching import (
 def setup_bga_exclusion_zones(
     pcb_data: PCBData,
     disable_bga_zones: Optional[List[str]],
-    existing_zones: Optional[List[Tuple[float, float, float, float]]] = None
+    existing_zones: Optional[List[Tuple[float, float, float, float]]] = None,
+    selected_net_ids: Optional[List[int]] = None
 ) -> List[Tuple[float, float, float, float, float]]:
     """
     Handle --no-bga-zones argument and auto-detect BGA exclusion zones.
@@ -84,10 +85,64 @@ def setup_bga_exclusion_zones(
         bga_exclusion_zones = auto_detect_bga_exclusion_zones(pcb_data, margin=0.0)
         if bga_exclusion_zones:
             bga_components = find_components_by_type(pcb_data, 'BGA')
-            print(f"Auto-detected {len(bga_exclusion_zones)} BGA exclusion zone(s):")
-            for i, (fp, zone) in enumerate(zip(bga_components, bga_exclusion_zones)):
-                edge_tol = zone[4] if len(zone) > 4 else 1.6
-                print(f"  {fp.reference}: ({zone[0]:.1f}, {zone[1]:.1f}) to ({zone[2]:.1f}, {zone[3]:.1f}), edge_tol={edge_tol:.2f}mm")
+            # #472 bare-ball exemption: a zone that entombs a BARE ball (no
+            # attached copper) of a net THIS run must route makes that net
+            # unroutable -- the deferred-fanout (direct-route) balls, and any
+            # net whose fanout dropped it. Auto-disable that component's zone.
+            # Engine-level (batch_route/batch_route_diff_pairs), so the GUI
+            # inherits; board-state-driven, so no sidecar file is load-bearing.
+            import os as _os
+            if (selected_net_ids and _os.environ.get(
+                    'KICAD_BARE_BALL_ZONE_EXEMPT', '1') not in ('0', 'off', 'false')):
+                _sel = set(selected_net_ids)
+                # Only nets that can actually be ROUTED (>=2 pads): a
+                # single-pad net's ball is trivially bare and disabled
+                # U6/U7's zones spuriously on ottercast.
+                _sel = {n for n in _sel
+                        if len(pcb_data.pads_by_net.get(n, [])) >= 2}
+                _pts_by_net = {}
+                for _s in pcb_data.segments:
+                    if _s.net_id in _sel:
+                        _pts_by_net.setdefault(_s.net_id, []).append(
+                            (_s.start_x, _s.start_y))
+                        _pts_by_net[_s.net_id].append((_s.end_x, _s.end_y))
+                for _v in pcb_data.vias:
+                    if _v.net_id in _sel:
+                        _pts_by_net.setdefault(_v.net_id, []).append((_v.x, _v.y))
+
+                def _ball_bare(_p):
+                    for (_x, _y) in _pts_by_net.get(_p.net_id, ()):
+                        if abs(_x - _p.global_x) < 0.05 and abs(_y - _p.global_y) < 0.05:
+                            return False
+                    return True
+                _keep, _keep_fps = [], []
+                for fp, zone in zip(bga_components, bga_exclusion_zones):
+                    # Only balls ENTOMBED beyond the zone's edge-tolerance
+                    # band trigger: outer-ring bare balls (the #472 deferral
+                    # targets) are reachable through the band + the endpoint
+                    # exemption machinery (MIPI has routed bare-ball for the
+                    # whole record history with zones ON).
+                    _x0, _y0, _x1, _y1, _tol = zone
+                    _bare = sorted({_p.net_name for _p in fp.pads
+                                    if _p.net_id in _sel and not _p.drill
+                                    and min(_p.global_x - _x0, _x1 - _p.global_x,
+                                            _p.global_y - _y0, _y1 - _p.global_y)
+                                    > _tol + 0.65
+                                    and _ball_bare(_p)})
+                    if _bare:
+                        print(f"  {fp.reference}: zone DISABLED -- bare ball(s) of "
+                              f"selected net(s) inside it ({', '.join(_bare[:6])}"
+                              f"{', ...' if len(_bare) > 6 else ''}) (#472)")
+                    else:
+                        _keep.append(zone)
+                        _keep_fps.append(fp)
+                bga_exclusion_zones = _keep
+                bga_components = _keep_fps
+            if bga_exclusion_zones:
+                print(f"Auto-detected {len(bga_exclusion_zones)} BGA exclusion zone(s):")
+                for i, (fp, zone) in enumerate(zip(bga_components, bga_exclusion_zones)):
+                    edge_tol = zone[4] if len(zone) > 4 else 1.6
+                    print(f"  {fp.reference}: ({zone[0]:.1f}, {zone[1]:.1f}) to ({zone[2]:.1f}, {zone[3]:.1f}), edge_tol={edge_tol:.2f}mm")
         else:
             print("No BGA components detected - no exclusion zones needed")
         return bga_exclusion_zones
@@ -203,9 +258,14 @@ def warn_targets_outside_board(pcb_data: PCBData,
             if not inside:
                 # Distinguish pads the router will actually SKIP (clearly
                 # outside, issue #291) from pads grazing the outline (kept
-                # routable -- castellated / edge-connector pads).
-                out_dist = (_dist_point_to_polygon(x, y, outline) if has_poly
-                            else -dist)
+                # routable -- castellated / edge-connector pads). Measure to the
+                # NEAREST outer ring (multi-outline boards, #304); `outline`
+                # (singular) is only bound on the bbox-fallback path, so use the
+                # `outlines` list that `has_poly`/`inside` were computed from --
+                # referencing `outline` here was an unbound-local crash whenever
+                # a pad fell outside a real polygon outline (issue #475).
+                out_dist = (min(_dist_point_to_polygon(x, y, o) for o in outlines)
+                            if has_poly else -dist)
                 kind = 'outside' if out_dist > OFF_BOARD_TOLERANCE else 'near-edge'
                 flagged.append((net_name, where, x, y, kind))
             elif edge_margin > 0 and dist < edge_margin:
@@ -288,9 +348,12 @@ def filter_already_routed(
             continue
 
         # Use check_net_connectivity for robust connectivity check
+        # pcb_data => fill-component-aware zone credit: without it a net
+        # whose only "connection" is a pinched pour island graded already-
+        # routed and was SKIPPED by every later step (validator parity).
         result = check_net_connectivity(
             net_id, net_segments, net_vias, net_pads, net_zones,
-            tolerance=0.02
+            tolerance=0.02, pcb_data=pcb_data
         )
 
         if result['connected']:
@@ -505,6 +568,7 @@ def get_common_config_kwargs(
     keepout_enabled: bool = False,
     keepout_layer: str = "User.2",
     ripup_abandon_metric: str = 'stranded',
+    ripup_blocker_select: str = 'count',
 ) -> Dict:
     """
     Build config kwargs dict from common parameters.
@@ -547,6 +611,7 @@ def get_common_config_kwargs(
         debug_lines=debug_lines,
         verbose=verbose,
         max_rip_up_count=max_rip_up_count,
+        ripup_blocker_select=ripup_blocker_select,
         ripup_abandon_metric=ripup_abandon_metric,
         target_swap_crossing_penalty=crossing_penalty,
         crossing_layer_check=crossing_layer_check,

@@ -89,7 +89,7 @@ from reroute_loop import run_reroute_loop
 from length_matching import apply_intra_pair_length_matching
 from net_ordering import order_nets_mps, order_nets_inside_out, separate_nets_by_type
 from routing_common import (
-    setup_bga_exclusion_zones, filter_already_routed,
+    setup_bga_exclusion_zones, resolve_net_ids, filter_already_routed,
     run_length_matching, sync_pcb_data_segments, get_common_config_kwargs,
     warn_targets_outside_board
 )
@@ -108,6 +108,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
                 direction_order: str = None,
                 ordering_strategy: str = "inside_out",
+                ripup_blocker_select: str = defaults.RIPUP_BLOCKER_SELECT,
                 disable_bga_zones: Optional[List[str]] = None,
                 track_width: float = defaults.TRACK_WIDTH,
                 impedance: Optional[float] = None,
@@ -362,7 +363,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                                         min_width=track_width)
 
     # Auto-detect BGA exclusion zones if not specified
-    bga_exclusion_zones = setup_bga_exclusion_zones(pcb_data, disable_bga_zones, bga_exclusion_zones)
+    _sel_ids = [nid for _nm, nid in resolve_net_ids(pcb_data, net_names)] \
+        if net_names else []
+    bga_exclusion_zones = setup_bga_exclusion_zones(
+        pcb_data, disable_bga_zones, bga_exclusion_zones,
+        selected_net_ids=_sel_ids)
 
     # Build config kwargs from common parameters plus diff-pair specific options
     config_kwargs = get_common_config_kwargs(
@@ -381,6 +386,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         bga_proximity_cost=bga_proximity_cost, track_proximity_distance=track_proximity_distance,
         track_proximity_cost=track_proximity_cost, debug_lines=debug_lines, verbose=verbose,
         max_rip_up_count=max_rip_up_count, crossing_penalty=crossing_penalty,
+        ripup_blocker_select=ripup_blocker_select,
         crossing_layer_check=crossing_layer_check, routing_clearance_margin=routing_clearance_margin,
         hole_to_hole_clearance=hole_to_hole_clearance, board_edge_clearance=board_edge_clearance,
         vertical_attraction_radius=vertical_attraction_radius,
@@ -903,6 +909,24 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     routed_results = state.routed_results
     diff_pair_by_net_id = state.diff_pair_by_net_id
     track_proximity_cache = state.track_proximity_cache
+
+    # BGA proximity costs live in the track-proximity cache under a reserved
+    # key (soft-knobs review B1): stamped into the base map they were wiped
+    # by prepare_obstacles_inplace's clear_stub_proximity before EVERY
+    # single-ended net, so the knob silently no-op'd in the most common path.
+    # The cache is re-merged on every prepare in every path (single-ended,
+    # diff pair, Phase 3 via the working-map clone).
+    from obstacle_costs import compute_bga_proximity_cost_cells, BGA_PROXIMITY_CACHE_KEY
+    _bga_cells = compute_bga_proximity_cost_cells(config, len(config.layers))
+    if len(_bga_cells):
+        track_proximity_cache[BGA_PROXIMITY_CACHE_KEY] = _bga_cells
+
+    # Congestion-aware soft costs (#424 Phase D): all-layer copper-density
+    # field under a second reserved cache key; env-gated (KICAD_CONGESTION_
+    # COST=0 default off). Vias in hot cells pay via_proximity_cost x the
+    # cell cost via the Rust via branch.
+    from congestion_field import register_congestion_field
+    register_congestion_field(pcb_data, config, track_proximity_cache)
     layer_map = state.layer_map
     reroute_queue = state.reroute_queue
     polarity_swapped_pairs = state.polarity_swapped_pairs
@@ -1563,6 +1587,10 @@ Examples:
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=3,
                         help="Maximum blockers to rip up at once during rip-up and retry (default: 3)")
+    parser.add_argument("--ripup-blocker-select",
+                        choices=list(defaults.RIPUP_BLOCKER_SELECT_CHOICES),
+                        default=defaults.RIPUP_BLOCKER_SELECT,
+                        help="""Blocker SELECTION algorithm for the rip-up ladder (see route.py --help / docs/rip-up-reroute.md)""")
     parser.add_argument("--max-setback-angle", type=float, default=45.0,
                         help="Maximum angle (degrees) for setback position search (default: 45.0)")
     parser.add_argument("--routing-clearance-margin", type=float, default=1.0,
@@ -1753,6 +1781,15 @@ Examples:
     # Expand patterns to net names
     net_names = expand_net_patterns(pcb_data, all_patterns)
 
+    # Plane-net manifest (chain consistency): wildcard-matched plane nets are
+    # excluded; a verbatim pattern still includes one (see plane_io helpers).
+    from plane_io import apply_plane_manifest_exclusions
+    net_names, _plane_excl = apply_plane_manifest_exclusions(
+        args.input_file, all_patterns, net_names)
+    if _plane_excl:
+        print(f"Plane manifest: excluded {len(_plane_excl)} plane net(s) "
+              f"from wildcard selection: {', '.join(sorted(_plane_excl))}")
+
     if not net_names:
         print("No nets matched the given patterns!")
         sys.exit(1)
@@ -1835,6 +1872,7 @@ Examples:
                 verbose=args.verbose,
                 polarity_swap_nets=args.polarity_swap_nets,
                 max_rip_up_count=args.max_ripup,
+                ripup_blocker_select=args.ripup_blocker_select,
                 max_setback_angle=args.max_setback_angle,
                 enable_layer_switch=not args.no_stub_layer_swap,
                 crossing_layer_check=not args.no_crossing_layer_check,
@@ -1888,3 +1926,11 @@ Examples:
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+
+    # Plane-net manifest carry-forward (chain consistency; see plane_io).
+    if args.output_file and os.path.isfile(args.output_file):
+        try:
+            from plane_io import carry_plane_manifest
+            carry_plane_manifest(args.input_file, args.output_file)
+        except Exception as e:
+            print(f"  (plane manifest not carried: {e})")

@@ -173,7 +173,12 @@ def run():
         # the empty -x half of the old bbox (local x ~ -2) is now OUTSIDE the copper
         check("gr_circle: anchor-side empty region no longer copper",
               not _pip(98.0, 50.0, rp))
-        check("gr_circle: disc centre is copper", _pip(101.35, 50.0, rp))
+        # An UNFILLED gr_circle (fill no, stroke 0.4) is a RING: the centre
+        # opening is NOT copper -- a bottom-port mic's signal pad lives there
+        # (ottercast MK1; the old solid-disc model made it unroutable) --
+        # while the stroke band is.
+        check("gr_circle: ring centre is OPEN (fill no)", not _pip(101.35, 50.0, rp))
+        check("gr_circle: ring band is copper", _pip(102.7, 50.0, rp))
 
     print("=" * 60)
     if fails:

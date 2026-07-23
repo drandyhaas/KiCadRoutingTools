@@ -1973,6 +1973,74 @@ def _empty_plane_results(return_results: bool):
     return (0, 0, 0)
 
 
+def _resolve_zone_clearance(zone_clearance, clearance, min_thickness,
+                            pcb_data, via_size, net_names=None):
+    """Resolve the pour clearance (see call site). None -> the routed
+    clearance; then, if the densest BGA via lattice the pour must serve is
+    tighter than 2*zc + min_thickness, escalate DOWN to what threads --
+    floored at the fab minimum clearance -- with a warning either way."""
+    from kicad_parser import find_components_by_type, detect_bga_pitch
+    from list_nets import fab_floors
+    explicit = zone_clearance is not None
+    zc = zone_clearance if explicit else clearance
+    if not explicit:
+        print(f"Zone clearance: following routed clearance {zc:g}mm "
+              f"(--zone-clearance to override)")
+    # Tightest pour channel across BGA fields: adjacent lattice gap
+    # pitch - via_size (the via size a field carries is dominated by the
+    # routing/fanout vias; use the run's via_size as the estimate).
+    plane_ids = {i for i, n in pcb_data.nets.items()
+                 if n.name in set(net_names or [])}
+    tightest = None
+    for fp in find_components_by_type(pcb_data, 'BGA'):
+        pitch = detect_bga_pitch(fp)
+        if not pitch:
+            continue
+        # Only fields the pour must actually serve: a BGA with no plane-net
+        # via inside it constrains nothing (U6's 0.5mm pitch false-warned).
+        _xs = [p2.global_x for p2 in fp.pads]
+        _ys = [p2.global_y for p2 in fp.pads]
+        if not any(v.net_id in plane_ids
+                   and min(_xs) - 0.5 < v.x < max(_xs) + 0.5
+                   and min(_ys) - 0.5 < v.y < max(_ys) + 0.5
+                   for v in pcb_data.vias):
+            continue
+        # Gap from the vias ACTUALLY in the field (fanout vias, typically
+        # smaller than the run's --via-size); fall back to the run size on
+        # a virgin field.
+        _in = [v.size for v in pcb_data.vias
+               if min(_xs) - 0.5 < v.x < max(_xs) + 0.5
+               and min(_ys) - 0.5 < v.y < max(_ys) + 0.5 and v.size > 0]
+        field_via = max(_in) if _in else via_size
+        gap = pitch - field_via
+        if tightest is None or gap < tightest:
+            tightest = gap
+    if tightest is None:
+        return zc
+    needed = (tightest - min_thickness) / 2.0
+    if needed >= zc:
+        return zc
+    ncu = (len(pcb_data.board_info.copper_layers)
+           if pcb_data.board_info.copper_layers else 2)
+    floor = fab_floors(ncu).get('clearance', 0.09)
+    if needed < floor:
+        print(f"  WARNING: pour cannot thread the densest BGA lattice even "
+              f"at the fab floor (needs {needed:.3f}mm < floor {floor:g}); "
+              f"zone clearance stays {zc:g} -- interior plane vias in that "
+              f"field may be unreachable islands")
+        return zc
+    if explicit:
+        print(f"  WARNING: explicit zone clearance {zc:g} cannot thread the "
+              f"densest BGA lattice (gap {tightest:.3f}mm needs <= "
+              f"{needed:.3f}); keeping it -- pass a smaller --zone-clearance "
+              f"or expect isolated plane islands there")
+        return zc
+    print(f"  Zone clearance escalated {zc:g} -> {needed:.3f}mm so the pour "
+          f"threads the densest BGA lattice (gap {tightest:.3f}mm, min "
+          f"width {min_thickness:g}; fab floor {floor:g})")
+    return round(needed, 4)
+
+
 def create_plane(
     input_file: str,
     output_file: str,
@@ -1982,8 +2050,9 @@ def create_plane(
     via_drill: float = defaults.VIA_DRILL,
     track_width: float = defaults.TRACK_WIDTH,
     clearance: float = defaults.CLEARANCE,
-    zone_clearance: float = defaults.PLANE_ZONE_CLEARANCE,
+    zone_clearance: float = None,
     min_thickness: float = defaults.PLANE_MIN_THICKNESS,
+    ripup_blocker_select: str = defaults.RIPUP_BLOCKER_SELECT,
     grid_step: float = defaults.GRID_STEP,
     max_search_radius: float = defaults.PLANE_MAX_SEARCH_RADIUS,
     max_via_reuse_radius: float = defaults.PLANE_MAX_VIA_REUSE_RADIUS,
@@ -2091,6 +2160,17 @@ def create_plane(
     if pcb_data is None:
         print(f"Loading PCB from {input_file}...")
         pcb_data = parse_kicad_pcb(input_file)
+
+    # Zone clearance defaults to the step's ROUTED clearance, and escalates
+    # DOWN toward the fab floor when even that cannot thread the densest BGA
+    # via lattice the pour must serve (ottercast: the old fixed 0.2 default
+    # vs 0.1 routing sealed the whole U1 field -- the pour needs
+    # 2*zone_clearance + min_thickness of gap to pass between vias, and no
+    # gap in a 0.65mm-pitch field is 0.5mm). Explicit values are honored
+    # (but still warned about when they cannot thread).
+    zone_clearance = _resolve_zone_clearance(
+        zone_clearance, clearance, min_thickness, pcb_data, via_size,
+        net_names)
 
     # Resolve all net IDs upfront
     net_ids = []
@@ -2218,7 +2298,8 @@ def create_plane(
         hole_to_hole_clearance=hole_to_hole_clearance,
         board_edge_clearance=board_edge_clearance,
         layers=all_layers,
-        layer_costs=layer_costs
+        layer_costs=layer_costs,
+        ripup_blocker_select=ripup_blocker_select
     )
     # Cross-class clearance (#434, mirrors batch_route/repair): auto-read the
     # board's non-Default netclasses from the INPUT's sibling .kicad_pro when
@@ -3329,6 +3410,10 @@ Examples:
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")
     parser.add_argument("output_file", nargs="?", help="Output KiCad PCB file (default: input_routed.kicad_pcb)")
+    parser.add_argument("--ripup-blocker-select",
+                        choices=list(defaults.RIPUP_BLOCKER_SELECT_CHOICES),
+                        default=defaults.RIPUP_BLOCKER_SELECT,
+                        help="""Blocker SELECTION algorithm for the rip-up ladder (see route.py --help / docs/rip-up-reroute.md)""")
     # #381 D9: accept --output FILE like route.py / route_diff.py (flag form of the
     # positional output). Additive: default None, positional still works.
     parser.add_argument("--output", metavar="FILE",
@@ -3349,7 +3434,7 @@ Examples:
     parser.add_argument("--clearance", type=float, default=None, help="Copper clearance CEILING in mm. When given, every net class (Default included) is capped at min(class, this) and the writeback clamps. When OMITTED, each net routes at its own net-class clearance (base = the board's Default class, else 0.25).")
 
     # Zone options
-    parser.add_argument("--zone-clearance", type=float, default=defaults.PLANE_ZONE_CLEARANCE, help="Zone clearance from other copper in mm (default: 0.2)")
+    parser.add_argument("--zone-clearance", type=float, default=None, help="Zone (pour) clearance from other copper in mm. Default: follow --clearance, auto-stepping down to the fab floor if the pour cannot thread the densest BGA via lattice")
     parser.add_argument("--min-thickness", type=float, default=defaults.PLANE_MIN_THICKNESS, help="Minimum zone copper thickness in mm (default: 0.1)")
 
     # Algorithm options
@@ -3549,6 +3634,7 @@ Examples:
     create_plane(
         input_file=args.input_file,
         output_file=args.output_file,
+        ripup_blocker_select=args.ripup_blocker_select,
         net_names=net_names,
         plane_layers=plane_layers,
         via_size=args.via_size,
@@ -3705,8 +3791,18 @@ Examples:
     import json as _json, clearance_ledger as _cl
     _summary = {
         "min_clearance_used": _cl.effective(args.clearance),
+        "plane_nets": sorted(set(args.nets)),
     }
     print("JSON_SUMMARY: " + _json.dumps(_summary))
+    # Plane-net manifest sidecar: persist the summary next to the output so
+    # downstream route/diff/fanout steps auto-exclude the planed nets from
+    # wildcard selection (chain consistency -- see plane_io helpers).
+    try:
+        from plane_io import record_plane_manifest
+        record_plane_manifest(args.output_file, args.nets, 'route_planes',
+                              input_board_path=args.input_file, summary=_summary)
+    except Exception as e:
+        print(f"  (plane manifest not written: {e})")
 
 
 if __name__ == "__main__":

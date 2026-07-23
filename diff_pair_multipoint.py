@@ -799,6 +799,35 @@ def route_multipoint_diff_pair(state, pair: DiffPairNet, pair_name: str,
             if leg_results is not None:
                 return leg_results, merged, uncoupled + se
 
+    # Last resort before deferring: MOVE the blocked terminals' escape stubs
+    # to a more-open layer. The switch's pad via sizes itself down the fab
+    # ladder (fitting_pad_via) -- the nominal via never fits a dense ball
+    # field, the smaller rungs do -- and moving a stub also REMOVES the
+    # copper that walls its twin (each USB twin's F.Cu escape is the other's
+    # nearest wall, so the pair unboxes itself). Endpoint derivation finds
+    # the moved tips naturally: the old-layer copper is gone.
+    switched = _switch_blocked_terminal_stubs(state, pair, terminals)
+    if switched:
+        leg_results, merged, se = _route_terminal_set(state, pair, pair_name,
+                                                      terminals)
+        if leg_results is not None:
+            print(f"  STUB LAYER SWITCH SUCCESS: coupled chain routed after "
+                  f"moving {len(switched)} terminal stub pair(s)")
+            # Persist the switch for the output writer: the moved stubs are
+            # PRE-EXISTING file segments (relabeled in memory only) and the
+            # pad vias live outside any route result -- without these the
+            # written file keeps the stubs on the old layer and drops the
+            # vias, shipping a board whose coupled route floats (the
+            # in-memory board and the file silently diverge).
+            for mods, vias in switched:
+                state.all_segment_modifications.extend(mods)
+                state.all_swap_vias.extend(vias)
+            return leg_results, merged, se
+        from stub_layer_switching import revert_stub_layer_switch
+        for mods, vias in reversed(switched):
+            revert_stub_layer_switch(pcb_data, mods, vias)
+        print(f"  Stub layer switch bought nothing - reverted")
+
     # No coupled chain could be routed and relocation didn't help (e.g. a dense
     # connector fan-out whose pads are too tightly pitched to drop relocation
     # vias - tigard /USB_D on a congested F.Cu). Rather than leave the pair
@@ -809,6 +838,57 @@ def route_multipoint_diff_pair(state, pair: DiffPairNet, pair_name: str,
     print(f"  Coupled routing failed and relocation unavailable - deferring the "
           f"whole pair to single-ended")
     return [], None, list(terminals)
+
+
+def _switch_blocked_terminal_stubs(state, pair: DiffPairNet, terminals):
+    """Move the escape stubs of blocked terminals (own layer >=45% walled)
+    onto the most-open other layer, validate_swap-checked; the pad vias size
+    themselves via fitting_pad_via. Returns [(segment_mods, new_vias)] undo
+    tokens, empty when nothing switched. Bare-pad terminals (no stub) are
+    left to the relocation path."""
+    from stub_layer_switching import (get_stub_info, apply_stub_layer_switch,
+                                      validate_swap)
+    config = state.config
+    pcb_data = state.pcb_data
+    obstacles = state.diff_pair_base_obstacles
+    switched = []
+    for term in terminals:
+        pp, nn = term
+        cx, cy = _terminal_center(term)
+        own_layer = _pad_layer(pp, config)
+        own_idx = config.layers.index(own_layer)
+        if obstacles is None or _blocked_fraction(config, obstacles, cx, cy,
+                                                  own_idx) < 0.45:
+            continue
+        ep = _terminal_stub_endpoint(pcb_data, term, config)
+        if ep is None:
+            continue
+        stub_layer = config.layers[ep[4]]
+        stub_p = get_stub_info(pcb_data, pp.net_id, ep[5], ep[6], stub_layer)
+        stub_n = get_stub_info(pcb_data, nn.net_id, ep[7], ep[8], stub_layer)
+        if stub_p is None or stub_n is None:
+            continue
+        ranked = sorted(
+            (l for l in config.layers if l != stub_layer),
+            key=lambda l: _blocked_fraction(config, obstacles, cx, cy,
+                                            config.layers.index(l)))
+        for dest in ranked:
+            ok, reason = validate_swap(
+                stub_p, stub_n, dest, {}, pcb_data, config,
+                swap_partner_net_ids={pp.net_id, nn.net_id})
+            if not ok:
+                continue
+            mods_all, vias_all = [], []
+            for st in (stub_p, stub_n):
+                vias, mods = apply_stub_layer_switch(pcb_data, st, dest,
+                                                     config, debug=False)
+                vias_all += vias
+                mods_all += mods
+            print(f"  Stub layer switch: {pp.component_ref}:"
+                  f"{pp.pad_number}/{nn.pad_number} {stub_layer} -> {dest}")
+            switched.append((mods_all, vias_all))
+            break
+    return switched
 
 
 def _route_terminal_set(state, pair: DiffPairNet, pair_name: str,
@@ -833,6 +913,25 @@ def _route_terminal_set(state, pair: DiffPairNet, pair_name: str,
                 # Every leg was electrically short - nothing coupled to merge,
                 # but this is success: the whole pair goes to single-ended.
                 return leg_results, None, se_terminals
+            # #444 chain-completion seam re-ask: every committed leg (pose,
+            # hybrid, or relocated) gets the island-aware joint whole-
+            # connection polish against the FINAL chain state -- the
+            # per-assembly re-ask only reaches hybrid candidates, and the
+            # winning construction is often the pose leg.
+            import os as _os
+            if _os.environ.get('KICAD_SEAM_REASK', '') not in ('0', 'off', 'false'):
+                from diff_pair_routing import seam_reask_chain_leg
+                _pcb = state.pcb_data
+                _cfg = state.config
+                _leg_obs = build_diff_pair_leg_obstacles(
+                    state.base_obstacles, _pcb, _cfg,
+                    state.routed_net_ids, state.remaining_net_ids,
+                    state.all_unrouted_net_ids, pair.p_net_id, pair.n_net_id,
+                    state.gnd_net_id, state.track_proximity_cache,
+                    state.layer_map)
+                for _lr in leg_results:
+                    seam_reask_chain_leg(_pcb, pair, _cfg, _leg_obs,
+                                         _cfg.layers, _lr)
             # Merge legs into a single result for bookkeeping (rip-up, sync,
             # caches). Segments/vias are already in pcb_data - the merged
             # result must NOT be passed to add_route_to_pcb_data again.
@@ -1011,6 +1110,7 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
                     not _pn_tracks_cross(hyb.get('new_segments', []), pair.p_net_id, pair.n_net_id) and
                     not _crosses_committed_legs(hyb.get('new_segments', []), committed_segments)):
                 print(f"  Leg {i + 1} via hybrid (coupled middle + single-ended escapes)")
+                hyb['_leg_terms'] = (term_a, term_b)  # #444 chain seam re-ask
                 add_route_to_pcb_data(pcb_data, hyb, debug_lines=config.debug_lines)
                 leg_results.append(hyb)
                 committed_segments.extend(hyb.get('new_segments', []))
@@ -1034,6 +1134,7 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
                 return None, []
 
         # Commit this leg so the next leg sees it (as obstacle and topology)
+        result['_leg_terms'] = (term_a, term_b)  # #444 chain seam re-ask
         add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
         leg_results.append(result)
         committed_segments.extend(result.get('new_segments', []))

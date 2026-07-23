@@ -149,11 +149,20 @@ def run_reroute_loop(
                     ripped_route_via_positions=state.ripped_route_via_positions
                 )
 
+            # A ripped bus member reroutes WITH its corridor (or a routed
+            # neighbor); previously it rerouted blind, so every rip degraded
+            # the river. Hoisted above the multipoint split so multipoint
+            # members get corridor-spanning main-edge selection + attraction.
+            from bus_detection import bus_attraction_context
+            _attr, _rev = bus_attraction_context(
+                ripped_net_id, getattr(state, 'bus_net_to_group', None),
+                getattr(state, 'bus_corridors', None), routed_net_paths)
             # Check for multi-point net (3+ pads, no existing segments since they were ripped)
             multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
             if multipoint_pads:
                 print(f"  Multi-point net with {len(multipoint_pads)} pads - routing main + taps")
-                result = route_multipoint_main(pcb_data, ripped_net_id, config, obstacles, multipoint_pads)
+                result = route_multipoint_main(pcb_data, ripped_net_id, config, obstacles, multipoint_pads,
+                                               attraction_path=_attr, state=state)
                 # If Phase 1 succeeded, immediately do Phase 3 (tap routing)
                 if result and not result.get('failed') and result.get('is_multipoint'):
                     main_segments_count = len(result['new_segments'])
@@ -175,7 +184,9 @@ def run_reroute_loop(
                         if ripped_net_id in state.pending_multipoint_nets:
                             del state.pending_multipoint_nets[ripped_net_id]
             else:
-                result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles)
+                result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles,
+                                                  attraction_path=_attr,
+                                                  reverse_direction=_rev)
             elapsed = time.time() - start_time
             total_time += elapsed
 
@@ -223,7 +234,18 @@ def run_reroute_loop(
                 if routed_net_paths and result:
                     fwd_cells = result.pop('blocked_cells_forward', [])
                     bwd_cells = result.pop('blocked_cells_backward', [])
-                    blocked_cells = list(set(fwd_cells + bwd_cells))
+                    # Fastest-failing direction only (audit #3b): pooling let
+                    # the broad flood's thousands of cells swamp the drained
+                    # pocket's dozens before attribution ran. Mirrors the SE
+                    # loop; falls back to the union when iterations are absent.
+                    fwd_it = result.get('iterations_forward', 0)
+                    bwd_it = result.get('iterations_backward', 0)
+                    if fwd_cells and bwd_cells and (fwd_it > 0 or bwd_it > 0):
+                        blocked_cells = list(set(
+                            fwd_cells if (fwd_it > 0 and (bwd_it == 0 or fwd_it <= bwd_it))
+                            else bwd_cells))
+                    else:
+                        blocked_cells = list(set(fwd_cells + bwd_cells))
                     del fwd_cells, bwd_cells  # Free memory immediately
 
                     if blocked_cells:
@@ -374,10 +396,16 @@ def run_reroute_loop(
                                     ripped_route_via_positions=state.ripped_route_via_positions
                                 )
 
+                            # Bus attraction for the retry (multipoint too)
+                            from bus_detection import bus_attraction_context
+                            _attr, _rev = bus_attraction_context(
+                                ripped_net_id, getattr(state, 'bus_net_to_group', None),
+                                getattr(state, 'bus_corridors', None), routed_net_paths)
                             # Check for multi-point net in retry as well
                             retry_multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
                             if retry_multipoint_pads:
-                                retry_result = route_multipoint_main(pcb_data, ripped_net_id, config, retry_obstacles, retry_multipoint_pads)
+                                retry_result = route_multipoint_main(pcb_data, ripped_net_id, config, retry_obstacles, retry_multipoint_pads,
+                                                                     attraction_path=_attr, state=state)
                                 if retry_result and not retry_result.get('failed') and retry_result.get('is_multipoint'):
                                     tap_result = route_multipoint_taps(pcb_data, ripped_net_id, config, retry_obstacles, retry_result)
                                     if tap_result:
@@ -393,7 +421,9 @@ def run_reroute_loop(
                                         if ripped_net_id in state.pending_multipoint_nets:
                                             del state.pending_multipoint_nets[ripped_net_id]
                             else:
-                                retry_result = route_net_with_obstacles(pcb_data, ripped_net_id, config, retry_obstacles)
+                                retry_result = route_net_with_obstacles(pcb_data, ripped_net_id, config, retry_obstacles,
+                                                                        attraction_path=_attr,
+                                                                        reverse_direction=_rev)
 
                             if retry_result and not retry_result.get('failed'):
                                 routed_length = calculate_route_length(retry_result['new_segments'], retry_result.get('new_vias', []), pcb_data)
@@ -497,7 +527,33 @@ def run_reroute_loop(
                     # trying to route taps for a net with no main route.
                     if ripped_net_id in state.pending_multipoint_nets:
                         del state.pending_multipoint_nets[ripped_net_id]
-                    failed += 1
+                    # #468: a terminally-failed rip victim must not ship with
+                    # LESS copper than it started with. Conflict-free saved
+                    # copper -> FULL restore (the net returns to its pre-rip
+                    # routed state); else at least the escape stub survives.
+                    from rip_restore import try_terminal_restore
+                    _tr = try_terminal_restore(
+                        pcb_data, config, ripped_net_id,
+                        working_obstacles=state.working_obstacles,
+                        net_obstacles_cache=state.net_obstacles_cache)
+                    if _tr == 'full':
+                        _sv, _rids, _wir = pcb_data._rip_saved[ripped_net_id]
+                        restore_net(ripped_net_id, _sv, _rids, _wir,
+                                    pcb_data, routed_net_ids, routed_net_paths,
+                                    routed_results, diff_pair_by_net_id,
+                                    remaining_net_ids, results, config,
+                                    track_proximity_cache, layer_map,
+                                    state.working_obstacles, state.net_obstacles_cache,
+                                    state.ripped_route_layer_costs,
+                                    state.ripped_route_via_positions,
+                                    refused_sink=state.collision_refused_net_ids)
+                        print(f"  RIP-RESTORE (#468): {ripped_net_name} restored "
+                              f"to its pre-rip route (reroute failed, corridor "
+                              f"still clear)")
+                        if _wir:
+                            successful += 1
+                    else:
+                        failed += 1
 
         elif reroute_item[0] == 'diff_pair':
             # Handle diff pairs that were ripped during single-ended routing
@@ -944,6 +1000,30 @@ def run_reroute_loop(
                         del state.pending_multipoint_nets[ripped_pair.p_net_id]
                     if ripped_pair.n_net_id in state.pending_multipoint_nets:
                         del state.pending_multipoint_nets[ripped_pair.n_net_id]
-                    failed += 1
+                    # #468: same terminal-restore leg for pair victims (the
+                    # payload is registered under both member ids; restore_net
+                    # restores the whole pair from either).
+                    from rip_restore import try_terminal_restore
+                    _tr = try_terminal_restore(
+                        pcb_data, config, ripped_pair.p_net_id,
+                        working_obstacles=state.working_obstacles,
+                        net_obstacles_cache=state.net_obstacles_cache)
+                    if _tr == 'full':
+                        _sv, _rids, _wir = pcb_data._rip_saved[ripped_pair.p_net_id]
+                        restore_net(ripped_pair.p_net_id, _sv, _rids, _wir,
+                                    pcb_data, routed_net_ids, routed_net_paths,
+                                    routed_results, diff_pair_by_net_id,
+                                    remaining_net_ids, results, config,
+                                    track_proximity_cache, layer_map,
+                                    state.working_obstacles, state.net_obstacles_cache,
+                                    state.ripped_route_layer_costs,
+                                    state.ripped_route_via_positions,
+                                    refused_sink=state.collision_refused_net_ids)
+                        print(f"  RIP-RESTORE (#468): pair {ripped_pair_name} "
+                              f"restored to its pre-rip route")
+                        if _wir:
+                            successful += 1
+                    else:
+                        failed += 1
 
     return successful, failed, total_time, total_iterations, route_index

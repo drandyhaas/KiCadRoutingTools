@@ -350,7 +350,8 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                            tolerance: float = 0.02,
                            verbose: bool = False,
                            return_graph: bool = False,
-                           zone_credit_validator=None) -> Dict:
+                           zone_credit_validator=None,
+                           pcb_data=None) -> Dict:
     """Check connectivity for a single net.
 
     Args:
@@ -512,12 +513,33 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     zone_repr_id = {}  # zone_idx -> a representative point id credited to the zone
     for zone_idx, zone in enumerate(zones):
         zone_layer = zone.layer
+        # Validator-parity fill model (KiCad semantics): when the caller
+        # supplies pcb_data, zone credit joins two items ONLY when they touch
+        # the SAME fill COMPONENT -- the outline-blob union credited pruned
+        # islands (a dogbone via's pinched ring deep in a BGA field graded
+        # plane-connected while open at fab; 7 phantom balls on ottercast,
+        # and step8's repair skipped them for the same reason). Points the
+        # model cannot answer (no scipy, oversize zone, out of bbox) keep the
+        # legacy blob credit.
+        _zm = None
+        try:
+            if pcb_data is not None:
+                from plane_fill_model import get_zone_model
+                _zm = get_zone_model(pcb_data, zone)
+            else:
+                # No pcb_data (removal-pass call sites): a model built
+                # earlier for this same zone OBJECT still applies.
+                from plane_fill_model import lookup_zone_model
+                _zm = lookup_zone_model(zone)
+        except Exception:
+            _zm = None
         # Find all points on this zone's layer
         points_on_layer = [(x, y, layer, pid, size) for x, y, layer, pid, size in all_points
                            if layer == zone_layer]
 
         # Find which points are inside the zone polygon
-        points_in_zone = []
+        points_in_zone = []   # legacy blob (no model verdict)
+        points_by_comp = {}   # fill component id -> [pid]
         for x, y, layer, pid, size in points_on_layer:
             if point_in_polygon(x, y, zone.polygon):
                 # Removal gates pass a fill validator (#outline-over-credit,
@@ -527,17 +549,35 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                 if zone_credit_validator is not None and \
                         not zone_credit_validator(x, y, zone.layer):
                     continue
-                points_in_zone.append(pid)
+                _c = _zm.query_component(x, y, size=size) if _zm is not None else None
+                if _c is None:
+                    points_in_zone.append(pid)
+                elif _c > 0:
+                    points_by_comp.setdefault(_c, []).append(pid)
+                # _c == 0: fill provably does not touch this point -> no credit
 
-        # Connect all points inside this zone together
-        if len(points_in_zone) > 1:
+        # Connect points that share a fill component
+        for _pids in points_by_comp.values():
+            for pid in _pids[1:]:
+                _union(_pids[0], pid)
+        # Legacy blob: union together and onto the PLANE component (largest),
+        # preserving old permissive semantics for unanswerable points.
+        _main = _zm.largest_component() if _zm is not None else 0
+        if points_in_zone:
             for pid in points_in_zone[1:]:
                 _union(points_in_zone[0], pid)
-        if points_in_zone:
-            # Representative point for this zone's copper component, so a graph
-            # consumer (plane_component_oracle) can tell which component IS the
-            # plane vs. a floating same-net island.
+            if _main in points_by_comp:
+                _union(points_by_comp[_main][0], points_in_zone[0])
+        # Representative point for this zone's copper component, so a graph
+        # consumer (plane_component_oracle) can tell which component IS the
+        # plane vs. a floating same-net island. With the fill model this is
+        # the LARGEST component (the plane proper), never an island.
+        if _main in points_by_comp:
+            zone_repr_id[zone_idx] = points_by_comp[_main][0]
+        elif points_in_zone:
             zone_repr_id[zone_idx] = points_in_zone[0]
+        elif points_by_comp:
+            zone_repr_id[zone_idx] = next(iter(points_by_comp.values()))[0]
 
     # Connect all points that are within tolerance on the same layer
     # Use spatial index for O(n) average instead of O(n²).
@@ -1116,7 +1156,8 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
         pads = pads_by_net.get(net_id, [])
         zones = zones_by_net.get(net_id, [])
 
-        result = check_net_connectivity(net_id, segments, vias, pads, zones, tolerance, verbose=verbose)
+        result = check_net_connectivity(net_id, segments, vias, pads, zones, tolerance, verbose=verbose,
+                                        pcb_data=pcb_data)
 
         if not result['connected']:
             issue = {

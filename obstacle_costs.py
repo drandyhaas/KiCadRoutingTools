@@ -71,7 +71,7 @@ def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tu
     coord = GridCoord(config.grid_step)
     stub_radius_grid = coord.to_grid_dist(config.stub_proximity_radius)
     stub_cost_grid = config.cell_cost(config.stub_proximity_cost)
-    block_vias = (config.via_proximity_cost == 0)
+    block_vias = (config.via_proximity_cost_int() == 0)
 
     # Convert stub positions to grid coordinates
     stub_grid_positions = []
@@ -129,6 +129,62 @@ def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig)
                     proximity = 1.0 - (dist / radius_grid)
                     cost = int(proximity * cost_grid)
                     obstacles.set_stub_proximity(gx, gy, cost)
+
+
+# Reserved track_proximity_cache key for the BGA proximity cost cells
+# (soft-knobs review B1): real net ids are positive, so -1 can never collide
+# or be evicted by the per-net cache lifecycle.
+BGA_PROXIMITY_CACHE_KEY = -1
+
+
+def compute_bga_proximity_cost_cells(config: GridRouteConfig,
+                                     num_layers: int) -> np.ndarray:
+    """BGA proximity costs as an (N, 4) [layer, gx, gy, cost] array.
+
+    Same geometry and cost math as add_bga_proximity_costs, but emitted for
+    the LAYER proximity map via the track-proximity cache under
+    BGA_PROXIMITY_CACHE_KEY (soft-knobs review B1): the old base-map
+    stub_proximity stamp was wiped by prepare_obstacles_inplace's
+    clear_stub_proximity() before every single-ended net, silently no-op'ing
+    the knob in the most common path (and double-counting was the risk for
+    diff pairs, whose obstacle build merges the cache on top of the base).
+    Registered once; merge_track_proximity_costs re-applies it on every
+    prepare in every path. Rows are replicated per layer because the old
+    stub_proximity stamp was all-layer.
+    """
+    if config.bga_proximity_radius <= 0 or config.bga_proximity_cost <= 0 \
+            or not config.bga_exclusion_zones or num_layers <= 0:
+        return np.empty((0, 4), dtype=np.int32)
+
+    coord = GridCoord(config.grid_step)
+    radius_grid = coord.to_grid_dist(config.bga_proximity_radius)
+    cost_grid = config.cell_cost(config.bga_proximity_cost)
+    cells: Dict[Tuple[int, int], int] = {}
+
+    for zone in config.bga_exclusion_zones:
+        min_x, min_y, max_x, max_y = zone[:4]
+        gmin_x, gmin_y = coord.to_grid(min_x, min_y)
+        gmax_x, gmax_y = coord.to_grid(max_x, max_y)
+        for gx in range(gmin_x - radius_grid, gmax_x + radius_grid + 1):
+            for gy in range(gmin_y - radius_grid, gmax_y + radius_grid + 1):
+                cx = max(gmin_x, min(gx, gmax_x))
+                cy = max(gmin_y, min(gy, gmax_y))
+                dist = ((gx - cx) ** 2 + (gy - cy) ** 2) ** 0.5
+                if dist <= radius_grid:
+                    proximity = 1.0 - (dist / radius_grid) if radius_grid > 0 else 1.0
+                    cost = int(proximity * cost_grid)
+                    key = (gx, gy)
+                    if cost > cells.get(key, 0):
+                        cells[key] = cost
+
+    if not cells:
+        return np.empty((0, 4), dtype=np.int32)
+    base = np.array([[gx, gy, c] for (gx, gy), c in cells.items()], dtype=np.int32)
+    rows = []
+    for li in range(num_layers):
+        layer_col = np.full((base.shape[0], 1), li, dtype=np.int32)
+        rows.append(np.hstack([layer_col, base]))
+    return np.vstack(rows)
 
 
 def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
@@ -214,6 +270,9 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
     return arr
 
 
+_MERGE_MEMO: dict = {}
+
+
 def merge_track_proximity_costs(obstacles: GridObstacleMap,
                                  per_net_costs: Dict[int, np.ndarray]):
     """Merge pre-computed per-net track proximity costs into the obstacle map.
@@ -227,14 +286,45 @@ def merge_track_proximity_costs(obstacles: GridObstacleMap,
     if not arrays_to_merge:
         return
 
-    all_costs = np.vstack(arrays_to_merge)
+    # P5 (soft-knobs review): phase-3 and diff-pair paths re-prepare many
+    # times between cache changes; memoize the concatenation keyed on the
+    # cache's identity signature so unchanged caches skip the O(all-nets)
+    # vstack. Exact-behavior: any entry add/replace changes the signature.
+    key = id(per_net_costs)
+    sig = (len(arrays_to_merge),
+           sum(len(a) for a in arrays_to_merge),
+           sum(id(a) & 0xFFFFFFFF for a in arrays_to_merge))
+    memo = _MERGE_MEMO.get(key)
+    if memo is not None and memo[0] == sig:
+        all_costs = memo[1]
+    else:
+        all_costs = np.vstack(arrays_to_merge)
+        _MERGE_MEMO[key] = (sig, all_costs)
     obstacles.set_layer_proximity_batch(all_costs)
+
+
+def _maybe_build_attraction_field(obstacles, config):
+    """P3 (Rust 0.18.5): precompute the per-layer attraction field so the
+    hot path is an O(1) lookup. hasattr-guarded so an older .so (no method)
+    keeps the exact scan fallback."""
+    if getattr(config, 'vertical_attraction_cost', 0) and \
+            hasattr(obstacles, 'build_attraction_field'):
+        from routing_config import GridCoord
+        coord = GridCoord(config.grid_step)
+        radius = coord.to_grid_dist(config.vertical_attraction_radius)
+        bonus = config.scaled_cell_units(config.vertical_attraction_cost)
+        obstacles.build_attraction_field(radius, bonus)
 
 
 def add_cross_layer_tracks(obstacles: GridObstacleMap, pcb_data: PCBData,
                             config: GridRouteConfig, layer_map: Dict[str, int],
                             exclude_net_ids: Set[int] = None):
     """Populate cross-layer track positions for vertical alignment attraction.
+
+    NET-AGNOSTIC by design (soft-knobs C4): the per-cell layer bitmask carries
+    no net id, so vertical attraction pulls the route toward ANY other net's
+    tracks on other layers (corridor stacking with strangers included). It
+    cannot express "stack with my own group" -- that needs a per-group mask.
 
     Adds positions of all routed tracks (excluding specified nets) to the
     obstacle map's cross-layer lookup structure. This enables the router
@@ -247,8 +337,13 @@ def add_cross_layer_tracks(obstacles: GridObstacleMap, pcb_data: PCBData,
         layer_map: Mapping of layer names to layer indices
         exclude_net_ids: Set of net IDs to exclude (typically the net being routed)
     """
-    if config.vertical_attraction_radius <= 0:
-        return  # Feature disabled
+    if config.vertical_attraction_radius <= 0 or config.vertical_attraction_cost <= 0:
+        # Feature disabled. The cost gate matters (soft-knobs review P1): the
+        # default radius is 1.0 with cost 0.0, so gating on radius alone
+        # walked every board segment with one FFI call per 0.5mm sample, on
+        # every prepare, to build a map the Rust lookup never reads
+        # (early-out on bonus <= 0).
+        return
 
     coord = GridCoord(config.grid_step)
     exclude_set = exclude_net_ids or set()

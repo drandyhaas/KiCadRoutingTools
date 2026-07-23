@@ -94,9 +94,18 @@ RIPUP_ABANDON_METRIC_CHOICES = ('stranded', 'total-pads', 'complete-nets',
                                 'congestion', 'history', 'weighted',
                                 'probe', 'weighted-probe')
 
+# Rip-up blocker SELECTION algorithm (#424 audit): which foreign net the
+# rip-up ladder targets first when a route fails. 'count' is the historical
+# weighted-cell-count ranking; the alternatives re-rank the same rippable set.
+RIPUP_BLOCKER_SELECT = 'count'
+RIPUP_BLOCKER_SELECT_CHOICES = ('count', 'near-target', 'bidir', 'mincut')
+
 # Layer direction preference (0=horizontal, 1=vertical, 255=none)
 # Alternates H/V starting with horizontal on top layer
-DIRECTION_PREFERENCE_COST = 50  # Cost penalty for non-preferred direction (0 = disabled)
+DIRECTION_PREFERENCE_COST = 5000  # Cost penalty for non-preferred direction (0 = disabled).
+# 5000 (5x a move) is the measured lane-discipline value: post-#452 it
+# reproduces human H/V style and the urchin cross-under; the old 50 was
+# ~5% of a move -- functionally inert. Completion effect is corpus-judged.
 
 # Bus routing - auto-detection and parallel routing of grouped nets
 BUS_DETECTION_RADIUS = 5.0  # mm - max endpoint distance to form bus

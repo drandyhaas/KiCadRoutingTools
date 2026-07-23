@@ -10,6 +10,7 @@ Implementation: `rip_up_reroute.py` (rip/restore), `blocking_analysis.py` (who i
 |--------|---------|-------------|
 | `--max-ripup` | 3 | Maximum number of blockers ripped up at once for one failing net |
 | `--ripup-abandon-metric` | `stranded` | How a multipoint tap rip-up decides keep-retry vs abandon (see [Abandon metrics](#abandon-metrics)) |
+| `--ripup-blocker-select` | `count` | Which blocker the rip-up ladder targets first (see [Blocker selection algorithms](#blocker-selection-algorithms)). Also on `route_diff.py`, `route_planes.py`, `route_disconnected_planes.py`. Env override (route.py): `KICAD_RIPUP_BLOCKER_SELECT` |
 | `--ripped-route-avoidance-radius` | 1.0 | Soft-penalty radius around a ripped net's former corridor (mm) |
 | `--ripped-route-avoidance-cost` | 0.1 | Soft-penalty cost in the former corridor (0 disables) |
 
@@ -29,11 +30,29 @@ Two mechanisms start a rip-up:
 
 `filter_rippable_blockers()` removes candidates that can't be ripped: nets not actually routed in this run (by default, pre-existing tracks are left untouched — see [Ripping Pre-Existing Routes](#ripping-pre-existing-routes) for the `--rip-existing-nets` exception), and diff pair members whose partner isn't routed. Differential pairs are treated as one unit — P and N are always ripped and restored together.
 
-The failure report printed to the console comes from this analysis ("Route stuck at (x, y) on F.Cu, blocked by: …").
+The failure report printed to the console comes from this analysis ("Route stuck at (x, y) on F.Cu, blocked by: …"). A coverage line reports how many frontier cells were attributed to routed nets; the remainder is static, unrippable copper (pads, planes, pre-existing tracks, the board edge) — when that share dominates, ripping cannot open the frontier at all.
+
+Two refinements sharpen the signal before ranking:
+
+- **Fastest-failing direction.** The search runs from both ends; the side that died in fewer iterations is the constrained one, and its frontier is the drained pocket's perimeter (hugging track included). Attribution uses that side's cells rather than pooling both directions, so the broad flood cannot swamp the tight pocket. This applies in the single-ended, reroute, victim-retry, and multipoint tap paths.
+- **Per-edge attribution (multipoint).** When several tap edges of one net fail, each edge is attributed separately against its *own* target, and the per-net results merge by taking each net's strongest edge — a net decisive at one edge is not diluted by edges it is irrelevant to, and a pooled "cell soup" can no longer promote a net relevant to none of them.
+
+### Blocker selection algorithms
+
+`--ripup-blocker-select` chooses how the candidates from the blocking analysis are ordered before the ladder starts ripping. The frontier is the *perimeter* of the reachable pocket, not the wall that actually separates source from target, so per-net cell counts can be misleading — the alternatives re-rank the same candidate set using better evidence:
+
+- **`count`** (default) — the historical weighted-cell-count ranking described above.
+- **`near-target`** — endpoint proximity first. The decisive last-mile blocker often hugs the failing pad but contributes only a handful of frontier cells, so the count ranking buries it under large far walls. Sort key: near-endpoint-unique cells, then unique, then count.
+- **`bidir`** — both-directions boost. The search runs from both ends; a net attributed in BOTH directions' frontiers lies on a genuine separating wall, while a bystander boxed in behind one endpoint appears in only one. Both-direction nets get their weighted score doubled.
+- **`mincut`** — soft-cost probe. The failing net is re-routed once on a clone of the obstacle map with every rippable candidate's copper converted from hard-blocked to a high soft cost; the copper the resulting path crosses is the true joint cut, and those nets are ripped first. If even the all-soft probe finds no path, the separating wall is static (unrippable) copper; the ladder still runs in legacy order, since ripping can free space for the via-placement and swap rescues even when no simple path exists. Costs roughly one extra A* search, on the failure path only.
+
+Validator-named blockers — identities proved by geometry validators such as via placement (the exact copper that vetoes a pad via) — sort ahead of every frontier-inferred tier under all four algorithms.
 
 ## Ripping Pre-Existing Routes
 
 By default only nets routed **in the current run** are rip-up candidates; tracks and vias already committed on the input board are left untouched, so re-running the router never disturbs existing routing. `route.py --rip-existing-nets PATTERN [PATTERN …]` opts specific pre-existing routed nets into the rip-up machinery: when one of them blocks a net the router is trying to route, it may be ripped up and re-routed like an in-run net. Use it on a board that a previous run (or another tool) already routed and that now needs a new net threaded through congested copper. Pass `'*'` to allow any non-plane net. Without the flag the default holds — pre-existing committed tracks are never ripped.
+
+One exception: the end-of-run oracle-reconnect pass may auto-grant `--rip-existing-nets` authority over pre-existing blockers that earlier failure hints named (capped at 12). That escalation always respects the run's own net filter — a net the caller excluded by pattern (`'!GND'` while planes pour in a later step) is excluded *by plan* and is never auto-ripped; only an explicit operator `--rip-existing-nets` can override that.
 
 ## Progressive N+1 Escalation
 
@@ -41,9 +60,10 @@ For a failing net, the router escalates through rip-up rounds (`reroute_loop.py`
 
 1. **N=1**: rip the top-ranked blocker, rebuild obstacles, retry the route.
 2. If the retry fails, the *new* frontier is re-analyzed — the next blocker is chosen from fresh data, not the original ranking, since ripping one net changes what's in the way.
-3. **N=2**: rip the next blocker as well (now two are ripped), retry. And so on up to `--max-ripup`.
+3. **Slot-0 guard**: if the re-analysis names a *different* top pick than the ripped singleton, the refuted rip is restored and the fresh pick is tried **alone** once before extending to pairs. Without this, the ladder only ever grows a prefix around its first guess, so a wrong first pick contaminated every combination it would ever try.
+4. **N=2**: rip the next blocker as well (now two are ripped), retry. And so on up to `--max-ripup`.
 
-A history set of `(net, frozenset(ripped blockers))` combinations prevents retrying a combination that already failed, which (together with the N cap) guarantees termination. If all rounds fail, every ripped net is restored unchanged and the net is reported as failed.
+A history set of `(net, frozenset(ripped blockers))` combinations (recorded when a combination *succeeds*) prevents pointlessly re-ripping a combo that already worked once for this net; together with the N cap this guarantees termination. If all rounds fail, every ripped net is restored unchanged and the net is reported as failed.
 
 On success, the ripped nets are appended to the **reroute queue**.
 

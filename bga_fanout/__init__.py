@@ -67,6 +67,9 @@ from obstacle_map import build_base_obstacle_map, build_layer_map
 from routing_config import GridRouteConfig
 from bga_fanout.collision import check_segment_collision
 from bga_fanout.diff_pair import find_differential_pairs
+
+# #472: nets deferred from fanout by the last generate_bga_fanout entry call
+_direct_route_nets: Set[str] = set()
 from bga_fanout.tracks import (
     detect_collisions,
     convert_segments_to_tracks,
@@ -547,7 +550,8 @@ def create_single_ended_route(
     channels: List[Channel],
     layers: List[str],
     exit_margin: float,
-    force_orientation: Optional[str] = None
+    force_orientation: Optional[str] = None,
+    preferred_dir: Optional[str] = None
 ) -> FanoutRoute:
     """
     Create a route for a single-ended (non-differential) signal.
@@ -565,7 +569,8 @@ def create_single_ended_route(
     """
     channel, escape_dir = find_escape_channel(
         pad.global_x, pad.global_y, grid, channels,
-        force_orientation=force_orientation
+        force_orientation=force_orientation,
+        preferred_dir=preferred_dir
     )
     is_edge = channel is None
 
@@ -1818,6 +1823,33 @@ def generate_bga_fanout(footprint: Footprint,
         back_transform_results(tracks, vias_to_add, vias_to_remove, back)
         return tracks, vias_to_add, vias_to_remove, failed_nets
 
+    # #472 direct-route deferral (KICAD_FANOUT_DIRECT=1): balls whose nearest
+    # target is surface-reachable get NO stub -- the stub carpet is itself the
+    # wall that seals the pocket (human ottercast: USB_D pure F.Cu, 0 vias).
+    # Applied ONCE at entry as '!' net-filter exclusions so both engines and
+    # both escape-priority passes inherit; qualifying diff pairs are dropped
+    # at the pair-discovery sites via _direct_route_nets. The route steps'
+    # bare-ball zone exemption (setup_bga_exclusion_zones) keeps the deferred
+    # balls routable.
+    global _direct_route_nets
+    if (_pad_filter is None and not _single_pass
+            and os.environ.get('KICAD_FANOUT_DIRECT', '') in ('1', 'true', 'on')):
+        from bga_fanout.escape import direct_route_candidates
+        _dp_probe = (find_differential_pairs(footprint, diff_pair_patterns)
+                     if diff_pair_patterns else None)
+        _names, _notes = direct_route_candidates(
+            pcb_data, footprint, net_filter=net_filter,
+            diff_pairs=_dp_probe, clearance=clearance)
+        if _names:
+            print(f"  #472 direct-route deferral: {len(_names)} net(s) skip "
+                  f"fanout (surface-reachable):")
+            for _nm, _pn, _why in _notes:
+                print(f"    {_nm} (ball {_pn}): {_why}")
+            net_filter = list(net_filter or ['*']) + ['!' + n for n in _names]
+            _direct_route_nets = set(_names)
+    elif _pad_filter is None and not _single_pass:
+        _direct_route_nets = set()
+
     # Escape priority for multi-ball nets (issue #129). Escape channels are
     # the scarce resource on a dense array (#122), and a net only NEEDS one
     # escape -- later routing can pick up its other balls inside the BGA
@@ -2195,6 +2227,10 @@ def generate_bga_fanout(footprint: Footprint,
         # can pick the two halves up (without this they go single-ended).
         up_diff_pairs = (find_differential_pairs(footprint, diff_pair_patterns)
                          if diff_pair_patterns else {})
+        if _direct_route_nets:
+            up_diff_pairs = {k: v for k, v in up_diff_pairs.items()
+                             if not ((v.p_pad and v.p_pad.net_name in _direct_route_nets)
+                                     or (v.n_pad and v.n_pad.net_name in _direct_route_nets))}
         if up_diff_pairs:
             print(f"  Found {len(up_diff_pairs)} differential pair(s) to escape coupled")
         tracks, vias_to_add, failed_nets = generate_underpad_escape(
@@ -2230,8 +2266,13 @@ def generate_bga_fanout(footprint: Footprint,
     # Find differential pairs if patterns specified
     diff_pairs: Dict[str, DiffPairPads] = {}
     pair_escape_assignments: Dict[str, Tuple[Optional[Channel], str]] = {}
+    _pair_toward: Dict[str, str] = {}  # #469 pair target-side preference
     if diff_pair_patterns:
         diff_pairs = find_differential_pairs(footprint, diff_pair_patterns)
+        if _direct_route_nets:
+            diff_pairs = {k: v for k, v in diff_pairs.items()
+                          if not ((v.p_pad and v.p_pad.net_name in _direct_route_nets)
+                                  or (v.n_pad and v.n_pad.net_name in _direct_route_nets))}
         original_pair_count = len(diff_pairs)
 
         # Filter out pairs that already have fanouts
@@ -2254,6 +2295,16 @@ def generate_bga_fanout(footprint: Footprint,
         # Pre-assign escape directions for all pairs to avoid overlaps
         force_str = " (forced)" if force_escape_direction else ""
         print(f"  Assigning escape directions (primary: {primary_escape}{force_str})...")
+        # Target-side preference for PAIRS (#469): one shared direction per
+        # pair (coupling untouched), biasing which direction the assigner
+        # tries first. Same env gate as the single-ended preference.
+        _pair_toward = {}
+        if os.environ.get('KICAD_FANOUT_TOWARD_TARGETS', '') in ('1', 'true', 'on'):
+            from bga_fanout.escape import preferred_pair_dirs
+            _pair_toward = preferred_pair_dirs(pcb_data, footprint, diff_pairs)
+            if _pair_toward:
+                print(f"  Target-side pair escape preference active for "
+                      f"{len(_pair_toward)} pair(s)")
         pair_escape_assignments, pair_layer_assignments = assign_pair_escapes(
             diff_pairs, grid, channels, layers,
             primary_orientation=primary_escape,
@@ -2263,7 +2314,8 @@ def generate_bga_fanout(footprint: Footprint,
             via_size=via_size,
             rebalance=rebalance_escape,
             pre_occupied=pre_occupied_exits,
-            force_escape_direction=force_escape_direction
+            force_escape_direction=force_escape_direction,
+            pair_preferred=_pair_toward
         )
 
     # Build lookup from net_name to pair info
@@ -2395,10 +2447,14 @@ def generate_bga_fanout(footprint: Footprint,
             cur_orientation = 'horizontal' if cur_dir in ('left', 'right') else 'vertical'
             secondary_orientation = 'vertical' if cur_orientation == 'horizontal' else 'horizontal'
             fpair = diff_pairs[fp]
+            # The forced-orientation retry picks the SIDE within the
+            # orthogonal orientation; the target-side preference (#469 v3)
+            # chooses it when the preference lies in that orientation.
             new_ch, new_dir = find_diff_pair_escape(
                 fpair.p_pad.global_x, fpair.p_pad.global_y,
                 fpair.n_pad.global_x, fpair.n_pad.global_y,
-                grid, channels, secondary_orientation
+                grid, channels, secondary_orientation,
+                preferred_dir=_pair_toward.get(fp)
             )
             # Only overwrite if we actually got a usable orthogonal direction.
             new_orientation = None
@@ -2411,6 +2467,18 @@ def generate_bga_fanout(footprint: Footprint,
 
         routes: List[FanoutRoute] = []
         processed_pairs: Set[str] = set()
+
+        # Target-side escape preference (#469, KICAD_FANOUT_TOWARD_TARGETS=1):
+        # each pad's escape direction biases toward its net's nearest
+        # off-footprint pad; the smart layer assignment then spreads the
+        # extra same-direction competition across layers.
+        _toward_targets = {}
+        if os.environ.get('KICAD_FANOUT_TOWARD_TARGETS', '') in ('1', 'true', 'on'):
+            from bga_fanout.escape import preferred_escape_dirs
+            _toward_targets = preferred_escape_dirs(pcb_data, footprint)
+            if _toward_targets:
+                print(f"  Target-side escape preference active for "
+                      f"{len(_toward_targets)} pad(s)")
 
         for pad in footprint.pads:
             if not pad.net_name or pad.net_id == 0:
@@ -2463,7 +2531,9 @@ def generate_bga_fanout(footprint: Footprint,
                 # Single-ended signal (not part of a pair)
                 force_orient = primary_escape if force_escape_direction else None
                 route = create_single_ended_route(
-                    pad, grid, channels, layers, exit_margin, force_orient
+                    pad, grid, channels, layers, exit_margin, force_orient,
+                    preferred_dir=_toward_targets.get(
+                        (round(pad.global_x, 3), round(pad.global_y, 3)))
                 )
                 routes.append(route)
 
@@ -2847,6 +2917,21 @@ def main():
         print(f"Available: {list(pcb_data.footprints.keys())[:20]}...")
         return 1
 
+    # Plane-net manifest (chain consistency): nets an earlier plane step
+    # declared get '!'-exclusions appended, so a '*' filter never fans out a
+    # plane net's balls as signal escapes (the ottercast +1V1/VCC-DDR stub-
+    # clutter class). Naming a plane net verbatim still includes it.
+    try:
+        from plane_io import read_plane_manifest
+        _pm_nets = read_plane_manifest(args.pcb).get('plane_nets', [])
+        _pm_excl = [n for n in _pm_nets if not (args.nets and n in args.nets)]
+        if _pm_excl:
+            args.nets = list(args.nets or ['*']) + ['!' + n for n in _pm_excl]
+            print(f"Plane manifest: excluding {len(_pm_excl)} plane net(s) "
+                  f"from fanout: {', '.join(sorted(_pm_excl))}")
+    except Exception as _e:
+        print(f"  (plane manifest not read: {_e})")
+
     footprint = pcb_data.footprints[args.component]
     print(f"\nFound {args.component}: {footprint.footprint_name}")
     print(f"  Position: ({footprint.x:.2f}, {footprint.y:.2f})")
@@ -2977,8 +3062,22 @@ def main():
         # Smallest copper clearance any step actually routed at; downstream steps
         # and check_drc grade the board at this floor.
         'min_clearance_used': eff_clearance,
+        # #472: nets deliberately DEFERRED from fanout (surface-reachable,
+        # direct-routed by a later step). Not failures. The route steps'
+        # bare-ball zone exemption keeps them routable automatically.
+        'deferred_fanout_nets': sorted(_direct_route_nets),
     }
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
+
+
+    # Plane-net manifest carry-forward (chain consistency; see plane_io).
+    try:
+        import os as _os
+        if args.output and _os.path.isfile(args.output):
+            from plane_io import carry_plane_manifest
+            carry_plane_manifest(args.pcb, args.output)
+    except Exception as _e:
+        print(f"  (plane manifest not carried: {_e})")
 
     return 0
 

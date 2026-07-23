@@ -139,6 +139,16 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
             if ripped_route_via_positions is not None:
                 ripped_route_via_positions[rid] = via_positions
 
+    # #468: keep the pre-rip payload reachable for the terminal-failure
+    # restore (rip_restore.try_terminal_restore). Keyed under EVERY ripped
+    # id so pair members resolve too; popped by restore_net.
+    _reg = getattr(pcb_data, '_rip_saved', None)
+    if _reg is None:
+        _reg = {}
+        pcb_data._rip_saved = _reg
+    for _rid in ripped_net_ids:
+        _reg[_rid] = (saved_result, ripped_net_ids, was_in_results)
+
     return saved_result, ripped_net_ids, was_in_results
 
 
@@ -276,6 +286,11 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
         refused_sink: Optional set; net IDs of a collision-refused restore are
             added here so the caller can re-route them cleanly later (#134)
     """
+    # #468: this payload is being consumed -- drop the registry entries.
+    _reg = getattr(pcb_data, '_rip_saved', None)
+    if _reg is not None:
+        for _rid in ripped_net_ids:
+            _reg.pop(_rid, None)
     if saved_result is None:
         return
 

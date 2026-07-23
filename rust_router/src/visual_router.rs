@@ -63,13 +63,16 @@ pub struct VisualRouter {
 #[pymethods]
 impl VisualRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0, layer_costs=None, proximity_heuristic_cost=0))]
+    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0, layer_costs=None, proximity_heuristic_cost=0, layer_direction_preferences=None, direction_preference_cost=0))]
     pub fn new(via_cost: i32, h_weight: f32, turn_cost: Option<i32>, via_proximity_cost: Option<i32>,
                vertical_attraction_radius: i32, vertical_attraction_bonus: i32,
-               layer_costs: Option<Vec<i32>>, proximity_heuristic_cost: i32) -> Self {
-        // The inner GridRouter carries the same knobs the visualizer always
-        // exposed; the ones it never had (direction preferences, bus
-        // attraction) stay at their inert defaults.
+               layer_costs: Option<Vec<i32>>, proximity_heuristic_cost: i32,
+               layer_direction_preferences: Option<Vec<u8>>,
+               direction_preference_cost: i32) -> Self {
+        // Direction preferences now pass through (soft-knobs C2: with the
+        // default-ON preference cost the visualizer routed a DIFFERENT board
+        // than the headless run). Bus attraction stays inert here -- the
+        // visualizer is a per-net debug tool and has no bus context.
         let router = GridRouter::new(
             via_cost,
             h_weight,
@@ -79,10 +82,11 @@ impl VisualRouter {
             vertical_attraction_bonus,
             layer_costs,
             Some(proximity_heuristic_cost),
-            None, // layer_direction_preferences
-            0,    // direction_preference_cost
+            layer_direction_preferences,
+            direction_preference_cost,
             0,    // attraction_radius
             0,    // attraction_bonus
+            0,    // attraction_cross_layer_pct
         );
         Self {
             router,

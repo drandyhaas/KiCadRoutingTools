@@ -13,6 +13,7 @@ Three ordering strategies are available:
 | MPS | `--ordering mps` | General routing, crossing conflicts |
 | Inside-Out | `--ordering inside_out` | BGA escape routing |
 | Original | `--ordering original` | Manual control |
+| Bus | `--ordering bus` | Detected bus groups first (members middle-out), rest by MPS. Ordering only -- corridor attraction still needs `--bus` (which implies this ordering) |
 
 ## MPS (Maximum Planar Subset) Algorithm
 

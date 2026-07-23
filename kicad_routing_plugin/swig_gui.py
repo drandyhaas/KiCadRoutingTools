@@ -583,6 +583,21 @@ class RoutingDialog(wx.Dialog):
             "probe / weighted-probe (discount pads unroutable either way)")
         grid.Add(self.ripup_abandon_metric, 0, wx.EXPAND)
 
+        # Rip-up blocker SELECTION algorithm (#424 audit)
+        grid.Add(wx.StaticText(parent, label="Rip-up Blocker Select:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.ripup_blocker_select = wx.Choice(
+            parent, choices=list(defaults.RIPUP_BLOCKER_SELECT_CHOICES))
+        self.ripup_blocker_select.SetStringSelection(defaults.RIPUP_BLOCKER_SELECT)
+        self.ripup_blocker_select.SetToolTip(
+            "Which net the rip-up ladder targets first: count (default; "
+            "historical weighted cell count), near-target (endpoint-proximity "
+            "first -- the true last-mile blocker hugs the failing pad but has "
+            "few cells), bidir (boost nets blocking BOTH search directions), "
+            "mincut (soft-cost probe on a map clone reads the actual crossing "
+            "set: the true joint cut; falls back to count when the wall is "
+            "static copper)")
+        grid.Add(self.ripup_blocker_select, 0, wx.EXPAND)
+
     def _on_obey_drc_changed(self, event):
         """Handle checkbox toggle - apply board minimums if enabled."""
         if self.obey_drc_check.GetValue():
@@ -851,8 +866,8 @@ class RoutingDialog(wx.Dialog):
             ('via_proximity_cost', 'Via Prox. Multiplier:', defaults.VIA_PROXIMITY_COST, "Cost multiplier for placing vias near other vias"),
             ('track_proximity_distance', 'Track Prox. (mm):', defaults.TRACK_PROXIMITY_DISTANCE, "Distance to detect parallel tracks for bunching avoidance"),
             ('track_proximity_cost', 'Track Prox. Cost:', defaults.TRACK_PROXIMITY_COST, "Cost for routing parallel to existing tracks"),
-            ('vertical_attraction_radius', 'Vert. Attract (mm):', defaults.VERTICAL_ATTRACTION_RADIUS, "Radius for attracting route toward target vertically"),
-            ('vertical_attraction_cost', 'Vert. Attract Cost:', defaults.VERTICAL_ATTRACTION_COST, "Bonus for moving toward target's vertical position"),
+            ('vertical_attraction_radius', 'Vert. Attract (mm):', defaults.VERTICAL_ATTRACTION_RADIUS, "Radius for cross-layer track stacking: attracts the route toward ANY net's tracks on other layers (net-agnostic)"),
+            ('vertical_attraction_cost', 'Vert. Attract Cost:', defaults.VERTICAL_ATTRACTION_COST, "Bonus for routing in the vertical shadow of other layers' tracks (0 = off; net-agnostic corridor stacking)"),
             ('ripped_route_avoidance_radius', 'Rip Avoid (mm):', defaults.RIPPED_ROUTE_AVOIDANCE_RADIUS, "Radius to avoid area where previous route failed"),
             ('ripped_route_avoidance_cost', 'Rip Avoid Cost:', defaults.RIPPED_ROUTE_AVOIDANCE_COST, "Cost for routing through previously ripped area"),
             ('routing_clearance_margin', 'Clearance Margin:', defaults.ROUTING_CLEARANCE_MARGIN, "Extra clearance margin multiplier for safety"),
@@ -868,9 +883,11 @@ class RoutingDialog(wx.Dialog):
 
         # Ordering strategy
         grid.Add(wx.StaticText(parent, label="Ordering Strategy:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.ordering_strategy = wx.Choice(parent, choices=["mps", "inside_out", "original"])
+        self.ordering_strategy = wx.Choice(parent, choices=["mps", "inside_out", "original", "bus"])
         self.ordering_strategy.SetSelection(0)
-        self.ordering_strategy.SetToolTip("Net ordering strategy: mps (minimum planar subset), inside_out, or original order")
+        self.ordering_strategy.SetToolTip("Net ordering strategy: mps (minimum planar subset), "
+                                          "inside_out, original order, or bus (detected bus groups "
+                                          "first, members middle-out, rest by mps)")
         grid.Add(self.ordering_strategy, 0, wx.EXPAND)
 
         # Direction dropdown
@@ -1673,6 +1690,8 @@ class RoutingDialog(wx.Dialog):
                 'max_ripup': self.max_ripup.GetValue(),
                 'ripup_abandon_metric': self.ripup_abandon_metric.GetString(
                     self.ripup_abandon_metric.GetSelection()),
+                'ripup_blocker_select': self.ripup_blocker_select.GetString(
+                    self.ripup_blocker_select.GetSelection()),
                 'ordering_strategy': self.ordering_strategy.GetString(self.ordering_strategy.GetSelection()),
                 'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
@@ -2003,9 +2022,13 @@ class RoutingDialog(wx.Dialog):
             if len(net_segments) == 0 and len(net_zones) == 0:
                 return False
 
+            # pcb_data enables the fill-COMPONENT-aware zone credit
+            # (validator parity): without it a pinched pour island graded
+            # plane-connected here while KiCad DRC showed it open, so
+            # "hide connected" hid a genuinely broken net.
             result = check_net_connectivity(
                 net_id, net_segments, net_vias, net_pads, net_zones,
-                tolerance=0.02
+                tolerance=0.02, pcb_data=self.pcb_data
             )
 
             return result['connected']
@@ -2125,6 +2148,14 @@ class RoutingDialog(wx.Dialog):
         # state (and the plan-side absent-means-off rules still apply).
         try:
             _po = self.planes_tab.create_options
+            if hasattr(_po, 'zone_clearance_check'):
+                # Default = unchecked = follow routed clearance (the
+                # ottercast sealed-field fix); a plan's explicit
+                # zone_clearance param checks it (override convention).
+                _po.zone_clearance_check.SetValue(False)
+                if hasattr(_po, 'zone_clearance'):
+                    _po.zone_clearance.SetValue(defaults.PLANE_ZONE_CLEARANCE)
+                    _po.zone_clearance.Enable(False)
             if hasattr(_po, 'add_gnd_vias_check'):
                 _po.add_gnd_vias_check.SetValue(False)
             if hasattr(_po, 'gnd_via_distance'):
@@ -2212,6 +2243,7 @@ class RoutingDialog(wx.Dialog):
         self.via_cost.SetValue(defaults.VIA_COST)
         self.max_ripup.SetValue(defaults.MAX_RIPUP)
         self.ripup_abandon_metric.SetStringSelection(defaults.RIPUP_ABANDON_METRIC)
+        self.ripup_blocker_select.SetStringSelection(defaults.RIPUP_BLOCKER_SELECT)
 
         # Reset layer selections (select all copper layers by default)
         for layer, cb in self.layer_checks.items():
@@ -2520,6 +2552,8 @@ class RoutingDialog(wx.Dialog):
             'max_ripup': self.max_ripup.GetValue(),
             'ripup_abandon_metric': self.ripup_abandon_metric.GetString(
                 self.ripup_abandon_metric.GetSelection()),
+            'ripup_blocker_select': self.ripup_blocker_select.GetString(
+                self.ripup_blocker_select.GetSelection()),
             'ordering_strategy': self.ordering_strategy.GetString(self.ordering_strategy.GetSelection()),
             'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
             'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
@@ -2953,9 +2987,10 @@ class RoutingDialog(wx.Dialog):
                     heuristic_weight=config['heuristic_weight'],
                     proximity_heuristic_factor=config.get('proximity_heuristic_factor', 0.02),
                     turn_cost=config['turn_cost'],
-                    direction_preference_cost=config.get('direction_preference_cost', 50),
+                    direction_preference_cost=config.get('direction_preference_cost', defaults.DIRECTION_PREFERENCE_COST),
                     max_rip_up_count=config['max_ripup'],
                     ripup_abandon_metric=config.get('ripup_abandon_metric', defaults.RIPUP_ABANDON_METRIC),
+                    ripup_blocker_select=config.get('ripup_blocker_select', defaults.RIPUP_BLOCKER_SELECT),
                     ordering_strategy=config['ordering_strategy'],
                     direction_order=config.get('direction'),
                     stub_proximity_radius=config['stub_proximity_radius'],

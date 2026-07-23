@@ -25,6 +25,11 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
 import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 
+# Over-blocking audit F3 A/B kill-switch: 1 restores the pre-fix cache stamps
+# (obstacle net's CONFIGURED width for narrow existing copper + via->track
+# rings). Temporary -- remove once the actual-width fix is validated corpus-wide.
+_LEGACY_CACHE_WIDTH = os.environ.get('KICAD_OBSCACHE_LEGACY_WIDTH', '') in ('1', 'true', 'on')
+
 try:
     from grid_router import GridObstacleMap
 except ImportError:
@@ -292,7 +297,15 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     for layer_name in config.layers:
         # Use per-net width for power nets, otherwise layer width (impedance) or default
         layer_width = config.get_net_track_width(net_id, layer_name)
-        layer_widths.append(layer_width)
+        # Routing-side width for the via->track ring: the FUTURE track that must
+        # clear this net's vias belongs to whatever net routes next, so its
+        # half-width is the LAYER's routing width (impedance/base) -- never this
+        # net's own configured (power) width, which the routed net's track_margin
+        # already covers. Matches _via_track_expansion_per_layer (obstacle_map),
+        # whose docstring calls the wider variant out as double-counting.
+        # KICAD_OBSCACHE_LEGACY_WIDTH=1 restores the pre-fix stamps (A/B only).
+        layer_widths.append(layer_width if _LEGACY_CACHE_WIDTH
+                            else config.get_track_width(layer_name))
         expansion_mm = layer_width / 2 + obs_clearance + config.track_width / 2 + extra_clearance
         # Float keep-out half-width for the capsule segment stamp (no floor): the
         # true perpendicular clearance, so off-grid / diagonal tracks are covered.
@@ -301,13 +314,17 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         via_block_mm = config.via_size / 2 + layer_width / 2 + obs_clearance + extra_clearance
         via_block_mm_by_layer[layer_name] = via_block_mm
 
-    # Process segments. Keep-out from the segment's ACTUAL width, not just the
-    # net's configured width: a pre-existing wide/diff-pair trace (e.g. a 0.2mm
-    # trunk placed by route_diff) under-reserved when stamped at the default
-    # 0.127 track width, letting a later track graze its edge (#172). Mirror the
-    # via path below, which already keeps out from the via's actual size. Only
-    # segments wider than the configured width grow their keep-out, so normal
-    # tracks (seg.width == configured) are unaffected - no blanket margin.
+    # Process segments. Keep-out from the segment's ACTUAL width in BOTH
+    # directions, not the net's configured width: a pre-existing wide/diff-pair
+    # trace (e.g. a 0.2mm trunk placed by route_diff) under-reserved when
+    # stamped at the default 0.127 track width (#172); and a wide-CONFIGURED
+    # net's narrow pre-existing copper (a 0.1mm fanout stub on a net configured
+    # 0.3 via --power-nets) over-blocked by (configured-actual)/2 per side when
+    # the old max(layer_w, seg_w) let the configured width win -- sealing real
+    # escape corridors past power stubs (over-blocking audit F3). The base map
+    # (build_base_obstacle_map) already stamps foreign copper at seg.width;
+    # this keeps the cache at parity. Normal tracks (seg.width == configured)
+    # are unaffected - no blanket margin.
     for seg in pcb_data.segments:
         if seg.net_id != net_id:
             continue
@@ -329,8 +346,8 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             continue
         layer_w = config.get_net_track_width(net_id, seg.layer)
         seg_w = seg.width if (getattr(seg, 'width', 0) and seg.width > 0) else layer_w
-        own_half = max(layer_w, seg_w) / 2
-        if seg_w <= layer_w:
+        own_half = (max(layer_w, seg_w) if _LEGACY_CACHE_WIDTH else seg_w) / 2
+        if (seg_w <= layer_w) if _LEGACY_CACHE_WIDTH else (seg_w == layer_w):
             expansion_mm = expansion_mm_by_layer.get(seg.layer, coord.grid_step)
             via_block_mm = via_block_mm_by_layer.get(seg.layer)
         else:

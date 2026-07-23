@@ -286,7 +286,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 max_probe_iterations: int = 5000,
                 heuristic_weight: float = 1.9,
                 turn_cost: int = 1000,
-                direction_preference_cost: int = 50,
+                direction_preference_cost: int = defaults.DIRECTION_PREFERENCE_COST,
                 bus_enabled: bool = False,
                 bus_detection_radius: float = 5.0,
                 bus_attraction_radius: float = 5.0,
@@ -304,11 +304,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 bga_proximity_radius: float = 7.0,
                 bga_proximity_cost: float = 0.2,
                 track_proximity_distance: float = 2.0,
-                track_proximity_cost: float = 0.2,
+                track_proximity_cost: float = defaults.TRACK_PROXIMITY_COST,
                 debug_lines: bool = False,
                 verbose: bool = False,
                 max_rip_up_count: int = 3,
                 ripup_abandon_metric: str = 'stranded',
+                ripup_blocker_select: str = 'count',
                 enable_layer_switch: bool = True,
                 crossing_layer_check: bool = True,
                 can_swap_to_top_layer: bool = False,
@@ -587,7 +588,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                         min_width=track_width)
 
     # Auto-detect BGA exclusion zones if not specified
-    bga_exclusion_zones = setup_bga_exclusion_zones(pcb_data, disable_bga_zones, bga_exclusion_zones)
+    _sel_ids = [nid for _nm, nid in resolve_net_ids(pcb_data, net_names)] \
+        if net_names else []
+    bga_exclusion_zones = setup_bga_exclusion_zones(
+        pcb_data, disable_bga_zones, bga_exclusion_zones,
+        selected_net_ids=_sel_ids)
 
     config_kwargs = get_common_config_kwargs(
         track_width=track_width, clearance=clearance, via_size=via_size,
@@ -608,6 +613,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         bga_proximity_cost=bga_proximity_cost, track_proximity_distance=track_proximity_distance,
         track_proximity_cost=track_proximity_cost, debug_lines=debug_lines, verbose=verbose,
         max_rip_up_count=max_rip_up_count, ripup_abandon_metric=ripup_abandon_metric,
+        ripup_blocker_select=ripup_blocker_select,
         crossing_penalty=crossing_penalty,
         crossing_layer_check=crossing_layer_check, routing_clearance_margin=routing_clearance_margin,
         hole_to_hole_clearance=hole_to_hole_clearance, board_edge_clearance=board_edge_clearance,
@@ -631,6 +637,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if collect_stats:
         config_kwargs['collect_stats'] = collect_stats
     config = GridRouteConfig(**config_kwargs)
+
+    try:
+        config.bus_rip_resistance = float(
+            os.environ.get('KICAD_BUS_RIP_RESISTANCE',
+                           config.bus_rip_resistance))
+    except ValueError:
+        pass
+    if config.bus_rip_resistance != 1.0:
+        print(f"Bus rip resistance: {config.bus_rip_resistance}x "
+              f"(bus members deprioritized in the rip ladder)")
+    # The SE loop needs the strategy to apply the explicit 'bus' ordering.
+    config.ordering_strategy = ordering_strategy
+    if config.ripup_blocker_select != 'count':
+        print(f"Rip-up blocker-select algorithm: {config.ripup_blocker_select}")
 
     # Build guide-corridor waypoints once (issue #7). These steer the per-segment
     # A* through a user-drawn polyline; empty when the feature is off / no guide.
@@ -764,7 +784,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # FILE_LEDGER audit on ottercast AP_WAKE_BT et al).
 
     # Apply net ordering strategy
-    if ordering_strategy == "mps":
+    if ordering_strategy in ("mps", "bus"):
+        # 'bus' = mps base order; the SE loop then moves bus groups to the
+        # front (members middle-out). Explicit form of what --bus implied.
         net_ids, mps_layer_swaps = order_nets_mps(
             pcb_data=pcb_data,
             net_ids=net_ids,
@@ -791,6 +813,45 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     elif ordering_strategy == "original":
         print("\nUsing original net order (no sorting)")
+
+    # #472 direct-first ordering (KICAD_DIRECT_FIRST=0 disables): nets with a
+    # BARE BGA ball (>=2 pads, no attached copper -- the fanout-deferred
+    # direct-route class) move to the FRONT of the order, keeping relative
+    # order within each partition. Their short natural surface lanes get
+    # claimed before the long nets and bus corridors contend for the same
+    # space (the human's sequence: nearby connections first). Inert on
+    # boards with no bare balls -- stubs/vias at every ball leave the order
+    # untouched. Board-state-driven and engine-level (GUI parity).
+    if (net_ids and os.environ.get('KICAD_DIRECT_FIRST', '1')
+            not in ('0', 'off', 'false')):
+        _bga_refs = set()
+        from kicad_parser import find_components_by_type
+        _sel_set = {nid for _nm, nid in net_ids}
+        _pts_by = {}
+        for _s in pcb_data.segments:
+            if _s.net_id in _sel_set:
+                _pts_by.setdefault(_s.net_id, []).append((_s.start_x, _s.start_y))
+                _pts_by[_s.net_id].append((_s.end_x, _s.end_y))
+        for _v in pcb_data.vias:
+            if _v.net_id in _sel_set:
+                _pts_by.setdefault(_v.net_id, []).append((_v.x, _v.y))
+        _direct_ids = set()
+        for _fp in find_components_by_type(pcb_data, 'BGA'):
+            for _p in _fp.pads:
+                if (_p.net_id in _sel_set and not _p.drill
+                        and len(pcb_data.pads_by_net.get(_p.net_id, [])) >= 2
+                        and not any(abs(_x - _p.global_x) < 0.05
+                                    and abs(_y - _p.global_y) < 0.05
+                                    for (_x, _y) in _pts_by.get(_p.net_id, ()))):
+                    _direct_ids.add(_p.net_id)
+        if _direct_ids:
+            _front = [t for t in net_ids if t[1] in _direct_ids]
+            _rest = [t for t in net_ids if t[1] not in _direct_ids]
+            net_ids = _front + _rest
+            print(f"Direct-first ordering (#472): {len(_front)} bare-ball "
+                  f"net(s) moved to the front: "
+                  f"{', '.join(nm for nm, _ in _front[:8])}"
+                  f"{', ...' if len(_front) > 8 else ''}")
 
     # All nets are single-ended in this tool
     single_ended_nets = net_ids
@@ -870,7 +931,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Use visualization-aware building if callback is provided
     base_vis_data = None
-    base_map_exclusions = all_net_ids_to_route + existing_rippable
+    # Tap relocation (#424): zone-backed plane nets become base-map-excluded
+    # and per-net cached so single-tap surgery is exact whole-net cache
+    # recompute (ref-count-balanced by construction); deliberately NOT in
+    # routed_results, so the whole-net rip ladder can never name them.
+    relocatable_plane_ids = []
+    from tap_relocation import tap_relocation_enabled as _tap_reloc_on
+    if _tap_reloc_on():
+        _zone_nids = {z.net_id for z in pcb_data.zones if z.net_id > 0}
+        relocatable_plane_ids = sorted(
+            n for n in _zone_nids
+            if n not in all_net_ids_to_route and n not in existing_rippable
+            and n in pcb_data.nets)
+        if relocatable_plane_ids:
+            print(f"Tap relocation armed: {len(relocatable_plane_ids)} plane "
+                  f"net(s) cached for single-tap surgery")
+    base_map_exclusions = all_net_ids_to_route + existing_rippable + relocatable_plane_ids
     # Cross-class clearance: install the per-net class map + routing-side floor on
     # config so BOTH the base map and every incremental in-run obstacle stamper
     # price foreign copper at KiCad's pairwise max(classA, classB). The floor is
@@ -940,9 +1016,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     )
     # Rippable pre-existing nets need cache entries too: the working obstacle
     # map is base + cache, and their copper was excluded from base (issue #103).
-    if existing_rippable:
+    if existing_rippable or relocatable_plane_ids:
         from obstacle_cache import precompute_net_obstacles
-        for nid in existing_rippable:
+        for nid in existing_rippable + relocatable_plane_ids:
             net_obstacles_cache[nid] = precompute_net_obstacles(
                 pcb_data, nid, config, extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN)
 
@@ -996,6 +1072,36 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     track_proximity_cache = state.track_proximity_cache
     layer_map = state.layer_map
 
+    # BGA proximity costs live in the track-proximity cache under a reserved
+    # key (soft-knobs review B1): stamped into the base map they were wiped
+    # by prepare_obstacles_inplace's clear_stub_proximity before EVERY
+    # single-ended net, so the knob silently no-op'd in the most common path.
+    # The cache is re-merged on every prepare in every path (single-ended,
+    # diff pair, Phase 3 via the working-map clone).
+    from obstacle_costs import compute_bga_proximity_cost_cells, BGA_PROXIMITY_CACHE_KEY
+    _bga_cells = compute_bga_proximity_cost_cells(config, len(config.layers))
+    if len(_bga_cells):
+        track_proximity_cache[BGA_PROXIMITY_CACHE_KEY] = _bga_cells
+
+    # Congestion-aware soft costs (#424 Phase D): all-layer copper-density
+    # field under a second reserved cache key; env-gated (KICAD_CONGESTION_
+    # COST=0 default off). Vias in hot cells pay via_proximity_cost x the
+    # cell cost via the Rust via branch.
+    from congestion_field import register_congestion_field
+    register_congestion_field(pcb_data, config, track_proximity_cache)
+
+    # Plane-fragility soft costs (#424 planes-first): near-boundary pour
+    # cells cost extra so signal avoids BISECTING a plane at its necks;
+    # env-gated (KICAD_PLANE_FRAGILITY_COST=0 default off).
+    from plane_fragility import register_plane_fragility
+    register_plane_fragility(pcb_data, config, track_proximity_cache)
+
+    # Congestion v2 (#424): demand/capacity bins + owner terminals; per-net
+    # stamping happens at prepare (routing_context.stamp_congestion2).
+    from congestion_field import build_congestion2
+    config._congestion2 = build_congestion2(pcb_data, config,
+                                            list(all_net_ids_to_route))
+
     # Register rippable pre-existing nets as already-routed (issue #103):
     # blocking analysis iterates routed_net_paths (cells are recomputed from
     # pcb_data, so an empty path is fine), filter_rippable_blockers requires
@@ -1031,8 +1137,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     total_time += se_time
     total_iterations += se_iterations
 
+    # Checkpoint abort (KICAD_STOP_AFTER / KICAD_STOP_FILE, set by the SE
+    # loop): skip every later routing/repair pass and fall through to the
+    # WRITE, so the partial board ships exactly as it stood at the stop.
+    _ckpt_stop = getattr(state, 'checkpoint_stop', False)
+    if _ckpt_stop:
+        print("Checkpoint stop: skipping reroute/length-match/Phase 3/rescue/"
+              "cleanup/reconciliation; writing the board as-is")
+
     # Run reroute loop for nets that were ripped during diff pair or single-ended routing
-    rq_successful, rq_failed, rq_time, rq_iterations, route_index = run_reroute_loop(
+    rq_successful, rq_failed, rq_time, rq_iterations, route_index = (0, 0, 0.0, 0, route_index) if _ckpt_stop else run_reroute_loop(
         state, route_index_start=route_index,
         cancel_check=cancel_check, progress_callback=progress_callback,
         failed_so_far=failed
@@ -1043,7 +1157,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     total_iterations += rq_iterations
 
     # Apply length matching if configured
-    if length_match_groups:
+    if length_match_groups and not _ckpt_stop:
         run_length_matching(routed_results, length_match_groups, config, pcb_data)
 
     # Sync pcb_data with length-matched segments before Phase 3
@@ -1061,7 +1175,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if progress_callback:
             progress_callback(current, num_multipoint_nets, f"Multi-point: {net_name}")
 
-    run_phase3_tap_routing(
+    if not _ckpt_stop:
+      run_phase3_tap_routing(
         state=state,
         pcb_data=pcb_data,
         config=config,
@@ -1107,7 +1222,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 state.reroute_queue.append(('single', pcb_data.nets[nid].name, nid))
                 state.queued_net_ids.add(nid)
                 recover.append(pcb_data.nets[nid].name)
-        if recover:
+        if recover and not _ckpt_stop:
             print(f"Issue #134 recovery: re-routing {len(recover)} net(s) left ripped "
                   f"to avoid a short: {', '.join(recover)}")
             run_reroute_loop(state, route_index_start=route_index,
@@ -1160,7 +1275,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # restored copper colliding with newly routed copper); honest 'unrecovered'
     # when nothing safe can be re-instated. Engine-side, so the GUI inherits.
     from diff_pair_custody import run_casualty_reconcile
-    casualty_summary = run_casualty_reconcile(state)
+    casualty_summary = None if _ckpt_stop else run_casualty_reconcile(state)
 
     # Issues #331/#371: last-chance scoped fine-parameter rescue for nets the
     # whole pipeline (main loop, rip-up ladder, reroute loop, Phase 3, #134
@@ -1172,8 +1287,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if progress_callback:
         progress_callback(0, 0, "Rescuing failed nets...")
     from net_rescue import rescue_failed_nets
-    rescue_summary = rescue_failed_nets(state, single_ended_nets,
-                                        net_clearances=net_clearances)
+    rescue_summary = None if _ckpt_stop else rescue_failed_nets(
+        state, single_ended_nets, net_clearances=net_clearances)
 
     # Final progress update
     if progress_callback:
@@ -1332,8 +1447,32 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _committed_seg_ids.update(id(s) for s in pcb_data.segments)
         _committed_via_ids.update(id(v) for v in pcb_data.vias)
 
-    _cleanup = run_post_route_cleanup(
+    # Checkpoint stop skips the cleanup pipeline, but the FREEZE must still
+    # happen: the #220/#284 stale-input strip below grades any input copper
+    # absent from the committed snapshot as stale -- with an empty snapshot
+    # it stripped EVERY routed net's input copper from the written file
+    # (checkpoint boards shipped bus nets consisting only of their new tap
+    # segments; 31-segment trunks vanished). The board at this point IS what
+    # routing committed, which is exactly the freeze semantics.
+    # KICAD_STOP_CLEANUP=1: run the cleanup pipeline ON the checkpoint
+    # snapshot (dead-end sweep, grazes, etc.) before writing -- shows what
+    # cleanup would retire (e.g. a stale escape stub the island-launch
+    # route no longer uses). The freeze then fires inside the pipeline.
+    _ckpt_cleanup = _ckpt_stop and os.environ.get(
+        'KICAD_STOP_CLEANUP', '') in ('1', 'true', 'on')
+    if _ckpt_stop and not _ckpt_cleanup:
+        _freeze_committed()
+    # #473: nets still carrying unfinished pads keep ALL their copper
+    # through the dead-end sweep -- their spurs are the landing sites the
+    # next chain step / rescue needs, and sweeping them each step eroded
+    # failed nets across chains.
+    _protect_unfinished = {nid for nid, _r in routed_results.items()
+                           if _r.get('failed_pads_info')}
+    _protect_unfinished |= {nid for _nm, nid in single_ended_nets
+                            if nid not in routed_results}
+    _cleanup = None if (_ckpt_stop and not _ckpt_cleanup) else run_post_route_cleanup(
         results, pcb_data, sweep_scope_ids, config,
+        protect_net_ids=_protect_unfinished,
         freeze_hook=_freeze_committed,
         # Lets the phantom step also remove ORPHAN routed copper from pcb_data
         # (rip/reroute slivers no surviving result references), so board ==
@@ -1346,7 +1485,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         original_via_ids=({id(v) for lst in _orig_via_by_net.values() for v in lst}
                           | {id(v) for v in all_swap_vias}),
         keep_input_copper=keep_input_copper)
-    dead_end_input_segments = _cleanup.input_strip_segments
+    dead_end_input_segments = _cleanup.input_strip_segments if _cleanup is not None else []
 
     # Issue #220: the output writer copies the INPUT FILE verbatim, then adds the
     # write-list results and strips `segments_to_remove`. So an in-scope net's
@@ -1525,7 +1664,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             continue
         _r = check_net_connectivity(
             _nid, _segs_by_net.get(_nid, []), _vias_by_net.get(_nid, []),
-            _pads, _zones_by_net.get(_nid, []), tolerance=0.02)
+            _pads, _zones_by_net.get(_nid, []), tolerance=0.02,
+            pcb_data=pcb_data)
         _dp = _r.get('disconnected_pads') or []
         if _dp:
             _res['failed_pads_info'] = [
@@ -1598,7 +1738,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             continue
         _r = check_net_connectivity(
             _nid, _segs_by_net.get(_nid, []), _vias_by_net.get(_nid, []),
-            _pads, _zones_by_net.get(_nid, []), tolerance=0.02)
+            _pads, _zones_by_net.get(_nid, []), tolerance=0.02,
+            pcb_data=pcb_data)
         _dp = _r.get('disconnected_pads') or []
         if not _dp:
             continue
@@ -1726,7 +1867,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # #331/#371 rescue pass outcome (key absent when nothing was rescued,
         # so pre-rescue JSON_SUMMARY consumers/diffs are unaffected).
         summary['rescue'] = rescue_summary
-    if casualty_summary.get('attempted'):
+    if casualty_summary and casualty_summary.get('attempted'):
         # T5 custody: casualties-only reconcile tally (additive; key absent
         # when no rip casualty occurred -- the common case).
         summary['casualty_reconcile'] = casualty_summary
@@ -1847,7 +1988,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # still-open set. Runs on BOTH fronts: CLI re-invokes on the written
     # file; GUI (return_results) re-invokes on the in-memory board and
     # merges the sub-run's results (claude-tab/stress parity gap closure).
-    if (final_reconcile and not skip_routing
+    if (final_reconcile and not skip_routing and not _ckpt_stop
             and (output_file or return_results)
             and (failed_single or failed_multipoint)):
         _rec_names = list(dict.fromkeys(
@@ -1877,6 +2018,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             if _bn not in _hinted:
                                 _hinted.append(_bn)
             _RIP_ESCALATION_CAP = 12
+            # Auto-granted rip authority must respect the caller's own net
+            # filter: a net excluded by pattern ('!GND' while planes route
+            # in a later step) is excluded BY PLAN, and ripping its stubs
+            # here reroutes the whole net as track copper in a step that was
+            # told not to touch it (ottercast: 52 dogbone stubs became a
+            # 757-segment GND web). Explicit --rip-existing-nets from the
+            # operator is honored as given; only the escalation filters.
+            if _hinted and net_names:
+                from net_queries import matches_net_filter as _mnf
+                _hinted = [_bn for _bn in _hinted if _mnf(_bn, net_names)]
             if _hinted and '*' not in (rip_existing_nets or []):
                 _hinted = _hinted[:_RIP_ESCALATION_CAP]
                 _rk['rip_existing_nets'] = list(dict.fromkeys(
@@ -1916,6 +2067,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     results_data.setdefault('vias_to_remove', []).extend(
                         _rdata['vias_to_remove'])
                 for _key in ('all_swap_vias', 'all_swap_segments',
+                             'all_segment_modifications',
                              'exclusion_zone_lines', 'boundary_debug_labels'):
                     if _rdata.get(_key):
                         results_data.setdefault(_key, []).extend(_rdata[_key])
@@ -1932,6 +2084,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         except Exception as _e:
             print(f"{RED}  final reconciliation pass failed: {_e}{RESET}")
 
+
+    # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
+    # net -- bus membership, ordering, failures with named blockers, rips,
+    # rescues, Phase-3 tap order, costs -- assembled from state.
+    from net_story import net_story_enabled, dump_net_story
+    if net_story_enabled():
+        try:
+            dump_net_story(state, output_file or input_file)
+        except Exception as _e:
+            print(f"  net story dump failed: {_e}")
 
     if return_results:
         return successful, failed, total_time, results_data
@@ -1974,9 +2136,12 @@ For differential pair routing, use route_diff.py:
                         help="Overwrite input file instead of creating _routed copy")
     parser.add_argument("--component", "-C", help="Route all nets connected to this component (e.g., U1). Excludes GND/VCC/VDD unless net patterns also specified.")
     # Ordering and strategy options
-    parser.add_argument("--ordering", "-o", choices=["inside_out", "mps", "original"],
+    parser.add_argument("--ordering", "-o", choices=["inside_out", "mps", "original", "bus"],
                         default=defaults.DEFAULT_ORDERING_STRATEGY,
-                        help="Net ordering strategy: mps (default, crossing conflicts), inside_out, or original")
+                        help="Net ordering strategy: mps (default, crossing conflicts), "
+                             "inside_out, original, or bus (detected bus groups first, "
+                             "members middle-out, rest by mps; ordering only -- "
+                             "corridor attraction still needs --bus)")
     parser.add_argument("--direction", "-d", choices=["forward", "backward"],
                         default=None,
                         help="Direction search order for each net route")
@@ -2153,6 +2318,20 @@ For differential pair routing, use route_diff.py:
                         help="How a Phase 3 tap rip-up decides keep-retry vs abandon "
                              "(see docs/rip-up-reroute.md). Env override: "
                              f"KICAD_RIPUP_ABANDON_METRIC (default: {defaults.RIPUP_ABANDON_METRIC})")
+    parser.add_argument("--ripup-blocker-select",
+                        choices=list(defaults.RIPUP_BLOCKER_SELECT_CHOICES),
+                        default=os.environ.get('KICAD_RIPUP_BLOCKER_SELECT',
+                                               defaults.RIPUP_BLOCKER_SELECT),
+                        help="Blocker SELECTION algorithm for the rip-up ladder. "
+                             "'count' = historical weighted cell "
+                             "count; 'near-target' = endpoint-proximity first "
+                             "(the true last-mile blocker hugs the failing pad "
+                             "but has few cells); 'bidir' = boost nets blocking "
+                             "BOTH search directions (genuine separating walls); "
+                             "'mincut' = soft-cost probe on a map clone that "
+                             "reads the actual crossing set (names the true "
+                             "joint cut; falls back to count order when the "
+                             "wall is static copper). Default: count.")
     parser.add_argument("--routing-clearance-margin", type=float, default=defaults.ROUTING_CLEARANCE_MARGIN,
                         help=f"Multiplier on track-via clearance ({defaults.ROUTING_CLEARANCE_MARGIN} = minimum DRC)")
     parser.add_argument("--hole-to-hole-clearance", type=float, default=None,
@@ -2165,7 +2344,7 @@ For differential pair routing, use route_diff.py:
     add_drc_fix_args(parser)
 
     # Vertical alignment attraction options
-    parser.add_argument("--vertical-attraction-radius", type=float, default=1.0,
+    parser.add_argument("--vertical-attraction-radius", type=float, default=defaults.VERTICAL_ATTRACTION_RADIUS,
                         help="Radius in mm for cross-layer track attraction (0 = disabled, default: 1.0)")
     parser.add_argument("--vertical-attraction-cost", type=float, default=defaults.VERTICAL_ATTRACTION_COST,
                         help=f"Cost bonus for aligning with tracks on other layers (0 = disabled, default: {defaults.VERTICAL_ATTRACTION_COST})")
@@ -2324,6 +2503,17 @@ For differential pair routing, use route_diff.py:
     # Get nets from patterns and/or component
     if all_patterns:
         net_names = expand_net_patterns(pcb_data, all_patterns)
+        # Plane-net manifest (chain consistency): nets an earlier plane step
+        # declared are excluded from WILDCARD selection -- routing them as
+        # normal signals here would fight the pour. Naming one verbatim in
+        # --nets still includes it (explicit override).
+        from plane_io import apply_plane_manifest_exclusions
+        net_names, _plane_excl = apply_plane_manifest_exclusions(
+            args.input_file, all_patterns, net_names)
+        if _plane_excl:
+            print(f"Plane manifest: excluded {len(_plane_excl)} plane net(s) "
+                  f"from wildcard selection: {', '.join(sorted(_plane_excl))} "
+                  f"(name one explicitly in --nets to include it)")
     else:
         net_names = []  # Will be populated by component filter below
 
@@ -2460,6 +2650,7 @@ For differential pair routing, use route_diff.py:
                 verbose=args.verbose,
                 max_rip_up_count=args.max_ripup,
                 ripup_abandon_metric=args.ripup_abandon_metric,
+                ripup_blocker_select=args.ripup_blocker_select,
                 enable_layer_switch=not args.no_stub_layer_swap,
                 crossing_layer_check=not args.no_crossing_layer_check,
                 can_swap_to_top_layer=args.can_swap_to_top_layer,
@@ -2509,3 +2700,13 @@ For differential pair routing, use route_diff.py:
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+
+    # Plane-net manifest carry-forward (chain consistency): the input board's
+    # sidecar (written by an earlier plane step) propagates to the output, so
+    # every later chain step keeps auto-excluding the planed nets.
+    if args.output_file and os.path.isfile(args.output_file):
+        try:
+            from plane_io import carry_plane_manifest
+            carry_plane_manifest(args.input_file, args.output_file)
+        except Exception as e:
+            print(f"  (plane manifest not carried: {e})")

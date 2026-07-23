@@ -66,7 +66,7 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | Field | Default | Meaning |
 |-------|---------|---------|
 | `layer_costs` | `[]` | Per-layer cost multipliers (1.0 = neutral), parallel to `layers` |
-| `direction_preference_cost` | `50` | Penalty for off-direction moves; layers alternate H/V starting horizontal on top (0 = off) |
+| `direction_preference_cost` | `5000` | Penalty for off-direction moves; layers alternate H/V starting horizontal on top (0 = off). 5000 = 5x a move: measured lane-discipline value; diagonal moves charge the wrong-axis component |
 | `vertical_attraction_radius` | `0.2` | Radius for cross-layer alignment bonus (0 = off) |
 | `vertical_attraction_cost` | `0.0` | Bonus (negative cost) for vertically aligned positions |
 
@@ -179,6 +179,8 @@ assert config.obstacle_clearance(some_default_net) == 0.15  # not in the map -> 
 |-------|---------|---------|
 | `max_rip_up_count` | `3` | Max blocking routes ripped up at once (progressive 1..N) |
 | `ripup_abandon_metric` | `'stranded'` | Keep-retry vs abandon rule for multipoint tap rip-ups (see [rip-up-reroute.md](rip-up-reroute.md#abandon-metrics)) |
+| `ripup_blocker_select` | `'count'` | Blocker-ordering algorithm for the rip-up ladder: `'count'`, `'near-target'`, `'bidir'`, `'mincut'` (see [rip-up-reroute.md](rip-up-reroute.md#blocker-selection-algorithms)) |
+| `bus_rip_resistance` | `1.0` | >1 divides bus-group members' blocker scores so the ladder prefers ripping bystanders over a settled bus river; mincut prices member cells higher by the same factor. Env: `KICAD_BUS_RIP_RESISTANCE` |
 | `stub_layer_swap` | `True` | Allow moving stubs to other layers to resolve conflicts (never moves an SMD pad's stub off the one layer that pad lives on — that would orphan the pad) |
 | `target_swap_crossing_penalty` | `1000.0` | Penalty for crossing assignments during target swap |
 | `crossing_layer_check` | `True` | Only count crossings between routes sharing a layer |

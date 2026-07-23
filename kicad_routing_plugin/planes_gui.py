@@ -247,12 +247,29 @@ class CreatePlanesOptionsPanel(wx.Panel):
 
         # Zone clearance
         grid.Add(wx.StaticText(self, label="Zone Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        # Checkbox + spin row, SAME convention as the basic tab's geometry
+        # floors (track width etc.): UNCHECKED = automatic (pour follows the
+        # routed Min Clearance, auto-stepping toward the fab floor when a
+        # dense BGA lattice can't be threaded -- the ottercast sealed-field
+        # fix); CHECKING the box overrides with the typed value.
         r = defaults.PARAM_RANGES['plane_zone_clearance']
+        _zrow = wx.BoxSizer(wx.HORIZONTAL)
+        self.zone_clearance_check = wx.CheckBox(self, label="")
+        self.zone_clearance_check.SetValue(False)
+        self.zone_clearance_check.SetToolTip(
+            "Override the zone (pour) clearance (unchecked = follow Min "
+            "Clearance, auto-reduced to thread dense BGA fields).")
         self.zone_clearance = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
                                                  initial=defaults.PLANE_ZONE_CLEARANCE, inc=r['inc'])
         self.zone_clearance.SetDigits(r['digits'])
         self.zone_clearance.SetToolTip("Clearance from zone fill to other copper")
-        grid.Add(self.zone_clearance, 0, wx.EXPAND)
+        self.zone_clearance.Enable(False)
+        self.zone_clearance_check.Bind(
+            wx.EVT_CHECKBOX,
+            lambda evt: self.zone_clearance.Enable(evt.IsChecked()))
+        _zrow.Add(self.zone_clearance_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        _zrow.Add(self.zone_clearance, 1, wx.EXPAND)
+        grid.Add(_zrow, 0, wx.EXPAND)
 
         # Max search radius
         grid.Add(wx.StaticText(self, label="Max Search Radius (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -361,7 +378,8 @@ class CreatePlanesOptionsPanel(wx.Panel):
         else:
             same_net_clr = self.same_net_pad_clearance.GetValue()
         return {
-            'zone_clearance': self.zone_clearance.GetValue(),
+            'zone_clearance': (self.zone_clearance.GetValue()
+                               if self.zone_clearance_check.GetValue() else None),
             'max_search_radius': self.max_search_radius.GetValue(),
             'rip_blocker_nets': self.rip_blocker_check.GetValue(),            'add_gnd_vias': self.add_gnd_vias_check.GetValue(),
             'gnd_via_distance': self.gnd_via_distance.GetValue(),
@@ -1021,7 +1039,7 @@ class PlanesTab(wx.Panel):
                 via_drill=config.get('via_drill', defaults.VIA_DRILL),
                 track_width=config.get('track_width', defaults.TRACK_WIDTH),
                 clearance=config.get('clearance', defaults.CLEARANCE),
-                zone_clearance=config.get('zone_clearance', defaults.PLANE_ZONE_CLEARANCE),
+                zone_clearance=config.get('zone_clearance'),
                 min_thickness=config.get('min_thickness', defaults.PLANE_MIN_THICKNESS),
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
                 max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
@@ -1239,7 +1257,7 @@ class PlanesTab(wx.Panel):
                 # clearance) threads but the GUI repair dropped. Config-driven,
                 # defaulting to the same PLANE_* values the CLI uses, so current
                 # behavior is unchanged unless a plan sets them.
-                zone_clearance=config.get('zone_clearance', defaults.PLANE_ZONE_CLEARANCE),
+                zone_clearance=config.get('zone_clearance'),
                 track_via_clearance=config.get('track_via_clearance',
                                                defaults.PLANE_TRACK_VIA_CLEARANCE),
                 reroute_ripped_nets=config.get('reroute_ripped_nets', False),
@@ -1860,6 +1878,18 @@ class PlanesTab(wx.Panel):
         # stale again around that copper (#362).
         from .gui_utils import refill_all_zones
         refill_all_zones(board)
+
+        # Plane-net manifest (CLI parity): declare the planed nets next to the
+        # board file, so later CLI steps on the saved board -- and this GUI
+        # session's own plan route/fanout steps -- auto-exclude them from
+        # wildcard selection (see plane_io helpers / claude_plan._plan_plane_nets).
+        try:
+            names = getattr(self, '_plane_net_names', None)
+            if names and getattr(self, 'board_filename', None):
+                from plane_io import record_plane_manifest
+                record_plane_manifest(self.board_filename, names, 'planes_gui')
+        except Exception as _e:
+            print(f"  (plane manifest not written: {_e})")
 
     def _run_plane_copper_cleanup(self, board, get_layer_id):
         """CLI/GUI parity: apply the shared plane-copper cleanup delta

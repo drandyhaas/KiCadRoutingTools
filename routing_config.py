@@ -55,6 +55,9 @@ class GridRouteConfig:
     bga_exclusion_zones: List[Tuple[float, float, float, float]] = field(default_factory=list)
     stub_proximity_radius: float = 2.0  # mm - radius around stubs to penalize
     stub_proximity_cost: float = 0.2  # mm equivalent cost at stub center
+    # NOTE (soft-knobs C6): in the Rust via branch this also MULTIPLIES the
+    # summed stub+layer proximity at the via site (track-proximity and
+    # ripped-corridor soft costs included), not just stub/BGA-zone costs.
     via_proximity_cost: float = 10.0  # via cost multiplier in stub/BGA proximity zones (0 = block vias)
     bga_proximity_radius: float = 7.0  # mm - distance from BGA edges to penalize
     bga_proximity_cost: float = 0.2  # mm equivalent cost at BGA edge
@@ -81,6 +84,15 @@ class GridRouteConfig:
     # phase3_routing.ABANDON_METRICS: stranded | total-pads | complete-nets |
     # congestion | history | weighted | probe | weighted-probe
     ripup_abandon_metric: str = 'stranded'
+    # Blocker SELECTION algorithm for the rip-up ladders (#424 audit;
+    # blocking_analysis.rank_blockers / mincut_probe_order):
+    # count | near-target | bidir | mincut
+    ripup_blocker_select: str = 'count'
+    # Bus rip resistance: >1.0 divides bus-group members' blocker scores so
+    # the rip ladder prefers bystanders over tearing up a settled bus river;
+    # the mincut probe prices member cells higher by the same factor.
+    # 1.0 = off (legacy). bus_member_net_ids is attached by the SE loop.
+    bus_rip_resistance: float = 1.0
     max_setback_angle: float = 45.0  # Maximum angle (degrees) for setback position search
     track_proximity_distance: float = 2.0  # mm - radius around routed tracks to penalize (same layer)
     stub_layer_swap: bool = True  # Enable stub layer switching optimization
@@ -102,7 +114,7 @@ class GridRouteConfig:
     neckdown_taper_length: float = 0.5  # mm narrow->wide taper (0 = abrupt width step)
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias
     # Vertical alignment attraction - encourages tracks on different layers to stack
-    vertical_attraction_radius: float = 0.2  # mm - radius for attraction lookup (0 = disabled)
+    vertical_attraction_radius: float = 1.0  # mm - radius for attraction lookup (0 = disabled); matches routing_defaults.VERTICAL_ATTRACTION_RADIUS (N1)
     vertical_attraction_cost: float = 0.0  # mm equivalent bonus for aligned positions
     # Ripped route avoidance - soft penalty for routing through a ripped net's former corridor
     ripped_route_avoidance_radius: float = 1.0  # mm - radius around ripped route segments/vias
@@ -141,7 +153,7 @@ class GridRouteConfig:
     # Heuristic tuning
     proximity_heuristic_factor: float = 0.02  # Factor for proximity heuristic (higher = tighter heuristic, faster but may overestimate)
     # Layer direction preference - alternates H/V starting with horizontal on top
-    direction_preference_cost: int = 50  # Cost penalty for non-preferred direction (0 = disabled)
+    direction_preference_cost: int = 5000  # Cost penalty for non-preferred direction (0 = disabled); see routing_defaults
     # Bus routing - auto-detection and parallel routing of grouped nets
     bus_enabled: bool = False  # Enable bus detection and routing
     bus_detection_radius: float = 5.0  # mm - max endpoint distance to form bus
@@ -304,12 +316,20 @@ class GridRouteConfig:
         independent of --grid-step (a finer grid visits proportionally more
         cells). At 0.1mm this reproduces the historical values exactly.
         """
-        return int(cost_mm * 1000 / REFERENCE_GRID_STEP * (self.grid_step / REFERENCE_GRID_STEP))
+        # soft-knobs B5: per-cell units are CONSTANT per cell (no grid_step
+        # factor). The old extra (grid_step/REFERENCE) factor made every
+        # per-cell knob relatively 2x/4x weaker at fine grids (0.05/0.025 --
+        # exactly the fine-pitch ladder and net_rescue grids) and 2x stronger
+        # at 0.2, because the base move cost per mm is 1000/grid_step, not
+        # constant. Identical to the old value at the 0.1 reference grid.
+        return int(cost_mm * 1000 / REFERENCE_GRID_STEP)
 
     def scaled_cell_units(self, units: float) -> int:
-        """Grid-invariant scaling for per-cell cost knobs given in raw cost
-        units calibrated at REFERENCE_GRID_STEP (e.g. bus_attraction_bonus)."""
-        return int(units * (self.grid_step / REFERENCE_GRID_STEP))
+        """Per-cell cost knobs in raw units calibrated at REFERENCE_GRID_STEP
+        (e.g. bus_attraction_bonus). soft-knobs B5: constant per cell -- the
+        old (grid_step/REFERENCE) factor broke relative strength vs the move
+        cost at non-reference grids. Identical at 0.1."""
+        return int(units)
 
     def via_cost_units(self) -> int:
         """Per-via penalty in cost units.
@@ -319,6 +339,17 @@ class GridRouteConfig:
         same mm-equivalent detour at any --grid-step.
         """
         return int(self.via_cost * 1000 * (REFERENCE_GRID_STEP / self.grid_step))
+
+    def via_proximity_cost_int(self) -> int:
+        """Rust-facing integer via-proximity multiplier.
+
+        0 stays 0 (its special meaning: BLOCK vias near obstacles instead of
+        penalizing); any positive fraction rounds to at least 1 (soft-knobs
+        review B3: a GUI value of 0.5 passed through bare int() became 0 --
+        neither blocked nor penalized, weaker than both settings around it).
+        """
+        c = self.via_proximity_cost
+        return 0 if c == 0 else max(1, int(round(c)))
 
     def get_proximity_heuristic_cost(self) -> int:
         """Get the maximum proximity heuristic cost for the Rust router.

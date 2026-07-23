@@ -109,27 +109,35 @@ def calculate_channels(grid: BGAGrid) -> List[Channel]:
     return channels
 
 
-def is_edge_pad(pad_x: float, pad_y: float, grid: BGAGrid, tolerance: float = EDGE_PAD_TOLERANCE) -> Tuple[bool, str]:
+def is_edge_pad(pad_x: float, pad_y: float, grid: BGAGrid,
+                tolerance: float = EDGE_PAD_TOLERANCE,
+                preferred_dir: str = None) -> Tuple[bool, str]:
     """
     Check if a pad is on the outer edge of the BGA.
     Returns (is_edge, escape_direction).
 
     Edge pads are on the outermost row or column and can escape directly
-    without needing a 45° stub.
+    without needing a 45° stub. A CORNER pad sits on two edges and has two
+    legal escape directions; preferred_dir (#469, the net's target side)
+    picks between them when it matches one -- otherwise the fixed
+    right/left/down/up priority stands.
     """
     on_left = abs(pad_x - grid.cols[0]) < tolerance
     on_right = abs(pad_x - grid.cols[-1]) < tolerance
     on_top = abs(pad_y - grid.rows[0]) < tolerance
     on_bottom = abs(pad_y - grid.rows[-1]) < tolerance
 
-    # Determine escape direction based on which edge
+    legal = []
     if on_right:
-        return True, 'right'
-    elif on_left:
-        return True, 'left'
-    elif on_bottom:
-        return True, 'down'
-    elif on_top:
-        return True, 'up'
-
-    return False, ''
+        legal.append('right')
+    if on_left:
+        legal.append('left')
+    if on_bottom:
+        legal.append('down')
+    if on_top:
+        legal.append('up')
+    if not legal:
+        return False, ''
+    if preferred_dir and preferred_dir in legal:
+        return True, preferred_dir
+    return True, legal[0]

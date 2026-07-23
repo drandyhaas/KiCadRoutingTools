@@ -38,6 +38,12 @@ FLAG_PARAMS = {
     '--max-iterations': 'max_iterations',
     '--max-ripup': 'max_ripup',
     '--ripup-abandon-metric': 'ripup_abandon_metric',
+    '--ripup-blocker-select': 'ripup_blocker_select',
+    # route.py spells the strategy flag --ordering; the GUI control (and the
+    # plan executor's param name) is ordering_strategy. Without this mapping
+    # the generic fallthrough carried it as 'ordering', which matches no
+    # dialog control, so a replayed plan silently routed in default order.
+    '--ordering': 'ordering_strategy',
     '--hole-to-hole-clearance': 'hole_to_hole_clearance',
     '--board-edge-clearance': 'board_edge_clearance',
     '--via-cost': 'via_cost',
@@ -72,6 +78,7 @@ BOOL_FLAGS = {
     '--no-gnd-vias': 'no_gnd_vias',
     # route.py spells it --no-bga-zones (plural, nargs='*'); bga_fanout uses the
     # singular. Both map to the GUI's no_bga_zone special (bare = exclude ALL).
+    '--zone-clearance': 'zone_clearance',
     '--no-bga-zone': 'no_bga_zone',
     '--no-bga-zones': 'no_bga_zone',
 }
@@ -130,6 +137,13 @@ def parse_command(argv):
     step = {'action': action, 'params': {}}
     step['_files'] = []  # positional .kicad_pcb args (input/output), for pruning
     lists = {}
+    # Normalize `--flag=value` to `--flag value` (recorded manifests mix both
+    # forms; core64_logic's `--nets=-BATT` otherwise fell into the unknown-flag
+    # branch as a mangled param, left --nets empty, and cascaded into EMPTY
+    # plane assignments even though --plane-layers parsed fine).
+    argv = [t for a in argv
+            for t in (a.split('=', 1) if a.startswith('--') and '=' in a
+                      else (a,))]
     i = argv.index([a for a in argv if os.path.basename(a) == tool][0]) + 1
     positional = []
     aliases = TOOL_FLAG_ALIASES.get(tool, {})
