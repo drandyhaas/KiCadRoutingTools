@@ -61,12 +61,15 @@ PLAN_RESULT_SCHEMA = (
     'blocked by a signal trace (e.g. a connector GND pin) is connected by ripping '
     'the blocker out of the way; the ripped blocker is then left UNROUTED. So '
     'whenever rip_blocker_nets is set, add ONE more route step AFTER repair_planes '
-    '(nets "*" minus the plane net names) to reconnect the ripped blockers - route '
-    'handles rip-up/restore safely against the live obstacle map and reuses the '
+    'with nets ["*"] to reconnect the ripped blockers - do NOT exclude the plane '
+    'nets there: the router skips nets the pour already connects and track-patches '
+    'any pad the plane steps left disconnected. route handles rip-up/restore '
+    'safely against the live obstacle map and reuses the '
     'route step\'s power_nets/power_nets_widths. '
-    'The route step\'s "nets" globs support '
-    '"!" exclusions and MUST exclude any net that a route_planes step will handle, '
-    'e.g. ["*", "!GND", "!VCC"]. '
+    'The route step\'s "nets" globs support "!" exclusions; a route step that '
+    'runs BEFORE the route_planes step MUST exclude every net a route_planes '
+    'step will handle, e.g. ["*", "!GND", "!VCC"] - the final post-repair '
+    'route step must NOT repeat those exclusions. '
     'Use only these actions; omit any parameter you have no recommendation for; '
     'all params are optional.'
 )
@@ -579,37 +582,45 @@ def apply_step_params(step, dialog):
 
 
 def _plan_plane_nets(steps, dialog):
-    """Plane nets this GUI run must not route/fan out as signals: the union of
-    every route_planes/repair_planes step's exact assignment net names in the
-    PLAN (works even for steps that run BEFORE the planes step -- the plan is
-    a whole-chain declaration, the CLI's fanout-before-planes hole) plus the
-    on-disk plane manifest next to the board file (a chain that started in
-    the CLI and continues here). Mirrors the CLI's plane_io semantics."""
+    """Plane nets a step running BEFORE the plane steps must not route/fan
+    out as signals: the union of every route_planes/repair_planes step's
+    exact assignment net names in the PLAN (a whole-chain declaration, so it
+    covers fanout/route steps that run before the planes exist -- the
+    ottercast stub-clutter class). Steps AFTER the planes may include these
+    nets freely: the engine's fill-aware selection skips a plane-connected
+    net untouched and track-patches only genuinely disconnected pads (#479)."""
     nets = set()
     for s in steps or []:
         if s.get("action") in ("route_planes", "repair_planes"):
             for a in s.get("assignments") or []:
                 nets.update(n for n in a.get("nets") or [] if n)
             nets.update(n for n in s.get("nets") or [] if n)
-    try:
-        from plane_io import read_plane_manifest
-        board_file = getattr(dialog, 'board_filename', None)
-        if board_file:
-            nets.update(read_plane_manifest(board_file).get('plane_nets', []))
-    except Exception:
-        pass
     return nets
 
 
+def _precedes_first_plane_step(step, all_steps):
+    """True when `step` runs before the plan's first route_planes/repair_planes
+    step (or when its position is unknown). Identity comparison: the runner
+    passes the same step dicts it iterates."""
+    if not all_steps:
+        return True
+    first = next((i for i, s in enumerate(all_steps)
+                  if s.get("action") in ("route_planes", "repair_planes")), None)
+    if first is None:
+        return True
+    idx = next((i for i, s in enumerate(all_steps) if s is step), None)
+    return idx is None or idx < first
+
+
 def _drop_plane_nets(names, globs, plane_nets, notes, label):
-    """CLI-parity exclusion: a plane net leaves a WILDCARD-matched selection;
-    a glob naming it verbatim keeps it (explicit override)."""
+    """Drop the plan's declared plane nets from a WILDCARD-matched selection;
+    a glob naming one verbatim keeps it (explicit override)."""
     if not plane_nets:
         return names
     literal = {g for g in (globs or []) if g in plane_nets}
     excluded = sorted(n for n in names if n in plane_nets and n not in literal)
     if excluded:
-        notes.append(f"{label}: plane manifest excluded {', '.join(excluded)}")
+        notes.append(f"{label}: plan plane nets excluded {', '.join(excluded)}")
         return [n for n in names if n not in set(excluded)]
     return names
 
@@ -624,7 +635,13 @@ def apply_step_selection(step, dialog, all_steps=None):
     if action == "route":
         globs = step.get("nets") or ["*"]
         names = _match_net_names(dialog.pcb_data, globs)
-        names = _drop_plane_nets(names, globs, plane_nets, notes, "route")
+        # Drop wildcard-selected plane nets only from route steps that run
+        # BEFORE the first plane step (routing a whole rail as tracks there
+        # fights the later pour). A route step AFTER the planes keeps them:
+        # the engine skips plane-connected nets and track-patches only pads
+        # the plane steps left disconnected (#479).
+        if _precedes_first_plane_step(step, all_steps):
+            names = _drop_plane_nets(names, globs, plane_nets, notes, "route")
         if not names:
             notes.append(f"route: no nets match {globs}")
         dialog.net_panel.set_selected_nets(names)

@@ -1879,18 +1879,6 @@ class PlanesTab(wx.Panel):
         from .gui_utils import refill_all_zones
         refill_all_zones(board)
 
-        # Plane-net manifest (CLI parity): declare the planed nets next to the
-        # board file, so later CLI steps on the saved board -- and this GUI
-        # session's own plan route/fanout steps -- auto-exclude them from
-        # wildcard selection (see plane_io helpers / claude_plan._plan_plane_nets).
-        try:
-            names = getattr(self, '_plane_net_names', None)
-            if names and getattr(self, 'board_filename', None):
-                from plane_io import record_plane_manifest
-                record_plane_manifest(self.board_filename, names, 'planes_gui')
-        except Exception as _e:
-            print(f"  (plane manifest not written: {_e})")
-
     def _run_plane_copper_cleanup(self, board, get_layer_id):
         """CLI/GUI parity: apply the shared plane-copper cleanup delta
         (pcb_modification.compute_plane_copper_cleanup -- the SAME core the CLI

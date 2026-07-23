@@ -1820,11 +1820,8 @@ Examples:
     import json as _json, clearance_ledger as _cl
     _routes, _regions = (_rdp_result if isinstance(_rdp_result, tuple)
                          and len(_rdp_result) >= 2 else (0, 0))
-    # Record only nets whose ZONES this step actually processed (net_names) --
-    # never args.power_nets, which is a track-width hint, not a plane
-    # declaration. Recording power nets here poisoned the sidecar and locked
-    # real rails out of every later wildcard route step (#479: ch32v203_ev's
-    # +5V ended the chain with zero copper).
+    # Informational only: the zone nets this step actually processed (never
+    # args.power_nets -- those are track-width hints, not planes; #479).
     _plane_nets = sorted(set(net_names))
     _summary = {
         "total_routes": _routes,
@@ -1835,14 +1832,6 @@ Examples:
     if LAST_RIPPED_RECONNECT is not None:
         _summary["ripped_reconnect"] = LAST_RIPPED_RECONNECT
     print("JSON_SUMMARY: " + _json.dumps(_summary))
-    # Plane-net manifest sidecar (see route_planes.py / plane_io helpers).
-    try:
-        from plane_io import record_plane_manifest
-        record_plane_manifest(args.output_file, _plane_nets,
-                              'route_disconnected_planes',
-                              input_board_path=args.input_file, summary=_summary)
-    except Exception as e:
-        print(f"  (plane manifest not written: {e})")
 
 
 if __name__ == "__main__":

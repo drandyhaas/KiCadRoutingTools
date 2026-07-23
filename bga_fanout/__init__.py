@@ -2917,21 +2917,6 @@ def main():
         print(f"Available: {list(pcb_data.footprints.keys())[:20]}...")
         return 1
 
-    # Plane-net manifest (chain consistency): nets an earlier plane step
-    # declared get '!'-exclusions appended, so a '*' filter never fans out a
-    # plane net's balls as signal escapes (the ottercast +1V1/VCC-DDR stub-
-    # clutter class). Naming a plane net verbatim still includes it.
-    try:
-        from plane_io import read_plane_manifest
-        _pm_nets = read_plane_manifest(args.pcb).get('plane_nets', [])
-        _pm_excl = [n for n in _pm_nets if not (args.nets and n in args.nets)]
-        if _pm_excl:
-            args.nets = list(args.nets or ['*']) + ['!' + n for n in _pm_excl]
-            print(f"Plane manifest: excluding {len(_pm_excl)} plane net(s) "
-                  f"from fanout: {', '.join(sorted(_pm_excl))}")
-    except Exception as _e:
-        print(f"  (plane manifest not read: {_e})")
-
     footprint = pcb_data.footprints[args.component]
     print(f"\nFound {args.component}: {footprint.footprint_name}")
     print(f"  Position: ({footprint.x:.2f}, {footprint.y:.2f})")
@@ -3069,15 +3054,6 @@ def main():
     }
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
 
-
-    # Plane-net manifest carry-forward (chain consistency; see plane_io).
-    try:
-        import os as _os
-        if args.output and _os.path.isfile(args.output):
-            from plane_io import carry_plane_manifest
-            carry_plane_manifest(args.pcb, args.output)
-    except Exception as _e:
-        print(f"  (plane manifest not carried: {_e})")
 
     return 0
 
