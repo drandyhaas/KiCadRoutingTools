@@ -44,6 +44,13 @@ FLAG_PARAMS = {
     # the generic fallthrough carried it as 'ordering', which matches no
     # dialog control, so a replayed plan silently routed in default order.
     '--ordering': 'ordering_strategy',
+    # route_planes' --zone-clearance is type=float (a value, NOT a toggle); it
+    # must consume its argument here. It briefly lived in BOOL_FLAGS, which
+    # dropped the value and set zone_clearance=True -> the plan executor's
+    # generic loop stamped float(True)=1.0 onto the plane zone-clearance
+    # SpinCtrlDouble (range max 2.0, so unclamped), replaying a board routed at
+    # e.g. 0.12 mm pour clearance with a 1.0 mm clearance instead.
+    '--zone-clearance': 'zone_clearance',
     '--hole-to-hole-clearance': 'hole_to_hole_clearance',
     '--board-edge-clearance': 'board_edge_clearance',
     '--via-cost': 'via_cost',
@@ -78,7 +85,6 @@ BOOL_FLAGS = {
     '--no-gnd-vias': 'no_gnd_vias',
     # route.py spells it --no-bga-zones (plural, nargs='*'); bga_fanout uses the
     # singular. Both map to the GUI's no_bga_zone special (bare = exclude ALL).
-    '--zone-clearance': 'zone_clearance',
     '--no-bga-zone': 'no_bga_zone',
     '--no-bga-zones': 'no_bga_zone',
 }
