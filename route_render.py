@@ -162,8 +162,12 @@ class BoardRenderer:
     def __init__(self, pcb, size: int = 1600, supersample: int = 2,
                  margin_frac: float = 0.03, show_pads: bool = True,
                  show_zones: bool = True, layers: Optional[Sequence[str]] = None,
-                 bg: Tuple[int, int, int] = _BG, layer_alpha: int = 150):
+                 bg: Tuple[int, int, int] = _BG, layer_alpha: int = 150,
+                 dynamic_zones: bool = False):
         self.pcb = pcb
+        # dynamic_zones: keep plane pours OUT of the static base so the animator
+        # can reveal each plane's fill per frame (via frame(zone_net_ids=...)).
+        self.dynamic_zones = dynamic_zones
         self.ss = max(1, int(supersample))
         self.copper_layers = list(layers) if layers else list(pcb.board_info.copper_layers)
         self.palette = layer_palette(self.copper_layers)
@@ -185,12 +189,15 @@ class BoardRenderer:
         Wp, Hp = self.W * self.ss, self.H * self.ss
         self.tf = Transform(bounds, Wp, Hp, margin_frac * size * self.ss)
 
+        self._show_pads = show_pads
         self._base = Image.new('RGB', (Wp, Hp), bg)
         d = ImageDraw.Draw(self._base)
         self._draw_outline(d)
-        if show_zones:
+        if show_zones and not dynamic_zones:
             self._draw_zones(d)
-        if show_pads:
+        # With dynamic_zones the pours are drawn per-frame, so pads must be too
+        # (drawn AFTER the pour so they read on top of it, as in the static base).
+        if show_pads and not dynamic_zones:
             self._draw_pads(d)
 
     # -- substrate -------------------------------------------------------
@@ -216,16 +223,25 @@ class BoardRenderer:
                         fill=_BOARD_FILL, outline=_EDGE,
                         width=max(1, int(round(self.tf.length(0.15)))))
 
-    def _draw_zones(self, d: ImageDraw.ImageDraw) -> None:
+    def _draw_zones(self, d: ImageDraw.ImageDraw, net_ids=None) -> None:
         # Plane pours drawn dim, under the tracks, tinted by layer. The stored
         # polygon is the zone OUTLINE (not the computed fill) -- a good-enough
-        # substrate hint for a debug view.
+        # substrate hint for a debug view. ``net_ids`` (a set) restricts to those
+        # nets' zones, for animating a plane "filling in" per frame.
         for z in getattr(self.pcb, 'zones', []) or []:
             if z.layer not in self._layer_set or len(z.polygon) < 3:
+                continue
+            if net_ids is not None and z.net_id not in net_ids:
                 continue
             base = self.palette.get(z.layer, (120, 120, 120))
             dim = tuple(int(_BOARD_FILL[i] * 0.55 + base[i] * 0.45) for i in range(3))
             d.polygon([self.tf.pt(x, y) for x, y in z.polygon], fill=dim)
+
+    def zone_net_ids(self):
+        """Net ids that have at least one drawable plane zone (for the animator
+        to reveal each plane's fill when its taps first appear)."""
+        return {z.net_id for z in (getattr(self.pcb, 'zones', []) or [])
+                if z.layer in self._layer_set and len(z.polygon) >= 3}
 
     def _draw_pads(self, d: ImageDraw.ImageDraw) -> None:
         for fp in self.pcb.footprints.values():
@@ -327,17 +343,25 @@ class BoardRenderer:
               highlight_segments: Optional[Iterable] = None,
               highlight_vias: Optional[Iterable] = None,
               highlight_color: Tuple[int, int, int] = _HILITE,
-              label: Optional[str] = None) -> Image.Image:
+              label: Optional[str] = None, zone_net_ids=None) -> Image.Image:
         """Composite the given copper onto the static substrate and return an
         RGB image at output resolution.
 
         ``segments``/``vias`` default to the whole board. ``highlight_*`` draw
         on top in ``highlight_color`` (e.g. tracks/vias added, ripped, or
         restored on this animation frame). ``label`` is stamped top-left.
+        ``zone_net_ids`` (used with dynamic_zones) draws just those nets' plane
+        pours under the copper, so a plane "fills in" on the frame its taps land.
         """
         segs = self.pcb.segments if segments is None else segments
         vs = self.pcb.vias if vias is None else vias
         img = self._base.copy()
+        if self.dynamic_zones:
+            dz = ImageDraw.Draw(img)
+            if zone_net_ids:
+                self._draw_zones(dz, net_ids=zone_net_ids)
+            if self._show_pads:
+                self._draw_pads(dz)   # pads on top of the (dynamic) pour
         by_layer = self._group_by_layer(segs)
         # Draw layers in reverse stack order (B.Cu first ... F.Cu last, so the
         # top copper reads as "nearest the viewer"). With layer_alpha < 255 each

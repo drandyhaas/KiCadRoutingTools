@@ -64,6 +64,7 @@ Fast, grid-based A\* routing with a native Rust core (~10× faster than pure Pyt
 - Full [KiCad plugin GUI](#kicad-plugin) (KiCad 9 & 10) and a scriptable [CLI](#command-line-interface)
 - [AI assistance](docs/claude-skills.md) — a **Claude tab** that plans an entire routing workflow, per-field "Ask Claude" helpers, and datasheet-driven power / high-speed / diff-pair analysis
 - Optional [real-time PyGame visualizer](pygame_visualizer/README.md) (`route.py --visualize`)
+- [Board rendering & routing animation](docs/route-animation.md) — fast geometry PNG renderer, plus a movie of the router laying/ripping/restoring copper (`KICAD_ROUTE_TRACE=1` → `animate_route.py`, `.mp4`/`.gif`)
 
 ## Quick Start
 

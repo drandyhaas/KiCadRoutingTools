@@ -79,18 +79,26 @@ class Movie:
         self.live_s: Dict[Tuple, _Seg] = {}
         self.live_v: Dict[Tuple, _Via] = {}
         self.frames: List = []
+        # Plane fills revealed so far (dynamic_zones): a plane pours in on the
+        # frame its taps first land, rather than being an always-on backdrop.
+        self.zone_avail = renderer.zone_net_ids() if getattr(renderer, 'dynamic_zones', False) else set()
+        self.revealed_zones: set = set()
+
+    def reveal_zone(self, net_id) -> None:
+        if net_id in self.zone_avail:
+            self.revealed_zones.add(net_id)
 
     def _frame(self, hl_s, hl_v, color, label):
         self.frames.append(self.r.frame(
             segments=list(self.live_s.values()), vias=list(self.live_v.values()),
             highlight_segments=hl_s, highlight_vias=hl_v,
-            highlight_color=color, label=label))
+            highlight_color=color, label=label, zone_net_ids=self.revealed_zones))
 
     def snapshot(self, label):
         """A plain frame of the current state (no highlight)."""
         self.frames.append(self.r.frame(
             segments=list(self.live_s.values()), vias=list(self.live_v.values()),
-            label=label))
+            label=label, zone_net_ids=self.revealed_zones))
 
     def add(self, seg_rows, via_rows, event, label, only_new=False):
         """Add copper and emit a frame highlighting what landed."""
@@ -131,6 +139,9 @@ class Movie:
         for i, ev in enumerate(events, 1):
             name = ev.get('net_name') or (f"net {ev['net']}" if 'net' in ev else '')
             event = ev.get('event', '')
+            # reveal this net's plane fill on the plane-copper events that add it
+            if 'net' in ev and event in ('plane-tap', 'plane-join', 'plane-fill'):
+                self.reveal_zone(ev['net'])
             lbl = f"{label_prefix}{i}/{total} {event}" + (f"  {name}" if name else '')
             dks = [seg_key_row(r) for r in ev.get('del_s', ())]
             dkv = [via_key_row(r) for r in ev.get('del_v', ())]
@@ -185,13 +196,13 @@ class Movie:
 # ---------------------------------------------------------------------------
 # Drivers
 # ---------------------------------------------------------------------------
-def _renderer(board_path, layers, size, ss, alpha):
+def _renderer(board_path, layers, size, ss, alpha, dynamic_zones=False):
     from kicad_parser import parse_kicad_pcb
     from route_render import BoardRenderer
     pcb = parse_kicad_pcb(board_path)
     lyrs = layers or list(pcb.board_info.copper_layers)
     return BoardRenderer(pcb, size=size, supersample=ss, layers=lyrs,
-                         layer_alpha=alpha), lyrs
+                         layer_alpha=alpha, dynamic_zones=dynamic_zones), lyrs
 
 
 def build_single(trace, board_path, size, ss, alpha, rip_hold):
@@ -230,38 +241,88 @@ def build_run(run_dir, size, ss, alpha, rip_hold, chunks):
     steps, final = discover_steps(run_dir)
     if not final:
         return []
-    r, layers = _renderer(final, None, size, ss, alpha)
+    # dynamic_zones: plane pours reveal as each plane is created, rather than
+    # sitting under every frame from the start.
+    r, layers = _renderer(final, None, size, ss, alpha, dynamic_zones=True)
     m = Movie(r, layers, rip_hold=rip_hold)
     m.snapshot("input")
     for label, board, trace_path in steps:
         pcb = parse_kicad_pcb(board)
         seg_rows, via_rows = _board_rows(pcb, layers)
+        # Reveal any plane whose pour exists on this step board but had no fine
+        # plane-tap event (untraced plane step) so its fill still appears here.
+        step_zone_nets = {z.net_id for z in (getattr(pcb, 'zones', None) or [])
+                          if z.net_id and len(z.polygon) >= 3}
         if trace_path:
             try:
                 m.play_trace(load_trace(trace_path), label_prefix=f"{label}: ",
                              only_new=True)
+                for _nid in step_zone_nets:
+                    m.reveal_zone(_nid)
                 m.reconcile_to(seg_rows, via_rows, label)   # trueup to step board
                 continue
             except Exception as e:
                 print(f"animate_route: trace {trace_path} failed ({e}); "
                       f"revealing delta", file=sys.stderr)
+        for _nid in step_zone_nets:      # untraced plane step: reveal its pours
+            m.reveal_zone(_nid)
         m.reveal_delta(seg_rows, via_rows, label, chunks=chunks)
     # final trueup (in case the graded final differs from the last step board)
     fpcb = parse_kicad_pcb(final)
+    for _z in (getattr(fpcb, 'zones', None) or []):   # ensure every pour shows
+        m.reveal_zone(_z.net_id)
     m.reconcile_to(*_board_rows(fpcb, layers), "routed")
     return m.frames
 
 
-def save_gif(frames, out, fps, end_hold, png_dir=None):
+def _write_mp4(frames, out, fps) -> bool:
+    """H.264 mp4 via imageio-ffmpeg (much smaller than GIF, full color, plays
+    everywhere). Returns False if imageio/ffmpeg isn't available so the caller
+    can fall back to GIF."""
+    try:
+        import numpy as np
+        import imageio.v2 as imageio
+    except Exception:
+        return False
+    try:
+        # yuv420p (broadly playable: browsers, QuickTime, Slack, social) needs
+        # even dimensions; macro_block_size=1 stops imageio from padding to 16,
+        # and we crop each frame to even W/H ourselves (drops at most 1 px).
+        w = imageio.get_writer(out, fps=max(1, round(fps)), codec='libx264',
+                               quality=8, macro_block_size=1, pixelformat='yuv420p')
+        for fr in frames:
+            a = np.asarray(fr.convert('RGB'))
+            h, wd = a.shape[0] & ~1, a.shape[1] & ~1
+            w.append_data(a[:h, :wd])
+        w.close()
+        return True
+    except Exception as e:
+        print(f"animate_route: mp4 encode failed ({e}); falling back to GIF",
+              file=sys.stderr)
+        return False
+
+
+def save_movie(frames, out, fps, end_hold, png_dir=None):
+    """Write the frames to ``out``. Format follows the extension: `.mp4`
+    (imageio-ffmpeg; falls back to a sibling `.gif` if unavailable) or `.gif`
+    (native Pillow, no dependency)."""
     if not frames:
         print("animate_route: no frames", file=sys.stderr)
         return False
-    dur = max(20, int(1000 / max(0.1, fps)))
     hold = [frames[-1]] * max(1, int(end_hold * fps))
-    frames[0].save(out, save_all=True, append_images=frames[1:] + hold,
-                   duration=dur, loop=0, optimize=False)
-    print(f"animate_route: wrote {out} ({len(frames)} frames, {dur}ms each, "
-          f"{frames[0].size[0]}x{frames[0].size[1]})")
+    seq = frames + hold
+    ext = os.path.splitext(out)[1].lower()
+    if ext == '.mp4' and _write_mp4(seq, out, fps):
+        print(f"animate_route: wrote {out} ({len(frames)} frames @ {fps:g}fps, "
+              f"{frames[0].size[0]}x{frames[0].size[1]}, h264)")
+    else:
+        if ext == '.mp4':
+            out = os.path.splitext(out)[0] + '.gif'
+        dur = max(20, int(1000 / max(0.1, fps)))
+        frames[0].save(out, save_all=True, append_images=seq[1:],
+                       duration=dur, loop=0, optimize=False)
+        print(f"animate_route: wrote {out} ({len(frames)} frames, {dur}ms each, "
+              f"{frames[0].size[0]}x{frames[0].size[1]})")
     if png_dir:
         os.makedirs(png_dir, exist_ok=True)
         for i, fr in enumerate(frames):
@@ -270,13 +331,20 @@ def save_gif(frames, out, fps, end_hold, png_dir=None):
     return True
 
 
+# Back-compat alias (render_run.py and older callers).
+save_gif = save_movie
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('trace', nargs='?', help='*_routetrace.json (single-trace mode)')
     ap.add_argument('--run-dir', default=None, help='stress run dir (whole-run mode)')
     ap.add_argument('--board', default=None, help='board .kicad_pcb substrate (single-trace mode)')
-    ap.add_argument('-o', '--output', default=None, help='output .gif')
+    ap.add_argument('-o', '--output', default=None,
+                    help='output path; extension picks the format: .mp4 (smaller, '
+                         'full-color, plays everywhere; needs imageio-ffmpeg) or '
+                         '.gif (native, autoplays inline). Default: .gif')
     ap.add_argument('--size', type=int, default=1000)
     ap.add_argument('--supersample', type=int, default=1)
     ap.add_argument('--layer-alpha', type=int, default=150)

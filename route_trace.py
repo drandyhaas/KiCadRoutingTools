@@ -61,18 +61,32 @@ def dump_trace(pcb_data, output_file: str) -> None:
 def start_plane_trace(pcb_data, output_file: str):
     """A LOCAL RouteTrace for the plane front-ends (route_planes /
     route_disconnected_planes), which add copper OUTSIDE the choke points and
-    call batch_route internally. It is deliberately NOT attached to
-    ``pcb_data._route_trace`` -- so a nested batch_route neither records into it
-    nor sees it -- and is driven purely by :meth:`RouteTrace.capture`. Returns
-    the trace (baseline captured) or None when disabled / no output path."""
+    call batch_route internally. Attached at ``pcb_data._plane_trace`` (a
+    DISTINCT attribute from ``_route_trace``) so the plane code can capture at
+    fine per-join / per-rip boundaries without threading it through every
+    function -- and so a nested batch_route (which only looks at ``_route_trace``,
+    and is gated off for output_file="" anyway) neither records into it nor sees
+    it. Baseline captured. Returns the trace, or None when disabled / no output."""
     if not (route_trace_enabled() and output_file):
         return None
     try:
         t = RouteTrace(list(pcb_data.board_info.copper_layers))
         t.capture(pcb_data, 'preexisting')   # baseline: the input board's copper
+        pcb_data._plane_trace = t
         return t
     except Exception:
         return None
+
+
+def plane_capture(pcb_data, event: str, net_id=None, net_name: str = '', by: str = None) -> None:
+    """Snapshot-diff capture via the plane trace attached at
+    ``pcb_data._plane_trace``. Best-effort no-op when none is attached."""
+    t = getattr(pcb_data, '_plane_trace', None)
+    if t is not None:
+        try:
+            t.capture(pcb_data, event, net_id=net_id, net_name=net_name, by=by)
+        except Exception:
+            pass
 
 
 class RouteTrace:

@@ -147,6 +147,8 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
         rsegs, rvias = _rip_net_from_pcb(pcb_data, blocker)
         ripped_local.append((blocker, rsegs, rvias))
         ripped_ids_local.add(blocker)
+        from route_trace import plane_capture as _plane_capture
+        _plane_capture(pcb_data, 'plane-rip', blocker, bname)  # individual rip frame
         if shared_via_maps is not None:
             shared_via_maps.resync()
             if plane_pad_tap._TAP_MAP_VERIFY:
@@ -211,6 +213,8 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
                         pcb_data.segments = [x for x in pcb_data.segments if x not in keep_segs]
                         pcb_data.vias = [x for x in pcb_data.vias if x not in keep_vias]
                         ripped_net_ids.append(blocker)
+            from route_trace import plane_capture as _plane_capture
+            _plane_capture(pcb_data, 'plane-restore', net_id)  # restored non-conflicting pieces
             return result
         failure = result
     # FINAL FAILURE: restore every ripped net's copper (#329).
@@ -221,6 +225,8 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
             if shared_via_maps is not None:
                 shared_via_maps.note_net_restored(blocker)
         print(f"(restored {len(ripped_local)} ripped net(s))", end=" ", flush=True)
+        from route_trace import plane_capture as _plane_capture
+        _plane_capture(pcb_data, 'plane-restore')  # tap failed: all ripped copper back
     return None
 
 
@@ -738,6 +744,8 @@ def route_planes(
                         # strap to them (transitive, no graph rebuild).
                         plane_oracle.note_tap_committed(pad, new_via_objs,
                                                         new_seg_objs)
+                        from route_trace import plane_capture as _plane_capture
+                        _plane_capture(pcb_data, 'plane-join', net_id, net_name)  # individual pad-tap frame
                         print(f"{GREEN}{where}, {len(result.segments)} trace segment(s){params_note}{RESET}")
                     else:
                         failed_repair_pads.append(f"{pad.component_ref}.{pad.pad_number} ({net_name})")
@@ -823,6 +831,8 @@ def route_planes(
                     layers=['F.Cu', 'B.Cu'],  # Through-hole vias
                     net_id=v['net_id']
                 ))
+            from route_trace import plane_capture as _plane_capture
+            _plane_capture(pcb_data, 'plane-join', net_id, net_name)  # individual region-join frame
 
     # Partial restores: emit kept pieces as new copper and strip the nets'
     # input copper (replacement semantics -- same as route_planes b2557cd).
