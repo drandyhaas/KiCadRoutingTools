@@ -705,6 +705,15 @@ def oracle_reconnect(board_file: str, net_names, config,
                 hole_to_hole_clearance=hole_to_hole_clearance)
             net_vias = [(v.x, v.y) for v in pcb_data.vias
                         if v.net_id == net_id]
+            # #479 reuse-audit gap 1: plated THT barrels are reusable layer
+            # transitions for reconnect links exactly as for region joins --
+            # route_plane_connection_wide's free-via registration and
+            # is_at_via suppression only see what this list carries, so
+            # without the barrels the oracle pays a fresh via beside one.
+            from kicad_parser import pad_is_plated_through as _pipt
+            for _p in pcb_data.pads_by_net.get(net_id, []):
+                if _pipt(_p):
+                    net_vias.append((_p.global_x, _p.global_y))
             island_fallback = False
             comps = _net_track_components(pcb_data, net_id)
             src, root_a = _cluster_points(pcb_data, net_id, ax, ay, al, comps)
@@ -922,6 +931,19 @@ def oracle_reconnect(board_file: str, net_names, config,
             # hole and bridge to the existing barrel with short connectors
             # on the two layers the path changes between (#340 style).
             _own_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+            # #479 reuse-audit gap 1: same-net PAD barrels are drill holes
+            # too -- a new via within hole-to-hole of one is the same #282
+            # class (KiCad's hole_to_hole is net-independent). Weld to the
+            # barrel exactly like an existing via; its annular ring carries
+            # the connectors on every layer.
+            from types import SimpleNamespace as _SN
+            from kicad_parser import pad_is_plated_through as _pipt2
+            for _p in pcb_data.pads_by_net.get(net_id, []):
+                if _pipt2(_p):
+                    _own_vias.append(_SN(
+                        x=(_p.hole_x if _p.hole_x is not None else _p.global_x),
+                        y=(_p.hole_y if _p.hole_y is not None else _p.global_y),
+                        drill=_p.drill))
             _extra_conn = []
             _kept_vias = []
             for vx, vy in via_positions:
