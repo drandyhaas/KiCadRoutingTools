@@ -28,7 +28,7 @@ MAP=(
   "urchin_kb|duckyb__urchin"
   "bfo9000|keebio__bfo9000"
   "orbiter_kb|kjeller__orbiter"
-  "weatherstation|ppusapati__weatherstation_mfg"
+  "stm32_datalogger|iamshubham3__stm32_datalogger"
   "osprey_kb|ebastler__osprey"
 )
 
