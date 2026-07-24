@@ -3934,6 +3934,22 @@ def merge_close_same_net_vias(all_new_vias, all_new_segments, pcb_data,
             continue
         survivors_by_net.setdefault(v.net_id, []).append(
             (v.x, v.y, v.drill, _span(v.layers)))
+    # #479 reuse-audit gap 3: plated THT PAD barrels are reuse targets too --
+    # they span every copper layer, and a new via within hole-to-hole of one
+    # is the U12.10 class (KiCad's hole_to_hole is net-independent, so the
+    # pair ships as a real DRC hit our via-only survivor set never saw).
+    # Anchor at the HOLE position (h2h-correct for offset-hole pads); the
+    # annular ring carries re-anchored segment endpoints on every layer.
+    from kicad_parser import pad_is_plated_through
+    _all_cu = _span(getattr(getattr(pcb_data, 'board_info', None),
+                            'copper_layers', None) or ['F.Cu', 'B.Cu'])
+    for _pads in getattr(pcb_data, 'pads_by_net', {}).values():
+        for _p in _pads:
+            if pad_is_plated_through(_p):
+                survivors_by_net.setdefault(_p.net_id, []).append(
+                    (_p.hole_x if _p.hole_x is not None else _p.global_x,
+                     _p.hole_y if _p.hole_y is not None else _p.global_y,
+                     _p.drill, _all_cu))
 
     kept, merged, unmergeable = [], 0, 0
     for nv in all_new_vias:

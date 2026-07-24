@@ -25,9 +25,20 @@ class _Via:
 
 
 class _PCB:
-    def __init__(self, vias):
+    def __init__(self, vias, pads_by_net=None):
         self.vias = vias
         self.nets = {}
+        self.pads_by_net = pads_by_net or {}
+
+
+class _Pad:
+    def __init__(self, x, y, drill=1.0, net_id=1):
+        self.global_x, self.global_y = x, y
+        self.hole_x = self.hole_y = None
+        self.drill = drill
+        self.net_id = net_id
+        self.pad_type = 'thru_hole'
+        self.layers = ['*.Cu', '*.Mask']
 
 
 def _v(x, y, net_id=1, drill=0.2, layers=('F.Cu', 'B.Cu')):
@@ -52,6 +63,22 @@ def run():
     check("merges one of two near same-net vias", n == 1 and len(vias) == 1)
     check("segment reconnected to survivor",
           segs[0]['start'] == surv)
+
+    # (2b, #479 gap 3) Reuse a plated THT PAD barrel: a new via within
+    #     hole-to-hole of a same-net barrel merges onto it; the attached
+    #     segment re-anchors to the barrel position.
+    vias = [_v(60.00, 60.75)]
+    segs = [{'start': (60.00, 60.75), 'end': (61.50, 60.75),
+             'width': 0.127, 'layer': 'F.Cu', 'net_id': 1}]
+    n = merge_close_same_net_vias(vias, segs, _PCB([], {1: [_Pad(60.00, 60.00)]}),
+                                  hole_to_hole_clearance=0.25)
+    check("new via merges onto same-net THT barrel", n == 1 and len(vias) == 0)
+    check("segment re-anchored to barrel", segs[0]['start'] == (60.00, 60.00))
+    # ...but a FOREIGN barrel must not swallow the via.
+    vias = [_v(70.00, 70.75)]
+    n = merge_close_same_net_vias(vias, [], _PCB([], {2: [_Pad(70.00, 70.00, net_id=2)]}),
+                                  hole_to_hole_clearance=0.25)
+    check("foreign barrel does not merge", n == 0 and len(vias) == 1)
 
     # (2) Reuse a PRE-EXISTING board via: the new via drops, no new via remains.
     vias = [_v(50.00, 50.03)]
