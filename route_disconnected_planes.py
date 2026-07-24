@@ -1028,6 +1028,80 @@ def route_planes(
                 except Exception:
                     pass
 
+    # GUARANTEED JOIN (#479 duodyne): the join plan and the sweep both lean
+    # on zone-fill MODELS (the 0.5mm analysis raster; the cached fill
+    # validators), which can disagree with the real pour -- duodyne's raster
+    # merged islands KiCad separates, so 20 pads shipped floating behind an
+    # all-joins-OK report. Final gate, immune to that quantization: drop the
+    # fill-model cache, re-run the AUTHORITATIVE pad union-find, and when a
+    # plane net is still split, route it like any multipoint net with an
+    # in-memory batch_route -- existing copper (fill, straps, barrels) is
+    # terminal credit, so only the true gaps get MST edges. Then re-check
+    # and report honestly.
+    if repair_pads and (return_results or not dry_run):
+        try:
+            from plane_fill_model import _CACHE_ATTR as _PFM_CACHE3
+            if hasattr(pcb_data, _PFM_CACHE3):
+                delattr(pcb_data, _PFM_CACHE3)
+        except Exception:
+            pass
+        from check_connected import check_net_connectivity as _cnc3
+        _zbn3: Dict[int, list] = {}
+        for _z in (getattr(pcb_data, 'zones', None) or []):
+            if getattr(_z, 'net_id', None) is not None:
+                _zbn3.setdefault(_z.net_id, []).append(_z)
+        for _nid, (_nname, _nlayers) in unique_nets.items():
+            def _check3(_n=_nid):
+                return _cnc3(_n,
+                             [s for s in pcb_data.segments if s.net_id == _n],
+                             [v for v in pcb_data.vias if v.net_id == _n],
+                             pcb_data.pads_by_net.get(_n, []),
+                             _zbn3.get(_n, []), pcb_data=pcb_data)
+            _r3 = _check3()
+            if _r3.get('connected'):
+                continue
+            _ncomp = _r3.get('num_components')
+            print(f"\n[{_nname}] guaranteed-join gate: authoritative check "
+                  f"finds {_ncomp} component(s) after repair -- routing the "
+                  f"remaining gaps as a multipoint net:")
+            if progress_callback:
+                progress_callback(0, 0, f"{_nname}: joining remaining gaps...")
+            try:
+                from route import batch_route
+                _ok3, _fail3, _t3, _rdata3 = batch_route(
+                    input_file, "", [_nname],
+                    layers=routing_layers,
+                    track_width=track_width, clearance=clearance,
+                    via_size=via_size, via_drill=via_drill,
+                    grid_step=grid_step, max_iterations=max_iterations,
+                    power_nets=power_nets, power_nets_widths=power_nets_widths,
+                    disable_bga_zones=([] if no_bga_zone else None),
+                    net_clearances=net_clearances,
+                    return_results=True, pcb_data=pcb_data)
+                for _r in _rdata3.get('results', []):
+                    all_new_segments.extend(
+                        {'start': (_s.start_x, _s.start_y),
+                         'end': (_s.end_x, _s.end_y),
+                         'width': _s.width, 'layer': _s.layer,
+                         'net_id': _s.net_id}
+                        for _s in (_r.get('new_segments') or []))
+                    all_new_vias.extend(
+                        {'x': _v.x, 'y': _v.y, 'size': _v.size,
+                         'drill': _v.drill, 'layers': _v.layers,
+                         'net_id': _v.net_id}
+                        for _v in (_r.get('new_vias') or []))
+                _r3b = _check3()
+                if _r3b.get('connected'):
+                    print(f"  {GREEN}[{_nname}] guaranteed-join gate: net now "
+                          f"fully connected{RESET}")
+                else:
+                    print(f"  {RED}[{_nname}] guaranteed-join gate: "
+                          f"{len(_r3b.get('disconnected_pads') or [])} pad(s) "
+                          f"still disconnected -- ships incomplete{RESET}")
+            except Exception as _e:
+                print(f"  {RED}[{_nname}] guaranteed-join gate failed: {_e}{RESET}")
+
+
     # Final fill-aware verification (glasgow U30 U1.27 +3V3). The per-pad check
     # (find_unconnected_plane_pads / _smd_pad_reaches_layer) is layer-aware: it
     # treats a pad as connected once it reaches the zone LAYER, even via a

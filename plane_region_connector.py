@@ -388,6 +388,36 @@ def find_disconnected_zone_regions(
                 return (id(_m), _c)
         return None
 
+    def _make_thick(blocked_set, inside_set):
+        """#479 conservative thickness: a fill cell CONDUCTS connectivity
+        only when some fully-filled 2x2 block contains it, so a single-cell
+        neck -- which KiCad's real pour may not even fill (duodyne: 15
+        island pairs the coarse raster merged and KiCad separates) -- can
+        never merge two islands. The model over-splits rather than
+        over-merges: a real split always gets a join planned, and an
+        unnecessary extra strap is harmless same-net copper. Net SEGMENT
+        cells stay exempt in the callers -- tracks are exact copper and
+        legitimately conduct at any width."""
+        cache: Dict[Tuple[int, int], bool] = {}
+
+        def _fill(c):
+            return (c not in blocked_set
+                    and (inside_set is None or c in inside_set))
+
+        def _thick(c):
+            v = cache.get(c)
+            if v is None:
+                cx, cy = c
+                v = any(
+                    _fill((cx + ox, cy + oy))
+                    and _fill((cx + ox + 1, cy + oy))
+                    and _fill((cx + ox, cy + oy + 1))
+                    and _fill((cx + ox + 1, cy + oy + 1))
+                    for ox in (0, -1) for oy in (0, -1))
+                cache[c] = v
+            return v
+        return _thick
+
     # Collect anchor points using helper function
     anchor_points, anchor_grid_points = _collect_anchor_points(
         net_id, zone_bounds, pcb_data, coord, zone_layers, routing_layers
@@ -467,6 +497,7 @@ def find_disconnected_zone_regions(
         inside_zone = (_zone_interior_cells(net_id, layer, pcb_data, coord,
                                             bounds_grid)
                        if layer in zone_layers else None)
+        _thick_layer = _make_thick(blocked, inside_zone)
 
         # Cache plane_layer data for reuse in anchor flood fill
         if layer == plane_layer:
@@ -566,6 +597,11 @@ def find_disconnected_zone_regions(
                                     and (nx, ny) not in inside_zone)):
                             if (nx, ny) not in net_segment_cells:
                                 continue
+                        elif ((nx, ny) not in net_segment_cells
+                              and not _thick_layer((nx, ny))):
+                            # Conservative thickness (#479): single-cell necks
+                            # do not conduct -- see _make_thick.
+                            continue
                         elif (_start_comp is not None
                               and (nx, ny) not in net_segment_cells):
                             # Component gate: fill continuity only within the
@@ -611,6 +647,7 @@ def find_disconnected_zone_regions(
     # (in case there are SMD pads or other anchors that aren't vias)
     # Use cached blocked_plane and net_plane_segment_cells from the layer loop above
     assert blocked_plane is not None, "plane_layer should have been processed in the loop"
+    _thick_plane = _make_thick(blocked_plane, inside_plane)
     assert net_plane_segment_cells is not None, "plane_layer should have been processed in the loop"
     plane_visited: Set[Tuple[int, int]] = set()
     # Per-flood fill cells, keyed by the starting anchor index: these ARE the
@@ -660,6 +697,10 @@ def find_disconnected_zone_regions(
                             and (nx, ny) not in inside_plane)):
                     if (nx, ny) not in net_plane_segment_cells:
                         continue
+                elif ((nx, ny) not in net_plane_segment_cells
+                      and not _thick_plane((nx, ny))):
+                    # Conservative thickness (#479): see _make_thick.
+                    continue
                 elif (_a_start_comp is not None
                       and (nx, ny) not in net_plane_segment_cells):
                     _fx, _fy = coord.to_float(nx, ny)
