@@ -1047,6 +1047,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         mem_after_working = get_process_memory_mb()
         print(format_memory_stats("After working obstacle map", mem_after_working, mem_after_working - mem_start))
 
+    # Route trace (#482, KICAD_ROUTE_TRACE=1): attach a recorder to pcb_data so
+    # the two copper choke points (add_route_to_pcb_data /
+    # remove_route_from_pcb_data) log every segment/via added, ripped, and
+    # restored, in order, for animating the routing process. Default-off.
+    from route_trace import route_trace_enabled, RouteTrace
+    if route_trace_enabled():
+        pcb_data._route_trace = RouteTrace(list(pcb_data.board_info.copper_layers))
+
     # Create routing state object to hold all shared state
     state = create_routing_state(
         pcb_data=pcb_data,
@@ -2104,6 +2112,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             dump_net_story(state, output_file or input_file)
         except Exception as _e:
             print(f"  net story dump failed: {_e}")
+
+    # Route trace dump (KICAD_ROUTE_TRACE=1): the per-copper add/rip/restore
+    # timeline recorded at the choke points, for animate_route.py (#482).
+    _rt = getattr(state.pcb_data, '_route_trace', None)
+    if _rt is not None:
+        try:
+            _rt.dump(output_file or input_file, state.pcb_data)
+        except Exception as _e:
+            print(f"  route trace dump failed: {_e}")
 
     if return_results:
         return successful, failed, total_time, results_data
