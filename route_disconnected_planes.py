@@ -432,6 +432,13 @@ def route_planes(
         print(f"Loading PCB from {input_file}...")
         pcb_data = parse_kicad_pcb(input_file)
 
+    # Route trace (#482): plane repair adds join tracks/vias and rips blockers
+    # OUTSIDE the copper choke points, so record it by snapshot-diffing pcb_data
+    # at each phase. Local (not attached) so the internal reconnect batch_route
+    # calls don't collide. baseline captured now; deltas captured below.
+    from route_trace import start_plane_trace as _start_plane_trace
+    _ptrace = _start_plane_trace(pcb_data, output_file)
+
     # Resolve net IDs
     net_ids = []
     for net_name in net_names:
@@ -852,6 +859,11 @@ def route_planes(
         pcb_data.segments = [s for s in pcb_data.segments
                              if s.net_id not in ripped_net_ids]
         pcb_data.vias = [v for v in pcb_data.vias if v.net_id not in ripped_net_ids]
+
+    # Route trace (#482): the island-join tracks/vias added and blocker copper
+    # ripped by the per-net repair pass above.
+    if _ptrace is not None:
+        _ptrace.capture(pcb_data, 'plane-join')
 
     # #347 (core1106 CLK1P): a net ripped or partially dropped for a pad
     # repair must not depend on a LATER chain step existing to reconnect it --
@@ -1475,6 +1487,12 @@ def route_planes(
     from pcb_modification import merge_close_same_net_vias
     merge_close_same_net_vias(all_new_vias, all_new_segments, pcb_data,
                               config.hole_to_hole_clearance)
+
+    # Route trace (#482): the rip-casualty reconnect + round-2 join copper added
+    # since the plane-join capture; then write <output>_routetrace.json.
+    if _ptrace is not None:
+        _ptrace.capture(pcb_data, 'plane-reconnect')
+        _ptrace.dump(output_file, pcb_data)
 
     if return_results:
         # GUI/stress parity (gap closure): the CLI main runs post-passes on

@@ -94,6 +94,11 @@ When fully done:
   echo "[run_board] result=$RESULT"
 } > "$RUNDIR/worker.log"
 
+# Record a per-copper route trace for each route.py / route_diff.py step the
+# agent runs (#482), so render_run.py can build a whole-run movie afterward.
+# Default-on; set KICAD_ROUTE_TRACE=0 in the outer env to skip.
+export KICAD_ROUTE_TRACE="${KICAD_ROUTE_TRACE:-1}"
+
 # Capture the agent transcript as JSONL (stream-json) so we can derive a routing
 # narrative; worker.log keeps the wrapper markers + stderr.
 ( cd "$RUNDIR" && claude -p "$PROMPT" \
@@ -118,20 +123,19 @@ if [ -f "$RESULT" ]; then
   python3 "$REPO/tests/stress/grade_final.py" "$RUNDIR" "$RESULT" >> "$RUNDIR/worker.log" 2>&1 || true
   MIS=$(python3 -c "import json; print('MISGRADE' if json.load(open('$RUNDIR/authoritative_grade.json')).get('misgrade') else '')" 2>/dev/null)
 
-  # Per-layer PNG renders of the FINAL board (issue #424 layer-role study): one
-  # <board>_<layer>.png per copper layer + the combined <board>.png, so plane vs
-  # signal layers / bus rivers / pour islands read at a glance. This MIRRORS the
-  # no-LLM replay path (redo_stress_test.py's render_board_layer_pngs); the live
-  # LLM worker path had no render at all, so ongoing runs produced no images.
-  # grade_final just resolved the final board into authoritative_grade.json.
-  # Non-fatal; board_image skips cleanly when kicad-cli is absent.
+  # Final-board snapshot (combined + per-layer PNGs, #424 layer-role study) AND
+  # the whole-run routing movie (#482), via the fast geometry renderer
+  # (render_run.py -> route_render + animate_route), replacing the old kicad-cli
+  # + headless-Chrome board_layer_images path. Drops <board>.png,
+  # <board>_<layer>.png, and <rundir>/routing.gif. This MIRRORS the no-LLM
+  # replay path (redo_stress_test.py). Non-fatal; needs no KiCad/browser.
   FB=$(python3 -c "import json,os,sys
 d=json.load(open('$RUNDIR/authoritative_grade.json'))
 fb=d.get('final_board') or ''
 if fb and not os.path.isabs(fb) and not os.path.exists(fb): fb=os.path.join('$RUNDIR', fb)
 print(fb if fb and os.path.exists(fb) else '')" 2>/dev/null)
   if [ -n "$FB" ]; then
-    python3 "$REPO/tests/stress/board_layer_images.py" "$FB" >> "$RUNDIR/worker.log" 2>&1 || true
+    python3 "$REPO/tests/stress/render_run.py" "$RUNDIR" "$FB" >> "$RUNDIR/worker.log" 2>&1 || true
 
     # Parser-parity validation of the FINAL board (headless twin of the GUI's
     # "Validate PCB Data" button): the pcbnew-built PCBData and the text parse

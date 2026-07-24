@@ -318,8 +318,9 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
             stash[rid] = saved_result
         return
 
-    # Add back to pcb_data
-    add_route_to_pcb_data(pcb_data, saved_result, debug_lines=config.debug_lines)
+    # Add back to pcb_data (tag as 'restore' for the route trace, #482)
+    add_route_to_pcb_data(pcb_data, saved_result, debug_lines=config.debug_lines,
+                          trace_event='restore')
 
     # Add back to results list if it was there (and not already present).
     # #369 A2: restore the per-LEG dicts for a multi-leg multipoint pair --

@@ -4229,8 +4229,14 @@ def swap_pad_nets_in_pcb_data(pcb_data: PCBData, pad_a, pad_b) -> None:
             new_net_obj.pads.append(pad)
 
 
-def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = False) -> None:
-    """Add routed segments and vias to PCB data for subsequent routes to see."""
+def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = False,
+                          trace_event: str = 'route') -> None:
+    """Add routed segments and vias to PCB data for subsequent routes to see.
+
+    ``trace_event`` labels the commit for the route trace (#482): 'route' for a
+    normal/initial commit, 'restore' when re-adding ripped copper. Inert unless
+    a RouteTrace is attached at ``pcb_data._route_trace`` (KICAD_ROUTE_TRACE=1).
+    """
     new_segments = result['new_segments']
     if not new_segments:
         return
@@ -4338,6 +4344,12 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     # Update result so output file also gets cleaned segments
     result['new_segments'] = cleaned_segments
 
+    _rt = getattr(pcb_data, '_route_trace', None)
+    if _rt is not None:
+        _record_copper_trace(_rt, pcb_data, cleaned_segments,
+                             result.get('new_vias') or [], result, trace_event,
+                             added=True)
+
 
 def drop_phantom_copper(results, pcb_data: PCBData,
                         original_segment_ids=None,
@@ -4418,7 +4430,28 @@ def _via_rip_sig(via):
     return (round(via.x, POSITION_DECIMALS), round(via.y, POSITION_DECIMALS), via.net_id)
 
 
-def remove_route_from_pcb_data(pcb_data: PCBData, result: dict) -> None:
+def _record_copper_trace(rt, pcb_data, segments, vias, result, event, added):
+    """Feed one add/remove event to the route trace (#482). net_id/name are
+    resolved from the result dict, else the first segment. Best-effort: any
+    failure here must never disturb routing."""
+    try:
+        nid = result.get('net_id') if isinstance(result, dict) else None
+        if nid is None and segments:
+            nid = segments[0].net_id
+        nm = ''
+        nets = getattr(pcb_data, 'nets', None) or {}
+        if nid in nets:
+            nm = nets[nid].name
+        if added:
+            rt.record_add(segments, vias, net_id=nid, net_name=nm, event=event)
+        else:
+            rt.record_remove(segments, vias, net_id=nid, net_name=nm, event=event)
+    except Exception:
+        pass
+
+
+def remove_route_from_pcb_data(pcb_data: PCBData, result: dict,
+                               trace_event: str = 'rip') -> None:
     """Remove routed segments and vias from PCB data (for rip-up and reroute).
 
     Removal is by OBJECT IDENTITY: a result's ``new_segments``/``new_vias``
@@ -4440,6 +4473,11 @@ def remove_route_from_pcb_data(pcb_data: PCBData, result: dict) -> None:
 
     if not segments_to_remove and not vias_to_remove:
         return
+
+    _rt = getattr(pcb_data, '_route_trace', None)
+    if _rt is not None:
+        _record_copper_trace(_rt, pcb_data, segments_to_remove, vias_to_remove,
+                             result, trace_event, added=False)
 
     if segments_to_remove:
         remove_ids = {id(s) for s in segments_to_remove}
