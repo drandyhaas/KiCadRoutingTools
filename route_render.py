@@ -17,9 +17,14 @@ is exactly what an animator needs to draw the cumulative copper state at
 each step, with optional highlight colors for the tracks/vias added, ripped,
 or restored on that frame.
 
+Copper layers are composited with per-layer transparency (``layer_alpha``),
+so overlapping layers blend at crossings instead of the top one hiding the
+rest; pass ``--layer-alpha 255`` for the opaque look.
+
 CLI (static image of a whole board):
     python3 route_render.py BOARD.kicad_pcb [-o OUT.png] [--size 1600]
-        [--supersample 2] [--no-pads] [--no-zones] [--layers F.Cu,B.Cu]
+        [--supersample 2] [--layer-alpha 150] [--no-pads] [--no-zones]
+        [--layers F.Cu,B.Cu]
 
 Library:
     from kicad_parser import parse_kicad_pcb
@@ -157,13 +162,17 @@ class BoardRenderer:
     def __init__(self, pcb, size: int = 1600, supersample: int = 2,
                  margin_frac: float = 0.03, show_pads: bool = True,
                  show_zones: bool = True, layers: Optional[Sequence[str]] = None,
-                 bg: Tuple[int, int, int] = _BG):
+                 bg: Tuple[int, int, int] = _BG, layer_alpha: int = 150):
         self.pcb = pcb
         self.ss = max(1, int(supersample))
         self.copper_layers = list(layers) if layers else list(pcb.board_info.copper_layers)
         self.palette = layer_palette(self.copper_layers)
         self._layer_set = set(self.copper_layers)
         self.bg = bg
+        # Per-layer copper opacity (0-255). <255 composites each layer as a
+        # translucent overlay so overlapping layers blend at crossings ("layers
+        # add on each other"); 255 = opaque (fast path, last layer wins).
+        self.layer_alpha = max(1, min(255, int(layer_alpha)))
 
         bounds = pcb.board_info.board_bounds or _geometry_bounds(pcb)
         # Aspect-fit the output box to the board so the image isn't mostly empty.
@@ -280,8 +289,15 @@ class BoardRenderer:
             d.ellipse([ex - r, ey - r, ex + r, ey + r], fill=fill)
 
     # -- copper (per-frame) ---------------------------------------------
+    def _group_by_layer(self, segments: Iterable) -> Dict[str, List]:
+        out: Dict[str, List] = {}
+        for s in segments:
+            if s.layer in self._layer_set:
+                out.setdefault(s.layer, []).append(s)
+        return out
+
     def _draw_segments(self, d: ImageDraw.ImageDraw, segments: Iterable,
-                       color: Optional[Tuple[int, int, int]] = None) -> None:
+                       color=None) -> None:
         for s in segments:
             if s.layer not in self._layer_set:
                 continue
@@ -322,8 +338,29 @@ class BoardRenderer:
         segs = self.pcb.segments if segments is None else segments
         vs = self.pcb.vias if vias is None else vias
         img = self._base.copy()
+        by_layer = self._group_by_layer(segs)
+        # Draw layers in reverse stack order (B.Cu first ... F.Cu last, so the
+        # top copper reads as "nearest the viewer"). With layer_alpha < 255 each
+        # layer is a translucent RGBA overlay composited onto the accumulator,
+        # so overlapping layers blend at crossings; == 255 is the opaque path.
+        if self.layer_alpha >= 255:
+            d = ImageDraw.Draw(img)
+            for layer in reversed(self.copper_layers):
+                self._draw_segments(d, by_layer.get(layer, ()),
+                                    color=self.palette.get(layer))
+        else:
+            acc = img.convert('RGBA')
+            for layer in reversed(self.copper_layers):
+                lsegs = by_layer.get(layer)
+                if not lsegs:
+                    continue
+                overlay = Image.new('RGBA', acc.size, (0, 0, 0, 0))
+                self._draw_segments(ImageDraw.Draw(overlay), lsegs,
+                                    color=self.palette[layer] + (self.layer_alpha,))
+                acc = Image.alpha_composite(acc, overlay)
+            img = acc.convert('RGB')
+        # Vias and highlights are drawn opaque on top so they stay unambiguous.
         d = ImageDraw.Draw(img)
-        self._draw_segments(d, segs)
         self._draw_vias(d, vs)
         if highlight_segments:
             self._draw_segments(d, highlight_segments, color=highlight_color)
@@ -359,12 +396,14 @@ def render_board_file(board_path: str, out_png: Optional[str] = None,
                       size: int = 1600, supersample: int = 2,
                       show_pads: bool = True, show_zones: bool = True,
                       layers: Optional[Sequence[str]] = None,
+                      layer_alpha: int = 150,
                       quiet: bool = False) -> Optional[str]:
     """Parse ``board_path`` and write a PNG. Returns the path written."""
     from kicad_parser import parse_kicad_pcb
     pcb = parse_kicad_pcb(board_path)
     r = BoardRenderer(pcb, size=size, supersample=supersample,
-                      show_pads=show_pads, show_zones=show_zones, layers=layers)
+                      show_pads=show_pads, show_zones=show_zones, layers=layers,
+                      layer_alpha=layer_alpha)
     if out_png is None:
         out_png = os.path.splitext(board_path)[0] + '.png'
     r.render().save(out_png)
@@ -388,6 +427,9 @@ def main() -> int:
                     help='anti-alias factor; 1 = fastest, 2 = crisp (default 2)')
     ap.add_argument('--layers', default=None,
                     help='comma-separated copper layers to draw (default: all)')
+    ap.add_argument('--layer-alpha', type=int, default=150,
+                    help='per-layer copper opacity 1-255; <255 blends overlapping '
+                         'layers at crossings, 255 = opaque (default 150)')
     ap.add_argument('--no-pads', action='store_true')
     ap.add_argument('--no-zones', action='store_true')
     args = ap.parse_args()
@@ -395,7 +437,8 @@ def main() -> int:
     out = render_board_file(args.board, args.output, size=args.size,
                             supersample=args.supersample,
                             show_pads=not args.no_pads,
-                            show_zones=not args.no_zones, layers=layers)
+                            show_zones=not args.no_zones, layers=layers,
+                            layer_alpha=args.layer_alpha)
     return 0 if out else 1
 
 
