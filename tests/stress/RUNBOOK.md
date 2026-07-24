@@ -89,6 +89,39 @@ within a board. `<SET>` below is `_set<N>` (e.g. `_set1` for set 1, `_set2` for 
    `boards_set1/`, `results_set1/`; set 2 → `boards_unrouted_set2/`, `runs_set2/`,
    `boards_set2/`, `results_set2/`)
 
+## Run artifacts: final snapshot + routing movie (#482)
+
+At the end of each board's run the harness renders, into the run dir, via the
+fast geometry renderer (`tests/stress/render_run.py` → `route_render` +
+`animate_route`; no KiCad / kicad-cli / browser, ~2 s/board — this replaced the
+old kicad-cli + headless-Chrome `board_layer_images` path):
+
+- `<final-board>.png` — combined all-copper snapshot of the final board.
+- `<final-board>_<layer>.png` — one snapshot per copper layer (plane vs signal
+  at a glance; plane pours render natively).
+- `<run-dir>/routing.gif` — a movie of the WHOLE run: each `stepN_*.kicad_pcb`
+  board's copper delta is revealed in chain order (so fanout, diff pairs,
+  planes, signal, and repair all appear), with fine per-copper rip/restore
+  animation spliced in for any step that recorded a trace. New copper flashes
+  white, reroutes/restores green, rips flash red.
+
+Both the live worker (`run_board.sh`) and the no-LLM replay
+(`redo_stress_test.py`) produce these automatically.
+
+**For these to be created correctly:**
+- Name every step output `stepN_<what>.kicad_pcb` (the existing convention).
+  `routing.gif` discovers `step*.kicad_pcb` and orders steps by the leading
+  `stepN` number; the last one is the final board and the movie's substrate.
+  A step written without a `stepN` prefix is sorted last and mis-ordered.
+- **Route tracing is ON by default** (`KICAD_ROUTE_TRACE=1`, exported by
+  `run_board.sh`, set by `redo_stress_test.py`). Each `route.py`, `route_diff.py`,
+  `route_planes.py`, and `route_disconnected_planes.py` step then drops a sibling
+  `<output>_routetrace.json` recording every segment/via committed, ripped, and
+  restored — which the movie splices in for fine animation. Set
+  `KICAD_ROUTE_TRACE=0` in the environment to skip tracing (leaner/faster runs;
+  the movie falls back to a coarse per-step reveal from the step boards alone).
+  Tracing is read-only over routing and never changes the routed result.
+
 ## Building a board set (source → validate → prep)
 
 How the `boards_setN/` (routed reference) and `boards_unrouted_setN/` (stripped
