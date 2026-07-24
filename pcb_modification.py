@@ -259,7 +259,7 @@ def _base_disconnected_component_ids(graph, base_result_pads=None):
 
 def _safe_prune_net(net_id, prunable, vias, pads, zones,
                     anchor_segments=None, aggressive=False, tol=None,
-                    zone_credit_validator=None):
+                    zone_credit_validator=None, fill_anchor_validator=None):
     """Prune a net's dead ends, but never at the cost of pad connectivity.
 
     prune_dead_end_segments works on an endpoint-coincidence model that does not
@@ -286,10 +286,17 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
     # raising the count" -- converting a grading false-negative into real
     # board damage (the cleanup trimmed 144 live gate-repair segments).
     # Over-keeping a genuinely dead fill-touching stub is harmless copper.
+    # Anchoring wants the OPPOSITE conservatism from crediting: the credit
+    # validator's 0.25mm interior margin (bitaxe Q2 over-credit guard) makes
+    # a strap landed on a narrow fill neck read as UN-anchored and the whole
+    # join chain unwinds (duodyne fill-path joins: 64 -> 8 emitted segs).
+    # Callers pass a near-zero-margin validator for anchoring; the credit
+    # validator stays the fallback.
+    _fa = fill_anchor_validator or zone_credit_validator
     _, candidates = prune_dead_end_segments(prunable, anchor_segments=anchor_segments,
                                             vias=vias, pads=pads, tol=tol,
                                             keep_terminal_escapes=not aggressive,
-                                            fill_anchor=zone_credit_validator)
+                                            fill_anchor=_fa)
     if not candidates:
         return prunable, []
 
@@ -393,7 +400,7 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
         _, candidates = prune_dead_end_segments(kept, anchor_segments=anchor_segments,
                                                 vias=vias, pads=pads, tol=tol,
                                                 keep_terminal_escapes=not aggressive,
-                                                fill_anchor=zone_credit_validator)
+                                                fill_anchor=_fa)
     return kept, removed
 
 
@@ -1339,9 +1346,11 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
         pads = pcb_data.pads_by_net.get(net_id, [])
         zones = [z for z in all_zones if z.net_id == net_id]
         _zcv = None
+        _zfa = None
         if zones:
             from check_connected import make_real_fill_validator
             _zcv = make_real_fill_validator(pcb_data, net_id)
+            _zfa = make_real_fill_validator(pcb_data, net_id, margin=0.02)
         anchor = []
         if keep_input_copper:
             # Input copper is read-only: anchor it (counts for degree/T-junction/
@@ -1351,6 +1360,7 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
         kept, removed = _safe_prune_net(net_id, net_segs, vias, pads, zones,
                                         anchor_segments=anchor or None,
                                         zone_credit_validator=_zcv,
+                                        fill_anchor_validator=_zfa,
                                         aggressive=True, tol=tol)
         # #319: never delete a coincident bridge and leave a soft joint.
         kept, removed = _restore_soft_joint_bridges(list(kept) + anchor, removed,
@@ -4171,16 +4181,19 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
         anchor = [s for s in segs if id(s) not in p_ids]
         _zones_n = [z for z in all_zones if z.net_id == net_id]
         _zcv3 = None
+        _zfa3 = None
         if _zones_n:
             from check_connected import make_real_fill_validator
             _zcv3 = make_real_fill_validator(pcb_data, net_id)
+            _zfa3 = make_real_fill_validator(pcb_data, net_id, margin=0.02)
         _, removed = _safe_prune_net(
             net_id, prunable,
             [v for v in pcb_data.vias if v.net_id == net_id],
             pcb_data.pads_by_net.get(net_id, []),
             _zones_n,
             anchor_segments=anchor, aggressive=True,
-            zone_credit_validator=_zcv3)
+            zone_credit_validator=_zcv3,
+            fill_anchor_validator=_zfa3)
         de_removed.extend(removed)
     de_removed = _veto(de_removed)
     all_new_segments, n_swept = strip(all_new_segments, de_removed)
@@ -4306,11 +4319,14 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
         net_pads = pcb_data.pads_by_net.get(net_id, [])
         net_zones = [z for z in all_zones if z.net_id == net_id]
         _zcv2 = None
+        _zfa2 = None
         if net_zones:
             from check_connected import make_real_fill_validator
             _zcv2 = make_real_fill_validator(pcb_data, net_id)
+            _zfa2 = make_real_fill_validator(pcb_data, net_id, margin=0.02)
         kept_net, _ = _safe_prune_net(net_id, net_new, net_vias, net_pads, net_zones,
                                       zone_credit_validator=_zcv2,
+                                      fill_anchor_validator=_zfa2,
                                       anchor_segments=anchor, aggressive=False)
         pruned_segments.extend(kept_net)
     cleaned_segments = pruned_segments

@@ -1064,6 +1064,49 @@ def route_planes(
             print(f"\n[{_nname}] guaranteed-join gate: authoritative check "
                   f"finds {_ncomp} component(s) after repair -- routing the "
                   f"remaining gaps as a multipoint net:")
+            # Which pad groups stayed split tells us WHERE the join plan and
+            # the checker disagree (model-vs-checker divergence is the gate's
+            # whole reason to exist) -- summarize each residual component.
+            _bycomp: Dict[int, list] = {}
+            for _loc, _cid in (_r3.get('pad_components') or {}).items():
+                _bycomp.setdefault(_cid, []).append(_loc)
+            for _cid, _locs in sorted(_bycomp.items(),
+                                      key=lambda kv: -len(kv[1]))[:10]:
+                _sample = ', '.join(
+                    f"{_l[3]}({_l[0]:.1f},{_l[1]:.1f})" for _l in _locs[:3])
+                print(f"    group {_cid}: {len(_locs)} pad(s): {_sample}")
+            if os.environ.get('KICAD_GATE_DEBUG'):
+                from plane_fill_model import get_fill_models as _gfm_dbg
+                _mods = _gfm_dbg(pcb_data, _nid)
+                for _cid, _locs in sorted(_bycomp.items(),
+                                          key=lambda kv: -len(kv[1]))[1:8]:
+                    _l = _locs[0]
+                    _isl = None
+                    for _lay, _ms in _mods.items():
+                        for _m in _ms:
+                            _c = _m.query_component(_l[0], _l[1], size=1.6)
+                            if _c:
+                                _isl = (_lay, id(_m) % 1000, _c)
+                    print(f"      [dbg] {_l[3]}@({_l[0]:.2f},{_l[1]:.2f}) "
+                          f"island={_isl}")
+                    if _isl is None:
+                        continue
+                    _hits = 0
+                    for _s in pcb_data.segments:
+                        if _s.net_id != _nid or _s.layer != _isl[0]:
+                            continue
+                        for _ex, _ey in ((_s.start_x, _s.start_y),
+                                         (_s.end_x, _s.end_y)):
+                            for _m in _mods[_isl[0]]:
+                                if (id(_m) % 1000 == _isl[1]
+                                        and _m.query_component(
+                                            _ex, _ey, size=_s.width) == _isl[2]):
+                                    _hits += 1
+                                    print(f"        seg-endpoint "
+                                          f"({_ex:.2f},{_ey:.2f}) w={_s.width} "
+                                          f"credits island")
+                    if not _hits:
+                        print(f"        NO segment endpoint credits island")
             if progress_callback:
                 progress_callback(0, 0, f"{_nname}: joining remaining gaps...")
             try:
