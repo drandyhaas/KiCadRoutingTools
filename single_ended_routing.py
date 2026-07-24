@@ -1170,6 +1170,106 @@ def _probe_route_with_frontier_once(
     return None, total_iterations, forward_blocked, backward_blocked, False, fwd_iters, bwd_iters
 
 
+def _free_on_pad_cells(pad, layer_idx, config, obstacles, coord,
+                       skip_cell=None):
+    """Grid cells on `pad`'s copper that are FREE for tracks on `layer_idx`,
+    keeping the whole track cross-section inside the copper (half-dims minus
+    track/2) so a landing there adds no copper edge nearer any obstacle than
+    the pad itself already has. Non-axis-aligned (rect_rotation) pads yield
+    nothing. Part of the #479 blocked-terminal seeding (see callers)."""
+    if getattr(pad, 'rect_rotation', 0.0):
+        return []
+    half_x = (pad.size_x or 0.0) / 2.0 - config.track_width / 2.0
+    half_y = (pad.size_y or 0.0) / 2.0 - config.track_width / 2.0
+    if half_x <= 0 or half_y <= 0:
+        return []
+    round_outline = pad.shape in ('circle', 'oval')
+    gx0, gy0 = coord.to_grid(pad.global_x - half_x, pad.global_y - half_y)
+    gx1, gy1 = coord.to_grid(pad.global_x + half_x, pad.global_y + half_y)
+    cells = []
+    for cgx in range(gx0, gx1 + 1):
+        cx = cgx * coord.grid_step
+        if abs(cx - pad.global_x) > half_x:
+            continue
+        for cgy in range(gy0, gy1 + 1):
+            if skip_cell is not None and (cgx, cgy) == skip_cell:
+                continue
+            cy = cgy * coord.grid_step
+            if abs(cy - pad.global_y) > half_y:
+                continue
+            if round_outline:
+                rx = max(half_x, 1e-9)
+                ry = max(half_y, 1e-9)
+                if (((cx - pad.global_x) / rx) ** 2
+                        + ((cy - pad.global_y) / ry) ** 2) > 1.0:
+                    continue
+            if obstacles.is_blocked(cgx, cgy, layer_idx):
+                continue
+            cells.append((cgx, cgy))
+    return cells
+
+
+def _augment_blocked_pad_terminals(endpoints, pcb_data, net_id, config,
+                                   obstacles):
+    """#479 (kbic65 stabilizer NPTH): when a PAD endpoint's grid cell is
+    hard-blocked -- a foreign NPTH keep-out reaching over the pad centre --
+    add the pad's FREE on-copper cells as extra endpoint cells, so the route
+    can terminate on copper it is allowed to touch instead of failing at an
+    unsteppable start. No-op for the overwhelmingly common case of a free
+    endpoint cell. Endpoint rows are (gx, gy, layer_idx, orig_x, orig_y)."""
+    coord = GridCoord(config.grid_step)
+    out = list(endpoints)
+    seen = set()
+    for ep in endpoints:
+        gx, gy, layer_idx, ox, oy = ep[0], ep[1], ep[2], ep[3], ep[4]
+        try:
+            if not obstacles.is_blocked(gx, gy, layer_idx):
+                continue
+        except Exception:
+            continue
+        for pad in pcb_data.pads_by_net.get(net_id, []):
+            if abs(pad.global_x - ox) > 1e-3 or abs(pad.global_y - oy) > 1e-3:
+                continue
+            key = (round(pad.global_x, 4), round(pad.global_y, 4), layer_idx)
+            if key not in seen:
+                seen.add(key)
+                free = _free_on_pad_cells(pad, layer_idx, config, obstacles,
+                                          coord, skip_cell=(gx, gy))
+                if free:
+                    print(f"    endpoint cell blocked for {pad.component_ref}."
+                          f"{pad.pad_number} -- seeded {len(free)} free "
+                          f"on-pad cell(s)")
+                    out.extend((cgx, cgy, layer_idx,
+                                cgx * coord.grid_step, cgy * coord.grid_step)
+                               for cgx, cgy in free)
+            break
+    return out
+
+
+def _augment_all_blocked_pad_side(cells, pad, config, obstacles):
+    """Multipoint-edge variant of the #479 blocked-terminal seeding: `cells`
+    is one side's (gx, gy, layer_idx) set for a pad (possibly island-widened).
+    Only when EVERY cell is blocked -- the route cannot start anywhere -- seed
+    the pad's free on-copper cells on each candidate layer."""
+    if pad is None or not cells:
+        return cells
+    try:
+        if any(not obstacles.is_blocked(gx, gy, li) for gx, gy, li in cells):
+            return cells
+    except Exception:
+        return cells
+    coord = GridCoord(config.grid_step)
+    extra = []
+    for li in sorted({li for _, _, li in cells}):
+        extra.extend((cgx, cgy, li) for cgx, cgy in
+                     _free_on_pad_cells(pad, li, config, obstacles, coord))
+    if extra:
+        print(f"    endpoint cell blocked for {pad.component_ref}."
+              f"{pad.pad_number} -- seeded {len(extra)} free on-pad cell(s)")
+        return list({*cells, *extra})
+    return cells
+
+
 def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                               obstacles: GridObstacleMap,
                               attraction_path: Optional[List[Tuple[int, int, int]]] = None,
@@ -1218,6 +1318,19 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # Swap source/target for bus routing from clustered targets
     if reverse_direction:
         sources, targets = targets, sources
+
+    # #479 (kbic65): a PAD endpoint whose own grid cell is hard-blocked -- a
+    # neighboring footprint's stabilizer-NPTH keep-out reaching over the pad
+    # centre -- can never take the first step, though free routable cells
+    # exist ON the pad's own copper outside the keep-out (the human route
+    # lands there). Seed those free on-pad cells as extra endpoint cells: the
+    # route terminates on pad copper (a real connection, credited by
+    # endpoint-in-pad / mid-span / KiCad alike) without laying copper through
+    # the keep-out band. No-op when the endpoint cell is free.
+    sources = _augment_blocked_pad_terminals(sources, pcb_data, net_id,
+                                             config, obstacles)
+    targets = _augment_blocked_pad_terminals(targets, pcb_data, net_id,
+                                             config, obstacles)
 
     # Clamp endpoints to the scoped window: nothing outside the fence may be a
     # source/target, so the A* is never pulled past the fence into un-modelled space.
@@ -3004,6 +3117,14 @@ def route_multipoint_main(
             _isl = _island_cells.get(pad_components.get(idx_b, idx_b))
             if _isl:
                 targets = list({*targets, *_isl})
+
+        # #479: a pad centre hard-blocked on every candidate layer (foreign
+        # stabilizer-NPTH keep-out over the pad) cannot take the first step;
+        # seed the pad's free on-copper cells as extra terminals.
+        sources = _augment_all_blocked_pad_side(sources, pad_a_obj, config,
+                                                obstacles)
+        targets = _augment_all_blocked_pad_side(targets, pad_b_obj, config,
+                                                obstacles)
 
         # Mark source/target cells (same-net pad cells; safe to accumulate)
         for gx, gy, layer in sources + targets:
