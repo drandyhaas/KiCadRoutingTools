@@ -35,6 +35,28 @@ def route_trace_enabled() -> bool:
     return os.environ.get('KICAD_ROUTE_TRACE', '') in ('1', 'true', 'on')
 
 
+def attach_trace(pcb_data) -> None:
+    """If KICAD_ROUTE_TRACE=1, attach a RouteTrace to ``pcb_data`` so the copper
+    choke points record into it. Idempotent; no-op when disabled. Call once,
+    right after parsing the board, in each routing front-end."""
+    if route_trace_enabled() and getattr(pcb_data, '_route_trace', None) is None:
+        try:
+            pcb_data._route_trace = RouteTrace(list(pcb_data.board_info.copper_layers))
+        except Exception:
+            pass
+
+
+def dump_trace(pcb_data, output_file: str) -> None:
+    """Dump ``pcb_data``'s attached RouteTrace next to ``output_file``. No-op if
+    none attached or no output path (e.g. GUI dry-run). Best-effort."""
+    rt = getattr(pcb_data, '_route_trace', None)
+    if rt is not None and output_file:
+        try:
+            rt.dump(output_file, pcb_data)
+        except Exception as e:
+            print(f"  route trace dump failed: {e}")
+
+
 class RouteTrace:
     """Accumulates add/remove events recorded directly at the copper choke
     points. One instance per run, attached as ``pcb_data._route_trace``. The

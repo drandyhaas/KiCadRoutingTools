@@ -289,6 +289,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     else:
         print("Using provided PCB data...")
 
+    # Route trace (#482, KICAD_ROUTE_TRACE=1): record diff-pair copper as it is
+    # committed/ripped/restored for animating the run. Default-off.
+    from route_trace import attach_trace as _attach_route_trace
+    _attach_route_trace(pcb_data)
+
     # Cross-class clearance: auto-read non-Default netclasses from the sibling
     # .kicad_pro when no map was passed (KiCad pairwise max(classA, classB)). A
     # caller that resolved the map (route_diff main, the GUI) passes a dict so this
@@ -1375,6 +1380,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 
         if schematic_swaps:
             apply_swaps_to_schematics(schematic_dir, schematic_swaps, verbose=verbose)
+
+    # Route trace dump (#482): diff-pair per-copper timeline for animate_route.py.
+    from route_trace import dump_trace as _dump_route_trace
+    _dump_route_trace(pcb_data, output_file or input_file)
 
     # Final memory summary
     if debug_memory:
