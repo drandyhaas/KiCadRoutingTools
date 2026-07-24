@@ -215,16 +215,21 @@ def build_single(trace, board_path, size, ss, alpha, rip_hold):
 
 
 def _step_sort_key(path: str):
+    # Match the step number anywhere in the name: chains use both `step6_route`
+    # and `board_step6_route` conventions; sub-steps (step2a/2b) sort by number
+    # then name. A sub-letter breaks ties within a step.
     b = os.path.basename(path)
-    m = re.match(r'step(\d+)', b)
-    return (int(m.group(1)) if m else 9999, b)
+    m = re.search(r'step\s*(\d+)([a-z]*)', b, re.I)
+    return (int(m.group(1)) if m else 9999, m.group(2) if m else '', b)
 
 
 def discover_steps(run_dir: str) -> Tuple[List[Tuple[str, str, Optional[str]]], Optional[str]]:
     """Return [(label, board_path, trace_path|None), ...] in chain order, and
     the final board path. A step's trace is ``<board_basename>_routetrace.json``
-    when present."""
-    boards = [p for p in glob.glob(os.path.join(run_dir, 'step*.kicad_pcb'))]
+    when present. Matches ``stepN`` anywhere in the filename (``step6_route`` or
+    ``board_step6_route``), skipping non-step .kicad_pcb (seed/final aliases)."""
+    boards = [p for p in glob.glob(os.path.join(run_dir, '*.kicad_pcb'))
+              if re.search(r'step\s*\d', os.path.basename(p), re.I)]
     boards.sort(key=_step_sort_key)
     steps = []
     for b in boards:
