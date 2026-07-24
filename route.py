@@ -1629,7 +1629,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # AUTHORITATIVE union-find (check_net_connectivity -- the model
     # filter_already_routed and check_connected.py use); the stricter geometric
     # pad-group split wrongly splits genuinely-connected power/bus nets.
-    from check_connected import check_net_connectivity
+    from check_connected import (check_net_connectivity,
+                                 net_break_within_outlines)
     # Per-net copper as it will be WRITTEN: the input board's original copper
     # MINUS everything the writer strips (cleanup strip lists + the #220/#284
     # stale strips of ripped/re-routed nets) plus the write-list's new copper.
@@ -1672,7 +1673,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _nid, _segs_by_net.get(_nid, []), _vias_by_net.get(_nid, []),
             _pads, _zones_by_net.get(_nid, []), tolerance=0.02,
             pcb_data=pcb_data)
-        _dp = _r.get('disconnected_pads') or []
+        # #479 multi-board: pads split only ACROSS board outlines are not
+        # failures (no copper can join them); keep within-outline breaks.
+        _broken, _dp = net_break_within_outlines(pcb_data, _r)
         if _dp:
             _res['failed_pads_info'] = [
                 {'x': _p[0], 'y': _p[1],
@@ -1746,8 +1749,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _nid, _segs_by_net.get(_nid, []), _vias_by_net.get(_nid, []),
             _pads, _zones_by_net.get(_nid, []), tolerance=0.02,
             pcb_data=pcb_data)
-        _dp = _r.get('disconnected_pads') or []
-        if not _dp:
+        # #479 multi-board: only within-outline breaks gate coverage.
+        _broken, _dp = net_break_within_outlines(pcb_data, _r)
+        if not _broken or not _dp:
             continue
         _net_name = pcb_data.nets[_nid].name if _nid in pcb_data.nets else f"Net {_nid}"
         print(f"{RED}COVERAGE GATE: {_net_name} was disturbed by this run "

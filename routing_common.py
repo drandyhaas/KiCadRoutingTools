@@ -307,7 +307,8 @@ def filter_already_routed(
         - nets_to_route: List of (net_name, net_id) needing routing
         - already_routed: List of (net_name, reason) for skipped nets
     """
-    from check_connected import check_net_connectivity
+    from check_connected import (check_net_connectivity,
+                                 net_break_within_outlines)
 
     # Group data by net for quick lookup
     zones_by_net: Dict[int, List] = {}
@@ -356,8 +357,16 @@ def filter_already_routed(
             tolerance=0.02, pcb_data=pcb_data
         )
 
-        if result['connected']:
-            already_routed.append((net_name, "Already fully connected"))
+        # #479 multi-board: a net whose only missing links run BETWEEN board
+        # outlines needs no routing -- no copper can ever join them (the
+        # board-to-board connector does, at assembly). Grading exempts them
+        # (net_break_within_outlines); skipping here keeps the router from
+        # burning iterations on impossible edges and reporting phantom fails.
+        _broken, _ = net_break_within_outlines(pcb_data, result)
+        if not _broken:
+            already_routed.append(
+                (net_name, "Already fully connected" if result['connected']
+                 else "Connected within each board outline"))
         else:
             nets_to_route.append((net_name, net_id))
 

@@ -345,6 +345,40 @@ def make_real_fill_validator(pcb_data, net_id, margin: float = 0.25):
     return validate
 
 
+def net_break_within_outlines(pcb_data, result):
+    """Multi-board files (#479, len42_filter2): with >=2 outer Edge.Cuts
+    outlines, a net is BROKEN only when some single outline's pads span more
+    than one connected component -- pads split across outlines are joined by
+    a board-to-board connector at assembly, never by copper. Returns
+    (broken, disconnected_pads): on single-outline boards this is exactly
+    (not result['connected'], result['disconnected_pads']); on multi-outline
+    boards the pad list is filtered to outlines that are split internally.
+    Shared by the grading path here and the routers' completion bookkeeping
+    (filter_already_routed, route.py's authoritative reporting), so "needs
+    routing" and "grades incomplete" agree on multi-board files."""
+    if result.get('connected'):
+        return False, []
+    dps = list(result.get('disconnected_pads') or [])
+    outs = getattr(pcb_data.board_info, 'board_outlines', None) or []
+    if len(outs) < 2:
+        return True, dps
+
+    def _which(px, py):
+        for _i, _poly in enumerate(outs):
+            if point_in_polygon(px, py, _poly):
+                return _i
+        return None
+
+    comps = {}
+    for _loc, _comp in (result.get('pad_components') or {}).items():
+        comps.setdefault(_which(_loc[0], _loc[1]), set()).add(_comp)
+    split = {oi for oi, s in comps.items() if len(s) > 1}
+    if not split:
+        return False, []
+    kept = [p for p in dps if _which(p[0], p[1]) in split]
+    return True, (kept or dps)
+
+
 def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via],
                            pads: List[Pad], zones: List[Zone] = None,
                            tolerance: float = 0.02,
@@ -1246,18 +1280,10 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
 
         # Multi-board: the net is complete when each outline's pads share one
         # connected component -- the only missing edges then run between
-        # outlines, where no copper can ever go.
+        # outlines, where no copper can ever go (net_break_within_outlines).
         if not result['connected'] and _outlines:
-            _comps_by_outline = {}
-            _split_within = False
-            for _loc, _comp in (result.get('pad_components') or {}).items():
-                _oi = _which_outline(_loc[0], _loc[1])
-                _s = _comps_by_outline.setdefault(_oi, set())
-                _s.add(_comp)
-                if len(_s) > 1:
-                    _split_within = True
-                    break
-            if not _split_within and _comps_by_outline:
+            _broken, _ = net_break_within_outlines(pcb_data, result)
+            if not _broken:
                 skipped_cross_board.append(net_name)
                 continue
 

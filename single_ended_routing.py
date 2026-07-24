@@ -2947,7 +2947,35 @@ def route_multipoint_main(
     if num_components < len(pad_info):
         print(f"  Existing copper joins {len(pad_info)} terminals into "
               f"{num_components} group(s)")
-    mst_edges = compute_component_mst_edges(pad_positions, pad_components)
+    # #479 multi-board: never ATTEMPT an MST edge between two board outlines
+    # -- no copper can join them (grading exempts them, and
+    # filter_already_routed skips the net entirely once each outline is
+    # internally connected). Run the component MST per outline so every
+    # edge stays on one board; cross-board "links" are simply not edges.
+    _outs = getattr(pcb_data.board_info, 'board_outlines', None) or []
+    if len(_outs) >= 2:
+        from check_connected import point_in_polygon as _pip
+
+        def _oid(_pt):
+            for _i, _poly in enumerate(_outs):
+                if _pip(_pt[0], _pt[1], _poly):
+                    return _i
+            return None
+        _by_out: Dict = {}
+        for _i, _pt in enumerate(pad_positions):
+            _by_out.setdefault(_oid(_pt), []).append(_i)
+        mst_edges = []
+        for _idxs in _by_out.values():
+            if len(_idxs) < 2:
+                continue
+            _sub_pos = [pad_positions[_i] for _i in _idxs]
+            _sub_comp = {_j: pad_components.get(_idxs[_j], _idxs[_j])
+                         for _j in range(len(_idxs))}
+            mst_edges.extend(
+                (_idxs[_a], _idxs[_b], _d) for _a, _b, _d in
+                compute_component_mst_edges(_sub_pos, _sub_comp))
+    else:
+        mst_edges = compute_component_mst_edges(pad_positions, pad_components)
 
     if not mst_edges:
         print(f"  All pads already connected by existing copper - nothing to route")
