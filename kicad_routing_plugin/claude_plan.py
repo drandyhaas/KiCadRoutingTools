@@ -70,6 +70,12 @@ PLAN_RESULT_SCHEMA = (
     'runs BEFORE the route_planes step MUST exclude every net a route_planes '
     'step will handle, e.g. ["*", "!GND", "!VCC"] - the final post-repair '
     'route step must NOT repeat those exclusions. '
+    'Whenever any route/route_diff step runs AFTER the plane steps, END the '
+    'plan with one more repair_planes step (same assignments as the earlier '
+    'plane step): a late signal route can pinch part of a pour off, and the '
+    'final repair re-verifies and heals it (fill-aware, fast no-op when the '
+    'planes are intact). The executor appends this step automatically when '
+    'it is missing. '
     'Use only these actions; omit any parameter you have no recommendation for; '
     'all params are optional.'
 )
@@ -107,6 +113,7 @@ def parse_plan_result(value):
     if not steps:
         return None, errors + ["no usable steps in plan"]
     _insert_cap_optimization(steps)
+    _append_final_plane_verify(steps)
     return steps, errors
 
 
@@ -125,6 +132,39 @@ def _insert_cap_optimization(steps):
             last_bga = i
     if last_bga is not None:
         steps.insert(last_bga + 1, {"action": "optimize_caps", "cap_prefix": "C,R,FB"})
+
+
+def _append_final_plane_verify(steps):
+    """Late-pinch guard (#479 wave finding): a route/route_diff/fanout step
+    that runs AFTER the last plane step can sever plane fill -- a signal
+    trace laid late pinches an island off the pour, and nothing re-checks
+    (ch32v203's In1.Cu GND shipped severed behind an all-green chain; same
+    mechanism on ch32v203_ev +3.3V). Whenever copper-modifying steps follow
+    the last plane step, append ONE final repair_planes verify step with the
+    same assignments: fill-aware, so on an intact plane it is a fast no-op,
+    and when a late route did pinch the pour it re-joins the regions."""
+    plane_actions = {"route_planes", "repair_planes"}
+    copper_actions = {"route", "route_diff", "fanout", "optimize_caps"}
+    last_plane = None
+    for i, s in enumerate(steps):
+        if s["action"] in plane_actions:
+            last_plane = i
+    if last_plane is None:
+        return
+    if not any(s["action"] in copper_actions for s in steps[last_plane + 1:]):
+        return
+    # Clone assignments/params from the last repair_planes when there is one
+    # (its params are tuned for repair); else from the route_planes step.
+    src = steps[last_plane]
+    for s in reversed(steps):
+        if s["action"] == "repair_planes":
+            src = s
+            break
+    steps.append({
+        "action": "repair_planes",
+        "assignments": [dict(a) for a in (src.get("assignments") or [])],
+        "params": dict(src.get("params") or {}),
+    })
 
 
 def step_label(index, step):

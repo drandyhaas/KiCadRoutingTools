@@ -261,6 +261,16 @@ harmless.
      signal params + `--power-nets`/`--power-nets-widths`) to reconnect the nets
      Step 5 ripped. route.py routes against the live obstacle map with safe
      rip-up/restore, so it reconnects them without shorts.
+   - FINAL PLANE VERIFY (Step 5d, mandatory whenever ANY route/route_diff/
+     fanout step runs after the plane steps): end the chain with one more
+     route_disconnected_planes pass (same params as Step 5). A late signal
+     route can pinch part of a pour off -- ch32v203's In1.Cu GND shipped
+     severed behind an all-green chain (the set6 wave's only incomplete net);
+     the final verify healed it in ~5s. Fill-aware, so on an intact plane it
+     is a fast near-no-op (it may add one small strap where the conservative
+     model over-splits -- harmless same-net copper). The GUI plan executor
+     appends this step automatically (claude_plan._append_final_plane_verify);
+     recorded CLI chains must include it explicitly.
    - TRACK WIDTH: the net-class `track_width` is a MINIMUM (keep it for the signal
      baseline); real boards widen power/high-current nets to many distinct widths
      (2-4mm buses) — widen those explicitly via `--power-nets`.
