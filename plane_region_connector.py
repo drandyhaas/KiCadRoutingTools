@@ -1431,19 +1431,139 @@ def route_disconnected_regions(
         for i, anchors in enumerate(region_anchors):
             print(f"    Region {i}: {len(anchors)} anchor(s)")
 
-    # Per-region interior-fill-point memo, scoped to this join: the MST scan and
-    # every edge's pseudo-anchor lookup erode + float-convert the SAME region's
-    # cells repeatedly (~90 ms per 40k-cell pour), so memoize per region (#351).
+    # Per-region interior-fill-point memo, scoped to this join: the closest-
+    # pair scan and every join's pseudo-anchor lookup erode + float-convert
+    # the SAME region's cells repeatedly (~90 ms per 40k-cell pour), so
+    # memoize per region (#351).
     interior_cache: Dict[int, tuple] = {}
 
-    # Find MST edges to connect regions
-    mst_edges = find_region_connection_points(region_anchors, region_cells, coord,
-                                              interior_cache=interior_cache)
-    print(f"  Routing {len(mst_edges)} connection(s) to join regions...")
+    # Prim-style incremental joining (#479 duodyne, 40-shard GND pour): the
+    # old up-front Kruskal MST froze every (region pair, landing point) before
+    # any routing happened, so a region that merged early still funneled every
+    # later join through its own few anchors (duodyne's region 14, 2 anchors,
+    # served as forced hub for 4 joins), and join copper was never reusable.
+    # Instead: repeatedly pick the geometrically-closest pair of CURRENT
+    # components, route it, merge, and append the routed strap's vertices to
+    # the merged component's point set -- every later join may land on any
+    # member region OR any earlier strap, so the blob grows like Prim's tree
+    # and straps are reused instead of paralleled. A pair that fails to route
+    # is excluded and the next-closest pair is tried (the old MST lost that
+    # tree edge outright).
+    planned = n_regions - 1
+    comp_roots: Set[int] = set(range(n_regions))
+    comp_members: Dict[int, List[int]] = {i: [i] for i in range(n_regions)}
+    comp_pts: Dict[int, List[Tuple[float, float]]] = {}
+    for i in range(n_regions):
+        pts = list(region_anchors[i])
+        pts.extend(_subsample_cell_points(
+            region_cells[i] if i < len(region_cells) else (), coord,
+            interior_cache=interior_cache))
+        comp_pts[i] = pts
+    comp_np: Dict[int, np.ndarray] = {}
+    _PAIR_PTS_CAP = 2000   # bound the closest-pair matrices on merged blobs
+
+    def _comp_sampled_pts(root):
+        pts = comp_pts[root]
+        if len(pts) > _PAIR_PTS_CAP:
+            step = (len(pts) + _PAIR_PTS_CAP - 1) // _PAIR_PTS_CAP
+            pts = pts[::step]
+        return pts
+
+    def _comp_arr(root):
+        arr = comp_np.get(root)
+        if arr is None:
+            arr = np.asarray(_comp_sampled_pts(root),
+                             dtype=np.float64).reshape(-1, 2)
+            comp_np[root] = arr
+        return arr
+
+    pair_cache: Dict[frozenset, Optional[tuple]] = {}
+    # A failed pair is retried ONLY when a later merge meaningfully shrinks
+    # its gap (< 0.75x the distance it failed at), and at most 3 times total:
+    # without the gate, every unrelated merge revived the same impossible
+    # pair and re-burned the full escalation ladder (duodyne comp 25: 14
+    # budget-x5 attempts at the same walled 0-distance neck).
+    failed_at: Dict[frozenset, Tuple[float, int]] = {}   # key -> (dist, tries)
+    _RETRY_SHRINK = 0.75
+    _MAX_PAIR_TRIES = 3
+    # Every iteration either merges (components shrink) or burns fail budget /
+    # marks a pair failed, so the loop terminates; the budget bounds the
+    # pathological all-walls case well above any real board's needs.
+    fail_budget = max(8, 3 * n_regions)
+
+    def _invalidate_pairs(*gone):
+        _g = set(gone)
+        for k in [k for k in pair_cache if k & _g]:
+            pair_cache.pop(k, None)
+        # Failed marks survive under a REKEYED identity: the merged blob keeps
+        # root min(i,j), so a failed pair {blob, X} keeps its key and its
+        # distance gate; only distances are recomputed.
+
+    def _pair_closest(ra, rb):
+        Pa, Pb = _comp_arr(ra), _comp_arr(rb)
+        if Pa.shape[0] == 0 or Pb.shape[0] == 0:
+            return None
+        dx = Pa[:, 0][:, None] - Pb[:, 0][None, :]
+        dy = Pa[:, 1][:, None] - Pb[:, 1][None, :]
+        d2 = dx * dx + dy * dy
+        flat = int(d2.argmin())
+        ii, jj = divmod(flat, Pb.shape[0])
+        return (math.sqrt(float(d2.reshape(-1)[flat])),
+                _comp_sampled_pts(ra)[ii], _comp_sampled_pts(rb)[jj])
+
+    def _closest_component_pair():
+        """Closest eligible pair of current components; deterministic
+        (sorted roots, strict-< with root-tuple tie-break). A pair that
+        failed before is eligible only if its gap shrank meaningfully since
+        (merges added points) and its try budget remains."""
+        best = None
+        rs = sorted(comp_roots)
+        for ai in range(len(rs)):
+            for bi in range(ai + 1, len(rs)):
+                key = frozenset((rs[ai], rs[bi]))
+                if key not in pair_cache:
+                    pair_cache[key] = _pair_closest(rs[ai], rs[bi])
+                ent = pair_cache[key]
+                if ent is None:
+                    continue
+                _f = failed_at.get(key)
+                if _f is not None:
+                    _fdist, _tries = _f
+                    if _tries >= _MAX_PAIR_TRIES:
+                        continue
+                    if ent[0] >= _fdist * _RETRY_SHRINK:
+                        continue
+                cand = (ent, (rs[ai], rs[bi]))
+                if best is None or ent[0] < best[0][0] \
+                        or (ent[0] == best[0][0] and cand[1] < best[1]):
+                    best = cand
+        return best
+
+    def _cap_near(pts, ref, cap):
+        if len(pts) <= cap:
+            return pts
+        return sorted(pts, key=lambda p: ((p[0] - ref[0]) ** 2
+                                          + (p[1] - ref[1]) ** 2, p))[:cap]
+
+    def _cap_cover(pts, ref, cap):
+        """Half nearest `ref`, half strided across the WHOLE set: the full-
+        fallback must keep launch points far from the closest approach --
+        a walled pocket is often reachable only by a long detour that starts
+        elsewhere on the blob (duodyne comp 25: the old MST's successful
+        126mm join launched ~30mm from the closest-approach point)."""
+        if len(pts) <= cap:
+            return pts
+        near = _cap_near(pts, ref, cap // 2)
+        step = (len(pts) + cap // 2 - 1) // (cap // 2)
+        cover = pts[::step]
+        return near + [p for p in cover if p not in near]
+
+    print(f"  Joining {n_regions} regions incrementally "
+          f"(closest components first, {planned} join(s) needed)...")
     if progress_callback:
-        progress_callback(0, len(mst_edges),
+        progress_callback(0, planned,
                           f"{net_name}: {n_regions} regions, "
-                          f"{len(mst_edges)} connection(s) to route")
+                          f"{planned} join(s) needed")
 
     # Get plane layer index and routing layers from layer_map
     plane_layer_idx = layer_map.get(plane_layer)
@@ -1478,13 +1598,19 @@ def route_disconnected_regions(
         proximity_heuristic_cost=config.get_proximity_heuristic_cost()
     )
 
-    for edge_idx, (region_i, region_j, point_i, point_j, dist) in enumerate(mst_edges):
+    while len(comp_roots) > 1 and fail_budget > 0:
         if cancel_check and cancel_check():
             print("    (cancelled)")
             break
-        # Get all anchors from each region for multi-point routing
-        anchors_i = region_anchors[region_i]
-        anchors_j = region_anchors[region_j]
+        _pick = _closest_component_pair()
+        if _pick is None:
+            break   # every remaining component pair already failed to route
+        (dist, point_i, point_j), (root_i, root_j) = _pick
+        edge_idx = routes_added + routes_failed
+        # The merged component point sets play the per-region anchor role:
+        # member anchors + fill subsamples + earlier straps' vertices.
+        anchors_i = comp_pts[root_i]
+        anchors_j = comp_pts[root_j]
 
         # Seed the A* only from the anchors nearest each region's connection
         # point (fix: giant regions otherwise feed thousands of seeds per attempt).
@@ -1511,35 +1637,43 @@ def route_disconnected_regions(
                                     _plane_layer_name, zone_clearance,
                                     npth_track_half=min_track_width / 2)
 
-        def _cells_for(region_idx, near_pt):
-            cells = region_cells[region_idx] \
-                if region_idx < len(region_cells) else ()
-            pts = _nearest_cell_points(cells, coord, near_pt,
-                                       validity=_valid_fill,
-                                       interior_cache=interior_cache)
-            if not pts:
-                # The track-width-padded margin starves thin pockets of
-                # seeds entirely ('seed 16x0' -> guaranteed FAILED edge);
-                # fall back to the bare zone clearance -- the A* still
-                # routes against the real obstacle map either way.
-                pts = _nearest_cell_points(cells, coord, near_pt,
-                                           validity=_valid_fill_relaxed,
+        def _cells_for(root, near_pt):
+            # Nearest fill cells across ALL member regions of the component.
+            pts = []
+            for _ridx in comp_members[root]:
+                cells = region_cells[_ridx] \
+                    if _ridx < len(region_cells) else ()
+                got = _nearest_cell_points(cells, coord, near_pt,
+                                           validity=_valid_fill,
                                            interior_cache=interior_cache)
+                if not got:
+                    # The track-width-padded margin starves thin pockets of
+                    # seeds entirely ('seed 16x0' -> guaranteed FAILED edge);
+                    # fall back to the bare zone clearance -- the A* still
+                    # routes against the real obstacle map either way.
+                    got = _nearest_cell_points(cells, coord, near_pt,
+                                               validity=_valid_fill_relaxed,
+                                               interior_cache=interior_cache)
+                pts.extend(p for p in got if p not in pts)
             return pts
 
-        cells_i = _cells_for(region_i, point_i)
-        cells_j = _cells_for(region_j, point_j)
-        seed_i = seed_i + [p for p in cells_i if p not in seed_i]
-        seed_j = seed_j + [p for p in cells_j if p not in seed_j]
-        full_i = anchors_i + [p for p in cells_i if p not in anchors_i]
-        full_j = anchors_j + [p for p in cells_j if p not in anchors_j]
+        cells_i = _cells_for(root_i, point_i)
+        cells_j = _cells_for(root_j, point_j)
+        seed_i = _cap_near(seed_i + [p for p in cells_i if p not in seed_i],
+                           point_i, 48)
+        seed_j = _cap_near(seed_j + [p for p in cells_j if p not in seed_j],
+                           point_j, 48)
+        full_i = _cap_cover(anchors_i + [p for p in cells_i
+                                         if p not in anchors_i], point_i, 512)
+        full_j = _cap_cover(anchors_j + [p for p in cells_j
+                                         if p not in anchors_j], point_j, 512)
         reduced = (len(seed_i) < len(full_i)) or (len(seed_j) < len(full_j))
 
         # Progress indicator
         seed_note = f" (seed {len(seed_i)}x{len(seed_j)})" if reduced else ""
-        print(f"    [{edge_idx+1}/{len(mst_edges)}] Region {region_i} ({len(anchors_i)} anchors) <-> Region {region_j} ({len(anchors_j)} anchors){seed_note}...", end=" ", flush=True)
+        print(f"    [{edge_idx+1}/{planned}] Component {root_i} ({len(comp_members[root_i])} region(s), {len(anchors_i)} pts) <-> Component {root_j} ({len(comp_members[root_j])} region(s), {len(anchors_j)} pts){seed_note}...", end=" ", flush=True)
         if progress_callback:
-            progress_callback(edge_idx + 1, len(mst_edges),
+            progress_callback(min(edge_idx + 1, planned), planned,
                               f"{net_name}: connecting plane regions")
 
         def _connect(a_i, a_j):
@@ -1641,8 +1775,17 @@ def route_disconnected_regions(
         if result is None:
             print(f"{RED}FAILED{RESET}")
             routes_failed += 1
+            # Gate this pair behind the distance-shrink retry policy and try
+            # the next-closest pair -- the two blobs may still connect
+            # through different partners (the old frozen MST lost the tree
+            # edge outright).
+            _key = frozenset((root_i, root_j))
+            _prev = failed_at.get(_key)
+            failed_at[_key] = (dist if _prev is None else min(dist, _prev[0]),
+                              1 if _prev is None else _prev[1] + 1)
+            fail_budget -= 1
             if verbose:
-                print(f"      Tried {len(anchors_i)}x{len(anchors_j)} + {len(anchors_j)}x{len(anchors_i)} + open-space combinations, no path found")
+                print(f"      Tried {len(seed_i)}x{len(seed_j)} seed + full + open-space combinations, no path found")
             continue
 
         route_points, via_positions = result
@@ -1747,9 +1890,37 @@ def route_disconnected_regions(
 
         routes_added += 1
 
+        # Merge the two components. The union's points PLUS this strap's
+        # vertices become landing space for every later join (trace reuse):
+        # a later join Ts into the strap instead of paralleling it.
+        _keep = min(root_i, root_j)
+        _gone = root_j if _keep == root_i else root_i
+        comp_members[_keep] = comp_members[root_i] + comp_members[root_j]
+        comp_pts[_keep] = (comp_pts[root_i] + comp_pts[root_j]
+                           + [(p[0], p[1]) for p in route_points])
+        if _gone != _keep:
+            comp_members.pop(_gone, None)
+            comp_pts.pop(_gone, None)
+            comp_roots.discard(_gone)
+        comp_np.pop(root_i, None)
+        comp_np.pop(root_j, None)
+        # Rekey failure gates onto the merged root (tightest distance, most
+        # tries survive), then drop stale cached distances to the blob --
+        # they get recomputed, and the retry gate decides eligibility.
+        for _k in [k for k in failed_at if k & {root_i, root_j}]:
+            _other = next(iter(_k - {root_i, root_j}), None)
+            _e = failed_at.pop(_k)
+            if _other is None or _other == _keep:
+                continue
+            _nk = frozenset((_keep, _other))
+            _p = failed_at.get(_nk)
+            failed_at[_nk] = _e if _p is None else (min(_e[0], _p[0]),
+                                                   max(_e[1], _p[1]))
+        _invalidate_pairs(root_i, root_j)
+
     # Summary for this net
     if routes_failed > 0:
-        print(f"  {YELLOW}Result: {routes_added}/{len(mst_edges)} routes succeeded, {routes_failed} failed{RESET}")
+        print(f"  {YELLOW}Result: {routes_added}/{planned} join(s) succeeded, {routes_failed} attempt(s) failed{RESET}")
     elif routes_added > 0:
         print(f"  {GREEN}Result: All {routes_added} route(s) succeeded{RESET}")
 
