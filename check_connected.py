@@ -1127,6 +1127,26 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
             if (net_id in segments_by_net or net_id in vias_by_net) and net_id in pads_by_net:
                 nets_to_check.append((net_id, net_info.name))
 
+    # Multi-board files (a panel / module + control board drawn as separate
+    # Edge.Cuts outlines, e.g. len42_filter2, #479): a net whose pads span two
+    # outlines can NEVER be copper-joined across them -- the link is a
+    # board-to-board connector mated at assembly. Grade such nets PER OUTLINE:
+    # within each outline the net's pads must be connected; the inter-board
+    # edge is free. Single-outline boards (the overwhelming majority) are
+    # untouched.
+    _outlines = pcb_data.board_info.board_outlines or []
+    if len(_outlines) < 2:
+        _outlines = None
+
+    def _which_outline(px, py):
+        if _outlines:
+            for _oi, _poly in enumerate(_outlines):
+                if point_in_polygon(px, py, _poly):
+                    return _oi
+        return None
+
+    skipped_cross_board = []
+
     # Find unrouted nets (pads but no segments) unless routed_only
     unrouted_nets = []
     skipped_noconnect = 0
@@ -1170,6 +1190,17 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                 if not net_patterns and net_info.name.lower().startswith('unconnected-'):
                     skipped_noconnect += 1
                     continue
+                # Multi-board: only an outline holding >=2 of the net's pads
+                # has anything routable. A one-pad-per-board net is purely a
+                # board-to-board link -- nothing on either board to route.
+                if _outlines:
+                    _counts = {}
+                    for _p in pads_by_net[net_id]:
+                        _oi = _which_outline(_p.global_x, _p.global_y)
+                        _counts[_oi] = _counts.get(_oi, 0) + 1
+                    if max(_counts.values()) <= 1:
+                        skipped_cross_board.append(net_info.name)
+                        continue
                 unrouted_nets.append((net_id, net_info.name, len(pads_by_net[net_id])))
 
     if not quiet:
@@ -1184,6 +1215,9 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
         if skipped_noconnect:
             print(f"  Skipped {skipped_noconnect} unrouted no-connect net(s) "
                   f"('unconnected-*'); pass --nets to check them")
+        if _outlines:
+            print(f"  Multi-board file: {len(_outlines)} board outlines; "
+                  f"nets graded per outline (board-to-board links exempt)")
 
     issues = []
 
@@ -1210,6 +1244,23 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
         result = check_net_connectivity(net_id, segments, vias, pads, zones, tolerance, verbose=verbose,
                                         pcb_data=pcb_data)
 
+        # Multi-board: the net is complete when each outline's pads share one
+        # connected component -- the only missing edges then run between
+        # outlines, where no copper can ever go.
+        if not result['connected'] and _outlines:
+            _comps_by_outline = {}
+            _split_within = False
+            for _loc, _comp in (result.get('pad_components') or {}).items():
+                _oi = _which_outline(_loc[0], _loc[1])
+                _s = _comps_by_outline.setdefault(_oi, set())
+                _s.add(_comp)
+                if len(_s) > 1:
+                    _split_within = True
+                    break
+            if not _split_within and _comps_by_outline:
+                skipped_cross_board.append(net_name)
+                continue
+
         if not result['connected']:
             issue = {
                 'net_id': net_id,
@@ -1230,6 +1281,11 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                     issue['gap_info'] = gap
 
             issues.append(issue)
+
+    if skipped_cross_board and not quiet:
+        print(f"  {len(skipped_cross_board)} net(s) complete within each board "
+              f"outline (only board-to-board links missing): "
+              f"{', '.join(sorted(skipped_cross_board))}")
 
     # Report results
     if quiet:
