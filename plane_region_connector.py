@@ -13,7 +13,8 @@ import math
 
 import numpy as np
 
-from kicad_parser import PCBData, Via, Segment, Pad, POSITION_DECIMALS, pad_drill_circles
+from kicad_parser import (PCBData, Via, Segment, Pad, POSITION_DECIMALS,
+                          pad_drill_circles, pad_is_plated_through)
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import (point_in_pad_rect, pad_rect_halfspan, filter_cells_in_pad_rect,
                            segment_blocked_cells_array)
@@ -1572,13 +1573,26 @@ def route_disconnected_regions(
         return [], [], 0, []
     routing_layers = list(layer_map.keys())
 
-    # Build list of existing vias and through-hole pads from this net (can be reused as layer transitions)
+    # Build list of existing vias and through-hole pads from this net (can be
+    # reused as layer transitions). pad_is_plated_through, not "'*.Cu' in
+    # layers": explicit-layer THT pads were missed (their barrels are legal
+    # transitions too) and a net-tied NPTH has no copper barrel at all (#328)
+    # -- a "transition" there would be an open.
     net_vias: List[Tuple[float, float]] = [(v.x, v.y) for v in pcb_data.vias if v.net_id == net_id]
-    # Add through-hole pads from this net (they connect all layers like vias)
+    # Real drill diameter per reusable barrel, for the drill-aware emission
+    # filter below: a THT pad's drill is typically 2-3x via_drill, so the old
+    # `via_drill + h2h` shortcut under-checked against barrels by the drill-
+    # radius difference (#274 fixed the MAP's version; U12.10 escaped through
+    # this filter).
+    net_via_drills: Dict[Tuple[float, float], float] = {
+        (round(v.x, POSITION_DECIMALS), round(v.y, POSITION_DECIMALS)): v.drill
+        for v in pcb_data.vias if v.net_id == net_id}
     if net_id in pcb_data.pads_by_net:
         for pad in pcb_data.pads_by_net[net_id]:
-            if '*.Cu' in pad.layers:  # Through-hole pad
+            if pad_is_plated_through(pad):
                 net_vias.append((pad.global_x, pad.global_y))
+                net_via_drills[(round(pad.global_x, POSITION_DECIMALS),
+                                round(pad.global_y, POSITION_DECIMALS))] = pad.drill
 
     segments: List[Dict] = []
     vias: List[Dict] = []
@@ -1847,6 +1861,14 @@ def route_disconnected_regions(
         # Required minimum distance between via centers = via_drill + hole_to_hole_clearance
         min_via_distance = config.via_drill + hole_to_hole_clearance
 
+        def _min_dist_to(ex, ey):
+            # Drill-aware: a barrel entry's REAL drill (pad drills run 2-3x
+            # via_drill) sets the h2h distance to it, not the via-via shortcut.
+            other = net_via_drills.get(
+                (round(ex, POSITION_DECIMALS), round(ey, POSITION_DECIMALS)),
+                config.via_drill)
+            return (config.via_drill + other) / 2 + hole_to_hole_clearance
+
         # First filter via_positions to remove vias too close to each other within this route
         filtered_via_positions = []
         for vx, vy in via_positions:
@@ -1859,7 +1881,7 @@ def route_disconnected_regions(
 
         for vx, vy in filtered_via_positions:
             too_close = any(
-                math.sqrt((ex - vx)**2 + (ey - vy)**2) < min_via_distance
+                math.sqrt((ex - vx)**2 + (ey - vy)**2) < _min_dist_to(ex, ey)
                 for ex, ey in net_vias
             )
             if not too_close:
@@ -1875,7 +1897,7 @@ def route_disconnected_regions(
         # Add open-space via if one was used and not too close to existing vias
         if open_space_via:
             too_close = any(
-                math.sqrt((ex - open_space_via[0])**2 + (ey - open_space_via[1])**2) < min_via_distance
+                math.sqrt((ex - open_space_via[0])**2 + (ey - open_space_via[1])**2) < _min_dist_to(ex, ey)
                 for ex, ey in net_vias
             )
             if not too_close:
@@ -2277,6 +2299,17 @@ def route_plane_connection_wide(
     def is_at_via(x: float, y: float) -> bool:
         """Check if a point is at a via location (connects all layers)."""
         return (round(x, POSITION_DECIMALS), round(y, POSITION_DECIMALS)) in via_positions
+
+    # #479 (a): every existing same-net via and plated THT barrel is a FREE
+    # layer transition for the search -- zero via cost, and a transition is
+    # allowed there even where a NEW drill would be blocked (h2h). The
+    # emitter below already skips adding a via at these positions
+    # (is_at_via / via_positions), so search and emission agree: the join
+    # rides the barrel lattice instead of paying fresh drills beside it
+    # (duodyne: 99 THT GND barrels, yet 106 new join vias).
+    if net_vias:
+        obstacles.add_free_vias_batch(
+            [coord.to_grid(vx, vy) for vx, vy in net_vias])
 
     # Set up sources - all anchor points from source region.
     # Points are (x, y) -- stamped on the plane layer, or all layers when at
