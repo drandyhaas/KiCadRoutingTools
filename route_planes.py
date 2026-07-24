@@ -136,7 +136,8 @@ def find_via_position(
     failed_route_positions: Optional[Set[Tuple[int, int]]] = None,
     pending_pads: Optional[List[Dict]] = None,
     router: Optional[GridRouter] = None,
-    position_filter=None
+    position_filter=None,
+    position_preference=None
 ) -> Optional[Tuple[float, float]]:
     """
     Find the closest valid position for a via near a pad.
@@ -164,6 +165,13 @@ def find_via_position(
             skipped. Used to keep a plane-tap via INSIDE its net's zone polygon on a
             Voronoi-shared layer (issue #287) -- a via in the inter-cell gap reaches
             no fill and leaves the pad floating while reporting success.
+        position_preference: Optional (x, y) -> bool SOFT ranking (never excludes):
+            candidates it approves are tried first (nearest-preferred wins over
+            nearest); with a routability check, the multi-source A* seeds the
+            preferred candidates alone first and falls back to the full set.
+            Used to prefer via sites on the PREDICTED main zone-fill component,
+            so stitching vias stop landing in clearance-carved pockets that the
+            plane repair step must strap later.
 
     Returns:
         (x, y) position for via, or None if no valid position found
@@ -261,55 +269,83 @@ def find_via_position(
     via_bin = 0
     if config is not None and len(open_cells) > 4000:
         via_bin = max(1, int(round(config.via_size / coord.grid_step / 2)))
-    seen_bins = set()
 
-    for gx, gy in open_cells:
-        dx, dy = gx - pad_gx, gy - pad_gy
-
-        # Outside the caller's allowed region (e.g. the net's own Voronoi
-        # cell/zone polygon, issue #287) - not a usable plane tap.
-        if position_filter is not None:
-            fx, fy = coord.to_float(gx, gy)
-            if not position_filter(fx, fy):
-                continue
-
-        # Skip if too close to a previously failed route position
+    # Vectorized candidate filtering (#263 follow-up): the per-cell Python loop
+    # over the batched open-cell query was ~12s of the scalenode route_planes
+    # step (125k cells x filters, repeated per pad). The failed-position and
+    # pending-pad filters are pure arithmetic -- run them as array passes, in
+    # the ORIGINAL order (both run before bin consumption, so a bin is never
+    # consumed by a cell one of them would have skipped). Only position_filter
+    # (an arbitrary Python predicate) still needs a per-cell loop, and it now
+    # runs over the pre-filtered survivors only.
+    if open_cells:
+        _oc = np.asarray(open_cells, dtype=np.int64).reshape(-1, 2)
+        _ogx, _ogy = _oc[:, 0], _oc[:, 1]
+        _keep = np.ones(len(_oc), dtype=bool)
         if failed_route_positions and skip_radius_sq > 0:
-            too_close = False
-            for failed_gx, failed_gy in failed_route_positions:
-                fdx = gx - failed_gx
-                fdy = gy - failed_gy
-                if fdx * fdx + fdy * fdy <= skip_radius_sq:
-                    too_close = True
-                    break
-            if too_close:
-                continue
+            for _fgx, _fgy in failed_route_positions:
+                _keep &= ((_ogx - _fgx) ** 2 + (_ogy - _fgy) ** 2
+                          > skip_radius_sq)
+        for _mnx, _mny, _mxx, _mxy in pending_pad_zones:
+            _keep &= ~((_ogx >= _mnx) & (_ogx <= _mxx)
+                       & (_ogy >= _mny) & (_ogy <= _mxy))
+        _sel = np.nonzero(_keep)[0]
 
-        # Skip if inside a pending pad's exclusion zone
-        if pending_pad_zones:
-            in_zone = False
-            for min_gx, min_gy, max_gx, max_gy in pending_pad_zones:
-                if min_gx <= gx <= max_gx and min_gy <= gy <= max_gy:
-                    in_zone = True
-                    break
-            if in_zone:
-                continue
-
-        # Thin redundant near-duplicate via sites: keep the nearest PASSING cell
-        # per via-radius bin (see via_bin note above). Done here, after the skip
-        # checks, so a bin is never consumed by a cell that was itself skipped.
-        if via_bin:
-            bin_key = (gx // via_bin, gy // via_bin)
-            if bin_key in seen_bins:
-                continue
-            seen_bins.add(bin_key)
-
-        dist_sq = dx * dx + dy * dy
-        valid_positions.append((dist_sq, coord.to_float(gx, gy), gx, gy))
+        if position_filter is not None:
+            # Arbitrary predicate: per-cell loop over survivors, binning after
+            # the filter exactly as before.
+            seen_bins = set()
+            for _i in _sel.tolist():
+                gx, gy = int(_ogx[_i]), int(_ogy[_i])
+                fx, fy = coord.to_float(gx, gy)
+                if not position_filter(fx, fy):
+                    continue
+                if via_bin:
+                    bin_key = (gx // via_bin, gy // via_bin)
+                    if bin_key in seen_bins:
+                        continue
+                    seen_bins.add(bin_key)
+                dx, dy = gx - pad_gx, gy - pad_gy
+                valid_positions.append(
+                    (dx * dx + dy * dy, coord.to_float(gx, gy), gx, gy))
+        else:
+            if via_bin and _sel.size:
+                _bins = np.stack([_ogx[_sel] // via_bin,
+                                  _ogy[_sel] // via_bin], axis=1)
+                # First occurrence per bin; open_cells is nearest-first, so
+                # np.sort(first-index) preserves keep-the-nearest semantics.
+                _, _first = np.unique(_bins, axis=0, return_index=True)
+                _sel = _sel[np.sort(_first)]
+            _sgx, _sgy = _ogx[_sel], _ogy[_sel]
+            _dsq = (_sgx - pad_gx) ** 2 + (_sgy - pad_gy) ** 2
+            _fxs = _sgx * coord.grid_step
+            _fys = _sgy * coord.grid_step
+            valid_positions.extend(
+                (int(d), (float(x), float(y)), int(g), int(h))
+                for d, x, y, g, h in zip(_dsq.tolist(), _fxs.tolist(),
+                                         _fys.tolist(), _sgx.tolist(),
+                                         _sgy.tolist()))
 
     # The Rust query is already nearest-first; sort anyway so the fallback path
     # (and any future unordered source) is correct.
     valid_positions.sort(key=lambda x: x[0])
+
+    # Soft preference ranking: stable-partition the nearest _PREF_EVAL_CAP
+    # candidates into preferred-first (bounded so an arbitrary predicate can't
+    # turn a 100k-cell search into 100k Python calls; beyond the cap candidates
+    # keep pure distance order). Preference never EXCLUDES -- a board whose
+    # predicted fill is wrong degrades to today's behavior, not to a failure.
+    n_preferred = 0
+    if position_preference is not None and valid_positions:
+        _PREF_EVAL_CAP = 600
+        head = valid_positions[:_PREF_EVAL_CAP]
+        tail = valid_positions[_PREF_EVAL_CAP:]
+        pref, rest = [], []
+        for vp in head:
+            (pref if position_preference(vp[1][0], vp[1][1])
+             else rest).append(vp)
+        valid_positions = pref + rest + tail
+        n_preferred = len(pref)
 
     # If no routing check needed, return closest valid position
     if routing_obstacles is None or config is None:
@@ -334,8 +370,9 @@ def find_via_position(
 
     source_cells = []
     src_set = set()
+    n_pref_sources = 0
     skipped_count = 0
-    for dist_sq, via_pos, gx, gy in valid_positions:
+    for cand_i, (dist_sq, via_pos, gx, gy) in enumerate(valid_positions):
         # Skip cells near a position where routing already failed (rip-up retries)
         if failed_route_positions and skip_radius_sq > 0:
             if any((gx - fgx) ** 2 + (gy - fgy) ** 2 <= skip_radius_sq
@@ -344,15 +381,13 @@ def find_via_position(
                 continue
         source_cells.append((gx, gy, layer_idx))
         src_set.add((gx, gy))
+        if cand_i < n_preferred:
+            n_pref_sources += 1
 
     if not source_cells:
         if verbose:
             print(f"[skipped {skipped_count}, no candidates left]", end=" ")
         return None
-
-    for gx, gy, _ in source_cells:
-        routing_obstacles.add_source_target_cell(gx, gy, layer_idx)
-    routing_obstacles.add_source_target_cell(pad_gx, pad_gy, layer_idx)
 
     if router is None:
         router = GridRouter(
@@ -364,17 +399,35 @@ def find_via_position(
             proximity_heuristic_cost=config.get_proximity_heuristic_cost()
         )
 
-    # One search, seeded from all candidates; generous budget since it replaces K.
-    ms_iters = max(10000, min(60000, len(source_cells) * 4))
-    path, iterations, _ = router.route_with_frontier(
-        routing_obstacles, source_cells, [(pad_gx, pad_gy, layer_idx)], ms_iters,
-        False,  # collinear_vias
-        0,      # via_exclusion_radius
-        None,   # start_direction
-        None,   # end_direction
-        0       # direction_steps
-    )
-    routing_obstacles.clear_source_target_cells()
+    # Two-phase when a preference partitioned the candidates: seed the
+    # PREFERRED cells alone first (a winning source is then guaranteed on the
+    # predicted main fill); fall back to the full set so the preference can
+    # never cost a connection.
+    phases = []
+    if 0 < n_pref_sources < len(source_cells):
+        phases.append(source_cells[:n_pref_sources])
+    phases.append(source_cells)
+
+    path = None
+    iterations = 0
+    for phase_cells in phases:
+        for gx, gy, _ in phase_cells:
+            routing_obstacles.add_source_target_cell(gx, gy, layer_idx)
+        routing_obstacles.add_source_target_cell(pad_gx, pad_gy, layer_idx)
+        # One search, seeded from all candidates; generous budget since it
+        # replaces K per-candidate searches.
+        ms_iters = max(10000, min(60000, len(phase_cells) * 4))
+        path, iterations, _ = router.route_with_frontier(
+            routing_obstacles, phase_cells, [(pad_gx, pad_gy, layer_idx)], ms_iters,
+            False,  # collinear_vias
+            0,      # via_exclusion_radius
+            None,   # start_direction
+            None,   # end_direction
+            0       # direction_steps
+        )
+        routing_obstacles.clear_source_target_cells()
+        if path:
+            break
 
     if path:
         # The via is the path endpoint that is one of our candidate sources
@@ -2440,6 +2493,43 @@ def create_plane(
                 )
             return routing_obstacles_cache[layer]
 
+        # Fill-aware via preference: predict this net's zone fill (the exact
+        # polygon create_plane will write, over the copper that exists NOW)
+        # and prefer via sites on its MAIN component. Distance-only placement
+        # happily drops a stitching via in a clearance-carved pocket or on a
+        # fill island -- DRC-clean, self-reports success, and becomes a
+        # region-join the plane REPAIR step must strap later. Single-net
+        # layers only: a Voronoi-shared layer's cells are seeded FROM the
+        # placed vias, so there is no polygon to predict yet (the repair
+        # path's oracle + outline filter covers those, #287). Soft preference,
+        # never a gate -- a mispredicted fill degrades to today's behavior.
+        fill_via_preference = None
+        _is_multi_net_layer = bool(layer_nets
+                                   and len(layer_nets.get(plane_layer, [])) > 1)
+        if should_create_zone and not _is_multi_net_layer:
+            try:
+                from types import SimpleNamespace
+                from plane_fill_model import ZoneFillModel
+                _synth_zone = SimpleNamespace(
+                    net_id=net_id, layer=plane_layer,
+                    clearance=zone_clearance, min_thickness=min_thickness,
+                    polygon=zone_polygon)
+                _pred_model = ZoneFillModel(pcb_data, _synth_zone)
+                if _pred_model.ok:
+                    _pred_main = _pred_model.largest_component()
+                    if _pred_main:
+                        def fill_via_preference(x, y, _m=_pred_model,
+                                                _c=_pred_main,
+                                                _s=via_size / 2):
+                            return _m.query_component(x, y, size=_s) == _c
+                        print(f"  Fill-aware via preference: predicted "
+                              f"{plane_layer} fill modeled (main component "
+                              f"located)")
+            except Exception as _fp_e:
+                fill_via_preference = None
+                if verbose:
+                    print(f"  (fill prediction unavailable: {_fp_e})")
+
         # Step 9: Place vias near each target pad (or reuse existing)
         new_vias = []
         new_segments = []
@@ -2750,7 +2840,8 @@ def create_plane(
                 verbose=verbose,
                 failed_route_positions=failed_route_positions,
                 pending_pads=pending_pads,
-                router=via_pad_router
+                router=via_pad_router,
+                position_preference=fill_via_preference
             )
 
             # Board-edge clamp: an in-pad via placed at the pad's true (off-grid)

@@ -1349,8 +1349,11 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
         _zfa = None
         if zones:
             from check_connected import make_real_fill_validator
-            _zcv = make_real_fill_validator(pcb_data, net_id)
-            _zfa = make_real_fill_validator(pcb_data, net_id, margin=0.02)
+            _fvb = {}
+            _zcv = make_real_fill_validator(pcb_data, net_id,
+                                            shared_buckets=_fvb)
+            _zfa = make_real_fill_validator(pcb_data, net_id, margin=0.02,
+                                            shared_buckets=_fvb)
         anchor = []
         if keep_input_copper:
             # Input copper is read-only: anchor it (counts for degree/T-junction/
@@ -4184,8 +4187,11 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
         _zfa3 = None
         if _zones_n:
             from check_connected import make_real_fill_validator
-            _zcv3 = make_real_fill_validator(pcb_data, net_id)
-            _zfa3 = make_real_fill_validator(pcb_data, net_id, margin=0.02)
+            _fvb3 = {}
+            _zcv3 = make_real_fill_validator(pcb_data, net_id,
+                                             shared_buckets=_fvb3)
+            _zfa3 = make_real_fill_validator(pcb_data, net_id, margin=0.02,
+                                             shared_buckets=_fvb3)
         _, removed = _safe_prune_net(
             net_id, prunable,
             [v for v in pcb_data.vias if v.net_id == net_id],
@@ -4328,8 +4334,11 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
         _zfa2 = None
         if net_zones:
             from check_connected import make_real_fill_validator
-            _zcv2 = make_real_fill_validator(pcb_data, net_id)
-            _zfa2 = make_real_fill_validator(pcb_data, net_id, margin=0.02)
+            _fvb2 = {}
+            _zcv2 = make_real_fill_validator(pcb_data, net_id,
+                                             shared_buckets=_fvb2)
+            _zfa2 = make_real_fill_validator(pcb_data, net_id, margin=0.02,
+                                             shared_buckets=_fvb2)
         kept_net, _ = _safe_prune_net(net_id, net_new, net_vias, net_pads, net_zones,
                                       zone_credit_validator=_zcv2,
                                       fill_anchor_validator=_zfa2,

@@ -603,6 +603,51 @@ def _edge_band_grid(gmin_x: int, gmin_y: int, gmax_x: int, gmax_y: int, grid_mar
     return gx_grid.ravel(), gy_grid.ravel()
 
 
+def _board_edge_cell_mask_cached(pcb_data, coord: GridCoord, board_outline,
+                                 gmin_x: int, gmin_y: int, gmax_x: int,
+                                 gmax_y: int, grid_margin: int,
+                                 edge_clearance: float):
+    """Memoized _board_edge_cell_mask, cached on pcb_data. The mask is a pure
+    function of the (static) board outline, the grid, and the clearance band,
+    yet every via/routing obstacle-map build re-rasterized it from scratch --
+    171 identical ray-cast + edge-distance passes on scalenode_cm4's polygon
+    outline (~1/3 of the whole route_planes step). Consumers only READ the
+    returned arrays (boolean indexing / column_stack), so sharing is safe."""
+    cache = getattr(pcb_data, '_edge_mask_cache', None)
+    if cache is None:
+        cache = {}
+        pcb_data._edge_mask_cache = cache
+    key = (round(coord.grid_step, 9), gmin_x, gmin_y, gmax_x, gmax_y,
+           grid_margin, round(edge_clearance, 9))
+    hit = cache.get(key)
+    if hit is None:
+        hit = _board_edge_cell_mask(coord, board_outline, gmin_x, gmin_y,
+                                    gmax_x, gmax_y, grid_margin, edge_clearance)
+        cache[key] = hit
+    return hit
+
+
+def _rasterize_cutout_cached(pcb_data, cutout_idx: int, cutout, coord: GridCoord,
+                             clearance: float):
+    """Memoized cutout rasterization (same rationale as the edge-mask cache):
+    board cutouts are static, but each obstacle build re-rasterized every one
+    per layer. Returns (cgx, cgy, cmask) with the clearance band applied."""
+    cache = getattr(pcb_data, '_cutout_mask_cache', None)
+    if cache is None:
+        cache = {}
+        pcb_data._cutout_mask_cache = cache
+    key = (cutout_idx, round(coord.grid_step, 9), round(clearance, 9))
+    hit = cache.get(key)
+    if hit is None:
+        cgx, cgy, c_inside, c_edge = _rasterize_polygon(cutout, coord, clearance)
+        if cgx is None:
+            hit = (None, None, None)
+        else:
+            hit = (cgx, cgy, c_inside | (c_edge < clearance))
+        cache[key] = hit
+    return hit
+
+
 def _board_edge_cell_mask(coord: GridCoord, board_outline, gmin_x: int, gmin_y: int,
                           gmax_x: int, gmax_y: int, grid_margin: int, edge_clearance: float):
     """Cells to block for a polygon board outline: those whose centre is outside the
@@ -677,8 +722,9 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         # via edge clearance. Same vectorized kernels as the signal router's
         # obstacle_map._add_polygon_edge_obstacles - the per-cell Python scan and
         # its band optimization are no longer needed (issue #81).
-        gx_flat, gy_flat, via_mask = _board_edge_cell_mask(
-            coord, board_outline, gmin_x, gmin_y, gmax_x, gmax_y, grid_margin, via_edge_clearance)
+        gx_flat, gy_flat, via_mask = _board_edge_cell_mask_cached(
+            pcb_data, coord, board_outline, gmin_x, gmin_y, gmax_x, gmax_y,
+            grid_margin, via_edge_clearance)
         if via_mask.any():
             obstacles.add_blocked_vias_batch(np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
     else:
@@ -690,13 +736,13 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
             obstacles.add_blocked_vias_batch(np.column_stack([gx_flat[mask], gy_flat[mask]]))
 
     # Block vias inside board cutouts
-    for cutout in pcb_data.board_info.board_cutouts:
+    for _ci, cutout in enumerate(pcb_data.board_info.board_cutouts):
         if len(cutout) < 3:
             continue
-        cgx, cgy, c_inside, c_edge = _rasterize_polygon(cutout, coord, via_edge_clearance)
+        cgx, cgy, cmask = _rasterize_cutout_cached(
+            pcb_data, _ci, cutout, coord, via_edge_clearance)
         if cgx is None:
             continue
-        cmask = c_inside | (c_edge < via_edge_clearance)
         if cmask.any():
             obstacles.add_blocked_vias_batch(np.column_stack([cgx[cmask], cgy[cmask]]))
 
@@ -744,8 +790,9 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         # Polygon board: rasterize the outline bbox + margin once and block (on this
         # one layer) every cell outside the board plus inside cells within the track
         # edge clearance. Mirrors obstacle_map._add_polygon_edge_obstacles (issue #81).
-        gx_flat, gy_flat, cell_mask = _board_edge_cell_mask(
-            coord, board_outline, gmin_x, gmin_y, gmax_x, gmax_y, grid_margin, track_edge_clearance)
+        gx_flat, gy_flat, cell_mask = _board_edge_cell_mask_cached(
+            pcb_data, coord, board_outline, gmin_x, gmin_y, gmax_x, gmax_y,
+            grid_margin, track_edge_clearance)
         _block_cells_on_layers(obstacles, gx_flat, gy_flat, cell_mask, [layer_idx])
     else:
         # Rectangular board - simple bounding box band, vectorized.
@@ -755,13 +802,13 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         _block_cells_on_layers(obstacles, gx_flat, gy_flat, mask, [layer_idx])
 
     # Block tracks inside board cutouts
-    for cutout in pcb_data.board_info.board_cutouts:
+    for _ci, cutout in enumerate(pcb_data.board_info.board_cutouts):
         if len(cutout) < 3:
             continue
-        cgx, cgy, c_inside, c_edge = _rasterize_polygon(cutout, coord, track_edge_clearance)
+        cgx, cgy, cmask = _rasterize_cutout_cached(
+            pcb_data, _ci, cutout, coord, track_edge_clearance)
         if cgx is None:
             continue
-        cmask = c_inside | (c_edge < track_edge_clearance)
         _block_cells_on_layers(obstacles, cgx, cgy, cmask, [layer_idx])
 
 
