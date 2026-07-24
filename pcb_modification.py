@@ -88,7 +88,8 @@ def _point_anchored(x: float, y: float, layer: str, via_pts, pad_pts,
 def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segment] = None,
                             vias: List = None, pads: List = None,
                             tol: float = 0.05,
-                            keep_terminal_escapes: bool = True) -> Tuple[List[Segment], List[Segment]]:
+                            keep_terminal_escapes: bool = True,
+                            fill_anchor=None) -> Tuple[List[Segment], List[Segment]]:
     """Iteratively drop a net's dead-end segments (issue #84).
 
     A dead end is a segment endpoint of degree 1 -- no other same-net segment
@@ -154,10 +155,14 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
             ek = key(s.end_x, s.end_y, s.layer)
             start_free = (degree[sk] == 1 and
                           not _point_anchored(s.start_x, s.start_y, s.layer,
-                                              via_pts, pad_pts, seg_index, _CELL, s, tol))
+                                              via_pts, pad_pts, seg_index, _CELL, s, tol)
+                          and not (fill_anchor is not None
+                                   and fill_anchor(s.start_x, s.start_y, s.layer)))
             end_free = (degree[ek] == 1 and
                         not _point_anchored(s.end_x, s.end_y, s.layer,
-                                            via_pts, pad_pts, seg_index, _CELL, s, tol))
+                                            via_pts, pad_pts, seg_index, _CELL, s, tol)
+                        and not (fill_anchor is not None
+                                 and fill_anchor(s.end_x, s.end_y, s.layer)))
             remove = False
             if start_free and end_free:
                 remove = True                      # isolated fragment
@@ -273,9 +278,18 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
     if tol is None:
         from connectivity import COINCIDENCE_TOL
         tol = COINCIDENCE_TOL  # #320: the one strict coincidence tolerance
+    # #479 duodyne C12: an endpoint landing on ANY same-net fill (whatever
+    # fill COMPONENT the model assigns it) is an anchor, never a dead end.
+    # Without this, a model fill-split (our pour model diverging from
+    # KiCad's) marks a strap-served pad disconnected in the BASE count, and
+    # the per-candidate gate below then happily unwinds the strap "without
+    # raising the count" -- converting a grading false-negative into real
+    # board damage (the cleanup trimmed 144 live gate-repair segments).
+    # Over-keeping a genuinely dead fill-touching stub is harmless copper.
     _, candidates = prune_dead_end_segments(prunable, anchor_segments=anchor_segments,
                                             vias=vias, pads=pads, tol=tol,
-                                            keep_terminal_escapes=not aggressive)
+                                            keep_terminal_escapes=not aggressive,
+                                            fill_anchor=zone_credit_validator)
     if not candidates:
         return prunable, []
 
@@ -378,7 +392,8 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
                 break
         _, candidates = prune_dead_end_segments(kept, anchor_segments=anchor_segments,
                                                 vias=vias, pads=pads, tol=tol,
-                                                keep_terminal_escapes=not aggressive)
+                                                keep_terminal_escapes=not aggressive,
+                                                fill_anchor=zone_credit_validator)
     return kept, removed
 
 
@@ -4154,12 +4169,18 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
             continue
         p_ids = {id(s) for s in prunable}
         anchor = [s for s in segs if id(s) not in p_ids]
+        _zones_n = [z for z in all_zones if z.net_id == net_id]
+        _zcv3 = None
+        if _zones_n:
+            from check_connected import make_real_fill_validator
+            _zcv3 = make_real_fill_validator(pcb_data, net_id)
         _, removed = _safe_prune_net(
             net_id, prunable,
             [v for v in pcb_data.vias if v.net_id == net_id],
             pcb_data.pads_by_net.get(net_id, []),
-            [z for z in all_zones if z.net_id == net_id],
-            anchor_segments=anchor, aggressive=True)
+            _zones_n,
+            anchor_segments=anchor, aggressive=True,
+            zone_credit_validator=_zcv3)
         de_removed.extend(removed)
     de_removed = _veto(de_removed)
     all_new_segments, n_swept = strip(all_new_segments, de_removed)
