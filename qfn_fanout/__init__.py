@@ -180,8 +180,21 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     # Foreign obstacles, keyed by net so the via's OWN net is exempt at check
     # time. A through-via spans every copper layer, so foreign tracks on ANY
     # layer matter -- don't filter tracks by layer.
-    foreign_vias = [(v.x, v.y, v.size, v.net_id) for v in pcb_data.vias]
+    foreign_vias = [(v.x, v.y, v.size, v.net_id, v.drill) for v in pcb_data.vias]
     foreign_pads = [p for plist in pcb_data.pads_by_net.values() for p in plist]
+    # #479 reuse-audit gap 2: existing same-net vias are REUSE targets (a
+    # re-run / post-route fanout used to drop a fresh drill ON one), and
+    # every drill on the board -- same-net included -- bounds new via holes
+    # net-independently (KiCad hole_to_hole).
+    _own_via_pos: Dict[int, List[Tuple[float, float]]] = {}
+    for v in pcb_data.vias:
+        _own_via_pos.setdefault(v.net_id, []).append((v.x, v.y))
+    from kicad_parser import pad_drill_circles as _pdc
+    import routing_defaults as _rd
+    _h2h = _rd.HOLE_TO_HOLE_CLEARANCE
+    _drilled_pad_holes = [(hx, hy, hd)
+                          for p in foreign_pads if p.drill and p.drill > 0
+                          for (hx, hy, hd) in _pdc(p)]
     foreign_tracks = [(s.start_x, s.start_y, s.end_x, s.end_y, s.width, s.net_id)
                       for s in pcb_data.segments]
 
@@ -202,10 +215,18 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return False
             if _pt_rings_dist(vx, vy, _edge_rings) < via_size / 2 + _edge_clear - 1e-6:
                 return False
-        for fx, fy, fs, fn in foreign_vias:
+        for fx, fy, fs, fn, fd in foreign_vias:
             if fn == net_id:
+                # Same-net copper is no obstacle, but the DRILLS still are:
+                # hole-to-hole is net-independent (#282/#479 audit gap 2).
+                if math.hypot(vx - fx, vy - fy) < (via_drill + fd) / 2 + _h2h - 1e-6:
+                    return False
                 continue
             if math.hypot(vx - fx, vy - fy) < via_size / 2 + fs / 2 + clearance - 1e-6:
+                return False
+        for hx, hy, hd in _drilled_pad_holes:
+            # Net-independent drill floor vs every drilled pad (slot-exact).
+            if math.hypot(vx - hx, vy - hy) < (via_drill + hd) / 2 + _h2h - 1e-6:
                 return False
         for pad in foreign_pads:
             if pad.net_id == net_id:            # own net (incl. via-in-pad) is fine
@@ -222,7 +243,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                     < via_size / 2 + sw / 2 + clearance - 1e-6:
                 return False
         for qx, qy, qn in placed:
-            floor = (via_size + clearance) if qn != net_id else (via_size * 0.5)
+            # Same-net floor was via_size*0.5 -- BELOW drill hole-to-hole for
+            # standard vias (#479 audit gap 2); both holes are via_drill here.
+            floor = (via_size + clearance) if qn != net_id \
+                else max(via_size * 0.5, via_drill + _h2h)
             if math.hypot(vx - qx, vy - qy) < floor - 1e-6:
                 return False
         return True
@@ -258,6 +282,21 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     def place_pin(pi, mode, placed):
         ex, ey = pi.escape_direction
         px, py = pi.pad.global_x, pi.pad.global_y
+        # #479 audit gap 2 (reuse): an existing same-net via within stub
+        # reach makes a new drill pointless (and often sub-h2h illegal).
+        # Bridge to it instead; the commit loop skips the via emission.
+        _best = None
+        for (ovx, ovy) in _own_via_pos.get(pi.pad.net_id, ()):
+            _d = math.hypot(ovx - px, ovy - py)
+            if _d < pi.pad_width / 2 + via_size / 2 + 0.1 \
+                    and (_best is None or _d < _best[0]):
+                _best = (_d, ovx, ovy)
+        if _best is not None:
+            _rvx, _rvy = _best[1], _best[2]
+            if (obs_layer_idx is None or
+                    check_line_clearance(obstacles, px, py, _rvx, _rvy,
+                                         obs_layer_idx, cfg)):
+                return (_rvx, _rvy)
         for d in candidate_offsets(pi.pad_width, mode):
             vx, vy = snap(px + ex * d), snap(py + ey * d)
             stub_ok = (obs_layer_idx is None or
@@ -328,6 +367,16 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             vx, vy = pos
             placed_global.append((vx, vy, pi.pad.net_id))
             px, py = pi.pad.global_x, pi.pad.global_y
+            # Reused an existing same-net via (#479 audit gap 2): emit only
+            # the bridging stub, never a duplicate drill.
+            if any(abs(vx - ox) < 1e-4 and abs(vy - oy) < 1e-4
+                   for ox, oy in _own_via_pos.get(pi.pad.net_id, ())):
+                if math.hypot(vx - px, vy - py) > POSITION_TOLERANCE:
+                    tracks.append({'start': (px, py), 'end': (vx, vy),
+                                   'width': track_width,
+                                   'layer': footprint.layer,
+                                   'net_id': pi.pad.net_id})
+                continue
             # Zero-length stub (via centred on the pad) needs no track.
             # The connecting stub bridges the pad to the via, so it must live on
             # the pad's own copper layer (the footprint mount layer) -- the
