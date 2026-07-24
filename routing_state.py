@@ -158,6 +158,13 @@ class RoutingState:
     # Maps net_id -> list of event dicts with keys: event, details, sequence
     net_history: Dict[int, List[Dict]] = field(default_factory=dict)
 
+    # Issue #409: latest non-empty frontier-blocking analysis per net_id
+    # (last-wins), recorded by blocking_analysis.record_frontier_blocking at
+    # the single-ended-path analysis sites. Serialized as the additive
+    # JSON_SUMMARY 'blockers' key for nets still failed at end of run.
+    # net_id -> {'stage': str, 'blocked_by': [dict], 'more': int (optional)}
+    frontier_blocking: Dict[int, Dict] = field(default_factory=dict)
+
     def __post_init__(self):
         """Initialize layer_map if not provided."""
         if not self.layer_map and self.config:

@@ -79,7 +79,7 @@ from connectivity import (
 from net_queries import get_chip_pad_positions, calculate_route_length
 from pcb_modification import add_route_to_pcb_data
 from single_ended_routing import route_net_with_obstacles, route_net_with_visualization, route_multipoint_main
-from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
+from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache, record_frontier_blocking
 from rip_up_reroute import rip_up_net, restore_net
 from diff_pair_custody import record_casualty
 from polarity_swap import get_canonical_net_id, rip_combo_already_tried
@@ -868,6 +868,8 @@ def route_single_ended_nets(
                              "near_target": b.near_target_cells,
                              "validator_named": b.validator_named}
                             for b in (blockers or [])[:6]]})
+                    record_frontier_blocking(state, net_id, blockers,
+                                             "single_ended")
                     print_blocking_analysis(blockers, blocked_cells=blocked_cells,
                                            pcb_data=pcb_data, config=config,
                                            nets_to_route=remaining_net_ids)
@@ -984,6 +986,9 @@ def route_single_ended_nets(
                                 source_xy=single_source_xy,
                                 obstacle_cache=obstacle_cache
                             )
+                            record_frontier_blocking(state, net_id,
+                                                     fresh_blockers,
+                                                     "single_ended")
                             print_blocking_analysis(fresh_blockers, prefix="    ")
                             # Find the most-blocking net that isn't already ripped
                             next_blocker = None
