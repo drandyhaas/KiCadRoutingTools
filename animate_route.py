@@ -226,11 +226,20 @@ def _step_sort_key(path: str):
 def discover_steps(run_dir: str) -> Tuple[List[Tuple[str, str, Optional[str]]], Optional[str]]:
     """Return [(label, board_path, trace_path|None), ...] in chain order, and
     the final board path. A step's trace is ``<board_basename>_routetrace.json``
-    when present. Matches ``stepN`` anywhere in the filename (``step6_route`` or
-    ``board_step6_route``), skipping non-step .kicad_pcb (seed/final aliases)."""
-    boards = [p for p in glob.glob(os.path.join(run_dir, '*.kicad_pcb'))
-              if re.search(r'step\s*\d', os.path.basename(p), re.I)]
-    boards.sort(key=_step_sort_key)
+    when present.
+
+    Ordering: prefer ``stepN`` in the filename (``step6_route`` or
+    ``board_step6_route``); when no board is step-numbered (chains that name
+    outputs semantically -- ``fanout`` / ``diff_groupA`` / ``planes`` /
+    ``final_board``) fall back to write-time (mtime) order, which is the order
+    the chain produced them. The final board is an explicit ``final*`` if
+    present, else the last in order."""
+    all_pcb = glob.glob(os.path.join(run_dir, '*.kicad_pcb'))
+    stepped = [p for p in all_pcb if re.search(r'step\s*\d', os.path.basename(p), re.I)]
+    if stepped:
+        boards = sorted(stepped, key=_step_sort_key)
+    else:
+        boards = sorted(all_pcb, key=lambda p: (os.path.getmtime(p), os.path.basename(p)))
     steps = []
     for b in boards:
         base = os.path.splitext(b)[0]
@@ -238,6 +247,9 @@ def discover_steps(run_dir: str) -> Tuple[List[Tuple[str, str, Optional[str]]], 
         label = os.path.splitext(os.path.basename(b))[0]
         steps.append((label, b, tr if os.path.exists(tr) else None))
     final = boards[-1] if boards else None
+    for b in boards:                      # an explicit final_board wins
+        if 'final' in os.path.basename(b).lower():
+            final = b
     return steps, final
 
 

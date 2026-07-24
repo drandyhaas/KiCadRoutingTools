@@ -145,7 +145,9 @@ Every stress run (live `run_board.sh` and no-LLM `redo_stress_test.py`) renders,
 per board:
 
 - `<final-board>.png` — combined snapshot, and `<final-board>_<layer>.png` per copper layer
-- `<run-dir>/routing.gif` — the whole-run movie
+- `<run-dir>/routing.mp4` — the whole-run movie (H.264 when `imageio-ffmpeg` is
+  installed, else `routing.gif`). Chain boards are ordered by `stepN` when
+  present, otherwise by write-time (for semantically-named chains).
 
 `KICAD_ROUTE_TRACE=1` is exported by default in stress runs (set
 `KICAD_ROUTE_TRACE=0` to skip; the movie then falls back to a coarse per-step

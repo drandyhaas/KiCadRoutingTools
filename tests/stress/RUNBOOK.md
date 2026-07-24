@@ -99,20 +99,24 @@ old kicad-cli + headless-Chrome `board_layer_images` path):
 - `<final-board>.png` — combined all-copper snapshot of the final board.
 - `<final-board>_<layer>.png` — one snapshot per copper layer (plane vs signal
   at a glance; plane pours render natively).
-- `<run-dir>/routing.gif` — a movie of the WHOLE run: each `stepN_*.kicad_pcb`
-  board's copper delta is revealed in chain order (so fanout, diff pairs,
-  planes, signal, and repair all appear), with fine per-copper rip/restore
-  animation spliced in for any step that recorded a trace. New copper flashes
-  white, reroutes/restores green, rips flash red.
+- `<run-dir>/routing.mp4` — a movie of the WHOLE run: each chain board's copper
+  delta is revealed in chain order (so fanout, diff pairs, planes, signal, and
+  repair all appear), with fine per-copper rip/restore animation spliced in for
+  any step that recorded a trace. New copper flashes white, reroutes/restores
+  green, rips flash red. Written as **H.264 `.mp4`** (≈10-50× smaller than GIF,
+  plays everywhere) when `imageio-ffmpeg` is installed, else falls back to
+  `routing.gif`.
 
 Both the live worker (`run_board.sh`) and the no-LLM replay
 (`redo_stress_test.py`) produce these automatically.
 
 **For these to be created correctly:**
-- Name every step output `stepN_<what>.kicad_pcb` (the existing convention).
-  `routing.gif` discovers `step*.kicad_pcb` and orders steps by the leading
-  `stepN` number; the last one is the final board and the movie's substrate.
-  A step written without a `stepN` prefix is sorted last and mis-ordered.
+- The movie discovers the chain boards automatically: it prefers a `stepN` in
+  the filename (`step6_route` or `board_step6_route`, sub-steps `step2a/2b`
+  ordered correctly); when a chain names outputs semantically instead
+  (`diff_groupA`, `planes`, `final_board`), it falls back to **write-time
+  order**. An explicit `final*` board is used as the final/substrate, else the
+  last in order. (mp4 needs `pip install imageio imageio-ffmpeg`.)
 - **Route tracing is ON by default** (`KICAD_ROUTE_TRACE=1`, exported by
   `run_board.sh`, set by `redo_stress_test.py`). Each `route.py`, `route_diff.py`,
   `route_planes.py`, and `route_disconnected_planes.py` step then drops a sibling

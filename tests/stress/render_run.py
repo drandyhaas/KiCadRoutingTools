@@ -53,17 +53,23 @@ def render_final_snapshot(board_path, size=1600, per_layer=True, quiet=False):
     return written
 
 
-def render_run_movie(run_dir, out_gif=None, size=1000, fps=6.0, quiet=False):
-    """Whole-run movie from the run dir's step boards + traces. Returns path
-    or None (e.g. no step boards found)."""
+def render_run_movie(run_dir, out=None, size=1000, fps=8.0, quiet=False):
+    """Whole-run movie from the run dir's step boards + traces. Returns path or
+    None (no chain boards found). Writes ``routing.mp4`` (H.264, ~10-50x smaller
+    than GIF and plays everywhere) when imageio-ffmpeg is available, else falls
+    back to ``routing.gif`` -- the .mp4 extension drives the choice in
+    save_movie."""
     import animate_route as a
     frames = a.build_run(run_dir, size=size, ss=1, alpha=150, rip_hold=2, chunks=6)
     if not frames:
         if not quiet:
-            print(f"render_run: no stepN boards in {run_dir}; no movie")
+            print(f"render_run: no chain boards in {run_dir}; no movie")
         return None
-    out = out_gif or os.path.join(run_dir, 'routing.gif')
-    a.save_gif(frames, out, fps=fps, end_hold=1.5)
+    out = out or os.path.join(run_dir, 'routing.mp4')
+    a.save_movie(frames, out, fps=fps, end_hold=1.5)
+    # report the path actually written (save_movie falls back .mp4 -> .gif)
+    if out.endswith('.mp4') and not os.path.exists(out):
+        out = os.path.splitext(out)[0] + '.gif'
     return out
 
 
