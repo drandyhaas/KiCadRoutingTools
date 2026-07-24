@@ -270,7 +270,8 @@ def _point_in_pad(px: float, py: float, pad: Pad, margin: float = 0.0) -> bool:
     return point_to_pad_distance(px, py, pad) <= margin
 
 
-def make_real_fill_validator(pcb_data, net_id, margin: float = 0.25):
+def make_real_fill_validator(pcb_data, net_id, margin: float = 0.25,
+                             shared_buckets: Optional[dict] = None):
     """Factory for a zone-credit validator: validate(x, y, layer) -> True iff
     a `margin`-radius disc at (x, y) is clear of every FOREIGN copper item on
     `layer` -- i.e. real zone fill can provably exist there.
@@ -284,11 +285,29 @@ def make_real_fill_validator(pcb_data, net_id, margin: float = 0.25):
     by construction: a False only DENIES credit, which blocks a removal.
 
     Foreign geometry is bucketed per layer on first use (1mm cells), so each
-    validate() is O(local)."""
+    validate() is O(local).
+
+    The buckets are built at a FIXED reach (_BUCKET_REACH_MARGIN, the largest
+    margin any caller uses) so validator instances with different margins can
+    share them: pass the same `shared_buckets` dict to each (sweep_dead_ends
+    builds two validators per net -- credit margin 0.25, anchor margin 0.02 --
+    and with margin baked into the reach each one re-bucketed every foreign
+    via / segment / pad on the board). A larger-reach bucket is a superset,
+    so any query margin <= the build reach stays exact. The dict is scoped to
+    the CALLER (never cached on pcb_data): copper mutates between sweeps and
+    a stale bucket would over-permit."""
     import math as _m
+    _BUCKET_REACH_MARGIN = 0.25
+    assert margin <= _BUCKET_REACH_MARGIN + 1e-9, \
+        f"validator margin {margin} exceeds bucket reach {_BUCKET_REACH_MARGIN}"
+    _shared = shared_buckets if shared_buckets is not None else {}
     _buckets = {}
 
     def _build(layer):
+        _ck = (net_id, layer)
+        b = _shared.get(_ck)
+        if b is not None:
+            return b
         b = {}
 
         def _add(x1, y1, x2, y2, reach, obj):
@@ -299,12 +318,12 @@ def make_real_fill_validator(pcb_data, net_id, margin: float = 0.25):
                     b.setdefault((bx, by), []).append(obj)
         for v in pcb_data.vias:
             if v.net_id != net_id:
-                _add(v.x, v.y, v.x, v.y, v.size / 2 + margin,
+                _add(v.x, v.y, v.x, v.y, v.size / 2 + _BUCKET_REACH_MARGIN,
                      ('c', v.x, v.y, v.size / 2))
         for s in pcb_data.segments:
             if s.net_id != net_id and s.layer == layer:
                 _add(s.start_x, s.start_y, s.end_x, s.end_y,
-                     s.width / 2 + margin, ('s', s))
+                     s.width / 2 + _BUCKET_REACH_MARGIN, ('s', s))
         for plist in pcb_data.pads_by_net.values():
             for p in plist:
                 if p.net_id == net_id:
@@ -314,7 +333,8 @@ def make_real_fill_validator(pcb_data, net_id, margin: float = 0.25):
                     continue
                 r = max(p.size_x, p.size_y) / 2
                 _add(p.global_x, p.global_y, p.global_x, p.global_y,
-                     r + margin, ('p', p))
+                     r + _BUCKET_REACH_MARGIN, ('p', p))
+        _shared[_ck] = b
         return b
 
     def validate(x, y, layer):
