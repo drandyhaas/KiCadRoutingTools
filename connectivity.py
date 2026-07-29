@@ -1028,6 +1028,32 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
                         if (gx1, gy1) != (gx2, gy2):
                             targets.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
 
+                # #72: each group's VIAS are terminals on every routing layer
+                # (a via spans the whole stack). Without this, a group whose
+                # segments all sit on layers OUTSIDE config.layers -- e.g. an
+                # F.Cu pad stub + escape via, routed with --layers In2/In3 --
+                # contributes no endpoint at all and the net is unroutable
+                # even though its via is reachable on every inner layer.
+                # Case 2 below has done this for years; Case 1 never did.
+                def _group_vias(g):
+                    pts = set()
+                    for _sg in g:
+                        pts.add((round(_sg.start_x, POSITION_DECIMALS),
+                                 round(_sg.start_y, POSITION_DECIMALS)))
+                        pts.add((round(_sg.end_x, POSITION_DECIMALS),
+                                 round(_sg.end_y, POSITION_DECIMALS)))
+                    return [v for v in net_vias
+                            if any(abs(v.x - px) < 0.05 and abs(v.y - py) < 0.05
+                                   for px, py in pts)]
+                for _vlist, _side in ((_group_vias(source_segs), sources),
+                                      (_group_vias(target_segs), targets)):
+                    for via in _vlist:
+                        gx, gy = coord.to_grid(via.x, via.y)
+                        for layer in config.layers:
+                            layer_idx = layer_map.get(layer)
+                            if layer_idx is not None:
+                                _side.append((gx, gy, layer_idx, via.x, via.y))
+
             if sources and targets:
                 return sources, targets, None
 
