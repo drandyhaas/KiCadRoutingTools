@@ -1064,9 +1064,15 @@ def build_routing_obstacle_map(
         # The exact capsule keep-out measures from the real segment, so the blocked
         # halo matches the true clearance envelope without the grid-rounding that used
         # to leave connection traces within clearance of signal copper (#146/#173).
+        # kad#69: the capsule is exact on the EXISTING-segment side, but the NEW
+        # track routes to grid-cell centres, so its own ±half-cell discretisation
+        # still lets it land ~grid/2 inside the clearance ring (edge-to-edge DRC
+        # then fails by up to grid/2). Add the same grid_step/2 cushion the via and
+        # pad stampings above already carry, so the delivered copper meets spec.
         seg_expansion_mm = (route_track_w / 2 + seg.width / 2
                             + config.layer_clearance(  # #498 (#434 cross-class)
-                                route_layer, config.obstacle_clearance(seg.net_id)))
+                                route_layer, config.obstacle_clearance(seg.net_id))
+                            + config.grid_step / 2)  # discretisation cushion (see docstring)
         _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_mm)
         seg_count += 1
     if verbose:
@@ -1084,10 +1090,18 @@ def build_routing_obstacle_map(
         # so a sub-cell via offset can't let a 0.3 mm plane trace sit inside the
         # clearance envelope (#70). The grid-circle-on-quantised-cell form lost up
         # to ~half a cell on the via side.
-        r_mm = (via.size / 2 + route_track_w / 2
-                + config.layer_clearance(  # #498: the route meets it on route_layer
-                    route_layer, config.obstacle_clearance(via.net_id))
-                + config.grid_step / 2)
+        # Enforce BOTH copper-to-copper AND copper-to-hole clearance. The copper
+        # envelope is via_radius + clearance; the hole envelope is drill_radius +
+        # hole clearance. When the hole clearance exceeds the copper clearance
+        # (e.g. fab copper-to-hole 0.2 vs class clearance 0.1) the hole envelope
+        # is larger, so a track kept only off the copper still grazes the drill
+        # (KiCad hole_clearance DRC fails). Take the max.
+        _via_drill = getattr(via, "drill", 0.0) or 0.0
+        r_mm = (max(via.size / 2
+                    + config.layer_clearance(  # #498: the route meets it on route_layer
+                        route_layer, config.obstacle_clearance(via.net_id)),
+                    _via_drill / 2 + config.hole_to_hole_clearance)
+                + route_track_w / 2 + config.grid_step / 2)
         rg = coord.to_grid_dist_safe(r_mm)
         r_sq = r_mm * r_mm
         # Vectorized real-centre disc (bit-identical to the scalar double loop:
