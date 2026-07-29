@@ -308,10 +308,17 @@ def warn_targets_outside_board(pcb_data: PCBData,
 def filter_already_routed(
     pcb_data: PCBData,
     net_ids: List[Tuple[str, int]],
-    config: GridRouteConfig
+    config: GridRouteConfig,
+    force_route_patterns: Optional[List[str]] = None
 ) -> Tuple[List[Tuple[str, int]], List[Tuple[str, str]]]:
     """
     Filter out nets that are already fully connected.
+
+    force_route_patterns (#71): nets matching these patterns are routed even
+    when fully connected — --rip-existing-nets exists to REPLACE a connected-
+    but-violating route, and the downstream stale-input-copper strip (#220)
+    removes the old copper. Without this the skip fires first and a connected
+    net is unrippable.
 
     Uses check_net_connectivity for robust connectivity checking that handles:
     - Track-based connectivity with T-junctions
@@ -354,7 +361,12 @@ def filter_already_routed(
     already_routed = []
     nets_to_route = []
 
+    from net_queries import matches_net_filter
+
     for net_name, net_id in net_ids:
+        if force_route_patterns and matches_net_filter(net_name, force_route_patterns):
+            nets_to_route.append((net_name, net_id))
+            continue
         net_segments = segments_by_net.get(net_id, [])
         net_vias = vias_by_net.get(net_id, [])
         net_pads = pcb_data.pads_by_net.get(net_id, [])

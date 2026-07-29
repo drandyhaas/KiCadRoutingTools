@@ -851,25 +851,36 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _write_passthrough_output(input_file, output_file)
         return 0, 0, 0.0
 
-    net_ids, _already_routed = filter_already_routed(pcb_data, net_ids, config)
-    # #515: --rip-existing-nets only rips copper that BLOCKS a net being
-    # routed; a net dropped here as already-connected never routes, so naming
-    # it in both --nets and --rip-existing-nets is a no-op. Warn instead of
-    # staying silent (the flag for a true rip+re-route was declined in #515;
-    # recipe: delete the net's copper first, then route it normally).
-    if rip_existing_nets and net_names:
-        from net_queries import matches_net_filter as _mnf_ripwarn
-        _rip_noop = [n for n, _reason in _already_routed
-                     if not _reason.startswith('Only')
-                     and _mnf_ripwarn(n, rip_existing_nets)]
-        if _rip_noop:
-            print(f"WARNING: {len(_rip_noop)} net(s) named in both --nets and "
-                  f"--rip-existing-nets are already fully connected and will "
-                  f"NOT be re-routed ({', '.join(_rip_noop[:6])}"
-                  f"{', ...' if len(_rip_noop) > 6 else ''}). "
-                  f"--rip-existing-nets only rips nets that block another "
-                  f"route; to force a fresh re-route, delete the net's copper "
-                  f"first and route it again (#515).")
+    # #515 follow-up: a net named in BOTH --nets and --rip-existing-nets is an
+    # explicit request to REPLACE its existing (connected-but-unwanted) route.
+    # The #515 warning documented the manual recipe ("delete the net's copper
+    # first, then route it normally") -- this automates exactly that recipe for
+    # exactly that flag combination: the net re-enters the route set and its
+    # copper is pre-stripped so the router replans from scratch. Nets matched
+    # by --rip-existing-nets but NOT selected by --nets keep the #515
+    # blocking-rip-only semantics unchanged.
+    net_ids, _ = filter_already_routed(pcb_data, net_ids, config,
+                                       force_route_patterns=rip_existing_nets)
+    prestripped_segments: List = []
+    prestripped_vias: List = []
+    if rip_existing_nets:
+        from net_queries import matches_net_filter as _mnf71
+        _rip_ids = {nid for name, nid in net_ids
+                    if _mnf71(name, rip_existing_nets)}
+        if _rip_ids:
+            prestripped_segments = [s for s in pcb_data.segments
+                                    if s.net_id in _rip_ids]
+            prestripped_vias = [v for v in pcb_data.vias if v.net_id in _rip_ids]
+        if prestripped_segments or prestripped_vias:
+            pcb_data.segments = [s for s in pcb_data.segments
+                                 if s.net_id not in _rip_ids]
+            pcb_data.vias = [v for v in pcb_data.vias if v.net_id not in _rip_ids]
+            _names = sorted({pcb_data.nets[n].name for n in _rip_ids
+                             if n in pcb_data.nets})
+            print(f"Pre-route rip: stripped {len(prestripped_segments)} "
+                  f"segment(s) / {len(prestripped_vias)} via(s) from "
+                  f"{len(_names)} net(s) selected for re-route: "
+                  f"{', '.join(_names[:6])}")
     if not net_ids:
         print("All nets are already fully connected - nothing to route!")
         if return_results:
@@ -1807,6 +1818,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         stale_input_vias = list(stale_input_vias) + \
             [v for v in state.tap_relocation_removed_vias
              if id(v) not in _known_trv]
+    # #71: pre-route-ripped originals were removed from pcb_data before the
+    # originals snapshot, so no strip computation above can see them -- merge
+    # explicitly or the writer re-emits them from the input text.
+    if prestripped_segments:
+        _known_ps = {id(s) for s in dead_end_input_segments}
+        dead_end_input_segments = list(dead_end_input_segments) + \
+            [s for s in prestripped_segments if id(s) not in _known_ps]
+    if prestripped_vias:
+        _known_pv = {id(v) for v in stale_input_vias}
+        stale_input_vias = list(stale_input_vias) + \
+            [v for v in prestripped_vias if id(v) not in _known_pv]
     if state.tap_relocation_removed_segments or state.tap_relocation_removed_vias:
         print(f"Stripping {len(state.tap_relocation_removed_segments)} "
               f"segment(s) + {len(state.tap_relocation_removed_vias)} via(s) "
