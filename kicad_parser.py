@@ -2459,7 +2459,11 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
     # without it a LOCKED via matched nothing at all (the segment-side #150
     # bug, via edition): never an obstacle, never protected.
     # (via blind ...) / (via micro ...): the type token precedes (at ...)
-    via_pattern = r'\(via\s+(?:blind\s+|micro\s+)?\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?(?:\(free\s+(yes|no)\)\s+)?(?:\(locked\s+yes\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
+    # uuid OPTIONAL: KiCad accepts uuid-less vias, and tool-injected copper
+    # often omits it. A required uuid silently DROPPED such vias from the
+    # model -- the router then planned straight through real barrels.
+    via_pattern = r'\(via\s+(?:blind\s+|micro\s+)?\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?(?:\(free\s+(yes|no)\)\s+)?(?:\(locked\s+yes\)\s+)?\(net\s+(\d+)\)(?:\s+\(uuid\s+"([^"]+)"\))?'
+
 
     for m in re.finditer(via_pattern, content, re.DOTALL):
         free_value = m.group(7)  # "yes", "no", or None
@@ -2470,7 +2474,7 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
             drill=float(m.group(4)),
             layers=[m.group(5), m.group(6)],
             net_id=int(m.group(8)),
-            uuid=m.group(9),
+            uuid=m.group(9) or "",
             free=(free_value == "yes"),
             locked='(locked yes)' in m.group(0)
         )
@@ -2702,7 +2706,8 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
     # emits it between width/layer or layer/net, so allow it at both spots -
     # otherwise a locked track parses to nothing, never becomes an obstacle, and
     # the router lays copper straight through it (issue #150).
-    segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
+    # uuid OPTIONAL (#74), same reason as the via pattern above.
+    segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+(\d+)\)(?:\s+\(uuid\s+"([^"]+)"\))?'
 
     for m in re.finditer(segment_pattern, content, re.DOTALL):
         segment = Segment(
@@ -2713,7 +2718,7 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
             width=float(m.group(5)),
             layer=m.group(6),
             net_id=int(m.group(7)),
-            uuid=m.group(8),
+            uuid=m.group(8) or "",
             # Store original strings for exact file matching
             start_x_str=m.group(1),
             start_y_str=m.group(2),
