@@ -1558,6 +1558,7 @@ def render_violation_panels(pcb_file: str, violations: List[dict],
 def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[str]] = None,
             debug_output: bool = False, quiet: bool = False,
             hole_to_hole_clearance: float = defaults.HOLE_TO_HOLE_CLEARANCE, board_edge_clearance: float = 0.0,
+            hole_clearance: float = 0.0,
             clearance_margin: float = 0.05, max_print: int = 20,
             min_track_width: Optional[float] = None,
             min_via_diameter: Optional[float] = None,
@@ -2378,8 +2379,15 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # Each hole is its drill CAPSULE ((x1,y1),(x2,y2),r): a slot drill's real
     # shape. Round drills degenerate to a zero-length capsule (the old circle).
     from kicad_parser import pad_drill_capsule
-    # JLC "NPTH to Track" fab floor (never below the graded clearance).
-    npth_clr = max(clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
+    # JLC "NPTH to Track" fab floor (never below the graded clearance), raised
+    # to the board's own `min_hole_clearance` when it declares a tighter-than-
+    # -default requirement. Without that third term this check graded every
+    # board at a HARDCODED 0.20 and never opened the project at all, so copper
+    # sitting in a board's authored copper-to-hole band read clean -- measured
+    # on neo6502: three NPTH holes at 0.2126/0.2263/0.2263 mm against an
+    # authored min_hole_clearance of 0.25, clean at 0.20, and clean BEFORE any
+    # ratchet as well, because the key was never consulted in the first place.
+    npth_clr = max(clearance, defaults.NPTH_TO_TRACK_CLEARANCE, hole_clearance)
     # Each entry: (p1, p2, r, net_id, ref, required_clr, copper_exempt).
     # NPTH (no-copper) pad holes graded at the fab floor -- or the pad's own
     # clearance OVERRIDE when larger (KiCad's hole_clearance honors it; #326
@@ -3133,6 +3141,11 @@ if __name__ == "__main__":
                              f'(default: {defaults.HOLE_TO_HOLE_CLEARANCE}, the fab floor — same as routing)')
     parser.add_argument('--board-edge-clearance', type=float, default=0.0,
                         help='Minimum clearance from board edge in mm (0 = use --clearance value)')
+    parser.add_argument('--hole-clearance', type=float, default=0.0,
+                        help=f'Minimum COPPER-to-drill-hole clearance in mm '
+                             f'(0 = auto: the project\'s min_hole_clearance, else '
+                             f'the {defaults.NPTH_TO_TRACK_CLEARANCE} fab floor). '
+                             f'Raises the floor, never lowers it.')
     parser.add_argument('--clearance-margin', type=float, default=0.05,
                         help='Fraction of clearance to use as tolerance (default: 0.05 = 5%%). Violations smaller than clearance*margin are ignored.')
     parser.add_argument('--nets', '-n', nargs='+', default=None,
@@ -3252,12 +3265,27 @@ if __name__ == "__main__":
             if not args.quiet:
                 print(f"Hole-to-hole clearance {_pro_h2h:.4g} mm "
                       f"(from project min_hole_to_hole)")
+        # COPPER-to-hole, the third of the same family and the one that was
+        # missing. The two blocks above board-derive their floors; this check
+        # did not, and graded every board at the hardcoded 0.20
+        # NPTH_TO_TRACK_CLEARANCE instead -- so a board declaring
+        # min_hole_clearance 0.25 had its authored 0.20-0.25 band graded clean,
+        # and no ratchet was needed to hide it (neo6502: 3 NPTH holes, tightest
+        # 0.2126 mm). Same shape as the two above: raise, never lower.
+        _pro_hclr = float(_rules.get('constraints', {})
+                          .get('min_hole_clearance') or 0.0)
+        if _pro_hclr > args.hole_clearance:
+            args.hole_clearance = _pro_hclr
+            if not args.quiet:
+                print(f"Copper-to-hole clearance {_pro_hclr:.4g} mm "
+                      f"(from project min_hole_clearance)")
     except Exception as e:
         if not args.quiet:
             print(f"  (netclass/edge rules not read: {e})")
 
     violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet,
                          args.hole_to_hole_clearance, args.board_edge_clearance,
+                         args.hole_clearance,
                          args.clearance_margin, max_print=args.max_print,
                          min_track_width=args.min_track_width,
                          min_via_diameter=args.min_via_diameter,

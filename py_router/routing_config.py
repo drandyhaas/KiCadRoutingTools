@@ -157,6 +157,14 @@ class GridRouteConfig:
                                            # Hole-to-Hole Spacing" (keep in sync with
                                            # routing_defaults.HOLE_TO_HOLE_CLEARANCE)
     board_edge_clearance: float = 0.0  # mm - clearance from board edge (0 = use track clearance)
+    # mm - copper-to-HOLE floor (KiCad's `min_hole_clearance`). 0 = not set by
+    # the caller, so the obstacle builder reads the board's own constraint and
+    # falls back to routing_defaults.NPTH_TO_TRACK_CLEARANCE. It is NOT the same
+    # rule as hole_to_hole_clearance (drill-to-drill): this one keeps TRACKS off
+    # an NPTH wall. The router used to hardcode the 0.20 fab floor here while
+    # check_drc already read min_hole_clearance, so on a board declaring 0.25 the
+    # router would happily route into a band its own checker then flagged.
+    hole_clearance: float = 0.0
     # HARD floor the neck-down may not cross (0 = no floor beyond the fab tier's).
     # `track_width` is a REQUEST: when a wide route will not fit, the neck-down
     # retries the whole net at the layer/default width and the run reports success

@@ -79,12 +79,111 @@ def run():
     check('clear reported point kept',
           any(round(p[0], 2) == 2.0 for p in pts))
 
+    _d11_obstacle_map_reads_the_board(check)
+
     print()
     if fails:
         print(f'{len(fails)} FAILURE(S): {fails}')
         return 1
     print('all checks passed')
     return 0
+
+
+# --- D11: the ROUTER's NPTH keep-out must read min_hole_clearance too --------
+#
+# obstacle_map priced NPTH holes at a hardcoded
+# max(config.clearance, NPTH_TO_TRACK_CLEARANCE) -- a flat 0.20 fab floor that
+# never read the board -- while check_drc DOES read min_hole_clearance
+# (check_drc.py:2390). So on a board declaring 0.25 the router routed into a
+# band its own checker then flagged. Measured: a route came within 0.2263 mm of
+# BUS1's NPTH against a declared 0.25 -- a real 0.0237 mm violation,
+# routing-introduced, confirmed independently by kicad-cli, and the single DRC
+# failure on that board.
+
+def _declaring_board(tmp, **rules):
+    """A board file whose sibling project declares board constraints."""
+    import json
+    p = os.path.join(tmp, 'b.kicad_pcb')
+    with open(p, 'w', encoding='utf-8') as f:
+        f.write('(kicad_pcb (version 20240108))\n')
+    with open(os.path.join(tmp, 'b.kicad_pro'), 'w', encoding='utf-8') as f:
+        json.dump({'board': {'design_settings': {'rules': rules}}}, f)
+    return p
+
+
+def _d11_obstacle_map_reads_the_board(check):
+    import tempfile
+    import obstacle_map
+    from routing_config import GridRouteConfig
+
+    print()
+    print('D11: the NPTH track keep-out reads the board, not a constant')
+
+    with tempfile.TemporaryDirectory() as tmp:
+        quiet_dir = os.path.join(tmp, 'silent')
+        os.makedirs(quiet_dir, exist_ok=True)
+        declares = _declaring_board(tmp, min_hole_clearance=0.25)
+        silent = _declaring_board(quiet_dir)          # declares no constraints
+
+        cfg = GridRouteConfig()
+        cfg.clearance = 0.15
+        obstacle_map._HOLE_CLR_CACHE.clear()
+
+        pcb = SimpleNamespace(source_path=declares)
+        check('a board declaring 0.25 resolves to 0.25',
+              obstacle_map.resolve_hole_clearance(pcb, cfg) == 0.25)
+
+        quiet = SimpleNamespace(source_path=silent)
+        check('a board declaring nothing resolves to 0.0 (fab floor applies)',
+              obstacle_map.resolve_hole_clearance(quiet, cfg) == 0.0)
+
+        check('an in-memory board with no source_path resolves to 0.0',
+              obstacle_map.resolve_hole_clearance(
+                  SimpleNamespace(source_path=''), cfg) == 0.0)
+
+        cfg_x = GridRouteConfig()
+        cfg_x.clearance = 0.15
+        cfg_x.hole_clearance = 0.4
+        check('an explicit config value wins over the board',
+              obstacle_map.resolve_hole_clearance(pcb, cfg_x) == 0.4)
+
+        # THE POINT: the clearance actually handed to the keep-out stamper.
+        # 0.20 (fab) and 0.15 (routing) are both below the declared 0.25, so
+        # the old expression yielded 0.20 -- 0.05mm too close, which is how a
+        # 0.2263mm approach to a 0.25 hole got built.
+        captured = []
+        real = obstacle_map.block_track_cells_near_drills
+        real_via = obstacle_map.block_via_cells_near_drills
+        obstacle_map.block_track_cells_near_drills = (
+            lambda o, holes, tw, clr, step, layers: captured.append(clr))
+        obstacle_map.block_via_cells_near_drills = (
+            lambda *a, **k: None)
+        try:
+            for board, label, want in ((declares, 'declared 0.25', 0.25),
+                                       (silent, 'nothing declared', 0.20)):
+                captured.clear()
+                obstacle_map.add_drill_hole_obstacles(
+                    _FakeObstacles(), _npth_board(board), cfg, set())
+                check(f'NPTH keep-out priced at {want} when {label}',
+                      captured and abs(captured[0] - want) < 1e-9,
+                      )
+                if captured:
+                    print(f'        priced at {captured[0]:.4g}mm')
+        finally:
+            obstacle_map.block_track_cells_near_drills = real
+            obstacle_map.block_via_cells_near_drills = real_via
+
+
+class _FakeObstacles:
+    """add_drill_hole_obstacles only passes this through to the stampers."""
+
+
+def _npth_board(path):
+    pad = _npth(10.0, 10.0, 2.0)
+    pad.pad_number, pad.component_ref = 'H1', 'BUS1'
+    pad.local_clearance = 0.0
+    return SimpleNamespace(pads_by_net={0: [pad]}, vias=[], segments=[],
+                           zones=[], source_path=path)
 
 
 if __name__ == '__main__':

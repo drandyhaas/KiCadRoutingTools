@@ -1439,6 +1439,61 @@ def block_track_cells_near_override_pad_holes(obstacles: GridObstacleMap,
         obstacles.add_blocked_cells_batch(np.hstack([arr, layer_col]))
 
 
+_HOLE_CLR_CACHE = {}          # board path -> declared min_hole_clearance (mm)
+_HOLE_CLR_ANNOUNCED = set()
+
+
+def resolve_hole_clearance(pcb_data: PCBData, config) -> float:
+    """The copper-to-HOLE floor this board declares, in mm (0.0 = none).
+
+    Resolved ENGINE-SIDE off ``PCBData.source_path`` (the #498 mechanism built
+    for exactly this), so both fronts inherit it with no wiring. An explicit
+    ``config.hole_clearance`` wins and stops the read.
+
+    WHO ACTUALLY INHERITS IT, precisely -- everything routed through
+    ``add_drill_hole_obstacles`` (signal, diff pairs, BGA/QFN fanout, via
+    ``build_base_obstacle_map``), plus ``plane_obstacle_builder`` which builds
+    its own map and therefore needed the call adding separately. It is NOT a
+    universal fix: the flat ``NPTH_TO_TRACK_CLEARANCE`` still stands in
+    ``plane_region_connector`` (taps / region joins / reconnects),
+    ``pcb_modification`` and ``placement/fanout_clearance``. Those are the same
+    defect and are not yet closed; do not read this helper's existence as
+    covering them.
+
+    Why it exists: this keep-out was priced at a hardcoded
+    ``max(clearance, NPTH_TO_TRACK_CLEARANCE)`` -- a flat 0.20 fab floor -- and
+    never read the board, while `check_drc` DOES read `min_hole_clearance`
+    (:2390). So on a board declaring 0.25 the router would route into a band its
+    own checker then flagged. Measured: a route came within 0.2263 mm of BUS1's
+    NPTH against a declared 0.25, a real 0.0237 mm violation, routing-introduced
+    and confirmed independently by kicad-cli. It was the single DRC failure on
+    that board.
+
+    Cached per board path: the obstacle map is rebuilt per net, and this would
+    otherwise re-read the project file thousands of times in one run.
+    """
+    explicit = getattr(config, 'hole_clearance', 0.0) or 0.0
+    if explicit > 0:
+        return float(explicit)
+    path = getattr(pcb_data, 'source_path', "") or ""
+    if not path:
+        return 0.0
+    if path not in _HOLE_CLR_CACHE:
+        try:
+            from list_nets import board_constraint
+            v = board_constraint(path, 'min_hole_clearance')
+            _HOLE_CLR_CACHE[path] = float(v) if v and v > 0 else 0.0
+        except Exception:                                       # noqa: BLE001
+            _HOLE_CLR_CACHE[path] = 0.0
+    v = _HOLE_CLR_CACHE[path]
+    if v > defaults.NPTH_TO_TRACK_CLEARANCE and path not in _HOLE_CLR_ANNOUNCED:
+        _HOLE_CLR_ANNOUNCED.add(path)
+        print(f"Copper-to-hole clearance {v:g}mm (from the board's own "
+              f"min_hole_clearance, above the {defaults.NPTH_TO_TRACK_CLEARANCE}"
+              f"mm fab floor)")
+    return v
+
+
 def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                               config: GridRouteConfig, nets_to_route_set: set,
                               extra_clearance: float = 0.0):
@@ -1461,6 +1516,9 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         config: Routing configuration
         nets_to_route_set: Set of net IDs being routed (excluded from blocking)
     """
+    # The board's own copper-to-hole floor, once per call (cached per board).
+    _hole_clr = resolve_hole_clearance(pcb_data, config)
+
     drill_holes = []   # every drill -> via (hole-to-hole) keep-out
     npth_holes = []    # no-copper holes only -> track keep-out
     npth_slot_holes = []  # milled SLOT subset: board-edge clearance applies (#448)
@@ -1517,7 +1575,10 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         # extra_clearance covers geometry offset from the routed centerline
         # (diff-pair P/N tracks ride +-(gap+width)/2 off it), matching how every
         # other obstacle in that base map is inflated (issue #268).
-        npth_clr = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE) + extra_clearance
+        # `_hole_clr` is the BOARD's own min_hole_clearance -- raise-only, so a
+        # board declaring nothing is byte-identical (see resolve_hole_clearance).
+        npth_clr = (max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE,
+                        _hole_clr) + extra_clearance)
         block_track_cells_near_drills(obstacles, npth_holes, config.track_width,
                                       npth_clr, config.grid_step,
                                       list(range(len(config.layers))))
@@ -1532,7 +1593,8 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         edge_eff = (config.board_edge_clearance if config.board_edge_clearance > 0
                     else config.clearance)
         slot_clr = edge_eff + extra_clearance
-        if slot_clr > max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE) + extra_clearance:
+        if slot_clr > max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE,
+                          _hole_clr) + extra_clearance:
             block_track_cells_near_drills(obstacles, npth_slot_holes,
                                           config.track_width, slot_clr,
                                           config.grid_step,

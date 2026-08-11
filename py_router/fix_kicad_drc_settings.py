@@ -371,6 +371,16 @@ FAB_FLOOR_KEYS = (
     ("min_via_annular_width", "via annular ring"),
     ("min_via_drill", "via drill"),
     ("min_through_hole_diameter", "hole diameter"),
+    # Copper-to-hole. It belongs here and not with the aspirational netclass
+    # clearances: it is a drill-REGISTRATION constraint, the same family as
+    # annular ring above, and relaxing it is a claim about what the fab can
+    # make. Measured on neo6502: a chain lowered it 0.25 -> 0.20 and the
+    # disclosure said nothing, because this tuple did not list it, so
+    # `relaxed: []` was a blind pass over three NPTH holes carrying copper at
+    # 0.2126/0.2263/0.2263 mm. NOTE it is DECLARATION-only: scan_board_minima
+    # measures object sizes and no pairwise geometry, so no measured
+    # counterpart exists for this key.
+    ("min_hole_clearance", "copper-to-hole clearance"),
 )
 
 

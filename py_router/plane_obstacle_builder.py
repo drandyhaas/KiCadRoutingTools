@@ -1199,7 +1199,14 @@ def build_routing_obstacle_map(
             if pad.drill > 0 and not _pad_has_copper(pad):
                 from kicad_parser import pad_drill_circles
                 npth_holes.extend(pad_drill_circles(pad))
-    npth_clr = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
+    # Board-first, exactly as the signal obstacle map does (#D11). The plane
+    # engines build their own map and never call add_drill_hole_obstacles, so
+    # fixing that one alone left plane taps / region joins / reconnects still
+    # pricing NPTH at the flat 0.20 fab floor on a board declaring more.
+    # Raise-only: a board declaring nothing is byte-identical.
+    from obstacle_map import resolve_hole_clearance
+    npth_clr = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE,
+                   resolve_hole_clearance(pcb_data, config))
     block_track_cells_near_drills(obstacles, npth_holes, route_track_w,
                                   npth_clr, config.grid_step, [layer_idx])
     # Holes of pads carrying a clearance OVERRIDE (pad.local_clearance): KiCad's
