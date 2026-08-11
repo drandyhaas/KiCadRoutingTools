@@ -24,6 +24,11 @@ from net_queries import expand_pad_layers
 # tests/test_component_multipoint.py) and > ~0.02 (COINCIDENCE_TOL).
 STRICT_JOINT_OVERLAP = 0.05
 
+# Zone layers already reported as not-a-copper-layer-of-this-board.
+# check_net_connectivity runs once PER NET, so without this the same phantom
+# layer would be announced fifty-odd times on one board.
+_WARNED_PHANTOM_ZONE_LAYERS: Set[str] = set()
+
 
 def point_in_polygon(x: float, y: float, polygon: List[Tuple[float, float]]) -> bool:
     """Check if a point (x, y) is inside a polygon using ray casting algorithm.
@@ -687,9 +692,32 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             # Skip wildcards like "*.Cu" - they don't represent actual layers
             if layer.endswith('.Cu') and not layer.startswith('*'):
                 copper_layer_set.add(layer)
+    # A zone layer is cross-checked against the board's OWN copper layers, not
+    # merely tested for a '.Cu' suffix (#run11). route_planes once accepted a
+    # net:layer pair as a layer name and wrote (layer "GND:B.Cu") into the zone:
+    # KiCad refuses such a file outright, but "GND:B.Cu".endswith('.Cu') is
+    # True, so the phantom layer joined this census, expand_pad_layers spread
+    # through-hole pads onto it, and the pour was credited 70/70 when the honest
+    # figure was 69/70. Every checker downstream of this function inherited that
+    # lie. GUARD: only when the board declares copper layers -- a board whose
+    # stackup failed to parse degrades to the old behaviour rather than having
+    # every zone rejected.
+    _board_copper = set(getattr(getattr(pcb_data, 'board_info', None),
+                                'copper_layers', None) or ())
     for zone in zones:
-        if zone.layer.endswith('.Cu'):
-            copper_layer_set.add(zone.layer)
+        if not zone.layer.endswith('.Cu'):
+            continue
+        if _board_copper and zone.layer not in _board_copper:
+            if zone.layer not in _WARNED_PHANTOM_ZONE_LAYERS:
+                _WARNED_PHANTOM_ZONE_LAYERS.add(zone.layer)
+                print(f"WARNING: zone on layer '{zone.layer}', which is NOT a "
+                      f"copper layer of this board "
+                      f"({', '.join(sorted(_board_copper))}). KiCad cannot open "
+                      f"this file; its copper is NOT credited here. A net:layer "
+                      f"pair passed to route_planes --plane-layers writes exactly "
+                      f"this.")
+            continue
+        copper_layer_set.add(zone.layer)
 
     # Sort layers: F.Cu first, then In*.Cu in order, then B.Cu last
     def layer_sort_key(layer):
@@ -1528,6 +1556,34 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                         continue
                 unrouted_nets.append((net_id, net_info.name, len(pads_by_net[net_id])))
 
+    # A scope that matched NOTHING is not a clean board. This printed
+    # `Checking 0 nets matching: [...]` and then went on to
+    # `ALL NETS FULLY CONNECTED!` and exit 0 -- so a typo'd or shell-mangled
+    # --nets turned the instrument the project says to always run before
+    # calling a route clean into a rubber stamp, invisible to `&&` and to
+    # `set -e`. Found live when a shell rewrote `/IO_Banks/Z0` into a Windows
+    # path. Same failure mode as the oracle branch ~200 lines below, which was
+    # already fixed there.
+    if (net_patterns or component) and not nets_to_check:
+        _what = []
+        if net_patterns:
+            _what.append(f"--nets {net_patterns}")
+        if component:
+            _what.append(f"component {component}")
+        print(f"ERROR: {' and '.join(_what)} matched NO nets on this board. "
+              f"That is a scope that selected nothing, not a board that is "
+              f"connected -- refusing to report a result. Check the pattern "
+              f"(a leading '/' is rewritten by some shells; MSYS_NO_PATHCONV=1 "
+              f"on Git Bash), or drop the flag to check every net.",
+              file=sys.stderr)
+        # Returned as an issue rather than an exit code: this function's
+        # contract is List[Dict] and library callers unpack it. main() maps
+        # `scope_error` to exit 2, which is distinct from 1 ("found real
+        # problems") so a caller can tell a bad scope from a bad board.
+        return [{'scope_error': True, 'net_patterns': net_patterns,
+                 'component': component,
+                 'description': 'the requested scope matched no nets'}]
+
     if not quiet:
         if net_patterns and component:
             print(f"Checking {len(nets_to_check)} nets on {component} matching: {net_patterns}")
@@ -1642,6 +1698,19 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
             from kicad_oracle import find_kicad_cli, kicad_unconnected
             _cli = find_kicad_cli()
             _links = kicad_unconnected(pcb_file, _cli) if _cli else None
+            if _links is None and not quiet:
+                # There was no `else` here, so "the oracle ran and agreed" and
+                # "the oracle never ran" printed identically -- i.e. nothing --
+                # and the run still ended `ALL NETS FULLY CONNECTED!` / exit 0.
+                # On a board with zones that is the difference between a graded
+                # result and an ungraded one, and the reader could not tell.
+                # kicad_unconnected() returns None for a missing CLI, a DRC
+                # timeout (ORACLE_DRC_TIMEOUT 240s), a bad return code, or
+                # unreadable JSON; only the timeout prints anything of its own.
+                print(f"  NOTE: the KiCad grade reconciliation did NOT run "
+                      f"({'kicad-cli not found' if not _cli else 'the oracle returned nothing -- DRC timeout, bad exit, or unreadable output'})."
+                      f" Zone-covered nets below are graded by the copper model "
+                      f"ALONE; KiCad has not agreed with them.")
             if _links is not None:
                 _linked_nets = {lk[0] for lk in _links}
                 _reclass = [i for i in issues
@@ -1857,4 +1926,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     issues = run_connectivity_check(args.pcb, args.nets, args.tolerance, args.quiet, args.verbose, args.component, args.routed_only)
+    # 2 = the scope selected nothing, so no board was graded. Deliberately not
+    # 1: a caller must be able to tell "your pattern is wrong" from "this board
+    # has unconnected nets", and must never read either as success.
+    if any(i.get('scope_error') for i in issues):
+        sys.exit(2)
     sys.exit(1 if issues else 0)
