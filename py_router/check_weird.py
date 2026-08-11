@@ -28,6 +28,10 @@ Categories:
   unsupported-via    a via with no same-net track copper reaching its barrel,
                      not inside a same-net pad, and not inside a same-net
                      zone polygon (a floating via).
+  dangling-via       a via whose same-net copper reaches it on exactly ONE of
+                     the layers it spans, so the barrel joins nothing. This is
+                     KiCad's own `via_dangling` rule; it is a strictly weaker
+                     condition than unsupported-via, which needs ZERO support.
   orphan-island      a connected group of same-net track copper (segments,
                      possibly with vias) that reaches NO pad of the net --
                      dead copper stranded by a rip or a superseded route.
@@ -61,7 +65,7 @@ from pcb_modification import _point_anchored, _prune_net_cycles, _pt_seg_dist
 
 CATEGORIES = ['dangling-end', 'soft-joint', 'redundant-cycle',
               'removable-segment', 'stacked-copper', 'unsupported-via',
-              'orphan-island']
+              'dangling-via', 'orphan-island']
 # Cost cap for the per-segment removable scan (spec: skip unless --thorough).
 MAX_SEGS_PER_NET = 500
 _CELL = 1.0  # spatial-grid cell (mm) fed to _point_anchored, as in the pruner
@@ -465,36 +469,47 @@ def _check_unsupported_vias(net_id, name, net_segs, net_vias, net_pads,
     for v in net_vias:
         span = _via_span(v, copper_layers)
         r = (getattr(v, 'size', 0.6) or 0.6) / 2.0
-        supported = False
+        # Collect WHICH layers support the barrel, not merely whether any does.
+        # A via exists to join layers, so one supported layer means it joins
+        # nothing -- that is KiCad's own `via_dangling` rule ("fewer than two
+        # layers connected"), and short-circuiting at the first hit could not
+        # express it: run 11 shipped a board KiCad flagged with 64 dangling
+        # vias while this check reported none, because every one of them had
+        # copper on exactly one end.
+        sup = set()
         for s in net_segs:
-            if s.layer not in span:
+            if s.layer not in span or s.layer in sup:
                 continue
             if _pt_seg_dist(v.x, v.y, s.start_x, s.start_y,
                             s.end_x, s.end_y) < r + s.width / 2 - 1e-6:
-                supported = True
-                break
-        if not supported:
-            for p in net_pads:
-                if getattr(p, 'pad_type', '') == 'np_thru_hole':
-                    continue  # NPTH pads have no copper
-                if p.drill and p.drill > 0:
-                    on_layer = True  # plated barrel spans all copper layers
-                else:
-                    pl = set(p.layers or [])
-                    on_layer = bool(span & pl) or any('*' in L for L in pl)
-                if on_layer and _point_in_pad(v.x, v.y, p, margin=COINCIDENCE_TOL):
-                    supported = True
-                    break
-        if not supported:
-            for z in net_zones:
-                if z.layer in span and point_in_polygon(v.x, v.y, z.polygon):
-                    supported = True
-                    break
-        if not supported:
-            layer_str = ','.join(v.layers) if v.layers else '*.Cu'
+                sup.add(s.layer)
+        for p in net_pads:
+            if getattr(p, 'pad_type', '') == 'np_thru_hole':
+                continue  # NPTH pads have no copper
+            if p.drill and p.drill > 0:
+                on = set(span)  # plated barrel spans all copper layers
+            else:
+                pl = set(p.layers or [])
+                on = set(span) if any('*' in L for L in pl) else (span & pl)
+            if on and not on <= sup and _point_in_pad(
+                    v.x, v.y, p, margin=COINCIDENCE_TOL):
+                sup |= on
+        for z in net_zones:
+            if z.layer in span and z.layer not in sup and point_in_polygon(
+                    v.x, v.y, z.polygon):
+                sup.add(z.layer)
+        layer_str = ','.join(v.layers) if v.layers else '*.Cu'
+        if not sup:
             findings.append(_finding(
                 'unsupported-via', name, layer_str, v.x, v.y,
                 "floating via: no same-net track, pad, or zone reaches it",
+                size=getattr(v, 'size', None)))
+        elif len(sup) == 1 and len(span) > 1:
+            findings.append(_finding(
+                'dangling-via', name, layer_str, v.x, v.y,
+                f"dangling via: same-net copper reaches it on {next(iter(sup))} "
+                f"only, so it spans {len(span)} layer(s) but joins none "
+                f"(KiCad via_dangling)",
                 size=getattr(v, 'size', None)))
 
 
