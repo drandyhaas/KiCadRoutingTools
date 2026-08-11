@@ -73,12 +73,93 @@ def main():
     bcu_edge = any(t['layer'] == 'B.Cu' for t in t2)
     checks.append(("bottom-side edge escape uses B.Cu", bcu_edge))
 
+    checks += _q7_drill_floor_reads_the_board()
+
     for name, ok in checks:
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}")
     n_pass = sum(1 for _, ok in checks if ok)
     print(f"\n{n_pass}/{len(checks)} checks passed")
     print("=" * 60)
     return 0 if n_pass == len(checks) else 1
+
+
+def _q7_drill_floor_reads_the_board():
+    """The underpad escape's drill floor was a constant, and the board unread.
+
+    `_via_site_conflict` spaced every drill at the flat
+    routing_defaults.HOLE_TO_HOLE_CLEARANCE, and grepping bga_fanout/underpad.py
+    for board_floor / board_constraint / min_hole_to_hole / resolve_hole_clearance
+    returned NOTHING -- the module never read the board at all. So a board
+    declaring min_hole_to_hole 0.4 got its BGA underpad drills spaced at 0.2:
+    the D9/D11 substitute-a-constant class, in the direction that ignores a
+    board asking for MORE. qfn_fanout is the sibling engine and already reads
+    it; check_join.py:118-122 is the board-first AND raise-only model.
+
+    Measured on ulx3s U1 (plane_drop at its 'auto' DEFAULT -- the rest of this
+    file pins it 'off', and with it off `_via_site_conflict` never governs a
+    site here, so the floor is inert and this gap is invisible):
+
+        declared        before          after
+        (nothing)   224 vias 0.3657   224 vias 0.3657   <- control, identical
+        0.4         224 vias 0.3657   224 vias 0.6000   <- board ignored/obeyed
+        0.10        224 vias 0.3657   224 vias 0.6000 + fab-pin disclosure
+
+    A declared 0.4 costs NO escapes; only the spacing moves.
+    """
+    import io
+    import json
+    import math
+    import shutil
+    import contextlib
+    import tempfile
+    out = []
+    if not os.path.exists(BOARD):
+        return out
+
+    # plane_drop left at its 'auto' default on purpose (see the docstring).
+    params = {k: v for k, v in PARAMS.items() if k != 'plane_drop'}
+
+    def run(h2h):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = os.path.join(tmp, 'u.kicad_pcb')
+            shutil.copyfile(BOARD, b)
+            if h2h is not None:
+                with open(os.path.splitext(b)[0] + '.kicad_pro', 'w',
+                          encoding='utf-8') as f:
+                    json.dump({'board': {'design_settings': {
+                        'rules': {'min_hole_to_hole': h2h}}}}, f)
+            pcb = parse_kicad_pcb(b)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _t, vias, _vr, failed = generate_bga_fanout(
+                    pcb.footprints["U1"], pcb, layers=LAYERS, **params)
+            gap = min((math.hypot(a['x'] - c['x'], a['y'] - c['y'])
+                       - (a.get('drill', 0.2) + c.get('drill', 0.2)) / 2
+                       for i, a in enumerate(vias)
+                       for c in vias[i + 1:]), default=None)
+            return len(vias), len(failed), gap, buf.getvalue()
+
+    base_n, _bf, base_gap, base_said = run(None)
+    decl_n, decl_f, decl_gap, decl_said = run(0.4)
+    sub_n, _sf, sub_gap, sub_said = run(0.10)
+
+    # The defect, in one line: the board's own rule was not honoured.
+    out.append(("#Q7 a declared min_hole_to_hole 0.4 spaces the drills",
+                decl_gap is not None and decl_gap >= 0.4 - 1e-9))
+    out.append(("#Q7 ...and it says the board is where that came from",
+                "from the board's own" in decl_said))
+    # It must not buy the spacing by dropping escapes.
+    out.append(("#Q7 ...at no cost in escaped balls",
+                decl_n == base_n and decl_f == 0))
+    # Raise-only: a sub-fab declaration is pinned UP, and disclosed.
+    out.append(("#Q7 a sub-fab 0.10 is pinned to the fab floor, not obeyed",
+                sub_gap is not None and sub_gap >= 0.2 - 1e-9
+                and "below the" in sub_said))
+    # CONTROL: a board declaring nothing must be byte-identical to before.
+    out.append(("#Q7 a board declaring nothing is unchanged",
+                base_gap is not None and abs(base_gap - 0.3657) < 0.01
+                and base_n == 224 and 'ole-to-hole' not in base_said))
+    return out
 
 
 if __name__ == "__main__":

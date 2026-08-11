@@ -628,6 +628,27 @@ def manage_vias(
 
     Returns:
         Tuple of (vias_to_add, vias_to_remove)
+
+    KNOWN GAP, NOT FIXED HERE -- D10's self-blindness, in this function.
+    `vias_to_add` is appended to below and never read back, and BOTH guards
+    that gate an append iterate `pcb_data.vias` only: `would_overlap_existing_via`
+    and `via_in_pad_conflict`'s drill loop. So two vias added in ONE call are
+    never tested against each other -- the same shape as the qfn underpad
+    escape's, where the fix was to test each candidate against this run's own
+    output as well as the input board (`qfn_fanout.run_output_conflict`, which
+    is reusable and would be this code's second caller).
+
+    Structurally verified by reading; the IMPACT is UNMEASURED, deliberately
+    stated as such. A 0.5mm-pitch BGA taking via 0.45 + clearance 0.1 needs
+    0.55mm between adjacent ball centres and has 0.50 -- but `clamp_via_to_pad`
+    shrinks a via to fit its pad first, and on that pitch it may clamp far
+    enough to make the pair legal anyway. Whether this bites needs measuring
+    on a real fine-pitch BGA before anyone claims it does.
+
+    `via_in_pad_conflict` also prices its drill floor at the flat
+    `routing_defaults.HOLE_TO_HOLE_CLEARANCE` rather than the board's own
+    `min_hole_to_hole` -- the D9/D11 substitute-a-constant class, unclosed
+    here (qfn_fanout resolves it board-first, wrapped at the fab floor).
     """
     def find_nearby_via(x: float, y: float, net_id: int, max_dist: float):
         """Find an existing via on the same net within max_dist of position."""
