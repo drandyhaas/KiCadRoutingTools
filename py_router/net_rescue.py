@@ -37,6 +37,7 @@ Design constraints (#331/#371 review):
 import env_knobs
 import math
 import os
+import collections as _c
 import time
 from dataclasses import replace
 from typing import Dict, List, Optional, Tuple
@@ -464,7 +465,7 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
     'unchanged', 'pads_reconnected', 'widths', 'time'}) or None when there was
     nothing to rescue (or KICAD_NET_RESCUE=0).
 
-    'widths' is {net: {'requested_mm', 'delivered_mm'}} for every net the
+    'widths' is {net: {'requested_mm', 'delivered_mm', and when the rescue emitted width-bearing copper, rescue_* keys describing THIS RESCUE's segments only}} for every net the
     rescue touched -- the width provenance that used to vanish: the ladder
     re-routes at the floor and reports the net `recovered` with
     `failed_single` empty, so a 0.8mm request silently shipping as 0.15mm
@@ -653,9 +654,56 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
         # was asked and what was delivered so the JSON tells the truth without
         # anyone re-measuring the board.
         _req_w = config.get_net_track_width(net_id, config.layers[0])
-        _del_w = min(used_widths) if used_widths else _req_w
-        summary['widths'][net_name] = {'requested_mm': round(_req_w, 4),
-                                       'delivered_mm': round(_del_w, 4)}
+        # A HISTOGRAM, not a scalar. `delivered_mm` was min(used_widths) under
+        # a name that reads as "what it got", and this net's copper is
+        # routinely MIXED: one rail came out 59 segments at 0.0889, 3 at
+        # 0.1998 and 67 at 0.2, reported as 0.0889. Both readings mislead in
+        # opposite directions -- the minimum makes a mostly-wide rail look
+        # uniformly thin, and a mean would hide the thin run entirely.
+        #
+        # Ampacity is set by the NARROWEST series segment, so `min` stays and
+        # keeps its meaning; `by_width` is what tells a reader whether that
+        # minimum is the whole net or a short neck. Taken from the emitted
+        # segments rather than the requested widths, because a request is not
+        # a result -- impedance and neckdown both diverge from it.
+        _hist = _c.Counter(round(float(getattr(sg, 'width', 0.0)), 4)
+                           for sg in merged['new_segments']
+                           if getattr(sg, 'width', None))
+        _del_w = min(_hist) if _hist else (min(used_widths) if used_widths
+                                           else _req_w)
+        _w = {
+            'requested_mm': round(_req_w, 4),
+            'delivered_mm': round(_del_w, 4),          # the NARROWEST, as before
+        }
+        if _hist:
+            # SCOPED, and named so. This histogram covers the copper THIS
+            # RESCUE emitted -- not the net's whole copper. That distinction
+            # is the difference between informing a reader and misleading one:
+            # the finding that motivated it measured +1V2 across the finished
+            # board as 59 segments @ 0.0889, 3 @ 0.1998 and 67 @ 0.2, but only
+            # the 0.0889 run came from the rescue. An unscoped name here would
+            # show a single 0.0889 bin and look like CORROBORATION of exactly
+            # the "uniformly thin" reading the finding was warning against.
+            #
+            # Emitted widths, not the requested rung: a request is not a
+            # result, and neckdown and the oracle's width clamp both diverge
+            # from it (measured: a 0.2 rung emitting a 0.1 and a 0.4 segment).
+            _w.update({
+                'rescue_min_mm': round(_del_w, 4),
+                'rescue_max_mm': round(max(_hist), 4),
+                'rescue_segments_emitted': sum(_hist.values()),
+                'rescue_by_width': {f'{w:g}': n for w, n in sorted(_hist.items())},
+                'scope': ('THIS RESCUE ONLY -- not the net. Counts are as '
+                          'EMITTED, before cycle-prune drops redundant loop '
+                          'segments, so the board can carry fewer. For the '
+                          "net's whole width profile, measure the board."),
+            })
+        else:
+            # No emitted segment carried a width (a vias-only edge). Say that,
+            # rather than asserting a min and max over an empty histogram.
+            _w['scope'] = ('this rescue emitted no width-bearing segment; '
+                           'delivered_mm falls back to the requested rung')
+        summary['widths'][net_name] = _w
         _thin = (f", {YELLOW}width {_del_w:g} vs requested {_req_w:g}{RESET}"
                  if _del_w < _req_w - 1e-9 else "")
         print(f"    {GREEN}{'fully reconnected' if fully else 'improved'}{RESET} "
