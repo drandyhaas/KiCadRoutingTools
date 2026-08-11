@@ -71,6 +71,41 @@ def merge_summaries(summaries: List[Dict], aborted: bool = False) -> Optional[Di
     for key in EFFORT_KEYS:
         merged[key] = sum(s.get(key, 0) for s in summaries)
 
+    # INCOMPLETENESS IS STICKY. `complete: false` marks a run that stopped on
+    # its own deadline, and merging is last-wins for everything not named
+    # above -- so a complete second pass would erase a partial first pass's
+    # disclosure and the merged tally would read as a whole-board result built
+    # partly on numbers nobody finished computing. Same reasoning as `aborted`
+    # just below: what matters is what is definitely on disk. `.get(...,
+    # True)` leaves every pre-deadline log untouched.
+    if any(not s.get('complete', True) for s in summaries):
+        merged['complete'] = False
+        _p = next((s for s in summaries if not s.get('complete', True)), {})
+        for k in ('status', 'stopped_in', 'deadline_s', 'elapsed_s'):
+            if _p.get(k) is not None:
+                merged[k] = _p[k]
+
+    # THE ORACLE'S ANSWER IS STICKY IN THE OTHER DIRECTION. `oracle_check` is
+    # not a last-wins field: the reconciliation sub-run never reaches the
+    # oracle block, so it emits the initialiser `'skipped'`, and last-wins then
+    # threw away a real answer from pass 1. Measured: a log carrying 10+
+    # `ORACLE CHECK:` lines where KiCad contradicted in-process grading merged
+    # to `oracle_check: 'skipped'` -- so the run's verdict rested on the
+    # router's own tally while the summary said the authority had not been
+    # consulted at all.
+    #
+    # Precedence, worst-news-first: a contradiction outranks agreement, which
+    # outranks "could not ask", which outranks "did not ask".
+    _ORACLE_RANK = {'failed': 4, 'ok': 3, 'unavailable': 2, 'disabled': 1}
+
+    def _orank(v):
+        return _ORACLE_RANK.get(str(v).split(' ')[0], 0)
+
+    _oracles = [s.get('oracle_check') for s in summaries
+                if s.get('oracle_check') is not None]
+    if _oracles:
+        merged['oracle_check'] = max(_oracles, key=_orank)
+
     # Rebuild the pad-pair tallies and the blockers key, which last-wins would
     # silently narrow to the reconcile subset (a 50/40 whole-board reading
     # becomes the sub-run's 3/2, or vanishes entirely). Skipped when aborted:
