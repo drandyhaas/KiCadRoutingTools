@@ -754,6 +754,23 @@ class RoutingDialog(wx.Dialog):
             else:
                 netclass = _get_netclass_parameters('Default') or {}
                 board_val = netclass.get(name)
+            # A declared 0 is UNSET, not a floor of zero -- KiCad writes 0 into
+            # these fields for "not configured". Every other resolver in the
+            # tree applies that rule (list_nets.board_floor / board_floor_knobs,
+            # resolve_cli_floor, and _effective_plane_edge_clearance just above,
+            # which already guarded `> 1e-9`); this branch tested only
+            # `is not None` and so diverged from the CLI.
+            #
+            # Masked in the default tier, because _fab_floored then pins a 0.0
+            # up to the 0.2 fab hole-to-hole floor and the CLI lands on 0.2
+            # too. NOT masked once the fab floor moves: with a --fab-overrides
+            # declaring hole_to_hole 0.10 (fab_floor_ladder collapses to that
+            # one hard rung, and the GUI reaches it through the fab_tier /
+            # fab_overrides_path controls), a board declaring 0.0 resolved to
+            # GUI 0.1 against CLI 0.2 -- the GUI drilling twice as close as the
+            # CLI on the same board and the same settings.
+            if board_val is not None and board_val <= 0:
+                board_val = None
             val = board_val if board_val is not None else getattr(self, name).GetValue()
         return self._fab_floored(name, val)
 

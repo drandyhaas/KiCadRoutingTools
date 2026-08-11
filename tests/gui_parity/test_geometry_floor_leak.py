@@ -122,6 +122,8 @@ def main():
             bad.append((n, f"leaked: board {board_vals[n]} but resolves {got} "
                            f"after a reset (CLI would use {board_vals[n]})"))
 
+    bad += _declared_zero_is_unset(dlg)
+
     print(f"board: {os.path.basename(board_path)}")
     for n in FLOORS:
         print(f"  {n:26s} board={board_vals[n]:<8} "
@@ -130,6 +132,77 @@ def main():
     for n, why in bad:
         print(f"    {n}: {why}")
     return 1 if bad else 0
+
+
+def _declared_zero_is_unset(dlg):
+    """A board declaring 0 must be UNSET on this side too, as on the CLI.
+
+    `_effective_geometry_floor`'s unchecked branch took the board value on
+    `is not None` alone. KiCad writes 0 into these fields for "not
+    configured", and every other resolver in the tree treats that as unset --
+    list_nets.board_floor, board_floor_knobs, resolve_cli_floor, and
+    `_effective_plane_edge_clearance` ten lines above it, which already
+    guarded `> 1e-9`. This branch did not.
+
+    It is MASKED in the default fab tier: `_fab_floored` pins a 0.0 up to the
+    0.20 fab hole-to-hole floor, and the CLI lands on 0.20 as well, so the two
+    agree by accident. Move the fab floor and they stop agreeing. With a
+    fab-overrides declaring hole_to_hole 0.10 -- reachable from the GUI via the
+    fab_tier / fab_overrides_path controls, and collapsing fab_floor_ladder to
+    that single hard rung -- a board declaring 0.0 gave GUI 0.10 against CLI
+    0.20: the GUI drilling twice as close as the CLI on the same board.
+
+    Driven through the REAL dialog rather than a mirrored config, per the
+    CLAUDE.md note that hand-mirrored parity maps silently drift.
+    """
+    import tempfile
+    from kicad_routing_plugin import swig_gui
+    out = []
+    # Force the "board declares 0.0" case without needing such a board.
+    real = swig_gui._get_board_minimum_constraints
+    swig_gui._get_board_minimum_constraints = lambda *a, **k: {
+        'min_hole_to_hole': 0.0}
+    saved_path = dlg.fab_overrides_path.GetValue()
+    tmp = tempfile.mkdtemp()
+    ovr = os.path.join(tmp, 'fine.fab')
+    with open(ovr, 'w', encoding='utf-8') as f:
+        f.write("# a fab that really can drill closer\n"
+                "hole_to_hole = 0.10\n")
+    try:
+        # 1. Default tier: both sides land on the 0.20 fab floor, which is why
+        #    this divergence is invisible until the fab floor moves.
+        got_default = dlg._effective_geometry_floor('hole_to_hole_clearance')
+        if abs(got_default - 0.20) > 1e-9:
+            out.append(('hole_to_hole_clearance',
+                        f"declared 0.0 at the default tier resolves "
+                        f"{got_default}, expected the 0.20 fab floor"))
+        # 2. The unmasking case, driven through the REAL control a user sets:
+        #    an override FILE lowering the fab hole-to-hole floor to 0.10.
+        #    _fab_floor_for_ctrl reads fab_overrides_path and parses it, so
+        #    set_default_fab_tier alone does NOT reach this path.
+        dlg.fab_overrides_path.SetValue(ovr)
+        floor = dlg._fab_floor_for_ctrl('hole_to_hole_clearance')
+        if floor is None or abs(floor - 0.10) > 1e-9:
+            out.append(('<fixture>',
+                        f"the override file did not lower the fab floor "
+                        f"(got {floor}); this check would prove nothing"))
+        got = dlg._effective_geometry_floor('hole_to_hole_clearance')
+        # The CLI resolves 0.2 here: board_floor calls a declared 0.0 unset and
+        # falls back to HOLE_TO_HOLE_CLEARANCE 0.2, which enforce_fab_floors
+        # only ever raises.
+        if abs(got - 0.20) > 1e-9:
+            out.append(('hole_to_hole_clearance',
+                        f"declared 0.0 under a 0.10 fab override resolves "
+                        f"{got}; the CLI resolves 0.2, so the GUI would drill "
+                        f"{0.2 / got:.1f}x closer on the same board"))
+        print(f"  declared-0.0 hole_to_hole, fab floor {floor} -> GUI {got} "
+              f"(CLI 0.2)")
+    finally:
+        swig_gui._get_board_minimum_constraints = real
+        dlg.fab_overrides_path.SetValue(saved_path)
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+    return out
 
 
 if __name__ == '__main__':

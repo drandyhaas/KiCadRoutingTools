@@ -627,3 +627,19 @@ HEAD 2026-07-30 parity audit 191abc4..d73b1d6 (3 commits). Outcome: no gaps.
     gate runs a fanout step; ea992d9), its stale _path bootstrap
     (3c4fc48), and the #562 rename breaking every recorded manifest's
     repair step (relocate_moved_scripts rename table, 89914ce).
+
+ADDENDUM 2026-08-12 (PR: board floors + false success) -- scope: the one
+GUI-relevant change in this PR is kicad_routing_plugin/swig_gui.py
+_effective_geometry_floor gaining the declared-0 guard (a board writing 0 for
+"not configured" was taken as a real hole-to-hole floor by the GUI while the
+CLI's resolver treated it as unset: measured, GUI drilled h2h 0.1 vs CLI 0.2,
+same board, same settings, under fab-overrides). The plane-edge helper beside
+it already guarded > 1e-9; this closes the divergence in the other helper.
+  * Pinned by tests/gui_parity/test_geometry_floor_leak.py (runs under real
+    KiCad python; "declared-0.0 hole_to_hole, fab floor 0.1 -> GUI 0.2
+    (CLI 0.2) ... 0 problem(s)").
+  * Parity evidence on the source branch (KiCad 10.0, pcbnew 10.0.0,
+    wx 4.2.2): test_gui_engine_parity VERDICT PARITY, copper sets IDENTICAL
+    (segments 1307=1307, vias 144=144, 0 one-sided); test_manifest_plan_parity
+    OK; test_cli_postpass_coverage 7 registered / 14 in use / 1 acknowledged
+    CLI-only (run_drc fanout graze audit, report-only) / 0 unreachable.
