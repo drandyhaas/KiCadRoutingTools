@@ -439,6 +439,14 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
     # Coarse-grid cells per plane-layer fill component: one vectorized
     # gather of each model's label array at the analysis-grid cell centres.
     cells_by_comp: Dict[tuple, Set[Tuple[int, int]]] = {}
+    # First island key seen at each coarse cell, and the (few) collisions. A
+    # cell claimed by two keys is a point where TWO models both predict fill --
+    # see the co-located union below. Only the FIRST key per cell is kept
+    # (union is transitive, so pairing every later key with it yields the same
+    # partition): storing a set per cell instead costs ~60MB of Python sets on
+    # a board-wide pour, for the same answer.
+    first_key_by_cell: Dict[Tuple[int, int], tuple] = {}
+    colocated_pairs: List[Tuple[tuple, tuple]] = []
     gxs = np.arange(min_gx, max_gx + 1)
     gys = np.arange(min_gy, max_gy + 1)
     if gxs.size == 0 or gys.size == 0:
@@ -456,8 +464,12 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
         lab[np.ix_(sel_x, sel_y)] = m.labels[ix[sel_x][:, None], iy[sel_y]]
         nz = np.nonzero(lab)
         for ii, jj in zip(nz[0].tolist(), nz[1].tolist()):
-            cells_by_comp.setdefault((id(m), int(lab[ii, jj])), set()).add(
-                (int(gxs[ii]), int(gys[jj])))
+            _key = (id(m), int(lab[ii, jj]))
+            _cell = (int(gxs[ii]), int(gys[jj]))
+            cells_by_comp.setdefault(_key, set()).add(_cell)
+            _prev = first_key_by_cell.setdefault(_cell, _key)
+            if _prev != _key:
+                colocated_pairs.append((_prev, _key))
 
     if not cells_by_comp:
         return None
@@ -473,6 +485,26 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
     # every island any single chain touches.
     uf = UnionFind()
     _pt_uf = UnionFind()
+
+    # CO-LOCATED islands are ONE piece of copper. A ZoneFillModel is built per
+    # ZONE and labels that zone's fill in isolation, but KiCad merges the fills
+    # of same-net zones on the same layer into a single pour -- so a patch pour
+    # dropped inside a board-wide pour yields two island keys over the very same
+    # copper, and nothing below ever unions them (the segment-chain and barrel
+    # passes both credit one key per layer). The join loop then sees a split
+    # that does not exist: it picks the pair at distance ~0, the A* answers with
+    # a zero-length or 0.1mm "strap", and the pair is burned as UNVERIFIED.
+    # Measured on neo6502 GND (27 sub-mm priority-16962 patch pours inside the
+    # board-wide F.Cu pour): 42 model regions where the fill-aware grader counts
+    # 13 components. Two models predicting fill at the SAME point means copper
+    # exists there in both fills, which on one net and one layer is one
+    # conductor -- so union them. Coarse sampling can only MISS an overlap
+    # (the over-split direction this module already prefers), never invent one.
+    _colo_uf = UnionFind()          # co-located unions ONLY, for the log line
+    for _ka, _kb in colocated_pairs:
+        uf.union(_ka, _kb)
+        _colo_uf.union(_ka, _kb)
+    n_islands = len({_colo_uf.find(_ck) for _ck in cells_by_comp})
 
     def _pk(layer, x, y):
         return (layer, round(x, 3), round(y, 3))
@@ -607,8 +639,13 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
         return ([region_anchors[0] if region_anchors else []],
                 [region_cells[0] if region_cells else set()],
                 [region_islands[0] if region_islands else set()])
+    # Report the island count AFTER the co-located union -- the raw
+    # len(cells_by_comp) counts one key per (zone model, label), so overlapping
+    # same-net zones inflate it next to a region count that already merged them.
+    _colo = len(cells_by_comp) - n_islands
+    _colo_note = f", {_colo} co-located key(s) fused" if _colo > 0 else ""
     print(f"  Region discovery from fill model: {len(region_anchors)} "
-          f"region(s) ({len(cells_by_comp)} fill island(s), "
+          f"region(s) ({n_islands} fill island(s){_colo_note}, "
           f"{len(singletons)} off-fill anchor(s), "
           f"{sum(1 for a in region_anchors if not a)} orphan island(s))")
     return region_anchors, region_cells, region_islands
@@ -1425,13 +1462,27 @@ def find_region_connection_points(
     return mst_edges
 
 
+# How many open-space candidates are material-tested before giving up (a model
+# query per probe is not free). The probe ORDER is what makes this bound safe:
+# candidates are ranked most-open first and then NEAREST THE REGION'S CENTROID.
+# Ranking by raw grid order instead is a trap -- the net's own copper is
+# excluded from the obstacle map, so clearance saturates across most of the
+# +-search_radius box and the tie-break decides everything; grid order then
+# probes only the far-left columns (2.5% of the box at a 0.1mm routing grid,
+# every one of them ~5mm off the region), so the search reports "no valid open
+# point" while hundreds sit next to the region, and the fallback silently stops
+# rescuing exactly the hemmed-in shards it exists for.
+_OPEN_SPACE_VALIDITY_PROBES = 256
+
+
 def find_open_space_point(
     anchors: List[Tuple[float, float]],
     base_obstacles: GridObstacleMap,
     plane_layer_idx: int,
     coord: GridCoord,
     search_radius: float = 5.0,
-    bounds: Optional[Tuple[float, float, float, float]] = None
+    bounds: Optional[Tuple[float, float, float, float]] = None,
+    validity=None
 ) -> Optional[Tuple[float, float]]:
     """
     Find the most open space near a region's anchors - a point with maximum clearance from obstacles.
@@ -1442,6 +1493,20 @@ def find_open_space_point(
         plane_layer_idx: Layer index to check for obstacles
         coord: Grid coordinate converter
         search_radius: How far from anchors to search (mm)
+        validity: Optional callable(x, y) -> bool the returned point must
+            satisfy. WITHOUT it this function answers "where is the emptiest
+            cell within search_radius of the region's centroid", which is a
+            question about the OBSTACLE MAP and says nothing about the
+            region's own copper -- the emptiest cell is typically a bare gap
+            metres of grid away from any fill. Fed to the connection A* as an
+            extra seed (see _try_route_between_regions) that point is the
+            cheapest cell in the neighbourhood, so the search lands on it and
+            the strap's end connects nothing (neo6502 GND: 15 joins routed
+            open-space-to-open-space, one of them a 0.1mm strap between two
+            regions' open points, all correctly rejected by the #479 endpoint
+            verification -- which then burned each pair's whole try
+            allowance). Callers that use the result as a seed MUST pass the
+            same material predicate the join is verified against.
 
     Returns:
         (x, y) of the most open point, or None if no good point found
@@ -1458,6 +1523,7 @@ def find_open_space_point(
 
     best_clearance = 0
     best_point = None
+    candidates: List[Tuple[int, int, int, int]] = []
 
     # Search in a grid around the centroid
     for dx in range(-search_radius_grid, search_radius_grid + 1):
@@ -1484,13 +1550,28 @@ def find_open_space_point(
             # Calculate clearance - distance to nearest blocked cell
             clearance = _calculate_clearance(gx, gy, base_obstacles, plane_layer_idx, max_check=10)
 
-            if clearance > best_clearance:
-                best_clearance = clearance
-                best_point = coord.to_float(gx, gy)
+            if validity is None:
+                if clearance > best_clearance:
+                    best_clearance = clearance
+                    best_point = coord.to_float(gx, gy)
+            elif clearance >= 2:
+                # Deterministic order: most open first, then nearest the
+                # region, then grid order (see _OPEN_SPACE_VALIDITY_PROBES).
+                candidates.append((-clearance,
+                                   (gx - center_gx) ** 2 + (gy - center_gy) ** 2,
+                                   gx, gy))
 
-    # Only return if we found a point with meaningful clearance (at least 2 grid steps)
-    if best_clearance >= 2:
-        return best_point
+    if validity is None:
+        # Only return if we found a point with meaningful clearance (at least 2 grid steps)
+        if best_clearance >= 2:
+            return best_point
+        return None
+
+    candidates.sort()
+    for _c, _d2, gx, gy in candidates[:_OPEN_SPACE_VALIDITY_PROBES]:
+        fx, fy = coord.to_float(gx, gy)
+        if validity(fx, fy):
+            return (fx, fy)
     return None
 
 
@@ -1541,6 +1622,8 @@ def _try_route_between_regions(
     bounds: Optional[Tuple[float, float, float, float]] = None,
     pcb_data=None,
     net_id: Optional[int] = None,
+    open_ok_i=None,
+    open_ok_j=None,
 ) -> Tuple[Optional[Tuple[List[Tuple[float, float, str]], List[Tuple[float, float]]]], float, Optional[Tuple[float, float]]]:
     """
     Try to route between two regions, attempting multiple track widths.
@@ -1560,6 +1643,12 @@ def _try_route_between_regions(
         max_iterations: Max routing iterations
         coord: Grid coordinate converter
         verbose: Print debug info
+        open_ok_i / open_ok_j: material predicates callable(x, y) -> bool for
+            the two regions. The open-space fallback below seeds the A* with a
+            point that is merely EMPTY, not on either region -- these gate it
+            so a fallback seed can only be a point the join's endpoint
+            verification would accept as that region's material. Omitted
+            (None) restores the pre-fix behavior of seeding any open cell.
 
     Returns:
         Tuple of (route_result, track_width_used, open_space_via_if_used)
@@ -1639,8 +1728,10 @@ def _try_route_between_regions(
     if result is None:
         # Can't route even at min width - try open-space fallback
         _t0 = _time.time()
-        open_i = find_open_space_point(anchors_i, base_obstacles, plane_layer_idx, coord, bounds=bounds)
-        open_j = find_open_space_point(anchors_j, base_obstacles, plane_layer_idx, coord, bounds=bounds)
+        open_i = find_open_space_point(anchors_i, base_obstacles, plane_layer_idx, coord,
+                                       bounds=bounds, validity=open_ok_i)
+        open_j = find_open_space_point(anchors_j, base_obstacles, plane_layer_idx, coord,
+                                       bounds=bounds, validity=open_ok_j)
         _dt_open = _time.time() - _t0
         _attempt_details.append(f"open-search {_dt_open:.2f}s")
         _total_route_time += _dt_open
@@ -1919,6 +2010,53 @@ def route_disconnected_regions(
             comp_np[root] = arr
         return arr
 
+    # ENDPOINT / SEED MATERIAL TEST (#479 duodyne): a point counts as a
+    # component's own copper when it sits on one of the component's fill
+    # ISLANDS per the model, within one analysis cell of its fill cells, or
+    # within 0.75mm of an anchor / earlier strap vertex. Used for BOTH the
+    # post-route endpoint verification below AND (since neo6502 GND) the
+    # open-space fallback seed, so the search can no longer be handed a seed
+    # the gate will reject.
+    #
+    # `strict` drops the 0.75mm branch. That branch is a post-hoc ACCEPTANCE
+    # tolerance -- fine for judging a strap the router already committed to,
+    # wrong as the objective a seed SEARCH optimizes against, because the
+    # search would then hunt for a point that barely passes it and hand back a
+    # strap ending up to 0.75mm of bare board short of the pour (#479's own
+    # failure mode at a smaller radius). It also admits earlier straps'
+    # vertices, which comp_pts stores LAYER-STRIPPED, so a B.Cu vertex would
+    # vouch for an F.Cu point. Seed gating and the coincident-merge guard use
+    # strict; the endpoint verification keeps the tolerance it shipped with.
+    def _on_material(_root, _pt, strict=False):
+        # Exact test first: does the landing point sit on one of the
+        # component's fill ISLANDS per the model? (The coarse cell sets
+        # below starve thin real islands -- quickfeather U6.29's joins
+        # died UNVERIFIED on legitimate landings.)
+        _keys = comp_islands.get(_root)
+        if _keys:
+            for _ms in _join_models.values():
+                for _m in _ms:
+                    _c = _m.query_component(_pt[0], _pt[1],
+                                            size=min_track_width)
+                    if _c is not None and _c > 0 \
+                            and (id(_m), _c) in _keys:
+                        return True
+        _gx, _gy = cell_coord.to_grid(_pt[0], _pt[1])
+        _cs = comp_cells.get(_root, ())
+        for _dx in (-1, 0, 1):
+            for _dy in (-1, 0, 1):
+                if (_gx + _dx, _gy + _dy) in _cs:
+                    return True
+        if strict:
+            return False
+        _arr = _comp_arr(_root)
+        if _arr.size:
+            _d2 = ((_arr[:, 0] - _pt[0]) ** 2
+                   + (_arr[:, 1] - _pt[1]) ** 2)
+            if float(_d2.min()) <= 0.75 * 0.75:
+                return True
+        return False
+
     pair_cache: Dict[frozenset, Optional[tuple]] = {}
     # A failed pair is retried ONLY when a later merge meaningfully shrinks
     # its gap (< 0.75x the distance it failed at), and at most 3 times total:
@@ -1940,6 +2078,50 @@ def route_disconnected_regions(
         # Failed marks survive under a REKEYED identity: the merged blob keeps
         # root min(i,j), so a failed pair {blob, X} keeps its key and its
         # distance gate; only distances are recomputed.
+
+    def _merge_components(root_i, root_j, route_points):
+        """Merge two components. The union's points PLUS the strap's vertices
+        become landing space for every later join (trace reuse): a later join
+        Ts into the strap instead of paralleling it. `route_points` may be
+        empty (a coincident pair merged without emitting copper)."""
+        _keep = min(root_i, root_j)
+        _gone = root_j if _keep == root_i else root_i
+        comp_members[_keep] = comp_members[root_i] + comp_members[root_j]
+        comp_pts[_keep] = (comp_pts[root_i] + comp_pts[root_j]
+                           + [(p[0], p[1]) for p in route_points])
+        comp_cells[_keep] = (comp_cells.get(root_i, set())
+                             | comp_cells.get(root_j, set())
+                             | {cell_coord.to_grid(p[0], p[1])
+                                for p in route_points})
+        comp_success[_keep] = (comp_success.get(root_i, 0)
+                               + comp_success.get(root_j, 0) + 1)
+        comp_strikes[_keep] = (comp_strikes.get(root_i, 0)
+                               + comp_strikes.get(root_j, 0))
+        comp_islands[_keep] = (comp_islands.get(root_i, set())
+                               | comp_islands.get(root_j, set()))
+        if _gone != _keep:
+            comp_members.pop(_gone, None)
+            comp_pts.pop(_gone, None)
+            comp_cells.pop(_gone, None)
+            comp_strikes.pop(_gone, None)
+            comp_success.pop(_gone, None)
+            comp_islands.pop(_gone, None)
+            comp_roots.discard(_gone)
+        comp_np.pop(root_i, None)
+        comp_np.pop(root_j, None)
+        # Rekey failure gates onto the merged root (tightest distance, most
+        # tries survive), then drop stale cached distances to the blob --
+        # they get recomputed, and the retry gate decides eligibility.
+        for _k in [k for k in failed_at if k & {root_i, root_j}]:
+            _other = next(iter(_k - {root_i, root_j}), None)
+            _e = failed_at.pop(_k)
+            if _other is None or _other == _keep:
+                continue
+            _nk = frozenset((_keep, _other))
+            _p = failed_at.get(_nk)
+            failed_at[_nk] = _e if _p is None else (min(_e[0], _p[0]),
+                                                   max(_e[1], _p[1]))
+        _invalidate_pairs(root_i, root_j)
 
     def _pair_closest(ra, rb):
         Pa, Pb = _comp_arr(ra), _comp_arr(rb)
@@ -2044,6 +2226,7 @@ def route_disconnected_regions(
     vias: List[Dict] = []
     routes_added = 0
     routes_failed = 0
+    routes_coincident = 0   # pairs that turned out to be the same copper
     previous_routes: List[List[Tuple[float, float]]] = []
 
     # Create a single reusable router for all MST edges
@@ -2066,7 +2249,7 @@ def route_disconnected_regions(
         if _pick is None:
             break   # every remaining component pair already failed to route
         (dist, point_i, point_j), (root_i, root_j) = _pick
-        edge_idx = routes_added + routes_failed
+        edge_idx = routes_added + routes_failed + routes_coincident
         # The merged component point sets play the per-region anchor role:
         # member anchors + fill subsamples + earlier straps' vertices.
         anchors_i = comp_pts[root_i]
@@ -2129,6 +2312,14 @@ def route_disconnected_regions(
                                          if p not in anchors_j], point_j, 512)
         reduced = (len(seed_i) < len(full_i)) or (len(seed_j) < len(full_j))
 
+        # Material predicates for THIS pair's open-space fallback seeds: the
+        # fallback point must be copper the endpoint verification will credit
+        # to that component, or the strap it produces connects nothing.
+        _open_ok_i = (lambda _x, _y, _r=root_i:
+                      _on_material(_r, (_x, _y), strict=True))
+        _open_ok_j = (lambda _x, _y, _r=root_j:
+                      _on_material(_r, (_x, _y), strict=True))
+
         # Progress indicator
         seed_note = f" (seed {len(seed_i)}x{len(seed_j)})" if reduced else ""
         print(f"    [{edge_idx+1}/{planned}] Component {root_i} ({len(comp_members[root_i])} region(s), {len(anchors_i)} pts) <-> Component {root_j} ({len(comp_members[root_j])} region(s), {len(anchors_j)} pts){seed_note}...", end=" ", flush=True)
@@ -2153,6 +2344,8 @@ def route_disconnected_regions(
                 router=plane_router,
                 pcb_data=pcb_data,
                 net_id=net_id,
+                open_ok_i=_open_ok_i,
+                open_ok_j=_open_ok_j,
             )
 
         # Try routing with multiple track widths using helper function
@@ -2192,6 +2385,8 @@ def route_disconnected_regions(
                 router=plane_router,
                 pcb_data=pcb_data,
                 net_id=net_id,
+                open_ok_i=_open_ok_i,
+                open_ok_j=_open_ok_j,
             )
 
         # Last resort (#217 castor +3.3VA): the corridor between two regions
@@ -2236,6 +2431,8 @@ def route_disconnected_regions(
                 router=plane_router,
                 pcb_data=pcb_data,
                 net_id=net_id,
+                open_ok_i=_open_ok_i,
+                open_ok_j=_open_ok_j,
             )
 
         if result is None:
@@ -2265,6 +2462,34 @@ def route_disconnected_regions(
             route_points,
             keep={(round(vx, 3), round(vy, 3)) for vx, vy in via_positions})
 
+        # COINCIDENT PAIR: the A* reached a target cell from a source cell in
+        # ZERO steps, so one grid cell on one layer is claimed by BOTH
+        # components' seed sets -- typically because the model split ONE piece
+        # of copper (overlapping same-net zones on a layer are labelled per
+        # zone, so a patch pour inside a board-wide pour becomes a second
+        # component over the same fill). Merge and emit NOTHING: a zero-length
+        # strap is not copper, and the old path reported it as UNVERIFIED
+        # "ends=None/None", which burned the pair's whole try allowance and
+        # left the phantom region in the tally forever (neo6502 GND).
+        #
+        # A shared seed CELL is not by itself proof of shared copper: seed
+        # lists also carry earlier straps' vertices (layer-stripped) and a
+        # gated open-space point, and two seeds within one grid step quantize
+        # together. So demand the meeting point be STRICT material for BOTH
+        # components before fusing them -- otherwise fall through to the
+        # endpoint verification, which refuses and re-queues the pair. Merging
+        # on the weaker evidence would be exactly the silent false "joined"
+        # that #479's verification exists to stop.
+        if len(route_points) < 2:
+            _mp = route_points[0] if route_points else None
+            if _mp is not None and _on_material(root_i, _mp, strict=True) \
+                    and _on_material(root_j, _mp, strict=True):
+                print(f"{GREEN}COINCIDENT{RESET} (same copper at "
+                      f"({_mp[0]:.2f},{_mp[1]:.2f}) -- merged, no join needed)")
+                routes_coincident += 1
+                _merge_components(root_i, root_j, route_points)
+                continue
+
         # ENDPOINT VERIFICATION (#479 duodyne): join success was previously
         # self-reported by the A* against its obstacle map -- the open-space
         # fallback in particular drops a via at "the most open point near the
@@ -2272,38 +2497,9 @@ def route_disconnected_regions(
         # 5 of duodyne's 23 joins shipped dangling vias/stubs while Prim
         # recorded the pair as merged (7 pad islands reached the gate
         # floating behind an all-OK report). Require each strap end to land
-        # on its component's MATERIAL: within one analysis cell of the
-        # component's fill cells, or within 0.75mm of an anchor / earlier
-        # strap vertex. An unverified join is a FAILED join: no copper is
-        # emitted and the pair re-enters the retry policy.
-        def _on_material(_root, _pt):
-            # Exact test first: does the landing point sit on one of the
-            # component's fill ISLANDS per the model? (The coarse cell sets
-            # below starve thin real islands -- quickfeather U6.29's joins
-            # died UNVERIFIED on legitimate landings.)
-            _keys = comp_islands.get(_root)
-            if _keys:
-                for _ms in _join_models.values():
-                    for _m in _ms:
-                        _c = _m.query_component(_pt[0], _pt[1],
-                                                size=min_track_width)
-                        if _c is not None and _c > 0 \
-                                and (id(_m), _c) in _keys:
-                            return True
-            _gx, _gy = cell_coord.to_grid(_pt[0], _pt[1])
-            _cs = comp_cells.get(_root, ())
-            for _dx in (-1, 0, 1):
-                for _dy in (-1, 0, 1):
-                    if (_gx + _dx, _gy + _dy) in _cs:
-                        return True
-            _arr = _comp_arr(_root)
-            if _arr.size:
-                _d2 = ((_arr[:, 0] - _pt[0]) ** 2
-                       + (_arr[:, 1] - _pt[1]) ** 2)
-                if float(_d2.min()) <= 0.75 * 0.75:
-                    return True
-            return False
-
+        # on its component's MATERIAL (see _on_material above the loop). An
+        # unverified join is a FAILED join: no copper is emitted and the pair
+        # re-enters the retry policy.
         _verified = False
         if len(route_points) >= 2:
             _e0, _e1 = route_points[0], route_points[-1]
@@ -2311,6 +2507,42 @@ def route_disconnected_regions(
                           and _on_material(root_j, _e1))
                          or (_on_material(root_i, _e1)
                              and _on_material(root_j, _e0)))
+        if not _verified and os.environ.get('KRT_JOIN_VERIFY_DEBUG'):
+            def _dbg(_root, _pt):
+                if _pt is None:
+                    return 'pt=None'
+                _keys = comp_islands.get(_root)
+                _hits = []
+                for _lay, _ms in _join_models.items():
+                    for _m in _ms:
+                        _c = _m.query_component(_pt[0], _pt[1],
+                                                size=min_track_width)
+                        if _c is not None and _c > 0:
+                            _hits.append((_lay, id(_m), _c,
+                                          (id(_m), _c) in (_keys or ())))
+                _gx, _gy = cell_coord.to_grid(_pt[0], _pt[1])
+                _cs = comp_cells.get(_root, ())
+                _cellhit = any((_gx + _dx, _gy + _dy) in _cs
+                               for _dx in (-1, 0, 1) for _dy in (-1, 0, 1))
+                _arr = _comp_arr(_root)
+                _dmin = None
+                if _arr.size:
+                    _dmin = float(np.sqrt(((_arr[:, 0] - _pt[0]) ** 2
+                                           + (_arr[:, 1] - _pt[1]) ** 2).min()))
+                return (f'root={_root} nkeys={len(_keys or ())} '
+                        f'ncells={len(_cs)} npts={_arr.shape[0]} '
+                        f'cellhit={_cellhit} dmin={_dmin} '
+                        f'modelhits={_hits[:6]}')
+            _d0, _d1 = (route_points[0], route_points[-1]) \
+                if len(route_points) >= 2 else (None, None)
+            print(f"\n      VERIFY-DEBUG pair=({root_i},{root_j}) dist={dist:.3f}"
+                  f" pi={point_i} pj={point_j} npts={len(route_points)}")
+            print(f"        e0 {_d0} vs i: {_dbg(root_i, _d0)}")
+            print(f"        e0 {_d0} vs j: {_dbg(root_j, _d0)}")
+            print(f"        e1 {_d1} vs i: {_dbg(root_i, _d1)}")
+            print(f"        e1 {_d1} vs j: {_dbg(root_j, _d1)}")
+            if len(route_points) < 6:
+                print(f"        route={route_points}")
         if not _verified:
             _e0, _e1 = (route_points[0], route_points[-1]) \
                 if len(route_points) >= 2 else (None, None)
@@ -2473,54 +2705,15 @@ def route_disconnected_regions(
                                     _near[0], _near[1])
 
         routes_added += 1
-
-        # Merge the two components. The union's points PLUS this strap's
-        # vertices become landing space for every later join (trace reuse):
-        # a later join Ts into the strap instead of paralleling it.
-        _keep = min(root_i, root_j)
-        _gone = root_j if _keep == root_i else root_i
-        comp_members[_keep] = comp_members[root_i] + comp_members[root_j]
-        comp_pts[_keep] = (comp_pts[root_i] + comp_pts[root_j]
-                           + [(p[0], p[1]) for p in route_points])
-        comp_cells[_keep] = (comp_cells.get(root_i, set())
-                             | comp_cells.get(root_j, set())
-                             | {cell_coord.to_grid(p[0], p[1])
-                                for p in route_points})
-        comp_success[_keep] = (comp_success.get(root_i, 0)
-                               + comp_success.get(root_j, 0) + 1)
-        comp_strikes[_keep] = (comp_strikes.get(root_i, 0)
-                               + comp_strikes.get(root_j, 0))
-        comp_islands[_keep] = (comp_islands.get(root_i, set())
-                               | comp_islands.get(root_j, set()))
-        if _gone != _keep:
-            comp_members.pop(_gone, None)
-            comp_pts.pop(_gone, None)
-            comp_cells.pop(_gone, None)
-            comp_strikes.pop(_gone, None)
-            comp_success.pop(_gone, None)
-            comp_islands.pop(_gone, None)
-            comp_roots.discard(_gone)
-        comp_np.pop(root_i, None)
-        comp_np.pop(root_j, None)
-        # Rekey failure gates onto the merged root (tightest distance, most
-        # tries survive), then drop stale cached distances to the blob --
-        # they get recomputed, and the retry gate decides eligibility.
-        for _k in [k for k in failed_at if k & {root_i, root_j}]:
-            _other = next(iter(_k - {root_i, root_j}), None)
-            _e = failed_at.pop(_k)
-            if _other is None or _other == _keep:
-                continue
-            _nk = frozenset((_keep, _other))
-            _p = failed_at.get(_nk)
-            failed_at[_nk] = _e if _p is None else (min(_e[0], _p[0]),
-                                                   max(_e[1], _p[1]))
-        _invalidate_pairs(root_i, root_j)
+        _merge_components(root_i, root_j, route_points)
 
     # Summary for this net
+    _coin_note = (f", {routes_coincident} coincident pair(s) merged without copper"
+                  if routes_coincident else "")
     if routes_failed > 0:
-        print(f"  {YELLOW}Result: {routes_added}/{planned} join(s) succeeded, {routes_failed} attempt(s) failed{RESET}")
-    elif routes_added > 0:
-        print(f"  {GREEN}Result: All {routes_added} route(s) succeeded{RESET}")
+        print(f"  {YELLOW}Result: {routes_added}/{planned} join(s) succeeded, {routes_failed} attempt(s) failed{_coin_note}{RESET}")
+    elif routes_added > 0 or routes_coincident:
+        print(f"  {GREEN}Result: All {routes_added} route(s) succeeded{_coin_note}{RESET}")
 
     return segments, vias, routes_added, previous_routes, connectivity_paths
 

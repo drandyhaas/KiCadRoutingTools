@@ -146,7 +146,9 @@ def test_usage_errors_exit_2():
         r = _run([b, 'N1', '104,116,In1.Cu', '107,116,In1.Cu'])
         assert r.returncode == 2 and 'not a copper layer' in r.stderr
         r = _run([b, 'N1', 'garbage'])
-        assert r.returncode == 2
+        # Not a bare `== 2`: argparse, an ImportError and a parse crash all
+        # exit 2, so the code alone cannot say the guard held.
+        assert r.returncode == 2 and 'Traceback' not in r.stderr, r.stderr[-400:]
     print("  PASS: unknown net / bad layer / bad token all exit 2")
 
 
