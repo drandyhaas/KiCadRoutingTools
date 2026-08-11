@@ -472,16 +472,56 @@ class BoardRenderer:
         return self.frame()
 
     def _label(self, img: Image.Image, text: str) -> None:
+        """Stamp the caption top-left, WRAPPING rather than clipping.
+
+        This measured the text width and then never used it, so PIL clipped at
+        the image edge and the overflow was simply gone. Measured on a 217-part
+        board: the caption built 156 chars and ~117 fit, so `hole-conflict
+        0.60mm` and `oob 7` -- a fab blocker and the off-board count, i.e. two
+        of the four questions the checklist exists to answer -- were absent
+        from the picture while the strip looked complete because it ended at a
+        plausible-looking field. A verdict strip that silently drops its last
+        fields is worse than no strip: it reads as the whole story.
+        """
         d = ImageDraw.Draw(img)
         font = load_font(max(12, self.H // 55))
         pad = 6
+        avail = max(80, self.W - 2 * pad - 6)
+
+        def _w(s):
+            try:
+                bb = d.textbbox((0, 0), s, font=font)
+                return bb[2] - bb[0]
+            except Exception:
+                return 8 * len(s)
+
+        # Break on the caption's own field separator so a wrap never lands
+        # mid-number; fall back to words, then to the raw string.
+        parts = [p.strip() for p in text.split('|')] if '|' in text \
+            else text.split(' ')
+        joiner = '  |  ' if '|' in text else ' '
+        lines, cur = [], ''
+        for p in parts:
+            cand = (cur + joiner + p) if cur else p
+            if cur and _w(cand) > avail:
+                lines.append(cur)
+                cur = p
+            else:
+                cur = cand
+        if cur:
+            lines.append(cur)
+        if not lines:
+            return
         try:
-            bb = d.textbbox((0, 0), text, font=font)
-            tw, th = bb[2] - bb[0], bb[3] - bb[1]
+            lh = (d.textbbox((0, 0), 'Ag', font=font)[3]
+                  - d.textbbox((0, 0), 'Ag', font=font)[1]) + 4
         except Exception:
-            tw, th = 8 * len(text), 12
-        d.rectangle([pad - 3, pad - 3, pad + tw + 3, pad + th + 5], fill=(0, 0, 0))
-        d.text((pad, pad), text, fill=(240, 240, 240), font=font)
+            lh = 16
+        box_w = max(_w(ln) for ln in lines)
+        d.rectangle([pad - 3, pad - 3, pad + box_w + 3,
+                     pad + lh * len(lines) + 5], fill=(0, 0, 0))
+        for i, ln in enumerate(lines):
+            d.text((pad, pad + i * lh), ln, fill=(240, 240, 240), font=font)
 
 
 def render_board_file(board_path: str, out_png: Optional[str] = None,
