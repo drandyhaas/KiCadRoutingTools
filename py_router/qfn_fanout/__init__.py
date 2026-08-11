@@ -118,6 +118,130 @@ def _board_edge_model(pcb_data, clearance, board_edge_clearance):
     return edge_clear, rings, outer, cutouts
 
 
+def run_output_conflict(vx, vy, net_id, placed, px=None, py=None, *,
+                        via_size, via_drill, clearance, track_width,
+                        hole_to_hole, adds_via=True):
+    """Does a candidate via (and its stub) collide with THIS RUN's own output?
+
+    D10. The underpad escape's `via_clears` tested a candidate against the
+    board it was handed -- `foreign_vias` / `foreign_pads` / `foreign_tracks`
+    are a snapshot taken once, before anything is placed -- and against the via
+    CENTRES emitted so far. It never saw the STUBS the same run emitted, so it
+    approved vias sitting on copper it had just laid itself, and those escapes
+    came back DRC CONTACTS.
+
+    Measured: U2 (QFN56) reported 39 of 46 escapes under
+    `--escape-method underpad --allow-via-in-pad` and the gate rejected every
+    one as a contact -- while the geometry was fine (a 1.4 mm moat admitting a
+    0.7 mm via at all 56 pads, `pad_via == 0`, a real 0.700 mm via placeable
+    DRC-clean in U2.43, true capacity 11 of 14 lanes per side). A valid escape
+    strategy reported as impossible, and two cycles skipped fanout on it.
+
+    `placed` entries are ``(via_x, via_y, net_id, pad_x, pad_y)``; the stub
+    runs pad -> via. A through-via conflicts with copper on ANY layer, so the
+    stubs are tested exactly the way `foreign_tracks` is -- the difference is
+    only that these cannot be in that list.
+
+    Module-level and pure so it is testable directly: the caller is a closure
+    over fifteen locals, and a check this consequential should not be reachable
+    only by routing a whole board.
+
+    ``adds_via=False`` is the REUSE case (#479 audit gap 2): the position is an
+    existing board via, so this run adds no drill and no via copper -- only the
+    bridging stub. Everything about that via's spacing is a fact of the input
+    board, not something this run creates, so pricing it as a NEW via at
+    ``config.via_size`` judges two vias that already exist, at a size neither
+    has, for a spacing this run does not produce. Measured on
+    kicad_files/routed_output.kicad_pcb U2 (B.Cu, track/clearance 0.1, via
+    0.45/0.25, --escape-method underpad --allow-via-in-pad): with the via terms
+    applied, all 7 reuse candidates were rejected on the different-net floor
+    ``via_size + clearance`` = 0.55 against pre-existing 0.30 vias sitting at
+    0.400 mm -- legal (0.15+0.15+0.10) and already on the board. That cost
+    Net-(U2A-DATA_30) its escape and put a fresh drill where a reuse would have
+    served: 28 vias / 12 dropped / 30 tracks became 29 / 13 / 31.
+
+    The VIA-TO-VIA term is not merely wrong there, it is REDUNDANT. Every
+    entry in `placed` is either a via this run created -- already tested
+    against this reuse target in `via_clears`'s `foreign_vias` loop at exact
+    pairwise sizes (``via_size/2 + fs/2 + clearance``, and
+    ``(via_drill + fd)/2 + h2h`` for same net) -- or another pre-existing via,
+    whose spacing is the board's.
+
+    TERM 1 (the candidate via against a stub this run emitted) is dropped for
+    a different and weaker reason, stated here rather than overclaimed: the
+    reuse target's POSITION is not this run's doing, so a stub grazing it is
+    a defect of that stub, which is already emitted. Rejecting the reuse does
+    not remove the graze -- it only forces a fresh drill elsewhere and leaves
+    the graze in place. It is a false remedy, not a check.
+
+    That it fires at all exposes a REAL and separate gap, measured rather than
+    assumed: an emitted stub is never tested against a pre-existing via on
+    another FANNED net, because `build_base_obstacle_map(nets_to_route=...)`
+    excludes every net being escaped (obstacle_map.py:105), so
+    `check_line_clearance` cannot see it, and `via_clears` tests only the via
+    CENTRE against `foreign_vias`, never the stub. Measured on U2: 5 emitted
+    stubs sit inside a foreign pre-existing via's floor, one of them at
+    0.0000mm, and in all 5 the via's net is a fanned one. That count is
+    IDENTICAL at 715c821 and here, so it is pre-existing and untouched by this
+    change -- and it wants its own fix in the stub check, not an accidental
+    partial cover for the subset of vias that happen to be reuse targets.
+
+    So with ``adds_via=False`` only the new STUB is tested against this run's
+    own output, which is the only copper the reuse emits. A stub shorter than
+    POSITION_TOLERANCE emits no track at all (the commit loop skips it), so it
+    conflicts with nothing.
+
+    Returns True when the candidate must be REJECTED.
+    """
+    from geometry_utils import segment_to_segment_distance
+    from obstacle_map import point_to_segment_distance
+
+    via_half = via_size / 2 + clearance - 1e-6
+    track_half = track_width / 2
+    if not adds_via and (px is None
+                         or math.hypot(px - vx, py - vy) <= POSITION_TOLERANCE):
+        return False                    # reuse with no stub emits no copper
+    for entry in placed:
+        qx, qy, qn = entry[0], entry[1], entry[2]
+        qpx = entry[3] if len(entry) > 3 else None
+        qpy = entry[4] if len(entry) > 4 else None
+        # Via-to-via. Same-net floor was via_size*0.5 -- BELOW drill
+        # hole-to-hole for standard vias (#479 audit gap 2); both are via_drill.
+        # Skipped for a REUSE: no drill and no via copper is added, so there is
+        # no new pair for this run to space.
+        if adds_via:
+            floor = (via_size + clearance) if qn != net_id \
+                else max(via_size * 0.5, via_drill + hole_to_hole)
+            if math.hypot(vx - qx, vy - qy) < floor - 1e-6:
+                return True
+        if qn == net_id:
+            continue                           # own-net copper is no obstacle
+        has_stub = (qpx is not None
+                    and math.hypot(qpx - qx, qpy - qy) > POSITION_TOLERANCE)
+        # 1. the candidate VIA against the stub already emitted for that via.
+        #    Dropped for a reuse because the target's POSITION is not this
+        #    run's doing: the graze belongs to that already-emitted stub, and
+        #    refusing the reuse only buys a fresh drill while leaving it. See
+        #    run_output_conflict's docstring for the separate, measured gap
+        #    this exposes (stub vs pre-existing via on another FANNED net).
+        if adds_via and has_stub \
+                and point_to_segment_distance(vx, vy, qpx, qpy, qx, qy) \
+                < via_half + track_half:
+            return True
+        if px is None:
+            continue
+        # 2. the candidate's own STUB against that placed via, and
+        # 3. stub against stub -- the same blindness, the other way round.
+        if point_to_segment_distance(qx, qy, px, py, vx, vy) \
+                < via_half + track_half:
+            return True
+        if has_stub and segment_to_segment_distance(
+                px, py, vx, vy, qpx, qpy, qx, qy) \
+                < track_width + clearance - 1e-6:
+            return True
+    return False
+
+
 def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                          track_width, clearance, via_size, via_drill, grid_step,
                          allow_via_in_pad=False, board_edge_clearance=0.0):
@@ -155,6 +279,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     -- nothing here assumes a group shares an edge axis."""
     from obstacle_map import (build_base_obstacle_map, build_layer_map,
                               check_line_clearance, point_to_segment_distance)
+    from geometry_utils import segment_to_segment_distance
     from bga_fanout.reroute import _seg_hits_pad
     from bga_fanout.geometry import clamp_via_to_pad
     from list_nets import fab_floor_ladder, fab_floor_min, warn_fab_escalation
@@ -194,7 +319,40 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         _own_via_pos.setdefault(v.net_id, []).append((v.x, v.y))
     from kicad_parser import pad_drill_circles as _pdc
     import routing_defaults as _rd
-    _h2h = _rd.HOLE_TO_HOLE_CLEARANCE
+    # BOARD-FIRST, same rule as every other floor: a board declaring
+    # min_hole_to_hole above the packaged default was having its drills spaced
+    # at the default instead. Discovered via source_path so the GUI inherits it.
+    #
+    # RAISE-ONLY IN THE CODE, not only in this comment. `board_floor` is
+    # board-AUTHORITATIVE, not raise-only -- it returns whatever the board
+    # declares once it is positive, with no max() against the fallback, and
+    # that is correct for the floors it mostly serves (check_channels and
+    # check_assembly must grade at the board's own clearance even when that is
+    # BELOW their default, or they manufacture phantom violations). It is a
+    # DRILL floor here, so the same freedom is a fab hazard: a project
+    # declaring `min_hole_to_hole: 0.10` resolved to (0.1, 'board constraint')
+    # and spaced this run's drills below the 0.20 JLC floor. `resolve_hole_clearance`
+    # is called raise-only for the same reason, and is raise-only only because
+    # ITS consumers wrap it in a max() (obstacle_map.py:1580,
+    # plane_obstacle_builder.py:1208) -- this is that wrap. The engine cannot
+    # lean on the CLI's enforce_fab_floors: that pins args.hole_to_hole_clearance,
+    # a value this code path never reads.
+    from list_nets import board_floor
+    _h2h_decl, _h2h_src = board_floor(
+        getattr(pcb_data, 'source_path', "") or "", 'hole_to_hole',
+        None, _rd.HOLE_TO_HOLE_CLEARANCE)
+    _h2h_fab = fab_floor_min(_copper).get('hole_to_hole', 0.0)
+    _h2h = max(_h2h_decl, _h2h_fab)
+    if _h2h_src == 'board constraint' and _h2h_decl > _rd.HOLE_TO_HOLE_CLEARANCE:
+        print(f"  Hole-to-hole {_h2h:g}mm (from the board's own "
+              f"min_hole_to_hole)")
+    elif _h2h_src == 'board constraint' and _h2h_decl < _h2h_fab:
+        # Never SILENTLY relaxed -- the whole point of the guard is that a
+        # board file cannot lower a fab floor without saying so. A user who
+        # genuinely has a finer fab declares it with --fab-tier/--fab-overrides,
+        # which is what fab_floor_min reads.
+        print(f"  Board min_hole_to_hole {_h2h_decl:g}mm is below the "
+              f"{_h2h_fab:g}mm fab hole-to-hole floor; using {_h2h:g}mm.")
     _drilled_pad_holes = [(hx, hy, hd)
                           for p in foreign_pads if p.drill and p.drill > 0
                           for (hx, hy, hd) in _pdc(p)]
@@ -212,7 +370,27 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     from check_drc import _point_to_rings_distance as _pt_rings_dist
     from check_drc import _point_on_board as _pt_on_board
 
-    def via_clears(vx, vy, net_id, placed):
+    def via_clears(vx, vy, net_id, placed, px=None, py=None):
+        """Is a via at (vx, vy) legal, given the board AND this run's own output?
+
+        `foreign_vias` / `foreign_pads` / `foreign_tracks` above are a SNAPSHOT
+        of the INPUT board, taken once. `placed` is what this run has emitted so
+        far -- and it used to carry only via CENTRES, so the STUBS this run laid
+        from each pad to each via were invisible to every later candidate. The
+        test therefore approved vias sitting on copper it had just emitted
+        itself, and each such escape came back a DRC CONTACT.
+
+        Measured: U2 (QFN, 56 pads) reported 39 of 46 escapes under
+        `--escape-method underpad --allow-via-in-pad`, and the gate rejected
+        every one of them as a contact. The wall was NOT geometry -- U2 has a
+        1.4 mm moat that admits a 0.7 mm via at all 56 pads, `pad_via == 0` in
+        every run, and a real 0.700 mm via IS placeable DRC-clean in pad U2.43.
+        True capacity is 11 of 14 lanes per side. So a valid escape strategy
+        reported as impossible, and two cycles skipped fanout on that premise.
+
+        `px, py` are the candidate's OWN pad, so its stub can be tested too --
+        the same blindness in the other direction.
+        """
         if _edge_rings:
             if not _pt_on_board(vx, vy, _edge_outer, _edge_cutouts):
                 return False
@@ -245,14 +423,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             if point_to_segment_distance(vx, vy, sx0, sy0, sx1, sy1) \
                     < via_size / 2 + sw / 2 + clearance - 1e-6:
                 return False
-        for qx, qy, qn in placed:
-            # Same-net floor was via_size*0.5 -- BELOW drill hole-to-hole for
-            # standard vias (#479 audit gap 2); both holes are via_drill here.
-            floor = (via_size + clearance) if qn != net_id \
-                else max(via_size * 0.5, via_drill + _h2h)
-            if math.hypot(vx - qx, vy - qy) < floor - 1e-6:
-                return False
-        return True
+        return not run_output_conflict(
+            vx, vy, net_id, placed, px, py,
+            via_size=via_size, via_drill=via_drill, clearance=clearance,
+            track_width=track_width, hole_to_hole=_h2h)
 
     def snap(v):
         return round(v / grid_step) * grid_step if grid_step > 0 else v
@@ -296,15 +470,41 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 _best = (_d, ovx, ovy)
         if _best is not None:
             _rvx, _rvy = _best[1], _best[2]
+            # `check_line_clearance` reads the INPUT-board obstacle map, so on
+            # its own this branch is blind to everything this run has emitted
+            # -- the reuse path was one of two ways a position is returned, and
+            # the only one that never consulted via_clears. The bridging stub
+            # it emits can still cross another net's stub or via laid earlier
+            # in the same run, and the position was then appended to
+            # placed_global as though it had been checked.
+            #
+            # It calls run_output_conflict directly rather than via_clears:
+            # the reused via IS on the board, so it is in `foreign_vias` at
+            # distance 0 from itself, and the full test would reject every
+            # reuse on its own same-net drill floor. Only this run's output is
+            # in question here.
+            #
+            # And `adds_via=False`, because a reuse adds NO drill and NO via
+            # copper -- only the bridging stub. Pricing the existing via as a
+            # new one at config.via_size rejected every reuse on this board:
+            # 0.30 board vias 0.400mm apart (legal at 0.15+0.15+0.10, and
+            # already there) judged against a demanded 0.55. That was measured
+            # as Net-(U2A-DATA_30) losing its escape to a fresh drill --
+            # 28/12/30 vias/dropped/tracks becoming 29/13/31 on U2.
             if (obs_layer_idx is None or
                     check_line_clearance(obstacles, px, py, _rvx, _rvy,
-                                         obs_layer_idx, cfg)):
+                                         obs_layer_idx, cfg)) \
+                    and not run_output_conflict(
+                        _rvx, _rvy, pi.pad.net_id, placed, px, py,
+                        via_size=via_size, via_drill=via_drill,
+                        clearance=clearance, track_width=track_width,
+                        hole_to_hole=_h2h, adds_via=False):
                 return (_rvx, _rvy)
         for d in candidate_offsets(pi.pad_width, mode):
             vx, vy = snap(px + ex * d), snap(py + ey * d)
             stub_ok = (obs_layer_idx is None or
                        check_line_clearance(obstacles, px, py, vx, vy, obs_layer_idx, cfg))
-            if stub_ok and via_clears(vx, vy, pi.pad.net_id, placed):
+            if stub_ok and via_clears(vx, vy, pi.pad.net_id, placed, px, py):
                 return (vx, vy)
         return None
 
@@ -316,7 +516,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             pos = place_pin(pis[idx], mode_fn(idx), placed)
             results[idx] = pos
             if pos is not None:
-                placed.append((pos[0], pos[1], pis[idx].pad.net_id))
+                # Carry the PAD origin, so the stub this placement implies is
+                # visible to every later candidate in the same run (D10).
+                placed.append((pos[0], pos[1], pis[idx].pad.net_id,
+                               pis[idx].pad.global_x, pis[idx].pad.global_y))
         return results
 
     # Stagger configurations, tried in order; the most-escaped wins, ties keep
@@ -368,8 +571,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 dropped.append(pi.pad.net_name)
                 continue
             vx, vy = pos
-            placed_global.append((vx, vy, pi.pad.net_id))
             px, py = pi.pad.global_x, pi.pad.global_y
+            # Committed across SIDES: side 2's candidates must see side 1's
+            # stubs, not only its via centres (D10).
+            placed_global.append((vx, vy, pi.pad.net_id, px, py))
             # Reused an existing same-net via (#479 audit gap 2): emit only
             # the bridging stub, never a duplicate drill.
             if any(abs(vx - ox) < 1e-4 and abs(vy - oy) < 1e-4
