@@ -371,8 +371,39 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
     src = getattr(pcb_data, 'source_path', None)
     if not polys and src and os.path.isfile(src):
         try:
-            from kicad_exact_fill import refill_islands
-            fills = refill_islands(src)
+            from kicad_exact_fill import refill_islands, EXACT_FILL_TIMEOUT
+            # BOUND THE FILL BY THE RUN'S REMAINING BUDGET. This call is reached
+            # from route.py:batch_route, so it runs on EVERY batch_route -- and
+            # on a board KiCad's ZONE_FILLER cannot fill (measured: a 217-part
+            # 4-layer board) each one pays the full 300s EXACT_FILL_TIMEOUT.
+            # The plane repair issues many batch_route calls, which is the root
+            # cause of both non-terminations measured in run 9. No signature
+            # between the CLI and here carries a budget, hence the global.
+            _t = EXACT_FILL_TIMEOUT
+            try:
+                import krt_deadline
+                _dl = krt_deadline.current()
+            except Exception:                                  # noqa: BLE001
+                _dl = None
+            if _dl is not None:
+                _left = _dl.remaining()
+                if _dl.expired() or (_left is not None and _left < 5.0):
+                    raise TimeoutError(
+                        'run budget spent; not starting a KiCad refill')
+                # Never let one fill eat the whole remaining budget.
+                _t = max(5, int(min(_t, (_left or _t) * 0.5)))
+            fills = refill_islands(src, timeout=_t, verbose=True)
+            if fills is None:
+                # refill_islands documents a None return, and this was the ONE
+                # call site in the repo that dereferenced it anyway. The
+                # resulting `'NoneType' object has no attribute 'items'` was
+                # printed as if it were the diagnosis, while the real reason --
+                # a 300s timeout, or pcbnew missing -- was computed inside
+                # refill_islands and discarded. verbose=True above makes it say
+                # so; this branch stops the AttributeError masquerading as one.
+                raise RuntimeError(
+                    f'KiCad refill returned nothing within {_t}s '
+                    f'(fill timed out, or pcbnew unavailable)')
             polys = [(name_to_id.get(_net, -1), layer, poly)
                      for (_net, layer), pp in fills.items() for poly in pp]
             if polys:
