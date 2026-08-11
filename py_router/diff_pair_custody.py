@@ -182,8 +182,18 @@ def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
             # read as a contradicted claim and demoted it from
             # routed_diff_pairs while its trunk was coupled and its board
             # finished clean. incomplete_members stays populated either way.
-            'member_audit_mismatch': bool(outcome == 'coupled'
-                                          and incomplete),
+            # ...but a 'partial' pair with BOTH members incomplete is not the
+            # protected case. The tigard exemption above is about ONE peeled
+            # leg closing in the single-ended follow-up; a pair where neither
+            # member ends up connected has nothing coupled left to credit, and
+            # counting it as routed is the same #514 defect wearing the
+            # 'partial' label (run 11: /USB_D reported "1/1 routed" with both
+            # /USB_D+ and /USB_D- in incomplete_members). Member COUNT is the
+            # discriminator the outcome label alone cannot supply.
+            'member_audit_mismatch': bool(
+                incomplete and (outcome == 'coupled'
+                                or (outcome == 'partial'
+                                    and len(incomplete) == 2))),
         }
         if diag.get('blocking_nets'):
             rep['blocking_nets'] = diag['blocking_nets']
