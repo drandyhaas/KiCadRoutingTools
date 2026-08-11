@@ -46,10 +46,41 @@ KICAD_CLI_CANDIDATES = [
 # far sooner and its remaining rounds are skipped.
 ORACLE_DRC_TIMEOUT = 240
 
-# realpath() of boards whose kicad-cli DRC blew ORACLE_DRC_TIMEOUT once. The
-# oracle is called once per plane-repair step, so remembering a slow board
-# stops it re-burning the timeout on every later step of the same run.
+# Boards whose kicad-cli DRC blew ORACLE_DRC_TIMEOUT once. The oracle is called
+# once per plane-repair step, so remembering a slow board stops it re-burning
+# the timeout on every later step of the same run.
+#
+# KEYED ON A FILL-COST SIGNATURE, NOT ON THE PATH. The path key never fired in
+# practice: a chain writes a NEW output board each step (r1c, r1b, r2, r3...),
+# so every step got a fresh key and re-burned the full 240s. Measured on run 9:
+# a board KiCad could not fill in 300s was re-attempted at every step of the
+# chain, and each attempt cost the whole timeout.
+#
+# What actually drives the fill cost is the ZONE geometry, the outline, and the
+# pad field -- not the routed copper, which grows between steps. So the memo
+# keys on those, which stay stable across a chain while the copper changes.
+# It is a heuristic and it is the honest one available: a board that could not
+# be filled with these zones and these pads will not become fillable because
+# thirty more tracks were added.
 _ORACLE_TIMED_OUT = set()
+
+
+def _fill_cost_key(board_file: str):
+    """(zones, pads, footprints, outline-ish) -- stable across a routing chain.
+
+    Falls back to the realpath when the board cannot be read, which restores the
+    old behaviour rather than failing closed on a parse error.
+    """
+    try:
+        from kicad_parser import parse_kicad_pcb
+        pcb = parse_kicad_pcb(board_file)
+        bb = pcb.board_info.board_bounds or (0, 0, 0, 0)
+        return ('fill', len(getattr(pcb, 'zones', ()) or ()),
+                sum(len(f.pads) for f in pcb.footprints.values()),
+                len(pcb.footprints),
+                tuple(round(v, 2) for v in bb))
+    except Exception:                                          # noqa: BLE001
+        return ('path', os.path.realpath(board_file))
 
 # The oracle reads ONLY unconnected_items, which KiCad's connectivity engine
 # computes independently of the geometric DRC rule providers. Forcing every
@@ -80,20 +111,46 @@ _IGNORE_SEVERITIES = [
 
 
 def find_kicad_cli() -> Optional[str]:
-    for c in KICAD_CLI_CANDIDATES:
-        if c and os.path.exists(c):
-            return c
-    # KICAD_CLI env override, then versioned Windows installs (not on PATH;
-    # newest wins). Run 5 silently skipped every oracle recheck on Windows
-    # because none of the unix candidates exist there.
+    # The ENV OVERRIDE GOES FIRST. It used to be checked after the unix
+    # candidates, so `KICAD_CLI=/my/build/kicad-cli` was ignored on any machine
+    # that also had a packaged one -- an override that the presence of a
+    # default silently defeats is not an override.
     env = os.environ.get('KICAD_CLI', '')
     if env and os.path.exists(env):
         return env
+    for c in KICAD_CLI_CANDIDATES:
+        if c and os.path.exists(c):
+            return c
+    # Versioned Windows installs (not on PATH; newest wins). Run 5 silently
+    # skipped every oracle recheck on Windows because none of the unix
+    # candidates exist there. The single hard-coded root missed a 32-bit
+    # install, a per-user install, and any non-C: drive -- all of which fail
+    # exactly like "no KiCad", i.e. silently, because a missing oracle is
+    # indistinguishable from a clean one downstream.
     if sys.platform == 'win32':
         import glob
-        hits = sorted(glob.glob(r'C:\Program Files\KiCad\*\bin\kicad-cli.exe'))
+        roots = [os.environ.get('ProgramFiles', r'C:\Program Files'),
+                 os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'),
+                 os.environ.get('ProgramW6432', ''),
+                 os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Programs'),
+                 r'C:\Program Files']
+        hits = []
+        for root in roots:
+            if not root:
+                continue
+            hits += glob.glob(os.path.join(root, 'KiCad', '*', 'bin',
+                                           'kicad-cli.exe'))
         if hits:
-            return hits[-1]
+            # Newest KiCad by version-ish directory name, de-duplicated: the
+            # roots overlap (ProgramFiles and ProgramW6432 are usually equal).
+            def _ver(p):
+                try:
+                    return tuple(int(x) for x in
+                                 os.path.basename(os.path.dirname(
+                                     os.path.dirname(p))).split('.'))
+                except ValueError:
+                    return (0,)
+            return sorted(set(hits), key=_ver)[-1]
     return None
 
 
@@ -187,7 +244,7 @@ def kicad_unconnected(board_file: str, kicad_cli: str,
             data = json.load(f)
     except subprocess.TimeoutExpired:
         dt = time.monotonic() - t0
-        _ORACLE_TIMED_OUT.add(os.path.realpath(board_file))
+        _ORACLE_TIMED_OUT.add(_fill_cost_key(board_file))
         print(f"  KiCad-oracle recheck: WARNING kicad-cli DRC timed out after "
               f"{dt:.0f}s (>{timeout}s) on {os.path.basename(board_file)}; "
               f"skipping the oracle for this board")
@@ -1026,7 +1083,7 @@ def oracle_reconnect(board_file: str, net_names, config,
     # A board whose DRC already blew ORACLE_DRC_TIMEOUT once (#420) will do it
     # again on every later plane-repair step of this run -- skip it outright
     # rather than re-burn minutes of wall time for the same lost result.
-    if os.path.realpath(board_file) in _ORACLE_TIMED_OUT:
+    if _fill_cost_key(board_file) in _ORACLE_TIMED_OUT:
         print("  KiCad-oracle recheck: kicad-cli DRC previously timed out on "
               "this board, skipping")
         return {'available': False, 'rounds': 0, 'links_routed': 0,
