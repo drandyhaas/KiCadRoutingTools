@@ -108,6 +108,13 @@ import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY bef
 from grid_router import GridObstacleMap, GridRouter
 
 
+#: Set when the --nets patterns resolved to no differential pair at all.
+#: Read by main() to exit non-zero: the refusal used to print `Error:` and
+#: return (0, 0, 0.0), which main discarded, so the process exited 0 and a
+#: chained caller walked past an unrouted board.
+_NO_PAIRS_MATCHED = False
+
+
 def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 layer_costs: Optional[List[float]] = None,
@@ -514,6 +521,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                   f"(coupled via {', '.join(_xn.bridge_refs)})")
 
     if not diff_pairs:
+        # A precise sentinel. Inferring this from a (0, 0) return conflates it
+        # with a legitimate run in which every pair DEFERRED to single-ended
+        # routing -- also 0 routed, 0 failed, and not an error at all.
+        global _NO_PAIRS_MATCHED
+        _NO_PAIRS_MATCHED = True
         print(f"Error: No differential pairs found matching the patterns!")
         print("  Differential pairs must have _P/_N, P/N, or +/- suffixes.")
         print(f"  Patterns provided: {net_names}")
@@ -1314,6 +1326,16 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         else:
             failed_diff_pairs.append(pair_name)
 
+    # A pair the audit demoted to PARTIAL was already counted in `successful`
+    # by the coupled-route loop, so the headline and the JSON key still claimed
+    # it. Take it back here, after the audit has spoken and BEFORE either the
+    # printed summary or the returned tuple reads the counter -- the GUI reads
+    # `successful` raw (differential_gui.py), so fixing only the print site
+    # would leave the GUI and JSON_SUMMARY saying different things than the
+    # member audit sitting next to them.
+    if partial_diff_pairs:
+        successful = max(0, successful - len(partial_diff_pairs))
+
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)
 
@@ -1345,6 +1367,20 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if single_ended_diff_pairs:
         print(f"  Single-ended:  {len(single_ended_diff_pairs)} (electrically short - "
               f"deferred to single-ended routing)")
+        # ...and say how those members ACTUALLY came out. The headline above
+        # reads `Diff pairs: 0/2 routed` on a step where every member net got
+        # copper and connected, so a log tail -- which is what a grep, a CI
+        # summary or a person reads -- shows total failure off a fully
+        # successful step. Run 14 had to open the JSON to find out otherwise.
+        _fb = se_fallback_summary or {}
+        _rt, _pt, _fl = (len(_fb.get('routed') or []),
+                         len(_fb.get('partial') or []),
+                         len(_fb.get('failed') or []))
+        if _rt or _pt or _fl:
+            _tail = (f", {_pt} partial" if _pt else '') + \
+                    (f", {RED}{_fl} FAILED{RESET}" if _fl else '')
+            print(f"  SE fallback:   {_rt}/{_rt + _pt + _fl} member net(s) "
+                  f"routed{_tail}")
     if skipped_bad_fanout:
         print(f"  {RED}Skipped:       {len(skipped_bad_fanout)} (fanout stubs self-overlap - "
               f"fix the fanout, #242){RESET}")
@@ -1387,6 +1423,14 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     }
     if ac_coupled_summary:
         summary['ac_coupled_xnets'] = ac_coupled_summary
+    # See route.py's identical stamp: a budget armed by the CLI must reach the
+    # one summary this engine prints, because the cancel path still writes.
+    # Inert with no budget armed (every GUI call) or a budget not spent.
+    try:
+        import krt_deadline as _kdl
+        _kdl.stamp(summary)
+    except Exception:
+        pass
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
     # Write output file or return results for direct application
@@ -1546,6 +1590,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 if __name__ == "__main__":
     from console_encoding import enable_utf8_console
     enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
+    # CMD/EXIT self-echo (run-3 B1); see route.py for why this waited for
+    # --deadline. CLI-`__main__`-only: the GUI imports the engine function.
+    import cli_banner
+    cli_banner.install()
     import argparse
     from redo_record import record_invocation
     record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
@@ -1783,6 +1831,21 @@ Examples:
     parser.add_argument("--ripped-route-avoidance-cost", type=float, default=defaults.RIPPED_ROUTE_AVOIDANCE_COST,
                         help=f"Soft penalty cost for routing through ripped corridors (0 = disabled, default: {defaults.RIPPED_ROUTE_AVOIDANCE_COST})")
 
+    parser.add_argument("--deadline", type=float, default=None, metavar="SECONDS",
+                        help="Wall-clock budget for the ROUTING LOOPS. Not a hard "
+                             "cap on total runtime -- the cancel is cooperative and "
+                             "the bounded tail (write, DRC writeback) still runs -- "
+                             "so expect to overshoot. What it guarantees is "
+                             "TERMINATION on THIS tool's terms: it stops between "
+                             "pairs, writes the copper it has, and prints a "
+                             "JSON_SUMMARY carrying complete=false / status=deadline "
+                             "before exiting 7. Without it an external kill on "
+                             "Windows is TerminateProcess, which leaves NO summary "
+                             "and NO exit code of ours. ANY harness with an external "
+                             "timeout should pass this at ~0.8x its own. Default: no "
+                             "budget (a wall-clock default would break replay "
+                             "determinism). Env: KRT_DEADLINE_S")
+
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
                         help="Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*)")
@@ -1983,8 +2046,22 @@ Examples:
                   f"(mm: {_classes}); diff-pair routing respects cross-class max(A,B). "
                   f"Override with --net-clearances.")
 
+    # See route.py: the deadline is ONE closure into plumbing this engine
+    # already has. `cancel_check` breaks the pair/reroute/cleanup loops rather
+    # than raising, so the write and the summary still happen and a cancelled
+    # run yields real, gated copper. The atexit hook armed here is what makes a
+    # JSON_SUMMARY land on the paths that never reach the engine at all.
+    import krt_deadline
+    _rd_report = {'tool': 'route_diff.py', 'board': args.input_file}
+    _dl = krt_deadline.arm(args.deadline, tool='route_diff',
+                           on_partial=lambda: _rd_report)
+
     batch_route_diff_pairs(args.input_file, args.output_file, net_names,
                 net_clearances=_net_clearances_map,
+                cancel_check=(_dl.cancel_check('diff-pair routing')
+                              if _dl else None),
+                progress_callback=(krt_deadline.stdout_progress(deadline=_dl)
+                                   if _dl else None),
                 direction_order=args.direction,
                 ordering_strategy=args.ordering,
                 disable_bga_zones=args.no_bga_zones,
@@ -2061,6 +2138,22 @@ Examples:
                 schematic_dir=args.schematic_dir,
                 add_teardrops=args.add_teardrops)
 
+    # The engine printed the authoritative JSON_SUMMARY (stamped by
+    # krt_deadline.stamp when the budget was spent). Seal so the atexit flush
+    # does not publish a second, contradicting `incomplete` line after it.
+    krt_deadline.seal()
+    # `stopped_in or expired()`: the durable record that the cancel fired, not
+    # just "the wall clock has since passed". See krt_deadline.stamp.
+    _deadline_hit = bool(_dl and (_dl.stopped_in or _dl.expired()))
+    if _deadline_hit:
+        print(f"{RED}DEADLINE: this run stopped on its own budget after "
+              f"{_dl.elapsed():.0f}s of {_dl.seconds:g}s"
+              + (f" (in {_dl.stopped_in})" if _dl.stopped_in else "")
+              + f". The board at {args.output_file or '(none)'} is a PARTIAL "
+              f"route -- real, gated copper, but pairs were left unattempted. "
+              f"Do not read it as clean; the JSON_SUMMARY above carries "
+              f"complete=false.{RESET}")
+
     # Make the output project's DRC design rules consistent with the floors we
     # just routed to (issue #160), mirroring route.py, so a manual DRC in KiCad
     # flags only genuine problems instead of stock-default noise.
@@ -2096,3 +2189,21 @@ Examples:
             persist_impedance_specs(_pro, consume_impedance_specs())
         except Exception as e:
             print(f"  (skipped protected-nets record: {e})")
+
+    # LAST, and non-zero: the bounded post-passes above belong to the partial
+    # board (skipping the DRC writeback would strand the output without its
+    # floor -- the #441 hazard), but a caller reading exit 0 would treat an
+    # unfinished route as a finished one.
+    if _deadline_hit:
+        sys.exit(krt_deadline.DEADLINE_EXIT)
+    # AFTER the deadline: a run that ran out of clock exits 7, and that is the
+    # more specific fact. This is the other false success -- the patterns
+    # matched no pair at all, which used to print `Error:` and exit 0 because
+    # main called the router as a bare statement. Measured: a shell rewrote
+    # every `/IO_Banks/Z*` argument into a Windows path and 14 patterns matched
+    # nothing.
+    if _NO_PAIRS_MATCHED:
+        print("route_diff: the --nets patterns matched no differential pair, "
+              "so nothing was routed. Exiting non-zero so a chained caller "
+              "does not read this as success.", file=sys.stderr)
+        sys.exit(2)

@@ -60,6 +60,10 @@ from route_summary import (merge_route_summaries, SUMMARY_RE as _SUMMARY_RE,
                            RECONCILE_ABORTED as _RECONCILE_ABORTED,
                            EFFORT_KEYS as _EFFORT_KEYS)
 
+# route.py's own "I stopped on my budget" code. Imported, not literal 7, so
+# this loop cannot drift from the tool it shells.
+from krt_deadline import DEADLINE_EXIT as _DEADLINE_EXIT
+
 
 def _log_tail(log: str, lines: int = 15) -> str:
     """Last few log lines, so an error names the real failure instead of
@@ -142,8 +146,14 @@ def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str,
     # glyph and lose the whole round.
     with open(log_file, encoding='utf-8', errors='replace') as f:
         log = f.read()
-    if rc != 0:
-        # route.py exits 0 even when nets fail; its only deliberate non-zero
+    # route.py's deadline exit (7) is a ROUTING RESULT, not a crash: the board
+    # is written, the summary is stamped `complete: false`, and the diagnosis
+    # the operator needs is the one below -- which the generic rc!=0 raise
+    # would preempt with "exited 7", a number that means nothing to a reader.
+    # Fall through and let the PARTIAL branch speak. (route.py grew --deadline
+    # after this check was written; before that, 7 was unreachable here.)
+    if rc != 0 and rc != _DEADLINE_EXIT:
+        # route.py exits 0 even when nets fail; its other deliberate non-zero
         # exit is "No nets matched the given patterns!". So non-zero means a
         # crash, an unreadable board or a --route-args typo, none of which is
         # a routing result.
@@ -152,8 +162,29 @@ def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str,
 
     summary = merge_route_summaries(log)
     if summary is None:
-        raise RuntimeError(f"route.py produced no JSON_SUMMARY (see {log_file})"
-                           f"\n" + _log_tail(log))
+        raise RuntimeError(
+            f"route.py produced no JSON_SUMMARY (see {log_file})"
+            + (f" -- and it exited {rc} (its deadline), so it was killed "
+               f"before it could print one. Raise --deadline."
+               if rc == _DEADLINE_EXIT else "")
+            + "\n" + _log_tail(log))
+    # A PARTIAL run is exactly as fatal as no summary, and this check is what
+    # keeps the deadline work from making things worse. Before deadlines
+    # existed, a killed step produced no summary at all and the raise above
+    # caught it. A `complete: false` summary PARSES -- so without this, the
+    # loop would consume an unfinished run's numbers as if they were a whole
+    # board's, which is a quieter and worse failure than the one it replaced.
+    # `.get('complete', True)` so pre-change logs are unaffected.
+    if not summary.get('complete', True):
+        raise RuntimeError(
+            f"route.py produced a PARTIAL JSON_SUMMARY "
+            f"(status={summary.get('status')!r}, "
+            f"stopped_in={summary.get('stopped_in')!r}, "
+            f"elapsed={summary.get('elapsed_s')}s of "
+            f"{summary.get('deadline_s')}s) -- the run stopped on its own "
+            f"deadline and its tallies are not a whole-board result. Raise "
+            f"--deadline, or drop it, and re-run.\nsee {log_file}\n"
+            + _log_tail(log))
 
     return metrics_from_summary(summary, log, extra_targets)
 

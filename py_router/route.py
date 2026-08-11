@@ -994,6 +994,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         if net.name in _scope_names}
                        | {nid for _name, nid in net_ids})
     if not net_ids:
+        # The caller named nets and NOT ONE of them exists on this board. That
+        # is an input error, not a no-op: the old soft return wrote an
+        # unchanged passthrough copy and reported rc 0, so a net list whose
+        # names all missed (run 11: a CRLF file gave every one of 88 names a
+        # trailing \r) looked exactly like "nothing left to do". Raise, so the
+        # CLI exits non-zero and the GUI surfaces a real error, instead of both
+        # of them reporting success over an untouched board.
+        if net_names:
+            from routing_exceptions import NetNotFoundError
+            raise NetNotFoundError(
+                list(net_names),
+                f"None of the {len(net_names)} requested net name(s) exist on "
+                f"this board -- nothing was routed and no copper was written. "
+                f"Check for stray whitespace (a CRLF net list gives every name "
+                f"a trailing carriage return) or a stale net list. "
+                f"First few: {', '.join(repr(n) for n in list(net_names)[:5])}")
         print("No valid nets to route!")
         if return_results:
             return 0, 0, 0.0, _empty_results_data()
@@ -3078,6 +3094,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # move successful/failed (scope-based), so they get their own key --
         # a caller that only reads the scoped tallies must still see them.
         summary['ripped_open'] = _ripped_open
+        # ...and say whether the VERDICT already counts them. The verdict is
+        # `failed_single + open_single + pad-deficit`; `ripped_open` is in none
+        # of the first two by construction (it is scope-EXCLUDED), and the
+        # deficit ships as two bare scalars with no per-net attribution, so
+        # membership in the third was untestable from the summary. One run's
+        # true open count was therefore a RANGE -- 58 to 61 -- that no
+        # published field could narrow. This names the uncounted set instead of
+        # leaving the reader to guess it.
+        _counted = set(summary.get('failed_single') or []) \
+            | set(summary.get('open_single') or [])
+        summary['ripped_open_uncounted'] = sorted(
+            n for n in _ripped_open if n not in _counted)
+        summary['ripped_open_note'] = (
+            'ripped_open nets are OUTSIDE this run\'s --nets scope, so they '
+            'move neither failed_single nor open_single. Those listed in '
+            'ripped_open_uncounted are additionally not in either scoped term: '
+            'if they are also outside the multipoint pad deficit, the run\'s '
+            'open-net verdict is understated by that many.')
     try:
         from protected_nets import PROTECTED_SKIPPED
         if PROTECTED_SKIPPED:
@@ -3218,6 +3252,36 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for _n, _r in sorted(_amp.items())]
     except Exception:
         pass
+    # A budget the CLI armed must reach THIS summary -- it is the only one
+    # route.py prints, and a cancelled run still falls through to here (the
+    # cancel breaks the routing loops, it does not skip the write), so without
+    # the stamp a partial board reported `complete` by omission. Inert when no
+    # budget was armed or the budget was not spent, which is every GUI call and
+    # every run that finished in time.
+    try:
+        import krt_deadline as _kdl
+        _kdl.stamp(summary)
+    except Exception:
+        pass
+    # WHICH SUMMARY IS THIS? A run that fires the reconciliation sub-pass emits
+    # a SECOND JSON_SUMMARY, scoped to that subset, and the only thing saying so
+    # was a prose "Note:" printed after it. Anything that scrapes the last
+    # JSON_SUMMARY -- a tail, a grep, a person -- then reads the subset's tally
+    # as the run's. Measured on run 14: one A/B arm emitted two summaries and
+    # the other one, so the arms were compared at `routed_single: 1` against
+    # `121` and the wrong arm looked catastrophic.
+    #
+    # Derived from the sink rather than a new kwarg, because the sink's own
+    # contract already IS this distinction: "the first pass and, when it fires,
+    # the reconciliation sub-run's".
+    summary['scope'] = 'run' if not _SUMMARY_SINK else 'reconciliation-subset'
+    if summary['scope'] != 'run':
+        # These are recomputed over the WHOLE board even in the subset pass, so
+        # a reader merging tallies must not add them twice.
+        summary['board_scoped_keys'] = [k for k in ('stacked_copper',
+                                                    'power_trace_ampacity',
+                                                    'min_clearance_used')
+                                        if k in summary]
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
     _SUMMARY_SINK.append(summary)
 
@@ -4327,8 +4391,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                           f"still failed -- one more lap on the updated "
                           f"board")
             print("Note: the JSON_SUMMARY above covers only the "
-                  "reconciliation subset; the run's full tally is the "
-                  "earlier JSON_SUMMARY plus these recoveries.")
+                  "reconciliation subset (it carries scope="
+                  "\"reconciliation-subset\"); the run's full tally is the "
+                  "earlier JSON_SUMMARY, the one with scope=\"run\", plus "
+                  "these recoveries. Never scrape the LAST JSON_SUMMARY of a "
+                  "route log -- count them, or read the scope.")
             if _rok:
                 successful += _rok
                 failed = max(0, failed - _rok)
@@ -4415,6 +4482,27 @@ if __name__ == "__main__":
     # the run (issue #152).
     from console_encoding import enable_utf8_console
     enable_utf8_console()
+    # CMD/EXIT self-echo (run-3 B1). CLI-`__main__`-only by construction: the
+    # GUI imports batch_route and never runs this block.
+    #
+    # This file was a deliberate non-adopter while it had no way to stop itself
+    # -- its long silent phases ended in an external kill, and `atexit` does not
+    # run on one, so the banner would have promised an EXIT= line that never
+    # arrived. `--deadline` is what makes the promise truthful, which is why the
+    # two landed in that order. The gap it closes: the convergence-
+    # ledger protocol says to paste a tool's own CMD: line into
+    # `converge record --argv`, which was unsatisfiable for a routing lap --
+    # run 11 hand-wrote replay scripts instead.
+    #
+    # NOT under --capabilities, whose whole stdout is ONE JSON document a
+    # consumer does `json.loads()` on (see the block near parse_args, and
+    # converge.py:787 for the same rule stated for the same reason). A `CMD:`
+    # line ahead of it is a JSONDecodeError at char 0, which is a broken API
+    # rather than a noisy log. Raw argv, because the flag is answered before
+    # argparse runs -- the banner has to be decided before then too.
+    if '--capabilities' not in sys.argv[1:]:
+        import cli_banner
+        cli_banner.install()
     from redo_record import record_invocation
     record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
 
@@ -4586,6 +4674,22 @@ For differential pair routing, use route_diff.py:
                              "either one alone is wrong -- the first counts every recovery as a "
                              "failure, the second narrows the whole-board pad-pair denominator to "
                              "the retried subset. Prefer this over parsing stdout.")
+    parser.add_argument("--deadline", type=float, default=None, metavar="SECONDS",
+                        help="Wall-clock budget for the ROUTING LOOPS. Not a hard "
+                             "cap on total runtime -- the cancel is cooperative and "
+                             "the bounded tail (write, cleanup, DRC writeback) still "
+                             "runs -- so expect to overshoot. What it guarantees is "
+                             "TERMINATION on THIS tool's terms: it stops between "
+                             "nets, writes the copper it has, and prints a "
+                             "JSON_SUMMARY carrying complete=false / status=deadline "
+                             "before exiting 7. Without it an external kill on "
+                             "Windows is TerminateProcess, which leaves NO summary "
+                             "and NO exit code of ours -- run 11 lost a lap that way "
+                             "and only a re-parse of the output board established "
+                             "the engine had in fact finished. ANY harness with an "
+                             "external timeout should pass this at ~0.8x its own. "
+                             "Default: no budget (a wall-clock default would break "
+                             "replay determinism). Env: KRT_DEADLINE_S")
     parser.add_argument("--neckdown-length", type=float, default=defaults.NECKDOWN_LENGTH,
                         help="Length in mm of narrow track from the target pad on neck-down tap routes; the track "
                              "returns to the power width beyond this where clearance allows (default: 2.5)")
@@ -4914,10 +5018,15 @@ For differential pair routing, use route_diff.py:
               "--list-groups to see what exists.", file=sys.stderr)
         sys.exit(2)
 
-    # Combine positional net_patterns and --nets argument
+    # Combine positional net_patterns and --nets argument.
+    # Strip surrounding whitespace, as route_diff.py already does: a net list
+    # read from a CRLF file hands every name a trailing '\r', which matches
+    # nothing and (before the guard in batch_route) reported success over an
+    # untouched board. Names are never meaningfully whitespace-padded.
     all_patterns = list(args.net_patterns) if args.net_patterns else []
     if args.nets:
         all_patterns.extend(args.nets)
+    all_patterns = [p.strip() for p in all_patterns if p.strip()]
 
     # --force-reroute rips every selected net; without an explicit scope the
     # default-'*' below would silently select the WHOLE BOARD for rip+reroute.
@@ -5012,6 +5121,22 @@ For differential pair routing, use route_diff.py:
     if not net_names:
         print("No nets matched the given patterns!")
         sys.exit(1)
+
+    # ...and the case that guard cannot see: net_names is NON-empty but every
+    # entry is a literal that matched nothing. expand_net_patterns deliberately
+    # passes an unmatched literal through (callers may name nets a board does
+    # not carry), so the list is full of names that will all fail to resolve.
+    # batch_route then found zero net_ids, wrote an unchanged passthrough copy
+    # and returned rc 0 -- indistinguishable from "nothing left to do". Run 11
+    # lost a lap to it: a CRLF net list gave all 88 names a trailing '\r'.
+    # batch_route now raises for the GUI's benefit; the CLI refuses here so the
+    # exit code is a clean 2 rather than a traceback.
+    if not resolve_net_ids(pcb_data, net_names):
+        print(f"route.py: error: none of the {len(net_names)} requested net "
+              f"name(s) exist on this board -- nothing would be routed. Check "
+              f"for stray whitespace or a stale net list. First few: "
+              f"{', '.join(repr(n) for n in net_names[:5])}", file=sys.stderr)
+        sys.exit(2)
 
     # --undo: strip the scoped nets' copper instead of routing them.
     if args.undo:
@@ -5137,12 +5262,34 @@ For differential pair routing, use route_diff.py:
             print(f"Netclass clearances for {len(_net_clearances_map)} net(s), {_mode} "
                   f"(mm: {_classes}); cross-class max(A,B) respected.")
 
+    # The deadline is ONE CLOSURE handed to plumbing this engine already has:
+    # `cancel_check` is honoured at every routing/reroute/rescue/cleanup loop
+    # head and forwards into the reconciliation self-invoke via
+    # `_reconcile_kwargs`, and on cancel the loops BREAK rather than raise -- so
+    # the write, the summary and the DRC writeback all still run and a cancelled
+    # run yields a real, gated, partial board rather than nothing. It was None
+    # on the CLI path only because this call never passed one; `progress_callback`
+    # is the same story (built for the GUI, dark on the CLI).
+    #
+    # No `try/finally` and no wrapper: `krt_deadline.arm`'s atexit hook is what
+    # makes "a JSON_SUMMARY on every path" true here, covering the early
+    # `sys.exit`s, argparse errors and unhandled exceptions that this inline
+    # __main__ block has a dozen of. `seal()` below then stops that hook from
+    # contradicting the engine's own summary on a run that finished.
+    import krt_deadline
+    _route_report = {'tool': 'route.py', 'board': args.input_file}
+    _dl = krt_deadline.arm(args.deadline, tool='route',
+                           on_partial=lambda: _route_report)
+
     # --preview: the engine already supports this -- return_results=True with
     # an empty output_file routes fully, mutates only the in-memory PCBData
     # and writes nothing. This just exposes it on the CLI (#459 follow-on).
     _preview_out = batch_route(args.input_file,
                 "" if args.preview else args.output_file, net_names,
                 return_results=args.preview,
+                cancel_check=(_dl.cancel_check('routing') if _dl else None),
+                progress_callback=(krt_deadline.stdout_progress(deadline=_dl)
+                                   if _dl else None),
                 direction_order=args.direction,
                 ordering_strategy=args.ordering,
                 disable_bga_zones=args.no_bga_zones,
@@ -5226,6 +5373,22 @@ For differential pair routing, use route_diff.py:
                 add_teardrops=args.add_teardrops,
                 collect_stats=args.stats)
 
+    # batch_route printed the authoritative JSON_SUMMARY (stamped by
+    # krt_deadline.stamp when the budget was spent). Seal so the atexit flush
+    # does not publish a second, contradicting `incomplete` line after it.
+    krt_deadline.seal()
+    # `stopped_in or expired()`: the durable record that the cancel fired, not
+    # just "the wall clock has since passed". See krt_deadline.stamp.
+    _deadline_hit = bool(_dl and (_dl.stopped_in or _dl.expired()))
+    if _deadline_hit:
+        print(f"{RED}DEADLINE: this run stopped on its own budget after "
+              f"{_dl.elapsed():.0f}s of {_dl.seconds:g}s"
+              + (f" (in {_dl.stopped_in})" if _dl.stopped_in else "")
+              + f". The board at {args.output_file or '(none)'} is a PARTIAL "
+              f"route -- real, gated copper, but nets were left unattempted. "
+              f"Do not read it as clean; the JSON_SUMMARY above carries "
+              f"complete=false.{RESET}")
+
     if args.preview:
         _ok, _fail, _t, _data = _preview_out
         _res = _data.get('results') or []
@@ -5256,7 +5419,7 @@ For differential pair routing, use route_diff.py:
         # run with failed nets also exits 0, so exiting 1 here would make the
         # read-only mode the only one that can kill a `set -e` redo_commands.sh
         # replay -- at a step that changes nothing.
-        sys.exit(0)
+        sys.exit(krt_deadline.DEADLINE_EXIT if _deadline_hit else 0)
 
     # Castellated landings (run-6 fix 1.7): pull track ends that landed inside
     # a castellated pad's edge-clearance zone back to the pad's inner reach.
@@ -5307,3 +5470,11 @@ For differential pair routing, use route_diff.py:
             persist_impedance_specs(_pro, consume_impedance_specs())
         except Exception as e:
             print(f"  (skipped protected-nets record: {e})")
+
+    # LAST, and non-zero: the post-passes above are bounded and belong to the
+    # partial board (skipping the DRC writeback would strand the output without
+    # its floor -- the #441 hazard). Exiting 0 here would let a caller read an
+    # unfinished route as a finished one; `complete: false` in the summary is the
+    # machine gate, this is the shell's.
+    if _deadline_hit:
+        sys.exit(krt_deadline.DEADLINE_EXIT)

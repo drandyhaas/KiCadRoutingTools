@@ -2665,6 +2665,23 @@ def _stitch_plane_area_vias(
     return new_via_dicts
 
 
+#: The pad tally from the last create_plane() in this process.
+#: #487 folded plane RESISTANCE into the machine-readable summary for exactly
+#: this reason and stopped one field short: the summary could report the
+#: plane's ampacity but not whether it reached its pads. `complete: true,
+#: status: "ok", EXIT=0` was the entire machine-readable story of a pour that
+#: left 5 pads open -- the number is held three times inside create_plane, and
+#: main() calls it as a bare statement, so none of it survived.
+_LAST_PAD_TALLY: dict = {}
+
+
+def consume_pad_tally() -> dict:
+    """Take (and clear) the last pour's pad tally."""
+    global _LAST_PAD_TALLY
+    out, _LAST_PAD_TALLY = dict(_LAST_PAD_TALLY), {}
+    return out
+
+
 def create_plane(
     input_file: str,
     output_file: str,
@@ -2791,6 +2808,31 @@ def create_plane(
     # copper in different ORDER, and list position leaks into decisions.
     from kicad_parser import canonicalize_pcb_data_order
     canonicalize_pcb_data_order(pcb_data)
+
+    # --plane-layers takes BARE copper layer names positionally matched to
+    # --nets, but the natural thing to type (and what the routing skill's R1
+    # stage used to instruct) is a net:layer pair. The argument is untyped
+    # `str`, so "GND:B.Cu" was accepted AS A LAYER NAME, travelled through
+    # generate_zone_sexpr, and was written verbatim as (layer "GND:B.Cu").
+    # KiCad then refuses the whole file ("Failed to load board") -- while every
+    # in-repo checker read it happily, because check_connected's copper-layer
+    # census only tested `endswith('.Cu')`. Two full routing laps of run 11
+    # were spent on boards nobody could open.
+    #
+    # Engine-side, not in main(): main() never parses the board so it cannot
+    # validate, and this way the CLI, the GUI planes tab and
+    # route_disconnected_planes all inherit the guard (same reasoning as the
+    # copper-to-edge rule below).
+    _copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or ())
+    if _copper:
+        _bad = [l for l in plane_layers if l not in _copper]
+        if _bad:
+            print(f"Error: {', '.join(sorted(set(_bad)))} is not a copper layer "
+                  f"of this board ({', '.join(_copper)}). --plane-layers takes "
+                  f"BARE layer names positionally matched to --nets "
+                  f"(e.g. --nets GND GNDA --plane-layers B.Cu B.Cu), "
+                  f"not net:layer pairs.")
+            return _empty_plane_results(return_results)
 
     # Route trace (#482): plane creation builds its tap tracks/vias as dicts in
     # all_new_segments/all_new_vias (never touching pcb_data.segments), so record
@@ -3539,6 +3581,8 @@ def create_plane(
         print(f"  Nets processed: {len(net_names)}")
         print(f"  Total new vias placed: {total_vias_placed}")
         print(f"  Total traces added: {total_traces_added}")
+        _LAST_PAD_TALLY['failed_pads'] = int(total_failed_pads)
+        _LAST_PAD_TALLY['pads_needing_vias'] = int(total_pads_needing_vias)
         if total_failed_pads > 0:
             print(f"  Total failed pads: {total_failed_pads}")
 
@@ -3667,6 +3711,7 @@ def create_plane(
             output_file, net_ids, net_names, plane_layers)
         if geo_results:
             geo_failed = sum(info['failed'] for info in geo_results.values())
+            _LAST_PAD_TALLY['geometric_failed'] = int(geo_failed)
             if geo_failed != total_failed_pads:
                 print(f"\n  {geo_failed} pad(s) are not connected to their "
                       f"plane by the pour alone -- EXPECTED (#562): the plane "
@@ -3770,10 +3815,13 @@ Examples:
     parser.add_argument("--nets", "-n", nargs="+", required=True,
                         help="Net name(s) for the plane(s) (e.g., GND VCC)")
     parser.add_argument("--plane-layers", "-p", nargs="+", required=True,
-                        help="Plane layer(s) for the zone(s), one per net (e.g., In1.Cu In2.Cu)")
+                        help="BARE copper layer name(s) for the zone(s), one per net, "
+                             "positionally matched to --nets (e.g., In1.Cu In2.Cu). "
+                             "NOT net:layer pairs -- 'GND:B.Cu' is not a layer name and "
+                             "is refused against the board's own copper layers.")
 
     # Via and track geometry
-    parser.add_argument("--via-size", type=float, default=None, help="Via outer diameter in mm (default: the board Default net-class via, else 0.5)")
+    parser.add_argument("--via-size", type=float, default=None, help="Via outer diameter in mm (default: the board Default net-class via, else 0.5). NOT a hard floor: a tap into a fine-pitch pad field can escalate to the --fab-tier via and print a per-via warning, because a 0.5mm via does not fit a 0.5mm-pitch TQFP. Pass --fab-overrides to forbid the escalation -- at the cost of the taps that then cannot be made")
     parser.add_argument("--via-drill", type=float, default=None, help="Via drill size in mm (default: the board Default net-class via drill, else 0.3)")
     parser.add_argument("--track-width", type=float, default=None, help="Track width for via-to-pad connections in mm (default: the board Default net-class width, else 0.3)")
     parser.add_argument("--clearance", type=float, default=None, help="Copper clearance CEILING in mm. When given, every net class (Default included) is capped at min(class, this) and the writeback clamps. When OMITTED, each net routes at its own net-class clearance (base = the board's Default class, else 0.25).")
@@ -3839,6 +3887,22 @@ Examples:
                         help="Edge-to-edge clearance (mm) between stitching vias and same-net pads. "
                              "-1 (default) allows via-in-pad placement; any value >= 0 forces vias "
                              "outside same-net pads with that clearance.")
+
+    parser.add_argument("--deadline", type=float, default=None, metavar="SECONDS",
+                        help="Wall-clock budget for the PLANE LOOPS. Not a hard cap "
+                             "on total runtime -- the cancel is cooperative and the "
+                             "bounded tail (fills, write, cleanup, DRC writeback) "
+                             "still runs -- so expect to overshoot. What it "
+                             "guarantees is TERMINATION on THIS tool's terms: it "
+                             "stops between regions, writes the copper it has, and "
+                             "prints a JSON_SUMMARY carrying complete=false / "
+                             "status=deadline before exiting 7. Without it an "
+                             "external kill on Windows is TerminateProcess, which "
+                             "leaves NO summary and NO exit code of ours. ANY "
+                             "harness with an external timeout should pass this at "
+                             "~0.8x its own. Default: no budget (a wall-clock "
+                             "default would break replay determinism). "
+                             "Env: KRT_DEADLINE_S")
 
     # Debug options
     parser.add_argument("--dry-run", action="store_true", help="Analyze without writing output")
@@ -4016,7 +4080,27 @@ Examples:
     _out_before = (os.path.getmtime(args.output_file)
                    if args.output_file and os.path.isfile(args.output_file) else None)
 
+    # The deadline is ONE closure into plumbing this engine already has:
+    # `cancel_check` is honoured at every region/pad/route loop head and the
+    # write branch still runs on cancel, so a cancelled run yields a real,
+    # gated, partial pour rather than nothing.
+    #
+    # RESERVE BAND, same correctness reason as route_disconnected_planes': the
+    # bounded tail after the engine (GND return vias, plane copper cleanup, the
+    # DRC-floor writeback) is what makes the partial board readable, and the
+    # KiCad-exact-fill validation inside the engine can itself burn minutes. So
+    # the region loops trip early, leaving clock for the tail.
+    import krt_deadline
+    _rp_report = {'tool': 'route_planes.py', 'board': args.input_file}
+    _dl = krt_deadline.arm(args.deadline, tool='route_planes',
+                           on_partial=lambda: _rp_report)
+    _reserve = max(30.0, (args.deadline or 0) * 0.2) if _dl else 0.0
+
     create_plane(
+        cancel_check=(_dl.cancel_check('plane create', reserve=_reserve)
+                      if _dl else None),
+        progress_callback=(krt_deadline.stdout_progress(deadline=_dl)
+                           if _dl else None),
         input_file=args.input_file,
         output_file=args.output_file,
         ripup_blocker_select=args.ripup_blocker_select,
@@ -4214,10 +4298,44 @@ Examples:
         "min_clearance_used": _cl.effective(args.clearance),
         "plane_nets": sorted(set(args.nets)),
     }
+    # `plane_nets` is a de-duplicated NAME list, and --nets/--plane-layers are
+    # matched POSITIONALLY, so `--nets GND GND --plane-layers In1.Cu In2.Cu`
+    # collapses two poured zones into one entry and the second one vanishes from
+    # the record entirely. Run 14 poured GND on both inner layers and its
+    # summary said `"plane_nets": ["GND"]`. Keep that key as it was -- consumers
+    # read it -- and state the actual zones alongside.
+    try:
+        _layers = list(getattr(args, 'plane_layers', None) or [])
+        _summary["plane_zones"] = [
+            {"net": _n, "layer": (_layers[_i] if _i < len(_layers) else None)}
+            for _i, _n in enumerate(args.nets)]
+    except Exception:                                       # noqa: BLE001
+        pass
     # #487: the plane resistance/ampacity numbers used to live only in stdout
     # ("report-only ... print and discard"). Fold the per-net results the
     # engine noted into the machine-readable summary so chains/graders/skills
     # can gate on them.
+    # The pad tally. Without it `complete: true, status: "ok", EXIT=0` is the
+    # whole machine-readable story of a pour that left pads open -- the text
+    # said "Total failed pads: 5" and the JSON had no channel for it at all.
+    _pt = consume_pad_tally()
+    if _pt:
+        _summary["pads"] = _pt
+        # SAY that this is one tally over every zone. The engine aggregates, so
+        # `failed_pads: 12` on a two-zone pour does not say which zone failed,
+        # and a reader pairing it with a single-entry `plane_nets` would
+        # reasonably assume it was scoped to that one net.
+        _summary["pads_scope"] = ("all zones in this run, summed -- not per "
+                                  "zone; see plane_zones for what was poured")
+        # `geometric_failed` is recorded but does NOT flip the status: under
+        # the pours-first architecture the plane step places no taps, so pads
+        # unreached by the pour alone are EXPECTED here (#562) -- the route
+        # step welds them and its finalize verifies/repairs. Only
+        # `failed_pads` (the engine's own via-placement failures) marks the
+        # pour incomplete.
+        if _pt.get('failed_pads'):
+            _summary["status"] = "incomplete-pads"
+
     try:
         from plane_resistance import consume_resistance_results
         _res = consume_resistance_results()
@@ -4234,10 +4352,45 @@ Examples:
                 for _n, _r in sorted(_res.items())]
     except Exception:
         pass
-    print("JSON_SUMMARY: " + _json.dumps(_summary))
+
+    # Emit through krt_deadline, NOT a raw print. `_emitted` is set only inside
+    # krt_deadline.emit(), so a bare print leaves it False and the atexit flush
+    # then publishes the contentless partial report armed at --deadline time --
+    # a SECOND, contradicting `{"complete": false, "status": "incomplete"}` line
+    # after the real one, which any consumer keying on the LAST JSON_SUMMARY
+    # reads as a failed run. (Measured in route_disconnected_planes, run 11.)
+    # `stopped_in`, not just `expired()`. The reserve band means the region
+    # loops trip at `deadline - reserve`, so a run whose bounded tail then
+    # finishes BEFORE the wall clock runs out is past its cancel and not past
+    # its deadline -- `expired()` alone would report a partial pour as
+    # complete, which is the exact confusion this whole mechanism removes.
+    # `stopped_in` is set by `Deadline.check` at the moment the cancel fires,
+    # so it is the durable record that the loops were cut short.
+    if _dl is not None and (_dl.stopped_in or _dl.expired()):
+        krt_deadline.stamp(_summary)
+        _rp_report.update(_summary)
+        krt_deadline.emit(_summary, complete=False, status='deadline',
+                          deadline=_dl)
+        print(f"{RED}DEADLINE: this run stopped on its own budget after "
+              f"{_dl.elapsed():.0f}s of {_dl.seconds:g}s"
+              + (f" (in {_dl.stopped_in})" if _dl.stopped_in else "")
+              + f". The board at {args.output_file or '(none)'} is a PARTIAL "
+              f"pour -- real copper, fully gated, but the plane work did not "
+              f"finish. Do not read it as clean.{RESET}")
+        return krt_deadline.DEADLINE_EXIT
+    _rp_report.update(_summary)
+    krt_deadline.emit(_summary)
+    return 0
 
 
 if __name__ == "__main__":
     from console_encoding import enable_utf8_console
     enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
-    main()
+    # CMD/EXIT self-echo (run-3 B1); see route.py for why this waited for
+    # --deadline. CLI-`__main__`-only: the GUI imports create_plane.
+    import cli_banner
+    cli_banner.install()
+    # `or 0`: main() has one early `return` (the net/plane-layer count
+    # mismatch) that returns None, and returning None from sys.exit is 0 --
+    # which is what this block did before, so that path is unchanged.
+    sys.exit(main() or 0)
