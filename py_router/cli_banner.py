@@ -53,12 +53,65 @@ def command_line() -> str:
     return ' '.join(_quote(a) for a in head)
 
 
+def install_dash_hint() -> None:
+    """Explain the one argparse failure a real net name can cause.
+
+    Run 14 lost a lap to this. The board carried a net called ``-12V`` -- not
+    exotic; every bipolar analog board has one -- and ``route.py --nets ...
+    -12V ...`` died with::
+
+        route.py: error: unrecognized arguments: -12V
+
+    no board, no JSON_SUMMARY, exit 2. ``--nets`` is ``nargs='+'``, so argparse
+    takes a leading ``-`` as the start of a flag. The same hole is in every
+    name-taking list flag across route.py, route_diff.py, route_planes.py,
+    route_disconnected_planes.py, check_drc.py and check_connected.py -- 30-odd
+    of them -- and the fix at each call site is the same one character:
+    ``--nets=-12V``.
+
+    Rather than patch thirty parsers, this patches ``ArgumentParser.error`` once
+    from ``install()``, which every instrument already calls. The GUI never
+    calls ``install()``, so no GUI path changes.
+    """
+    import argparse
+    import re
+    orig = argparse.ArgumentParser.error
+    if getattr(orig, '_krt_dash_hint', False):
+        return
+
+    def error(self, message):                       # noqa: D401
+        try:
+            m = re.search(r'unrecognized arguments:\s*(.+)$', str(message))
+            bad = [t for t in (m.group(1).split() if m else [])
+                   if t.startswith('-') and t != '-']
+            if bad:
+                t = bad[0]
+                sys.stderr.write(
+                    "\n  NOTE: %r begins with '-', so argparse read it as a "
+                    "flag rather than a value.\n"
+                    "        A net (or layer) whose NAME starts with '-' must "
+                    "be attached with '=':\n"
+                    "            --nets=%s          not   --nets %s\n"
+                    "        Every name-taking list flag here has this shape "
+                    "(--nets, --power-nets,\n"
+                    "        --rip-existing-nets, --plane-layers, ...).\n\n"
+                    % (t, t, t))
+                sys.stderr.flush()
+        except Exception:               # a hint must never mask the real error
+            pass
+        return orig(self, message)
+
+    error._krt_dash_hint = True
+    argparse.ArgumentParser.error = error
+
+
 def install() -> None:
     """Print the CMD banner now; print EXIT=<rc> when the process ends."""
     global _installed
     if _installed or os.environ.get('KRT_NO_BANNER'):
         return
     _installed = True
+    install_dash_hint()
     # Line-buffer the log (run-7 A11). Redirected to a file, stdout is
     # BLOCK-buffered, so a run that is killed -- a timeout, a stall, a closed
     # session -- loses whatever sits in the 8KB buffer. One run-7 board's
