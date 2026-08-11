@@ -1808,7 +1808,7 @@ Examples:
     # default to the board's own constraint minimum when omitted. Resolved before
     # enforce_fab_floors; _clamp_netclasses is stashed for drc_fix_kwargs.
     from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
-                           board_constraint)
+                           resolve_cli_floor)
     # #435: whether the diff geometry was EXPLICITLY set on the CLI. If NOT, each
     # pair falls back engine-side to its OWN netclass diff_pair_gap/width (not the
     # board Default class), so a multi-class board routes every pair to its own
@@ -1871,18 +1871,14 @@ Examples:
         print(f"Diff-pair gap {args.diff_pair_gap}mm is below clearance "
               f"{args.clearance}mm; raising gap to clearance (#441).")
         args.diff_pair_gap = args.clearance
-    if args.hole_to_hole_clearance is None:
-        _h2h = board_constraint(args.input_file, 'min_hole_to_hole')
-        args.hole_to_hole_clearance = _h2h if _h2h is not None else defaults.HOLE_TO_HOLE_CLEARANCE
-        print(f"--hole-to-hole-clearance not given; using "
-              f"{'the board min_hole_to_hole' if _h2h is not None else 'the fallback'} "
-              f"{args.hole_to_hole_clearance}mm.")
-    if args.board_edge_clearance is None:
-        _edge = board_constraint(args.input_file, 'min_copper_edge_clearance')
-        args.board_edge_clearance = _edge if _edge is not None else defaults.BOARD_EDGE_CLEARANCE
-        print(f"--board-edge-clearance not given; using "
-              f"{'the board min_copper_edge_clearance' if _edge is not None else 'the fallback'} "
-              f"{args.board_edge_clearance}mm.")
+    # Shared resolver: a declared 0 is UNSET, the same rule the placement half
+    # of the loop applies (list_nets.resolve_cli_floor).
+    args.hole_to_hole_clearance = resolve_cli_floor(
+        args.input_file, 'hole_to_hole', args.hole_to_hole_clearance,
+        defaults.HOLE_TO_HOLE_CLEARANCE, '--hole-to-hole-clearance')
+    args.board_edge_clearance = resolve_cli_floor(
+        args.input_file, 'board_edge_clearance', args.board_edge_clearance,
+        defaults.BOARD_EDGE_CLEARANCE, '--board-edge-clearance')
     set_default_fab_tier(*fab_tier_from_args(args))
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.input_file),

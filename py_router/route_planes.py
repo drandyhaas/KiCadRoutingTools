@@ -3905,7 +3905,7 @@ Examples:
     # keep their larger PLANE_EDGE_CLEARANCE fallback when the board declares none.
     # Resolved here, before enforce_fab_floors and every downstream use.
     from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
-                           board_constraint)
+                           resolve_cli_floor)
     for _pname, _nckey, _fallback in (('track_width', 'track_width', defaults.TRACK_WIDTH),
                                       ('via_size', 'via_diameter', defaults.VIA_SIZE),
                                       ('via_drill', 'via_drill', defaults.VIA_DRILL)):
@@ -3928,20 +3928,18 @@ Examples:
               f"clearance {args.clearance}mm.")
     else:
         args.clearance = min(_dflt_clr, _ceiling) if _dflt_clr is not None else _ceiling
-    if args.hole_to_hole_clearance is None:
-        _h2h = board_constraint(args.input_file, 'min_hole_to_hole')
-        args.hole_to_hole_clearance = _h2h if _h2h is not None else defaults.HOLE_TO_HOLE_CLEARANCE
-        print(f"--hole-to-hole-clearance not given; using "
-              f"{'the board min_hole_to_hole' if _h2h is not None else 'the fallback'} "
-              f"{args.hole_to_hole_clearance}mm.")
-    if args.board_edge_clearance is None:
-        # Planes keep their larger edge keep-out (PLANE_EDGE_CLEARANCE) only when
-        # the board declares no edge rule of its own.
-        _edge = board_constraint(args.input_file, 'min_copper_edge_clearance')
-        args.board_edge_clearance = _edge if _edge is not None else defaults.PLANE_EDGE_CLEARANCE
-        print(f"--board-edge-clearance not given; using "
-              f"{'the board min_copper_edge_clearance' if _edge is not None else 'the fallback'} "
-              f"{args.board_edge_clearance}mm.")
+    # Shared resolver (list_nets.resolve_cli_floor). Planes keep their larger
+    # edge keep-out (PLANE_EDGE_CLEARANCE) only when the board declares no edge
+    # rule of its own -- and a DECLARED 0.0 is exactly that case, KiCad's "not
+    # configured". Read straight it was taken as a rule, dropping the plane
+    # inset from 0.5 to 0.0 while the GUI's plane tab held 0.5 (swig_gui.py
+    # _effective_plane_edge_clearance already had the `> 1e-9` guard).
+    args.hole_to_hole_clearance = resolve_cli_floor(
+        args.input_file, 'hole_to_hole', args.hole_to_hole_clearance,
+        defaults.HOLE_TO_HOLE_CLEARANCE, '--hole-to-hole-clearance')
+    args.board_edge_clearance = resolve_cli_floor(
+        args.input_file, 'board_edge_clearance', args.board_edge_clearance,
+        defaults.PLANE_EDGE_CLEARANCE, '--board-edge-clearance')
     set_default_fab_tier(*fab_tier_from_args(args))
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.input_file),

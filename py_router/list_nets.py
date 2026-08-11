@@ -268,6 +268,47 @@ def board_constraint(pcb_path, key, design_rules=None):
         return None
 
 
+def board_floor_declaration(pcb_path, design_rules=None):
+    """What this board DECLARES about its own DRC floors -- and whether that is
+    nothing at all.
+
+    Returns ``{'classes': int, 'constraints': int, 'source': str|None,
+    'declares_nothing': bool}``. ``declares_nothing`` is True when the board
+    carries NO net class and NO board constraint from any source -- no sibling
+    ``.kicad_pro``, and no KiCad 6/7 ``(net_class ...)`` block in the board
+    file either.
+
+    Why the graders need this rather than just a value (run-12 Tier 1.3): every
+    floor accessor here answers ``None`` on such a board, and each grader then
+    quietly substitutes its own constant (``routing_defaults.CLEARANCE`` 0.25,
+    check_drc's 0.2). Measured on tigard, which ships no project: a whole
+    placement baseline was graded against a fallback with nothing in the
+    transcript recording that the number was a fallback rather than the board's
+    own. That is the "grade at a floor the board was not routed to" failure
+    CLAUDE.md warns about, reached from the other direction -- and unlike a
+    board that declares 0.25, there is no value to compare against to notice it.
+
+    Report-only. Nothing here changes a floor or an exit code; it exists so a
+    grader can NAME its fallback.
+
+    A board whose rules could not be READ answers ``declares_nothing: False``
+    plus an ``error``, never True: "I could not look" is not "there is nothing
+    there", and a disclosure that fires on a read failure is the kind of line
+    readers learn to skip.
+    """
+    try:
+        dr = design_rules if design_rules is not None else read_design_rules(pcb_path)
+    except Exception as exc:                                   # noqa: BLE001
+        return {'classes': 0, 'constraints': 0, 'source': None,
+                'declares_nothing': False,
+                'error': f'{type(exc).__name__}: {exc}'}
+    classes = dr.get('classes') or {}
+    constraints = dr.get('constraints') or {}
+    return {'classes': len(classes), 'constraints': len(constraints),
+            'source': dr.get('source'),
+            'declares_nothing': not classes and not constraints}
+
+
 def board_floor_knobs(pcb_path, clearance=None, board_edge_clearance=None,
                       clearance_default=0.25, edge_default=0.55,
                       design_rules=None):
@@ -284,10 +325,17 @@ def board_floor_knobs(pcb_path, clearance=None, board_edge_clearance=None,
     records each value's source (``'cli'`` | ``'board netclass'`` |
     ``'board constraint'`` | ``'fixed default'``) for JSON disclosure.
     """
+    # A non-positive declared value is UNSET, not a floor of zero -- KiCad
+    # writes 0 into these fields for "not configured", and reading it as a real
+    # floor collapses every consumer to no clearance at all. `board_floor`
+    # below encodes the same rule; this helper predates it and did NOT, so a
+    # project declaring `min_copper_edge_clearance: 0.0` silently gave
+    # render_placement a 0.0 edge floor (every edge-halo and oob term
+    # vanishing) where it had previously used 0.55.
     knobs = {}
     if clearance is None:
         v = board_default_netclass_clearance(pcb_path, design_rules)
-        clearance, src = ((v, 'board netclass') if v is not None
+        clearance, src = ((v, 'board netclass') if v is not None and v > 0
                           else (clearance_default, 'fixed default'))
     else:
         src = 'cli'
@@ -295,13 +343,167 @@ def board_floor_knobs(pcb_path, clearance=None, board_edge_clearance=None,
     if board_edge_clearance is None:
         v = board_constraint(pcb_path, 'min_copper_edge_clearance',
                              design_rules)
-        board_edge_clearance, src = ((v, 'board constraint') if v is not None
+        board_edge_clearance, src = ((v, 'board constraint')
+                                     if v is not None and v > 0
                                      else (edge_default, 'fixed default'))
     else:
         src = 'cli'
     knobs['board_edge_clearance'] = {'value': board_edge_clearance,
                                      'source': src}
     return clearance, board_edge_clearance, knobs
+
+
+# Where each floor legitimately comes from: (Default-netclass key, board
+# constraint key). None means "this floor is not expressed there".
+#
+# `clearance` deliberately has NO constraint fallback. `min_clearance` is an
+# unreliable edit-floor -- it is 0.0 on the measured board and stale-large on
+# others (see effective_floors' note at :86) -- so falling back to it would
+# resolve a board declaring a 0.2 netclass to 0.0 and relax every consumer to
+# nothing. The netclass is the honest source for clearance; the constraints are
+# the honest source for the hole/edge floors, which no netclass expresses.
+_FLOOR_SOURCES = {
+    'clearance':            ('clearance',    None),
+    'track_width':          ('track_width',  'min_track_width'),
+    'via_diameter':         ('via_diameter', 'min_via_diameter'),
+    'via_drill':            ('via_drill',    None),
+    'board_edge_clearance': (None,           'min_copper_edge_clearance'),
+    'hole_clearance':       (None,           'min_hole_clearance'),
+    'hole_to_hole':         (None,           'min_hole_to_hole'),
+}
+
+
+def board_floor(pcb_path, name, explicit=None, fallback=None,
+                design_rules=None):
+    """ONE floor, resolved BOARD-FIRST. Returns ``(value, source)``.
+
+    Precedence, the same one `board_floor_knobs` uses and with the same source
+    vocabulary (``'cli'`` | ``'board netclass'`` | ``'board constraint'`` |
+    ``'fixed default'``): an explicit value wins, then the board's own Default
+    netclass, then its board constraint, then the caller's fallback.
+
+    This exists because instruments kept substituting their own constant for a
+    value the board declares, each in its own way, and each wrong in a
+    different direction. Measured here: `check_channels` at its old 0.25/0.3
+    constants reported 334 escape lanes where the board's own 0.2/0.254 floor
+    gives 399 -- 65 lanes understated. (The originating report measured 304 vs
+    378 on the same board at 0.2/0.2; same direction and scale, different track
+    width.) It also invented a deficit on a face that had none -- a phantom
+    that would have steered a placement search. `obstacle_map` priced NPTH at
+    a hardcoded max(clearance, 0.20) while the board declared
+    ``min_hole_clearance`` 0.25, and a route came within 0.2263 mm of an NPTH:
+    a real 0.0237 mm violation, routing-introduced.
+
+    A non-positive constraint is treated as UNSET rather than as a floor of
+    zero. KiCad writes 0 for "not configured" in these fields, and reading it
+    as a genuine 0 relaxes the consumer to nothing -- the same trap that keeps
+    `min_clearance` out of the table above.
+
+    IT IS NOT RAISE-ONLY, and nothing here pretends otherwise. Once a declared
+    value is positive it is returned as-is, with NO max() against `fallback`,
+    so a board can resolve a floor DOWNWARDS. That is the point for a tool
+    that GRADES EXISTING COPPER: `check_assembly` must measure at the board's
+    own clearance even when it sits below the packaged default, or it
+    manufactures phantom violations on copper placed correctly (CLAUDE.md,
+    "Grade DRC at the clearance the board was actually routed to").
+
+    THE DISTINCTION IS GRADE-vs-PREDICT, not tool-by-tool. `check_channels`
+    was listed here as another such consumer and that was wrong: it does not
+    grade copper, it PREDICTS routability, so a declared lane pitch finer than
+    the fab can etch makes it promise capacity nobody can build. Measured on
+    tigard --refs U3 (fab floors 0.09 / 0.0762): a declared 0.05/0.05 took its
+    deficit faces from 3 to 1 and U3's supply from 29 to 120, hiding two real
+    deficits. It now wraps at the fab floor (check_channels.py, `_fab`). A
+    predictive consumer needs the wrap; a grading one must not have it.
+
+    A consumer for which downward is a FAB question must therefore wrap this
+    in its own max(), exactly as `resolve_hole_clearance`'s consumers do
+    (obstacle_map.py:1580, plane_obstacle_builder.py:1208) -- that helper is
+    called "raise-only" only because of those wraps, never on its own.
+    Measured: a project declaring ``min_hole_to_hole: 0.10`` resolves here to
+    ``(0.1, 'board constraint')``, and the qfn underpad escape spaced this
+    run's drills at 0.10 -- below the 0.20 JLC fab floor -- until it grew the
+    wrap (qfn_fanout/__init__.py, ``_h2h_fab``). The routing CLIs get the same
+    protection from `enforce_fab_floors`, which runs on args right after
+    `resolve_cli_floor`; an engine-internal read like the qfn one does not,
+    because that pins a value it never reads.
+    """
+    if name not in _FLOOR_SOURCES:
+        raise KeyError(f"unknown floor {name!r}; "
+                       f"known: {', '.join(sorted(_FLOOR_SOURCES))}")
+    if explicit is not None:
+        return float(explicit), 'cli'
+    cls_key, con_key = _FLOOR_SOURCES[name]
+    # The guard wraps the ACCESSORS too, not just read_design_rules: a caller
+    # may hand in its own `design_rules`, and a malformed one raises inside
+    # board_default_netclass_param / board_constraint rather than here.
+    try:
+        dr = (design_rules if design_rules is not None
+              else read_design_rules(pcb_path))
+        if cls_key:
+            v = board_default_netclass_param(pcb_path, cls_key, dr)
+            if v is not None and v > 0:
+                return float(v), 'board netclass'
+        if con_key:
+            v = board_constraint(pcb_path, con_key, dr)
+            if v is not None and v > 0:
+                return float(v), 'board constraint'
+    except Exception:                                          # noqa: BLE001
+        # "I could not look" is NOT "there is nothing there" -- the same
+        # distinction board_floor_declaration exists to preserve. The VALUE is
+        # the fallback either way, but the source must not claim the board was
+        # read and found silent, or a corrupt .kicad_pro reads in a table
+        # exactly like a board that genuinely declares nothing.
+        return _num(fallback), 'unreadable project'
+    return _num(fallback), 'fixed default'
+
+
+def _num(v):
+    """Fallbacks are returned in the same type the board paths return."""
+    return None if v is None else float(v)
+
+
+def resolve_cli_floor(pcb_path, name, explicit, fallback, flag):
+    """One routing-CLI geometry floor, resolved board-first and ANNOUNCED with
+    its real source. Returns the value.
+
+    THE SPLIT THIS CLOSES. `board_floor` / `board_floor_knobs` /
+    `resolve_hole_clearance` -- and the GUI's own
+    `_effective_plane_edge_clearance` -- all treat a declared 0 as UNSET,
+    because that is what KiCad writes into these fields for "not configured".
+    The four routing mains did not: each carried its own copy of
+    ``board_constraint(...) if ... is not None else <default>``, an
+    ``is not None`` test with no positivity guard, eight sites in all
+    (route.py 3725/3731, route_diff.py 1947/1953, route_planes.py 4940/4946,
+    route_disconnected_planes.py 3410/3416).
+
+    So on a board declaring ``min_copper_edge_clearance: 0.0`` the two halves
+    of the place/route loop read one declared floor two ways: the placement
+    half (render_placement, check_floorplan, converge -- all via
+    board_floor_knobs) resolved 0.55 ``[fixed default]``, while the routing
+    half took a REAL floor of 0.0 and printed *"using the board
+    min_copper_edge_clearance 0.0mm"* -- claiming the board had declared what
+    it had in fact left unset. The plane engines were worse than misleading:
+    a declared 0.0 dropped their zone inset from PLANE_EDGE_CLEARANCE 0.5 to
+    0.0, while the GUI's plane tab held 0.5 because it already had the guard.
+
+    The FALLBACKS legitimately differ between callers and are NOT unified
+    here: the signal mains fall back to BOARD_EDGE_CLEARANCE 0.0, which is a
+    deliberate sentinel meaning "no edge rule declared, use the copper-copper
+    clearance instead" (route.py:896, obstacle_map.py:797), while the plane
+    mains fall back to PLANE_EDGE_CLEARANCE 0.5 and the placement model to
+    0.55. What must agree -- and now does -- is whether the board declared
+    anything at all, and what the tool SAYS about where its number came from.
+
+    The source tag is printed in the same ``[board constraint]`` /
+    ``[fixed default]`` / ``[unreadable project]`` vocabulary the placement
+    instruments use, because "fixed default" means the board declared nothing,
+    not that it agreed.
+    """
+    value, src = board_floor(pcb_path, name, explicit, fallback)
+    if src != 'cli':
+        print(f"{flag} not given; using {value}mm [{src}].")
+    return value
 
 
 def net_clearance_map_by_id(pcb_path, nets, design_rules=None):

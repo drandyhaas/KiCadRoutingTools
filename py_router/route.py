@@ -4791,7 +4791,7 @@ For differential pair routing, use route_diff.py:
     # constraint minimum). Resolved here, before enforce_fab_floors and every
     # downstream use. Stashed on args for drc_fix_kwargs (the writeback clamp).
     from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
-                           board_constraint)
+                           resolve_cli_floor)
     # #435 companion: whether --track-width was EXPLICITLY set. If NOT, each net
     # routes at its OWN netclass track width engine-side (not the single board
     # Default-class width). --impedance derives width per layer, so it counts as
@@ -4828,18 +4828,18 @@ For differential pair routing, use route_diff.py:
     else:
         # min(Default class, ceiling) so Default is capped like every other class.
         args.clearance = min(_dflt_clr, _ceiling) if _dflt_clr is not None else _ceiling
-    if args.hole_to_hole_clearance is None:
-        _h2h = board_constraint(args.input_file, 'min_hole_to_hole')
-        args.hole_to_hole_clearance = _h2h if _h2h is not None else defaults.HOLE_TO_HOLE_CLEARANCE
-        print(f"--hole-to-hole-clearance not given; using "
-              f"{'the board min_hole_to_hole' if _h2h is not None else 'the fallback'} "
-              f"{args.hole_to_hole_clearance}mm.")
-    if args.board_edge_clearance is None:
-        _edge = board_constraint(args.input_file, 'min_copper_edge_clearance')
-        args.board_edge_clearance = _edge if _edge is not None else defaults.BOARD_EDGE_CLEARANCE
-        print(f"--board-edge-clearance not given; using "
-              f"{'the board min_copper_edge_clearance' if _edge is not None else 'the fallback'} "
-              f"{args.board_edge_clearance}mm.")
+    # Both floors go through the SHARED resolver (list_nets.resolve_cli_floor),
+    # so a declared 0 -- KiCad's "not configured" -- reads as UNSET here exactly
+    # as it does on the placement half of the loop. Read straight, these two
+    # constraints made the two halves disagree about one declared number: 0.55
+    # [fixed default] in render_placement/check_floorplan/converge against a
+    # REAL 0.0 here, announced as "the board min_copper_edge_clearance 0.0mm".
+    args.hole_to_hole_clearance = resolve_cli_floor(
+        args.input_file, 'hole_to_hole', args.hole_to_hole_clearance,
+        defaults.HOLE_TO_HOLE_CLEARANCE, '--hole-to-hole-clearance')
+    args.board_edge_clearance = resolve_cli_floor(
+        args.input_file, 'board_edge_clearance', args.board_edge_clearance,
+        defaults.BOARD_EDGE_CLEARANCE, '--board-edge-clearance')
     set_default_fab_tier(*fab_tier_from_args(args))
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.input_file),
