@@ -148,7 +148,33 @@ def displacement_to_original(poses_now: Dict[str, Pose],
     out_set = [v for r, v in per_part.items() if r not in members]
     home = [r for r in members
             if per_part.get(r, float('inf')) <= HOME_TOLERANCE_MM]
+    # A SINGLE threshold saturates and then carries no signal. Run 9 measured
+    # `parts_home_frac` = 0.0 for the damaged board AND for the recovered one,
+    # while `recovery` moved +0.045 -- so the headline metric could not
+    # distinguish "moved nothing" from "moved 80 parts most of the way", which
+    # is the distinction the experiment exists to make. The curve is pure
+    # derivation from `per_part`, which is already computed above.
+    _in = sorted(in_set)
+    def _frac(t):
+        return round(sum(1 for v in _in if v <= t) / len(_in), 6) if _in else None
+    # The ladder runs well past HOME_TOLERANCE_MM on purpose. Measured on run 9:
+    # a ladder stopping at 20mm was ALSO all-zero on both boards, because the
+    # median displacement was 28.6mm -- i.e. a curve can saturate exactly like
+    # the single threshold it replaces, just more verbosely. `per_part_median`
+    # below is the scalar that cannot saturate, and it is the one that showed
+    # the movement there (28.580 -> 27.277mm). Keep the ladder FIXED rather than
+    # deriving it per board: an adaptive ladder is not comparable between two
+    # boards, which is the whole point of reporting it.
+    home_curve = {t: _frac(t) for t in (0.5, 1.0, HOME_TOLERANCE_MM,
+                                        5.0, 10.0, 20.0, 50.0, 100.0)}
+    if _in:
+        _m = len(_in) // 2
+        median = round(_in[_m] if len(_in) % 2 else (_in[_m - 1] + _in[_m]) / 2.0, 6)
+    else:
+        median = None
     return {
+        'home_curve': home_curve,
+        'per_part_median': median,
         'perturbed_pad_rms': round(_rms(in_set), 6),
         'perturbed_pad_max': round(max(in_set), 6) if in_set else 0.0,
         'perturbed_centre_rms': round(_rms([centre[r] for r in members
@@ -248,6 +274,39 @@ def frozen_net_ids(pcb_data, ignore_net_ids: Sequence[int] = ()) -> List[int]:
     for nid, pads in (getattr(pcb_data, 'pads_by_net', None) or {}).items():
         if nid and nid not in ignored and len(pads) >= 2:
             out.append(nid)
+    return sorted(out)
+
+
+def dirty_net_ids(pcb_routed, drc_json_path: str) -> List[int]:
+    """Net ids carrying a DRC violation, from `check_drc.py --json`.
+
+    The missing half of `connectivity_tally`'s contract. `dirty_nets` has never
+    once been supplied by any caller, so `PRR`/`NRR` -- the DRC-CLEAN forms,
+    which are the ones OmniRouting actually defines -- have always come back
+    `None`, and only the `_connected` forms carried a number. This is the whole
+    producer: check_drc writes `items[].net1` / `net2` as net NAMES, and the
+    parsed board maps names to ids.
+
+    Names, not ids, is deliberate on check_drc's side and is why this cannot be
+    a one-liner at the call site: an id is meaningless without the net table of
+    the exact board it came from, and a report outlives the board it graded.
+    An unresolvable name is DROPPED rather than guessed -- silently widening
+    the dirty set would depress PRR on nets that are clean.
+    """
+    import json as _json
+    try:
+        with open(drc_json_path, encoding='utf-8') as fh:
+            doc = _json.load(fh)
+    except Exception:                                          # noqa: BLE001
+        return []
+    by_name = {n.name: nid for nid, n in (pcb_routed.nets or {}).items()
+               if n.name}
+    out = set()
+    for item in (doc.get('items') or ()):
+        for key in ('net1', 'net2'):
+            nid = by_name.get(item.get(key))
+            if nid is not None:
+                out.add(nid)
     return sorted(out)
 
 
@@ -414,6 +473,12 @@ def static_metrics(pcb_data, board_path: str, record: Optional[Dict] = None
         'block_displacement_ran': bool(bd),
         'state': {'unplaced': state.unplaced,
                   'partially_unplaced': state.partially_unplaced,
+                  # The refs the flag above is actually decided on. Without it
+                  # a scorecard shows `partially_unplaced: false` beside a
+                  # non-zero `signals.duplicate_fraction` and a reader cannot
+                  # tell "suppressed as markers / far side" from a broken
+                  # check. Same reason floorplan's `state` block carries it.
+                  'stacked_suspect_refs': list(state.stacked_suspect_refs),
                   'has_copper': state.has_copper,
                   'signals': state.signals},
     }

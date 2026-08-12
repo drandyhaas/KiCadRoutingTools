@@ -102,6 +102,14 @@ def build_parser():
                         "it connects to, and what crosses each declared bus "
                         "corridor. Advisory -- these say the floorplan will "
                         "fight the router, not that it breaks the intent")
+    p.add_argument('--require-rules', type=int, default=0, metavar='N',
+                   help='fail unless at least N rules actually RAN. Default 0 '
+                        '(off), which keeps the long-standing contract that a '
+                        'vacuous intent exits 0 -- but that contract is how an '
+                        'intent running ZERO rules constrained two placement '
+                        'laps with nothing, twice, and every consumer stayed '
+                        'silent. A caller that means "grade this" should pass '
+                        '--require-rules 1.')
     p.add_argument('--exit-zero', action='store_true',
                    help='report violations but exit 0 anyway')
     p.add_argument('-q', '--quiet', action='store_true',
@@ -193,6 +201,19 @@ def main(argv=None):
     s['clearance_used'] = knobs['clearance']
     s['edge_clearance_used'] = knobs['board_edge_clearance']
     print("JSON_SUMMARY: " + json.dumps(s, sort_keys=True))
+    # "0 violations" and "0 rules ran" must not look the same to a machine --
+    # this module's own docstring says so, and until now only the DATA said it
+    # (`rules_run` / `rules_skipped`); the exit code could not. Opt-in, so the
+    # pinned default contract is untouched.
+    _ran = s.get('rules_run', 0)
+    if args.require_rules and _ran < args.require_rules:
+        print(f"  FAIL: --require-rules {args.require_rules}, but {_ran} "
+              f"rule(s) ran. A grade that ran no rules is a VACUOUS PASS, not "
+              f"a clean board: {s.get('rules_skipped', 0)} rule(s) were "
+              f"skipped because the intent declares nothing they apply to.",
+              file=sys.stderr)
+        if not args.exit_zero:
+            return VIOLATIONS_EXIT
     if result.errors and not args.exit_zero:
         return VIOLATIONS_EXIT
     return 0

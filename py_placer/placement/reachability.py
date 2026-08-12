@@ -312,6 +312,22 @@ class Reachability:
                 or self.bottleneck_mm < self.track_mm)
 
     @property
+    def measured(self) -> bool:
+        """Did this run ask an answerable question at all?
+
+        `target_cells == 0` means "no other island of this net is inside the
+        view" -- the pad is already joined to everything nearby, or the margin
+        is too small. That is NOT a verdict, and the CLI has always known it
+        (exit 2, never 1). But `bottleneck_mm` is None in that case, so `caged`
+        is True, so `to_dict()` stamped `verdict: CAGED` anyway -- and a caller
+        reading the documented `--json` payload instead of the exit code got a
+        confident CAGED for a question nobody answered. Measured on run 15: 7
+        CAGED reported where 3 was the truth, on a classification where a single
+        CAGED flips the whole loop into re-entering placement.
+        """
+        return self.target_cells > 0
+
+    @property
     def margin_um(self) -> Optional[float]:
         if self.bottleneck_mm is None:
             return None
@@ -324,7 +340,13 @@ class Reachability:
                 'bottleneck_mm': (None if self.bottleneck_mm is None
                                   else round(self.bottleneck_mm, 5)),
                 'wide_open': self.wide_open,
-                'verdict': 'CAGED' if self.caged else 'PASSABLE',
+                # NO-TARGET is a third state, not a shade of CAGED -- see
+                # `measured`. It matches the CLI's long-standing exit 2, so the
+                # JSON and the exit code finally agree, and `verdict == 'CAGED'`
+                # becomes safe to test directly.
+                'verdict': ('CAGED' if self.caged else 'PASSABLE')
+                           if self.measured else 'NO-TARGET',
+                'measured': self.measured,
                 'margin_um': (None if self.margin_um is None
                               else round(self.margin_um, 2)),
                 'target_cells': self.target_cells,
@@ -341,7 +363,15 @@ class Reachability:
                  f"grid       {self.grid[0]}x{self.grid[1]} @ {self.step_mm}mm"]
         if self.note:
             lines.append(f"note       {self.note}")
-        if self.bottleneck_mm is None:
+        if not self.measured:
+            # Same third state the JSON carries, and the same one the CLI has
+            # always signalled with exit 2. Printing CAGED here said the
+            # opposite of what the exit code said.
+            lines.append("BOTTLENECK not measured: nothing of this net to "
+                         "reach inside the view")
+            lines.append("VERDICT    NO-TARGET -- this is NOT a verdict. Widen "
+                         "--margin, or this is not a reachability question.")
+        elif self.bottleneck_mm is None:
             lines.append("BOTTLENECK none: no positive-slack path exists at "
                          "any grid")
             lines.append("VERDICT    CAGED for any track width")

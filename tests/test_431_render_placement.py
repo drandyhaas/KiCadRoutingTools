@@ -497,6 +497,73 @@ def test_focus_without_summary_json_warns():
         shutil.rmtree(d, ignore_errors=True)
 
 
+# --- D8: the render must be able to say its net list missed -----------------
+#
+# There was NO field in the instrument block where "61 requested, 51 matched"
+# could ever appear, and that absence is why a mangled net list went undetected:
+# board_score published `--ignore-nets` candidates double-escaped, 10 of 61
+# matched nothing, and the render reported hpwl +45.6% / crossings +129.5% on an
+# identical board. Both renders were internally consistent. The operator had to
+# compare declared against matched by hand, outside the tool.
+
+def test_net_pattern_report_counts_declared_against_matched():
+    """The unit the JSON field is built from -- no rendering needed."""
+    pcb = parse_kicad_pcb(PLACED)
+    names = [n.name for n in pcb.nets.values() if n.name]
+    real = names[0]
+    rep = RP.net_pattern_report(pcb, [real, 'NOSUCHNET', 'ALSO_NOT_HERE*'],
+                                '--ignore-nets')
+    assert rep['requested'] == 3, rep
+    assert rep['matched'] == 1, rep
+    assert rep['unmatched'] == ['ALSO_NOT_HERE*', 'NOSUCHNET'], rep
+    assert rep['nets_matched'] >= 1, rep
+    # An empty list is not a failure, and must still produce the fields --
+    # a key that appears only on failure is a key no reader looks for.
+    empty = RP.net_pattern_report(pcb, None, '--ratsnest-nets')
+    assert empty == {'flag': '--ratsnest-nets', 'requested': 0, 'matched': 0,
+                     'unmatched': [], 'nets_matched': 0}, empty
+
+
+def test_a_net_list_that_missed_is_reported_in_the_json_and_on_stderr():
+    """The single change that would have caught the double-escaping."""
+    import json as _json
+    d = tempfile.mkdtemp()
+    try:
+        js = os.path.join(d, 'r.json')
+        # 'GND' exists on this board; the other two cannot. The second is the
+        # measured shape exactly -- a real net name carrying one backslash too
+        # many, which is indistinguishable from a net that does not exist.
+        r = _run(PLACED, '-o', os.path.join(d, 'r.png'), '--json-out', js,
+                 '--size', '300', '--supersample', '1',
+                 '--ignore-nets', 'GND', 'NOSUCHNET', '/GPIO10\\\\OE3#')
+        assert r.returncode == 0, r.stderr[-600:]
+
+        rep = _json.load(open(js, encoding='utf-8'))['instrument']['net_lists']
+        ig = rep['ignore_nets']
+        assert (ig['requested'], ig['matched']) == (3, 1), ig
+        assert ig['unmatched'] == ['/GPIO10\\\\OE3#', 'NOSUCHNET'], ig
+        assert 'ratsnest_nets' in rep, 'both net lists must be reported'
+
+        # ...and it must SAY so, unprompted. A JSON field nobody opens is not
+        # a warning.
+        assert '3 requested, 1 matched' in r.stderr, r.stderr[-600:]
+        assert 'NOSUCHNET' in r.stderr, r.stderr[-600:]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_fully_matching_net_list_stays_quiet():
+    """The warning has to mean something, so it must not fire on a good run."""
+    d = tempfile.mkdtemp()
+    try:
+        r = _run(PLACED, '-o', os.path.join(d, 'r.png'), '--size', '300',
+                 '--supersample', '1', '--ignore-nets', 'GND')
+        assert r.returncode == 0, r.stderr[-600:]
+        assert 'matched NO net' not in r.stderr, r.stderr[-400:]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_legality_findings_cached_once_per_model():
     m = _model()
     a = RP.legality_findings(m)

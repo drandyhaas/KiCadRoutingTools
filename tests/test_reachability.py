@@ -22,21 +22,26 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # placement split
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # placement split
 
+# The GEOMETRY tests need scipy; the EXIT-CODE tests below do not, and must not
+# inherit its skip -- an exit code that means "the placement is impossible" is
+# not something to leave unguarded because an optional dependency is missing.
 try:
     from placement import reachability
     from placement.reachability import ScipyRequired
     reachability._require_scipy()
+    HAVE_SCIPY = True
 except Exception as exc:                          # noqa: BLE001
-    print(f"SKIP: {exc}")
-    sys.exit(0)
+    print(f"SKIP (geometry tests only): {exc}")
+    HAVE_SCIPY = False
 
 
 class _Pad:
-    def __init__(self, x, y, sx, sy, net_id, layers=('F.Cu',), drill=0.0):
+    def __init__(self, x, y, sx, sy, net_id, layers=('F.Cu',), drill=0.0,
+                 number='1'):
         self.global_x, self.global_y = x, y
         self.size_x, self.size_y = sx, sy
         self.net_id, self.layers, self.drill = net_id, list(layers), drill
-        self.pad_number, self.pad_type, self.rect_rotation = '1', 'smd', 0.0
+        self.pad_number, self.pad_type, self.rect_rotation = number, 'smd', 0.0
 
 
 class _Fp:
@@ -198,7 +203,118 @@ def test_a_seed_off_the_net_is_an_error_not_a_guess():
     raise AssertionError("expected a ValueError")
 
 
+# --- D7: exit 1 is the geometry verdict, and nothing else may borrow it -------
+#
+# `raise SystemExit(msg)` exits 1, and 1 is CAGED. Measured on the run board:
+#
+#     --pad NOSUCH.9  -> exit 1      a typo
+#     --pad RM1.1.1   -> exit 1      a REAL pad; RM1's pads are named "1.1"
+#     --pad U1.1      -> exit 2      the honest "nothing to reach in view"
+#
+# The loop's L3 stage takes one genuine CAGED on the copper-free board as enough
+# to re-enter placement, and re-entering placement discards every routed board.
+# So a misspelling bought the most expensive misclassification the loop has.
+import check_reachability as cr                                 # noqa: E402
+import subprocess                                               # noqa: E402
+
+BOARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     'kicad_files', 'splitflap_driver.kicad_pcb')
+
+
+class _NumFp:
+    def __init__(self, pads):
+        self.pads = pads
+
+
+class _NumPcb:
+    """Just the `footprints` slice `_resolve_pad` reads."""
+    def __init__(self, by_ref):
+        self.footprints = {k: _NumFp(v) for k, v in by_ref.items()}
+
+
+def _pad(number, net_id=7):
+    return _Pad(1.0, 2.0, 0.5, 0.5, net_id, number=number)
+
+
+def test_a_dotted_pad_number_resolves_against_the_board():
+    """KiCad pad numbers are strings and may contain dots. RM1 on the measured
+    board has a pad literally named "1.1", so rsplit('.', 1) asked for footprint
+    "RM1.1" -- which does not exist -- and the tool answered CAGED about a pad
+    that is fine."""
+    pcb = _NumPcb({'RM1': [_pad('1.1'), _pad('1.2')], 'C1': [_pad('1')]})
+    x, y, net_id, _layer = cr._resolve_pad(pcb, 'RM1.1.1')
+    assert (x, y, net_id) == (1.0, 2.0, 7), 'RM1 pad "1.1" must resolve'
+    x, y, net_id, _layer = cr._resolve_pad(pcb, 'C1.1')
+    assert net_id == 7, 'the ordinary REF.NUM case must keep working'
+    print('  PASS: a dotted pad number resolves to the pad the board has')
+
+
+def test_an_unresolvable_pad_raises_rather_than_naming_a_verdict():
+    pcb = _NumPcb({'U1': [_pad('1')]})
+    for spec, want in (('NOSUCH.9', 'no footprint'),
+                       ('U1.99', 'no pad'),
+                       ('U1', 'REF.PADNUM')):
+        try:
+            cr._resolve_pad(pcb, spec)
+        except cr.Unresolvable as exc:
+            assert want in str(exc), f'{spec}: want {want!r} in {exc}'
+        else:
+            raise AssertionError(f'{spec} must not resolve')
+    # It must never GUESS when the board genuinely allows two readings.
+    ambiguous = _NumPcb({'A': [_pad('1.1')], 'A.1': [_pad('1')]})
+    try:
+        cr._resolve_pad(ambiguous, 'A.1.1')
+    except cr.Unresolvable as exc:
+        assert 'ambiguous' in str(exc), exc
+    else:
+        raise AssertionError('A.1.1 is genuinely ambiguous and must say so')
+    print('  PASS: unresolvable and ambiguous specs raise Unresolvable')
+
+
+def _cli(*args):
+    p = subprocess.run([sys.executable, '-X', 'utf8',
+                        os.path.join(os.path.dirname(os.path.dirname(
+                            os.path.abspath(__file__))), 'py_tools', 'check_reachability.py')]
+                       + list(args),
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       encoding='utf-8', errors='replace')
+    return p.returncode, p.stdout + p.stderr
+
+
+def test_the_cli_never_exits_CAGED_for_something_it_could_not_resolve():
+    """The exit code is the whole interface here -- callers branch on it."""
+    if not os.path.isfile(BOARD):
+        print(f'  SKIP: no {BOARD}')
+        return
+    for args in (('--pad', 'NOSUCH.9'), ('--pad', 'U1.99999'),
+                 ('--at', 'not-a-number', '--net', 'GND'), (),
+                 # --view was missed the first time round, and it fails in TWO
+                 # ways: garbage floats raise ValueError here, while the wrong
+                 # COUNT of good floats survives to an IndexError deep inside
+                 # reachability.slack_field. Both were tracebacks, so both
+                 # exited 1 = CAGED.
+                 ('--pad', 'U1.1', '--view', 'not,a,number,here'),
+                 ('--pad', 'U1.1', '--view', '1,2,3'),
+                 ('--pad', 'U1.1', '--view', '5,5,1,1')):
+        rc, out = _cli(BOARD, *args)
+        assert rc == 2, (f'{args or "(no seed)"} must exit 2, got {rc}. '
+                         f'1 is CAGED and re-enters placement.\n{out}')
+        assert 'cannot resolve' in out, f'{args}: must say what it could not '\
+                                        f'resolve, got:\n{out}'
+    rc, out = _cli('no-such-board.kicad_pcb', '--pad', 'U1.1')
+    assert rc == 2, f'an unreadable board must exit 2, got {rc}\n{out}'
+    print('  PASS: every unresolvable argument exits 2, naming what it was')
+
+
 if __name__ == '__main__':
+    for fn in (test_a_dotted_pad_number_resolves_against_the_board,
+               test_an_unresolvable_pad_raises_rather_than_naming_a_verdict,
+               test_the_cli_never_exits_CAGED_for_something_it_could_not_resolve):
+        print(fn.__name__)
+        fn()
+    if not HAVE_SCIPY:
+        print('\nGEOMETRY TESTS SKIPPED (no scipy); exit-code tests passed')
+        sys.exit(0)
     for fn in (test_the_measured_throat_matches_the_closed_form,
                test_a_gap_too_narrow_is_CAGED_and_a_wide_one_is_PASSABLE,
                test_it_resolves_a_few_microns_either_side_of_the_track_width,

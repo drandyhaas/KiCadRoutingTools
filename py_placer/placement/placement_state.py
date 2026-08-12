@@ -70,6 +70,12 @@ class PlacementState:
     # must not be able to manufacture an "unplaced" verdict.
     outside_fraction: Optional[float] = None
     stacked_refs: List[str] = field(default_factory=list)
+    #: The subset of `stacked_refs` that is not explicable as deliberate
+    #: co-location -- i.e. neither on a side the others cannot reach (a DRILLED
+    #: part reaches both) nor a marker class. Being LOCKED is deliberately not
+    #: an excuse; see the NOTE in `_suspect_in`. `partially_unplaced` keys on
+    #: THIS, not on `stacked_refs`.
+    stacked_suspect_refs: List[str] = field(default_factory=list)
     segments: int = 0
     vias: int = 0
 
@@ -107,7 +113,109 @@ def assess_placement(pcb_data, pcb_file: Optional[str] = None,
         pos.setdefault((round(fp.x, 3), round(fp.y, 3)), []).append(fp.reference)
     st.distinct_positions = len(pos)
     dup_refs = sorted(r for refs in pos.values() if len(refs) > 1 for r in refs)
+
+    # A CO-LOCATED PAIR IS NOT AUTOMATICALLY A PILE-UP. This was bare origin
+    # equality over every pad-bearing footprint, so six fiducials sitting on
+    # four mounting holes -- placed there deliberately, and stamped
+    # `(locked yes)` -- reported "N footprint(s) are stacked ... typically a
+    # netlist re-import dropping new parts at one spot", on a board where
+    # nothing had moved. TWO filters, both from data already in hand and both
+    # already trusted elsewhere in this codebase:
+    #
+    #   * opposite SIDES cannot pile up -- unless a part is DRILLED, which puts
+    #     it on both. legality._sides_interact draws exactly that line
+    #     ("None = through (both sides)"), and this filter now follows it.
+    #   * a MARKER class (fiducial / mount_hole / testpoint) is co-located by
+    #     design. legality._MARKER waives exactly this set for assembly.
+    #
+    # A third filter, "every part in the group is LOCKED", was tried and
+    # REMOVED -- see the NOTE in _suspect_in. It is named here because the
+    # field docstring and the operator-facing reason string both used to
+    # advertise it, which is worse than not having it.
+    #
+    # The strong signal (s1) keeps every ref, because a genuine pile-up buries
+    # markers and locks along with everything else; only the weak
+    # `partially_unplaced` signal is filtered.
+    _by_ref = {fp.reference: fp for fp in fps}
+    #: Matches legality._MARKER, which waives exactly this set for assembly.
+    _MARKER_CLASSES = ('fiducial', 'mount_hole', 'testpoint')
+
+    def _marker(ref):
+        try:
+            from placement.part_class import classify_part
+            # `.name`, not `.kind`. PartClass has fields (name, confidence,
+            # evidence); reading `.kind` raised AttributeError straight into
+            # the except below, so this whole filter was dead code while the
+            # warning text advertised it.
+            return classify_part(_by_ref[ref], ref).name in _MARKER_CLASSES
+        except Exception:                                   # noqa: BLE001
+            return False
+
+    def _sides_of(ref):
+        """Which physical sides this footprint occupies: ('F',), ('B',) or both.
+
+        A DRILLED part is on both, and that is not a nicety -- it is the case
+        this partition got wrong. `legality.footprint_side` alone put tigard's
+        J2 (F.Cu, nine 1.0mm drilled pads) and JP1 (B.Cu) in different groups,
+        each alone on its side, so both were exonerated. Moved to one
+        coordinate they produce SIX pad conflicts by `grade_pad_legality` --
+        this function was the only thing in the repo saying they were fine, and
+        it said so because it modelled a through-hole part as living on one
+        side. `legality._sides_interact` has always drawn the other line
+        ("None = through (both sides)"); `footprint_side` /
+        `footprint_has_through_pads` are the canonical readers, so use them
+        rather than comparing `fp.layer` strings.
+        """
+        fp = _by_ref[ref]
+        try:
+            from placement.legality import (footprint_has_through_pads,
+                                            footprint_side)
+            if footprint_has_through_pads(fp):
+                return ('F', 'B')
+            return (footprint_side(fp),)
+        except Exception:                                   # noqa: BLE001
+            # Unknown side is the SUSPICIOUS answer, not the safe one: put it
+            # on both so it groups with everything at this coordinate.
+            return ('F', 'B')
+
+    def _suspect_in(refs_at_one_spot):
+        """The refs at ONE coordinate that are not explicable, PER SIDE.
+
+        Partitioned by side rather than tested group-wide. A group-wide test
+        let ONE back-side part exonerate an arbitrarily large front-side pile:
+        measured, 105 parts at a single coordinate with one on the far side
+        reported zero suspects and an empty reason list -- silence about a
+        board in a far worse state than the one this filter was written for.
+        Parts on opposite sides cannot collide; parts on the SAME side still
+        can, however many neighbours the far side has -- and a drilled part is
+        on both sides, so it collides with either.
+        """
+        out = set()
+        by_side = {'F': [], 'B': []}
+        for r in refs_at_one_spot:
+            for s in _sides_of(r):
+                by_side[s].append(r)
+        for _side, group in by_side.items():
+            if len(group) < 2:
+                continue                    # alone on its side: nothing to hit
+            if all(_marker(r) for r in group):
+                continue                    # co-located by design
+            # NOTE what is deliberately NOT here: "all locked". A lock records
+            # a decision about WHERE a part goes; it does not make two parts
+            # able to occupy one space. And this toolchain stamps its own locks
+            # -- seeder.stamp_locked, called on place_seed's output -- so a
+            # pile-up the tools CREATED would have been invisible to the check
+            # meant to catch pile-ups. Markers are the real discriminator: a
+            # fiducial and a mounting hole are different physical things and
+            # share a coordinate by design. Costs nothing on the corpus: every
+            # board that changed was already suppressed by side or by class.
+            out.update(group)
+        return sorted(out)      # a through part appears in both side-groups
+
+    suspect = sorted(r for refs in pos.values() if len(refs) > 1
+                     for r in _suspect_in(refs))
     st.stacked_refs = dup_refs
+    st.stacked_suspect_refs = suspect
     st.duplicate_fraction = len(dup_refs) / len(fps)
     s1 = (st.duplicate_fraction >= th['dup_fraction']
           and st.distinct_positions <= max(3, 0.1 * len(fps)))
@@ -136,7 +244,7 @@ def assess_placement(pcb_data, pcb_file: Optional[str] = None,
                                        else round(st.outside_fraction, 3))}
 
     st.unplaced = bool(s1 or (s2 and s3) or (s3 and st.distinct_positions <= 2))
-    st.partially_unplaced = (not st.unplaced) and 0 < st.duplicate_fraction
+    st.partially_unplaced = (not st.unplaced) and bool(suspect)
 
     if s1:
         st.reasons.append(
@@ -150,10 +258,16 @@ def assess_placement(pcb_data, pcb_file: Optional[str] = None,
         st.reasons.append(
             f"{st.outside_fraction:.0%} of footprints lie outside the board outline")
     if st.partially_unplaced:
+        _benign_n = len(dup_refs) - len(suspect)
         st.reasons.append(
-            f"{len(dup_refs)} footprint(s) are stacked on another "
-            f"({', '.join(dup_refs[:8])}) -- typically a netlist re-import "
-            f"dropping new parts at one spot on an otherwise-placed board")
+            f"{len(suspect)} footprint(s) are stacked on another "
+            f"({', '.join(suspect[:8])}) -- typically a netlist re-import "
+            f"dropping new parts at one spot on an otherwise-placed board"
+            + (f" [{_benign_n} further co-located ref(s) look deliberate "
+               f"(the far side of the board, or a marker class) and are not "
+               f"counted -- note being LOCKED is NOT one of the excuses, "
+               f"because this toolchain stamps its own locks]"
+               if _benign_n else ""))
     return st
 
 

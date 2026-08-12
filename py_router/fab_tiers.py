@@ -236,6 +236,9 @@ def check_param_floors(copper_layer_count, tier=None, overrides=None, **params):
     return viols
 
 
+_escalation_lever_said = []
+
+
 def warn_fab_escalation(context):
     """Emit a one-line warning (deduped per run, per context) that a routing step
     dropped below the standard floor to the more-costly advanced floor."""
@@ -245,6 +248,13 @@ def warn_fab_escalation(context):
     print(f"  WARNING: {context}: escalated standard->advanced fab floor "
           f"(0.25/0.15 via etc., more costly to fab); pass --fab-tier advanced to "
           f"silence, or --fab-overrides to pin your own floor (forbids escalation)")
+    if not _escalation_lever_said:
+        _escalation_lever_said.append(True)
+        print("           NOTE: --via-size cannot prevent this. The via is "
+              "re-derived from min(pad.size_x, pad.size_y) floored at the fab "
+              "ladder, so RAISING --via-size makes the clamp fire more "
+              "readily, never less. --fab-overrides collapses the ladder to a "
+              "single rung and is the only flag that forbids the escalation.")
 
 
 # --- Override file + argparse helpers ----------------------------------------
