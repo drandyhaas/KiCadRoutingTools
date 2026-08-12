@@ -22,7 +22,8 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from krt_capabilities import capabilities, missing, script_flags  # noqa: E402
+from krt_capabilities import (capabilities, missing, script_flags,  # noqa: E402
+                              _tool_path)
 
 
 def _run(args, cwd=ROOT):
@@ -42,8 +43,8 @@ def test_the_inventory_is_json_and_complete():
 
 def test_flags_are_read_without_importing():
     """Asking 'can you do X' must not be able to trigger a side effect."""
-    flags = script_flags(os.path.join(ROOT, 'route.py'))
-    for f in ('--track-width-floor', '--json-out', '--nets', '--rip-existing-nets'):
+    flags = script_flags(_tool_path(ROOT, 'route.py'))
+    for f in ('--track-width', '--json-out', '--nets', '--rip-existing-nets'):
         assert f in flags, f"{f} not discovered in route.py"
     assert script_flags(os.path.join(ROOT, 'no_such_file.py')) == []
     print("  PASS: flags read from source, missing file is empty not fatal")
@@ -51,8 +52,8 @@ def test_flags_are_read_without_importing():
 
 def test_require_passes_on_what_this_clone_has():
     r = _run([os.path.join(ROOT, 'krt_capabilities.py'), '--require',
-              'route.py:--track-width-floor', 'route.py:--json-out',
-              'route_disconnected_planes.py:--net-layers',
+              'route.py:--track-width', 'route.py:--json-out',
+              'repair_planes.py:--plane-layers',
               'place_route_loop.py:--accept-cmd', 'check_floorplan.py'])
     assert r.returncode == 0, r.stderr
     print("  PASS: --require exits 0 when every token is satisfied")
@@ -84,7 +85,7 @@ def test_route_py_answers_without_a_board():
     """`route.py --capabilities` must work with no positional argument: the
     question is asked before there is any trust in the clone, so requiring a
     board to ask it defeats the purpose."""
-    r = _run([os.path.join(ROOT, 'route.py'), '--capabilities'])
+    r = _run([_tool_path(ROOT, 'route.py'), '--capabilities'])
     assert r.returncode == 0, r.stderr[-800:]
     caps = json.loads(r.stdout)
     assert caps['modules']['route.py'] is True
@@ -134,7 +135,7 @@ def test_a_script_does_NOT_inherit_another_CLIs_flags():
     # These four are argparse errors on the real CLI -- verified by --help.
     for token in ('route_planes.py:--net-clearances',
                   'route_planes.py:--track-width-floor',
-                  'route_disconnected_planes.py:--net-clearances',
+                  'repair_planes.py:--net-clearances',
                   'route_diff.py:--track-width-floor'):
         assert k.missing(caps, [token]), \
             f'{token} does not exist on that CLI and must be reported missing'
@@ -143,8 +144,8 @@ def test_a_script_does_NOT_inherit_another_CLIs_flags():
     # from the fab_tiers registrar (0 ArgumentParser, 2 add_argument), which is
     # exactly the hop that must survive.
     for token in ('route_planes.py:--fab-overrides',
-                  'route_disconnected_planes.py:--net-layers',
-                  'route_disconnected_planes.py:--track-width-floor',
+                  'repair_planes.py:--plane-layers',
+                  'repair_planes.py:--fab-overrides',
                   'route.py:--net-clearances',
                   'route_diff.py:--net-clearances',
                   'qfn_fanout.py:--escape-method'):

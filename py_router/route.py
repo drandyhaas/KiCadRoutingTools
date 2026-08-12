@@ -4881,6 +4881,11 @@ For differential pair routing, use route_diff.py:
         # asks it precisely because it does not yet trust anything else this
         # clone would tell it. sys.exit rather than return: this block lives
         # directly under `if __name__ == "__main__":`, not inside a main().
+        # krt_capabilities lives at the REPO root, one level above this
+        # engine dir (#522 layout), so hop up before importing it.
+        _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if _repo_root not in sys.path:
+            sys.path.insert(0, _repo_root)
         from krt_capabilities import capabilities as _caps
         print(json.dumps(_caps(), indent=1, sort_keys=True))
         sys.exit(0)

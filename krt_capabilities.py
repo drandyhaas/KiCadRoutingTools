@@ -27,10 +27,33 @@ import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
+# The #522/placement-split layout spread the tools over py_router/, py_tools/
+# and py_placer/. A consumer keeps naming them bare ('route.py'), so every
+# lookup resolves through _tool_path, which accepts EITHER layout -- flat for
+# an older clone, packaged for this one.
+_TOOL_DIRS = ('', 'py_router', 'py_tools', 'py_placer')
+
+
+def _tool_path(root, mod):
+    """Absolute path to `mod`, wherever the #522/placement-split layout put it.
+
+    Falls back to the flat join so the error message a missing module produces
+    still names the place the caller expected it.
+    """
+    for d in _TOOL_DIRS:
+        p = os.path.join(root, d, mod)
+        if os.path.isfile(p):
+            return p
+    return os.path.join(root, mod)
+
+
 # The modules a consumer is likely to depend on by name. Presence is reported
 # for every one; absence is only an ERROR when --require asks for it.
+# `route_disconnected_planes.py` was RENAMED to `repair_planes.py`; a consumer
+# pinning the old name still gets an honest "module not present" from
+# missing(), which looks up un-inventoried names itself.
 KNOWN_MODULES = (
-    'route.py', 'route_diff.py', 'route_planes.py', 'route_disconnected_planes.py',
+    'route.py', 'route_diff.py', 'route_planes.py', 'repair_planes.py',
     'place_optimize.py', 'place_route_loop.py', 'place_fanout_clearance.py',
     'bga_fanout.py', 'qfn_fanout.py',
     'check_drc.py', 'check_connected.py', 'check_floorplan.py',
@@ -41,7 +64,7 @@ KNOWN_MODULES = (
 
 # Scripts whose flag set a consumer may want to pin.
 FLAG_SCRIPTS = ('route.py', 'route_diff.py', 'route_planes.py',
-                'route_disconnected_planes.py', 'place_route_loop.py',
+                'repair_planes.py', 'place_route_loop.py',
                 'place_optimize.py', 'check_drc.py', 'check_floorplan.py')
 
 _FLAG_RE = re.compile(r'add_argument\(\s*["\'](--[A-Za-z0-9][A-Za-z0-9-]*)["\']')
@@ -127,8 +150,8 @@ def script_flags(path, _depth=1):
 
 
 def capabilities(root=ROOT):
-    mods = {m: os.path.isfile(os.path.join(root, m)) for m in KNOWN_MODULES}
-    flags = {s: script_flags(os.path.join(root, s))
+    mods = {m: os.path.isfile(_tool_path(root, m)) for m in KNOWN_MODULES}
+    flags = {s: script_flags(_tool_path(root, s))
              for s in FLAG_SCRIPTS if mods.get(s)}
     out = {
         'schema': 1,
@@ -138,6 +161,9 @@ def capabilities(root=ROOT):
         'flags': flags,
     }
     try:                                    # best-effort, never fatal
+        _eng = os.path.join(root, 'py_router')
+        if os.path.isdir(_eng) and _eng not in sys.path:
+            sys.path.insert(0, _eng)        # #522 layout: the engine dir
         import routing_defaults as _d
         out['version'] = getattr(_d, 'VERSION', None)
     except Exception:
@@ -163,7 +189,7 @@ def missing(caps, required):
     gaps = []
     for token in required:
         mod, _, flag = token.partition(':')
-        path = os.path.join(root, mod)
+        path = _tool_path(root, mod)
         present = caps['modules'].get(mod)
         if present is None:                      # not in the inventory: look
             present = os.path.isfile(path)
