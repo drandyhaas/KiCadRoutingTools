@@ -486,13 +486,23 @@ def test_expect_moved_mismatch_is_reported_not_fatal():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_focus_without_summary_json_warns():
+def test_focus_without_summary_json_clusters_legality_findings():
+    """--focus with no --summary-json used to warn and emit nothing (run-4
+    G7); it now clusters the LEGALITY findings -- which need no route summary
+    -- into pocket panels instead of refusing. Pin the refusal-free path: no
+    warning, and the pocket siblings actually land next to the base render."""
     d = tempfile.mkdtemp()
     try:
         r = _run(PLACED, '-o', os.path.join(d, 'r.png'), '--focus',
                  '--size', '320', '--supersample', '1')
         assert r.returncode == 0
-        assert '--focus emits nothing without --summary-json' in r.stderr
+        assert '--focus emits nothing without --summary-json' not in r.stderr
+        assert os.path.exists(os.path.join(d, 'r.png'))
+        pockets = sorted(f for f in os.listdir(d) if 'pocket' in f)
+        assert pockets, (r.stdout, r.stderr)
+        # This fixture HAS legality findings, so the empty-board NOTE must
+        # not fire either -- the pockets ARE the focus output.
+        assert 'found nothing to focus on' not in r.stderr, r.stderr
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

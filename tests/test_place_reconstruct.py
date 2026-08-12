@@ -81,6 +81,9 @@ class TestReseatRung(unittest.TestCase):
 
     def test_ladder_order(self):
         sys.path.insert(0, ROOT)
+        sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
+        sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # placement split
+        sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
         import place_reconstruct as pr
         s = pr._STAGES
         self.assertIn('reseat', s)
@@ -133,6 +136,9 @@ class TestReseatRung(unittest.TestCase):
         158 mm off the outline, and every candidate looks equally good.
         """
         sys.path.insert(0, ROOT)
+        sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
+        sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # placement split
+        sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
         import tempfile
         from kicad_parser import parse_kicad_pcb
         from placement import floorplan, seeder
