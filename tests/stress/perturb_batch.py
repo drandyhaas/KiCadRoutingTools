@@ -252,10 +252,21 @@ def do_board(name, kind, out_dir, doses):
     for dose in doses:
         cell = os.path.join(work, f'd{dose:g}')
         os.makedirs(cell, exist_ok=True)
+        # GROUND TRUTH LIVES OUTSIDE THE CELL. The cell is the work dir every
+        # arm runs in, and the control is the human placement pose-for-pose --
+        # left beside `perturbed.kicad_pcb` (perturb's compatibility default)
+        # any glob, any `--before`, any tool taking a directory could read it,
+        # so the experiment would be fenced on paper and open in fact. `_truth/`
+        # is a sibling of the d<dose> cells, so `fence_audit --workdir <cell>`
+        # never walks it.
+        truth = os.path.join(work, '_truth', f'd{dose:g}')
+        os.makedirs(truth, exist_ok=True)
         perturbed = os.path.join(cell, 'perturbed.kicad_pcb')
         try:
             rec = P.perturb(board, perturbed, kind=kind, dose_mm=dose,
-                            ignore_nets=IGNORE_NETS)
+                            ignore_nets=IGNORE_NETS,
+                            control_out=os.path.join(truth,
+                                                     'control.kicad_pcb'))
         except Exception as exc:                            # noqa: BLE001
             rows.append({'board': name, 'kind': kind, 'dose_mm_requested': dose,
                          'status': 'error', 'reason': f'{type(exc).__name__}: {exc}'})
@@ -273,7 +284,9 @@ def do_board(name, kind, out_dir, doses):
         # per perturbed unit at its ORIGINAL bbox. Emitted intent alone is
         # vacuous on boards with no sheets (tigard/splitflap: 0 zones), so
         # without this the grader would PASS a wildly perturbed board.
-        intent = os.path.join(cell, 'truth_intent.json')
+        # It is DERIVED from truth (the unit's original bbox), so it belongs in
+        # `_truth/` with the control -- it is the grader's input, never an arm's.
+        intent = os.path.join(truth, 'truth_intent.json')
         _emit_truth_intent(control, members, intent)
 
         # Step 0b on the perturbed board -- what the skill would actually see.

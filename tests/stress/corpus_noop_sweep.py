@@ -53,7 +53,7 @@ def _signature(res):
     if res.get('refused'):
         return f'refused:{res["refused"]}'
     parts = []
-    for key in ('moved', 'proposed', 'legalize_moves'):
+    for key in ('moved', 'proposed', 'legalize_moves', 'unevidenced'):
         vals = sorted(res.get(key) or [])
         if vals:
             parts.append(f'{key}={",".join(vals)}')
@@ -98,14 +98,28 @@ def sweep_reconstruct(board, workdir):
     # A proposal that the gate rejected is still a proposal: the sweep asks
     # whether the tool SAW damage on a healthy board, not only whether it
     # applied any.
-    proposed = sorted((rep.get('proposals') or {}).keys()) \
-        if isinstance(rep.get('proposals'), dict) else []
+    # The key is `fit_proposals` (place_reconstruct.py:191). This read said
+    # `proposals`, so it was ALWAYS [] -- the one arm of the signature that
+    # exists to catch "a vector source fires on a healthy hole pattern" was
+    # blind to precisely that, on every board, since the arm was written.
+    # Accept the old name too: a sweep is only a change detector if it can
+    # read a baseline recorded before the rename.
+    props = rep.get('fit_proposals')
+    if not isinstance(props, dict):
+        props = rep.get('proposals')
+    proposed = sorted(props.keys()) if isinstance(props, dict) else []
     vectors = (list(rep.get('vectors') or [])
                + list(rep.get('vectors_derived') or [])
                + list(rep.get('vectors_airwire') or []))
     legal = (rep.get('legalize') or {}).get('would_move') or []
+    # An UNEVIDENCED move -- one the gate tuple cannot see -- is a silent
+    # regression of exactly the kind this sweep exists for, and it was not in
+    # the signature either.
+    unevidenced = sorted({m.get('ref') for m in (rep.get('unevidenced_moves')
+                                                 or []) if m.get('ref')})
     return {'moved': moved, 'proposed': proposed,
-            'vectors': len(vectors), 'legalize_moves': list(legal)}, None
+            'vectors': len(vectors), 'legalize_moves': list(legal),
+            'unevidenced': unevidenced}, None
 
 
 def sweep_repair(board, workdir):

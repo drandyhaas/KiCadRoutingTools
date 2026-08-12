@@ -185,8 +185,14 @@ def main():
             m = re.search(r"FOUND (\d+) DRC", o)
             grade["drc"] = int(m.group(1)) if m else (0 if "NO DRC" in o else None)
             grade["drc_final_raw"] = grade["drc"]
+            # `[^\n]*:` -- check_drc's per-type header carries an optional
+            # ` -- N in CONTACT` suffix, so a pinned `):` returned {} on every
+            # contact-carrying board. `drc` above is unaffected (different
+            # regex), so the symptom was a silently MISSING breakdown beside a
+            # correct total. `[A-Z0-9-]` matches board_score's char class so a
+            # numeric type name cannot reintroduce the same silence.
             grade["by_type"] = dict((k.strip(), int(v)) for k, v in
-                                    re.findall(r"^([A-Z][A-Z -]+?) violations \((\d+)\):", o, re.M))
+                                    re.findall(r"^([A-Z0-9][A-Z0-9 -]+?) violations \((\d+)\)[^\n]*:", o, re.M))
         except Exception as e2:
             grade["drc"] = None; grade["drc_err"] = str(e2)[:100]
     try:

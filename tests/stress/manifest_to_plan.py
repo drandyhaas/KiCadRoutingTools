@@ -172,8 +172,17 @@ BOOL_FLAGS = {
 # --output still feeds the chain-pruning file list. --net-clearances is a
 # board-specific JSON path; the GUI derives the same map from the board's live
 # net classes, so a replayed plan carries no param for it.
+#
+# --deadline is a HARNESS budget, not a routing parameter: it changes nothing
+# about the copper, only how long the process is allowed to spend making it, and
+# the recorded number belongs to whatever external timeout the recording harness
+# had. The GUI has no equivalent and needs none -- it has a live Cancel button
+# driving the same `cancel_check`. Without this entry it falls through to the
+# unknown-flag branch and lands in the plan as a `deadline` param that no dialog
+# control matches, which the executor then drops silently; consuming it here
+# says so on purpose instead.
 IGNORE_FLAGS = {'--output', '--summary-json', '--schematic-dir', '--report',
-                '--net-clearances'}
+                '--net-clearances', '--deadline'}
 
 # Per-tool flag renames: bga_fanout calls the trace width --width (routed to the
 # Basic-tab track_width, which BGA fanout reads). qfn_fanout also uses --width

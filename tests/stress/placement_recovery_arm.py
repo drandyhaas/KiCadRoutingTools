@@ -11,6 +11,14 @@ perturb.json (see the workdir prep in the run-8 notes), and prints one JSON
 object: the gate numbers, the graded output, how many vectors each source
 produced, the rigid-consistency count, and the recovery.
 
+THAT LAYOUT IS NOW A LEAK, and this reader is kept on it only to stay usable
+against the run-8 dirs that already exist. Truth living in the work dir is what
+run-12 Tier 0 closed: `fence_audit --mode create` reports a control inside the
+work dir whatever it is named, and `perturb(control_out=...)` puts the control
+AND the record in a sibling `_truth/`. Stage anything NEW that way
+(tests/stress/RUNBOOK.md, "Staging a perturbed subject") and point `ctrl` at
+the fenced path; do not copy this dir shape forward.
+
 Two rules this encodes, both learned the expensive way:
 
   * the applied dose must exceed the home tolerance, or the arm cannot measure
