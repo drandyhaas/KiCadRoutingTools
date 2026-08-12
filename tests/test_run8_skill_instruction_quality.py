@@ -54,6 +54,12 @@ DEFAULT_OVER_MEASUREMENT = re.compile(
     r'(\b(skip|skipped|skipping)\b'
     r'|\b(do not|don\'t|never|no need to|not)\s+'
     r'(run|check|measure|verify|need|use|pass|read|grade)\b'
+    # "usually routes better WITHOUT a fanout" pre-decides a question the
+    # stage just told the executor to measure four ways, and the verb list
+    # above did not cover it: the defect is the frequency word deciding, not
+    # the particular verb it decides with. Any "without/instead of/rather
+    # than X" is the same shape.
+    r'|\b(without|instead of|rather than)\b'
     r'|\bthe answer is no\b)', re.I)
 
 # Hedges: they turn an instruction into a suggestion, and a suggestion into
@@ -95,6 +101,9 @@ SELF_CHECK = [
     ('placement is normally skipped on a placed board', True, 'a paraphrase'),
     ('you typically do not need to run the lock advisor', True,
      'a different verb'),
+    ('A part that passes 1 and 2 with room to spare usually routes better '
+     'WITHOUT a fanout', True,
+     'the same defect reached through a verb the first list did not carry'),
     ('Schematic sheets usually are not one contiguous area', False,
      'a claim about BOARDS, not behaviour'),
     ('NEVER skip the assessment', False, 'a prohibition'),

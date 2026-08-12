@@ -25,6 +25,7 @@ check that catches stacked parts.
 import importlib.util
 import os
 import re
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,6 +38,31 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # whole point of this gate is that NO skill file drifts from the real parsers --
 # so every one is a source, and the assertions below say which file must carry
 # which rule.
+def source_text(rel):
+    """What the executor actually reads for this source.
+
+    For a DRIVER that is its --dump-all output, not its Python source. The
+    source splits one emitted command across several string literals, so a
+    source scan sees `--json` at the end of a line whose value is on the next
+    one and reports a defect that does not exist -- while missing that the
+    emitted text is what the executor runs. Ask the driver.
+    """
+    path = os.path.join(ROOT, rel)
+    if not os.path.isfile(path):
+        return ''
+    if rel.endswith('_driver.py'):
+        env = dict(os.environ, COLUMNS='200', KRT_NO_BANNER='1')
+        p = subprocess.run([sys.executable, '-X', 'utf8', path, '--dump-all'],
+                           capture_output=True, text=True, encoding='utf-8',
+                           errors='replace', cwd=ROOT, timeout=300, env=env)
+        out = (p.stdout or '') + (p.stderr or '')
+        assert '=====' in out, f'{rel} --dump-all emitted nothing:\n{out[:400]}'
+        assert p.returncode == 0, \
+            f'{rel} --dump-all exited {p.returncode}; a stage refused:\n{out[-600:]}'
+        return out
+    return open(path, encoding='utf-8', errors='replace').read()
+
+
 def _all_skill_text():
     """Every skill file as one string: a rule may live in any of the three."""
     out = []
@@ -57,22 +83,93 @@ SOURCES = [
     '.claude/skills/plan-pcb-routing/references/evidence-map.md',
     '.claude/skills/plan-pcb-routing/references/verifier-prompts.md',
     '.claude/skills/plan-pcb-routing/references/convergence.md',
+    # ...and so does the DRIVER that now emits the workflow. This is the same
+    # hole one level down, and it opened exactly as the comment above predicts:
+    # the stage bodies moved out of SKILL.md into scripts/*.py, the gate kept
+    # scanning only .md, and it went on reporting "all flag citations real"
+    # while the drivers emitted SEVEN commands that die at argparse. A command
+    # the executor is told to run is a command this gate must check, whatever
+    # file it is spelled in.
+    '.claude/skills/plan-pcb-placement/scripts/placement_driver.py',
+    '.claude/skills/plan-pcb-placement-and-routing/scripts/loop_driver.py',
     'docs/floorplan-intent.md',
     'docs/placement-optimization.md',
     'docs/claude-skills.md',
-    'placement/README.md',
+    'py_placer/placement/README.md',
     'README.md',
 ]
 
-TOOLS = ('place_optimize.py', 'place_route_loop.py', 'render_placement.py',
-         'check_floorplan.py', 'make_movie.py',
-         # Skill-local helper, cited by its full path in the docs -- so the
-         # entry is the path, which is also what _continued_blocks matches on.
-         '.claude/skills/plan-pcb-routing/scripts/board_score.py')
+# Tools are DISCOVERED from what the sources actually invoke, never listed by
+# hand. The hand-written list had six entries while the skills invoked twenty:
+# route.py, route_diff.py, route_planes.py, check_drc.py, check_reachability.py
+# and the rest were cited constantly and checked nowhere. A list someone has to
+# remember to extend is a list that silently stops covering things.
+# Only an INVOKED tool: something a `python3 ...` line runs. Matching bare
+# `foo.py` anywhere in the text sweeps in every library module the prose names
+# (routing_defaults.py, obstacle_map.py, ...), which have no CLI at all -- and a
+# gate that reports 40 unparseable libraries is a gate nobody reads.
+_TOOL_RE = re.compile(
+    r'\bpython[0-9]*(?:\s+-[A-Za-z]\S*(?:\s+\S+)?)*\s+'
+    r'((?:[\w./-]+/)?[a-z][a-z0-9_]*\.py)')
+
+
+def discovered_tools():
+    """Every repo tool the skills tell the executor to run."""
+    found = set()
+    for rel in SOURCES:
+        path = os.path.join(ROOT, rel)
+        if not os.path.isfile(path):
+            continue
+        text = open(path, encoding='utf-8', errors='replace').read()
+        for m in _TOOL_RE.finditer(text):
+            name = m.group(1).replace('\\', '/')
+            # A test is not a tool: it has no flag contract for the executor,
+            # and resolving its "parser" means EXECUTING it inside this gate.
+            if name.startswith(('tests/', 'wk/')):
+                continue
+            if os.path.isfile(os.path.join(ROOT, name)):
+                found.add(name)
+    return tuple(sorted(found))
+
+
+TOOLS = discovered_tools()
 
 # Flags that belong to a DIFFERENT tool on the same command line (a pipe, a
 # --route-args payload). --route-args carries route.py's flags verbatim.
 _ROUTE_ARGS_RE = re.compile(r"--route-args\s+(['\"])(.*?)\1", re.S)
+
+
+def _flags_from_help(tool):
+    """Option strings straight out of `tool --help`.
+
+    Needed because a good half of these tools build their parser inside the
+    `if __name__ == '__main__'` block, where importing the module cannot reach
+    it. --help is the same contract the executor sees, which makes it the right
+    authority anyway. Wide COLUMNS so argparse does not wrap a long flag onto
+    two lines and hide it from the regex.
+    """
+    def ask(*argv):
+        env = dict(os.environ, COLUMNS='200', KRT_NO_BANNER='1')
+        p = subprocess.run([sys.executable, '-X', 'utf8',
+                            os.path.join(ROOT, tool), *argv, '--help'],
+                           capture_output=True, text=True, encoding='utf-8',
+                           errors='replace', cwd=ROOT, timeout=180, env=env)
+        return (p.stdout or '') + (p.stderr or ''), p.returncode
+
+    text, rc = ask()
+    if '--help' not in text:
+        raise RuntimeError(f'--help produced no option list (exit {rc})')
+    flags = set(re.findall(r'(--[a-z][a-z0-9-]+)', text))
+    # A SUBCOMMAND tool keeps its real flags on the subparsers, and top-level
+    # --help never lists them. Reading only the top level reports every
+    # subcommand flag as nonexistent, which is a wall of false failures that
+    # buries the true ones. argparse prints the choices as {a,b,c}.
+    for m in re.finditer(r'\{([a-z0-9_][a-z0-9_,-]*)\}', text):
+        for sub in m.group(1).split(','):
+            sub_text, _ = ask(sub)
+            if '--help' in sub_text:
+                flags |= set(re.findall(r'(--[a-z][a-z0-9-]+)', sub_text))
+    return flags
 
 
 def _parser_for(tool):
@@ -107,7 +204,41 @@ def _parser_for(tool):
             argparse.ArgumentParser.parse_args = real_parse
         p = got.get('p')
         assert p is not None, f"could not capture {tool}'s parser"
-    return {s for a in p._actions for s in a.option_strings}
+    return _option_strings(p)
+
+
+def _option_strings(parser):
+    """Every option a parser accepts, subcommands included.
+
+    A subparsers action carries no option_strings of its own, so reading only
+    the top level of a verb-style tool reports every one of its real flags as
+    nonexistent -- dozens of false failures with the true ones buried in them.
+    """
+    import argparse
+    out = {s for a in parser._actions for s in a.option_strings}
+    for a in parser._actions:
+        if isinstance(a, argparse._SubParsersAction):
+            for sub in a.choices.values():
+                out |= _option_strings(sub)
+    return out
+
+
+def _strip_flag_payloads(block):
+    """Drop quoted spans that are a flag's VALUE; keep ordinary quoted args.
+
+    `--lever 'rip lever: --rip-existing-nets X + --grid-step 0.025'` describes
+    a step in prose, and its contents are not this tool's flags. But
+    `--nets "*" "!GND"` is an ordinary quoted argument, and dropping it makes
+    --nets look like a flag given no value. So strip a quoted span only when it
+    carries flags of its own, and keep it when it invokes something: --argv
+    "python3 route.py --nets ..." really is a command worth checking.
+    """
+    def repl(m):
+        inner = m.group(2)
+        if '.py' in inner:
+            return m.group(0)
+        return ' ' if '--' in inner else m.group(0)
+    return re.sub(r"""(['"])(.*?)\1""", repl, block, flags=re.S)
 
 
 def _cited_flags(block, tool):
@@ -117,10 +248,41 @@ def _cited_flags(block, tool):
     containing the tool name (the obvious first cut) reads only the first line
     of a backslash-continued command and silently checks almost nothing -- this
     gate found 5 flags that way instead of 20.
+
+    A flag belongs to the LAST tool named before it, which is how a shell reads
+    it. Handing every flag on the line to every tool on the line is what made
+    `converge.py record --kind route --argv "route.py --nets ..."` report
+    --kind and --argv as route.py flags: real-looking failures against a tool
+    that never saw them, mixed in with the true ones.
     """
     # strip --route-args payloads: those are route.py's flags, not this tool's
     block = _ROUTE_ARGS_RE.sub(' ', block)
-    return set(re.findall(r'(--[a-z][a-z0-9-]+)', block))
+    # A quoted VALUE is prose, not a command line: `--lever 'rip lever:
+    # --rip-existing-nets X + --grid-step 0.025'` describes what a step did.
+    # Keep quoted spans that invoke something, because those (--argv
+    # "python3 route.py --nets ...") really are commands worth checking.
+    block = _strip_flag_payloads(block)
+    # In prose, a command lives inside backticks and the sentence around it
+    # talks about OTHER tools by name ("`converge.py where ...` -- pass
+    # `--summary-json` on the render"). Scanning the whole line hands the
+    # render's flags to converge. One span, one command.
+    spans = re.findall(r'`([^`]+)`', block) or [block]
+
+    out = set()
+    for span in spans:
+        current = None
+        for tok in re.split(r'\s+', span):
+            bare = tok.strip('\'"`(),;').replace('\\', '/')
+            if bare.endswith('.py'):
+                current = next((t for t in TOOLS
+                                if bare == t or bare.endswith('/' + t)
+                                or os.path.basename(t) == os.path.basename(bare)),
+                               current)
+                continue
+            m = re.match(r'(--[a-z][a-z0-9-]+)', bare)
+            if m and current == tool:
+                out.add(m.group(1))
+    return out
 
 
 def _continued_blocks(text, tool):
@@ -141,25 +303,160 @@ def _continued_blocks(text, tool):
     return blocks
 
 
+DRIVERS = tuple(s for s in SOURCES if s.endswith('_driver.py'))
+
+
+def _tool_spans(block, tool):
+    """Token runs that belong to `tool`: from its name to the next tool named."""
+    block = _ROUTE_ARGS_RE.sub(' ', block)
+    block = _strip_flag_payloads(block)
+    spans, cur = [], None
+    for tok in re.split(r'\s+', block):
+        bare = tok.strip('\'"`(),;').replace('\\', '/')
+        if bare.endswith('.py'):
+            hit = next((t for t in TOOLS
+                        if bare == t or bare.endswith('/' + t)
+                        or os.path.basename(t) == os.path.basename(bare)), None)
+            if cur is not None:
+                spans.append(cur)
+                cur = None
+            if hit == tool:
+                cur = []
+            continue
+        if cur is not None and bare:
+            cur.append(bare)
+    if cur is not None:
+        spans.append(cur)
+    return spans
+
+
+def _parser_obj(tool):
+    """The parser itself, for metadata a flag-name set cannot carry."""
+    path = os.path.join(ROOT, tool)
+    spec = importlib.util.spec_from_file_location(
+        os.path.basename(tool)[:-3] + '_meta', path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    if hasattr(mod, 'build_parser'):
+        return mod.build_parser()
+    import argparse
+    got = {}
+    real = argparse.ArgumentParser.parse_args
+
+    def capture(self, *a, **kw):
+        got['p'] = self
+        raise SystemExit(0)
+    argparse.ArgumentParser.parse_args = capture
+    try:
+        mod.main()
+    except SystemExit:
+        pass
+    finally:
+        argparse.ArgumentParser.parse_args = real
+    assert got.get('p') is not None, f'no parser for {tool}'
+    return got['p']
+
+
+def test_driver_commands_supply_required_options_and_values():
+    """A flag that EXISTS can still make the command die at argparse.
+
+    The flag-name check above cannot see two failures that stop the executor
+    just as hard, and both shipped:
+
+      * a REQUIRED option left out entirely -- `route_planes.py` without
+        `--plane-layers` exits 2 before it opens the board;
+      * a flag that takes a value, given none -- `board_score.py --json` at the
+        end of a line is `expected one argument`.
+
+    Scoped to the drivers, because a driver emission is a command the executor
+    is told to run verbatim. Prose may legitimately show a fragment.
+    """
+    problems = []
+    checked = 0
+    for src in DRIVERS:
+        text = source_text(src)
+        for tool in TOOLS:
+            spans = [s for b in _continued_blocks(text, tool)
+                     for s in _tool_spans(b, tool)]
+            if not spans:
+                continue
+            try:
+                parser = _parser_obj(tool)
+            except Exception:
+                continue          # covered by the flag test's own <parser> row
+            import argparse as _ap
+            # store_true/store_false/count/help consume nothing; every other
+            # action stores a value and argparse errors without one -- EXCEPT
+            # when its nargs makes zero values legal. `nargs='*'` and `'?'`
+            # both accept none, so `--reseat --clearance 0.2` parses to
+            # `{'reseat': [], 'clearance': 0.2}` and is the documented calling
+            # convention ("bare --reseat = auto scope"). Without this the check
+            # reported a correct, working command as dying at argparse, and the
+            # false positive outlived several attempts to fix the driver that
+            # was never wrong. `nargs='+'` and a fixed count still need values.
+            def _optional_value(a):
+                return getattr(a, 'nargs', None) in ('*', '?', 0)
+            takes_value = {s: (not isinstance(a, (_ap._StoreTrueAction,
+                                                  _ap._StoreFalseAction,
+                                                  _ap._StoreConstAction,
+                                                  _ap._CountAction,
+                                                  _ap._HelpAction))
+                               and not _optional_value(a))
+                           for a in parser._actions for s in a.option_strings}
+            required = [tuple(a.option_strings) for a in parser._actions
+                        if getattr(a, 'required', False) and a.option_strings]
+            for span in spans:
+                checked += 1
+                for opts in required:
+                    if not any(o in span for o in opts):
+                        problems.append(
+                            (src, tool, f'required {"/".join(opts)} not passed'))
+                for i, tok in enumerate(span):
+                    if not takes_value.get(tok):
+                        continue
+                    nxt = span[i + 1] if i + 1 < len(span) else None
+                    if nxt is None or nxt.startswith('--'):
+                        problems.append(
+                            (src, tool, f'{tok} takes a value, none given'))
+    assert not problems, (
+        'driver commands that die at argparse:\n'
+        + '\n'.join(f'  {s}:  {t}  {w}' for s, t, w in sorted(set(problems))))
+    assert checked >= 10, f'only {checked} driver command(s) scanned'
+    print(f'  PASS: {checked} driver command spans, all runnable')
+
+
 def test_every_documented_flag_exists():
     problems = []
     checked = 0
     for tool in TOOLS:
-        try:
-            valid = _parser_for(tool)
-        except Exception as e:
-            problems.append((tool, '<parser>', f"{type(e).__name__}: {e}"))
-            continue
+        # Collect the citations FIRST, and only then go looking for a parser.
+        # A tool invoked without flags has no contract to check, and resolving
+        # a parser for it is how a useful failure list fills up with noise
+        # about modules nobody passed a flag to.
+        cites = []
         for src in SOURCES:
-            path = os.path.join(ROOT, src)
-            if not os.path.isfile(path):
-                continue
-            text = open(path, encoding='utf-8', errors='replace').read()
+            text = source_text(src)
             for block in _continued_blocks(text, tool):
                 for flag in _cited_flags(block, tool):
-                    checked += 1
-                    if flag not in valid:
-                        problems.append((tool, src, flag))
+                    cites.append((src, flag))
+        if not cites:
+            continue
+        try:
+            valid = _parser_for(tool)
+        except Exception:
+            # The import path cannot reach a parser built under
+            # `if __name__ == '__main__'`. Ask the tool the way the executor
+            # does before calling it unparseable.
+            try:
+                valid = _flags_from_help(tool)
+            except Exception as e:
+                problems.append((tool, '<parser>', f"{type(e).__name__}: {e}"))
+                continue
+        for src, flag in cites:
+            checked += 1
+            if flag not in valid:
+                problems.append((tool, src, flag))
     assert not problems, "documented flags that do not exist:\n" + "\n".join(
         f"  {t}  in {s}:  {f}" for t, s, f in problems)
     # A gate that checks nothing passes for the wrong reason. The docs cite well
@@ -384,6 +681,7 @@ def test_routed_board_lenses_exist_and_reenter_the_loop():
 
 TESTS = [
     test_every_documented_flag_exists,
+    test_driver_commands_supply_required_options_and_values,
     test_the_score_is_the_gate_and_the_router_is_not_the_judge,
     test_routed_board_lenses_exist_and_reenter_the_loop,
     test_the_placement_tools_are_actually_mentioned,
