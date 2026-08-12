@@ -18,6 +18,10 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-routing', 'scripts'))
+# board_score's own main() puts the clone root on sys.path before it calls
+# anything; a test calling those functions directly has to do the same, or
+# `kicad_parser` is missing and the net-name audit reports UNGRADED forever.
+sys.path.insert(0, ROOT)
 
 import board_score as bs                                        # noqa: E402
 
@@ -164,6 +168,130 @@ def test_a_fully_connected_board_reports_empty_lists_not_missing_keys():
     conn = _parse('ALL NETS FULLY CONNECTED\n')
     assert conn['broken'] == 0 and conn['unrouted'] == 0
     print('  PASS: a clean board is clean')
+
+
+# --- D6: one payload, one spelling of every net -------------------------------
+#
+# `poured_nets` is the ONLY net-name field in the score read out of the raw file
+# text instead of through the parser, and the file escapes a backslash. Measured
+# on neo6502, from a single json.dump:
+#     poured_nets   : '/GPIO10\\OE3#'   <- two backslashes
+#     unrouted.nets : '/GPIO10\OE3#'    <- one, and the board agrees
+# A consumer built --ignore-nets from the first, 10 of 61 names matched nothing,
+# and the render came back hpwl +45.6% / crossings +129.5% on an unchanged board.
+
+# A net name with a backslash, as the FILE stores it (escaped). This is the
+# neo6502 shape exactly: the file says `\\`, the net is one `\`.
+ESCAPED_BOARD = (
+    '(kicad_pcb (version 20240108)\n'
+    '\t(net 0 "")\n'
+    '\t(net 1 "/GPIO10\\\\OE3#")\n'
+    '\t(net 2 "GND")\n'
+    '\t(zone (net 1) (net_name "/GPIO10\\\\OE3#") (layer "B.Cu") (hatch edge 0.5))\n'
+    '\t(zone (net 2) (net_name "GND") (layer "B.Cu") (hatch edge 0.5))\n'
+    ')\n')
+
+# What the parser -- and therefore the board, check_connected, and every other
+# field of the score -- calls those two nets.
+TRUE_NAMES = ['/GPIO10\\OE3#', 'GND']
+
+
+def _write(d, name, text):
+    p = os.path.join(d, name)
+    with open(p, 'w', encoding='utf-8') as f:
+        f.write(text)
+    return p
+
+
+def test_poured_nets_is_spelled_the_way_the_board_spells_it():
+    """The field must survive a round trip through the board's own parser."""
+    import tempfile
+    from kicad_parser import parse_kicad_pcb
+    with tempfile.TemporaryDirectory() as d:
+        b = _write(d, 'b.kicad_pcb', ESCAPED_BOARD)
+        real = bs.run_tool
+        bs.run_tool = lambda root, tool, board, *a, **k: (1, SAMPLE)
+        try:
+            conn = bs.score_connectivity('.', b)
+        finally:
+            bs.run_tool = real
+        truth = sorted(n.name for n in parse_kicad_pcb(b).nets.values() if n.name)
+
+    assert conn['poured_nets'] == TRUE_NAMES, (
+        f'poured_nets must spell nets as the board does.\n'
+        f'  got   : {conn["poured_nets"]}\n  want  : {TRUE_NAMES}')
+    assert conn['poured_nets'] == truth, (
+        f'poured_nets disagrees with the parser on the same file: '
+        f'{conn["poured_nets"]} vs {truth}')
+    print('  PASS: poured_nets is unescaped, and matches the parser exactly')
+
+
+def test_poured_nets_carries_its_meaning_in_the_payload():
+    """It means "the handler is route_disconnected_planes", NOT "this is a
+    plane". A consumer read it the second way and removed 332 of 545 pads
+    (72%) from its own analysis. The sentence has to travel WITH the list --
+    a comment in board_score.py is invisible to whoever reads the JSON."""
+    conn = _parse(SAMPLE)
+    meaning = conn.get('poured_nets_meaning', '')
+    assert meaning and 'NOT' in meaning and 'ignore-nets' in meaning, \
+        f'poured_nets must publish what it means, got {meaning!r}'
+    print('  PASS: poured_nets ships its own definition')
+
+
+def test_every_published_net_name_exists_on_the_board():
+    """The self-check that makes a future D6 impossible to publish silently.
+
+    A mangled name and an absent net are INDISTINGUISHABLE downstream -- both
+    match nothing, neither complains. Only the tool that emitted the name can
+    tell them apart, so it has to be the one that looks.
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        b = _write(d, 'b.kicad_pcb', ESCAPED_BOARD)
+
+        good = {'connectivity_nets': ['GND'],
+                'components': {'broken': {'poured_nets': TRUE_NAMES},
+                               'unrouted': {'nets': ['/GPIO10\\OE3#']}}}
+        a = bs.audit_net_names(b, good)
+        assert a['ran'] and a['unknown_count'] == 0, \
+            f'a correct payload must audit clean, got {a}'
+        assert a['checked'] == 4, f'all four names must be checked, got {a}'
+
+        # The exact defect, reconstructed: poured_nets double-escaped while
+        # unrouted.nets is right -- one payload, two spellings.
+        bad = {'connectivity_nets': ['GND'],
+               'components': {'broken': {'poured_nets': ['/GPIO10\\\\OE3#']},
+                              'unrouted': {'nets': ['/GPIO10\\OE3#']}}}
+        a = bs.audit_net_names(b, bad)
+        assert a['unknown_count'] == 1, \
+            f'the double-escaped name must be caught, got {a}'
+        assert a['unknown'] == {'components.broken.poured_nets':
+                                ['/GPIO10\\\\OE3#']}, \
+            f'the audit must name the FIELD that is wrong, got {a["unknown"]}'
+
+        # Fields whose job is naming things that do NOT exist are excluded on
+        # purpose; auditing them would report every correct run as broken.
+        spec = {'components': {
+            'net_widths': {'nets': {'GND': {}},
+                           'patterns_matching_no_routed_net': ['NOPE*']},
+            'length': {'groups': {'B': {'missing_nets': ['ALSO_NOT_HERE'],
+                                        'worst': 'GND'}}}}}
+        a = bs.audit_net_names(b, spec)
+        assert a['unknown_count'] == 0, \
+            f'spec-finding fields must not be audited as net names, got {a}'
+    print('  PASS: every published net name is checked against the board')
+
+
+def test_the_audit_refuses_to_pass_a_board_it_could_not_read():
+    """`0 unknown` from a board with no net table is the vacuity trap this
+    file guards everywhere else -- it must say `ran: false` instead."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        b = _write(d, 'b.kicad_pcb', '(kicad_pcb (version 20240108))\n')
+        a = bs.audit_net_names(b, {'connectivity_nets': ['GND']})
+    assert a['ran'] is False and 'unknown_count' not in a, \
+        f'no net table is not a pass, got {a}'
+    print('  PASS: an unreadable board audits UNGRADED, not clean')
 
 
 if __name__ == '__main__':
