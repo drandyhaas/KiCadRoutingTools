@@ -3611,7 +3611,14 @@ class RoutingDialog(wx.Dialog):
                 if drc_changes:
                     board.SetModified()
                     print(f"DRC settings: loosened {len(drc_changes)} Board Setup "
-                          f"value(s) to the routed floors (save to persist)")
+                          f"value(s) to the routed floors (save to persist):")
+                    # LIST them, same as the CLI writeback. A count alone hid
+                    # `severity[annular_width]: error -> ignore` and
+                    # `severity[solder_mask_bridge]: error -> ignore` on run 14
+                    # -- the two rules that board went on to violate, silenced
+                    # inside a "17 value(s)" summary.
+                    for _c in drc_changes:
+                        print(f"    {_c}")
             except Exception as e:
                 print(f"(skipped DRC-settings write-back: {e})")
 
