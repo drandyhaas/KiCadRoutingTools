@@ -1131,6 +1131,33 @@ class LegalityContext:
         return self.gate.rect_outside_amount(ext, exact=exact, edges=edges)
 
 
+def format_oob_clause(report, limit: int = 6) -> str:
+    """One line naming the off-board parts AND which measure produced them.
+
+    Lives beside the measure so the CLIs that print it cannot drift -- hand
+    copying a basis string into each is the Class-2 CLI drift CLAUDE.md warns
+    about, and no parity gate covers a print.
+
+    Sorted by AMOUNT, worst first. Sorting by ref and then truncating hides the
+    offenders that matter: on one board the four mounting holes at 3.0mm sat
+    behind five fiducials at 0.875mm. That is the run-4 census-cap defect,
+    which this module already records elsewhere.
+    """
+    refs = list(report.get('oob_pad_refs') or [])
+    if not refs:
+        return ''
+    refs.sort(key=lambda ra: -ra[1])
+    shown = ', '.join('{} ({}mm)'.format(r, a) for r, a in refs[:limit])
+    more = ' ... showing {} of {}'.format(limit, len(refs)) if len(refs) > limit else ''
+    basis = (
+        "    (part pad AABB -- pads PLUS NPTH drill circles, summed over the "
+        "union rect's four sides -- against an outline inflated by the GRADING "
+        "CLEARANCE. It moves when --clearance moves, so a hit here is not "
+        "necessarily copper off the outline. The per-pad, margin-0 outline "
+        "measure is render_placement's checklist.a_off_outline.pad_copper.)")
+    return shown + more + "\n" + basis
+
+
 def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
                        edge_margin: Optional[float] = None,
                        worst_n: int = 10) -> Dict[str, object]:
@@ -1245,6 +1272,10 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
 
     oob_count = 0
     oob_amount = 0.0
+    # NAME them. This returned a bare count, so the three CLIs that print it
+    # ("N part(s) with pad copper off-board") could not say WHICH part -- one
+    # run deduced the single ref by elimination.
+    oob_refs = []
     board_info = getattr(pcb_data, 'board_info', None)
     if board_info is not None and getattr(board_info, 'board_bounds', None):
         gate = BoardOutlineGate(board_info,
@@ -1259,12 +1290,25 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
             if amt > EPS:
                 oob_count += 1
                 oob_amount += amt
+                oob_refs.append([ref, round(amt, 4)])
     worst.sort(key=lambda t: -t[2])
     return {'pad_conflicts': pad_conflicts,
             'pad_shortfall': round(pad_shortfall, 4),
             'hole_conflicts': hole_conflicts,
             'oob_pad_count': oob_count,
             'oob_pad_amount': round(oob_amount, 4),
+            'oob_pad_refs': sorted(oob_refs),
+            # WHICH QUANTITY THIS IS. Three tools print "pad copper
+            # off-board" for three different measurements. This one is the
+            # part's pad AABB against an outline inflated by the GRADING
+            # CLEARANCE -- so it moves when --clearance moves, and a rotated
+            # part reports a breach no pad makes. render_placement's
+            # `checklist.a_off_outline.pad_copper` is the per-PAD, margin-0
+            # outline measure the docs designate as authoritative.
+            'oob_pad_basis': ('part pad AABB vs outline inflated by the '
+                              'grading clearance (NOT the per-pad outline '
+                              'measure; see render_placement '
+                              'checklist.a_off_outline.pad_copper)'),
             # worst_n <= 0 = list ALL (run-4 F5: the repair rung's census
             # was silently capped at 10 movers on a 20-pair board).
             'worst': worst[:worst_n] if worst_n and worst_n > 0 else worst,

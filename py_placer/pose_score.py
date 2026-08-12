@@ -59,7 +59,8 @@ def make_state(pcb_data, board_path: str, *, clearance: float = 0.25,
                halo_base: float = 0.5, halo_coef: float = 0.15,
                halo_weight: float = 2.0, edge_halo: float = 2.0,
                edge_weight: float = 2.0,
-               ignore_net_ids=None, net_weights=None, move_refs=None):
+               ignore_net_ids=None, net_weights=None, move_refs=None,
+               extra_locked_refs=None):
     """A QuenchState used purely as an oracle -- built, queried, thrown away.
 
     Defaults mirror the placement guidance rather than quench's own library
@@ -74,13 +75,15 @@ def make_state(pcb_data, board_path: str, *, clearance: float = 0.25,
         halo_coef=halo_coef, halo_weight=halo_weight, edge_halo=edge_halo,
         edge_weight=edge_weight, grid_step=grid_step,
         length_weight=length_weight, ignore_net_ids=ignore_net_ids,
-        net_weights=net_weights, move_refs=move_refs)
+        net_weights=net_weights, move_refs=move_refs,
+        extra_locked_refs=extra_locked_refs)
 
 
 def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
                step: float = 0.5, rotations: Sequence[float] = ROTATIONS,
                limit: int = 12, allow_rotations: bool = True,
                state=None, diagnostics: Optional[Dict] = None,
+               cancel_check=None,
                **state_kw) -> List[Dict]:
     """Legal poses for `ref`, cheapest first.
 
@@ -122,6 +125,17 @@ def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
     dropped_total = 0
     dropped_in_place = []
     for dx, dy in _offsets(radius, step):
+        # THE SWEEP, which `--limit` never bounded: limit truncates the sorted
+        # RESULT on the last line of this function, while every candidate here
+        # has already paid a full total_cost() plus ref_inversions(). A 30mm /
+        # 0.25mm ring set is 231,392 candidates and --limit 12 evaluates all of
+        # them. `_offsets` yields flat POINTS, not rings, so this runs once
+        # per candidate position (58,081 for r=30/s=0.25) -- finer than a
+        # ring and still negligible against a full cost evaluation.
+        if cancel_check is not None and cancel_check():
+            if diagnostics is not None:
+                diagnostics['stopped_early'] = True
+            break
         for rot in rots:
             x, y = x0 + dx, y0 + dy
             if not st.candidate_valid(ref, x, y, rot):

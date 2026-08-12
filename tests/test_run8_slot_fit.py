@@ -97,6 +97,54 @@ def main():
     got = reconstruct.fit_corner_insets(S(BOARD, parts), T(parts))
     check('one survivor does not over-determine a pattern', not got, str(got))
 
+    # ---- run-9: the cases the corner-only model could not express ----------
+    #
+    # A hole one inset in from an edge, mid-span along it, is an ordinary
+    # mounting pattern. With no slot there, a displaced member's offset agrees
+    # with nothing, the support >= 2 rule discards the one correct offset along
+    # with the wrong ones, and the ladder mints no vector at all.
+    print('a hole at an edge MIDPOINT is at seat, not displaced')
+    parts = {'H1': P(3.0, 3.0), 'H2': P(97.0, 3.0), 'H3': P(3.0, 77.0),
+             'H4': P(97.0, 77.0), 'H5': P(50.0, 77.0)}
+    got = reconstruct.fit_corner_insets(S(BOARD, parts), T(parts))
+    check('a mid-edge hole standing on its own seat is not proposed',
+          not got, str(got))
+    check('...specifically, it is not offered the place it already occupies',
+          (50.0, 77.0) not in got.get('H5', []), str(got.get('H5')))
+
+    print('mid-edge slots appear only when the corner model is over-subscribed')
+    # Four corners occupied, two displaced: demand 4 + 2 = 6 > 4.
+    parts = {'H1': P(3.0, 3.0), 'H2': P(97.0, 3.0), 'H3': P(3.0, 77.0),
+             'H4': P(97.0, 77.0), 'H5': P(40.0, 40.0), 'H6': P(60.0, 41.0)}
+    got = reconstruct.fit_corner_insets(S(BOARD, parts), T(parts))
+    check('both displaced holes get proposals', set(got) == {'H5', 'H6'},
+          str(sorted(got)))
+    check('...and the mid-edge seats are among them',
+          (50.0, 77.0) in got.get('H5', []) and (50.0, 3.0) in got.get('H5', []),
+          str(got.get('H5')))
+    check('...while every corner is correctly taken',
+          (3.0, 3.0) not in got.get('H5', []), str(got.get('H5')))
+
+    # The gate that keeps this from breaking the shipped single-hole case: one
+    # free corner and one claimant needs no mid-edge slot, and offering one
+    # hands the nearest-slot tiebreak a closer WRONG answer.
+    print('...and NOT when one free corner suffices')
+    parts = {'H1': P(3.0, 3.0), 'H2': P(97.0, 3.0), 'H3': P(3.0, 77.0),
+             'H4': P(50.0, 40.0)}
+    got = reconstruct.fit_corner_insets(S(BOARD, parts), T(parts))
+    check('the sole claimant is offered the free corner', got.get('H4') == [(97.0, 77.0)],
+          str(got.get('H4')))
+
+    print('two hole families are both fitted')
+    # An imperial board with a (3,3) family and a (7.62,1.27) family. Fitting
+    # only the largest makes the second family read as displaced, and its
+    # members then compete for the first family's free seat.
+    parts = {'H1': P(3.0, 3.0), 'H2': P(97.0, 3.0), 'H3': P(3.0, 77.0),
+             'A1': P(7.62, 1.27), 'A2': P(92.38, 78.73)}
+    got = reconstruct.fit_corner_insets(S(BOARD, parts), T(parts))
+    check('neither family member is treated as displaced',
+          'A1' not in got and 'A2' not in got, str(sorted(got)))
+
     print()
     if FAILURES:
         print(f'FAIL: {len(FAILURES)} check(s): {", ".join(FAILURES)}')

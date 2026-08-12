@@ -48,6 +48,13 @@ def _promote_staged(staged: str, final: str) -> None:
             os.replace(src, final_base + ext)
 
 
+#: The stage names that actually gate code. `classify` runs unconditionally
+#: (it is a prerequisite for everything below it, `reconstruct.classify` at the
+#: top of the pipeline) and is listed here so the default string round-trips.
+_STAGES = ('classify', 'fit', 'vector', 'assign', 'exchange', 'reseat',
+           'legalize')
+
+
 def main():
     import routing_defaults as defaults
 
@@ -65,8 +72,20 @@ Examples:
                    help="Optional floorplan intent (edge connectors exempt "
                         "from off-board repair; zones constrain re-seating)")
     p.add_argument("--stages",
-                   default="classify,fit,vector,assign,exchange,legalize",
-                   help="Comma list of stages to run (default: all)")
+                   default="classify,fit,vector,assign,exchange,reseat,"
+                           "legalize",
+                   help="Comma list of stages to run. Valid: classify, fit, "
+                        "vector, assign, exchange, reseat, legalize "
+                        "(default: all). `classify` runs regardless -- it is "
+                        "a prerequisite. `assign` also needs fit or vector to "
+                        "have produced candidates. `reseat` lifts the parts "
+                        "whose pad CENTRES are off the outline and re-seats "
+                        "them from scratch at their net centroids -- it runs "
+                        "before `legalize` because no cap ladder anchored on "
+                        "a part's current pose can carry it back onto the "
+                        "board, and legalize's minimal-move cleanup is much "
+                        "cheaper once everything is on it. An unknown name is "
+                        "an error, not a silent no-op.")
     p.add_argument("--anchor-extent", default="auto",
                    help="Anchor tier threshold in mm, or 'auto' = "
                         "max(3.5, P75 of pad-extent diagonals)")
@@ -84,16 +103,63 @@ Examples:
                         "boundary partners are home (run-4 F2/F4). Each "
                         "round is gated and pruned; the loop stops early "
                         "when a round moves nothing")
+    p.add_argument("--lock", nargs="+", default=None, metavar="REF",
+                   help="Reference globs this run may NOT move, on top of the "
+                        "board's own (locked yes) stamps. Every sibling "
+                        "placement tool has this and reconstruct did not -- "
+                        "the tool whose whole job is moving parts was the one "
+                        "with no way to say which parts it may not move. "
+                        "Scoping it therefore meant stamping temporary lock "
+                        "bits INTO the board being measured, which "
+                        "check_assembly then waives on and #521 reads.")
     p.add_argument("--max-move", type=float, default=5.0,
                    help="Legalize-stage displacement cap ladder tops out here "
                         "(default: 5.0)")
-    p.add_argument("--clearance", type=float, default=defaults.CLEARANCE)
-    p.add_argument("--board-edge-clearance", type=float, default=0.55)
+    p.add_argument("--clearance", type=float, default=None)
+    p.add_argument("--board-edge-clearance", type=float, default=None)
     p.add_argument("--grid-step", type=float, default=defaults.GRID_STEP)
     p.add_argument("--dry-run", action="store_true",
                    help="Print the stage reports and move list; write nothing")
+    p.add_argument("--deadline", type=float, default=None, metavar="SECONDS",
+                   help="Wall-clock budget. The legalize sweep has no internal "
+                        "bound and ran 46 min without terminating on a 217-part "
+                        "board (run 9); with a budget it stops between "
+                        "violators, keeps the seats it made, reports the rest "
+                        "in deadline_skipped, and exits 7. Default: no budget "
+                        "(a wall-clock default would break replay "
+                        "determinism). ANY harness with an external timeout "
+                        "should pass this at ~0.8x its own. Env: KRT_DEADLINE_S")
     args = p.parse_args()
+
+    # Run-7 S1 / run-13 F6: unset floors come from the BOARD, not a constant.
+    # A fixed 0.25 on a board declaring 0.2 measured 34% more shortfall and
+    # double the oob count -- and these tools VETO candidate moves on it, so a
+    # wrong floor steers the search, it does not merely mis-report.
+    from list_nets import board_floor_knobs
+    args.clearance, args.board_edge_clearance, _knobs = board_floor_knobs(
+        args.input_file, args.clearance, args.board_edge_clearance)
+    print(f"legality at clearance {args.clearance} "
+          f"({_knobs['clearance']['source']}), edge {args.board_edge_clearance} "
+          f"({_knobs['board_edge_clearance']['source']})")
     stages = {s.strip() for s in args.stages.split(',') if s.strip()}
+    # A misspelt stage used to be accepted silently and gate nothing, so
+    # `--stages legalise` ran no legalize and exited 0 with a clean-looking
+    # summary -- the same silent-lie class as the hang below.
+    _unknown = sorted(stages - set(_STAGES))
+    if _unknown:
+        p.error(f"unknown stage(s) {', '.join(_unknown)}; valid stages are "
+                f"{', '.join(_STAGES)}")
+
+    # Armed HERE, before the refusal paths below, not next to the first stage.
+    # The refusals (no Edge.Cuts, board carries copper, no legality layer)
+    # printed to stderr and returned with no JSON_SUMMARY at all, so a caller
+    # scraping the summary could not tell a refusal from a kill. `report` is
+    # mutated in place from here on and the flush hook sees whatever it holds.
+    report = {}
+    import krt_deadline
+    _dl = krt_deadline.arm(args.deadline, tool='place_reconstruct',
+                           on_partial=lambda: report)
+    report['stages_requested'] = sorted(stages)
 
     if not args.dry_run:
         try:
@@ -132,17 +198,26 @@ Examples:
               file=sys.stderr)
         return UNPLACED_EXIT
 
+    # Two lock sources, resolved once so every consumer agrees: the file's
+    # own (locked yes) stamps (read inside QuenchState) and these globs.
+    _extra_locked = set()
+    if args.lock:
+        import fnmatch as _fn
+        _extra_locked = {r for r in pcb.footprints
+                         if any(_fn.fnmatch(r, pat) for pat in args.lock)}
+        print(f"Locked via --lock: {len(_extra_locked)} ref(s)"
+              + (f": {', '.join(sorted(_extra_locked)[:8])}"
+                 if _extra_locked else " -- NO ref matched, check the globs"))
     state = pose_score.make_state(
         pcb, args.input_file, clearance=args.clearance,
         board_edge_clearance=args.board_edge_clearance,
-        grid_step=args.grid_step)
+        grid_step=args.grid_step, extra_locked_refs=_extra_locked or None)
     if state.legality_ctx is None:
         print("place_reconstruct: pad legality layer unavailable on this "
               "state; refusing to run blind.", file=sys.stderr)
         return 2
 
     notes = []
-    report = {}
 
     tiers = reconstruct.classify(state, intent, args.anchor_extent)
     report['tiers'] = tiers.as_dict()
@@ -181,8 +256,7 @@ Examples:
     report['edge_bands'] = {r: m for r, m in sorted(edge_bands.items())}
 
     base = reconstruct.measure(state, edge_bands)
-    print(f"Gate before: pad_pairs={base[0]} hole={base[1]} oob={base[2]} "
-          f"stacks={base[3]} hpwl={base[4]} overlap={base[5]}")
+    print(f"Gate before: {reconstruct.format_gate(base)}")
     report['gate_before'] = list(base)
 
     proposals = {}
@@ -218,6 +292,36 @@ Examples:
                               for d in derived))
             vectors = vectors + [d['v'] for d in derived]
         report['vectors_derived'] = [list(d['v']) for d in derived]
+
+        # SAY SO WHEN THERE IS NO STRUCTURAL HYPOTHESIS.
+        #
+        # Run 9: three derived vectors with support 6, 6 and 4 against a
+        # 107-part displaced block -- they explained ~15% of the damage -- and
+        # the run then moved 80 parts on that basis and reported nothing
+        # unusual. The near-inert recovery (+0.045, 0/107 home) was visible in
+        # this ratio at minute four and was not discovered until the audit.
+        # A render of the same board shows it instantly: the move arrows are
+        # broadly parallel over one region, so there IS structure the detector
+        # is not recovering. That is a finding about the DETECTOR, and it
+        # belongs in the log while there is still time to act on it.
+        _sup = sum(d['support'] for d in derived) if derived else 0
+        _movable = len([r for r in state.parts if not state.parts[r].locked])
+        report['vector_support'] = {
+            'derived_support_total': _sup,
+            'pattern_vectors': len(vectors) - len(derived),
+            'movable_parts': _movable,
+            'fraction_explained': (round(_sup / _movable, 4)
+                                   if _movable else None),
+        }
+        if derived and _movable and (_sup / _movable) < 0.25:
+            print(f"  WARNING: the derived vectors explain only {_sup} of "
+                  f"{_movable} movable part(s) ({_sup / _movable:.0%}). This "
+                  f"run is proceeding WITHOUT a confident structural "
+                  f"hypothesis -- expect the assignment to move parts on weak "
+                  f"evidence and recovery to be near-inert. If the damage "
+                  f"looks like a coherent block in a render, the detector is "
+                  f"missing it; that is a finding about the detector, not "
+                  f"about the board.")
 
     # F2: declared edge entries whose edge could not be named (implausible
     # pose) -- their objective term is the EDGE metric, not the net-anchor
@@ -288,9 +392,7 @@ Examples:
             print(f"  exchange: {n_refs} part(s) moved in "
                   f"{len(xrep['accepted'])} joint move(s)"
                   + (f" ({len(xpruned)} pruned back)" if xpruned else "")
-                  + f"; gate now pad_pairs={base[0]} hole={base[1]} "
-                  f"oob={base[2]} stacks={base[3]} hpwl={base[4]} "
-                  f"overlap={base[5]}")
+                  + f"; gate now {reconstruct.format_gate(base)}")
         return sorted(set(xold) - set(xpruned))
 
     moved = []
@@ -298,6 +400,18 @@ Examples:
     xmoved_all = []
     if 'assign' in stages and (vectors or proposals):
         for rnd in range(max(1, args.assign_rounds)):
+            # BETWEEN ROUNDS. `--deadline` used to reach only reseat and
+            # legalize, so parse, state build, classify, fit, vector, every
+            # assign round (each one a scipy ILP) and exchange all ran outside
+            # it, so `--deadline 0` could run a board to COMPLETION and still
+            # report `complete: true` -- measured on tigard__swap: 7s, assign
+            # and exchange both ran, exit 0. A round is the right unit:
+            # the ILP inside one is not interruptible, and the partial is the
+            # previous round's board, which is coherent.
+            if _dl is not None and _dl.check('assign'):
+                notes.append(f"assign: stopped after {rnd} round(s) (budget)")
+                print(f"  assign: stopping after {rnd} round(s) (budget)")
+                break
             cands, pattern = reconstruct.build_candidates(
                 state, tiers, vectors, proposals, edge_bands=edge_bands)
             n_multi = sum(1 for c in cands.values() if len(c) > 1)
@@ -315,6 +429,7 @@ Examples:
                     x, y = cands[ref][k]
                     state.apply_move(ref, x, y, state.parts[ref].rot)
             after = reconstruct.measure(state, edge_bands)
+            before_round = base
             rmoved = []
             if after <= base:
                 # Run-4 F3(b): the gate is one board-wide tuple, so an
@@ -323,9 +438,16 @@ Examples:
                 # input inside a hugely-improving set). Per-part revert
                 # sweep, gated on strict tuple improvement -- monotone,
                 # board-only.
-                pruned = reconstruct.prune_assignment(state, old, notes,
-                                                      edge_bands=edge_bands,
-                                                      exempt=set(edge_pref))
+                # ...and a move the tuple rates EQUAL is reverted too unless
+                # it agrees with a kept vector. A zero-net part in free space
+                # touches no term the tuple has, so `strictly better` never
+                # fires for it and a 26.27mm carry to another hole's seat
+                # survived a sweep written to catch exactly that.
+                pruned = reconstruct.prune_assignment(
+                    state, old, notes, edge_bands=edge_bands,
+                    exempt=set(edge_pref),
+                    evidenced=reconstruct.evidenced_moves(
+                        state, old, list(vectors) + list(derived)))
                 all_pruned.extend(pruned)
                 after = reconstruct.measure(state, edge_bands)
                 base = after
@@ -335,9 +457,32 @@ Examples:
                 print(f"  assign round {rnd + 1} APPLIED: {len(rmoved)} "
                       f"part(s) moved"
                       + (f" ({len(pruned)} pruned back)" if pruned else "")
-                      + f"; gate now pad_pairs={after[0]} hole={after[1]} "
-                      f"oob={after[2]} stacks={after[3]} hpwl={after[4]} "
-                      f"overlap={after[5]}")
+                      + f"; gate now {reconstruct.format_gate(after)}")
+                # The accept rule is smaller-OR-EQUAL, so a round can move
+                # parts and change nothing the gate can see. That is not
+                # neutral: displacement is unbounded, and a run was measured
+                # taking a mounting hole 26mm and rotating a connector 90 deg
+                # on an equal tuple -- both had been at their correct poses.
+                # The rung above says an unimproving proposal means "the
+                # determinant was not on the board", so at minimum say it out
+                # loud rather than reporting a move as progress.
+                if rmoved and after == before_round:
+                    dists = []
+                    for r in rmoved:
+                        ox, oy, orot = old[r]
+                        p = state.parts[r]
+                        dists.append((r, math.hypot(p.x - ox, p.y - oy),
+                                      (p.rot - orot) % 360.0))
+                    worst = max(dists, key=lambda t: t[1])
+                    print(f"    UNEVIDENCED: the gate did not change, so "
+                          f"nothing measured justifies {len(rmoved)} move(s). "
+                          f"Largest: {worst[0]} {worst[1]:.2f}mm"
+                          + (f", rot {worst[2]:+.0f} deg" if worst[2] else "")
+                          + ". Check these against their input poses before "
+                            "trusting the result.")
+                    report.setdefault('unevidenced_moves', []).extend(
+                        {'ref': r, 'mm': round(d, 4), 'rot': round(ro, 1)}
+                        for r, d, ro in sorted(dists, key=lambda t: -t[1]))
             else:
                 for ref, (x, y, rot) in old.items():
                     state.apply_move(ref, x, y, rot)
@@ -359,6 +504,13 @@ Examples:
     report['assign_pruned'] = sorted(set(all_pruned))
     report['assign_moved'] = sorted(moved)
     report['gate_after_assign'] = list(base)
+    # Membership FIRST: `check()` latches `stopped_in` on its first call, so
+    # testing the clock before the stage set made a run report it stopped in
+    # `exchange` when exchange was never requested.
+    if 'exchange' in stages and _dl is not None and _dl.check('exchange'):
+        notes.append('exchange: skipped (budget)')
+        print('  exchange: skipped (budget)')
+        stages = stages - {'exchange'}
     if 'exchange' in stages:
         report['exchange'] = {
             'attempts': xrep_all['attempts'],
@@ -385,6 +537,68 @@ Examples:
     for n in notes:
         print(f"  NOTE: {n}")
 
+    def _run_reseat(board_path):
+        """Re-seat the off-outline parts of `board_path` IN PLACE.
+
+        The rung between `exchange` and `legalize`: exchange carries parts the
+        damage moved by a DETECTED vector, and legalize nudges parts that are
+        nearly right, so a part that is neither -- tens of millimetres out with
+        no surviving family to over-determine a vector -- falls between them
+        and nothing in the ladder moves it. Measured on a 107-part board: 11
+        such parts, and every one of the 13 nets the router could not attempt
+        had a pad on one of them.
+        """
+        pcb2 = parse_kicad_pcb(board_path)
+        rep = seeder.reseat_scope(
+            pcb2, board_path, intent, group_sources=(),
+            lock_globs=args.lock,
+            clearance=args.clearance,
+            board_edge_clearance=args.board_edge_clearance,
+            grid_step=args.grid_step,
+            # The scope's own bands are filtered out INSIDE: a ref being
+            # re-seated has forfeited its declared band (the band was measured
+            # off the pose being discarded), and leaving it in makes the gate
+            # read `oob 4.348` on a board with parts 158mm off the outline.
+            edge_bands=edge_bands, deadline=_dl,
+            progress=krt_deadline.stdout_progress(deadline=_dl))
+        for n in rep['notes']:
+            print(f"  NOTE: {n}")
+        if rep['edge_bands_dropped']:
+            print("  reseat dropped the declared band of: "
+                  + ", ".join(f"{r} ({m:g})" for r, m in
+                              sorted(rep['edge_bands_dropped'].items())))
+        if rep['moves']:
+            tmp = board_path + '.reseat'
+            write_placed_output(board_path, tmp, rep['moves'])
+            os.replace(tmp, board_path)
+        print(f"  reseat ({rep['scope_source']}): {len(rep['scope'])} in "
+              f"scope, {len(rep['reseated'])} re-seated, "
+              f"{len(rep['unseated'])} unseated, {len(rep['refused'])} "
+              f"refused; OFF-OUTLINE PARTS {len(rep['witnesses_before'])} -> "
+              f"{len(rep['witnesses_after'])}"
+              + ('' if rep['accepted'] else '  [GATE REFUSED]'))
+        print(f"  reseat gate: {reconstruct.format_gate(rep['gate_before'])}"
+              f"  ->  {reconstruct.format_gate(rep['gate_after'])}")
+        return rep
+
+    def _reseat_report(rep, preview=False):
+        d = {'scope': rep['scope'], 'scope_source': rep['scope_source'],
+             'reseated': rep['reseated'], 'unseated': rep['unseated'],
+             'refused': rep['refused'], 'pruned': rep['pruned'],
+             'edge_bands_dropped': rep['edge_bands_dropped'],
+             'gate_before': rep['gate_before'],
+             'gate_after': rep['gate_after'],
+             'accepted': rep['accepted'],
+             # `witnesses_after` is the number that predicts routability --
+             # NOT `reseated`, which counts effort.
+             'witnesses_before': rep['witnesses_before'],
+             'witnesses_after': rep['witnesses_after'],
+             'deadline_skipped': rep.get('deadline_skipped', []),
+             'complete': rep.get('complete', True)}
+        if preview:
+            d['preview'] = True
+        return d
+
     def _run_legalize(board_path):
         """Legalize `board_path` IN PLACE; returns the seeder's report."""
         pcb2 = parse_kicad_pcb(board_path)
@@ -393,9 +607,11 @@ Examples:
             caps = list(caps) + [args.max_move]
         rep = seeder.repair_placement(
             pcb2, board_path, intent, group_sources=(),
+            lock_globs=args.lock,
             clearance=args.clearance,
             board_edge_clearance=args.board_edge_clearance,
-            grid_step=args.grid_step, caps=caps)
+            grid_step=args.grid_step, caps=caps, deadline=_dl,
+            progress=krt_deadline.stdout_progress(deadline=_dl))
         for n in rep['notes']:
             print(f"  NOTE: {n}")
         if rep['moves']:
@@ -415,21 +631,29 @@ Examples:
         # parts when it really ran. A preview that silently skips the stage is
         # worse than no preview. Stage it in a temp dir instead and report what
         # legalize WOULD do; the caller's output path is still never written.
-        if 'legalize' in stages:
+        if {'reseat', 'legalize'} & stages:
             import tempfile
             with tempfile.TemporaryDirectory() as _td:
                 _preview = os.path.join(
                     _td, os.path.basename(args.output_file) or 'preview.kicad_pcb')
                 write_placed_output(args.input_file, _preview, placements)
                 copy_siblings(args.input_file, _preview)
-                _rep = _run_legalize(_preview)
-                report['legalize'] = {
-                    'preview': True,
-                    'repaired': _rep['repaired'],
-                    'unrepairable': _rep['unrepairable'],
-                    'would_move': sorted(m['reference'] for m in _rep['moves']),
-                }
-        print("JSON_SUMMARY: " + json.dumps(report, sort_keys=True))
+                # Same ORDER as the real run, so the legalize preview is taken
+                # against the RE-SEATED board rather than one the real run
+                # would never hand it.
+                if 'reseat' in stages:
+                    report['reseat'] = _reseat_report(_run_reseat(_preview),
+                                                      preview=True)
+                if 'legalize' in stages:
+                    _rep = _run_legalize(_preview)
+                    report['legalize'] = {
+                        'preview': True,
+                        'repaired': _rep['repaired'],
+                        'unrepairable': _rep['unrepairable'],
+                        'would_move': sorted(m['reference']
+                                             for m in _rep['moves']),
+                    }
+        krt_deadline.emit(report, deadline=_dl)
         return 0
 
     # Run-7 A11: the output used to be written BEFORE legalize ran, so a run
@@ -441,10 +665,61 @@ Examples:
     write_placed_output(args.input_file, staged, placements)
     copy_siblings(args.input_file, staged)
 
+    if 'reseat' in stages:
+        _rs = _run_reseat(staged)
+        report['reseat'] = _reseat_report(_rs)
+        if not _rs.get('complete', True):
+            krt_deadline.mark(
+                report, _dl,
+                staged_board=staged, output=None,
+                board_stage='pre-legalize + %d reseat(s)'
+                            % len(_rs['reseated']),
+                deadline_skipped=_rs.get('deadline_skipped', []))
+            print(f"  DEADLINE: reseat stopped with "
+                  f"{len(_rs.get('deadline_skipped', []))} part(s) untried. "
+                  f"The output path was NOT written; the partial board is "
+                  f"at:\n    {staged}", file=sys.stderr)
+            krt_deadline.emit(report, deadline=_dl)
+            return krt_deadline.DEADLINE_EXIT
+
     if 'legalize' in stages:
         rep = _run_legalize(staged)
         report['legalize'] = {'repaired': rep['repaired'],
-                              'unrepairable': rep['unrepairable']}
+                              'unrepairable': rep['unrepairable'],
+                              'deadline_skipped': rep.get('deadline_skipped', []),
+                              'complete': rep.get('complete', True)}
+        if not rep.get('complete', True):
+            # Run-7 A11's invariant, kept verbatim: the OUTPUT path only ever
+            # holds a complete board. So on a deadline hit we promote NOTHING
+            # and simply name the staged board, which already exists, already
+            # has a distinguishing name, and already survives a kill -- the only
+            # defect today is that nobody is told it is there.
+            #
+            # Deliberately NOT a --promote-partial flag: that re-creates the
+            # exact defect A11 fixed, behind a switch a harness author will
+            # turn on without reading the rationale. A caller who genuinely
+            # wants the pre-legalize board can copy_board the staged path AFTER
+            # reading a summary that says complete:false -- an explicit act by
+            # someone who has seen the warning.
+            krt_deadline.mark(
+                report, _dl,
+                staged_board=staged,
+                output=None,
+                board_stage='pre-legalize + %d of %d legalize seat(s)'
+                            % (len(rep['repaired']),
+                               len(rep['repaired']) + len(rep.get(
+                                   'deadline_skipped', []))),
+                legalize_repaired=len(rep['repaired']),
+                deadline_skipped=rep.get('deadline_skipped', []))
+            print(f"  DEADLINE: legalize stopped with "
+                  f"{len(rep.get('deadline_skipped', []))} violator(s) "
+                  f"untried. The output path was NOT written; the partial "
+                  f"board is at:\n    {staged}\n  It carries the assign/"
+                  f"exchange result plus {len(rep['repaired'])} legalize "
+                  f"seat(s). Copy it with copy_board.py if you want it.",
+                  file=sys.stderr)
+            krt_deadline.emit(report, deadline=_dl)
+            return krt_deadline.DEADLINE_EXIT
 
     _promote_staged(staged, args.output_file)
 
@@ -470,6 +745,12 @@ Examples:
           f"{final['hole_conflicts']} hole conflict(s), "
           f"{final['oob_pad_count']} part(s) with pad copper off-board, "
           f"{body['blocking']} blocking body pair(s)")
+    _oc = __import__('placement.legality', fromlist=['x']).format_oob_clause(final)
+    if _oc:
+        # Printed BEFORE the edge_connectors advice below, because that advice
+        # tells the reader to declare a by-design overhang -- and this measure
+        # fires on a part sitting INSIDE the board by a clearance band.
+        print(f"  off-board parts: {_oc}")
     for q in body['blocking_pairs']:
         print(f"  BODY STACK: {q.a} <-> {q.b} {q.kind} {q.area_mm2}mm2 "
               f"side {q.side} -- not physically buildable")
@@ -477,7 +758,7 @@ Examples:
         print("  (off-board residue that no cap could repair: if it is a "
               "by-design overhang -- a card edge, a switch actuator -- "
               "declare it in an intent's edge_connectors; it is then exempt)")
-    print("JSON_SUMMARY: " + json.dumps(report, sort_keys=True))
+    krt_deadline.emit(report, deadline=_dl)
     # Exit 4 = residual PAD/HOLE conflicts or a blocking BODY pair -- the
     # defect classes this tool exists to remove. Off-board residue is
     # reported (and by-design overhang is indistinguishable from defect

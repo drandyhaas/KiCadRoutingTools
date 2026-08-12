@@ -68,5 +68,116 @@ class TestReconstructSwap(unittest.TestCase):
             self.assertEqual(moved, [])
 
 
+class TestReseatRung(unittest.TestCase):
+    """The `reseat` rung: parts no vector can carry and no cap can reach.
+
+    It sits between `exchange` and `legalize` deliberately -- exchange moves
+    parts the damage displaced by a DETECTED vector, legalize nudges parts that
+    are nearly right, and a part tens of millimetres out with no surviving
+    family to over-determine a vector falls between them. Nothing in the ladder
+    moved those, and on the measured board they carried a pad on every one of
+    the 13 nets the router refused to attempt.
+    """
+
+    def test_ladder_order(self):
+        sys.path.insert(0, ROOT)
+        import place_reconstruct as pr
+        s = pr._STAGES
+        self.assertIn('reseat', s)
+        self.assertLess(s.index('exchange'), s.index('reseat'))
+        self.assertLess(s.index('reseat'), s.index('legalize'))
+        # ...and the DEFAULT ladder runs it, or it ships switched off and
+        # every caller has to know to ask for it. Asserted on what the run
+        # REPORTS it requested, not on the help text.
+        if not os.path.exists(CONTROL):
+            self.skipTest('control board not present')
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            r = run_reconstruct(CONTROL, os.path.join(td, 'o.kicad_pcb'),
+                                '--dry-run')
+            line = next(l for l in r.stdout.splitlines()
+                        if l.startswith('JSON_SUMMARY:'))
+            doc = json.loads(line.split(':', 1)[1])
+            self.assertIn('reseat', doc['stages_requested'],
+                          'the default --stages must include reseat')
+
+    def test_reseat_is_a_noop_on_a_healthy_board(self):
+        if not os.path.exists(CONTROL):
+            self.skipTest('control board not present')
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, 'recon.kicad_pcb')
+            r = run_reconstruct(CONTROL, out, '--stages', 'classify,reseat',
+                                '--dry-run')
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            line = next(l for l in r.stdout.splitlines()
+                        if l.startswith('JSON_SUMMARY:'))
+            doc = json.loads(line.split(':', 1)[1])
+            self.assertIn('reseat', doc, doc)
+            rs = doc['reseat']
+            self.assertEqual(rs['scope'], [], rs)
+            self.assertEqual(rs['witnesses_before'], [], rs)
+            self.assertEqual(rs['witnesses_after'], [], rs)
+            self.assertEqual(rs['scope_source'], 'auto:damage_witnesses')
+
+    def test_reseat_measures_with_SCOPE_FILTERED_edge_bands(self):
+        """The scope forfeits its own declared band, in the GATE too.
+
+        This is the whole reason the pass can be graded at all. An intent
+        emitted off a damaged board declares each off-board part an edge
+        connector with a band equal to its damage displacement, and
+        `pad_oob_amount` charges only the excess past the band -- so with those
+        bands in place the gate reads `oob = 4.348` on a board carrying parts
+        158 mm off the outline, and every candidate looks equally good.
+        """
+        sys.path.insert(0, ROOT)
+        import tempfile
+        from kicad_parser import parse_kicad_pcb
+        from placement import floorplan, seeder
+        from placement import reconstruct as rec
+        from placement.writer import write_placed_output
+        import pose_score
+
+        board = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
+        if not os.path.exists(board):
+            self.skipTest('fixture board not present')
+        with tempfile.TemporaryDirectory() as td:
+            pcb = parse_kicad_pcb(board)
+            bb = pcb.board_info.board_bounds
+            victims = [r for r, fp in sorted(pcb.footprints.items())
+                       if fp.pads][:3]
+            dmg = os.path.join(td, 'dmg.kicad_pcb')
+            write_placed_output(board, dmg, [
+                {'reference': r, 'new_x': bb[2] + 25.0 + 5.0 * i,
+                 'new_y': (bb[1] + bb[3]) / 2,
+                 'new_rotation': pcb.footprints[r].rotation or 0}
+                for i, r in enumerate(victims)])
+            dpcb = parse_kicad_pcb(dmg)
+            st = pose_score.make_state(dpcb, dmg)
+            scope = set(rec.damage_witnesses(st))
+            self.assertEqual(sorted(scope), sorted(victims))
+
+            # A band big enough to swallow the damage, as a laundered intent
+            # would carry. The gate must NOT see it for a scope ref.
+            bands = {r: 500.0 for r in victims}
+            self.assertLess(rec.measure(st, bands)[rec.GATE_TERMS.index('oob')],
+                            1.0, 'the laundered band hides the damage')
+            filtered = {r: m for r, m in bands.items() if r not in scope}
+            self.assertGreater(
+                rec.measure(st, filtered)[rec.GATE_TERMS.index('oob')], 50.0,
+                'filtering the scope out exposes it again')
+
+            # ...and reseat_scope does that filtering itself, given the map.
+            rep = seeder.reseat_scope(dpcb, dmg, floorplan.empty_intent(dmg),
+                                      edge_bands=bands)
+            oob = rec.GATE_TERMS.index('oob')
+            self.assertGreater(rep['gate_before'][oob], 50.0, rep['gate_before'])
+            self.assertLess(rep['gate_after'][oob], rep['gate_before'][oob])
+            self.assertTrue(rep['accepted'], rep['notes'])
+            self.assertEqual(rep['witnesses_after'], [], rep)
+
+
 if __name__ == '__main__':
     unittest.main()
