@@ -379,8 +379,17 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
 
     if not quiet:
         n_cards = sum(1 for s in shots if s['kind'] == 'card')
+        # "assembled", not "frames": this is the list handed to the writer, and
+        # the GIF encoder collapses runs of identical frames (card holds, the
+        # end hold), so the file that lands holds FEWER. Printing both as
+        # "frames" invited exactly one reconciliation failure -- 377 here, 348
+        # in the delivered GIF, and nothing said which was the film. The
+        # `animate_route: wrote ...` line below counts the artifact itself; that
+        # is the number to quote.
         print(f"make_film: {len(boards)} beats ({n_att} attempts), "
-              f"{n_cards} cards, {len(out)} frames", file=sys.stderr)
+              f"{n_cards} cards, {len(out)} frames assembled "
+              f"(the writer reports what the file actually holds)",
+              file=sys.stderr)
     return out
 
 

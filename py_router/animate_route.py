@@ -377,7 +377,14 @@ def _write_mp4(frames, out, fps) -> bool:
     try:
         import numpy as np
         import imageio.v2 as imageio
-    except Exception:
+    except Exception as e:
+        # SAY SO. The encode-failure branch below prints and this one did not,
+        # so a missing imageio-ffmpeg silently produced a .gif where the caller
+        # asked for .mp4 -- the only trace being a `wrote ...` line with a
+        # different extension than the one requested. Two branches, one
+        # consequence, and only one of them was audible.
+        print(f"animate_route: mp4 unavailable ({e}); falling back to GIF. "
+              f"`pip install imageio imageio-ffmpeg` for mp4.", file=sys.stderr)
         return False
     try:
         # yuv420p (broadly playable: browsers, QuickTime, Slack, social) needs
@@ -416,7 +423,22 @@ def save_movie(frames, out, fps, end_hold, png_dir=None):
         dur = max(20, int(1000 / max(0.1, fps)))
         frames[0].save(out, save_all=True, append_images=seq[1:],
                        duration=dur, loop=0, optimize=False)
-        print(f"animate_route: wrote {out} ({len(frames)} frames, {dur}ms each, "
+        # Count what LANDED, not what was handed to the encoder. Pillow's GIF
+        # writer collapses runs of byte-identical frames into one frame with an
+        # accumulated duration, and this film is full of such runs by
+        # construction -- card holds and the end hold are literal repeats of a
+        # single Image. So `len(frames)` overstates the file: one run printed
+        # 377 and wrote 348, and the gap was only found by counting the
+        # delivered GIF by hand. A number nobody can reconcile against the
+        # artifact is worse than no number.
+        _n = len(frames)
+        try:
+            from PIL import Image as _PILImage, ImageSequence
+            with _PILImage.open(out) as _chk:
+                _n = sum(1 for _ in ImageSequence.Iterator(_chk))
+        except Exception:                                       # noqa: BLE001
+            pass
+        print(f"animate_route: wrote {out} ({_n} frames, {dur}ms each, "
               f"{frames[0].size[0]}x{frames[0].size[1]})")
     if png_dir:
         os.makedirs(png_dir, exist_ok=True)

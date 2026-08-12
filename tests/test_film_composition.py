@@ -203,7 +203,10 @@ def test_the_cli_runs_end_to_end():
         r = subprocess.run(
             [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_tools', 'make_film.py'),
              '-o', out], capture_output=True, text=True, cwd=ROOT)
-        assert r.returncode == 2, "no boards is a clean refusal, not a crash"
+        # The message claimed "not a crash" while nothing checked that -- a
+        # crash exiting 2 passed. Assert what the sentence says.
+        assert r.returncode == 2 and 'Traceback' not in (r.stderr or ''), \
+            f"no boards must be a clean refusal, not a crash: {(r.stderr or '')[-400:]}"
     print("  PASS: the CLI films a chain and refuses an empty one")
 
 
