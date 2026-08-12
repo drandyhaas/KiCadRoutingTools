@@ -364,7 +364,8 @@ def pose_distance_mm(final_a: Dict[str, Tuple[float, float, float]],
 
 
 def _quench_to(src_board: str, dst_board: str, quench_kw: Dict,
-               groups: Optional[Dict]) -> Tuple[Dict, Dict]:
+               groups: Optional[Dict], cancel_check=None,
+               progress_callback=None) -> Tuple[Dict, Dict]:
     """Parse src, quench in-process, write the result AGAINST src (the seed
     file), carry siblings. Returns (metrics, final_poses)."""
     from kicad_parser import parse_kicad_pcb
@@ -373,7 +374,8 @@ def _quench_to(src_board: str, dst_board: str, quench_kw: Dict,
     pcb_local = parse_kicad_pcb(src_board)
     m: Dict = {}
     placements = quench(pcb_local, pcb_file=src_board, metrics_out=m,
-                        groups=groups, **quench_kw)
+                        groups=groups, cancel_check=cancel_check,
+                        progress_callback=progress_callback, **quench_kw)
     write_placed_output(src_board, dst_board, placements)
     copy_siblings(src_board, dst_board)
     return m, _final_poses(pcb_local, placements)
@@ -388,7 +390,8 @@ def generate(input_file: str, out_dir: str, *, seed: int = 0,
              swap_blocks: Optional[Dict[str, Sequence[str]]] = None,
              quench_kw: Optional[Dict] = None,
              groups: Optional[Dict] = None,
-             only: Optional[int] = None) -> Dict:
+             only: Optional[int] = None,
+             cancel_check=None, progress_callback=None) -> Dict:
     """Generate the portfolio: baseline quench (candidate 0) plus perturbed
     candidates 1..n_candidates-1, all boards written under `out_dir`.
 
@@ -423,7 +426,8 @@ def generate(input_file: str, out_dir: str, *, seed: int = 0,
     if only is None:
         print(f"[portfolio] candidate 0 (baseline): plain quench")
         board0 = os.path.join(out_dir, 'baseline_quenched.kicad_pcb')
-        m, final = _quench_to(input_file, board0, qkw, groups)
+        m, final = _quench_to(input_file, board0, qkw, groups, cancel_check=cancel_check,
+                   progress_callback=progress_callback)
         rms, moved = _displacement(final, origin, free)
         baseline = Candidate(
             index=0, strategy='baseline', seed_board=input_file, board=board0,
@@ -433,6 +437,12 @@ def generate(input_file: str, out_dir: str, *, seed: int = 0,
     indices = [only] if only is not None else list(range(1, n_candidates))
     candidates: List[Candidate] = []
     for i in indices:
+        # BETWEEN CANDIDATES, which is this loop's real unit: each one is a
+        # full quench over the whole board. Checking inside the quench too
+        # (it has its own hook) bounds the tail; this bounds the count.
+        if cancel_check is not None and cancel_check():
+            print(f"  portfolio: stopping before candidate {i} (budget)")
+            break
         if i < 1:
             raise ValueError(f"candidate index {i} out of range (baseline is "
                              f"not regenerable via only=; it has no stream)")
@@ -471,7 +481,8 @@ def generate(input_file: str, out_dir: str, *, seed: int = 0,
         write_placed_output(input_file, seed_board, poses)
         copy_siblings(input_file, seed_board)
         board = os.path.join(out_dir, f'cand_{i:02d}.kicad_pcb')
-        m, final = _quench_to(seed_board, board, qkw, groups)
+        m, final = _quench_to(seed_board, board, qkw, groups, cancel_check=cancel_check,
+                   progress_callback=progress_callback)
         rms, moved = _displacement(final, origin, free)
         cand.seed_board = seed_board
         cand.board = board

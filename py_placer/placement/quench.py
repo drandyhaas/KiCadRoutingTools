@@ -1643,7 +1643,9 @@ def quench(pcb_data: PCBData, pcb_file: str,
            min_gain_per_mm: float = 0.1,
            move_unconnected: bool = False,
            corridor_weight: float = 0.0,
-           corridor_specs: Optional[Sequence[Dict]] = None) -> List[Dict]:
+           corridor_specs: Optional[Sequence[Dict]] = None,
+           cancel_check=None,
+           progress_callback=None) -> List[Dict]:
     """Greedy quench: iterate over parts, accept only cost-reducing moves.
 
     align_weight / align_radius / align_span, orient_weight: the #548 tidiness
@@ -1758,7 +1760,21 @@ def quench(pcb_data: PCBData, pcb_file: str,
             from placement.groups import describe
             print(describe(blocks))
 
+    stopped = False
     for pass_num in range(1, max_passes + 1):
+        # COOPERATIVE STOP. This engine had no clock of any kind -- no cancel
+        # hook, no progress, no iteration bound but max_passes -- and it is
+        # what `place_optimize` and `place_portfolio` run. A 217-part board hung
+        # a whole run behind it, indistinguishable from slow work because the
+        # only output is one line per COMPLETED pass.
+        #
+        # A partial is coherent here by construction: apply_move mutates the
+        # state in place and the return below reads state.parts, so stopping
+        # between parts yields a valid, less-optimised board -- never a torn
+        # one. There is no staging step to invalidate.
+        if cancel_check is not None and cancel_check():
+            print(f"  quench: stopping at pass {pass_num} (budget)")
+            break
         improved = 0.0
         moves = 0
         group_moves = 0
@@ -1816,7 +1832,17 @@ def quench(pcb_data: PCBData, pcb_file: str,
                           f"gain={base_cost - best[0]:.1f}")
 
         # --- single-part moves (nudge + rotate) ---
-        for ref in movable:
+        for _mi, ref in enumerate(movable):
+            # Per PART, not per candidate pose: one monotonic read per
+            # violator is the granularity krt_deadline documents, and a part
+            # costs O(candidates x rotations x parts) so it is a real unit.
+            if cancel_check is not None and cancel_check():
+                print(f"  quench: stopping mid-pass {pass_num} at "
+                      f"{_mi}/{len(movable)} (budget)")
+                stopped = True
+                break
+            if progress_callback is not None:
+                progress_callback(_mi, len(movable), f'quench pass {pass_num}')
             part = state.parts[ref]
             involved = set(part.nets)
             other_aw = state.airwires_excluding(involved)
@@ -1878,6 +1904,12 @@ def quench(pcb_data: PCBData, pcb_file: str,
             for fp_name, refs in by_fp.items():
                 if len(refs) < 2:
                     continue
+                # The swap phase is O(n^2) per footprint group and runs AFTER
+                # the per-part sweep, so a budget spent above must not be
+                # re-spent here.
+                if cancel_check is not None and cancel_check():
+                    stopped = True
+                    break
                 for i in range(len(refs)):
                     for j in range(i + 1, len(refs)):
                         ra, rb = refs[i], refs[j]
@@ -2004,6 +2036,8 @@ def quench(pcb_data: PCBData, pcb_file: str,
               f"length={stats['length']:.1f}mm crossings={stats['crossings']} "
               f"halo={stats['halo']:.1f} edge={stats['edge']:.1f} "
               f"total={stats['total']:.1f}{group_note}{swap_note}")
+        if stopped:
+            break
         if moves == 0:
             break
 

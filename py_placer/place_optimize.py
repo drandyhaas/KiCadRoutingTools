@@ -57,10 +57,27 @@ Examples:
                         help="Candidate grid step in mm (default: 1.0)")
     parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP,
                         help=f"Routing grid snap in mm (default: {defaults.GRID_STEP})")
-    parser.add_argument("--clearance", type=float, default=defaults.CLEARANCE,
-                        help=f"Min courtyard gap in mm (default: {defaults.CLEARANCE})")
-    parser.add_argument("--board-edge-clearance", type=float, default=0.55,
-                        help="Hard clearance from board edge in mm (default: 0.55)")
+    # BOARD-FIRST, like check_floorplan and converge. `None` is the "not
+    # given" signal these knobs never had: a fixed 0.25 on a board whose
+    # declared floor is 0.2 grades 34% more shortfall and double the oob count,
+    # and this tool VETOES candidate moves on that number -- so the wrong floor
+    # does not just mis-report, it steers the search.
+    parser.add_argument("--clearance", type=float, default=None,
+                        help="Min courtyard gap in mm (default: the board's "
+                             "own Default net-class clearance, else "
+                             f"{defaults.CLEARANCE})")
+    parser.add_argument("--board-edge-clearance", type=float, default=None,
+                        help="Hard clearance from board edge in mm (default: "
+                             "the board's own min_copper_edge_clearance, else "
+                             "0.55)")
+    parser.add_argument("--deadline", type=float, default=None,
+                        metavar="SECONDS",
+                        help="Wall-clock budget for the quench. Without one "
+                             "this tool has no clock at all: it is silent "
+                             "between its 'Pad legality before' line and its "
+                             "'N parts moved' line, so a long run and a hung "
+                             "one are indistinguishable, and killing it "
+                             "produces no JSON_SUMMARY. Env: KRT_DEADLINE_S")
     parser.add_argument("--crossing-penalty", type=float, default=10.0,
                         help="Cost in mm per airwire crossing (default: 10)")
     parser.add_argument("--length-weight", type=float, default=1.0,
@@ -123,6 +140,15 @@ Examples:
 
     args = parser.parse_args()
 
+    # Run-7 S1: unset knobs grade at the BOARD's floor, not fixed constants.
+    from list_nets import board_floor_knobs
+    args.clearance, args.board_edge_clearance, _knobs = board_floor_knobs(
+        args.input_file, args.clearance, args.board_edge_clearance)
+    print(f"legality at clearance {args.clearance} "
+          f"({_knobs['clearance']['source']}), edge "
+          f"{args.board_edge_clearance} "
+          f"({_knobs['board_edge_clearance']['source']})")
+
     if args.swap_max_displacement is not None:
         if args.swap_max_displacement < 0:
             parser.error("--swap-max-displacement must be >= 0")
@@ -184,16 +210,27 @@ Examples:
     # Exact pad/hole legality of the INPUT (file poses): the before half of
     # the report pair. Gate-currency tallies live inside the quench; this is
     # the phantom-free number an auditor compares.
-    from placement.legality import grade_pad_legality
+    from placement.legality import (grade_pad_legality,
+                                    format_oob_clause as _oob_clause)
     legality_before = None
     if not args.courtyard_only:
         legality_before = grade_pad_legality(pcb_data, args.clearance)
         print(f"Pad legality before: {legality_before['pad_conflicts']} "
               f"conflict pair(s), {legality_before['hole_conflicts']} hole "
               f"conflict(s), {legality_before['oob_pad_count']} part(s) with "
-              f"pad copper off-board")
+              f"pad copper off-board"
+              + (": " + _oob_clause(legality_before)
+                 if _oob_clause(legality_before) else ""))
 
     ratsnest = {}
+    import krt_deadline
+    # Bound BEFORE arming: the atexit hook resolves this name when the process
+    # dies, and a kill between arm() and the summary build would otherwise
+    # raise inside the hook and print nothing at all -- the exact silence this
+    # is here to remove. place_seed.py does the same for the same reason.
+    summary = {'parts_moved': 0}
+    _dl = krt_deadline.arm(args.deadline, tool='place_optimize',
+                           on_partial=lambda: summary)
     placements = quench(
         pcb_data,
         pcb_file=args.input_file,
@@ -225,6 +262,9 @@ Examples:
         pad_legality=not args.courtyard_only,
         min_gain_per_mm=args.min_gain_per_mm,
         move_unconnected=args.move_unconnected,
+        cancel_check=(_dl.cancel_check('quench') if _dl else None),
+        progress_callback=(krt_deadline.stdout_progress(deadline=_dl)
+                           if _dl else None),
     )
 
     print(f"{len(placements)} parts moved")
@@ -241,7 +281,7 @@ Examples:
     # so nothing downstream could gate on what a quench run actually achieved.
     # Same shape as route_planes.py's JSON_SUMMARY (#487's plane-resistance fix).
     before, after = ratsnest.get('before', {}), ratsnest.get('after', {})
-    summary = {
+    summary.update({
         'parts_moved': len(placements),
         'blocks': len(blocks),
         'block_parts': sum(len(v) for v in blocks.values()),
@@ -255,7 +295,16 @@ Examples:
         'airwire_length_after': after.get('length'),
         'cost_before': before.get('total'),
         'cost_after': after.get('total'),
-    }
+        # The two pad-conflict numbers here are DIFFERENT CURRENCIES and sat
+        # adjacent under near-identical names, ~2x apart on one unchanged
+        # board. `pad_conflict_pairs` is the quench's AABB gate currency
+        # (conservative: a bbox graze on a rotated or round pad counts, and a
+        # pair over PAIR_TEST_CAP falls back to an extent-level verdict).
+        # `pad_conflicts_before/_after` re-grade the written file with exact
+        # pad geometry and carry no phantoms. A >= B is structural, not a bug.
+        'pad_conflict_pairs_currency': 'aabb-gate (conservative, phantoms)',
+        'pad_conflicts_currency': 'exact geometry (phantom-free)',
+    })
     summary.update(ratsnest.get('legality', {}))
     # After half of the exact report pair, graded on the WRITTEN file so it
     # covers exactly what the next step will read. WARN on any worsened
@@ -267,7 +316,9 @@ Examples:
         print(f"Pad legality after: {legality_after['pad_conflicts']} "
               f"conflict pair(s), {legality_after['hole_conflicts']} hole "
               f"conflict(s), {legality_after['oob_pad_count']} part(s) with "
-              f"pad copper off-board")
+              f"pad copper off-board"
+              + (": " + _oob_clause(legality_after)
+                 if _oob_clause(legality_after) else ""))
         for key in ('pad_conflicts', 'hole_conflicts', 'oob_pad_count'):
             summary[f'{key}_before'] = legality_before[key]
             summary[f'{key}_after'] = legality_after[key]
@@ -277,7 +328,11 @@ Examples:
                       f"the legality gate should have prevented this")
         summary['pad_shortfall_before'] = legality_before['pad_shortfall']
         summary['pad_shortfall_after'] = legality_after['pad_shortfall']
-    print("JSON_SUMMARY: " + json.dumps(summary))
+    if _dl is not None and _dl.expired():
+        krt_deadline.mark(summary, _dl)
+        krt_deadline.emit(summary, deadline=_dl)
+        return krt_deadline.DEADLINE_EXIT
+    krt_deadline.emit(summary, deadline=_dl)
 
 
 if __name__ == "__main__":
