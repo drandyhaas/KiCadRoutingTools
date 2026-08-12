@@ -101,6 +101,32 @@ def main():
         check('the same pair inside ONE group is not flagged',
               reconstruct._cross_group_contact(st2, {1: [a, b]}, snap) is None)
 
+    # A gate term printed under its neighbour's name is worse than one not
+    # printed at all: the reconstruct ladder's apply rule is "improves the
+    # violation count AND does not increase the off-board amount", so a human
+    # or an executor compares `oob` by eye. When locked_contacts was prepended
+    # to measure(), three f-strings kept their old indices and `oob` printed
+    # the HOLE SHORTFALL -- 0.0 on a board carrying a part 44 mm off the
+    # outline. Labels now come from one definition; this asserts they match it.
+    print('the gate labels match the gate tuple')
+    live = reconstruct.measure(st)
+    check('there is one name per term',
+          len(reconstruct.GATE_TERMS) == len(live),
+          f'{len(reconstruct.GATE_TERMS)} names, {len(live)} terms')
+    line = reconstruct.format_gate(live)
+    check('every term is labelled in the printed line',
+          all(f'{n}=' in line for n in reconstruct.GATE_TERMS), line)
+    check('a tuple of the wrong width says so instead of mislabelling',
+          'GATE TUPLE CHANGED' in reconstruct.format_gate((1, 2, 3)))
+    probe = reconstruct.format_gate((0, 1, 2.0, 3.0, 4, 5.0, 6.0))
+    check('...and the values land on their own names, in order',
+          'oob=3' in probe and 'hpwl=5' in probe and 'overlap=6' in probe,
+          probe)
+    for name in ('place_reconstruct.py',):
+        txt = open(os.path.join(ROOT, 'py_placer', name), encoding='utf-8').read()
+        check(f'{name} prints the gate through format_gate only',
+              'pad_pairs={' not in txt, 'a hand-indexed gate print survives')
+
     print('the engine wires both in')
     src = open(os.path.join(ROOT, 'py_placer', 'placement', 'reconstruct.py'),
                encoding='utf-8').read()

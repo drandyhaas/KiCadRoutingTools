@@ -14,6 +14,82 @@ placement at all, fixing it when it is wrong, and proving the fix.
 `/plan-pcb-placement-and-routing`, which sequences the two and owns the rules
 that only exist when they meet.
 
+## What you are optimising FOR
+
+**A board that ROUTES: parts arranged so they work together, ending at zero
+`unrouted` and zero `broken`.** Not parts returned to the poses they used to
+have. On a repair or reconstruction job this distinction decides which result
+you call a success.
+
+- **Lead with the routed outcome.** `board_score`'s `blocking` —
+  `unrouted + broken` first — then `quality` as the tie-break once it is 0.
+- On the perturbed corpus, **`recovery` and `home /N` are DIAGNOSTICS, not the
+  score.** They measure distance to the original pose. Measured (run 10):
+  `recovery` −0.0014, `home` 0/30, on a run that took copper-free DRC 9 → 0,
+  assembly blocking 4 → 0, and the board from NOT BUILDABLE to **buildable**.
+  The one recovery figure that IS a defect signal is `collateral_pad_rms`
+  rising — that means parts nothing had damaged were moved.
+- A human original is a **benchmark to approach** (its vias / copper / segment
+  counts), not a pose to match.
+
+### The top-priority defect: pad copper off the outline
+
+Ahead of every clearance graze. Those nets **cannot be routed at all**, so the
+defect converts one-for-one into `unrouted` and `broken`. Measured, run 10: 11
+such parts caused ALL 13 unrouted nets and most of 37 broken ones.
+
+Read it from `render_placement --json-out`'s
+`checklist.a_off_outline.pad_copper`. A whole-board pass/fail verdict is the
+wrong channel to learn it from — check the per-part list.
+
+### Scope the search to the refs the gate names
+
+When a gate names specific parts, free exactly those and lock everything else.
+A whole-board sweep orders its violators by its own priority — usually
+worst-off-board first — and may never reach the ones blocking you. Measured:
+2 parts freed and 105 locked cleared both blocking pairs in **63 seconds**,
+where whole-board sweeps ran 10+ minutes without touching them.
+
+Repair searches start from a part's CURRENT pose, which carries no information
+once it is tens of millimetres from where it belongs; cost grows sharply with
+the displacement cap. **Prefer RE-SEATING such a part over nudging it** — lift
+it and search from its net centroid instead, holding everything else fixed:
+
+    python3 -X utf8 py_placer/place_seed.py <board> <out> --intent fp.json --reseat \
+        --clearance <floor> --deadline 600      # bare --reseat = auto scope
+
+The auto scope is the off-outline pad-CENTRE census, which is zero on all 33
+corpus boards, so this is a no-op with exit 0 on a healthy board. It composes
+with `--repair` and runs before it, and `place_reconstruct --stages
+...,reseat,legalize` is the same engine as a ladder rung. **Read
+`witnesses_after`, not `reseated`** — the first predicts routability, the
+second counts effort. Measured on the same board: `--repair` spent 4 m 55 s
+and attempted none of the 11 off-board parts (its cap ladder tops out at 5 mm
+from the wrong centre); `--reseat` seated 11 of 11 in 13 s, taking the
+off-outline count to 0.
+
+Expect `recovery` to get no better and `collateral_pad_rms` to grow: this puts
+parts where the netlist wants them, not where they were. That is the intended
+trade.
+
+### An observed violation is evidence, never permission
+
+**Never derive an intent from a damaged board and then use it to gate that
+damage's repair.** `check_floorplan --emit-intent --declare-classes` records
+what the board DOES; run it on a damaged board and every overhang becomes a
+declared `edge_connectors` band, and every consumer that exempts declared edge
+parts then goes blind to exactly the damage you are trying to fix. Measured,
+run 10: an 81 mm board emitted bands up to **160 mm** (each part's own damage
+displacement); the repair census skipped all 11 off-board parts and reported
+5 violators, none of them the ones whose pads were in the air; and the
+reconstruct gate read `oob = 4.348` on a board with parts 158 mm out.
+
+The emitter now caps an observed band at `max(5 mm, the part's own size)` and
+emits the entry **without an `edge`** above that, saying it is treating the
+overhang as damage — so a fresh intent is safe. An intent emitted BEFORE this
+is not: check `overhang_mm.max` against the part before trusting one, and
+re-emit if in doubt.
+
 <non_negotiable>
 1. NEVER skip the assessment. It is two commands on the copper-free board and
    it decides everything below. Skipping it is how a board with parts stacked
@@ -139,9 +215,15 @@ always (the R2 rule, applied to the gate itself):**
 ```bash
 python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>   # NOT piped
 echo "EXIT=$?"
-python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb --clearance <floor>
+python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb   # reads the board's own floor
 echo "EXIT=$?"
 ```
+
+`check_assembly` resolves its clearance from the board (Default net-class, else
+`routing_defaults`) and prints it with its source, so **omit `--clearance`** —
+that is what grades at the board's floor. Pass it only to override
+deliberately. It used to default to a flat 0.25 and so graded stricter than the
+board it was grading.
 
 A copper-free board has no routing, so **every violation these return is a placement
 defect that no router can ever remove**. `check_drc` measures copper clearances (68
@@ -376,11 +458,20 @@ Each lap:
 
    ```bash
    python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>
-   python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb --clearance <floor> \
+   python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb \
        --baseline <the ORIGINAL input board> --json wk/assembly_lapN.json
-   python3 -X utf8 py_tools/check_channels.py board.kicad_pcb --clearance <floor> \
-       --track-width <w> --grid-step <g> --json wk/channels_lapN.json
+   python3 -X utf8 py_tools/check_channels.py board.kicad_pcb \
+       --grid-step <g> --json wk/channels_lapN.json
    ```
+
+   **`check_assembly` and `check_channels` read the board's own floor** (and
+   `check_channels` its track width too) when the flags are omitted, and print
+   each value with its source — so omitting them is what grades at the board.
+   They used to default to a flat 0.25 / 0.3: on a 0.2 board that track width
+   invented a "U2 N short 1 lane" deficit that did not exist (supply 14, demand
+   12), handed forward as floorplan-shaped residue. `check_drc` still wants
+   `--clearance` spelled out. Read the printed tag: `[fixed default]` means the
+   board declared nothing, not that it agreed.
 
    `--baseline` is load-bearing: dense healthy boards ship hundreds of by-design
    courtyard kisses (corpus: 235), so the loop's advisory fix-list is the pairs
@@ -895,15 +986,52 @@ command (`converge.py replay` runs it); record your adoption as an
 `accepted: true` entry so the chain's provenance survives. Same `--seed` +
 same input reproduces the whole portfolio byte for byte.
 
-### Step 0d: see it before trusting it
+### Step 0d: see it before trusting it — and this one is ENFORCED
 
 ```bash
 python3 -X utf8 py_tools/render_placement.py board_placed.kicad_pcb \
-    --before board.kicad_pcb -o /tmp/placement_delta.png
+    --before board.kicad_pcb --pair \
+    --clearance <the board's own floor> --ignore-nets <the poured nets> \
+    --expect-moved <what the step reported> \
+    --json-out wk/render.json -o wk/render.png
 ```
 
+**`placement_driver` refuses to open P4, P6 and P-close without
+`--render-json`.** It checks the document is of THIS board (`instrument.board`
+vs `--board`), carries a `checklist`, and agrees with `--expect-moved`. It
+cannot check that you looked; that is still yours, and `converge record
+--render-json` is the only trace it leaves.
+
+The reason it is a gate rather than a sentence: a whole placement campaign once
+ran with **zero** reads and nothing noticed — not the driver, not the ledger,
+not afterwards, because nothing recorded reads either way.
+
+**Use `--pair` after a move, not bare `--before`.** `--before` overlays ghosts
+and arrows on one panel and shows what MOVED. `--pair` renders both boards at
+identical settings and diffs the findings **by name**, which is what says
+whether the move helped:
+
+```
+body stacks: 55 -> 46   [9 fixed, 0 NEW, 46 kept]
+VERDICT: 29 resolved, none introduced.
+overlap mm2: 237.50 -> 239.02   (worse)
+```
+
+`46 -> 46` can be nine fixed and nine new somewhere else; only names show that.
+And note the last line — every discrete finding improved while the aggregate got
+worse. A lap that introduces findings it did not resolve is a lap to revert.
+
+The tool also prints **WHAT THIS PANEL SHOWS** (every finding in words, with its
+consequence), **THE WORST N** (one ready `--view` crop command each — run one),
+and **DECLUTTER** (`--no-ratsnest` first). `--gate` makes the checklist decide
+the exit code; `--focus` now clusters legality findings even with no route
+summary, which is the only form of the question available on a copper-free
+board.
+
 Ghost rects mark seed positions, arrows show what moved, and the caption strip
-carries the real metrics.
+carries the real metrics — it wraps rather than clipping, so the trailing fields
+(`hole-conflict`, `oob`) are actually present. On a `--view` crop those metrics
+are still WHOLE-BOARD, and the caption says so.
 
 **The render is triage, not a verdict.** The verdict is the numbers —
 `crossings`/`hpwl` from the `JSON_SUMMARY`, and for the loop `failures` and
