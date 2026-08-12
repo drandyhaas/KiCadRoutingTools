@@ -739,6 +739,14 @@ def audit_net_names(board: str, score: dict) -> dict:
     meaning of every ledger row already recorded to chase one.
     """
     try:
+        # Self-sufficient import: main() bootstraps sys.path for the #522
+        # layout, but this function is also called IN-PROCESS (the worklist
+        # tests import it directly), where that bootstrap never ran -- the
+        # audit then reported ran:False on a perfectly parseable board.
+        for _d in _TOOL_DIRS:
+            _p = os.path.join(krt_dir(), _d) if _d else krt_dir()
+            if os.path.isdir(_p) and _p not in sys.path:
+                sys.path.insert(0, _p)
         from kicad_parser import parse_kicad_pcb
         pcb = parse_kicad_pcb(board)
     except Exception as exc:                                    # noqa: BLE001
