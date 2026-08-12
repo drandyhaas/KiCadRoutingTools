@@ -116,7 +116,7 @@ exact after three iterations have overwritten the same path.
 python3 -X utf8 py_placer/converge.py record --ledger wk/ledger.jsonl \
     --board wk/iter03.kicad_pcb --kind completion \
     --lever 'rip lever: --rip-existing-nets QSPI_SD2 + --grid-step 0.025' \
-    --score "$(cat wk/score_iter03.json)" \
+    --score-file wk/score_iter03.json \
     --argv python3 -X utf8 py_router/route.py wk/iter02.kicad_pcb wk/iter03.kicad_pcb --nets QSPI_SD1
 
 # `--argv` is a REMAINDER: everything after it is the command. Do NOT write

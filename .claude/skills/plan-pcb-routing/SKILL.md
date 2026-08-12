@@ -1164,6 +1164,67 @@ the ledger entry must name the panels read (see 9.4).
    `pad-conflicts` / `hole-conflict` numbers pair with what you see — the
    numbers stay the verdict.
 
+### Which of these a tool ENFORCES, and which are on you
+
+The eight above are doctrine. Only some are gated, and knowing which is the
+difference between a rule and a hope:
+
+| mandate | enforced by | what happens if you skip it |
+|---|---|---|
+| 2, 8 — after a placement move | `placement_driver` **P4** refuses without `--render-json` | `<error>`, exit 4, no instructions |
+| 1 — before writing an intent | `placement_driver` **P6** refuses | `<error>`, exit 4 |
+| the close-out | `placement_driver` **P-close** refuses | `<error>`, exit 4 |
+| the ROUTING close-out | `loop_driver` **L5** refuses without `--score`, and its close-out dispatches the three lens verifiers (references/verifier-prompts.md) until every `--lens` verdict is in hand | `<error>`, exit 4 |
+| shipping | `loop_driver` **L5** refuses without a `check_complete` close-out, and refuses again when it CONTRADICTS `converge` | `<error>`, exit 4 |
+| recording the verdicts | `converge record --final` refuses without the three routed-board lenses, and forbids stop-condition 1 when any FAILED | exit 2, nothing written |
+| recording the read | `converge record --kind placement` NOTEs when `--render-json` is absent | a warning; the row is still written |
+| 3, 4, 5, 6, 7 | **nothing** | silence |
+
+The gate checks that a render EXISTS, is of **this** board (`instrument.board`
+vs `--board`), carries a `checklist`, and agrees with `--expect-moved`. It
+**cannot** check that you looked at the pixels. That part is still yours, and
+the only trace it leaves is `--render-json` in the ledger — which is why the
+`[read: …]` convention moved from free-text into a field.
+
+### The render tells you what it sees — read that too
+
+`render_placement` prints three blocks unless `--no-describe`:
+
+- **WHAT THIS PANEL SHOWS** — every finding in words, with the consequence
+  attached (off-board pad copper: *"their nets cannot be routed at all"*; a body
+  stack: *"not a clearance graze; no router can fix one"*; a locked part:
+  *"the OTHER part must move"*).
+- **THE WORST N, framed one per crop** — ranked by severity, each with a ready
+  `--view` command. Run one. Clustering everything implicated does not work on a
+  dense board — single-linkage merges 54 parts into one board-sized "pocket" —
+  so these frame ONE finding each.
+- **DECLUTTER** — `--no-ratsnest` first, it is the biggest source of noise.
+
+**`--pair` is the one to reach for after a move.** `--before` alone overlays
+ghosts and arrows on one panel and tells you what MOVED; `--pair` renders both
+boards at identical instrument settings and diffs the findings **by name**:
+
+```
+body stacks: 55 -> 46   [9 fixed, 0 NEW, 46 kept]
+VERDICT: 29 resolved, none introduced.
+overlap mm2: 237.50 -> 239.02   (worse)
+```
+
+Names, not counts, for the same reason the ledger records failing nets by name:
+`46 -> 46` can be nine fixed and nine new somewhere else. And note the last row —
+every discrete finding improved while the aggregate got worse; a single scalar
+would have picked one and hidden the other.
+
+**`--gate` makes the checklist decide the exit code** (4 when anything is off the
+outline, overlapping, hole-conflicting, or disagreeing with `--expect-moved`).
+Default stays 0: seeing a broken board is the renderer's job.
+
+**Two things the caption cannot do for you.** On a `--view` crop the metrics are
+still WHOLE-BOARD — the strip says so, but read it as the board's totals, not the
+crop's. And there is no colour key: red rings = pad/hole conflict, solid red =
+body stack, orange = NPTH keepout, dashed red = off-board pad extent, yellow =
+move vectors, hatched = KiCad-locked.
+
 **Show without reading:** the movie, `--ratsnest-all` hairballs, full panel
 dumps. Those are for the human. Budget **≤3 images read per turn**, crops
 count as cheap — pick by the question you have, not by what is available. The
@@ -1273,6 +1334,91 @@ only in `check_floorplan`'s `outline` block.
   ```bash
   grep -oE '"routed_single": \[[^]]*\]|"failed_single": \[[^]]*\]|"failed_multipoint": \[[^]]*' run.log
   ```
+
+- **YOUR OWN CHECKS ARE INSTRUMENTS TOO, and they fail the same way.** Every
+  rule above is about a tool that can fail two ways and reports one. The checks
+  you write to test those tools have exactly that shape, and they are *easier*
+  to get wrong, because a check's failure path is the path nobody looks at.
+
+  Measured in a single session, all five reporting "the guard held" or "the
+  feature is absent" when neither was true:
+
+  | what I ran | what it actually did | what I concluded |
+  |---|---|---|
+  | a negative control copied to a temp dir | died on `ModuleNotFoundError`, exit 1 | "the gate refused" |
+  | a probe calling `check_connectivity(...)` | that function does not exist | "the branch never fires" |
+  | evidence passed as `<(echo '{...}')` | fd gone before a Windows child opened it | "the stage never mentions it" |
+  | an `awk` section splitter | matched the first of two `===== L5 =====` | "zero render mentions" |
+  | `--deadline 0` must yield a partial | a board with no work correctly completes | "the deadline is broken" |
+
+  Four rules, and the first one is most of it:
+
+  1. **A non-zero exit is not evidence.** Assert the REASON. `tests/run_utils.py`
+     has `check(argv, refuse='<the reason>', code=N)`, which reports an
+     `ImportError`/traceback/argparse accident as a **BROKEN TEST** rather than
+     as a satisfied guard. Use it instead of `assert r.returncode == 2`.
+  2. **Verify the input before trusting the output.** `run_utils.evidence(path)`
+     refuses a path that is not a real non-empty file. A check whose input is
+     missing tests nothing — and process substitution is not a file on Windows.
+  3. **Test both directions.** "It refuses when X" is half a test; "it accepts
+     when not-X" is the half that catches a gate wedged shut. The deadline case
+     above was a spec error, and only the accepting direction exposed it.
+  4. **When a check reports something surprising, suspect the check first.**
+     Every one of the five looked like a real finding. The tell is always the
+     same: a result that would require the code to be broken in a way you have
+     no other evidence for.
+
+- **THE SILENT-TIMEOUT FAMILY. Learn its signature, because five different
+  instruments share it and none of them says the word "timeout" where you look.**
+  A long quiet phase after a complete-looking report; an exit code belonging to
+  the **shell** rather than the tool; and staged output that leaves nothing at
+  the output path on a kill. Measured members:
+
+  | where | limit | on expiry | what you see |
+  |---|---|---|---|
+  | `place_reconstruct --stages legalize` | `--deadline` | stops between violators, keeps the seats | `JSON_SUMMARY` `status: deadline`, exit `7` |
+  | `place_seed --repair/--reseat` | `--deadline` | the same | the same |
+  | `route.py` / `route_diff.py` / `route_planes.py` | `--deadline` | stops between nets/pairs/regions, writes the copper it has | the same |
+  | `route_disconnected_planes` (either form) | `--deadline` | partial repair, fully gated | the same |
+  | *any of the above WITHOUT `--deadline`* | none | runs forever | shell `124`, no output, no `JSON_SUMMARY` |
+  | `EXACT_FILL_TIMEOUT` (`kicad_exact_fill.py`) | 300 s | returns `None` | ONE misattributed line |
+  | `ORACLE_DRC_TIMEOUT` (`kicad_oracle.py`) | 240 s | `None`, and **memoises the board so every later step skips the oracle too** | nothing at all |
+  | `converge record` argv | ~32 kB | never execs | shell `126`, **no ledger row** |
+
+  The last three degrade to a fallback with no failure signal and no effect on
+  the exit code. Two consequences you must build into how you run:
+
+  1. **Pass `--deadline` on any step with an external timeout**, set well below
+     it (~0.8×). It is the only mechanism that works: on Windows a harness kill
+     is `TerminateProcess`, which no handler, `atexit` or flush can catch, so
+     the tool must stop ITSELF. **The routing tools have it too now** — run 11
+     lost a full lap because `route.py` did not, and only a re-parse of the
+     output board established that the engine had in fact finished. A log with
+     no `DEADLINE:` line is proof no budget was set. `KRT_DEADLINE_S` budgets a
+     whole chain with one export. Note the cancel is cooperative — measured
+     109 s against a 45 s budget — so it guarantees TERMINATION, not a
+     wall-clock cap.
+
+     **Read `complete` before you read any tally.** A partial run's
+     `JSON_SUMMARY` parses perfectly and its numbers are not a whole board's;
+     `place_route_loop` already refuses one, and a hand-read must too
+     (`.get('complete', True)`, so pre-deadline logs are unaffected).
+  2. **Check the row count after every `converge.py record`.** The 126 is the
+     shell's, so a caller that does not re-count sees no error and the lap is
+     gone. Prefer `--score-file` over `--score "$(cat …)"`.
+
+  A `'NoneType' object has no attribute 'items'` from the plane fragility field
+  was, for a long time, the *caller's* own `AttributeError` printed where the
+  diagnosis should be — the real reason (a 300 s fill timeout) was computed and
+  discarded. If a message names a Python type error, suspect that the instrument
+  is reporting its own bug rather than the board's.
+
+- **The routable denominator is ON-BOARD pads.** `board_score` counts a net
+  routable at ≥2 pads; the router's own `net_queries.filter_routable_nets`
+  requires ≥2 pads **on the board**. Measured on one board: 147 vs 149, and the
+  two nets in the gap (2 pads, 1 on-board each) appear in `unrouted` forever
+  while no router could ever route them. Before reporting an unrouted net as a
+  routing failure, check it has two pads the router can reach.
 
   **This is a family, not a route.py quirk**: ANY truncated or piped read of
   ANY instrument — an exit code through a pipe, a `grep | tail -N` of a long
@@ -3194,6 +3340,25 @@ only routed under a staged/lifted rule cannot be re-joined once ripped.
 out of the rip set — the log line `N PROTECTED net(s) excluded from blocker
 rip-up` is the tell that it survived.
 
+**Check `protected_nets` is still there before relying on it.** `route_diff`
+records the pair under `kicad_routing_tools.protected_nets` in the output
+`.kicad_pro`, and any helper that *replaces* that project file rather than
+merging into it — a "restore the canonical netclasses" script, for instance —
+silently deletes the record and re-exposes the pair. The tell is that log
+line: if it is absent or its count dropped, the protection is gone and only
+your `--power-nets` width carries it.
+
+**Pass `--deadline` on that call too, set BELOW the smallest cap in your
+stack.** The silent-timeout table above lists this tool WITHOUT a deadline as
+*runs forever → shell 124, no output, no `JSON_SUMMARY`*, and that is what
+happened: 40 min with `--rip-blocker-nets` and 25 min plain on a 217-part
+board, no board written either time (run 9), and it fired again on a
+**113**-part board (run 15) — so do not assume a small board is safe. The
+cancel is cooperative, so the tool overshoots the number; give it room under
+your real cap rather than matching it. With it you get a partial repair,
+`status: deadline`, and exit 7 — all three are results. Without it you get a
+shell code and nothing to read.
+
 > **Never `cp` a board without its `.kicad_pro`.** A bare `cp a.kicad_pcb
 > b.kicad_pcb` copies only the board and strands the sibling `.kicad_pro`, which
 > holds the DRC floor (the Default-netclass clearance/track/via the chain routed to).
@@ -3988,6 +4153,17 @@ cannot succeed. Measured: `broken` sat at **14 across two iterations** of
 `route.py` calls and fell to **11 in one** `repair_planes` call once
 the plane net was separated out.
 
+**`poured_nets` is that handler decision and NOTHING else — it is not a list of
+plane nets, and it is not a safe `--ignore-nets` population.** It means "this net
+has at least one zone", which on a board that pours signal nets includes them:
+measured on neo6502, its 61 nets covered **332 of 545 pads (72%)**, all of
+`/A0`–`/A15` among them. A run read it as "the planes, ignore those" and removed
+most of the board from its own render. The field publishes this sentence itself,
+as `broken.poured_nets_meaning` — read it there rather than inferring from the
+name. Every net name `board_score` publishes is now checked against the board
+(`net_name_audit`); a non-zero `unknown_count` is a bug in the instrument, not a
+finding about the board.
+
 **One tool per class — they are not interchangeable, and using `route.py` on all
 of them is why the count does not move:**
 
@@ -4364,6 +4540,29 @@ if `blocking` is level, because 9.1a ranks connectivity above the rest. Say so i
 the ledger with both numbers. A dead net is worse than a wide trace, and the scalar
 does not know that.
 
+**A THIRD EXCEPTION, for a MANDATORY CHAIN STEP that manufactures `broken` by
+construction.** A fanout converts nets that had NO copper into nets whose copper
+is in fragments — that is what an escape stub *is* — so it moves work from
+`unrouted` into `broken` and `blocking` rises. The step is not a candidate
+iteration to be accepted or reverted; it is a step the chain requires, and the
+pass that closes those fragments comes later. Measured on one board: the U1
+fanout took `blocking` 297 → 371 while `unrouted` fell 144 → 83 (61 nets gained
+copper) and `broken` rose 11 → 140; the bulk signal route then took `blocking`
+to 222 and `broken` to 65.
+
+Neither of the two exceptions above covers it, and reaching for them is the
+mistake: exception 1 is scoped to "`blocking` is **level**" and here it rose 74,
+and exception 2's commensurability probes (`ungraded`,
+`patterns_matching_no_routed_net`, `nets_analyzed`) are **identical** across the
+two rows, because nothing new became measurable — the same nets are graded, they
+simply moved between components. By the letter of the accept rule that lap
+should have been reverted, which would have deleted the fanout.
+
+So: **name the step as a mandatory chain step, record the component-level
+movement (not the scalar), and say which later step closes the fragments.** Do
+not dress it up as 9.1a rank — 9.1a is a LEVER-SELECTION rule, not an accept
+rule, and citing it here is a category error that reads as compliance.
+
 **A SECOND EXCEPTION, and it is the one you will get backwards: `blocking` can
 RISE because the iteration made more of the board MEASURABLE.** 9.1's rule that
 "a run reporting 12 has not found a better board, it has looked at less of it"
@@ -4430,7 +4629,7 @@ unreachable from it.
 python3 -X utf8 py_placer/converge.py record --ledger wk/ledger.jsonl \
     --board wk/iter03.kicad_pcb --kind completion \
     --lever 'rip lever: --rip-existing-nets QSPI_SD2 + --grid-step 0.025' \
-    --score "$(cat wk/score_iter03.json)" \
+    --score-file wk/score_iter03.json \
     --argv python3 -X utf8 py_router/route.py wk/iter02.kicad_pcb wk/iter03.kicad_pcb --nets QSPI_SD1 ...
 
 python3 -X utf8 py_placer/converge.py status --ledger wk/ledger.jsonl      # EVERY iteration
@@ -4498,6 +4697,17 @@ reuse an output path across iterations**: a ledger that says
 `wk/placed.kicad_pcb` when three iterations wrote that name is unauditable, and
 one that named a *rejected* board as the parent of everything downstream got
 shipped.
+
+**Take the argv from the tool's own `CMD:` line, not from memory.** Every
+routing tool now self-echoes `CMD: <the exact invocation>` as its first stdout
+line and `EXIT=<rc>` as its last (`route.py`, `route_diff.py`,
+`route_planes.py`, `route_disconnected_planes.py`, and the checkers). That line
+comes from `sys.orig_argv`, so it carries interpreter flags like `-X utf8`
+verbatim and is REPLAYABLE truth rather than a reconstruction. Until run 12 the
+three signal/diff/plane routers did not have it, which made "paste the tool's
+own `CMD:` line into `converge record --argv`" unsatisfiable for a routing lap
+— run 11 hand-wrote replay scripts instead, which is exactly the placeholder-
+argv failure the next paragraph exists to stop.
 
 **The argv must be real, and the close-out must name its stop condition —
 `record` now enforces both.** An `--argv` whose first token is neither an
