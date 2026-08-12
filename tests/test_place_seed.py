@@ -122,5 +122,151 @@ with tempfile.TemporaryDirectory() as d:
     check("seed output carries the .kicad_dru sibling",
           os.path.isfile(os.path.join(d, 's.kicad_dru')))
 
+    # ---------------------------------------------------------------- --reseat
+    #
+    # A part tens of millimetres off the outline is unreachable by every
+    # minimal-move repair in this stack, because they all search outward from
+    # the part's CURRENT pose. Measured on a real damaged board: --repair spent
+    # 4m55s and attempted none of the 11 such parts. --reseat lifts them.
+    print("\n--reseat")
+
+    # (a) HEALTHY BOARD: the auto scope is empty and the pass is a no-op that
+    # exits 0. This is the property that makes it safe in a default ladder --
+    # the census is corpus-calibrated to zero on all 33 in-repo boards.
+    r = run([seed_py, BOARD, os.path.join(d, 'h.kicad_pcb'),
+             '--intent', intent_path, '--reseat', '--dry-run'])
+    check("healthy board: bare --reseat exits 0", r.returncode == 0,
+          f"rc={r.returncode} {(r.stdout + r.stderr)[-300:]}")
+    s = summary(r)
+    check("healthy board: auto scope is empty", s['scope'] == [], str(s['scope']))
+    check("healthy board: no witnesses before OR after",
+          s['witnesses_before'] == 0 and s['witnesses_after'] == 0)
+
+    # (b) DAMAGED BOARD, synthesized here so the test owns its own fixture:
+    # push three parts well outside the outline.
+    victims = [ref for ref, fp in sorted(pcb.footprints.items())
+               if fp.pads][:3]
+    far_x = b[2] + 25.0
+    dmg = os.path.join(d, 'dmg.kicad_pcb')
+    write_placed_output(BOARD, dmg, [
+        {'reference': ref, 'new_x': far_x + 5.0 * i, 'new_y': cy,
+         'new_rotation': pcb.footprints[ref].rotation or 0}
+        for i, ref in enumerate(victims)])
+
+    import pose_score
+    from placement import reconstruct as _rec
+    _dpcb = parse_kicad_pcb(dmg)
+    _dst = pose_score.make_state(_dpcb, dmg)
+    wit = sorted(_rec.damage_witnesses(_dst))
+    check("damage_witnesses names exactly the parts pushed off",
+          wit == sorted(victims), f"{wit} vs {sorted(victims)}")
+
+    # (c) THE LAUNDERED-BAND REGRESSION. An intent emitted off the DAMAGED
+    # board must NOT convert those overhangs into declared edge bands: run 10
+    # emitted bands equal to each part's damage displacement (up to 160mm on an
+    # 81mm board), which blinded the repair census, the reconstruct gate and
+    # the intent grade all at once. The entry is capped AND loses its `edge`.
+    dmg_intent = os.path.join(d, 'dmg_intent.json')
+    _di = emit_intent(_dpcb, dmg, declare_classes=True)
+    with open(dmg_intent, 'w', encoding='utf-8') as f:
+        json.dump(_di, f)
+    _ec = {c['ref']: c for c in _di.get('edge_connectors') or ()}
+    _bad = [(v, _ec[v].get('overhang_mm', {}).get('max'), _ec[v].get('edge'))
+            for v in victims if v in _ec]
+    check("a 25mm+ overhang is emitted WITHOUT an edge (treated as damage)",
+          all(e is None for _r, _m, e in _bad) and len(_bad) == len(victims),
+          str(_bad))
+    check("...and its band is CAPPED, not the observed displacement",
+          all(m is not None and m <= 25.0 for _r, m, _e in _bad), str(_bad))
+    check("...and the entry says so in machine-readable form",
+          all(_ec[v].get('overhang_capped') for v in victims if v in _ec))
+    # The counterfactual, pinned because this is the kind of finding that gets
+    # re-litigated: seeding WITH such a band is not a small error. Stage 1
+    # places a declared edge connector with no legality gate at the middle of
+    # its band, and a 160mm band threw a part THIRTY KILOMETRES off the board.
+    check("the uncapped band would have been >= the displacement",
+          all(m < 20.0 for _r, m, _e in _bad),
+          'cap must be far below the ~25-35mm observed overhang')
+
+    # (d) THE PASS ITSELF: auto scope, all seated, witnesses to zero.
+    out_r = os.path.join(d, 'r.kicad_pcb')
+    r = run([seed_py, dmg, out_r, '--intent', dmg_intent, '--reseat'])
+    check("--reseat on the damaged board exits 0", r.returncode == 0,
+          f"rc={r.returncode} {(r.stdout + r.stderr)[-400:]}")
+    s = summary(r)
+    check("--reseat auto scope is exactly the witnesses",
+          s['scope'] == sorted(victims), str(s['scope']))
+    check("--reseat scope_source names the census",
+          s['scope_source'] == 'auto:damage_witnesses')
+    check("witnesses_after is 0 -- THE number that predicts routability",
+          s['witnesses_after'] == 0,
+          f"{s['witnesses_before']} -> {s['witnesses_after']}")
+    check("every scope part was seated", s['unseated'] == [] and
+          s['reseated'] == len(victims), str(s))
+    check("the gate ACCEPTED", s['accepted'] is True)
+    _gb, _ga = s['gate_before'], s['gate_after']
+    _oob = _rec.GATE_TERMS.index('oob')
+    check("oob strictly improved", _ga[_oob] < _gb[_oob],
+          f"{_gb[_oob]} -> {_ga[_oob]}")
+    check("nothing ABOVE oob in the gate tuple worsened",
+          all(_ga[i] <= _gb[i] for i in range(_oob)),
+          f"{_gb[:_oob]} -> {_ga[:_oob]}")
+    check("no scope ref kept an edge declaration",
+          set(s['edge_bands_dropped']) <= set(victims))
+
+    # (e) THE CAUSAL PROPERTY, and the reason the pass exists: every net that
+    # had a pad OFF THE BOARD has none afterwards. That is the thing which
+    # converts one-for-one into `unrouted` -- on the measured board the 11
+    # off-board parts carried a pad on every one of the 13 nets the router
+    # refused to attempt.
+    #
+    # `placement_blocked` (< 2 ON-BOARD pads, board_score's split) is the
+    # STRICTER form and is asserted only when the fixture actually produces
+    # one: whether an off-board pad drops its net below two on-board pads
+    # depends on which parts got pushed off, and here they are decaps on rails
+    # with many other pads. The general property above holds either way.
+    from check_drc import make_off_board_test
+    from net_queries import routable_pad_count
+
+    def net_shapes(board):
+        p = parse_kicad_pcb(board)
+        off = make_off_board_test(p.board_info)
+        dirty, blocked = set(), set()
+        for nid, pads in p.pads_by_net.items():
+            if nid not in p.nets or len(pads) < 2:
+                continue
+            if any(off(q.global_x, q.global_y) for q in pads):
+                dirty.add(p.nets[nid].name)
+            if routable_pad_count(p, nid, off) < 2:
+                blocked.add(p.nets[nid].name)
+        return dirty, blocked
+
+    _d0, _b0 = net_shapes(dmg)
+    _d1, _b1 = net_shapes(out_r)
+    check("damaged board HAS nets with an off-board pad", bool(_d0),
+          str(sorted(_d0)[:6]))
+    check("after --reseat NO net has an off-board pad", not _d1,
+          str(sorted(_d1)[:6]))
+    check("placement-blocked nets do not survive the pass", not _b1,
+          f"before {sorted(_b0)[:4]} after {sorted(_b1)[:4]}")
+
+    # (f) determinism across PYTHONHASHSEED, same as the seeding path above.
+    out_r2 = os.path.join(d, 'r2.kicad_pcb')
+    r = run([seed_py, dmg, out_r2, '--intent', dmg_intent, '--reseat'],
+            hashseed="12345")
+    check("--reseat is byte-identical across hash seeds",
+          r.returncode == 0
+          and open(out_r, 'rb').read() == open(out_r2, 'rb').read())
+
+    # (g) refusals are NAMED, never silent.
+    r = run([seed_py, dmg, os.path.join(d, 'n.kicad_pcb'),
+             '--intent', dmg_intent, '--reseat', 'NOSUCHREF', '--dry-run'])
+    check("an unmatched ref is named in the notes",
+          'NOSUCHREF' in r.stdout, r.stdout[-300:])
+    r = run([seed_py, dmg, os.path.join(d, 'f.kicad_pcb'),
+             '--intent', dmg_intent, '--reseat', '--force'])
+    check("--reseat with --force is a usage error", r.returncode == 2,
+          f"rc={r.returncode}")
+
 print(f"\n{passed}/{passed + failed} checks passed")
 sys.exit(1 if failed else 0)

@@ -60,6 +60,27 @@ WARN = 'warn'
 DEFAULT_ZONE_TOLERANCE_MM = 0.5
 DEFAULT_ENVELOPE_TOLERANCE_MM = 0.5
 
+#: Floor for how large an OBSERVED overhang may be and still be emitted as a
+#: declared edge band. An observation entry converts what the board DOES into
+#: what the spec ALLOWS, and above this there is no plausible reading under
+#: which it is a spec: a part hanging 160 mm off an 81 mm board is not an edge
+#: connector with a 160 mm band, it is a part that was dragged off the board.
+#:
+#: The real cap is `max(this, the part's own largest dimension)` -- an overhang
+#: cannot exceed the part's own size without the part being entirely off the
+#: outline -- and this floor keeps a small part's legitimate band (a 0603 test
+#: point half off the edge, a switch actuator) from being called damage.
+#:
+#: Measured, run 10: `check_floorplan --emit-intent --declare-classes` on a
+#: damaged board declared all ELEVEN off-board parts edge connectors with bands
+#: equal to their damage displacement (R7 east 34.792 ... TP4 north 160.062).
+#: Every downstream consumer then went blind: seeder's off-board census skips
+#: declared edge refs, so `--repair` found 5 violators and none of the 11; and
+#: reconstruct's gate read `oob = 4.348` on a board with parts 158 mm out
+#: (929.671 without the bands). This generalises the mount_hole refusal below,
+#: which already knows this failure mode for one part class.
+EDGE_BAND_SANITY_MM = 5.0
+
 _TOP_LEVEL_KEYS = {
     'schema', 'kind', 'board', 'units', 'envelope', 'defaults', 'blocks',
     'keepouts', 'edge_connectors', 'decaps', 'must_lock', 'legality_budget',
@@ -157,6 +178,21 @@ class Intent:
             return float(zone.tolerance_mm)
         return float(self.defaults.get('zone_tolerance_mm',
                                        DEFAULT_ZONE_TOLERANCE_MM))
+
+
+def empty_intent(board: str = '') -> Intent:
+    """An intent that declares nothing -- every construct empty.
+
+    For engine paths that are intent-DRIVEN but must still run when the caller
+    has none (`place_reconstruct` without `--intent`, `place_seed --reseat` on a
+    board with no floorplan file). Declaring nothing is not the same as having
+    no intent object: the seeding stages read zones, edge bands and must_lock
+    off it, and each of those reads is a no-op here rather than a branch at
+    every site."""
+    return Intent(schema=SCHEMA_VERSION, kind=KIND, board=board, units='mm',
+                  envelope={}, defaults={}, blocks=(), keepouts=(),
+                  edge_connectors=(), decaps={}, must_lock=(),
+                  legality_budget={}, health={}, severity={})
 
 
 # --------------------------------------------------------------------------
@@ -1113,6 +1149,12 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
                'outside_fraction': (None if st.outside_fraction is None
                                     else round(st.outside_fraction, 4)),
                'stacked_refs': list(st.stacked_refs),
+               # The subset `partially_unplaced` is actually decided on, and
+               # the one place_seed scopes its seed from. Without it a reader
+               # sees `partially_unplaced: false` beside a non-empty
+               # `stacked_refs` and has no way to tell "suppressed as markers /
+               # opposite sides" from a bug in the check.
+               'stacked_suspect_refs': list(st.stacked_suspect_refs),
                'segments': st.segments, 'vias': st.vias},
         health=health_out,
         rules_run=tuple(ran), rules_skipped=skipped,
@@ -1272,11 +1314,28 @@ def emit_intent(pcb_data, pcb_file: str, *,
                                     f'sits fully on-board')
         return None
 
+    def _band_cap(ref: str) -> float:
+        """The largest overhang that can still be READ as a declared band.
+
+        An overhang wider than the part itself puts the part entirely off the
+        outline, which no spec expresses; below that, `EDGE_BAND_SANITY_MM`
+        keeps a small part's legitimate band from being called damage."""
+        rect = parts[ref].rect
+        try:
+            extent = max(abs(rect[2] - rect[0]), abs(rect[3] - rect[1]))
+        except Exception:                                       # noqa: BLE001
+            extent = 0.0
+        return max(EDGE_BAND_SANITY_MM, extent)
+
     conns = []
     declared = set()
     for ref in sorted(parts):
         amt = state.edge_gate.rect_outside_amount(parts[ref].rect)
         if amt > legality.EPS:
+            # An OBSERVED overhang above the sanity cap is not a band. Emitting
+            # it as one launders the damage into the spec that is supposed to
+            # gate the damage's repair -- see EDGE_BAND_SANITY_MM.
+            over_cap = amt > _band_cap(ref)
             fp = (pcb_data.footprints or {}).get(ref)
             pc = None
             if fp is not None:
@@ -1306,16 +1365,45 @@ def emit_intent(pcb_data, pcb_file: str, *,
                     entry['class'] = pc.name
                     entry['source'] = 'auto-class'
                     entry['overhang_mm'] = default_band(pc.name, fp)
+                elif over_cap:
+                    entry['overhang_mm'] = {'min': 0.0,
+                                            'max': round(_band_cap(ref), 3)}
+                    entry['overhang_capped'] = True
+                    entry['observed_overhang_mm'] = round(amt, 3)
+                    entry['note'] += (
+                        f'; observed overhang {amt:.3f}mm exceeds any '
+                        f'plausible band ({_band_cap(ref):.3f}mm) and is '
+                        f'treated as DAMAGE, not an allowance')
                 else:
                     entry['overhang_mm'] = {'min': 0.0,
                                             'max': round(amt + 0.5, 3)}
                 conns.append(entry)
                 declared.add(ref)
                 continue
-            entry = {'ref': ref, 'edge': _nearest_edge(parts[ref].rect,
-                                                       bounds),
-                     'overhang_mm': {'min': 0.0,
-                                     'max': round(amt + 0.5, 3)}}
+            if over_cap:
+                # NO `edge` key: the schema supports edge-less entries and both
+                # the seeder's stage 1 (seeder.py:409-417) and its repair path
+                # already handle them by declining to guess. The band is capped
+                # rather than emitted at the observed amount, so a consumer
+                # that reads only `overhang_mm` cannot be blinded either.
+                entry = {'ref': ref,
+                         'overhang_mm': {'min': 0.0,
+                                         'max': round(_band_cap(ref), 3)},
+                         'overhang_capped': True,
+                         'observed_overhang_mm': round(amt, 3),
+                         'note': (f'overhang observed at {amt:.3f}mm, which '
+                                  f'exceeds any plausible band '
+                                  f'({_band_cap(ref):.3f}mm) -- treated as '
+                                  f'DAMAGE, not an allowance: no edge is '
+                                  f'declared and the excess is charged. An '
+                                  f'observation entry that blesses this is '
+                                  f'how a 160mm displacement became a 160mm '
+                                  f'spec allowance (run 10)')}
+            else:
+                entry = {'ref': ref, 'edge': _nearest_edge(parts[ref].rect,
+                                                           bounds),
+                         'overhang_mm': {'min': 0.0,
+                                         'max': round(amt + 0.5, 3)}}
             if declare_classes and pc is not None \
                     and pc.name in ('edge_receptacle', 'edge_actuator'):
                 entry['class'] = pc.name
