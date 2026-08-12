@@ -2843,7 +2843,31 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         # router never places pads), so flagging them by default just adds noise
         # to routed-board grading. Enable with --check-pad-edge to catch a
         # placement step that pushed a component off the board / into a cutout.
+        if not check_pad_edge and not quiet:
+            # SAY that it was not checked. The severity-ignore case one branch
+            # up prints a "Skipping..." line and this one printed nothing at
+            # all, so "pads are clear of the edge" and "pads were never looked
+            # at" were the same output. The default is off because on a ROUTED
+            # board the hits are almost always pre-existing edge connectors --
+            # but that premise inverts on a placement-repair run, where a part
+            # really can be pushed off the outline. One board's copper-free
+            # baseline was 93 by default and 95 with the flag, and the two
+            # extra violations were on precisely the two parts that run was
+            # about to freeze and waive.
+            print("Skipping pad-to-board-edge checks (--check-pad-edge is off; "
+                  "pads are edge-exempt by default because on a routed board "
+                  "the hits are usually pre-existing edge connectors). Pass it "
+                  "on a board whose PLACEMENT may have moved a part off the "
+                  "outline.")
         if check_pad_edge:
+            if not quiet:
+                # The OFF branch above announces itself and the ON branch used
+                # to print nothing, so a log showed a line when the check was
+                # skipped and silence when it ran. That is backwards for
+                # anyone reading the log later to find out whether the
+                # top-priority placement defect was looked for at all.
+                print("Checking pad-to-board-edge clearances "
+                      "(--check-pad-edge is on)...")
             for pad_net, pads in pads_by_net.items():
                 if matching_pad_nets is not None and pad_net not in matching_pad_nets:
                     continue
@@ -2995,7 +3019,21 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             # (issue #93: a fixed cap silently dropped most of a long list).
             limit = len(violations) if max_print is not None and max_print <= 0 else max_print
             for vtype, vlist in by_type.items():
-                print(f"\n{vtype.upper()} violations ({len(vlist)}):")
+                # CONTACT count per type. `[SHORT]` is printed at exactly one
+                # place in this file, inside the pad-pad branch, so it cannot
+                # name a track touching a pad -- two boards differing by a
+                # power-rail short reported identical totals AND identical
+                # pad-pad short counts, because every differing contact was
+                # pad-segment. Only a per-type contact figure separates them,
+                # and the JSON already carries it as `contacts_by_type`.
+                _nc = sum(1 for v in vlist
+                          if isinstance(v.get('overlap_mm'), (int, float))
+                          and v['overlap_mm'] >= (
+                              v['required_mm']
+                              if isinstance(v.get('required_mm'), (int, float))
+                              else clearance))
+                _ct = f" -- {_nc} in CONTACT" if _nc else ""
+                print(f"\n{vtype.upper()} violations ({len(vlist)}){_ct}:")
                 print("-" * 40)
                 for v in vlist[:limit]:  # Show first `limit` of each type
                     if vtype in ('segment-segment', 'segment-segment-track-rule'):
@@ -3172,6 +3210,13 @@ if __name__ == "__main__":
                         help='Also check pad-to-board-edge clearance (issue #236). '
                              'Off by default: pad-edge violations are almost always '
                              'pre-existing edge-connector pads, not router-introduced.')
+    parser.add_argument('--json', metavar='FILE', default=None,
+                        help='also write the result as JSON: the graded floors '
+                             'with their source, the non-accepted violation '
+                             'count, the per-type breakdown and every item. '
+                             'The file is COMPLETE regardless of --max-print, '
+                             'so a consumer never quotes a count off a '
+                             'truncated listing.')
     parser.add_argument('--render', metavar='DIR', default=None,
                         help='write question-scoped crop panels of the violation '
                              'clusters to DIR (one PNG per spatial cluster, red '
@@ -3190,6 +3235,7 @@ if __name__ == "__main__":
     # tap escalation). Grading stricter than that invents phantom violations on
     # legitimately tight copper; grading looser hides real ones. (issue follow-up
     # to the repair_planes fine-tap grading confusion.)
+    _explicit_clearance = args.clearance is not None   # args.clearance is overwritten below
     if args.clearance is None:
         args.clearance = 0.2
         found = False
@@ -3222,6 +3268,36 @@ if __name__ == "__main__":
         # log and board_score's graded_at parsed to null exactly when the
         # caller was most explicit. Say it always, with its source.
         print(f"Grading at clearance {args.clearance:.4g} mm (--clearance)")
+
+    # ...and say when the board declares NO floor of its own, on BOTH branches
+    # (run-12 Tier 1.3). The missing-project warning above fires only when -c
+    # was omitted -- yet CLAUDE.md tells a caller to pass the routed clearance
+    # explicitly, which is exactly the case where the board's own silence went
+    # unrecorded. Measured on tigard (no .kicad_pro): every floor accessor
+    # returns None, a whole baseline was graded against fallbacks, and
+    # `grep -icE "no sibling|no .kicad_pro|no project"` over the log returned 0.
+    # Report-only: no floor and no exit code changes here. The flag is computed
+    # even under -q, because the JSON below carries it too.
+    _board_declares_no_floor = False
+    try:
+        from list_nets import board_floor_declaration
+        _decl = board_floor_declaration(args.pcb)
+        _board_declares_no_floor = bool(_decl['declares_nothing'])
+        if _board_declares_no_floor and not args.quiet:
+            print(f"  NOTE: {os.path.basename(args.pcb)} declares NO net class "
+                  f"and NO board constraint (no sibling .kicad_pro, no "
+                  f"(net_class) block). Every floor here is a FALLBACK, not "
+                  f"this board's own: clearance {args.clearance:.4g} mm"
+                  + (" (--clearance)" if _explicit_clearance
+                     else " (check_drc default)")
+                  + f", hole-to-hole {args.hole_to_hole_clearance:.4g} mm, "
+                  f"board-edge {args.board_edge_clearance:.4g} mm. Whether "
+                  f"they match what the copper was routed to is unverified "
+                  f"HERE -- read the route step's --clearance from "
+                  f"redo_commands.sh.")
+    except Exception as _e:
+        if not args.quiet:
+            print(f"  (board floor declaration not read: {_e})")
 
     # Issue #326: per-netclass clearances -- KiCad grades every pair at the
     # max of the two items' netclass values, so read the board's classes
@@ -3296,6 +3372,73 @@ if __name__ == "__main__":
                          net_clearances=net_clearances)
     if args.render and any(not v.get('accepted') for v in violations):
         render_violation_panels(args.pcb, violations, args.render)
+    if args.json:
+        # A machine-readable result, because the copper-free placement gate is
+        # consumed by a driver that REFUSES to proceed without it -- and a gate
+        # whose evidence file cannot be produced is satisfiable only by
+        # fabricating it. Count 'accepted' items separately: they are published
+        # for other graders but are not failures, exactly as the exit status
+        # below treats them.
+        import collections as _c
+        import json as _json
+        _real = [v for v in violations if not v.get('accepted')]
+
+        def _clearance_for(v):
+            """The clearance THIS violation was graded against.
+
+            Per-net clearances mean the graded floor is not one number, so a
+            violation carrying its own `required_mm` wins; otherwise the run's
+            clearance applies. Same relation the pad-pad `[SHORT]` tag uses.
+            """
+            r = v.get('required_mm')
+            return r if isinstance(r, (int, float)) else args.clearance
+
+        _doc = {
+            'schema': 1,
+            'tool': 'check_drc.py',
+            'board': os.path.abspath(args.pcb),
+            'graded_at': {
+                'clearance': args.clearance,
+                'clearance_margin': args.clearance_margin,
+                'hole_to_hole_clearance': args.hole_to_hole_clearance,
+                'board_edge_clearance': args.board_edge_clearance,
+                'per_net_clearances': bool(net_clearances),
+                'size_checks': not args.no_size_checks,
+                # run-12 Tier 1.3: True when the BOARD declared no net class
+                # and no constraint, so every floor above is this tool's
+                # fallback rather than the board's own. A reader comparing
+                # `graded_at` across boards cannot otherwise tell the two apart.
+                'board_declares_no_floor': _board_declares_no_floor,
+            },
+            'violations': len(_real),
+            'accepted': len(violations) - len(_real),
+            'by_type': dict(_c.Counter(v.get('type') for v in _real)),
+            # CONTACT, per type. `overlap_mm >= clearance` means the two pieces
+            # of copper physically reach each other -- required_dist is
+            # (width/2 + clearance) and overlap is required_dist minus the
+            # EDGE-TO-EDGE distance, so the relation holds for every type, not
+            # just pad-pad.
+            #
+            # Two boards once differed by a +1V2-to-signal short and reported
+            # 38 violations with byte-identical `by_type`. The pad-pad SHORT
+            # count was identical too (10 vs 10) -- every differing contact was
+            # `pad-segment`, whose TOTAL was 8 on both. So neither the total nor
+            # the obvious refinement could separate them, and the `[SHORT]` tag
+            # is emitted at exactly one place in this file, inside the pad-pad
+            # branch, and is structurally incapable of naming a track contact.
+            # Only a PER-TYPE contact count does it.
+            'contacts_by_type': dict(_c.Counter(
+                v.get('type') for v in _real
+                if isinstance(v.get('overlap_mm'), (int, float))
+                and v['overlap_mm'] >= _clearance_for(v))),
+            'items': [dict(item,
+                           short=(isinstance(item.get('overlap_mm'), (int, float))
+                                  and item['overlap_mm'] >= _clearance_for(item)))
+                      for item in violations],
+        }
+        with open(args.json, 'w', encoding='utf-8') as _fh:
+            _json.dump(_doc, _fh, indent=1, default=str, sort_keys=True)
+        print(f"  JSON -> {args.json}")
     # 'accepted' items (e.g. a track covered by an edge-exempt pad) are published in
     # the return for other graders but are NOT failures -- exclude from exit status.
     sys.exit(1 if any(not v.get('accepted') for v in violations) else 0)
