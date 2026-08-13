@@ -559,7 +559,16 @@ def score_candidate(cand: Candidate, *, free: Sequence[str],
                        f"{baseline_oob}")
     # Pad+drill layer gates, same baseline-relative shape as the two above.
     pad_pairs = cand.metrics.get('pad_conflict_pairs', 0) or 0
-    if pad_pairs > baseline_pad_pairs:
+    # run-19: a PILE seed's baseline carries hundreds of pad pairs, and "no
+    # worse than the baseline" then licenses ANY smaller intersection count.
+    # Above 50 the baseline is degenerate -- compare against 0, and say so.
+    if baseline_pad_pairs > 50:
+        if pad_pairs > 0:
+            reasons.append(
+                f"{pad_pairs} pad-clearance conflict pair(s) vs 0: the seed "
+                f"baseline's {baseline_pad_pairs} is pile-degenerate (> 50) "
+                f"and licenses nothing")
+    elif pad_pairs > baseline_pad_pairs:
         reasons.append(f"{pad_pairs} pad-clearance conflict pair(s) vs the "
                        f"baseline's {baseline_pad_pairs}")
     hole_sf = cand.metrics.get('hole_shortfall', 0.0) or 0.0

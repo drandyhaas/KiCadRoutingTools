@@ -1028,6 +1028,22 @@ class LegalityContext:
         self.pose_of = pose_of
         self.seed_of = seed_of
         self._baselines: Dict[Tuple[str, str], PairShortfall] = {}
+        # run-19: a PILE seed is not a license. Every conjunct of pads_ok is
+        # relative to seed_baseline, and on a pile the seed pair carries huge
+        # base.pad with pad_overlap and stack both True -- so ANY smaller
+        # intersection passed (measured: the SW23/SW28<->U2 blocker pairs).
+        # A seed bucket of >= 3 parts at one round(coord, 3) point is the
+        # pile signature; every part in one loses its baseline license and
+        # must be absolutely clean toward every neighbor. Deliberately above
+        # 2: a legitimate two-part by-design overlap (run 18's under-module
+        # R1<->U2 pairs) KEEPS its license.
+        _buckets: Dict[Tuple[float, float], List[str]] = {}
+        for _ref in part_pads:
+            _sx, _sy = seed_of(_ref)[:2]
+            _buckets.setdefault((round(_sx, 3), round(_sy, 3)),
+                                []).append(_ref)
+        self._degenerate_refs = frozenset(
+            r for refs in _buckets.values() if len(refs) >= 3 for r in refs)
 
     # -- pair measurement ------------------------------------------------------
     def pair_shortfall(self, a: str, b: str, pose_a=None,
@@ -1081,6 +1097,11 @@ class LegalityContext:
         return PairShortfall(pad_short, overlap, hole, stack)
 
     def seed_baseline(self, a: str, b: str) -> PairShortfall:
+        # The single choke point every consumer routes through (pads_ok and
+        # swap_pads_ok): a part from a degenerate seed bucket gets the ZERO
+        # baseline, which is exactly the semantics a pile deserves.
+        if a in self._degenerate_refs or b in self._degenerate_refs:
+            return ZERO_SHORTFALL
         key = (a, b) if a <= b else (b, a)
         base = self._baselines.get(key)
         if base is None:
