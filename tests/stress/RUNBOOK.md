@@ -787,6 +787,20 @@ anyone run it, run 14 would have picked a different board or expected the
 redraw. `stage_blind` now redraws by itself, but that only rescues an unlucky
 draw; it cannot rescue an unsuitable board.
 
+### 1b. Choose damage kinds the fence can adjudicate
+
+A qualified board can still stage an **undecidable** run: on a grid-homed
+board, `swap` and `translate` recovery is byte-identical to the truth board
+BY CONSTRUCTION — every displaced part's home pose is a grid point any honest
+search also lands on, so a perfect result and a truth-file LEAK produce the
+same bytes and the fence cannot tell them apart (run 18's undecidable LEAK
+verdict). Before staging, pick from `KINDS` (`placement/perturb.py:56` —
+`translate`, `wrong_side`, `swap`, `scatter`, `pile`) with the fence in mind:
+on grid-homed boards prefer `pile`/`scatter`, whose recovered poses carry no
+byte-identity shortcut, or pre-declare the secondary tell (which independent
+measurement will separate an honest recovery from a leak) BEFORE the damage
+is drawn. A tell declared after the result is an accusation, not a fence.
+
 ### 2. Run a positive control first
 
 The series has no control arm, so every null is ambiguous between "the placer

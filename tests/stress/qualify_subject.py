@@ -208,6 +208,9 @@ def main():
                   % (r['applied_mm_median'], r['applied_mm_min'],
                      r['applied_mm_max'], r['graded_at_clearance']))
     if a.json_out:
+        # run 19 lost a qualification JSON to a not-yet-created directory
+        # AFTER all the draws had been paid for. Make the parent, then write.
+        os.makedirs(os.path.dirname(a.json_out) or '.', exist_ok=True)
         with open(a.json_out, 'w', encoding='utf-8') as f:
             json.dump(rows, f, indent=1)
         print('  JSON -> %s' % a.json_out)
