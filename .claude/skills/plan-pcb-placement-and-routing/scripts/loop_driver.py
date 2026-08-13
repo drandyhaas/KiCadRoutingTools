@@ -609,7 +609,11 @@ The ONLY board you may open is the one named above. If you come across a
 control board, a `_truth/` directory, a `*.perturb.json` pose record, a `.bak`
 or any other board file in or near the work dir, do NOT open it: say that you
 found it and carry on without it. Reading one silently invalidates the whole
-run, and nothing downstream can detect that it happened.'''
+run, and nothing downstream can detect that it happened.
+Use the repo's engine tools for every board mutation. If you write ANY script
+that computes or writes poses or copper, disclose it in your next message and
+name it in every ledger lap it feeds -- a disclosed hand-assist is a finding;
+an undisclosed one silently invalidates the run.'''
 
 
 def _board_size(board):
@@ -2334,7 +2338,10 @@ def _self_test():
                                         '--shape', 'placement']))
         want(out.startswith(('<stage_instructions', '<error>')),
              f'{key} emits a tagged block')
-        want(len(out.splitlines()) <= 70, f'{key} stays under 70 lines')
+        # 74, not 70: run-19 A2 grew FENCE_CLAUSE by four lines (the
+        # hand-script disclosure duty). L1 sits exactly AT the cap, as it
+        # did at 70 -- any further growth is a deliberate decision, here.
+        want(len(out.splitlines()) <= 74, f'{key} stays under 74 lines')
 
     want(STAGES['L2'](_args(base)).startswith('<error>'),
          'routing refuses to start without a placement close-out')

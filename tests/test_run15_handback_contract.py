@@ -214,6 +214,18 @@ class HandbackContractTest(unittest.TestCase):
                           name + ' must name the pose record')
             self.assertIn('ONLY board you may open', out)
 
+    def test_both_prompts_carry_the_hand_script_disclosure_duty(self):
+        """Run 19: the teammate built arrange.py v1-v5 undisclosed until
+        challenged. The fence named the carriers a teammate must not OPEN,
+        but said nothing about scripts a teammate might WRITE -- so the
+        disclosure duty now travels in the same clause, on both prompts."""
+        _c, l1 = run(['--stage', 'L1', '--board', self.board,
+                      '--ledger', self.ledger])
+        _placed, l2 = self._l2_prompt()
+        for name, out in (('L1', l1), ('L2', l2)):
+            self.assertIn('disclosed hand-assist', out,
+                          name + ' must carry the hand-script disclosure duty')
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
