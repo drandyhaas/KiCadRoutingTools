@@ -16,7 +16,8 @@ courtyard kisses -- the corpus measured 235 -- so the placement fix loop
 targets the pairs OUR moves introduced, never a shipped design's own).
 
 Exit codes: 0 = clean, 2 = usage/load error, 4 = a blocking pair OR copper
-landing on a KiCad-locked part (see LOCKED-PART CONTACT).
+landing on a KiCad-locked part (see LOCKED-PART CONTACT) OR a coincident-
+origin stack (see COINCIDENT ORIGINS).
 """
 import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
@@ -139,6 +140,41 @@ def main():
                            pcb_file=args.board)
     leg = grade_pad_legality(pcb, clearance, worst_n=0)
 
+    # COINCIDENT ORIGINS (run-19, measured twice): SW17+SW34+REF_PUCK_R all at
+    # one point graded `buildable (blocking 0)` -- the pair currency counts pad
+    # INTERSECTIONS, and the rotated pads happened to interleave. A stack of
+    # parts at one origin is unbuildable whatever the pads do, so it is its own
+    # blocking channel. The grouping and the exoneration are placement_state's
+    # prior art, reused rather than re-derived: assess_placement buckets every
+    # pad-bearing footprint by round(coord, 3), partitions each bucket by
+    # physical side (a drilled part is on both), and exonerates all-marker
+    # side-groups (fiducials, mounting holes, testpoints -- mouse-bites and
+    # graphics markers are co-located by design and must NOT flag). A bucket is
+    # a finding here only when it holds >= 2 suspect NON-marker parts: one real
+    # part sitting on a fiducial is not a stack of parts.
+    from placement.part_class import classify_part
+    from placement.placement_state import assess_placement
+    _MARKER_CLASSES = ('fiducial', 'mount_hole', 'testpoint')
+
+    def _marker(ref):
+        try:
+            return classify_part(pcb.footprints[ref],
+                                 ref).name in _MARKER_CLASSES
+        except Exception:                                      # noqa: BLE001
+            return False
+
+    _suspect = assess_placement(pcb, pcb_file=args.board).stacked_suspect_refs
+    _buckets = {}
+    for _ref in _suspect:
+        _fp = pcb.footprints.get(_ref)
+        if _fp is None:
+            continue
+        _buckets.setdefault((round(_fp.x, 3), round(_fp.y, 3)),
+                            []).append(_ref)
+    stack_groups = [{'point': [pt[0], pt[1]], 'refs': refs}
+                    for pt, refs in sorted(_buckets.items())
+                    if sum(1 for r in refs if not _marker(r)) >= 2]
+
     new_advisory = None
     if args.baseline:
         try:
@@ -171,6 +207,14 @@ def main():
         for sh in getattr(q, 'shorts', ()) or ():
             print(f"        SHORT: {sh}")
 
+    if stack_groups:
+        print(f"  COINCIDENT ORIGINS ({len(stack_groups)}): parts stacked at "
+              f"one point. Rotated pads can interleave, so the pad-"
+              f"intersection channel alone can grade a stack buildable.")
+        for grp in stack_groups:
+            print(f"    {' '.join(grp['refs'])} @ "
+                  f"({grp['point'][0]}, {grp['point'][1]})")
+
     locked_contact = g.get('locked_contact_pairs') or []
     if locked_contact:
         print(f"  LOCKED-PART CONTACT ({len(locked_contact)}): copper lands on "
@@ -189,8 +233,12 @@ def main():
           f"{leg['hole_conflicts']} hole conflict(s), "
           f"{leg['oob_pad_count']} part(s) with pad copper off-board"
           + (": " + _clause if _clause else ""))
-    verdict = ('NOT BUILDABLE' if (g['blocking'] or locked_contact)
-               else 'buildable (blocking 0)')
+    # ONE predicate, used verbatim at all three sites (verdict, JSON
+    # `buildable`, exit code). Three re-derivations of `blocking or
+    # locked_contact` is how the coincident-origin channel would have reached
+    # two of them and silently missed the third.
+    not_buildable = bool(g['blocking'] or locked_contact or stack_groups)
+    verdict = 'NOT BUILDABLE' if not_buildable else 'buildable (blocking 0)'
     print(f"  VERDICT: {verdict}")
 
     if args.json:
@@ -213,7 +261,7 @@ def main():
             # wrong got it wrong quietly: board_score's assembly component
             # reads `blocking` alone, and the recovery arm scraped this
             # verdict back out of stdout rather than reading the JSON.
-            'buildable': not (g['blocking'] or locked_contact),
+            'buildable': not not_buildable,
             'verdict': verdict,
             'locked_contacts': len(locked_contact),
             'advisory': g['advisory'],
@@ -234,6 +282,11 @@ def main():
             'oob_pad_refs': leg.get('oob_pad_refs') or [],
             'oob_pad_basis': leg.get('oob_pad_basis'),
             'locked_contact_pairs': [q._asdict() for q in locked_contact],
+            # run-19: parts stacked at one origin, marker classes exonerated.
+            # Groups, not fake N*(N-1)/2 pair entries -- a stack is one
+            # finding about one point, and the fix is one re-seat per part.
+            'coincident_origin_groups': stack_groups,
+            'coincident_origins': len(stack_groups),
         }
         if new_advisory is not None:
             doc['baseline'] = args.baseline
@@ -242,7 +295,7 @@ def main():
             json.dump(doc, f, indent=1, sort_keys=True)
         print(f"  JSON -> {args.json}")
 
-    return 4 if (g['blocking'] or locked_contact) else 0
+    return 4 if not_buildable else 0
 
 
 if __name__ == "__main__":
