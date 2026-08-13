@@ -2141,8 +2141,8 @@ def _args(argv=None):
                     help='explicit form of the default (both halves go to a '
                          'teammate). Accepted so existing invocations keep '
                          'working; it changes nothing on its own')
-    ap.add_argument('--accept-residue', nargs='*', metavar='CHECK',
-                    default=None,
+    ap.add_argument('--accept-residue', nargs='*', action='extend',
+                    metavar='CHECK', default=None,
                     help='proceed to routing with a NAMED, measured-unfixable '
                          'placement residue -- naming WHICH check you are '
                          'accepting: ' + ' '.join(L2_CHECKS) + '. One blanket '
@@ -2157,8 +2157,8 @@ def _args(argv=None):
                          'ever refused to FINISH, so a run reached the '
                          'terminal artifact having never entered the routing '
                          "half's own V1-V5 loop at all.")
-    ap.add_argument('--accept-unclosed', nargs='*', metavar='CHECK',
-                    default=None,
+    ap.add_argument('--accept-unclosed', nargs='*', action='extend',
+                    metavar='CHECK', default=None,
                     help='ship with a NAMED close-out check unsatisfied: '
                          + ' '.join(CLOSE_CHECKS) + '. Deliberately separate '
                          'from --accept-residue, which is the placement gate: '
@@ -3303,6 +3303,21 @@ def _self_test():
         want(out.startswith('<error>') and 'close out:' not in out
              and 'board_score.py' in out and '--stop-condition' not in out,
              'D9: an unreadable score is a re-score refusal, not a ceremony')
+
+        # run-19 A1: a REPEATED --accept-* flag must ACCUMULATE. Plain
+        # nargs='*' made the second occurrence REPLACE the first, so
+        # `--accept-unclosed agreement --accept-unclosed ungraded` silently
+        # dropped `agreement` and the cross-check re-fired at L5. A bare flag
+        # still yields [] (the refusals keep firing); omitted still yields
+        # None (every `is not None` guard holds).
+        _au = _args(base + ['--accept-unclosed', 'agreement',
+                            '--accept-unclosed', 'ungraded'])
+        want(_au.accept_unclosed == ['agreement', 'ungraded'],
+             'A1: repeated --accept-unclosed flags accumulate, never replace')
+        _ar = _args(base + ['--accept-residue', 'blocking',
+                            '--accept-residue', 'oob_pad_count'])
+        want(_ar.accept_residue == ['blocking', 'oob_pad_count'],
+             'A1: repeated --accept-residue flags accumulate, never replace')
 
         # --------------------- run-17 audit: the gates that had no pinning test
         # Each of these held in the audit's hand-checks -- and deleting any of
