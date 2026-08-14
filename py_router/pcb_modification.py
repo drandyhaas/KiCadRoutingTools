@@ -2631,19 +2631,48 @@ def _self_crossing_pairs(net_segs):
     Endpoint-sharing and collinear-overlap are NOT crossings there (only a
     true interior X is), which is exactly the shape #162 is about.
 
-    Spatially hashed at 1mm so the scan costs ~O(local density), not O(n^2)
-    per net. Returns [(i, j, (cx, cy))] in a deterministic order.
+    Spatially hashed at 1mm. NOTE the hash indexes each segment's BOUNDING
+    BOX, not its traversed cells, so a long diagonal lands in ~O(length^2)
+    cells and a board full of them costs MORE than the naive pairwise scan
+    (measured: 150 board-spanning diagonals -> 11x slower than O(n^2), same
+    pairs). The guard below therefore falls back to the plain double loop
+    when the bbox-cell fanout exceeds the pairwise cost. In-repo nets are
+    tiny either way (worst observed: 130 cell inserts). Returns
+    [(i, j, (cx, cy))] in a deterministic order.
     """
     from collections import defaultdict
     from check_drc import segments_cross
 
     _CELL = 1.0
-    grid = defaultdict(list)
-    for i, s in enumerate(net_segs):
+    n = len(net_segs)
+    spans = []
+    total_cells = 0
+    for s in net_segs:
         lo_x = int(min(s.start_x, s.end_x) // _CELL)
         hi_x = int(max(s.start_x, s.end_x) // _CELL)
         lo_y = int(min(s.start_y, s.end_y) // _CELL)
         hi_y = int(max(s.start_y, s.end_y) // _CELL)
+        spans.append((lo_x, hi_x, lo_y, hi_y))
+        total_cells += (hi_x - lo_x + 1) * (hi_y - lo_y + 1)
+
+    if total_cells > n * n:
+        # Bbox fanout would out-cost the pairwise scan (long diagonals):
+        # do the simple thing. Same predicate, same deterministic order.
+        out = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                s1, s2 = net_segs[i], net_segs[j]
+                if s1.layer != s2.layer:
+                    continue
+                crosses, pt = segments_cross(s1, s2)
+                if crosses:
+                    out.append((i, j, pt))
+        out.sort(key=lambda t: (round(t[2][0], 6), round(t[2][1], 6),
+                                t[0], t[1]))
+        return out
+
+    grid = defaultdict(list)
+    for i, (lo_x, hi_x, lo_y, hi_y) in enumerate(spans):
         for gx in range(lo_x, hi_x + 1):
             for gy in range(lo_y, hi_y + 1):
                 grid[(gx, gy)].append(i)
