@@ -596,6 +596,9 @@ when they happen, the schematic sync step below applies (see "Schematic Synchron
 After Swaps"). Pairs that *wanted* a swap but were denied are listed in
 `polarity_swap_denied_pairs` — surface these to the user (they either routed via the
 opposite-side flip or failed honestly and may need a manual pin swap in the schematic).
+Side-flipped pairs the HYBRID routed with a wrap-around leg because no swap was
+permitted are listed in `polarity_flip_unswapped_pairs` (#266) — surface these too:
+adding the pair to `--polarity-swap-nets` on a re-run may shorten it.
 
 **Far-apart terminal pads → single-ended follow-up (issue #121).** A "diff pair"
 sometimes has pads that aren't a coupled connection — e.g. a P and an N test point

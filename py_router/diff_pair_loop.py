@@ -552,6 +552,14 @@ def route_diff_pairs(
                 result, pair, pcb_data, config, obstacles, base_obstacles,
                 routed_net_ids, remaining_net_ids, all_unrouted_net_ids,
                 gnd_net_id, track_proximity_cache, layer_map)
+            # #266 disclosure, fourth hybrid commit site: a side-flipped
+            # hybrid taken via the #215 pinch swap must reach the summary
+            # too, or the console and JSON disagree (dormant today --
+            # HYBRID REPLACES fires on none of the in-repo boards -- but
+            # the console line already printed by the engine would name a
+            # pair the summary omits).
+            if result.get('polarity_flip_unswapped'):
+                state.polarity_flip_unswapped_pairs.add(pair_name)
             # Calculate actual routed length from segments (includes connectors and via barrels)
             new_segments = result.get('new_segments', [])
             new_vias = result.get('new_vias', [])
