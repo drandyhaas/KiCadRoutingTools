@@ -238,8 +238,8 @@ def grade(pcb, clearance, baseline=None):
             import json as _json
             sys.path.insert(0, str(REPO))
             sys.path.insert(0, str(REPO / 'py_router'))  # #522
-            sys.path.insert(0, os.path.join(str(REPO / 'py_router')), 'py_placer'))  # #522/py_placer layout
-            sys.path.insert(0, os.path.join(str(REPO / 'py_router')), 'py_tools'))  # #522/py_placer layout
+            sys.path.insert(0, str(REPO / 'py_placer'))  # #522/py_placer layout
+            sys.path.insert(0, str(REPO / 'py_tools'))   # #522/py_placer layout
             from fix_kicad_drc_settings import project_copper_clearance
             with open(pro) as _f:
                 _recorded = project_copper_clearance(_json.load(_f))

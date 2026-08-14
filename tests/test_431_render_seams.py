@@ -17,7 +17,13 @@ comparison of two images produced by the same Pillow.
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# #522 moved the engine modules out of the repo root into py_router/ (and the
+# placement family into py_placer/, the leaf tools into py_tools/).
+for _p in (_ROOT, os.path.join(_ROOT, 'py_router'),
+           os.path.join(_ROOT, 'py_placer'), os.path.join(_ROOT, 'py_tools')):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from PIL import Image, ImageChops, ImageDraw  # noqa: E402
 

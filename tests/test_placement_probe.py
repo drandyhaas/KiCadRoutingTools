@@ -79,6 +79,16 @@ def probe(board, nets, workdir, route_args=None):
 
 
 def main(argv=None):
+    # This is an OPT-IN two-board A/B driver, not a self-running test: --off
+    # and --on are required, so a bare `test_placement_probe.py` (which is how
+    # tests/run_all.py invokes every test_*.py) can only ever exit 2 on
+    # argparse. Skip cleanly instead, the same way the KiCad-python gates skip
+    # when their interpreter is absent -- a red that no change can fix teaches
+    # the reader to ignore the failure list.
+    if not (sys.argv[1:] if argv is None else list(argv)):
+        print("SKIP: opt-in A/B probe -- needs --off BOARD --on BOARD "
+              "(it ROUTES both boards; see CLAUDE.md)")
+        return 0
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)

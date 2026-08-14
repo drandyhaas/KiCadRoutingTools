@@ -119,7 +119,7 @@ def test_the_duplications_are_gone():
     """The point of the port. Each of these is a second implementation of
     something the shared stack already owns."""
     import ast
-    path = os.path.join(ROOT, 'animate_fanout_clearance.py')
+    path = os.path.join(ROOT, 'py_tools', 'animate_fanout_clearance.py')
     src = open(path, encoding='utf-8').read()
     tree = ast.parse(src)
     fn = next(n for n in ast.walk(tree)
@@ -142,7 +142,7 @@ def test_the_duplications_are_gone():
 
 
 def test_the_shared_easing_helpers_are_imported_not_copied():
-    src = open(os.path.join(ROOT, 'animate_fanout_clearance.py'),
+    src = open(os.path.join(ROOT, 'py_tools', 'animate_fanout_clearance.py'),
                encoding='utf-8').read()
     assert 'from movie_camera import' in src
     for name in ('def _smoothstep', 'def _lerp_rect', 'def _net_color'):

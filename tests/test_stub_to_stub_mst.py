@@ -20,7 +20,10 @@ import sys
 
 _TESTS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(_TESTS)
-for p in (ROOT, _TESTS):
+# #522 moved the engine modules out of the repo root into py_router/ (and the
+# placement family into py_placer/, the leaf tools into py_tools/).
+for p in (ROOT, _TESTS, os.path.join(ROOT, 'py_router'),
+          os.path.join(ROOT, 'py_placer'), os.path.join(ROOT, 'py_tools')):
     if p not in sys.path:
         sys.path.insert(0, p)
 
