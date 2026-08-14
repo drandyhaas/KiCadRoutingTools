@@ -1071,11 +1071,55 @@ def route_diff_pairs(
                         base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
                         all_unrouted_net_ids, pair.p_net_id, pair.n_net_id, gnd_net_id,
                         track_proximity_cache, layer_map)
+                    # #266: this is the ONE hybrid call site that consumes a
+                    # polarity pad swap (below), so it is the only one that may
+                    # ask for one. Still deny-by-default per pair (#279).
                     hyb = _route_direct_coupled_middle(pcb_data, pair, config, obstacles,
-                                                       config.layers, leg_obstacles=leg_obstacles)
+                                                       config.layers, leg_obstacles=leg_obstacles,
+                                                       allow_polarity_swap=True)
+                    if hyb and not hyb.get('failed') and hyb.get('polarity_fixed'):
+                        # Apply the pad swap BEFORE committing the copper: the
+                        # appendix cleanup in add_route_to_pcb_data must already
+                        # see the swapped pad nets, or it collapses the legs that
+                        # end on what still looks like a foreign-net pad (same
+                        # ordering as the multipoint leg loop).
+                        #
+                        # A False return means the copper would land on the wrong
+                        # pads, so this route cannot be committed -- but the hybrid
+                        # ALSO assembled perfectly good UNSWAPPED candidates, and
+                        # throwing the whole thing away drops the pair to the
+                        # single-ended follow-up, strictly worse than before this
+                        # feature existed. Re-ask without the swap instead.
+                        # (Reachable case: apply_polarity_swap returns False
+                        # WITHOUT mutating when the pair is already in
+                        # `polarity_swapped_pairs` -- swapped earlier in the run,
+                        # then ripped and re-reaching this hybrid. Its other False
+                        # branch, a missing target pad, would leave pcb_data
+                        # half-swapped; that one is unreachable because the engine
+                        # pre-checks BOTH pads before it will emit polarity_fixed
+                        # at all -- diff_pair_routing.py's polarity_swap_ok gate.)
+                        if not apply_polarity_swap(pcb_data, hyb, pad_swaps, pair_name,
+                                                   polarity_swapped_pairs):
+                            print(f"  Hybrid polarity pad swap could not be applied - "
+                                  f"retrying the hybrid without a swap")
+                            hyb = _route_direct_coupled_middle(
+                                pcb_data, pair, config, obstacles, config.layers,
+                                leg_obstacles=leg_obstacles)
+                            if hyb and hyb.get('polarity_fixed'):
+                                # Belt and braces: the no-swap re-ask must not come
+                                # back asking for one (allow_polarity_swap defaults
+                                # False, so it cannot) -- never commit copper whose
+                                # pad rename was not applied.
+                                hyb = None
                     if hyb and not hyb.get('failed'):
                         print(f"  HYBRID ESCAPE: direct coupled middle + point-to-point "
                               f"terminal legs")
+                        if hyb.get('polarity_flip_unswapped'):
+                            # #266 disclosure: the pair is side-flipped, so one leg
+                            # wraps around its partner, and no P/N pad swap was
+                            # applied (usually: the pair is not in
+                            # --polarity-swap-nets). Surfaced in JSON_SUMMARY.
+                            state.polarity_flip_unswapped_pairs.add(pair_name)
                         add_route_to_pcb_data(pcb_data, hyb, debug_lines=config.debug_lines)
                         results.append(hyb)
                         successful += 1

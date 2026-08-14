@@ -1153,6 +1153,15 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
                     not _pn_tracks_cross(hyb.get('new_segments', []), pair.p_net_id, pair.n_net_id) and
                     not _crosses_committed_legs(hyb.get('new_segments', []), committed_segments)):
                 print(f"  Leg {i + 1} via hybrid (coupled middle + single-ended escapes)")
+                if hyb.get('polarity_flip_unswapped'):
+                    # #266 disclosure: this leg is side-flipped, so one terminal
+                    # leg wraps around its partner, and no P/N pad swap was
+                    # applied. This site cannot request one (it passes
+                    # terminal_pads, and a multipoint swap needs source/target end
+                    # policy plus an undo on the rip path) -- but the pair must
+                    # still be NAMED, or the console line and
+                    # JSON_SUMMARY.polarity_flip_unswapped_pairs disagree.
+                    state.polarity_flip_unswapped_pairs.add(pair_name)
                 hyb['_leg_terms'] = (term_a, term_b)  # #444 chain seam re-ask
                 add_route_to_pcb_data(pcb_data, hyb, debug_lines=config.debug_lines)
                 leg_results.append(hyb)

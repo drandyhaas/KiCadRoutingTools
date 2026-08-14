@@ -111,6 +111,13 @@ class RoutingState:
     # Pairs where a polarity swap was WANTED but the per-pair policy forbade
     # it (#279, --polarity-swap-nets) - resolved by flip or failed honestly.
     polarity_swap_denied_pairs: Set[str] = field(default_factory=set)
+    # Pairs the hybrid coupled-middle escape routed SIDE-FLIPPED (#266): the P
+    # pad sits on opposite sides of the centerline at the two ends, so one
+    # terminal leg wraps around its partner. The copper is legal and connected,
+    # just longer/less symmetric than a P/N pad swap would make it. Disclosure
+    # only - a swap is deny-by-default (#279) and is applied instead of this
+    # whenever --polarity-swap-nets permits the pair and the swap routes better.
+    polarity_flip_unswapped_pairs: Set[str] = field(default_factory=set)
     rip_and_retry_history: Set[Tuple] = field(default_factory=set)
     ripup_success_pairs: Set[str] = field(default_factory=set)
     rerouted_pairs: Set[str] = field(default_factory=set)
