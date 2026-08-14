@@ -3278,11 +3278,17 @@ def audit_via_hole_to_hole(footprint: Footprint,
                   f"via-in-pad.")
         _movable = kinds['against_existing'] + kinds['new_to_new']
         if _movable:
-            print(f"    {_movable} pair(s) are NOT pinned by the ball grid "
-                  f"({kinds['against_existing']} against a hole that was "
-                  f"already on the board): the site could not clear the other "
-                  f"hole, so read those as an engine finding -- a smaller "
-                  f"--via-drill or a different escape may move them.")
+            # NOT "not pinned by the ball grid" -- measured, the new drill in
+            # these pairs usually IS at a ball centre; what distinguishes them
+            # is that the OTHER end is copper already on the board, so the
+            # conflict is not purely the package's fault.
+            print(f"    {_movable} pair(s) have their OTHER end in a hole "
+                  f"that was already on the board "
+                  f"({kinds['against_existing']} against pre-existing copper): "
+                  f"the site could not clear that hole, so read those as an "
+                  f"engine/board finding rather than a package limit -- a "
+                  f"smaller --via-drill, a different escape, or skipping "
+                  f"via-in-pad on that ball may resolve them.")
         shown = ", ".join(f"{a}<->{b} {g:.4f}mm" for g, a, b, _k in pairs[:6])
         print(f"    worst: {shown}"
               + (f" (+{len(pairs) - 6} more)" if len(pairs) > 6 else ""))
