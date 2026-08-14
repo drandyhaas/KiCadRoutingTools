@@ -31,9 +31,23 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Needs real zones AND at least one INCOMPLETE plane net: the finalize is a
 # plane pass, and a board whose pours are already whole exits before it ever
 # reaches the oracle leg (which is how two earlier fixture picks here made
-# the gate vacuously "pass"). This one has both GND and +3.3V pours reading
-# unconnected, and routes in seconds.
-BOARD = os.path.join(REPO, 'kicad_files', 'kit-out-plane.kicad_pcb')
+# the gate vacuously "pass").
+#
+# It must ALSO be a board a fresh clone actually has. The previous pick,
+# kit-out-plane.kicad_pcb, is an OUTPUT of tests/test_kit_route.py and was
+# untracked + gitignored by 25de9022 (#426) on 2026-07-18 -- 17 days before
+# this gate was written -- so it has never existed on any clone, and this
+# file has only ever run where a stale artifact happened to be left behind.
+# /kicad_files/kit-out*.kicad_pcb is still in .gitignore; do not point back
+# at it. Regenerating it is not an option either: it is a full route of
+# kit-dev-coldfire (minutes), which is exactly what tests/fixture_boards.py
+# declines to cover.
+#
+# lvds_converter_dualclk_gnd.kicad_pcb is TRACKED, carries a real /GND pour
+# that reads unconnected (the run's improvement gate reports the pour
+# gaining /GND, 42 -> 41 disconnected pads), and the whole gate runs in
+# under a second on it.
+BOARD = os.path.join(REPO, 'kicad_files', 'lvds_converter_dualclk_gnd.kicad_pcb')
 
 from kicad_parser import parse_kicad_pcb            # noqa: E402
 from route import batch_route                       # noqa: E402
@@ -48,12 +62,23 @@ def _run(with_callback):
         if os.path.exists(src):
             shutil.copy(src, board.replace('.kicad_pcb', ext))
 
+    if not os.path.exists(BOARD):
+        raise SystemExit(
+            f"FAIL: fixture board is missing: {BOARD}\n"
+            "  This gate needs a TRACKED board. A generated/gitignored one "
+            "makes it unrunnable on every fresh clone (see the note above).")
+
     pcb = parse_kicad_pcb(board)
     zone_nets = sorted({pcb.nets[z.net_id].name for z in (pcb.zones or [])
                         if z.net_id in pcb.nets})
     if not zone_nets:
-        print("SKIP: fixture board has no zone nets")
-        return None
+        # Deliberately NOT a skip. A fixture with no zone nets never reaches
+        # the plane finalize, so the gate would report success while testing
+        # nothing -- the silent non-coverage this file's own note warns about.
+        raise SystemExit(
+            "FAIL: fixture board has no zone nets, so the plane finalize -- "
+            "and the oracle leg this gate exists to check -- never runs. "
+            "Pick a fixture with a real, incomplete pour.")
 
     staged = []
 
@@ -80,8 +105,6 @@ def main():
     # 1. WITH a staging callback: the leg runs in-run, and the deferred
     #    hand-off to the applier must NOT be posted (both would double-run).
     r = _run(True)
-    if r is None:
-        return 0
     if r['staged'] < 1:
         failures.append("stage_board_fn was never called -- the finalize "
                         "did not try to stage a board for the oracle")
