@@ -613,6 +613,37 @@ end-jog is validated against the full obstacle map (foreign pads + tracks +
 vias): a jog that would extend into a foreign obstacle is dropped, leaving an
 on-grid stub end the router can launch from (issue #149).
 
+**Via-in-pad drill spacing is the BALL PITCH, and the run says so (#618).** A
+via-in-pad sits at the ball centre, so the closest drill spacing this engine
+can reach is `pitch - drill` — 0.600 mm on an 0.8 mm array with a 0.2 mm
+drill — and no `min_hole_to_hole` the board declares can move it. When the
+emitted drills fall below the board's own declared floor (fab-wrapped, read
+via `list_nets.board_floor`), the run prints a `WARNING (#618)` naming the
+offending BALL PADS and records the finding in
+`JSON_SUMMARY.hole_to_hole` (`floor` / `declared` / `source` / `min_gap` /
+`violations` / `by_kind` / `pads` / `pad_count` / `worst`). This is a
+DISCLOSURE, not a refusal: the vias are still emitted, `failed` stays a
+routing verdict, and for the `by_kind.ball_to_ball` pairs the fix belongs at
+the source — relax `min_hole_to_hole` for that part, use a smaller
+`--via-drill`, or escape it without via-in-pad. Enforcing the floor instead
+takes the violations to 0 and costs escapes — measured at a declared 0.9,
+ulx3s U1 on the default engine goes 186 → 171 escaped (21 → 33 failed) and
+glasgow_revC U30 on `--escape-method channel` goes 98 → 63 escaped (1 → 36
+failed) — which is the board owner's call to make, not a default.
+
+Read `by_kind` before acting on the count. `ball_to_ball` is the package
+talking and the engine cannot help; `against_existing` (a new via too close
+to a hole already on the board) and `new_to_new` are sites the engine could
+in principle have put elsewhere, so they read as router findings, not board
+findings. A negative `min_gap` means two holes physically OVERLAP. `pads`
+lists at most 24 ball-pad names — `pad_count` is the true number — and
+`worst` at most 12 pairs, so a 900-ball part cannot swamp the summary line.
+One limitation to know about: the floor is read from the sibling
+`.kicad_pro` only. A board that expresses `hole_to_hole` as a custom
+`.kicad_dru` rule instead (`kicad_dru.py` models `clearance` constraints
+only) is graded at the flat fab default and stays silent — the same blind
+spot the under-pad escape and the QFN engine have, not one introduced here.
+
 ### Example
 
 ```bash

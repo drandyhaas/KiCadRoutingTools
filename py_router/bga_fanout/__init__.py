@@ -3039,6 +3039,255 @@ def _generate_bga_fanout_core(footprint: Footprint,
 # the GUI results panel. Refreshed by every top-level generate_bga_fanout call.
 LAST_PLANE_DROP_REPORT: Dict = {}
 
+# Per-call drill hole-to-hole audit of the vias this fanout emits (#618).
+# Refreshed by every top-level generate_bga_fanout call; see
+# audit_via_hole_to_hole for what is in it and why it is report-only.
+LAST_HOLE_TO_HOLE_REPORT: Dict = {}
+
+
+def audit_via_hole_to_hole(footprint: Footprint,
+                           pcb_data: PCBData,
+                           vias_to_add: List[Dict],
+                           vias_to_remove: Optional[List[Dict]] = None,
+                           verbose: bool = True) -> Dict:
+    """DISCLOSE emitted via drills spaced below the board's own floor (#618).
+
+    A BGA via-in-pad sits at the BALL CENTRE, so the drill spacing this engine
+    can achieve is fixed by the package: ``pitch - drill``. On a 0.8mm-pitch
+    array with a 0.2mm drill that is 0.600mm, and NOTHING in the fanout can
+    move it -- the site is the ball. A board declaring ``min_hole_to_hole``
+    above that therefore gets copper it cannot build, and until now got it
+    SILENTLY. Measured (via 0.35 / drill 0.2, 4 layers, declared 0.9):
+
+      * glasgow_revC U30, ``escape_method='channel'``: 76 vias, 307 tracks,
+        1 failed, min drill gap 0.600mm -- and the emitted copper is
+        BYTE-IDENTICAL to the same run with nothing declared. The declaration
+        was inert in every respect, including the log, while 114 via pairs sat
+        below it.
+      * ulx3s U1 -- the board the issue names -- on the DEFAULT
+        ``escape_method='auto'``, everything else stock: 186/207 escaped, 21
+        failed, 144 vias, 184 pairs at 0.600mm. The declaration is not merely
+        ignored: the same run with nothing declared escapes 204/204 with 0
+        failed, so the board PAYS escapes for a floor its output then violates
+        184 times. The log prints "Hole-to-hole 0.9mm (from the board's own
+        min_hole_to_hole)" on the way past.
+
+    WHICH ENGINE emits the violating drills has to be measured, not read off
+    the log, and the log invites exactly the wrong conclusion. ``auto`` runs
+    the CHANNEL escape and then, PER PASS, retries with the under-pad grid and
+    keeps whichever dropped fewer balls (#288) -- and a fanout makes several
+    such passes, only one of which supplies the vias that ship. On ulx3s U1
+    the log says "Under-pad escape wins" twice, yet stamping every returned
+    via with the ``escape_method`` of the core call that created it shows all
+    138 escape vias came from the one pass that KEPT ITS CHANNEL RESULT, and
+    all 184 violating pairs are channel-via vs channel-via (glasgow_revC U30
+    on ``auto``: 71/71 channel vias, 100/100 pairs; haasoscope_pro_max U3:
+    151/151, 131/131. In each case the pass whose under-pad arm won
+    contributed 0 vias). So the live enforcement point is the channel engine's
+    ``manage_vias.via_in_pad_conflict``, whose own docstring already names the
+    two halves: it prices its drill floor at the flat
+    ``routing_defaults.HOLE_TO_HOLE_CLEARANCE`` rather than the board's
+    ``min_hole_to_hole``, and never reads back this run's own ``vias_to_add``.
+
+    The under-pad engine's ``_via_site_conflict`` is NOT the gap (#616 taught
+    that one to read the board), and forcing it settles the question:
+    ``escape_method='underpad'`` on the same ulx3s U1 at the same declared 0.9
+    emits 53 vias with ZERO violating pairs (min gap 0.931mm). Every sub-floor
+    drill on that board comes from the channel arm. The audit still grades the
+    EMITTED VIAS rather than any one engine's decisions, because which arm
+    ships is decided per pass at run time: the report is about the copper, not
+    about the code path that produced it.
+
+    This function does NOT enforce the floor, deliberately. Enforcement was
+    built and measured (arm A = ``via_in_pad_conflict`` resolving its floor
+    from the board AND testing candidates against this run's own
+    ``vias_to_add``). It takes every violation to 0 and costs escapes, at the
+    same declared 0.9:
+
+        ulx3s U1      auto     186 -> 171 escaped, 21 -> 33 failed, 184 -> 0
+        glasgow  U30  auto      98 ->  89 escaped,  1 -> 10 failed, 100 -> 0
+        glasgow  U30  channel   98 ->  63 escaped,  1 -> 36 failed, 114 -> 0
+        orangecrab U3 channel   70 ->  65 escaped, 39 -> 45 failed,  12 -> 0
+                      (declared 0.4)
+
+    Trading escapes for a rule the PACKAGE contradicts is a policy call for
+    the board owner, not a default, and four boards cannot settle it. There is
+    a second reason to keep this hands-off: the sibling issue #620 asks for
+    the same edit to the same function, and its fix was abandoned after two
+    reviews measured a connectivity regression from it -- ``manage_vias`` runs
+    to completion and the caller then deletes whole nets' vias, so candidates
+    get refused against blockers that never ship. Naming the violation costs
+    nothing and leaves the call where it belongs; deciding it needs the corpus
+    A/B in ``tests/stress/cloud_replay_sets.py``.
+
+    Graded pairs are the ones THIS RUN caused: new-vs-new among ``vias_to_add``,
+    and new-vs-existing against board vias (minus the ones ``vias_to_remove``
+    deletes) and drilled pads. Existing-vs-existing is somebody else's
+    finding. The floor is board-first and fab-wrapped, the
+    same resolution the under-pad engine uses (``list_nets.board_floor`` ->
+    ``max(declared, fab)``), so a board declaring nothing is graded at the flat
+    ``routing_defaults.HOLE_TO_HOLE_CLEARANCE`` and stays silent unless it is
+    genuinely violated.
+
+    Returns (and publishes as ``LAST_HOLE_TO_HOLE_REPORT``) a dict with:
+    ``floor`` / ``declared`` / ``source`` / ``vias`` / ``min_gap`` /
+    ``violations`` / ``by_kind`` / ``pads`` / ``pad_count`` / ``worst`` (up to
+    12 named pairs). ``min_gap`` is the smallest gap among GRADED pairs: every
+    new-vs-new pair, and every pre-existing hole within ``floor + 1mm`` of a
+    new via (a dense board carries thousands of holes and none of the distant
+    ones can violate). A gap is NEGATIVE when the two holes physically
+    overlap, and that is counted and reported like any other -- only an EXACT
+    co-location (centres within 1um of a pre-existing hole, i.e. a via this
+    run re-emits rather than adds) is skipped, because it is the same hole.
+
+    ``by_kind`` splits the count three ways, because the remedy differs:
+    ``ball_to_ball`` pairs are two ball-centre via-in-pad sites and the engine
+    genuinely cannot move them; ``against_existing`` pairs put a new via
+    against a hole that was already on the board, and ``new_to_new`` pairs
+    involve a new via that is not at a ball centre -- both of those the engine
+    could in principle have placed elsewhere. ``pads`` names the offending
+    BALL PADS only (never a bare coordinate), capped at 24 entries with the
+    true total in ``pad_count`` so a 900-ball part cannot swamp the summary.
+    """
+    report: Dict = {'violations': 0, 'vias': len(vias_to_add)}
+    if not vias_to_add:
+        return report
+    try:
+        from list_nets import board_floor as _board_floor
+    except Exception:                                          # noqa: BLE001
+        return report
+    src_path = getattr(pcb_data, 'source_path', "") or ""
+    declared, source = _board_floor(src_path, 'hole_to_hole', None,
+                                    defaults.HOLE_TO_HOLE_CLEARANCE)
+    copper = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
+    floor = max(declared, fab_floor_min(copper).get('hole_to_hole', 0.0))
+    report.update({'floor': round(floor, 6), 'declared': round(declared, 6),
+                   'source': source})
+
+    # Name a hole by the pad it sits in when it does (via-in-pad is the whole
+    # point of the issue); otherwise by its net. Ball centres are exact, so an
+    # 0.05mm match is generous and never picks the wrong ball on any pitch this
+    # engine handles.
+    def _name(x, y, net_id):
+        for p in footprint.pads:
+            if math.hypot(p.global_x - x, p.global_y - y) < 0.05:
+                return f"{footprint.reference}/{p.pad_number}"
+        net = pcb_data.nets.get(net_id)
+        return (f"{net.name}@({x:.3f},{y:.3f})" if net and net.name
+                else f"({x:.3f},{y:.3f})")
+
+    # Every drilled hole already on the board, plus this run's own vias. Pad
+    # drills use the capsule (slots/offset holes) like via_in_pad_conflict.
+    from kicad_parser import pad_drill_capsule
+    # A via this run DELETES is not a hole the output has, so it must not be
+    # graded against (the writer drops it from the board).
+    gone = {(round(v['x'], 6), round(v['y'], 6)) for v in (vias_to_remove or [])}
+    existing = []                       # (x1, y1, x2, y2, radius, label)
+    for v in pcb_data.vias:
+        r = (getattr(v, 'drill', 0) or 0.0) / 2.0
+        if r > 0 and (round(v.x, 6), round(v.y, 6)) not in gone:
+            # Carry the position: without it two distinct offenders read as
+            # the same string in `worst` and nobody can find either.
+            existing.append((v.x, v.y, v.x, v.y, r,
+                             f"an existing via @({v.x:.3f},{v.y:.3f})"))
+    for pads in pcb_data.pads_by_net.values():
+        for p in pads:
+            if (getattr(p, 'drill', 0) or 0) > 0:
+                (c1x, c1y), (c2x, c2y), prad = pad_drill_capsule(p)
+                existing.append((c1x, c1y, c2x, c2y, prad,
+                                 f"pad {p.component_ref}/{p.pad_number}"))
+
+    def _seg_d(x, y, x1, y1, x2, y2):
+        dx, dy = x2 - x1, y2 - y1
+        L2 = dx * dx + dy * dy
+        if L2 <= 0:
+            return math.hypot(x - x1, y - y1)
+        t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / L2))
+        return math.hypot(x - (x1 + t * dx), y - (y1 + t * dy))
+
+    ball = footprint.reference + '/'
+    pairs = []          # (gap, label_a, label_b, kind)
+    min_gap = None
+    for i, a in enumerate(vias_to_add):
+        ar = (a.get('drill') or 0.0) / 2.0
+        if ar <= 0:
+            continue
+        an = _name(a['x'], a['y'], a.get('net_id'))
+        for b in vias_to_add[i + 1:]:
+            br = (b.get('drill') or 0.0) / 2.0
+            if br <= 0:
+                continue
+            gap = math.hypot(a['x'] - b['x'], a['y'] - b['y']) - ar - br
+            if min_gap is None or gap < min_gap:
+                min_gap = gap
+            if gap < floor - 1e-6:
+                bn = _name(b['x'], b['y'], b.get('net_id'))
+                pairs.append((gap, an, bn,
+                              'ball' if an.startswith(ball)
+                              and bn.startswith(ball) else 'new'))
+        # Axis prefilter: a hole further away than this in x or y cannot be
+        # within `floor`, and a dense board carries thousands of them.
+        ax, ay = a['x'], a['y']
+        for (x1, y1, x2, y2, orad, label) in existing:
+            reach = floor + ar + orad + 1.0
+            if (ax < min(x1, x2) - reach or ax > max(x1, x2) + reach
+                    or ay < min(y1, y2) - reach or ay > max(y1, y2) + reach):
+                continue
+            # Co-location is decided on the CENTRES, never on the sign of the
+            # gap: a via re-emitted at an existing hole is the SAME hole and is
+            # skipped, but a via that merely OVERLAPS one is the worst
+            # violation there is and must not be filtered out along with it
+            # (#619 / #620 are about engines doing exactly that).
+            d = _seg_d(ax, ay, x1, y1, x2, y2)
+            if d < 1e-6:
+                continue
+            gap = d - ar - orad
+            if min_gap is None or gap < min_gap:
+                min_gap = gap
+            if gap < floor - 1e-6:
+                pairs.append((gap, an, label, 'existing'))
+
+    pairs.sort(key=lambda t: t[0])
+    kinds = {'ball_to_ball': 0, 'new_to_new': 0, 'against_existing': 0}
+    _kmap = {'ball': 'ball_to_ball', 'new': 'new_to_new',
+             'existing': 'against_existing'}
+    for _g, _a, _b, _k in pairs:
+        kinds[_kmap[_k]] += 1
+    report['min_gap'] = None if min_gap is None else round(min_gap, 6)
+    report['violations'] = len(pairs)
+    report['by_kind'] = kinds
+    report['worst'] = [{'gap': round(g, 6), 'a': a, 'b': b}
+                       for g, a, b, _k in pairs[:12]]
+    named = sorted({n for _g, a, b, _k in pairs for n in (a, b)
+                    if n.startswith(ball)})
+    report['pad_count'] = len(named)
+    report['pads'] = named[:24]
+    if pairs and verbose:
+        whose = ("the board's own declared min_hole_to_hole"
+                 if source == 'board constraint' else 'the fab hole-to-hole floor')
+        print(f"  WARNING (#618): {len(pairs)} emitted via pair(s) are drilled "
+              f"closer than {whose} {floor:g}mm -- smallest gap "
+              f"{pairs[0][0]:.4f}mm.")
+        if kinds['ball_to_ball']:
+            print(f"    {kinds['ball_to_ball']} pair(s) are two BALL-CENTRE "
+                  f"via-in-pad sites: that spacing is the package pitch minus "
+                  f"the drill, so this engine cannot space them further apart "
+                  f"and the copper is UNMANUFACTURABLE against the rule as it "
+                  f"stands. Fix at the source: relax min_hole_to_hole for this "
+                  f"part, use a smaller --via-drill, or escape it without "
+                  f"via-in-pad.")
+        _movable = kinds['against_existing'] + kinds['new_to_new']
+        if _movable:
+            print(f"    {_movable} pair(s) are NOT pinned by the ball grid "
+                  f"({kinds['against_existing']} against a hole that was "
+                  f"already on the board): the site could not clear the other "
+                  f"hole, so read those as an engine finding -- a smaller "
+                  f"--via-drill or a different escape may move them.")
+        shown = ", ".join(f"{a}<->{b} {g:.4f}mm" for g, a, b, _k in pairs[:6])
+        print(f"    worst: {shown}"
+              + (f" (+{len(pairs) - 6} more)" if len(pairs) > 6 else ""))
+    return report
+
 
 def generate_plane_drops(footprint: Footprint,
                          pcb_data: PCBData,
@@ -3249,6 +3498,20 @@ def generate_bga_fanout(footprint: Footprint,
         tracks = tracks + d_tracks
         vias_to_add = vias_to_add + d_vias
         LAST_PLANE_DROP_REPORT.update(rep)
+
+    # #618 disclosure: name the drills this run spaced below the board's own
+    # min_hole_to_hole instead of shipping them silently. Report-only -- it
+    # never removes a via -- and it lives here, in the SHARED engine, so the
+    # GUI fanout tab discloses it too (CLAUDE.md Class 1). Never fatal: a
+    # disclosure that can abort a routing run is worse than the silence.
+    LAST_HOLE_TO_HOLE_REPORT.clear()
+    if _pad_filter is None and not _single_pass:
+        try:
+            LAST_HOLE_TO_HOLE_REPORT.update(
+                audit_via_hole_to_hole(footprint, pcb_data, vias_to_add,
+                                       vias_to_remove))
+        except Exception as _e:                                # noqa: BLE001
+            LAST_HOLE_TO_HOLE_REPORT.update({'error': str(_e)})
     return tracks, vias_to_add, vias_to_remove, failed_nets
 
 
@@ -3566,6 +3829,14 @@ def main():
         # #424 D2: per-net plane-ball drop counts (gap/in_pad/existing/failed);
         # empty when the pass is off or the part has no plane balls.
         'plane_drop': dict(LAST_PLANE_DROP_REPORT),
+        # #618: drill hole-to-hole audit of the vias this run emitted, graded
+        # against the board's OWN min_hole_to_hole (fab-wrapped). `violations`
+        # > 0 means the escape shipped copper the declared rule forbids;
+        # `by_kind.ball_to_ball` is the part it could not have done otherwise
+        # (via-in-pad sites are the ball centres), the rest is engine-side.
+        # `pads` is capped at 24 names, `pad_count` is the true total.
+        # Report-only; `failed` above stays a routing verdict.
+        'hole_to_hole': dict(LAST_HOLE_TO_HOLE_REPORT),
     }
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
 
