@@ -212,6 +212,13 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     _own_via_pos: Dict[int, List[Tuple[float, float]]] = {}
     for v in pcb_data.vias:
         _own_via_pos.setdefault(v.net_id, []).append((v.x, v.y))
+    # #619: the obstacle map ERASES every via on a fanned net (nets_to_route
+    # above), so the pad->via bridging stub below was never tested against a
+    # pre-existing via belonging to ANOTHER net we're escaping right now -- the
+    # exact hole the surface fan closes geometrically with _fanned_existing_vias
+    # (#257). Keep them for the stub test; the VIA position itself is already
+    # covered by via_clears/foreign_vias.
+    _unmapped_vias = [v for v in pcb_data.vias if v.net_id in fanned_nets]
     from kicad_parser import pad_drill_circles as _pdc
     import routing_defaults as _rd
     _h2h = _rd.HOLE_TO_HOLE_CLEARANCE
@@ -274,6 +281,23 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return False
         return True
 
+    def stub_clears_unmapped(px, py, vx, vy, net_id):
+        # #619: pad->via stub vs a PRE-EXISTING via on another fanned net, which
+        # `obstacles` does not contain. Same test as the surface fan's #257 loop.
+        # Deliberately LAYER-BLIND, matching that loop and the graders around it:
+        # check_drc.check_via_segment_overlap ignores via.layers ("vias go
+        # through all layers") and obstacle_map._add_via_obstacle stamps every
+        # via on every layer, so filtering a blind/buried via out here would emit
+        # copper this repo's own DRC flags. (The surface fan's SEGMENT half does
+        # layer-filter -- segments really are single-layer objects.)
+        for v in _unmapped_vias:
+            if v.net_id == net_id:
+                continue
+            if point_to_segment_distance(v.x, v.y, px, py, vx, vy) \
+                    < v.size / 2 + track_width / 2 + clearance - 1e-6:
+                return False
+        return True
+
     def snap(v):
         return round(v / grid_step) * grid_step if grid_step > 0 else v
 
@@ -318,12 +342,32 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             _rvx, _rvy = _best[1], _best[2]
             if (obs_layer_idx is None or
                     check_line_clearance(obstacles, px, py, _rvx, _rvy,
-                                         obs_layer_idx, cfg)):
+                                         obs_layer_idx, cfg)) \
+                    and stub_clears_unmapped(px, py, _rvx, _rvy, pi.pad.net_id):
                 return (_rvx, _rvy)
+        # #619 note on cost: a pad rejected by stub_clears_unmapped is DROPPED,
+        # not re-placed. Without allow_via_in_pad every candidate offset is
+        # `px + ex*d` for growing d -- further out along the SAME escape ray --
+        # so a via sitting on that ray blocks every remaining candidate too.
+        # Measured over every footprint with >=4 pads on the 22 tracked in-repo
+        # boards (408 of them, NO package-name filter): 7 footprints change,
+        # 22 escapes withdrawn, and the ladder recovers 0 of the REJECTED pads.
+        # (orangecrab_ext_pll U3 does gain one escape -- SPI_CONFIG_MOSI, which
+        # main drops -- but that is a DIFFERENT pad taking the offset a
+        # withdrawn neighbour freed, not this ladder recovering.) Recovering a
+        # rejected pad needs a new mechanism: a lateral offset, or on-pad
+        # offsets without --allow-via-in-pad.
+        # On orangecrab_ext_pll U7 (WLCSP-20, 0.4mm pitch) that cost is real and
+        # not free: all four GND balls are withdrawn, and after the full chain
+        # (pour + route) all eight of the part's GND pads are left unreached,
+        # where main reached them across stubs shorting GND to four other nets
+        # (d=0.0000 through the via centres). See the PR for the end-to-end
+        # measurement; taking this trade is a judgement, not a free win.
         for d in candidate_offsets(pi.pad_width, mode):
             vx, vy = snap(px + ex * d), snap(py + ey * d)
             stub_ok = (obs_layer_idx is None or
-                       check_line_clearance(obstacles, px, py, vx, vy, obs_layer_idx, cfg))
+                       check_line_clearance(obstacles, px, py, vx, vy, obs_layer_idx, cfg)) \
+                and stub_clears_unmapped(px, py, vx, vy, pi.pad.net_id)
             if stub_ok and via_clears(vx, vy, pi.pad.net_id, placed):
                 return (vx, vy)
         return None
