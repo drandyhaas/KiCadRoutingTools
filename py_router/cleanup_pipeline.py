@@ -42,6 +42,7 @@ from pcb_modification import (
     nudge_grazing_microshift,
     nudge_grazing_vias,
     prune_redundant_cycles,
+    prune_self_crossing_segments,
     collapse_strict_redundant,
     remove_orphan_islands,
     sweep_dead_ends,
@@ -118,6 +119,9 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
       6. nudge_grazing_vias    -- re-bend / micro-shift load-bearing grazes the
                                   prune must keep (#224/#276/#280).
       7. prune_redundant_cycles -- per-net tree invariant (RAM_A9 loops).
+      7b. prune_self_crossing_segments -- #162: the cycle prune's blind spot,
+                                  a same-net X with no endpoint at the
+                                  intersection. DELETE-ONLY, same guards.
       8. sweep_dead_ends       -- trim dead-end spurs and unsupported vias.
       9. neck_wide_segments_grazing_pads -- width-only fix for wide power
                                   trunks overlapping a fine-pitch foreign pad.
@@ -351,6 +355,31 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         if _cy_segs:
             print(f"{label}Cycle prune: removed {_cy_segs} redundant loop "
                   f"segment(s) across {_cy_nets} net(s)")
+
+    # Same-net SELF-CROSSING prune (#162), right after the cycle prune because
+    # it is the cycle prune's blind spot: a pure X has no endpoint at the
+    # intersection, so the endpoint-cluster tree invariant never sees the loop
+    # it closes. DELETE-ONLY -- no endpoint ever moves (the #159 lesson: the
+    # geometric "fix" that extends/snaps a segment to the crossing trades a
+    # KiCad-permitted warning for real DRC violations).
+    #
+    # Scope: the same _sub_scope as the cycle prune and the strict collapse,
+    # which subtracts ONLY protect_net_ids (route.py's _protect_unfinished --
+    # nets with failed pads, plus unrouted single-ended nets). It does NOT
+    # exclude #521-protected matched groups, impedance nets or diff pairs:
+    # those reach the pipeline through sweep_scope_ids (name-filtered) and,
+    # from route_diff.py, as the scope itself. Same exposure as its two
+    # neighbours here -- the pass carries its own net-level guards instead
+    # (locked copper, zoned nets, pad-less nets; see its docstring).
+    _prog("self-crossing prune")
+    _xc_segs, _xc_nets, _xc_strip = prune_self_crossing_segments(
+        results, pcb_data, _sub_scope, keep_input_copper=keep_input_copper)
+    counts['self_crossings_pruned'] = _xc_segs
+    _trace('self_crossings')
+    strip.extend(_xc_strip)
+    if _xc_segs:
+        print(f"{label}Self-crossing prune: removed {_xc_segs} redundant "
+              f"same-net crossing segment(s) across {_xc_nets} net(s)")
 
     # Strict-redundant collapse (#217 classes 1-2): superseded parallel
     # chains and pad/via-buried tails that are redundant under the strict

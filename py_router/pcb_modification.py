@@ -2271,6 +2271,70 @@ def neck_wide_segments_grazing_pads(results, pcb_data, config) -> int:
     return necked
 
 
+class _ViaSupport(NamedTuple):
+    supported_vias: object          # (seglist) -> set of via indices
+    supported_excluding: object     # (excluded_seg_indices) -> same, or None
+
+
+def _via_support_model(net_vias, net_pads, net_segs=None) -> _ViaSupport:
+    """The #209 via-support model shared by the subtractive per-net passes.
+
+    A via survives ``sweep_dead_ends`` only if a kept same-net segment ENDPOINT
+    lands within 0.05mm of it, or a pad covers it -- so a removal that drops a
+    via's last support would be followed by the sweep culling that via and
+    disconnecting the net. Both ``_prune_net_cycles`` and
+    ``prune_self_crossing_segments`` gate on it; this is the single copy.
+
+    ``supported_vias(seglist)`` -> set of indices into ``net_vias``.
+
+    ``supported_excluding(excluded_indices)`` is the same answer for
+    ``net_segs`` minus those indices, but costs O(vias) per query instead of
+    O(vias x segments) -- available only when ``net_segs`` is passed, and
+    exactly equal to ``supported_vias([s for i, s in enumerate(net_segs)
+    if i not in excluded])`` (pinned over all subsets of a fixture by
+    tests/test_162_self_crossing_prune.py).
+    """
+    vias = list(net_vias or [])
+    # Pad coverage points, mirroring sweep_dead_ends' via-support model exactly.
+    pad_cover = []
+    for p in (net_pads or []):
+        px = getattr(p, 'global_x', getattr(p, 'x', 0.0))
+        py = getattr(p, 'global_y', getattr(p, 'y', 0.0))
+        ps = max(getattr(p, 'size_x', 0.5), getattr(p, 'size_y', 0.5))
+        pad_cover.append((px, py, ps))
+    pad_backed = {i for i, v in enumerate(vias)
+                  if any(math.hypot(v.x - cx, v.y - cy) < cs / 2 + 0.05
+                         for cx, cy, cs in pad_cover)}
+
+    def _touches(v, sg):
+        return (math.hypot(v.x - sg.start_x, v.y - sg.start_y) < 0.05
+                or math.hypot(v.x - sg.end_x, v.y - sg.end_y) < 0.05)
+
+    def supported_vias(seglist):
+        out = set(pad_backed)
+        for i, v in enumerate(vias):
+            if i in out:
+                continue
+            if any(_touches(v, sg) for sg in seglist):
+                out.add(i)
+        return out
+
+    supported_excluding = None
+    if net_segs is not None:
+        by_via = [{k for k, sg in enumerate(net_segs) if _touches(v, sg)}
+                  for v in vias]
+
+        def supported_excluding(excluded=()):  # noqa: F811 (index-based twin)
+            ex = set(excluded)
+            out = set(pad_backed)
+            for i, sup in enumerate(by_via):
+                if i not in out and (sup - ex):
+                    out.add(i)
+            return out
+
+    return _ViaSupport(supported_vias, supported_excluding)
+
+
 def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
                       fgrid, fcell: float, fmax_rad: float, clearance: float,
                       protected_ids=None):
@@ -2436,25 +2500,8 @@ def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
         return net_segs, []
     base_comps = base.get('num_components') or 1
     base_disc = len(base.get('disconnected_pads') or [])
-    # Pad coverage points, mirroring sweep_dead_ends' via-support model exactly.
-    pad_cover = []
-    for p in (net_pads or []):
-        px = getattr(p, 'global_x', getattr(p, 'x', 0.0))
-        py = getattr(p, 'global_y', getattr(p, 'y', 0.0))
-        ps = max(getattr(p, 'size_x', 0.5), getattr(p, 'size_y', 0.5))
-        pad_cover.append((px, py, ps))
-
-    def supported_vias(seglist):
-        # A via survives sweep_dead_ends only if a kept same-net segment endpoint
-        # lands within 0.05mm of it, or a pad covers it (see sweep_dead_ends).
-        out = set()
-        for i, v in enumerate(net_vias or []):
-            if any(math.hypot(v.x - sg.start_x, v.y - sg.start_y) < 0.05 or
-                   math.hypot(v.x - sg.end_x, v.y - sg.end_y) < 0.05 for sg in seglist) \
-               or any(math.hypot(v.x - cx, v.y - cy) < cs / 2 + 0.05
-                      for cx, cy, cs in pad_cover):
-                out.add(i)
-        return out
+    # The #209 via-support model (shared with prune_self_crossing_segments).
+    supported_vias = _via_support_model(net_vias, net_pads).supported_vias
 
     cur = list(net_segs)
     cur_supported = supported_vias(cur)
@@ -2574,6 +2621,312 @@ def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
             continue  # revert: keep all of this net's copper
         nets_pruned += 1
         for s in removed:
+            if id(s) in routed_seg_ids:
+                removed_routed_ids.add(id(s))
+            else:
+                original_to_remove.append(s)
+
+    if removed_routed_ids:
+        for r in results:
+            segs = r.get('new_segments')
+            if segs:
+                r['new_segments'] = [s for s in segs if id(s) not in removed_routed_ids]
+    if removed_routed_ids or original_to_remove:
+        orig_ids = {id(s) for s in original_to_remove}
+        pcb_data.segments = [s for s in pcb_data.segments
+                             if id(s) not in removed_routed_ids and id(s) not in orig_ids]
+
+    return len(removed_routed_ids) + len(original_to_remove), nets_pruned, original_to_remove
+
+
+def _self_crossing_pairs(net_segs):
+    """Same-net, same-LAYER geometric X-crossings among one net's segments.
+
+    The predicate is ``check_drc.segments_cross`` -- literally the one
+    check_drc counts the #162 "same-net self-crossing" warning from -- so a
+    crossing this resolves is a crossing the checker stops reporting.
+    Endpoint-sharing and collinear-overlap are NOT crossings there (only a
+    true interior X is), which is exactly the shape #162 is about.
+
+    Spatially hashed at 1mm. NOTE the hash indexes each segment's BOUNDING
+    BOX, not its traversed cells, so a long diagonal lands in ~O(length^2)
+    cells and a board full of them costs MORE than the naive pairwise scan
+    (measured: 150 board-spanning diagonals -> 11x slower than O(n^2), same
+    pairs). The guard below therefore falls back to the plain double loop
+    when the bbox-cell fanout exceeds the pairwise cost. In-repo nets are
+    tiny either way (worst observed: 130 cell inserts). Returns
+    [(i, j, (cx, cy))] in a deterministic order.
+    """
+    from collections import defaultdict
+    from check_drc import segments_cross
+
+    _CELL = 1.0
+    n = len(net_segs)
+    spans = []
+    total_cells = 0
+    for s in net_segs:
+        lo_x = int(min(s.start_x, s.end_x) // _CELL)
+        hi_x = int(max(s.start_x, s.end_x) // _CELL)
+        lo_y = int(min(s.start_y, s.end_y) // _CELL)
+        hi_y = int(max(s.start_y, s.end_y) // _CELL)
+        spans.append((lo_x, hi_x, lo_y, hi_y))
+        total_cells += (hi_x - lo_x + 1) * (hi_y - lo_y + 1)
+
+    if total_cells > n * n:
+        # Bbox fanout would out-cost the pairwise scan (long diagonals):
+        # do the simple thing. Same predicate, same deterministic order.
+        out = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                s1, s2 = net_segs[i], net_segs[j]
+                if s1.layer != s2.layer:
+                    continue
+                crosses, pt = segments_cross(s1, s2)
+                if crosses:
+                    out.append((i, j, pt))
+        out.sort(key=lambda t: (round(t[2][0], 6), round(t[2][1], 6),
+                                t[0], t[1]))
+        return out
+
+    grid = defaultdict(list)
+    for i, (lo_x, hi_x, lo_y, hi_y) in enumerate(spans):
+        for gx in range(lo_x, hi_x + 1):
+            for gy in range(lo_y, hi_y + 1):
+                grid[(gx, gy)].append(i)
+
+    seen = set()
+    out = []
+    for cell in sorted(grid):
+        idxs = grid[cell]
+        for a in range(len(idxs)):
+            for b in range(a + 1, len(idxs)):
+                i, j = idxs[a], idxs[b]
+                if i > j:
+                    i, j = j, i
+                if (i, j) in seen:
+                    continue
+                seen.add((i, j))
+                s1, s2 = net_segs[i], net_segs[j]
+                if s1.layer != s2.layer:
+                    continue
+                crosses, pt = segments_cross(s1, s2)
+                if crosses:
+                    out.append((i, j, pt))
+    # Deterministic order: the crossing point, then the segment indices.
+    out.sort(key=lambda t: (round(t[2][0], 6), round(t[2][1], 6), t[0], t[1]))
+    return out
+
+
+def _self_crossing_rank(s):
+    """Removal preference for the two arms of a self-crossing X: the SHORTER
+    arm first (less copper at risk), then a pure-geometry tie-break so the
+    choice never depends on board/list order."""
+    return (math.hypot(s.end_x - s.start_x, s.end_y - s.start_y), s.layer,
+            min((s.start_x, s.start_y), (s.end_x, s.end_y)),
+            max((s.start_x, s.start_y), (s.end_x, s.end_y)),
+            getattr(s, 'width', 0.0) or 0.0)
+
+
+def prune_self_crossing_segments(results, pcb_data: PCBData, scope_net_ids=None,
+                                 keep_input_copper: bool = False
+                                 ) -> Tuple[int, int, List[Segment]]:
+    """Resolve same-net SELF-CROSSINGS by DELETION ONLY (issue #162).
+
+    Nothing in the cleanup pipeline sees a pure X: ``_prune_net_cycles``' node
+    set is built from segment ENDPOINT clusters, and a self-crossing has no
+    endpoint at the intersection, so the loop it closes is invisible to the
+    union-find tree invariant. Measured on the two in-repo boards that carry
+    the defect: ``prune_redundant_cycles`` in isolation removes 1 segment on
+    ``routed_output`` and 2 on ``rp2350_fpga_eensy_prePlane`` and resolves
+    ZERO of their crossings (2 -> 2 and 4 -> 4) -- it is blind to the shape,
+    not idle. Every other subtractive pass is whole-segment / endpoint-graph
+    based too. ``check_drc`` only *warns*.
+
+    NOT the only pass that can reach this shape, and it is not first in line:
+    ``collapse_strict_redundant`` runs right after and, on ``routed_output``,
+    removes the same arm on its own (measured in isolation: 2 -> 1 crossings,
+    dropping ``Net-(U2A-~{RXF}) In1.Cu (217.7,107.7)->(217.4,108.0)``). Through
+    the real pipeline that board's shipped copper is therefore IDENTICAL with
+    and without this pass; the shipped delta is on ``rp2350`` only.
+
+    This pass DELETES; it never moves an endpoint. That is the whole design.
+    ``fix_self_intersections`` (deleted in #159) resolved the same shape by
+    EXTENDING a segment to the crossing point, which manufactured long
+    non-orthonormal diagonals across foreign copper; the obvious "snap the
+    shorter tail back to the crossing" trim has the same failure mode one step
+    down -- it converts KiCad-permitted cosmetic warnings into counted
+    ``segment-endpoint-gap`` DRC violations (gaps above
+    ``connectivity.COINCIDENCE_TOL`` are counted, see check_drc). So: a
+    crossing is resolved only when one of its two arms is provably redundant
+    copper, and is otherwise LEFT ALONE.
+
+    For each crossing, the shorter arm is tried first and a removal is
+    accepted only if EVERY existing guard passes -- the same gates
+    ``prune_redundant_cycles`` uses:
+
+      * copper graphics (#337) are never candidates; a net is skipped ENTIRELY
+        when it is zoned (planes are meshes, not trees), when ANY of its
+        segments or vias is KiCad-locked (#521: locked copper makes its whole
+        net off-limits, with no override -- the lock need not be on the arm
+        being tried), and when it is net 0 or has fewer than two pads (every
+        gate below is vacuous without pads to grade);
+      * under ``keep_input_copper`` only this-run copper is a candidate;
+      * ``check_net_connectivity`` still reports connected, with no increase
+        in ``num_components`` and none in ``disconnected_pads``;
+      * no via loses its support (the #209 gate: a via the dead-end sweep
+        would then cull);
+      * ``_restore_soft_joint_bridges`` (#319) does not put a removal back,
+        so a removal can never manufacture a soft joint.
+
+    SCOPE IS NOT A PROTECTION LIST. The pipeline hands this pass the same
+    ``_sub_scope`` as the cycle prune and the strict collapse, which subtracts
+    only ``protect_net_ids`` (route.py's ``_protect_unfinished``: nets with
+    failed pads plus unrouted single-ended nets). #521-protected matched
+    groups, impedance nets and diff pairs ARE in scope -- ``route_diff.py``
+    even calls the pipeline with the diff-pair nets as the scope. That is the
+    same exposure the neighbouring subtractive passes already have; do not
+    read the pipeline call site as excluding them.
+
+    COST: one connectivity graph per crossing-carrying net
+    (``return_graph=True``), then ``analyze_conn_excluding`` per candidate
+    (#263: O(net_size + candidates), not O(net_size x candidates)), one
+    batched soft-joint guard per net, and one AUTHORITATIVE
+    ``check_net_connectivity`` recompute per net that actually lost copper --
+    if that recompute disagrees with the graph model, the whole net's removals
+    are reverted, so no net is ever left in a state the real checker has not
+    blessed.
+
+    Runs inside the shared cleanup pipeline, so BOTH fronts (CLI and GUI) get
+    it; no flag, no new engine parameter. It sits at step 7b, BEFORE
+    ``close_soft_joints`` -- crossings a later pipeline pass manufactures are
+    out of its reach (measured on rp2350: ``close_soft_joints`` creates 3, on
+    base and on this branch alike).
+
+    STRICTLY INERT on a net with no self-crossing: the per-net scan returns
+    empty and the function touches neither ``results`` nor
+    ``pcb_data.segments`` (the list object is not even reassigned).
+
+    Returns (segments_removed, nets_pruned, original_segments_to_remove)."""
+    from collections import defaultdict
+
+    routed_seg_ids = set()
+    for r in results:
+        for s in r.get('new_segments') or []:
+            routed_seg_ids.add(id(s))
+
+    zoned_nets = {z.net_id for z in (getattr(pcb_data, 'zones', []) or [])}
+    # #521: KiCad-LOCKED copper makes its NET never-rippable with no override,
+    # and the lock can sit on any of the net's copper -- including copper this
+    # call's scope filter excludes. Scan the whole board, skip the whole net.
+    locked_nets = {s.net_id for s in pcb_data.segments
+                   if getattr(s, 'locked', False)}
+    locked_nets |= {v.net_id for v in pcb_data.vias
+                    if getattr(v, 'locked', False)}
+    segs_by_net = defaultdict(list)
+    for s in pcb_data.segments:
+        if scope_net_ids is not None and s.net_id not in scope_net_ids:
+            continue
+        if getattr(s, 'graphic', False):
+            continue  # copper graphics are immutable input art (#337)
+        segs_by_net[s.net_id].append(s)
+
+    vias_by_net = defaultdict(list)
+    for v in pcb_data.vias:
+        vias_by_net[v.net_id].append(v)
+
+    from check_connected import check_net_connectivity, analyze_conn_excluding
+
+    removed_routed_ids = set()
+    original_to_remove = []
+    nets_pruned = 0
+
+    for net_id in sorted(segs_by_net):
+        if not net_id:
+            continue  # unassigned copper: there is no net to grade
+        if net_id in zoned_nets:  # planes / pours are meshes, not trees
+            continue
+        if net_id in locked_nets:  # #521: user-pinned net, no override
+            continue
+        net_segs = segs_by_net[net_id]
+        if len(net_segs) < 2:
+            continue
+        net_pads = pcb_data.pads_by_net.get(net_id, [])
+        if len(net_pads) < 2:
+            # check_net_connectivity calls a pad-less net "connected" with
+            # num_components 0, so every gate below would pass vacuously and
+            # the pass would delete copper it cannot grade at all.
+            continue
+        crossings = _self_crossing_pairs(net_segs)
+        if not crossings:
+            continue  # the inertness gate: a crossing-free net costs one scan
+
+        net_vias = vias_by_net.get(net_id, [])
+        r0 = check_net_connectivity(net_id, net_segs, net_vias, net_pads, [],
+                                    return_graph=True)
+        if r0.get('connected') is False:
+            continue  # already broken: never trim a net we cannot grade
+        graph = r0.get('graph')
+        if not graph or not graph.get('pad_ids'):
+            continue
+        base = analyze_conn_excluding(graph, ())
+        if not base.get('connected'):
+            continue  # graph model disagrees with the recompute: hands off
+        base_comps = base.get('num_components') or 1
+        base_disc = len(base.get('disconnected_pads') or [])
+
+        support = _via_support_model(net_vias, net_pads, net_segs)
+        idx_of = {id(s): i for i, s in enumerate(net_segs)}
+        excluded = set()
+        cur_supported = support.supported_excluding(excluded)
+        dropped = []
+        for (i, j, _pt) in crossings:
+            if i in excluded or j in excluded:
+                continue  # an earlier removal already opened this X
+            for cand in sorted((net_segs[i], net_segs[j]),
+                               key=_self_crossing_rank):
+                ci = idx_of[id(cand)]
+                if keep_input_copper and id(cand) not in routed_seg_ids:
+                    continue  # input copper is read-only for this caller
+                trial_excl = excluded | {ci}
+                t = analyze_conn_excluding(graph, tuple(sorted(trial_excl)))
+                if not (t.get('connected')
+                        and (t.get('num_components') or 1) <= base_comps
+                        and len(t.get('disconnected_pads') or []) <= base_disc):
+                    continue
+                if support.supported_excluding(trial_excl) < cur_supported:
+                    continue  # #209: would strand a via the sweep then culls
+                excluded = trial_excl
+                cur_supported = support.supported_excluding(excluded)
+                dropped.append(cand)
+                break
+
+        if not dropped:
+            continue  # both arms load-bearing on every crossing: leave them
+        survivors = [s for k, s in enumerate(net_segs) if k not in excluded]
+        # #319, batched exactly as collapse_strict_redundant batches it: put
+        # back any removal that manufactured a soft joint, so close_soft_joints
+        # never sees a joint a cleanup pass created. Batching (rather than one
+        # _restore_soft_joint_bridges call per candidate) is what keeps the
+        # gate O(net) per net instead of O(net x crossings); measured to give
+        # the identical removal set on both in-repo boards and on the
+        # synthetic SJ fixture.
+        survivors, dropped = _restore_soft_joint_bridges(
+            survivors, dropped, net_vias, net_pads)
+        if not dropped:
+            continue
+        # AUTHORITATIVE confirm. analyze_conn_excluding replays a graph built
+        # from the FULL segment list, so it diverges from a real recompute if a
+        # removal empties a copper layer (its documented caveat). Grade the
+        # final survivor set with the real checker; if it is worse than the net
+        # started, revert EVERY removal on this net.
+        after = check_net_connectivity(net_id, survivors, net_vias, net_pads)
+        if not (after.get('connected')
+                and (after.get('num_components') or 1) <= (r0.get('num_components') or 1)
+                and len(after.get('disconnected_pads') or [])
+                <= len(r0.get('disconnected_pads') or [])):
+            continue  # revert: keep all of this net's copper
+        nets_pruned += 1
+        for s in dropped:
             if id(s) in routed_seg_ids:
                 removed_routed_ids.add(id(s))
             else:
@@ -5424,7 +5777,10 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
         # collapse_appendices) removed: it "fixed" same-net crossings by extending a
         # segment to a far off-grid endpoint, creating long non-orthonormal diagonals
         # that crossed foreign copper (#159). prune_redundant_cycles + sweep_dead_ends
-        # cover connectivity; the residual cosmetic self-crossings are tracked in #162.
+        # cover connectivity; the residual cosmetic self-crossings are resolved
+        # DELETE-ONLY, once per run, by prune_self_crossing_segments (#162) -- in the
+        # cleanup pipeline, not here: a per-commit clean cannot know whether the arm
+        # it drops is the one a LATER net's copper is about to make redundant.
         cleaned_segments.extend(net_segs)
 
     # Filter out very short (degenerate) segments. A dropped segment whose BOTH

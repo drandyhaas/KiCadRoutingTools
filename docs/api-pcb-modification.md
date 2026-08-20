@@ -95,7 +95,44 @@ the routing pipeline applies both so the model and the output file agree.
 > redundant with `sweep_dead_ends`). `add_route_to_pcb_data` now commits routed
 > segments directly; connectivity cleanup is handled by `prune_redundant_cycles`
 > and the whole-net dead-end trim `sweep_dead_ends` (#84). The residual same-net
-> self-crossings are tracked in #162.
+> self-crossings are handled by `prune_self_crossing_segments` (#162) — by
+> DELETION only, never by moving an endpoint.
+
+```python
+prune_self_crossing_segments(results, pcb_data, scope_net_ids=None,
+                             keep_input_copper=False)
+    -> (segments_removed, nets_pruned, original_segments_to_remove)
+```
+
+Resolves same-net **self-crossings** (issue #162) — two segments of one net
+crossing in an interior X, which `check_drc` reports as a
+`same-net self-crossing` warning. `prune_redundant_cycles` cannot see them:
+its node set is built from segment *endpoint* clusters, and an X has no
+endpoint at the intersection, so the loop it closes is invisible to the tree
+invariant.
+
+**Delete-only.** For each crossing the shorter arm is tried first, and a
+removal is accepted only if every guard `prune_redundant_cycles` uses still
+passes: `check_net_connectivity` still connected with no extra components and
+no extra disconnected pads, no via loses its support (#209), and
+`_restore_soft_joint_bridges` (#319) does not put the segment back. A crossing
+whose *both* arms are load-bearing is left alone — the pass never extends or
+snaps an endpoint to the crossing point, which is what `fix_self_intersections`
+did wrong (#159). Copper graphics (#337) are never candidates, and a whole net
+is skipped when it is zoned, when **any** of its copper is KiCad-locked (#521 —
+the lock need not be on the arm being tried), or when it is net 0 / has fewer
+than two pads (`check_net_connectivity` calls a pad-less net *connected*, so
+every gate would pass vacuously).
+
+`scope_net_ids` is a scope, **not** a protection list: the pipeline passes the
+same `_sub_scope` the cycle prune and the strict collapse get, which subtracts
+only the caller's `protect_net_ids`. Protected matched groups, impedance nets
+and diff pairs are in scope, exactly as they are for those two passes.
+
+Runs inside `cleanup_pipeline.run_post_route_cleanup` at step 7b, so both the
+CLI and the GUI front get it; there is no flag. Strictly inert on a net with no
+self-crossing. It runs *before* `close_soft_joints`, so a crossing that a later
+pipeline pass manufactures is out of its reach.
 
 ## `geometry_utils.py`
 
