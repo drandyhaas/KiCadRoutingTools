@@ -249,7 +249,8 @@ def process_board(set_board, manifest, work_root, out_dir, drc_size_checks):
         dest = os.path.join(out_dir, set_board)
         os.makedirs(dest, exist_ok=True)
         base = os.path.splitext(os.path.basename(out_board))[0]
-        for ext in (".kicad_pcb", ".kicad_pro", ".kicad_prl"):
+        from copy_board import SIBLING_EXTS
+        for ext in (".kicad_pcb",) + SIBLING_EXTS:
             p = os.path.join(wdir, base + ext)
             if os.path.isfile(p):
                 shutil.copy(p, os.path.join(dest, board + "_diff" + ext))

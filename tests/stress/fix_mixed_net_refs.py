@@ -18,6 +18,7 @@ names come from pads, which fanout does not change).
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path

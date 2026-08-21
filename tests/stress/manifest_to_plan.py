@@ -73,6 +73,14 @@ REFUSED_TOOLS = {
 
 # CLI flag -> plan params key (numbers parsed; lists collected).
 FLAG_PARAMS = {
+    # #522-era gap: these two were in NONE of this module's tables, so a
+    # recorded manifest lost its fab settings on conversion and the
+    # replayed plan routed at the DEFAULT tier. They are string-valued;
+    # `_num` falls through to the raw string, the same way --ordering
+    # already does. Param names match the dialog controls
+    # (settings_persistence.py:67-68), which is what ai_plan matches on.
+    '--fab-tier': 'fab_tier',
+    '--fab-overrides': 'fab_overrides_path',
     '--track-width': 'track_width',
     '--clearance': 'clearance',
     '--via-size': 'via_size',

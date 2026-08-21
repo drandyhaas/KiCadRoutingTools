@@ -38,7 +38,8 @@ FAVORED_LAYER = "In1.Cu"
 
 def _cleanup(out):
     base = out[:-len(".kicad_pcb")]
-    for f in (out, base + ".kicad_pro", base + ".kicad_prl"):
+    for f in (out, base + ".kicad_pro", base + ".kicad_prl",
+              base + ".kicad_dru"):
         if os.path.exists(f):
             os.remove(f)
 

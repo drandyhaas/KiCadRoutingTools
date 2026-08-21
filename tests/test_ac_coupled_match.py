@@ -183,7 +183,8 @@ def run():
                 fails.append("control: ac_coupled_xnets present without --ac-couple-match (not inert)")
         finally:
             base = out[:-len(".kicad_pcb")]
-            for ext in (".kicad_pcb", ".kicad_pro", ".kicad_prl"):
+            for ext in (".kicad_pcb", ".kicad_pro", ".kicad_prl",
+                        ".kicad_dru"):
                 if os.path.exists(base + ext):
                     os.remove(base + ext)
 

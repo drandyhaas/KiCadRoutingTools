@@ -919,7 +919,7 @@ def filter_rippable_blockers(
     With `pcb_data`, PROTECTED nets are also dropped (run-6 fix): this is the
     one choke point all six in-run rip ladders flow through, and none of them
     consulted protection_map -- so a .kicad_pro protected net, KiCad-locked
-    copper, or a --protect-nets match could be ripped mid-run by the phase-3
+    copper, or a protected net could be ripped mid-run by the phase-3
     cascade even though every PRE-run rip channel refused it (test-board run
     5, journal [10]: the #444 seam re-ask and the tap ladder churned a
     committed net's copper repeatedly). Refusals are recorded in
