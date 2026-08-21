@@ -85,7 +85,17 @@ class HandbackContractTest(unittest.TestCase):
                       'the teammate must be told which kind to record')
 
     def test_what_l1_asks_for_opens_l2(self):
-        """The whole point: follow the prompt, and the next gate opens."""
+        """Follow the prompt, and the next gate opens -- PLUS the one thing
+        L1 deliberately does NOT ask for.
+
+        run-23: L2 also demands wk/review_handoff.md, the orchestrator's OWN
+        blind-first look at the board between the halves. It is not in L1's
+        teammate prompt ON PURPOSE -- a review by the agent that just placed
+        the board is not independent eyes -- so this test now pins BOTH
+        halves of the contract: without the review L2 refuses AND names the
+        protocol; with everything L1 asked for plus the orchestrator's
+        review, L2 opens.
+        """
         placed = os.path.join(self.work, 'placed.kicad_pcb')
         shutil.copyfile(self.board, placed)
         rep = os.path.join(self.work, 'assembly_close.json')
@@ -96,8 +106,21 @@ class HandbackContractTest(unittest.TestCase):
         self._ledger_with(placed)
         code, out = run(['--stage', 'L2', '--board', placed,
                          '--ledger', self.ledger, '--placement-report', rep])
-        self.assertEqual(code, 0, 'L2 must open on exactly what L1 asked for:\n'
-                         + out[:600])
+        self.assertEqual(code, 4, 'L2 must still demand the orchestrator\'s '
+                         'review:\n' + out[:400])
+        self.assertIn('BLIND-FIRST', out)
+        self.assertIn('review_handoff.md', out)
+        with open(os.path.join(self.work, 'review_handoff.md'), 'w',
+                  encoding='utf-8') as f:
+            f.write('# handoff review (fixture)\n\nOBSERVATIONS '
+                    '(blind-first): fixture board, unit test, no panels; '
+                    'nothing off-outline, no pockets, no interior '
+                    'connectors observed.\n\nRECONCILIATION: nothing '
+                    'observed, nothing to disposition.\n')
+        code, out = run(['--stage', 'L2', '--board', placed,
+                         '--ledger', self.ledger, '--placement-report', rep])
+        self.assertEqual(code, 0, 'L2 must open on what L1 asked for plus '
+                         'the orchestrator\'s review:\n' + out[:600])
         self.assertIn('DELEGATING:', out)
 
     def test_l2_refuses_without_the_document_l1_was_told_to_make(self):
@@ -137,6 +160,17 @@ class HandbackContractTest(unittest.TestCase):
                    'locked_contacts': 0, 'buildable': True,
                    'verdict': 'buildable (blocking 0)'},
                   open(rep, 'w', encoding='utf-8'))
+        # run-23: L2 refuses without the blind-first handoff review. A
+        # fixture exercising the PROMPT must satisfy the eyes gate the same
+        # way it satisfies the four numeric keys above.
+        with open(os.path.join(self.work, 'review_handoff.md'), 'w',
+                  encoding='utf-8') as f:
+            f.write('# handoff review (fixture)\n\n'
+                    'OBSERVATIONS (blind-first): fixture board; no panels in '
+                    'a unit test; nothing off-outline, no pockets, no '
+                    'interior connectors observed.\n\n'
+                    'RECONCILIATION: nothing observed, nothing to '
+                    'disposition; the numeric gates carry this fixture.\n')
         self._ledger_with(placed)
         code, out = run(['--stage', 'L2', '--board', placed,
                          '--ledger', self.ledger, '--placement-report', rep])
@@ -225,6 +259,51 @@ class HandbackContractTest(unittest.TestCase):
         for name, out in (('L1', l1), ('L2', l2)):
             self.assertIn('disclosed hand-assist', out,
                           name + ' must carry the hand-script disclosure duty')
+
+    def test_l2_tells_the_teammate_how_to_hand_back_a_long_step(self):
+        """A subagent cannot block on a detached process, so it must not try.
+
+        Both routing halves in run 20 returned "still working, I'll wait" --
+        because a teammate has no way to sit on a backgrounded step and be
+        woken when it exits. The orchestrator armed the wait itself and resumed
+        them twice, and each round trip cost a re-read of the whole context.
+
+        The prompt now names the shape: LOG / MARKER / NEXT, and says it is a
+        correct hand-back rather than a failure -- an agent that thinks it has
+        failed will keep trying to finish, which is the behaviour being fixed.
+        """
+        _placed, out = self._l2_prompt()
+        for token in ('LOG=', 'MARKER=', 'NEXT='):
+            self.assertIn(token, out,
+                          f'the hand-back shape must name {token}')
+        self.assertIn('--deadline', out,
+                      'a hand-back whose step never terminates turns one '
+                      'blocked agent into two')
+        self.assertIn('correct hand-back, not a', out,
+                      'a half that hands back correctly must not report it as '
+                      'a failure, or the parent reads it as one')
+        self.assertIn('written by the STEP', out,
+                      'a marker the HALF writes says the work finished when '
+                      'it has not started')
+
+    def test_the_routing_skill_documents_the_same_pattern(self):
+        """The driver prompt is where a teammate reads it; the skill is where a
+        human does. A pattern in only one of the two drifts."""
+        sk = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-routing',
+                          'SKILL.md')
+        with open(sk, encoding='utf-8') as fh:
+            txt = fh.read()
+        self.assertIn('CANNOT BLOCK ON A DETACHED PROCESS', txt)
+        self.assertIn('COMPLETION MARKER', txt)
+        # It has to sit WITH the deadline guidance: the two are the same
+        # problem seen from the two ends, and separating them is how one gets
+        # applied without the other.
+        self.assertLess(abs(txt.index('CANNOT BLOCK ON A DETACHED PROCESS')
+                            - txt.index('Pass `--deadline` on any budget-capable step')),
+                        6000,
+                        'the hand-back pattern belongs beside the --deadline '
+                        'guidance -- a hand-back without a deadline is two '
+                        'blocked agents instead of one')
 
 
 if __name__ == '__main__':
