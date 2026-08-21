@@ -145,6 +145,23 @@ the failure, and without `--accept-cmd` its comparator cannot see the thing you
 are trying to fix (a length, a width, a clause). An ACCEPTED round is not a
 verdict -- grade the output with the same battery either skill would use.
 
+## Eyes at the boundaries (run-23)
+
+Numbers gate legality; nothing gated LOOKING, and run 23 shipped a board a
+human rejected at a glance (15 courtyard interpenetrations, four mid-board
+connectors) while every key read clean — its orchestrator viewed ONE image in
+4.7 hours, after the failure. Two driver gates now refuse without a written
+review: L2 needs `wk/review_handoff.md`, the L5 terminal close needs
+`wk/review_close.md`. The protocol is BLIND-FIRST: produce
+`render_placement --review-sheet`, VIEW it, write your observations
+(connectors vs edges with distances, density pockets vs empty regions,
+anything wrong no key names) **before reading any checklist key**, then a
+reconciliation paragraph dispositioning each observation against a named
+number — or refuse the boundary. Observations must carry distances/mm² the
+keys alone cannot produce; that is what separates a review from theater.
+Reorient any time with `loop_driver --status` (RUN_STATE.json is the NOW
+view; the ledger stays the authority).
+
 ## What a run DELIVERS
 
 Four artifacts, every time, in the work dir. A run that produces the board alone

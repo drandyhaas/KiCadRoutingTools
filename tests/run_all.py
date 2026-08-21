@@ -22,6 +22,7 @@ maintained list; a new pytest-style test can instead use @pytest.mark.integratio
 import argparse
 import glob
 import os
+import re
 import subprocess
 import sys
 import time
@@ -33,6 +34,39 @@ ROOT = os.path.dirname(TESTS_DIR)
 _EXCLUDE = {'run_all.py', 'run_utils.py', 'run_doc_examples.py', 'conftest.py', 'synth.py'}
 
 _INTEGRATION_MARKERS = ('import run_utils', 'from run_utils', 'subprocess')
+
+# A test exits with this when it CANNOT run -- a fixture it needs is absent --
+# as distinct from passing. 77 is the autotools convention. Before this, a test
+# that printed "SKIP: ..." and exited 0 was indistinguishable from a green one,
+# which is how a headline acceptance test reported PASS on every clone while
+# asserting nothing. A self-skip gets its own bucket and never counts as a pass.
+SKIP_EXIT = 77
+
+#: A test may declare its own budget with a module-level
+#: `RUN_ALL_TIMEOUT = <seconds>`. Read from the SOURCE, not by importing --
+#: importing a test runs it.
+#:
+#: Why this exists: three tests carried internal budgets ABOVE this runner's
+#: cap (test_compare_seeds sets timeout=3600 on its own subprocess,
+#: test_obstacle_map_balance 1200) and were killed at 600 s before their own
+#: deadline could fire -- so they produced no partial result and no
+#: diagnosis, and a machine-speed fact was reported as a code fact. Measured:
+#: test_obstacle_map_balance passes ALONE in 681 s with all 18 checks green.
+#:
+#: A declared budget is a claim the test makes about itself, in the test,
+#: where the next reader will look. Raising the GLOBAL --timeout instead
+#: would hide a genuinely hung test behind the slow ones.
+_BUDGET_RE = re.compile(r'^RUN_ALL_TIMEOUT\s*=\s*([0-9.]+)', re.M)
+
+
+def _declared_budget(path, default):
+    try:
+        m = _BUDGET_RE.search(open(path, encoding='utf-8',
+                                   errors='replace').read())
+    except OSError:
+        return default
+    return max(float(m.group(1)), default) if m else default
+
 
 
 def is_integration(path: str) -> bool:
@@ -105,6 +139,7 @@ def main():
 
     def run_one(f):
         name = os.path.basename(f)
+        budget = _declared_budget(f, args.timeout)
         try:
             # `text=True` alone decodes with the LOCALE default (cp1252 on
             # Windows) and raises UnicodeDecodeError in the reader thread the
@@ -116,22 +151,45 @@ def main():
             r = subprocess.run([sys.executable, '-X', 'utf8', f], cwd=ROOT,
                                capture_output=True, text=True,
                                encoding='utf-8', errors='replace',
-                               timeout=args.timeout)
+                               timeout=budget)
         except subprocess.TimeoutExpired:
-            return name, None, (f'TIME  {name}  (timeout after '
-                                f'{args.timeout:.0f}s -- NOT a failed '
+            return name, ('timeout', budget), (f'TIME  {name}  (timeout after '
+                                f'{budget:.0f}s -- NOT a failed '
                                 f'assertion; re-run it alone before treating '
                                 f'it as one)')
+        if r.returncode == SKIP_EXIT:
+            # A test that cannot run (a fixture it needs is absent) must not
+            # report PASS. Before this existed, `sys.exit(0)` after printing
+            # "SKIP: ..." was indistinguishable from a green run -- which is
+            # how the placement branch's headline acceptance test reported
+            # PASS on every clone while asserting nothing, for weeks.
+            why = ''
+            for line in (r.stdout or '').splitlines():
+                if line.strip().upper().startswith('SKIP'):
+                    why = line.strip()
+                    break
+            return name, 'skip', f'SKIP  {name}  ({why or "self-skipped"})'
         if r.returncode == 0:
             return name, True, f'PASS  {name}'
         tail = (r.stdout or '')[-800:] + (r.stderr or '')[-800:]
         return name, False, f'FAIL  {name}  (exit {r.returncode})\n{tail}'
 
     timed_out = []
+    self_skipped = []
 
     def record(name, ok, line):
-        if ok is None:
-            timed_out.append(name)
+        if ok == 'skip':
+            # NOT a pass and NOT a timeout: the test declined to run. Kept in
+            # its own bucket so the summary cannot read as green.
+            self_skipped.append(name)
+        elif isinstance(ok, tuple) and ok and ok[0] == 'timeout':
+            # Carry the budget this test ACTUALLY got. The summary used to
+            # print the global --timeout for every row, so a test killed at
+            # its own declared 1800s was reported as "Timed out at 600s" --
+            # which sends the reader to raise a cap the test had already been
+            # given 3x of. The per-test TIME line was right all along; only
+            # the line people read was wrong.
+            timed_out.append((name, ok[1]))
         elif ok:
             passed.append(name)
         else:
@@ -154,12 +212,20 @@ def main():
     # gets its own bucket and never joins the exit-deciding `failed` count on
     # its own -- but the exit code still goes non-zero, because an unfinished
     # suite is not a green one.
+    if self_skipped:
+        print(f'\nSELF-SKIPPED ({len(self_skipped)}) -- these asserted '
+              f'NOTHING; they are not passes:')
+        for n in self_skipped:
+            print(f'  {n}')
     print(f'\n{len(passed)} passed, {len(failed)} failed, '
-          f'{len(timed_out)} timed out, {len(skipped)} skipped in {dt:.1f}s')
+          f'{len(timed_out)} timed out, {len(skipped)} skipped '
+          f'(+{len(self_skipped)} self-skipped) in {dt:.1f}s')
     if failed:
         print('Failed: ' + ', '.join(failed))
     if timed_out:
-        print(f'Timed out at {args.timeout:.0f}s: ' + ', '.join(timed_out))
+        print('Timed out: ' + ', '.join(
+            f'{n} (at its own {b:.0f}s budget)' if b > args.timeout
+            else f'{n} (at {b:.0f}s)' for n, b in timed_out))
         print('  A timeout is not evidence of a broken test. Re-run each one '
               'alone (or raise --timeout) before recording it as a failure.')
     return 1 if (failed or timed_out) else 0

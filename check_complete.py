@@ -207,6 +207,12 @@ def _grade(a, doc):
     doc['board_sha'] = score.get('board_sha')
     blocking = score.get('blocking')
     ungraded = sorted(score.get('ungraded') or [])
+    # NOT the same as ungraded, and it must not block: the board declares no
+    # such requirement, so there is nothing to grade and passing the flag would
+    # invent one. Run 20 closed with `--accept-unclosed ungraded` covering both
+    # a real gap and a non-question, and a standing false waiver on every simple
+    # board is how a real one stops being read.
+    not_applicable = sorted(score.get('not_applicable') or [])
     unknown = sorted(score.get('unknown') or [])
     score_failed = (code == TIMED_OUT or not score)
 
@@ -330,6 +336,12 @@ def _grade(a, doc):
         why += ('. UNEXAMINED, and not passed: ' + ', '.join(ungraded)
                 + ' -- nothing was asked to grade them, so they are unknown '
                   'rather than clean')
+    if not_applicable:
+        # Printed, never blocking. Visible so a reader can tell "no such
+        # requirement" from "nobody looked" without opening the JSON.
+        why += ('. NOT APPLICABLE (this board declares no such requirement): '
+                + ', '.join(not_applicable))
+    doc['not_applicable'] = not_applicable
     doc['verdict'] = verdict
     doc['reason'] = why
     doc['ungraded'] = ungraded

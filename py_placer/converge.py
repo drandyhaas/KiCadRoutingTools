@@ -767,6 +767,15 @@ def cmd_record(a):
              'lever_argv': list(a.argv) if a.argv else None,
              'score': json.loads(a.score) if a.score else None,
              'renders': list(a.render_json) if a.render_json else None,
+             # The MEASUREMENT the next lap is aimed at, not a paragraph about
+             # it. Run 20 recorded "throat 0.409mm vs 0.450 needed, blocked by
+             # U4.53/R7.2" as English inside `lever`, so the re-entry could be
+             # read by a person and by nothing else.
+             'defects': list(a.defect_json) if a.defect_json else None,
+             # L4 requires a --shape and the ledger has never kept it, so
+             # "which shape did we re-enter at, and did it work" was not a
+             # question the record could answer.
+             'shape': a.shape,
              'lenses': list(a.lens) if a.lens else None,
              # Split on whitespace and commas so `--scope-refs "$(cat locks.txt)"`
              # records 45 refs rather than one 45-ref string.
@@ -820,6 +829,12 @@ def cmd_record(a):
                   f"add 'failed_nets' to the score JSON so the ledger stays "
                   f"readable without re-deriving the open set.",
                   file=sys.stderr)
+    # run-23: every record refreshes the NOW view. Best-effort -- the ledger
+    # append above is the authority and already succeeded.
+    try:
+        write_run_state(a.ledger)
+    except Exception as exc:                                    # noqa: BLE001
+        print(f"RUN_STATE not refreshed: {exc}", file=sys.stderr)
     return 0
 
 
@@ -868,9 +883,10 @@ def cmd_replay(a):
 
 CONTINUE, DONE, STUCK, BUDGET = 4, 0, 5, 6
 
-#: Which half of the loop a ledger row belongs to. `systemic` is neither -- it
-#: changes how the chain measures itself, not the board -- so it can never make
-#: a half look like it is still improving.
+#: Which half of the loop a ledger row belongs to. `systemic` and
+#: `classification` are neither -- one changes how the chain measures itself,
+#: the other decides where to re-enter -- and neither changes the board, so
+#: neither can make a half look like it is still improving.
 _HALF = {'placement': 'placement', 'completion': 'routing'}
 
 
@@ -1252,11 +1268,101 @@ def cmd_verdict(a):
     return code
 
 
+def write_run_state(ledger_path):
+    """Write <workdir>/RUN_STATE.json -- the machine-readable NOW view.
+
+    Run 23 measured 74% of its wall clock as agent context work, a large
+    share of it re-deriving "where are we" from ledger + journal + logs,
+    because only HISTORY existed on disk. This is the snapshot: written on
+    every `record` (and stage-stamped by the drivers), atomically. The
+    LEDGER stays the authority -- `source_ledger_row` + `written_at` let any
+    reader detect a stale snapshot after a crash and fall back to it.
+    """
+    out = {'written_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+           'ledger': ledger_path, 'source_ledger_row': 0}
+    try:
+        with open(ledger_path, encoding='utf-8') as f:
+            rows = [json.loads(ln) for ln in f if ln.strip()]
+    except (OSError, ValueError):
+        rows = []
+    out['source_ledger_row'] = len(rows)
+    if rows:
+        last = rows[-1]
+        out['lap'] = last.get('iteration')
+        out['last_kind'] = last.get('kind')
+        out['last_accepted'] = last.get('accepted')
+        out['last_lever'] = (last.get('lever') or '')[:240]
+        out['board_sha'] = last.get('result_sha')
+        for r in reversed(rows):
+            sc = r.get('score')
+            if r.get('accepted') and isinstance(sc, dict) and 'blocking' in sc:
+                out['blocking'] = sc.get('blocking')
+                out['blocking_by'] = sc.get('blocking_by')
+                out['quality'] = sc.get('quality')
+                out['score_lap'] = r.get('iteration')
+                break
+        for r in reversed(rows):
+            if r.get('lenses'):
+                out['last_lens_verdicts'] = r['lenses']
+                break
+        out['final_recorded'] = any(r.get('final') for r in rows)
+        # Exhaustion declarations, honouring the supersession rule the
+        # `record --exhausted` output promises: a later recorded lap of that
+        # half clears it.
+        _KINDS = {'placement': ('placement',),
+                  'routing': ('completion', 'routing')}
+        ex = {}
+        for half in ('placement', 'routing'):
+            decl = [r for r in rows
+                    if (r.get('exhausted') or {}).get('half') == half]
+            if not decl:
+                continue
+            t_decl = max(r.get('t', 0) for r in decl)
+            if not any(r.get('t', 0) > t_decl
+                       and r.get('kind') in _KINDS[half] for r in rows):
+                ex[half] = (decl[-1]['exhausted'].get('reason') or '')[:160]
+        out['exhausted'] = ex
+        out['phase'] = ('closeout' if out['final_recorded'] else
+                        {'placement': 'placement',
+                         'completion': 'routing'}.get(last.get('kind'),
+                                                      last.get('kind')))
+    wd = os.path.dirname(ledger_path) or '.'
+    ct = os.path.join(wd, 'cmd_timing.jsonl')
+    if os.path.exists(ct):
+        try:
+            with open(ct, encoding='utf-8') as f:
+                tail = [json.loads(ln) for ln in f.read().splitlines()[-5:]
+                        if ln.strip()]
+            out['last_commands'] = [
+                {'label': r.get('label'), 'exit': r.get('exit'),
+                 'wall_s': r.get('wall_s')} for r in tail]
+        except (OSError, ValueError):
+            pass
+    path = os.path.join(wd, 'RUN_STATE.json')
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(out, f, indent=1, sort_keys=True)
+    os.replace(tmp, path)
+    return path
+
+
 def cmd_status(a):
     from board_store import Ledger
     lg = Ledger(a.ledger)
     c = lg.counts()
-    print(json.dumps(c, indent=1, sort_keys=True))
+    # run-23: `status` is also the snapshot RENDERER -- refresh RUN_STATE.json
+    # and fold it into the ONE json doc this command prints. One doc, not
+    # two: this is a bare-JSON-stdout command and its consumers json.loads
+    # the whole stream (the cli_banner lesson, relearned live when a second
+    # doc broke test_converge's status test on the first try).
+    doc = dict(c)
+    try:
+        path = write_run_state(a.ledger)
+        with open(path, encoding='utf-8') as f:
+            doc['run_state'] = json.load(f)
+    except Exception as exc:                                    # noqa: BLE001
+        print(f"RUN_STATE not written: {exc}", file=sys.stderr)
+    print(json.dumps(doc, indent=1, sort_keys=True))
     if c['total'] and c['systemic'] * 2 >= c['total']:
         print("NOTE: at least half of this budget went to SYSTEMIC iterations -- "
               "changes to how the chain measures or grades itself, not to the "
@@ -1312,8 +1418,16 @@ def build_parser():
     r.add_argument('--ledger', required=True)
     r.add_argument('--board', required=True)
     r.add_argument('--store', default=None)
-    r.add_argument('--kind', choices=('completion', 'placement', 'systemic'),
-                   default='completion')
+    r.add_argument('--kind',
+                   choices=('completion', 'placement', 'systemic',
+                            'classification'),
+                   default='completion',
+                   help="which half of the loop this lap belongs to. "
+                        "`classification` is the L3 lap that DECIDES the shape "
+                        "of the next re-entry; it changes no board, so like "
+                        "`systemic` it belongs to neither half. It had to be "
+                        "filed as `systemic` before, which made a decision "
+                        "look like a tool change.")
     r.add_argument('--lever', default=None)
     r.add_argument('--score', default=None, help='JSON')
     r.add_argument('--score-file', default=None, metavar='PATH',
@@ -1322,6 +1436,17 @@ def build_parser():
                         '~32kB and the shell then exits 126 BEFORE record '
                         'runs, so the lap is lost with no error. Mutually '
                         'exclusive with --score.')
+    r.add_argument('--defect-json', action='append', default=None,
+                   metavar='PATH',
+                   help='defect-record document(s) this lap was aimed at; '
+                        'repeatable. Stored as entry["defects"]. A ledger that '
+                        'keeps the MEASUREMENT can tell a later reader what '
+                        'the lap was for; a ledger that keeps a paragraph '
+                        'about it cannot.')
+    r.add_argument('--shape', choices=('parameter', 'placement', 'floorplan'),
+                   default=None,
+                   help='the re-entry shape this lap acted on (the same word '
+                        'L4 demands). Stored as entry["shape"].')
     r.add_argument('--render-json', action='append', default=None,
                    metavar='PATH',
                    help='render_placement --json-out document(s) that were '
@@ -1425,7 +1550,13 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    # NO cli_banner here (deliberate): converge's stdout is a JSON API --
-    # `record` and `status` print documents that callers json.loads() whole
-    # (tests/test_converge.py does). The other instruments' stdout is a log.
-    sys.exit(main())
+    # Declare the lever for the WHOLE run, so every pose this CLI
+    # writes carries its name. Nothing called declare_lever outside
+    # tests, so the unaided instrument had no armed state at all:
+    # unarmed it is silent, and armed by hand it refused the engine.
+    from placement.provenance import declare_lever
+    with declare_lever('converge.py', sys.argv):
+        # NO cli_banner here (deliberate): converge's stdout is a JSON API --
+        # `record` and `status` print documents that callers json.loads() whole
+        # (tests/test_converge.py does). The other instruments' stdout is a log.
+        sys.exit(main())

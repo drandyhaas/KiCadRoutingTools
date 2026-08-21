@@ -38,6 +38,7 @@ import hashlib
 import json
 import os
 import re
+import re as _re_wk
 import sys
 import time
 
@@ -206,6 +207,129 @@ def _score_board_mismatch(board, payload):
 # that one gated, this one annotates, and a threshold nobody acts on does not
 # need to be right -- it needs to be roughly where the interesting cases are.
 _CONGESTION_RATIO = 0.25
+
+
+def _load_route_summary(path):
+    """(summary, err). Accepts a bare JSON file OR a route LOG.
+
+    The loop's own L2 contract hands the operator `route.log -- the one carrying
+    JSON_SUMMARY`, and `--route-summary` used to `json.load` it, fail, and skip
+    the box-in precondition with a NOTE. The guard that exists to stop run 20's
+    40 minutes of futile grid laps was therefore OFF for anyone who passed the
+    artifact the loop told them to produce, and it failed OPEN.
+
+    Delegates to `route_summary.merge_route_summaries`, which is also what
+    `render_placement --summary-json` uses. NOT a "take the last JSON_SUMMARY"
+    scan: a run that fires the reconciliation sub-pass emits a SECOND summary
+    scoped to that subset, so the last line is the subset's tally, not the
+    run's -- route.py says so in its own comment.
+    """
+    if not path:
+        return None, ''
+    if not os.path.isfile(path):
+        return None, f'--route-summary {path}: no such file'
+    try:
+        txt = open(path, encoding='utf-8', errors='replace').read()
+    except OSError as exc:
+        return None, f'--route-summary {path}: unreadable ({exc})'
+    try:
+        return json.loads(txt), ''
+    except ValueError:
+        pass
+    try:
+        from route_summary import merge_route_summaries
+        merged = merge_route_summaries(txt)
+    except Exception as exc:                                # noqa: BLE001
+        return None, (f'--route-summary {path}: not JSON, and the log parse '
+                      f'failed ({type(exc).__name__}: {exc})')
+    if not merged:
+        return None, (f'--route-summary {path}: no JSON_SUMMARY line in it, so '
+                      f'it is neither a summary nor a route log')
+    return merged, ''
+
+
+def _guard_static_boxin(a):
+    """(ok, why) -- refuse a GRID lever the router has already said cannot help.
+
+    The router prints "boxed in by static obstacles ... not by congestion" on
+    every such failure, and since the `boxed_in` key it also SAYS it in JSON,
+    with the geometry it was running and whether that geometry sits at the
+    board's declared floor.
+
+    A finer grid resolves the SAME obstacles more precisely. It does not make a
+    gap wider. So when the geometry is at the floor, the parameter family is
+    spent and a grid lap is a measured waste: run 20 spent three of them,
+    0.05 -> 0.025 -> 0.0125, roughly 40 minutes, with `unrouted` at exactly
+    BUSY / Net-(U4-XTAL_P) / SCK at every resolution.
+
+    REFUSES on that case, mirroring `_guard_congestion` -- warn-only was tried
+    by circumstance in run 20, the warning was on screen on every residual
+    failure, and the three laps were spent anyway. REPORTS, never refuses, when
+    the geometry still has travel: there the grid is a legitimate COMPLEMENT to
+    a geometry change, just never the lever alone.
+
+    Silent when there is no `--route-summary`, no box-in verdict, or the verdict
+    cannot say whether the geometry is at the floor. This guard exists to stop a
+    KNOWN-futile lever; "I could not tell" must not become "you failed".
+    """
+    if not getattr(a, 'route_summary', None):
+        return True, ''
+    summary, _serr = _load_route_summary(a.route_summary)
+    if _serr:
+        return True, (f'  NOTE: {_serr}, so the static-boxin precondition was '
+                      f'not checked.')
+    boxed = summary.get('boxed_in') or []
+    if not boxed:
+        return True, ''
+    nets = ', '.join(str(e.get('net')) for e in boxed[:6])
+    at_floor = [e for e in boxed if e.get('at_floor') is True]
+    unknown = [e for e in boxed if e.get('at_floor') is None]
+    g = (boxed[0].get('geometry') or {})
+    geom = (f"grid {g.get('grid_step')}, clearance {g.get('clearance')}, "
+            f"track {g.get('track_width')}")
+    if not at_floor:
+        _tail = ('' if not unknown else
+                 f' ({len(unknown)} of them could not read a declared floor, so '
+                 f'whether the geometry has travel is UNKNOWN there.)')
+        return True, (
+            f'  NOTE: the router reports {len(boxed)} net(s) boxed in by STATIC '
+            f'obstacles, not congestion: {nets}. Running {geom}.{_tail}\n'
+            f'  A finer grid resolves the same obstacles more precisely; it does '
+            f'not make a gap wider. Pair it with the geometry that still has '
+            f'travel -- the grid is the complement, never the lever alone.')
+    _why = str(getattr(a, 'accept_boxin', None) or '').strip()
+    if _why:
+        # The REASON, echoed into the stage body -- mirroring
+        # --accept-congestion. A waiver whose justification lives only in a
+        # shell history is one nobody can review later, and the ledger is what
+        # the next pass reads.
+        return True, (
+            f'  --accept-boxin: proceeding against a static-boxin verdict on '
+            f'{nets}, whose geometry is at the declared floor ({geom}).\n'
+            f'  Reason on the record: {_why}')
+    return False, (
+        f'The router says these nets are boxed in by STATIC obstacles, not by '
+        f'congestion, and the geometry is ALREADY at this board\'s declared '
+        f'floor:\n\n'
+        f'  nets:     {nets}\n'
+        f'  running:  {geom}\n'
+        f'  floors:   {(boxed[0].get("floors") or {})}\n\n'
+        f'A finer grid resolves the SAME obstacles more precisely. It does not '
+        f'make a gap wider, and there is no geometry left to pair it with -- so '
+        f'the parameter family is spent on these nets.\n\n'
+        f'Measured (run 20): three grid refinements against exactly this '
+        f'verdict, 0.05 -> 0.025 -> 0.0125, ~40 minutes, with `unrouted` at '
+        f'exactly BUSY / Net-(U4-XTAL_P) / SCK at every resolution.\n\n'
+        f'Measure it as placement instead -- check_reachability on the '
+        f'COPPER-FREE board, which is the only board on which a CAGED verdict '
+        f'means placement rather than rip-up depth:\n'
+        f'  python3 -X utf8 py_tools/check_reachability.py <copper-free board> \\\n'
+        f'      --pad <REF.PAD on one of those nets> --track <the floor> \\\n'
+        f'      --defect-json wk/defect.json\n'
+        f'  ... --stage L3 --defect-json wk/defect.json '
+        f'--route-summary {a.route_summary}\n\n'
+        f'If you have a reason this is still a parameter problem, say it:\n'
+        f'  --accept-boxin "<why a grid/parameter lever will help here>"')
 
 
 def _guard_congestion(a):
@@ -592,11 +716,127 @@ def _log_invocation(a, stage, out, code):
                'out_sha': hashlib.sha256(
                    (out or '').encode('utf-8')).hexdigest()[:16],
                'out_lines': len((out or '').splitlines())}
+        _note_inner_half(p, row)
         with open(p, 'a', encoding='utf-8') as fh:
             fh.write(json.dumps(row, sort_keys=True) + '\n')
+        # run-23: stamp the stage onto the workdir's NOW view. The ledger-
+        # derived body of RUN_STATE.json is owned by converge.write_run_state
+        # (every `record` refreshes it); the driver only merges in what it
+        # alone knows -- the last stage and whether it refused -- so a fresh
+        # agent reorients from ONE file instead of tailing three logs.
+        try:
+            sp = os.path.join(d, 'RUN_STATE.json')
+            st = {}
+            if os.path.exists(sp):
+                with open(sp, encoding='utf-8') as sf:
+                    st = json.load(sf)
+            st.update({'last_stage': stage, 'stage_exit': code,
+                       'stage_refused': bool(code == 4),
+                       'stage_written_at': row['iso']})
+            tmp = sp + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as sf:
+                json.dump(st, sf, indent=1, sort_keys=True)
+            os.replace(tmp, sp)
+        except Exception:                                    # noqa: BLE001
+            pass
         return p
     except Exception:                                       # noqa: BLE001
         return None
+
+
+def _status(a) -> int:
+    """--status: the NOW view, one command (run-23).
+
+    Refreshes RUN_STATE.json from the ledger via converge (subprocess, the
+    same authority every record goes through), prints it, then the last 5
+    driver stages and timed commands. Degrades gracefully on an empty or
+    absent workdir: an honest 'nothing recorded yet' beats a traceback.
+    """
+    import subprocess
+    work = _work(a)
+    if a.ledger and os.path.exists(a.ledger):
+        subprocess.run([sys.executable, '-X', 'utf8',
+                        os.path.join(ROOT, 'py_placer', 'converge.py'),
+                        'status', '--ledger', os.path.abspath(a.ledger)],
+                       cwd=ROOT, capture_output=True, text=True)
+    sp = os.path.join(work, 'RUN_STATE.json')
+    if os.path.exists(sp):
+        with open(sp, encoding='utf-8') as f:
+            print(f.read())
+    else:
+        print(f'RUN_STATE: nothing recorded yet ({sp} does not exist -- no '
+              f'lap has been recorded and no stage has run against this '
+              f'workdir).')
+    for name, label in (('loop_driver.log', 'driver stages'),
+                        ('cmd_timing.jsonl', 'timed commands')):
+        p = os.path.join(work, name)
+        if not os.path.exists(p):
+            continue
+        try:
+            with open(p, encoding='utf-8') as f:
+                tail = [json.loads(ln) for ln in f.read().splitlines()[-5:]
+                        if ln.strip()]
+        except (OSError, ValueError):
+            continue
+        print(f'last {len(tail)} {label}:')
+        for r in tail:
+            if name == 'loop_driver.log':
+                print(f"  {r.get('iso')}  {r.get('stage')}  exit "
+                      f"{r.get('exit')}"
+                      + ('  REFUSED' if r.get('refused') else ''))
+            else:
+                print(f"  {r.get('iso_start')}  {r.get('label')}  exit "
+                      f"{r.get('exit')}  {r.get('wall_s')}s")
+    return 0
+
+
+#: How long two invocations of the same stage against the same ledger have to be
+#: apart before they stop looking like the outer loop and an inner half both
+#: driving. Deliberately short: a legitimate re-run after fixing a refusal takes
+#: minutes of work, not seconds.
+_INNER_HALF_WINDOW_S = 180.0
+
+
+def _note_inner_half(logpath, row):
+    """Say so when an inner half appears to be driving the outer loop.
+
+    Run 20's routing teammate called `--stage L2` on the frozen board seconds
+    after being spawned -- the run-14 shape the delegation rule exists to
+    prevent, where the half that knows more than its parent quietly does the
+    parent's job and the classification never travels up. It was caught only
+    because a watcher happened to be reading the log.
+
+    REPORTS, never refuses. A legitimate re-run of a stage must not be blocked,
+    and this cannot distinguish the two with certainty -- it can only make the
+    shape visible at the moment it happens instead of in a post-mortem.
+    """
+    try:
+        with open(logpath, encoding='utf-8') as fh:
+            tail = fh.readlines()[-40:]
+    except OSError:
+        return
+    for line in reversed(tail):
+        try:
+            prev = json.loads(line)
+        except ValueError:
+            continue
+        if prev.get('stage') != row['stage']:
+            continue
+        if (row['t'] - float(prev.get('t') or 0)) > _INNER_HALF_WINDOW_S:
+            return                       # older than the window: nothing to say
+        if prev.get('board') == row['board'] and prev.get('cwd') == row['cwd']:
+            return                       # a plain re-run of the same thing
+        print(f'loop_driver NOTE: --stage {row["stage"]} was already invoked '
+              f'{row["t"] - float(prev.get("t") or 0):.0f}s ago against this '
+              f'same ledger, on a DIFFERENT board:\n'
+              f'    then: {prev.get("board")}\n'
+              f'    now:  {row["board"]}\n'
+              f'  If that earlier call was an inner half driving the outer '
+              f'loop, its classification never reaches the parent and the '
+              f'parent re-runs work it never authorised (the run-14 shape). '
+              f'Not refused -- a legitimate re-run looks the same from here.',
+              file=sys.stderr)
+        return
 
 
 #: Never open anything but the board you were given. A delegated half is a fresh
@@ -732,7 +972,9 @@ message.
   close-out    : {_asm}
                  python3 -X utf8 py_tools/check_assembly.py {_placed} \\
                      --clearance <the board's own floor> \\
-                     --json {_asm}
+                     --baseline {a.board} --json {_asm}
+                 (--baseline ARMS the run-23 courtyard gate; without it a
+                 pair your moves placed stays report-only)
   render       : {_rend}
                  the render_placement.py --json-out you actually READ
   freeze refs  : {_refs}
@@ -813,7 +1055,8 @@ def l2(a):
                 'gate alone and use ITS output:\n'
                 '  python3 -X utf8 py_router/check_drc.py <board> --clearance <floor> '
                 '--json wk/drc0.json\n'
-                '  python3 -X utf8 py_tools/check_assembly.py <board> --json '
+                '  python3 -X utf8 py_tools/check_assembly.py <board> '
+                '--baseline <the board the run started from> --json '
                 'wk/assembly0.json')
     # Bind the close-out to the board it is unlocking. check_assembly writes the
     # graded board's path into the payload and this gate never compared it, so
@@ -830,7 +1073,8 @@ def l2(a):
                 f'  handing to route: {os.path.abspath(a.board)}\n\n'
                 f'A stale close-out is not evidence about this board. Re-grade '
                 f'the board you are actually routing:\n'
-                f'  python3 -X utf8 py_tools/check_assembly.py {a.board} --json '
+                f'  python3 -X utf8 py_tools/check_assembly.py {a.board} '
+                f'--baseline <the board the run started from> --json '
                 f'wk/assembly_close.json')
 
     # SHAPE, BEFORE CONTENT. `blocking` exists in BOTH check_assembly's report
@@ -937,7 +1181,8 @@ def l2(a):
             'not say whether the placement is assembly-clean -- and a missing '
             'measurement is not a passing one. Produce the close-out from the '
             'instrument that measures it:\n'
-            '  python3 -X utf8 py_tools/check_assembly.py <board> --json '
+            '  python3 -X utf8 py_tools/check_assembly.py <board> '
+            '--baseline <the board the run started from> --json '
             'wk/assembly_close.json\n\nAn EMPTY or unrelated JSON satisfies a '
             'file-exists check and tells you nothing; that is the failure this '
             'refusal exists to stop.')
@@ -959,14 +1204,92 @@ def l2(a):
     oob, _ooberr = _count('oob_pad_count')
     if _ooberr:
         return err(_ooberr)
+    # PREFER the per-pad channel when a render is on hand. `oob_pad_count` is
+    # the COARSE measure and check_assembly's own `oob_pad_basis` string says so
+    # verbatim: it is a part pad AABB -- pads PLUS NPTH drill circles -- against
+    # an outline inflated by the GRADING CLEARANCE, so it moves when
+    # `--clearance` moves and a hit is not necessarily copper off the outline.
+    # The precise, margin-0 measure is render_placement's
+    # `checklist.a_off_outline.pad_copper`, and this gate was already being
+    # handed it.
+    #
+    # Measured on run 20, on the same board: coarse said [R4 0.2328,
+    # SW2 2.0172], per-pad said [SW2 1.5672]. R4's copper was on the board the
+    # whole time, and that single false positive is why --accept-residue
+    # oob_pad_count had to be used in BOTH cycles -- a waiver that also covers
+    # the real SW2 finding it was not meant to cover.
+    _oob_basis, _oob_refs = 'oob_pad_count (coarse, from check_assembly)', None
+    _pc = None
+    if getattr(a, 'render_json', None):
+        _rj, _rjerr = _load(a.render_json, 'The render (--render-json)')
+        if _rjerr:
+            # Not a refusal -- L3 is where a render is a gate. But the basis
+            # line must not claim a precision this gate did not get.
+            _oob_basis += f' -- {_rjerr}'
+        elif not isinstance(_rj, dict):
+            _oob_basis += ' -- the render is not a JSON object'
+        else:
+            # BOARD-BIND IT, exactly as _guard_route_render does for L3. This
+            # channel REPLACES the coarse count rather than max()ing it, so
+            # every way of getting the wrong document fails OPEN: a render of
+            # another board with an empty `pad_copper` turned a refusal into a
+            # pass on a board with three parts hanging off the outline. L2 was
+            # the only stage reading a document it did not bind.
+            _shown = ((_rj.get('instrument') or {}).get('board')
+                      if isinstance(_rj.get('instrument'), dict) else None)
+            if not _shown:
+                _oob_basis += (' -- the render carries no instrument.board, so '
+                               'it cannot say WHICH board it looked at '
+                               '(re-render with --json-out, not bare --json)')
+            elif os.path.normcase(os.path.abspath(_shown)) !=                     os.path.normcase(os.path.abspath(a.board)):
+                _oob_basis += (f' -- the render is of a DIFFERENT board '
+                               f'({_shown}), so it says nothing about this one')
+            else:
+                _chk = _rj.get('checklist')
+                _off = _chk.get('a_off_outline') if isinstance(_chk, dict) else None
+                _pc = _off.get('pad_copper') if isinstance(_off, dict) else None
+                if not isinstance(_pc, list):
+                    _oob_basis += (' -- the render carries no '
+                                   'checklist.a_off_outline.pad_copper')
+    if isinstance(_pc, list):
+        _oob_refs = [r[0] if isinstance(r, (list, tuple)) and r else r
+                     for r in _pc]
+        oob = len(_pc)
+        _oob_basis = ('checklist.a_off_outline.pad_copper (per-pad, margin 0, '
+                      'from the render)')
     if oob and oob > 0 and not _accept(a, 'oob_pad_count'):
+        _named = (f' Named: {", ".join(str(r) for r in _oob_refs)}.'
+                  if _oob_refs else '')
+        _corr = ''
+        if _oob_refs is not None:
+            _coarse, _ = _count('oob_pad_count')
+            if _coarse is not None and _coarse != oob:
+                # NOT "the coarse one is a phantom". The two measure DIFFERENT
+                # things and the extra parts in the coarse count are usually
+                # real -- just a different finding. Measured on run 20: the
+                # coarse channel named R4 as well as SW2, and R4's copper is
+                # indeed on the outline (so `pad_copper` is right to omit it)
+                # while `check_drc --check-pad-edge` reports R4.1 and R4.2 in
+                # CONTACT with the board edge. Calling that a false positive,
+                # as this message first did, discards a genuine violation.
+                _corr = (f'\n\ncheck_assembly\'s coarse `oob_pad_count` says '
+                         f'{_coarse}. They differ because the coarse measure '
+                         f'tests the pad AABB against an outline INFLATED by '
+                         f'the grading clearance -- so it also catches copper '
+                         f'that is ON the board but too close to its edge. '
+                         f'That is a real requirement, not noise: the extra '
+                         f'parts are a BOARD-EDGE CLEARANCE finding, and\n'
+                         f'  python3 -X utf8 py_router/check_drc.py {a.board} '
+                         f'--check-pad-edge\n'
+                         f'names them. Fix the per-pad count here; do not read '
+                         f'the difference as a false positive.')
         return err(
-            f'The placement close-out reports blocking = 0, but '
-            f'oob_pad_count = {oob}: {oob} part(s) carry pad copper OFF the '
-            f'board. Those parts are assembly-clean precisely because nothing '
+            f'The placement close-out reports blocking = 0, but {oob} part(s) '
+            f'carry pad copper OFF the board, measured by {_oob_basis}.{_named} '
+            f'Those parts are assembly-clean precisely because nothing '
             f'is out there to collide with, and their nets cannot be routed at '
-            f'all.\n\nThis is placement-shaped damage, and it is cheaper to '
-            f'fix now than to discover it as a routing failure and re-enter. '
+            f'all.{_corr}\n\nThis is placement-shaped damage, and it is cheaper '
+            f'to fix now than to discover it as a routing failure and re-enter. '
             f'Go back to the placement half.\n\nIf the overhang is BY DESIGN '
             f'-- a card edge, a switch actuator, a castellated module -- '
             f'declare it in the floorplan intent (edge_connectors), which '
@@ -985,14 +1308,60 @@ def l2(a):
             f'the board changed after the last lap was recorded -- and both '
             f'are the same problem for everything downstream, because the '
             f'ledger is what step-back, the film and the staleness list all '
-            f'read.\n\nRecord it:\n  python3 -X utf8 py_placer/converge.py record '
+            f'read.\n\nRecord it -- WITH a score, or the lap is invisible to '
+            f'the L5 plateau read (run-23: 17 score-less placement laps made '
+            f'the plateau NOT ANSWERABLE):\n'
+            f'  python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/'
+            f'board_score.py \\\n      {a.board} --json {_work(a)}/score_place.json\n'
+            f'  python3 -X utf8 py_placer/converge.py record '
             f'--ledger {a.ledger} \\\n      --board {a.board} --kind placement '
-            f'--argv <the command that produced it>')
+            f'\\\n      --score-file {_work(a)}/score_place.json '
+            f'\\\n      --argv <the command that produced it>')
     # Deliberately NOT refusing on an empty or absent ledger. `_recorded`
     # returns None there, and this gate's own refusal text documents the case:
     # a board placed by someone else, handed straight to routing, has no
     # placement lap to record and never will. "I could not check" must not
     # become "you failed", or the legitimate path stops working.
+    # run-23: the BLIND-FIRST VISUAL REVIEW gate. Every numeric gate below
+    # passed run 23's board while it carried 15 courtyard interpenetrations
+    # and four mid-board connectors -- things a human saw in the render in
+    # seconds. The orchestrator viewed ONE image in 4.7 hours, after the
+    # failure, because no stage ever asked for eyes. This one does: the
+    # handoff is the last copper-free moment, so it is the cheapest one.
+    _rv = os.path.join(work, 'review_handoff.md')
+    if not (os.path.isfile(_rv) and os.path.getsize(_rv) >= 200):
+        return err(
+            f'No boundary review at {_rv} (missing or trivially small).\n\n'
+            f'Before the handoff, VIEW the board and write down what you saw '
+            f'-- BLIND-FIRST: open the renders and write your observations '
+            f'BEFORE reading any checklist key or banner metric. Run 23 '
+            f'measured why that ordering matters: the reviewer had "overlap '
+            f'26.30mm2" printed in the image banner and read past it, because '
+            f'the keys had already said clean and a closed question stays '
+            f'closed.\n\n'
+            f'  python3 -X utf8 py_tools/render_placement.py {a.board} \\\n'
+            f'      --clearance <the board\'s own floor> '
+            f'--review-sheet {work}/review_sheet.png \\\n'
+            f'      --json-out {work}/review_render.json --quiet -o {work}/review.png\n\n'
+            f'(--quiet keeps the keys off your screen -- the render used to echo '
+            f'JSON_SUMMARY in this very command, defeating the ordering '
+            f'this gate exists for. View the sheet BEFORE opening the '
+            f'JSON file.)\n\n'
+            f'Open {work}/review_sheet.png and write {_rv} with:\n'
+            f'  1. OBSERVATIONS (written before reading any JSON): connectors '
+            f'vs edges with distances; density pockets vs empty regions; '
+            f'orientation coherence; decap proximity; anything wrong that no '
+            f'key names.\n'
+            f'  2. RECONCILIATION (written after): every observation either '
+            f'dispositioned against a named key/number, or converted into a '
+            f'refusal of this handoff.\n'
+            f'  3. The check_pockets windows, each dispositioned:\n'
+            f'     python3 -X utf8 py_tools/check_pockets.py {a.board} '
+            f'--json {work}/pockets.json\n\n'
+            f'Observations must carry distances/mm2 the keys alone cannot '
+            f'produce -- that is what makes the review real rather than '
+            f'theater. ~2 images; run 23 spent 1.5M tokens NOT looking.')
+
     delegate, why = _delegation(a, half='routing')
     cyc, P = _paths(a)
     _frozen, _routed = P['frozen.kicad_pcb'], P['routed.kicad_pcb']
@@ -1024,8 +1393,11 @@ half wrote; do not re-derive it by diffing poses.
 
   python3 -X utf8 py_router/copy_board.py {a.board} {_frozen}
   ... stamp (locked yes) on the refs that file names ...
+  python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py \\
+      {_frozen} --json {work}/score_freeze.json
   python3 -X utf8 py_placer/converge.py record --ledger {a.ledger} \\
       --board {_frozen} --kind placement \\
+      --score-file {work}/score_freeze.json \\
       --lever "L2 freeze: <n> refs the placement half named as decisions"
 
 A later step that moves a decided pose silently undoes the placement work, and
@@ -1086,12 +1458,13 @@ hole-conflicting will still be there after the route, and no router setting
 removes it. Keep that board: it is the baseline `check_channels --baseline`
 needs, and you return its path below.
 
-No step has a wall-clock budget -- `--deadline` was removed everywhere (no
-result may depend on timing), so passing it is an argparse error. A harness
-timeout SIGTERMs the tool, its own shutdown never runs, and you get exit 143
-with no partial board and no summary. 143 and 124 are the SHELL's codes, not a
-tool's. Run long steps DETACHED, and bound them by SCOPE -- fewer nets, a
-tighter --max-ripup, a smaller violator set -- rather than by a clock.
+Only route.py and place_seed take a wall-clock budget
+(`--deadline`); the other mains lost the flag to #621, and passing it there is
+an argparse error. A harness timeout SIGTERMs a budget-less tool, its own
+shutdown never runs, and you get exit 143 with no partial board and no
+summary. 143 and 124 are the SHELL's codes, not a tool's. Run long steps
+DETACHED; pass `--deadline` where the tool has one, and bound the rest by
+SCOPE -- fewer nets, a tighter --max-ripup, a smaller violator set.
 
 Record EVERY accepted iteration into the ledger above with converge.py, and
 every rejected one with --rejected before stepping back. The stage after this
@@ -1136,6 +1509,26 @@ Return, and return ONLY:
   5. anything left UNGRADED, named as unexamined rather than clean.
 
 Do not summarise the process, and do not retype the numbers.
+
+IF A STEP RUNS LONG, HAND BACK -- do not wait on it. You cannot: a teammate has
+no way to sit on a backgrounded process and be woken when it exits, and both
+routing halves in run 20 returned "still working, I'll wait" for exactly that
+reason. Launch it detached (WITH --deadline when the tool takes one), then return three things and stop:
+  LOG=<where it is writing>   MARKER=<the file whose appearance means done>
+  NEXT=<what consumes it>
+This loop arms the wait and resumes you. That is a correct hand-back, not a
+failure -- report it as one and it will be read as one. The marker must be
+written by the STEP, never by you: a "done" file you write before returning says
+the work finished when it has not started. Run steps through
+tests/stress/tee_cmd.py and the marker is free: it writes
+logs/<label>.done containing the exit code at child exit -- wait on THAT
+file, never on a log line (run 23 lost 25 minutes to a completion line that
+goes to stdout while the waiter grepped the log).
+
+READ ROUTE RESULTS FROM THE `JSON_SUMMARY_MIN:` LINE -- one per run,
+authoritative-last, the MERGED tally in <1KB (run-23). The big JSON_SUMMARY
+lines are 6-20KB each, several per log, with scope semantics the log itself
+warns about; they are forensics, not your read.
 </subagent_prompt>
 
 When it returns, continue here with the paths it named. Do not retype its
@@ -1164,12 +1557,13 @@ only ones in front of you:
 Its Step 0 placement gate will pass: you just did that work, and the close-out
 is the evidence -- so it drops straight through to the routing stages.
 
-No step has a wall-clock budget -- `--deadline` was removed everywhere (no
-result may depend on timing), so passing it is an argparse error. A harness
-timeout SIGTERMs the tool, its own shutdown never runs, and you get exit 143
-with no partial board and no summary. 143 and 124 are the SHELL's codes, not a
-tool's. Run long steps DETACHED, and bound them by SCOPE -- fewer nets, a
-tighter --max-ripup, a smaller violator set -- rather than by a clock.
+Only route.py and place_seed take a wall-clock budget
+(`--deadline`); the other mains lost the flag to #621, and passing it there is
+an argparse error. A harness timeout SIGTERMs a budget-less tool, its own
+shutdown never runs, and you get exit 143 with no partial board and no
+summary. 143 and 124 are the SHELL's codes, not a tool's. Run long steps
+DETACHED; pass `--deadline` where the tool has one, and bound the rest by
+SCOPE -- fewer nets, a tighter --max-ripup, a smaller violator set.
 
 Two rules that are only true HERE, where the halves meet:
   - copper is not evidence about placement. A route that completed does not
@@ -1355,11 +1749,195 @@ check_reachability answers about ONE pad per run -- give it a pad on a failing
 net (or --net <id> --at <x,y>). A single genuine CAGED (exit 1) on the
 copper-free board is enough to make the shape placement.
 
+{_propose_shape(a)}
 Then re-run this stage with the shape you measured:
   --stage L4 --shape <parameter|placement|floorplan> --board {a.board} \\
       --score {a.score} --ledger {a.ledger} \\
+      [--defect-json <the record(s) that classified it>] \\
       [--congestion-json wk/cong_now.json --congestion-baseline wk/cong_base.json]
 </stage_instructions>'''
+
+
+def _propose_shape(a):
+    """Derive a shape from the evidence already in hand, and PRINT the derivation.
+
+    L3 prints four measurement commands and asks the operator to run
+    check_channels, check_reachability and two renders, read the exit codes and
+    decide. Every one of those measurements is exactly what a defect record and
+    a route summary contain -- so the loop was asking for work it was already
+    holding.
+
+    It PROPOSES; it does not decide and it does not refuse. `--shape` on L4
+    stays the operator's assertion -- this driver's own text calls that "the
+    guard that matters most", and it must keep costing a deliberate act. What
+    changes is that the assertion is now made against a printed derivation
+    instead of from memory.
+
+    Absent both inputs, returns '' and L3 reads exactly as it did before.
+    """
+    defects, notes = [], []
+    # `read` counts documents that PARSED, so "a record was given and it found
+    # nothing" stays distinguishable from "no record was given". They are
+    # different evidence: the first is a measurement that came back clean.
+    read = 0
+    for path in (getattr(a, 'defect_json', None) or []):
+        try:
+            with open(path, encoding='utf-8') as fh:
+                doc = json.load(fh)
+            if doc.get('kind') != 'defect-record':
+                notes.append(f'{path}: not a defect-record')
+                continue
+            read += 1
+            defects += list(doc.get('defects') or [])
+        except Exception as exc:                            # noqa: BLE001
+            notes.append(f'{path}: unreadable ({exc})')
+    summary = None
+    if getattr(a, 'route_summary', None):
+        summary, _serr = _load_route_summary(a.route_summary)
+        if _serr:
+            notes.append(_serr)
+    if not read and summary is None and not notes:
+        return ''
+
+    rows, shapes = [], set()
+    caged = [d for d in defects if d.get('verdict') == 'CAGED']
+    if caged:
+        d = caged[0]
+        m = d.get('measure') or {}
+        rows.append(
+            f'  CAGED on {d.get("net")} -- throat {m.get("gap_mm")}mm vs '
+            f'{m.get("gap_need_mm")}mm needed, margin '
+            f'{-1000.0 * (m.get("short_mm") or 0):+.2f} um'
+            + (f', between {", ".join(d.get("pads") or [])}'
+               if d.get('pads') else '')
+            + f'   -> placement')
+        # THE PRECONDITION, stated with the proposal rather than assumed: a
+        # CAGED verdict measured on ROUTED copper is rip-up depth, not
+        # placement, because the field it measured includes the router's own
+        # tracks. Three genuine cages once became three PASSABLE once the
+        # copper was removed.
+        rows.append('     (only if that was measured on the COPPER-FREE '
+                    'board -- on a routed one, CAGED is rip-up depth)')
+        shapes.add('placement')
+    blockers = (summary or {}).get('blockers') or []
+    if blockers:
+        rows.append(f'  summary["blockers"] names {len(blockers)} net(s) with '
+                    f'rippable copper in the way   -> parameter (congestion)')
+        shapes.add('parameter')
+    boxed = (summary or {}).get('boxed_in') or []
+    if boxed:
+        g = (boxed[0].get('geometry') or {})
+        rows.append(
+            f'  summary["boxed_in"] names {len(boxed)} net(s) walled in by '
+            f'STATIC obstacles, at grid {g.get("grid_step")}, clearance '
+            f'{g.get("clearance")}, track {g.get("track_width")}')
+        rows.append('     -> parameter (geometry) IF that geometry still has '
+                    'travel above the board\'s declared floor;')
+        rows.append('     -> placement    IF it is already AT the floor -- the '
+                    'parameter family is spent, and a finer grid alone has no '
+                    'geometry to pair with. L4 refuses the grid lever there.')
+        shapes.add('boxed')
+    if not rows:
+        rows.append('  the documents given carry no CAGED defect, no blockers '
+                    'and no box-in verdict -- nothing to derive from')
+    if shapes == {'placement'}:
+        verdict = 'proposed shape: placement'
+    elif shapes == {'parameter'}:
+        verdict = 'proposed shape: parameter'
+    elif shapes == {'boxed'}:
+        verdict = ('proposed shape: parameter OR placement -- decided by '
+                   'whether the geometry above is at the board floor')
+    elif shapes:
+        verdict = ('proposed shape: NONE -- the evidence DISAGREES across '
+                   'nets. Both readings are printed above; classify per net or '
+                   'measure again, do not average them.')
+    else:
+        verdict = 'proposed shape: none derivable from what was given'
+    return ('\nDERIVED FROM THE EVIDENCE YOU ALREADY HAVE:\n'
+            + '\n'.join(rows)
+            + (('\n  NOTE ' + '\n  NOTE '.join(notes)) if notes else '')
+            + f'\n\n  {verdict}\n  This is a PROPOSAL. --shape on L4 is still '
+              f'your assertion, and a disagreement between the two is printed '
+              f'there.\n')
+
+
+def _shape_disagreement(a):
+    """A LOUD note when --shape contradicts what the evidence derives, or ''.
+
+    Reports, never refuses. The evidence can be partial (reachability answers
+    about one pad) and the operator may know something the documents do not --
+    but a contradiction should never pass silently, because the whole cost of
+    this stage is that the wrong shape is expensive in both directions.
+    """
+    txt = _propose_shape(a)
+    if not txt:
+        return ''
+    for want, line in (('placement', 'proposed shape: placement'),
+                       ('parameter', 'proposed shape: parameter')):
+        if line in txt and a.shape != want:
+            return (f'loop_driver NOTE: you asserted --shape {a.shape}, but '
+                    f'the evidence you passed derives {want}:\n' + txt
+                    + f'  Proceeding with {a.shape} -- the assertion is '
+                      f'yours. Say in the ledger why the derivation is wrong.')
+    return ''
+
+
+def _defect_brief(paths):
+    """The defect records, as a TARGET line -- or '' when there are none.
+
+    Run 20 measured a cage at U4.54 (throat 0.409 mm against 0.450 needed,
+    blocking pads U4.53 and R7.2, relief ~0.042 mm) and then had to hand-write
+    that into an English paragraph in a ledger `lever` string and again into a
+    subagent prompt. The measurement existed; nothing could carry it.
+
+    NEVER a gate. L3 already refuses without `--render-json`; a second mandatory
+    document on the stage the loop turns on doubles the ways a real run stalls,
+    and producers are inherently partial (reachability answers about one pad).
+    """
+    out = []
+    for path in (paths or []):
+        try:
+            with open(path, encoding='utf-8') as fh:
+                doc = json.load(fh)
+        except Exception as exc:                            # noqa: BLE001
+            out.append(f'  --defect-json {path}: unreadable ({exc})')
+            continue
+        if doc.get('kind') != 'defect-record':
+            out.append(f'  --defect-json {path}: not a defect-record '
+                       f'({doc.get("kind")!r})')
+            continue
+        for d in (doc.get('defects') or []):
+            m = d.get('measure') or {}
+            at = d.get('at') or {}
+            who = ', '.join(d.get('pads') or d.get('refs') or [])
+            out.append(
+                f"  {d.get('verdict', '?')} {d.get('kind', '?')} on "
+                f"{d.get('net', '?')}"
+                + (f" at ({at['x']}, {at['y']}) {at.get('layer', '')}"
+                   if at.get('x') is not None else '')
+                + (f", between {who}" if who else ''))
+            if m.get('gap_mm') is not None:
+                # BOTH SPACES, each labelled. `bottleneck_mm` is slack space
+                # (2*(dist - clearance)); the physical gap is that plus
+                # 2*clearance. Run 20's ledger put one of each in one sentence
+                # as though they were the same number.
+                out.append(
+                    f"      gap {m['gap_mm']:.4f} / {m['gap_need_mm']:.4f} mm "
+                    f"needed (gap space); track {m.get('have_mm')} / "
+                    f"{m.get('need_mm')} (track space); short "
+                    f"{1000.0 * (m.get('short_mm') or 0):.1f} um at "
+                    f"{m.get('resolution_mm')} mm resolution")
+            for rel in (d.get('relief') or [])[:2]:
+                out.append(
+                    f"      TARGET: move {rel.get('ref')} >= "
+                    f"{rel.get('min_mm')} mm {rel.get('dir')} "
+                    f"(away from {rel.get('against')}) -- "
+                    f"{rel.get('bound', 'lower')} bound: this clears THIS pair "
+                    f"and may create another")
+    if not out:
+        return ''
+    return ('\nWHAT THIS RE-ENTRY IS AIMED AT (from --defect-json):\n'
+            + '\n'.join(out) + '\n')
 
 
 def l4(a):
@@ -1372,13 +1950,27 @@ def l4(a):
             'parameters spends iterations on a board no parameter can fix; '
             'sending a parameter-shaped failure back to placement throws away '
             'a routed board for nothing. L3 tells you how to measure it.')
+    # The assertion is still the operator's, and still costs a deliberate act.
+    # What is new is that it is now made against a DERIVATION L3 printed, so a
+    # disagreement between the two is a thing that can be seen rather than a
+    # thing that has to be remembered.
+    _disagree = _shape_disagreement(a)
+    if _disagree:
+        print(_disagree, file=sys.stderr)
     if a.shape == 'parameter':
         # Refuses only when the congestion evidence is MISSING. The numbers
         # themselves report and never refuse -- see _guard_congestion.
+        # BOTH preconditions, and the boxin one FIRST: a grid lever the router
+        # has already said cannot help is futile whether or not the congestion
+        # evidence exists, so asking for that evidence first would send the
+        # operator off to render two boards for a lap that is refused anyway.
+        _bok, _bwhy = _guard_static_boxin(a)
+        if not _bok:
+            return err(_bwhy)
         _cok, _cwhy = _guard_congestion(a)
         if not _cok:
             return err(_cwhy)
-        _cread = f'\n{_cwhy}\n' if _cwhy else ''
+        _cread = ''.join(f'\n{x}\n' for x in (_bwhy, _cwhy) if x)
         return f'''<stage_instructions stage="L4" name="re-enter: parameter" of="5">
 {_cread}
 Re-enter the FAILING ROUTING STEP with the parameter changed. Nothing before it
@@ -1445,10 +2037,11 @@ Next: --stage L1 --board <the adopted arrangement> --ledger {a.ledger}
             f'{a.ledger} \\\n'
             '          --board <the routed board> --kind completion \\\n'
             '          --score-file <the score json> --argv <the command>')
+    _dbrief = _defect_brief(getattr(a, 'defect_json', None))
     return f'''<stage_instructions stage="L4" name="re-enter: placement" of="5">
 This is the expensive one, and the cost is the point: no router setting adds a
 lane, so every routed board produced from this placement is now stale.
-
+{_dbrief}
 Routed boards this ledger recorded, which must not be reused:
 {stale}
 
@@ -1701,7 +2294,8 @@ check_complete is the one that fails CLOSED: board_score exits 0 with four of
 nine components ungraded, and it has no component at all for orphan stubs,
 weird copper or pad overlaps. --authored-from is what lets it see whether this
 board grades itself against floors it rewrote -- the writeback only ever
-loosens, so without the original project there is nothing left to compare to.
+loosens. Without it the check falls back to the project's own fab_floor_origin,
+which is narrower (only the keys declared at the first writeback), so pass it.
 
 Connectivity is orthogonal to DRC: a DRC-clean board can be entirely
 disconnected, because isolated copper has no clearance conflicts.
@@ -1995,10 +2589,14 @@ def _close_out(a, name):
                 f'  python3 -X utf8 check_complete.py {a.board} \\\n'
                 f'      --authored-from <the board this chain STARTED from> \\\n'
                 f'      --json wk/routing_close.json\n\n'
-                f'--authored-from is not optional bookkeeping: without it the '
-                f'floor check cannot run at all, and UNSOUND becomes '
-                f'unreachable. The chain rewrites the floors in place, so the '
-                f'original project is the only thing left to compare against.')
+                f'--authored-from is not optional bookkeeping. Without it the '
+                f'floor check falls back to the project\'s own '
+                f'fab_floor_origin, which is NARROWER: it holds only the keys '
+                f'the project declared at the FIRST writeback, so a floor the '
+                f'human never wrote down has no baseline and lands in '
+                f'`unmeasured` instead of `relaxed`. Pass it anyway -- the '
+                f'chain rewrites the floors in place, and the original project '
+                f'is the only complete record of what they were.')
 
     _missing = [k for k in CLOSE_KEYS if k not in doc]
     if _missing or doc.get('verdict') not in CLOSE_VERDICTS:
@@ -2081,7 +2679,35 @@ def _close_out(a, name):
     # STUCK/BUDGET alongside INCOMPLETE is a CONSISTENT pair and passes. It
     # lives in _cross_check now because it also has to run on the CONTINUE
     # branch -- see there for the run where it never ran at all.
-    return _cross_check(a, name, doc)
+    _disagree = _cross_check(a, name, doc)
+    if _disagree:
+        return _disagree
+    # run-23: the LAST guard, deliberately -- every evidence check above
+    # has passed, and the remaining question is whether anyone LOOKED.
+    # Same blind-first protocol as L2's handoff review, on the board
+    # being SHIPPED; not waivable by --accept-unclosed (that flag accepts
+    # a named CHECK's residue; this is not a check, it is eyes).
+    _work_dir = _work(a)
+    _rvc = os.path.join(_work_dir, 'review_close.md')
+    if not (os.path.isfile(_rvc) and os.path.getsize(_rvc) >= 200):
+        return err(
+            f'Every close-out number passed -- and nobody has LOOKED at '
+            f'the board being shipped ({_rvc} is missing or trivially '
+            f'small).\n\nRun 23 shipped a board a human rejected at a '
+            f'glance -- 15 courtyard interpenetrations, connectors '
+            f'mid-board -- while every terminal number read clean. '
+            f'Produce the sheet, view it BLIND-FIRST (observations '
+            f'written before reading any key), then reconcile each '
+            f'observation against a named number or refuse this close:\n'
+            f'  python3 -X utf8 py_tools/render_placement.py {a.board} \\\n'
+            f'      --clearance <the board\'s own floor> '
+            f'--review-sheet {_work_dir}/review_close_sheet.png \\\n'
+            f'      --json-out {_work_dir}/review_close_render.json --quiet '
+            f'-o {_work_dir}/review_close.png\n'
+            f'(--quiet keeps the keys off your screen; view the sheet BEFORE '
+            f'opening the JSON file.)\n'
+            f'Write the review to {_rvc}, then re-run this stage.')
+    return None
 
 
 STAGES = {'L1': l1, 'L2': l2, 'L3': l3, 'L4': l4, 'L5': l5}
@@ -2097,7 +2723,13 @@ def _args(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--stage', choices=sorted(STAGES))
     ap.add_argument('--board', default='board.kicad_pcb')
-    ap.add_argument('--ledger', default='wk/ledger.jsonl')
+    ap.add_argument('--workdir', default='wk',
+                    help="the work dir the emitted instructions should point at. Default 'wk' leaves them exactly as before. Set it and every wk/ path in the printed stage text is retargeted, so the artifacts land where run_watch/fence_audit/provenance_audit actually look -- they walk only the dir they are given, and a relative wk/ resolves against the process CWD instead")
+    # None, then filled from --workdir after parse: a hardcoded
+    # 'wk/ledger.jsonl' is the one path this driver resolves ITSELF,
+    # so leaving it fixed would put the ledger outside the work dir
+    # even when every emitted instruction pointed inside it.
+    ap.add_argument('--ledger', default=None)
     ap.add_argument('--placement-report', default=None)
     ap.add_argument('--score', default=None)
     ap.add_argument('--congestion-json', default=None, metavar='PATH',
@@ -2110,6 +2742,13 @@ def _args(argv=None):
     ap.add_argument('--congestion-baseline', default=None, metavar='PATH',
                     help='render_placement --json-out of the pre-placement '
                          'board, to compare --congestion-json against.')
+    ap.add_argument('--accept-boxin', default=None, metavar='REASON',
+                    help="proceed with a `parameter` re-entry even though the "
+                         "route summary reports the failing nets boxed in by "
+                         "STATIC obstacles at the board's declared floor. Takes "
+                         "the REASON, echoed into the stage body so it reaches "
+                         "the ledger. Run 20 spent three grid laps (~40 min) "
+                         "against exactly this verdict.")
     ap.add_argument('--accept-congestion', default=None, metavar='REASON',
                     help='Proceed with --shape parameter even though the '
                          'congestion read says the failure may be '
@@ -2121,6 +2760,18 @@ def _args(argv=None):
                          'speaks the L2 placement gate\'s vocabulary, and a '
                          'waiver that covers two gates at once waives the one '
                          'that was working.')
+    ap.add_argument('--route-summary', default=None, metavar='PATH',
+                    help="the route step's JSON_SUMMARY. L3 reads `blockers` "
+                         "and `boxed_in` from it to propose a shape, and L4 "
+                         "reads `boxed_in` to refuse a grid lever the router "
+                         "has already said will not help.")
+    ap.add_argument('--defect-json', action='append', default=None,
+                    metavar='PATH',
+                    help='defect-record document(s) -- check_reachability '
+                         '--defect-json. L3 derives a proposed shape from them '
+                         'and L4-placement prints the TARGET they name. Never '
+                         'a gate: a second mandatory document on the stage the '
+                         'loop turns on doubles the ways a real run stalls.')
     ap.add_argument('--render-json', default=None, metavar='PATH',
                     help='render_placement --json-out document. L3 requires '
                          'one when there is a failure to classify: "one pocket '
@@ -2174,7 +2825,61 @@ def _args(argv=None):
     ap.add_argument('--list', action='store_true')
     ap.add_argument('--dump-all', action='store_true')
     ap.add_argument('--self-test', action='store_true')
-    return ap.parse_args(argv)
+    ap.add_argument('--status', action='store_true',
+                    help='the NOW view (run-23): print RUN_STATE.json '
+                         '(refreshing it from the ledger first), the last 5 '
+                         'driver stages and the last 5 timed commands. One '
+                         'command to reorient instead of tailing three logs.')
+    ns = ap.parse_args(argv)
+    # Fill the ledger from the work dir, preserving the old default exactly
+    # when --workdir is not given.
+    if ns.ledger is None:
+        wd = (getattr(ns, 'workdir', None) or 'wk').replace(chr(92), '/')
+        ns.ledger = wd.rstrip('/') + '/ledger.jsonl'
+    return ns
+
+
+#: Paths in the emitted instructions are written against `wk/`. When the caller
+#: names a real work dir, retarget them -- otherwise the agent executing those
+#: instructions writes to a literal relative `wk/...`, which resolves against
+#: the process CWD and lands OUTSIDE the directory every audit walks.
+#:
+#: Measured, run 22: `run_watch --workdir`, `fence_audit --workdir` and
+#: `provenance_audit --workdir` all walk only the directory they are given, so
+#: a driver that tells the agent to write `wk/locks.json` puts that artifact
+#: where all three are blind. That is a hole in the EVIDENCE, not a cosmetic
+#: path issue: the watchers reported a clean run over a directory half the
+#: run's artifacts never entered.
+#:
+#: One substitution at the single emission point, rather than rewriting ~70
+#: string literals across two 3000-line files -- that diff would be large,
+#: risky, and would touch text an agent executes verbatim.
+_WK_RE = _re_wk.compile(r'(?<![\w./-])wk/')
+
+#: Real repo artifacts that live under `wk/` and must NOT be retargeted: they
+#: are prose references to things that exist, not work paths the caller owns.
+_WK_KEEP_RE = _re_wk.compile(r'wk/(?:calibration|run\d+)/')
+
+
+def _retarget(text, workdir):
+    """Point the emitted instructions at the caller's work dir.
+
+    The default `wk` short-circuits and returns the text unchanged, so every
+    existing caller -- and both embedded self-test suites, which construct
+    args without --workdir -- sees byte-identical output.
+    """
+    if not text or not workdir:
+        return text
+    wd = str(workdir).replace('\\', '/').rstrip('/')
+    if wd in ('', 'wk'):
+        return text
+    out, last = [], 0
+    for m in _WK_KEEP_RE.finditer(text):
+        out.append(_WK_RE.sub(wd + '/', text[last:m.start()]))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(_WK_RE.sub(wd + '/', text[last:]))
+    return ''.join(out)
 
 
 def main(argv=None):
@@ -2183,6 +2888,8 @@ def main(argv=None):
         for k in ('L1', 'L2', 'L3', 'L4', 'L5'):
             print(f'  {k}  {TITLES[k]}')
         return 0
+    if a.status:
+        return _status(a)
     if a.self_test:
         return _self_test()
     if a.dump_all:
@@ -2205,6 +2912,9 @@ def main(argv=None):
             # opposite of what a dump is for.
             _bd = os.path.join(tmp, 'b.kicad_pcb')
             open(_bd, 'w', encoding='utf-8').close()
+            # run-23: the review gates read files beside the ledger.
+            _stage_review(tmp, 'review_handoff.md')
+            _stage_review(tmp, 'review_close.md')
             # ...and a LEDGER carrying that board's sha. L5 now refuses without
             # one, because its verdict is computed from the ledger and an empty
             # history reads as "still improving".
@@ -2314,7 +3024,7 @@ def main(argv=None):
     if not a.stage:
         print('loop_driver: --stage is required (see --list)', file=sys.stderr)
         return 2
-    out = STAGES[a.stage](a)
+    out = _retarget(STAGES[a.stage](a), getattr(a, 'workdir', None))
     code = 4 if out.startswith('<error>') else 0
     # BEFORE the print, so a stage that dies printing still leaves its trace,
     # and on stdout NOTHING changes -- existing callers tee exactly what they
@@ -2322,6 +3032,24 @@ def main(argv=None):
     _log_invocation(a, a.stage, out, code)
     print(out)
     return code
+
+
+def _stage_review(d, name):
+    """A non-trivial review fixture, for tests exercising the OTHER guards.
+
+    run-23 added the blind-first review gates (L2 handoff, close-out); every
+    self-test case that expects a stage to EMIT must carry one, exactly as
+    the close-out fixtures carry every key their gates read.
+    """
+    p = os.path.join(d, name)
+    with open(p, 'w', encoding='utf-8') as fh:
+        fh.write('# boundary review (self-test fixture)\n\n'
+                 'OBSERVATIONS (blind-first): fixture board, no panels to '
+                 'view in a unit test; nothing off-outline, no pockets, no '
+                 'interior connectors observed.\n\n'
+                 'RECONCILIATION: nothing observed, nothing to disposition; '
+                 'the numeric gates carry this fixture.\n')
+    return p
 
 
 def _self_test():
@@ -2343,7 +3071,10 @@ def _self_test():
         # 74, not 70: run-19 A2 grew FENCE_CLAUSE by four lines (the
         # hand-script disclosure duty). L1 sits exactly AT the cap, as it
         # did at 70 -- any further growth is a deliberate decision, here.
-        want(len(out.splitlines()) <= 74, f'{key} stays under 74 lines')
+        # 76, not 74: run-23 grew L1's close-out command by --baseline plus a
+        # two-line note (it ARMS the courtyard gate; omitting it is how J4
+        # shipped 0.90mm inside U6). Deliberate, decided here.
+        want(len(out.splitlines()) <= 76, f'{key} stays under 76 lines')
 
     want(STAGES['L2'](_args(base)).startswith('<error>'),
          'routing refuses to start without a placement close-out')
@@ -2359,6 +3090,11 @@ def _self_test():
         # detector: run 10 fed this gate `board_score`'s JSON, which shares the
         # field name `blocking` and means a six-component total by it, and
         # three of the four checks silently did not run.
+        # run-23: pass-through cases also need the review gate satisfied, in
+        # THIS tmp (never the repo's wk/), so the ledger is scoped here too.
+        base = ['--board', 'b.kicad_pcb',
+                '--ledger', os.path.join(tmp, 'ledger.jsonl')]
+        _stage_review(tmp, 'review_handoff.md')
         _asm = {'buildable': True, 'verdict': 'buildable (blocking 0)',
                 'locked_contacts': 0, 'oob_pad_count': 0}
         p = os.path.join(tmp, 'p.json')
@@ -2378,8 +3114,10 @@ def _self_test():
         json.dump({**_asm, 'blocking': 0, 'oob_pad_count': 4},
                   open(oob, 'w', encoding='utf-8'))
         out = STAGES['L2'](_args(base + ['--placement-report', oob]))
-        want(out.startswith('<error>') and 'oob_pad_count = 4' in out,
-             'routing refuses a blocking-0 placement with pads off the board')
+        want(out.startswith('<error>') and '4 part(s) carry pad copper OFF'
+              in out and 'coarse' in out,
+             'routing refuses a blocking-0 placement with pads off the board, '
+             'and names the count and the measure it used')
         want('edge_connectors' in out,
              '...and names how a BY-DESIGN overhang is declared instead')
         out = STAGES['L2'](_args(base + ['--placement-report', oob,
@@ -2393,7 +3131,8 @@ def _self_test():
         # oob_pad_count gate went with it.
         out = STAGES['L2'](_args(base + ['--placement-report', oob,
                                          '--accept-residue', 'blocking']))
-        want(out.startswith('<error>') and 'oob_pad_count = 4' in out,
+        want(out.startswith('<error>') and '4 part(s) carry pad copper OFF'
+              in out,
              'accepting `blocking` does NOT waive the oob_pad_count gate')
         out = STAGES['L2'](_args(base + ['--placement-report', oob,
                                          '--accept-residue']))
@@ -2437,6 +3176,7 @@ def _self_test():
         want('nothing to classify' in out,
              'a clean score has no failure to classify')
 
+    base = ['--board', 'b.kicad_pcb']
     with tempfile.TemporaryDirectory() as _ct:
         def _cong(name, hpwl, crossings=500.0):
             p = os.path.join(_ct, name)
@@ -2552,7 +3292,9 @@ def _self_test():
             n = _part_count(small)
             want(isinstance(n, int) and n > 0,
                  'the board can be sized at all')
-            auto = ['--board', small, '--placement-report', rep]
+            _stage_review(_t, 'review_handoff.md')     # run-23 gate fixture
+            auto = ['--board', small, '--placement-report', rep,
+                    '--ledger', os.path.join(_t, 'ledger.jsonl')]
             for k in ('L1', 'L2'):
                 out = STAGES[k](_args(auto))
                 want('DELEGATING:' in out and '<subagent_prompt' in out,
@@ -2586,7 +3328,8 @@ def _self_test():
         # An unreadable board no longer changes the decision -- it only changes
         # what can be SAID about it.
         out = STAGES['L1'](_args(['--board', os.path.join(_t, 'nope.kicad_pcb'),
-                                  '--placement-report', rep]))
+                                  '--placement-report', rep,
+                                  '--ledger', os.path.join(_t, 'l2.jsonl')]))
         want('could not be read' in out and '<subagent_prompt' in out,
              'an unreadable board still delegates, and says it could not size it')
 
@@ -2598,6 +3341,8 @@ def _self_test():
         # close-out commands, and the close-out is the run's terminal artifact.
         _bf = os.path.join(tmp, 'b.kicad_pcb')
         open(_bf, 'w', encoding='utf-8').close()
+        _stage_review(tmp, 'review_handoff.md')      # run-23 gate fixtures
+        _stage_review(tmp, 'review_close.md')
         ok_rep = os.path.join(tmp, 'p.json')
         # The close-out must also carry the keys the L2 gate now reads --
         # `buildable`, `locked_contacts` and the board it graded -- because a
@@ -2683,6 +3428,8 @@ def _self_test():
         # fixtures were relying on that.
         _b5 = os.path.join(tmp, 'b.kicad_pcb')
         open(_b5, 'w', encoding='utf-8').close()
+        _stage_review(tmp, 'review_handoff.md')      # run-23 gate fixtures
+        _stage_review(tmp, 'review_close.md')
         base = ['--board', _b5]
 
         want(STAGES['L5'](_args(base)).startswith('<error>'),
@@ -2991,6 +3738,8 @@ def _self_test():
     with tempfile.TemporaryDirectory() as tmp:
         _b = os.path.join(tmp, 'b.kicad_pcb')
         open(_b, 'w', encoding='utf-8').write('(kicad_pcb)')
+        _stage_review(tmp, 'review_handoff.md')      # run-23 gate fixtures
+        _stage_review(tmp, 'review_close.md')
         sys.path.insert(0, ROOT)
         from board_store import sha256_file as _shaf2
         _rep = os.path.join(tmp, 'p.json')
@@ -3294,6 +4043,7 @@ def _self_test():
         # the freeze itself writes the _cN name.
         _c2 = os.path.join(tmp, 'c2')
         os.makedirs(_c2)
+        _stage_review(_c2, 'review_handoff.md')      # run-23 gate fixture
         open(os.path.join(_c2, 'frozen_c2.kicad_pcb'), 'w',
              encoding='utf-8').close()
         _c2fwd = _c2.replace('\\', '/')

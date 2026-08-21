@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_placer'))  # placement split
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # placement split
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # placement split
+from run_utils import tool as _tool  # #522: resolve a moved CLI, loudly
 
 # #522 reorg + skill merge: engine -> py_router/, placer -> py_placer/,
 # board_score.py -> the placement-and-routing skill. Without these roots the
@@ -43,6 +44,14 @@ from kicad_parser import parse_kicad_pcb  # noqa: E402
 from placement.lock_advisor import advise_locks, to_json  # noqa: E402
 from placement.placement_state import (UNPLACED_EXIT, assess_placement)  # noqa: E402
 from placement.writer import write_placed_output  # noqa: E402
+
+#: Measured 516 s ALONE (2026-08-19, exit 0, all checks pass) -- UNDER the
+#: 600 s default, yet it times out in-suite. run_all defaults to -j 4, so
+#: it competes for CPU with three other processes while that clock runs.
+#: A budget for the contended case, not for a hung test: the standalone
+#: number is the evidence that it finishes.
+RUN_ALL_TIMEOUT = 1200
+
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KF = os.path.join(ROOT, 'kicad_files')

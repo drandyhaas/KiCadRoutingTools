@@ -198,11 +198,12 @@ on this page describes what a step *claims*; this describes what the board *is*.
 | `blocking` | **must reach 0 before the board is deliverable.** `unrouted + broken + drc + undersized + floorplan + impedance + length` |
 | `blocking_by.<component>` | names WHERE the blocking sits. **The largest entry is NOT automatically the lever** -- that rule wrecked a run. Choose by the connectivity-first ladder (unrouted -> broken -> widths -> floorplan -> drc); an entry's size ranks within a rung, never across rungs |
 | `quality` = `{vias, copper_mm, segments}` | tie-break **only** at `blocking == 0`. Comparing it earlier lets a router trade a disconnected net for a lower via count |
-| `ungraded` | components nothing examined (no `--intent`, no `--impedance-nets`, no `--length-groups`). **Report as unexamined, never as clean** |
+| `ungraded` | components that were MEASURABLE and nobody asked for (no `--intent`, no `--net-min-widths`). **Report as unexamined, never as clean** |
+| `not_applicable` | components the BOARD declares no requirement for — no matched group or diff pair in `protected_nets`, no `net_impedance`. There is nothing to grade, so this does NOT block a close-out and passing the flag would invent a requirement. Still printed, so "no such requirement" stays distinguishable from "nobody looked" |
 | `unknown` | a component that was asked for and could not run. `blocking` is `null`, not 0 — the loop must not stop here |
 | `components.drc.graded_at` | the clearance actually graded at. Confirm it is the routed floor; stricter invents violations, looser hides them |
 | `components.drc.by_type` | `segment-segment`, `pad-segment`, … — clearance conflicts |
-| `components.undersized.by_type` | `track-width`, `via-size`, `via-drill-size` — **sub-spec copper** |
+| `components.undersized.by_type` | `track-width`, `via-size`, `via-drill-size` — **sub-spec copper**, graded separately per floor. Note what this cannot see: diameter and drill are tested independently, so a via whose ring is zero (a 0.3/0.3 via) passes both — a removal of such vias earns no credit here; state it in the ledger |
 | `components.floorplan.rules_run` / `.rules_skipped` | `0 violations` with `0 rules run` is a vacuous pass. Quote both |
 | `connectivity_nets` | *which* nets failed. Same nets every iteration ⇒ parameters; different nets ⇒ congestion |
 | exit code | `0` blocking is zero · `4` graded with blockers · `3` board state · `2` args · `1` crash |

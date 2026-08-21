@@ -710,4 +710,10 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Declare the lever for the WHOLE run, so every pose this CLI
+    # writes carries its name. Nothing called declare_lever outside
+    # tests, so the unaided instrument had no armed state at all:
+    # unarmed it is silent, and armed by hand it refused the engine.
+    from placement.provenance import declare_lever
+    with declare_lever('place_portfolio.py', sys.argv):
+        sys.exit(main())

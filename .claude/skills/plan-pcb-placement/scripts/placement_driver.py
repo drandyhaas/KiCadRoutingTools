@@ -27,11 +27,12 @@ Exit: 0 emitted, 2 usage, 4 a guard refused.
 import argparse
 import json
 import os
+import re as _re_wk
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(HERE)
-REFS = os.path.join(os.path.dirname(SKILL_DIR), 'plan-pcb-routing', 'references')
+REFS = os.path.join(os.path.dirname(SKILL_DIR), 'plan-pcb-placement-and-routing', 'references')
 
 
 # --------------------------------------------------------------------------
@@ -136,8 +137,36 @@ Walk the ladder in order and say which rung applies:
        python3 -X utf8 py_placer/place_seed.py {a.board} seed.kicad_pcb --intent fp.json
    The seeder grades its own output against the same intent; exit 4 means the
    seed does not satisfy the intent it was built from, and says which rule broke.
-3. Neither -> say so and STOP. This toolchain does not invent a placement, and
-   inventing mechanical geometry is what every rule here forbids.
+   A part it cannot seat is no longer a dead end: it censuses the seated
+   neighbours, evicts the one that frees the most poses, seats the part, then
+   puts the blocker back -- gated and reverted whole if the board does not
+   improve. READ `no_pose_blockers` in its JSON_SUMMARY -- it maps each
+   unseated ref to each blocker and the poses lifting that blocker frees,
+   which IS the next move where a bare "no legal pose" was a dead end.
+   `--evict-depth 0` censuses and moves nothing, if you want the call.
+3. The arrangement is STRUCTURAL and an intent cannot hold it -- a key matrix,
+   a mirrored pair of halves, a row at a pitch, a part whose ROTATION is the
+   decision. An intent has no pitch, no mirror, no rotation and no origin you
+   can measure off the outline. Treat those poses as MECHANICAL FACTS (P2):
+   compute each one off the outline, write it, lock the ref, and let the
+   seeder and the quench work around the locked set:
+       python3 -X utf8 py_placer/place_seed.py {a.board} seed.kicad_pcb --intent fp.json
+       python3 -X utf8 py_placer/place_optimize.py seed.kicad_pcb out.kicad_pcb --lock <REFS>
+   READ THE BOARD FIRST -- render it and read the JSON beside the picture
+   (part extents, free regions, the blocking pairs at the fab floor), so the
+   poses you assert are measured rather than guessed:
+       python3 -X utf8 py_tools/render_placement.py {a.board} --json-out view.json -o view/
+       python3 -X utf8 py_tools/check_assembly.py {a.board} --clearance <C> --json asm.json
+4. Neither, and the board may simply be too small -- MEASURE that rather than
+   asserting it: compare the parts' courtyard area against the usable area
+   inside the outline (render_placement's JSON carries both), and count the
+   blocking pairs check_assembly reports at the fab floor. Hand back the
+   numbers and the options -- a larger outline, more layers, a tighter
+   clearance the fab supports. NEVER act on them: the outline and the stackup
+   are mechanical decisions the user owns.
+5. Still neither -> say so and STOP. This toolchain does not invent mechanical
+   geometry. But do not reach rung 5 without having run rung 4: "too small"
+   with a number is a finding, and "too small" without one is a guess.
 
 Next: --stage P4 (legalize the seed) or --stage P6 (declare the intent first).
 </stage_instructions>'''
@@ -259,8 +288,8 @@ R2  Does the BOARD determine a position? A family whose pattern is
 R3  Apply with the repair tools, never the from-scratch seeder:
       python3 -X utf8 py_placer/place_seed.py {a.board} r.kicad_pcb --intent fp.json --repair
       python3 -X utf8 py_placer/place_reconstruct.py {a.board} r.kicad_pcb [--intent fp.json]
-    Both take --dry-run and report what they WOULD do, and both take
-    NO STEP HAS A WALL-CLOCK BUDGET -- `--deadline` was removed everywhere (no result may depend on timing), so passing it is an argparse error. A harness timeout SIGTERMs the tool, its shutdown never runs, and you get exit 143 with no partial board and no summary. 143 and 124 are the SHELL's codes, not a tool's. Run long steps DETACHED, and bound them by scope rather than by a clock.
+    Both take --dry-run and report what they WOULD do. place_seed also takes
+    --deadline SECONDS -- BELOW THE SMALLEST CAP IN THE STACK, your harness's included (a 2400s deadline inside a 600s window can never fire). place_reconstruct has NO wall-clock budget (#621 removed its --deadline; passing it is an argparse error) -- bound it by scope and run it DETACHED. A harness timeout SIGTERMs a budget-less tool, its shutdown never runs, and you get exit 143 with no partial board and no summary. 143 and 124 are the SHELL's codes, not a tool's.
 R3b A part whose pad CENTRES are off the outline is not repairable by a
     minimal-move sweep, whatever cap you give it: every repair search starts
     from the part's current pose, and that pose carries no information once
@@ -367,9 +396,16 @@ you which one worked.
 VERIFY: re-run all four. A lap is ACCEPTED only if the finding it aimed at is
 gone and nothing above it got worse.
 
-Then record it, before starting the next lap:
+Then record it, before starting the next lap -- WITH a score, or the lap is
+invisible to every plateau read downstream (run-23: seventeen placement laps
+recorded score-less; converge's window dropped them all as 'unjudged', L5's
+plateau question came back NOT ANSWERABLE, and run_watch's lap comparison
+reset on every one):
+  python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py \\
+      {a.board} --json wk/score_lap<N>.json
   python3 -X utf8 py_placer/converge.py record --ledger wk/ledger.jsonl \\
       --board {a.board} --kind placement --lever "<what you changed and why>" \\
+      --score-file wk/score_lap<N>.json \\
       --argv <the real command that produced this board, as BARE TOKENS>
 
 --argv takes the rest of the line, unquoted, and it must REPLAY: converge
@@ -439,9 +475,15 @@ def p6(a):
     return f'''<stage_instructions stage="P6" name="declare the intent" of="7">
 An intent turns "it looks right" into something gradable.
 
-  python3 -X utf8 py_tools/check_floorplan.py {a.board} --emit-intent wk/intent.json
+  python3 -X utf8 py_tools/check_floorplan.py {a.board} --emit-intent wk/intent.json \\
+      --declare-classes
   # then EDIT it down: the emit describes the board as it is, including its
   # damage. Keep what the SPEC requires; delete what is merely observed.
+  # --declare-classes is what puts CONNECTORS in the intent (run-23): without
+  # it only parts already overhanging get an entry, so a header seated
+  # mid-board is invisible to every rule -- run 23 shipped J2/J5/J6/J7 that
+  # way. Receptacles get an edge; generic connectors get the weak
+  # connector_affinity class (INTERIOR flagged at advisory, never an error).
 
   python3 -X utf8 py_tools/check_floorplan.py {a.board} --intent wk/intent.json --health
 
@@ -487,7 +529,7 @@ def p_close(a):
             '`rules_run: 0`, which constrained two laps with nothing, then a '
             'second covering 0 of 266 parts. Nothing objected either time.\n\n'
             '  python3 -X utf8 py_tools/check_floorplan.py <board> '
-            '--emit-intent wk/intent.json\n'
+            '--emit-intent wk/intent.json --declare-classes\n'
             '  # then EDIT IT DOWN -- the emit describes the board AS IT IS, '
             'damage included\n'
             '  python3 -X utf8 py_tools/check_floorplan.py <board> '
@@ -1060,6 +1102,8 @@ def _args(argv=None):
     ap = argparse.ArgumentParser(add_help=True, description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--stage', choices=sorted(STAGES))
+    ap.add_argument('--workdir', default='wk',
+                    help="the work dir the emitted instructions should point at. Default 'wk' leaves them exactly as before. Set it and every wk/ path in the printed stage text is retargeted, so the artifacts land where run_watch/fence_audit/provenance_audit actually look -- they walk only the dir they are given, and a relative wk/ resolves against the process CWD instead")
     ap.add_argument('--board', default='board.kicad_pcb')
     ap.add_argument('--before', default=None,
                     help='the board this one was derived from (the delta gates '
@@ -1112,6 +1156,97 @@ def _args(argv=None):
     return ap.parse_args(argv)
 
 
+#: Paths in the emitted instructions are written against `wk/`. When the caller
+#: names a real work dir, retarget them -- otherwise the agent executing those
+#: instructions writes to a literal relative `wk/...`, which resolves against
+#: the process CWD and lands OUTSIDE the directory every audit walks.
+#:
+#: Measured, run 22: `run_watch --workdir`, `fence_audit --workdir` and
+#: `provenance_audit --workdir` all walk only the directory they are given, so
+#: a driver that tells the agent to write `wk/locks.json` puts that artifact
+#: where all three are blind. That is a hole in the EVIDENCE, not a cosmetic
+#: path issue: the watchers reported a clean run over a directory half the
+#: run's artifacts never entered.
+#:
+#: One substitution at the single emission point, rather than rewriting ~70
+#: string literals across two 3000-line files -- that diff would be large,
+#: risky, and would touch text an agent executes verbatim.
+_WK_RE = _re_wk.compile(r'(?<![\w./-])wk/')
+
+#: Real repo artifacts that live under `wk/` and must NOT be retargeted: they
+#: are prose references to things that exist, not work paths the caller owns.
+_WK_KEEP_RE = _re_wk.compile(r'wk/(?:calibration|run\d+)/')
+
+
+def _retarget(text, workdir):
+    """Point the emitted instructions at the caller's work dir.
+
+    The default `wk` short-circuits and returns the text unchanged, so every
+    existing caller -- and both embedded self-test suites, which construct
+    args without --workdir -- sees byte-identical output.
+    """
+    if not text or not workdir:
+        return text
+    wd = str(workdir).replace('\\', '/').rstrip('/')
+    if wd in ('', 'wk'):
+        return text
+    out, last = [], 0
+    for m in _WK_KEEP_RE.finditer(text):
+        out.append(_WK_RE.sub(wd + '/', text[last:m.start()]))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(_WK_RE.sub(wd + '/', text[last:]))
+    return ''.join(out)
+
+
+def _log_invocation(a, stage, out, code):
+    """Append this invocation to <workdir>/placement_driver.log (run-23).
+
+    loop_driver has journalled itself since run 15; this driver never did,
+    so a placement stage that ran, refused and was worked around left no
+    trace the audit could find. Same row shape, same never-breaks-a-stage
+    contract; also stamps the stage onto the workdir's RUN_STATE.json (the
+    ledger-derived body of that file is converge.write_run_state's).
+    """
+    import hashlib
+    import json as _json
+    import time as _time
+    try:
+        d = getattr(a, 'workdir', None) or 'wk'
+        if not os.path.isdir(d):
+            return None
+        row = {'t': round(_time.time(), 3),
+               'iso': _time.strftime('%Y-%m-%dT%H:%M:%S'),
+               'stage': stage, 'exit': code, 'refused': bool(code == 4),
+               'board': getattr(a, 'board', None),
+               'cwd': os.getcwd(), 'argv': list(sys.argv),
+               'out_sha': hashlib.sha256(
+                   (out or '').encode('utf-8')).hexdigest()[:16],
+               'out_lines': len((out or '').splitlines())}
+        with open(os.path.join(d, 'placement_driver.log'), 'a',
+                  encoding='utf-8') as fh:
+            fh.write(_json.dumps(row, sort_keys=True) + '\n')
+        try:
+            sp = os.path.join(d, 'RUN_STATE.json')
+            st = {}
+            if os.path.exists(sp):
+                with open(sp, encoding='utf-8') as sf:
+                    st = _json.load(sf)
+            st.update({'last_stage': f'placement:{stage}',
+                       'stage_exit': code,
+                       'stage_refused': bool(code == 4),
+                       'stage_written_at': row['iso']})
+            tmp = sp + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as sf:
+                _json.dump(st, sf, indent=1, sort_keys=True)
+            os.replace(tmp, sp)
+        except Exception:                                    # noqa: BLE001
+            pass
+        return d
+    except Exception:                                       # noqa: BLE001
+        return None
+
+
 def main(argv=None):
     a = _args(argv)
     if a.list:
@@ -1126,9 +1261,11 @@ def main(argv=None):
         print('placement_driver: --stage is required (see --list)',
               file=sys.stderr)
         return 2
-    out = STAGES[a.stage](a)
+    out = _retarget(STAGES[a.stage](a), getattr(a, 'workdir', None))
+    code = 4 if out.startswith('<error>') else 0
+    _log_invocation(a, a.stage, out, code)
     print(out)
-    return 4 if out.startswith('<error>') else 0
+    return code
 
 
 def _fake_render(board, halo=100.0, crossings=100.0, hpwl=1000.0, moved=3):
