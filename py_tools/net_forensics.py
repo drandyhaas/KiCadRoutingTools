@@ -161,6 +161,38 @@ def _history(net_name, log_path, out):
         out(f"  (log unreadable: {e})")
 
 
+def net_data(pcb, net):
+    """The islands-and-gap facts as DATA (run-23): what _describe prints.
+
+    Exists because this tool was text-only, so run 23's teammates re-derived
+    the island gap by hand to feed their rip-set decisions -- the number
+    (/TXLED's 20.27mm span) lived in a paragraph nothing could consume.
+    """
+    comps = _components(pcb, net.net_id)
+    doc = {'net': net.name, 'net_id': net.net_id, 'islands': [], 'gap': None}
+    for c in comps:
+        doc['islands'].append({
+            'segs': sum(1 for k, _, _ in c if k == 'seg'),
+            'vias': sum(1 for k, _, _ in c if k == 'via'),
+            'pads': [f"{o.component_ref}.{o.pad_number}"
+                     for k, o, _ in c if k == 'pad'],
+            'layers': sorted({o.layer for k, o, _ in c if k == 'seg'})})
+    if len(comps) >= 2:
+        best = (9e9, None, None)
+        for _k, _o, ps in comps[0]:
+            for p1 in ps:
+                for _k2, _o2, ps2 in comps[1]:
+                    for p2 in ps2:
+                        d = math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+                        if d < best[0]:
+                            best = (d, p1, p2)
+        d, p1, p2 = best
+        doc['gap'] = {'mm': round(d, 3),
+                      'from': [round(p1[0], 3), round(p1[1], 3)],
+                      'to': [round(p2[0], 3), round(p2[1], 3)]}
+    return doc
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('board')
@@ -168,6 +200,10 @@ def main():
     ap.add_argument('--radius', type=float, default=1.0)
     ap.add_argument('--route-log', action='append', default=[])
     ap.add_argument('--log', help='also append the report to this file')
+    ap.add_argument('--json', metavar='PATH', default=None,
+                    help='also write {nets: [islands+gap docs]} here '
+                         '(run-23: the gap number was text-only and had to '
+                         'be re-derived by hand to feed rip-set decisions)')
     args = ap.parse_args()
 
     from kicad_parser import parse_kicad_pcb
@@ -179,15 +215,24 @@ def main():
         if sink:
             sink.write(line + '\n')
 
+    docs = []
     out(f"# net_forensics: {args.board}")
     for nm in args.nets:
         net = next((x for x in pcb.nets.values() if x.name == nm), None)
         if net is None:
             out(f"\n=== {nm}: NOT FOUND ===")
+            docs.append({'net': nm, 'error': 'not found'})
             continue
         _describe(pcb, net, args.radius, out)
+        docs.append(net_data(pcb, net))
         for lp in args.route_log:
             _history(nm, lp, out)
+    if args.json:
+        import json as _json
+        with open(args.json, 'w', encoding='utf-8') as f:
+            _json.dump({'board': args.board, 'nets': docs}, f, indent=1,
+                       sort_keys=True)
+        out(f"  JSON -> {args.json}")
     if sink:
         sink.close()
 

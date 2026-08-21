@@ -588,9 +588,23 @@ def run_reroute_loop(
                     if not ripped_items:
                         print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
                         from routing_diagnostics import static_boxin_hint, condense_hint
-                        hint = condense_hint(static_boxin_hint(result, config, pcb_data))
+                        hint, _boxin = static_boxin_hint(
+                            result, config, pcb_data, return_verdict=True)
+                        hint = condense_hint(hint)
                         if hint:
                             print(f"  {hint}")
+                        if _boxin:
+                            # NO function-local import here. `record_net_event`
+                            # is imported at module scope (line 12) and used at
+                            # four other points in THIS function; a local import
+                            # rebinds the name for the whole function body, so
+                            # the earlier uses raise UnboundLocalError before
+                            # this line is ever reached. It crashed route.py on
+                            # any board where a reroute SUCCEEDED -- caught by
+                            # test_compare_seeds, which had been a timeout at
+                            # baseline and so was carrying no signal at all.
+                            record_net_event(state, ripped_net_id,
+                                             "boxed_in_static", _boxin)
                     # Remove from pending_multipoint_nets to prevent Phase 3 from
                     # trying to route taps for a net with no main route.
                     if ripped_net_id in state.pending_multipoint_nets:

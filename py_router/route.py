@@ -266,6 +266,7 @@ def _empty_results_data() -> dict:
         'segments_to_remove': [],
         'vias_to_remove': [],
         'blockers': [],
+        'boxed_in': [],
         'pad_pairs_open': [],
     }
 
@@ -3383,6 +3384,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # a net that failed early but was later rescued/rerouted is filtered out
     # here because the final failed sets are authoritative.
     blockers_report = []
+    boxed_in_report = []
     try:
         _final_failed_ids = list(dict.fromkeys(
             failed_single_ids + [m['net_id'] for m in failed_multipoint]))
@@ -3413,8 +3415,27 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     'net': _name, 'stage': 'preexisting',
                     'blocked_by': [{'net': _bn, 'preexisting': True}
                                    for _bn in _pre103]})
+            # The static-vs-congestion verdict, as its OWN key. The router has
+            # printed "boxed in by static obstacles ... not by congestion" on
+            # every such failure since #95, and run 20 spent three grid
+            # refinements (0.05 -> 0.025 -> 0.0125, ~40 min) against exactly
+            # that sentence, because a sentence is not something a gate can read.
+            #
+            # DELIBERATELY NOT inside `blockers`. The routing skill's own
+            # classifier row is "`blockers` empty; the log says boxed in" --
+            # making `blockers` non-empty here would break the clause being
+            # fixed. The row becomes "`blockers` empty AND `boxed_in` names the
+            # net": one JSON test, no regex.
+            _bx = None
+            for _ev in (state.net_history.get(_nid) or []):
+                if _ev.get('event') == 'boxed_in_static':
+                    _bx = _ev.get('details') or _bx
+            if _bx:
+                boxed_in_report.append(dict(_bx, net=_name))
         if blockers_report:
             summary['blockers'] = blockers_report
+        if boxed_in_report:
+            summary['boxed_in'] = boxed_in_report
     except Exception:
         blockers_report = []
     # #409 follow-up: pad-pair routability tallies (PRR ingredients: connected
@@ -3566,6 +3587,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             'vias_to_remove': stale_input_vias,
             # #409: same data as JSON_SUMMARY['blockers'] (may be empty).
             'blockers': blockers_report,
+            # ...and the static-vs-congestion verdict beside it, same data as
+            # JSON_SUMMARY['boxed_in']. The GUI reads results_data, not the
+            # printed summary, so a key that only reaches stdout does not
+            # reach the plugin (CLAUDE.md's Class-1 CLI/GUI gap).
+            'boxed_in': boxed_in_report,
             # #409 follow-up: same data as JSON_SUMMARY['pad_pairs_open']
             # (may be empty).
             'pad_pairs_open': pad_pairs_open_report,
@@ -3874,12 +3900,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                      if not _mnf9(n, net_names)})
                 _zpairs = [(n, l) for n, l in _zpairs if _mnf9(n, net_names)]
                 if _excluded9:
-                    print(f"{RED}  Plane finalize: zone net(s) "
+                    print(f"{RED}  WARNING: Plane finalize: zone net(s) "
                           f"{', '.join(_excluded9)} are OUTSIDE this route's "
                           f"--nets scope -- excluded from the finalize BY "
                           f"PLAN. Since #562 a pour alone connects nothing: "
                           f"unless a later route step covers these nets, "
                           f"their pads ship disconnected.{RESET}")
+                    # ...and in the SUMMARY, not only in the log. A later grade
+                    # can see disconnected plane pads but cannot tell whether a
+                    # step declined to weld them BY PLAN or failed to; run 20
+                    # hit this twice before designing around it, both times by
+                    # reading the log by eye.
+                    #
+                    # NOTE the printed `JSON_SUMMARY:` line predates the
+                    # finalize, so it does NOT carry this key. `summary` is in
+                    # `_SUMMARY_SINK` by reference, so `--json-out` does, as do
+                    # in-process callers reading the returned dict. A consumer
+                    # that greps the log line still needs the WARNING above --
+                    # which is why it is a WARNING now.
+                    summary['finalize_excluded_nets'] = _excluded9
             # PRE-GATE for the MODEL-BASED legs (engine taps/joins +
             # cleanup): run them only for zone nets the fill-aware checker
             # says are incomplete on THIS run's board (pcb_data == file
@@ -4973,6 +5012,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print(f"  route summary written to {json_out}")
         except Exception as _e:
             print(f"  WARNING: could not write --json-out {json_out}: {_e}")
+
+    # run-23: ONE compact authoritative line per outermost run, CLI and GUI
+    # alike. The big JSON_SUMMARY lines are 6-20KB each and their scope
+    # semantics need the log's own warning paragraph; agents consuming them
+    # paid that in context per lap. `final_reconcile` is True only on the
+    # outermost call (every sub-run -- plane finalize, end-of-run reconcile --
+    # passes False, the #562 recursion guard), so nested passes never emit a
+    # second MIN line. Deliberately AFTER the reconcile block: this line
+    # carries the merged tally or it is a lie.
+    if final_reconcile:
+        try:
+            from route_summary import merge_summaries as _ms, summary_min
+            _m = _ms(list(_SUMMARY_SINK), _RECONCILE_RAISED[0])
+            if _m:
+                print("JSON_SUMMARY_MIN: "
+                      + json.dumps(summary_min(_m), sort_keys=True))
+        except Exception as _e:                                 # noqa: BLE001
+            print(f"  WARNING: could not emit JSON_SUMMARY_MIN: {_e}")
 
     from net_story import net_story_enabled, dump_net_story
     if net_story_enabled():

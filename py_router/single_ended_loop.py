@@ -1457,11 +1457,18 @@ def route_single_ended_nets(
                 from routing_diagnostics import (static_boxin_hint,
                                                  preexisting_blocker_hint,
                                                  condense_hint)
-                hint = static_boxin_hint(result, config, pcb_data)
+                hint, _boxin = static_boxin_hint(result, config, pcb_data,
+                                                 return_verdict=True)
                 if hint:
                     hint = condense_hint(hint)
                     if hint:
                         print(f"  {hint}")
+                if _boxin:
+                    # The verdict, not just the sentence. `preexisting_blockers`
+                    # below has been recorded and serialized since #301; this
+                    # one -- the static-vs-congestion decision the whole retry
+                    # ladder turns on -- was print-only.
+                    record_net_event(state, net_id, "boxed_in_static", _boxin)
                 # #301: the blockers may be PRE-EXISTING copper (earlier run/
                 # step) the rip-up attribution cannot see -- name them and the
                 # --rip-existing-nets retry. Cells were popped into

@@ -21,10 +21,18 @@ import json
 import re
 from typing import Dict, List, Optional
 
-__all__ = ['merge_summaries', 'merge_route_summaries',
-           'SUMMARY_RE', 'RECONCILE_ABORTED', 'EFFORT_KEYS']
+__all__ = ['merge_summaries', 'merge_route_summaries', 'summary_min',
+           'SUMMARY_RE', 'SUMMARY_MIN_RE', 'RECONCILE_ABORTED', 'EFFORT_KEYS']
 
 SUMMARY_RE = re.compile(r'JSON_SUMMARY: (\{.*\})')
+
+# run-23: the one-line compact tally route.py prints at the end of every
+# OUTERMOST run (CLI and GUI alike). The big JSON_SUMMARY lines measured
+# 6-20KB each, several per log with scope semantics the log itself warns
+# about; every agent that consumed them paid that in context, per lap. This
+# line is the authoritative merged verdict in <1KB. The trailing colon-space
+# differs from SUMMARY_RE's subject, so neither regex can eat the other.
+SUMMARY_MIN_RE = re.compile(r'JSON_SUMMARY_MIN: (\{.*\})')
 
 # route.py prints this from the except around its reconciliation self-invoke.
 # The sub-run prints its JSON_SUMMARY BEFORE the board is written, so a summary
@@ -133,12 +141,19 @@ def merge_summaries(summaries: List[Dict], aborted: bool = False) -> Optional[Di
                 merged['pad_pairs_connected'] = first.get('pad_pairs_connected', 0)
                 if 'pad_pairs_open' in first:
                     merged['pad_pairs_open'] = first['pad_pairs_open']
-        if 'blockers' in first and 'blockers' not in merged:
-            _failed = set(merged.get('failed_single') or [])
-            _failed |= {d.get('net_name') if isinstance(d, dict) else d
-                        for d in (merged.get('failed_multipoint') or [])}
-            merged['blockers'] = [e for e in first['blockers']
-                                  if e.get('net') in _failed]
+        # `blockers` and `boxed_in` are both first-pass attribution: the
+        # reconcile sub-run re-routes a SUBSET and its summary carries neither,
+        # so without this a merged summary loses the evidence for nets that are
+        # still failing. Filtered to the nets that ARE still failing, so a net
+        # the reconcile fixed does not carry a stale accusation.
+        _failed = None
+        for _k in ('blockers', 'boxed_in'):
+            if _k in first and _k not in merged:
+                if _failed is None:
+                    _failed = set(merged.get('failed_single') or [])
+                    _failed |= {d.get('net_name') if isinstance(d, dict) else d
+                                for d in (merged.get('failed_multipoint') or [])}
+                merged[_k] = [e for e in first[_k] if e.get('net') in _failed]
 
     # Coverage-gate nets have NO routed result, so their pads never reach
     # multipoint_pads_total and a caller's
@@ -168,3 +183,50 @@ def merge_route_summaries(log: str) -> Optional[Dict]:
     summaries = [json.loads(s) for s in raw]
     aborted = log.rfind(RECONCILE_ABORTED) > log.rfind(raw[-1])
     return merge_summaries(summaries, aborted)
+
+
+def summary_min(merged: Dict, name_cap: int = 20) -> Dict:
+    """The <1KB verdict an agent reads INSTEAD of the big summaries.
+
+    Every value here is derived from the MERGED tally, so it carries the
+    "run-scope plus recoveries" semantics automatically -- the trap the log
+    warns about ("never scrape the LAST JSON_SUMMARY") cannot be re-imported
+    through this line. Name lists are capped at `name_cap` with an explicit
+    '+N more' marker, never silently truncated.
+
+    Deliberately ABSENT: power_widths, ampacity, stacked copper --
+    forensics that stay in the big summaries / --json-out. And the DRC-floor
+    writeback verdict, which does not exist yet when this prints: the
+    writeback runs afterwards and reports on its own, so a consumer must
+    read both -- this line says nothing about whether the floors held.
+    """
+    def _names(vals) -> List[str]:
+        names = [str(v) for v in (vals or [])]
+        if len(names) > name_cap:
+            return names[:name_cap] + [f'+{len(names) - name_cap} more']
+        return names
+
+    pairs = merged.get('pad_pairs_open') or []
+    tr = merged.get('terminal_restores') or {}
+    broken_restores = sorted(n for n, v in tr.items()
+                             if v in ('full_open', 'stub'))
+    total = merged.get('multipoint_pads_total') or 0
+    conn = merged.get('multipoint_pads_connected') or 0
+    return {
+        'scope': 'merged',
+        'complete': merged.get('complete', True),
+        'status': merged.get('status', 'ok'),
+        'routed': merged.get('successful'),
+        'failed': merged.get('failed'),
+        'failed_single': _names(merged.get('failed_single')),
+        'open_single': _names(merged.get('open_single')),
+        'multipoint_deficit': max(0, total - conn),
+        'pad_pairs_open': {
+            'count': len(pairs),
+            'nets': _names(sorted({p.get('net') for p in pairs
+                                   if p.get('net')}))},
+        'terminal_restores_broken': _names(broken_restores),
+        'min_clearance_used': merged.get('min_clearance_used'),
+        'vias': merged.get('total_vias'),
+        'duration_s': merged.get('elapsed_s') or merged.get('total_time'),
+    }
