@@ -14,9 +14,12 @@ import tempfile
 
 _TESTS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(_TESTS)
-for p in (ROOT, _TESTS, os.path.join(ROOT, 'rust_router')):
+for p in (ROOT, _TESTS, os.path.join(ROOT, 'rust_router'),
+          os.path.join(ROOT, 'py_router'), os.path.join(ROOT, 'py_tools'),
+          os.path.join(ROOT, 'py_placer')):   # #522: the CLIs moved into packages
     if p not in sys.path:
         sys.path.insert(0, p)
+from run_utils import tool as _tool  # #522: resolve a moved CLI, loudly
 
 # #522 reorg + skill merge: engine -> py_router/, placer -> py_placer/,
 # board_score.py -> the placement-and-routing skill. Without these roots the
@@ -82,7 +85,7 @@ def test_route_render_view_cli():
     with tempfile.TemporaryDirectory() as td:
         out = os.path.join(td, 'crop.png')
         r = subprocess.run([sys.executable, '-X', 'utf8',
-                            os.path.join(ROOT, 'py_router', 'route_render.py'), BOARD,
+                            _tool('route_render.py'), BOARD,
                             '-o', out, '--view', '60,30,80,45'],
                            capture_output=True, text=True, cwd=ROOT)
         assert r.returncode == 0, r.stderr[-500:]
@@ -132,6 +135,35 @@ def test_drc_panels_cluster_mark_and_cap():
         assert len(paths2) == 1
         assert 'NOT rendered' in buf.getvalue()
     print("  PASS: 2 clusters -> 2 panels, waived skipped, cap reported")
+
+
+def test_quiet_keeps_keys_off_stdout_when_json_out_carries_them():
+    """Run 24, finding A-1: the review gates order 'view the image BEFORE the
+    keys', then prescribe a render command whose unconditional JSON_SUMMARY
+    echo put the keys on screen first. --quiet with --json-out now suppresses
+    the echo and the describe text (the file carries both); --quiet WITHOUT
+    --json-out must still print the summary -- data is never silenced into
+    nowhere."""
+    rp = _tool('render_placement.py')
+    board = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, 'r.json')
+        r = subprocess.run(
+            [sys.executable, '-X', 'utf8', rp, board, '--clearance', '0.15',
+             '--json-out', out, '--quiet', '-o', os.path.join(td, 'r.png')],
+            capture_output=True, text=True, cwd=ROOT)
+        assert r.returncode == 0, r.stdout[-400:]
+        assert 'JSON_SUMMARY' not in r.stdout, 'the echo defeats blind-first'
+        assert 'WHAT THIS PANEL SHOWS' not in r.stdout
+        assert os.path.getsize(out) > 100, 'the file must still carry the doc'
+        r2 = subprocess.run(
+            [sys.executable, '-X', 'utf8', rp, board, '--clearance', '0.15',
+             '--json', '--quiet'],
+            capture_output=True, text=True, cwd=ROOT)
+        assert 'JSON_SUMMARY' in r2.stdout, \
+            'without --json-out the summary must still print somewhere'
+    print("  PASS: --quiet + --json-out is blind; --quiet alone never "
+          "silences data into nowhere")
 
 
 if __name__ == '__main__':

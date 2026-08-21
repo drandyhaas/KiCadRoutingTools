@@ -878,19 +878,32 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # a violation -- which is also what makes a misplaced edge part
         # CHARGEABLE by place_seed --repair.
         setback = c.get('max_setback_mm')
+        _sev = ctx.sev('edge_connector')
         if setback is None and c.get('class') == 'edge_receptacle':
             from .part_class import SEAT_TOL_MM
             setback = SEAT_TOL_MM
+        if setback is None and c.get('class') == 'connector_affinity':
+            # run-23: the weak class. An INTERIOR generic connector is a flag
+            # for the boundary review, never an error -- legitimately-interior
+            # connectors exist (tigard J7), so this fires at WARN whatever the
+            # rule's configured severity. An author upgrades by writing
+            # max_setback_mm (then the configured severity applies) or edge.
+            from .part_class import INTERIOR_AFFINITY_MM
+            setback = INTERIOR_AFFINITY_MM
+            _sev = WARN
         if setback is not None and amount <= legality.EPS:
             clr = ctx.gate.edge_clearance(part.rect)
             if clr > float(setback) + legality.EPS:
                 yield Violation(
-                    rule='edge_connector', severity=ctx.sev('edge_connector'),
+                    rule='edge_connector', severity=_sev,
                     ref=ref,
                     message=(f"{ref} is an edge part seated {clr:.2f}mm from "
                              f"the nearest edge with no overhang (seat "
-                             f"tolerance {float(setback):.2f}mm) -- the "
-                             f"mating face cannot reach the edge"),
+                             f"tolerance {float(setback):.2f}mm) -- "
+                             + ("a plug may not reach it; disposition in the "
+                                "boundary review or declare max_setback_mm"
+                                if _sev == WARN else
+                                "the mating face cannot reach the edge")),
                     measured={'edge_clearance_mm': round(clr, 4)},
                     expected={'max_setback_mm': float(setback)})
 
@@ -1428,6 +1441,21 @@ def emit_intent(pcb_data, pcb_file: str, *,
             if fp is None:
                 continue
             pc = classify_part(fp, ref)
+            if pc.name == 'connector_affinity':
+                # run-23: generic connectors (headers, JST, terminal blocks)
+                # had NO class, so J2/J5/J6/J7 seated mid-board and no
+                # instrument could say so. Declared WITHOUT an edge (the
+                # run-4 rule stands: naming one would be an invention) and
+                # with no band ceiling; the grade flags an INTERIOR pose at
+                # ADVISORY severity only. A human upgrades by adding `edge`
+                # or `max_setback_mm` to the entry.
+                clr = state.edge_gate.edge_clearance(parts[ref].rect)
+                conns.append({
+                    'ref': ref, 'class': pc.name, 'source': 'auto-class',
+                    'overhang_mm': {'min': 0.0},
+                    'note': (f'connector-family part, no edge claim; '
+                             f'measured {clr:.2f}mm from the nearest edge')})
+                continue
             if pc.name != 'edge_receptacle':
                 # actuators make no claim unless they actually overhang
                 # (handled above); nothing else is an edge class.
@@ -1453,15 +1481,37 @@ def emit_intent(pcb_data, pcb_file: str, *,
     # (the emitted 6.112 budget graded the C14-on-R14 board clean). The
     # repaired board re-emits the honest number; meanwhile board_score's
     # `assembly` component grades independently of any budget.
+    # Run-23 extends the same withholding to unwaived COURTYARD interpene-
+    # trations past the blocking floors: run 23's intent was emitted from a
+    # mid-repair board carrying J4 0.90mm inside U6, baked overlap_area
+    # 30.1085, and the final board's 26.302 then graded PASS -- the budget
+    # blessed the board it was emitted from. A board with such pairs gets no
+    # auto overlap budget; declare one by hand (visibly) if the overlap is
+    # by design. Cost, measured: 5 of 34 corpus boards carry by-design
+    # censuses and lose the auto-budget too -- the legality rule then
+    # ABSTAINS (not-derivable) on them, which is honest degradation; their
+    # independent coverage is check_assembly's moved-vs-baseline gate.
     try:
         from placement.legality import grade_body_overlap
-        _body_blocking = grade_body_overlap(
-            pcb_data, state.clearance, pcb_file=pcb_file)['blocking']
+        _g_overlap = grade_body_overlap(
+            pcb_data, state.clearance, pcb_file=pcb_file)
+        _body_blocking = _g_overlap['blocking']
+        _courtyard_blocking = _g_overlap.get('courtyard_blocking', 0)
     except Exception:
         _body_blocking = 0
+        _courtyard_blocking = 0
     _suspects = any('SUSPECT' in (c.get('note') or '') for c in conns)
     _budget = {}
-    if not _body_blocking:
+    _withheld = {}
+    if _body_blocking:
+        _withheld['overlap_area'] = (f'{_body_blocking} blocking body '
+                                     f'pair(s) on the emitting board (run-6)')
+    elif _courtyard_blocking:
+        _withheld['overlap_area'] = (
+            f'{_courtyard_blocking} unwaived courtyard interpenetration(s) '
+            f'past the blocking floors on the emitting board (run-23): an '
+            f'auto-budget would bless them')
+    else:
         _budget['overlap_area'] = _ceil4(float(leg['overlap_area']))
     if not _suspects:
         _budget['oob_count'] = int(leg['oob_count'])
@@ -1499,6 +1549,10 @@ def emit_intent(pcb_data, pcb_file: str, *,
             'note': ('read-only, describing the board as it is. The outline is '
                      'not editable by this toolchain: size, cutouts and slots '
                      'are mechanical decisions the user owns'),
+            # Budget keys deliberately NOT baked, and why -- so a reader of
+            # the intent can tell "withheld" from "forgot" (empty when
+            # nothing was withheld).
+            'budget_withheld': _withheld,
             'cutouts': [[[round(x, 3), round(y, 3)] for x, y in ring]
                         for ring in (pcb_data.board_info.board_cutouts or [])],
             'edge_contours': len(

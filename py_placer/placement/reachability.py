@@ -44,6 +44,7 @@ because a silently-degraded reachability answer is worse than none.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -212,7 +213,8 @@ def slack_field(pcb, target_net_id, layer, view, base_clearance,
 # widest path
 # --------------------------------------------------------------------------
 
-def widest_path(slacks, targets, via_ok, seed_xy, seed_layer, view, step):
+def widest_path(slacks, targets, via_ok, seed_xy, seed_layer, view, step,
+                return_throat=False):
     """Kruskal widest path over a multi-layer grid; returns mm or None.
 
     Nodes are (cell, layer). In-layer edges join adjacent ACTIVE cells; a via
@@ -223,6 +225,13 @@ def widest_path(slacks, targets, via_ok, seed_xy, seed_layer, view, step):
     Returns the largest t such that a path exists using only cells of slack
     >= t. Exact for the raster: no search order, no grid alignment, no
     heuristic. None means no positive-slack path exists at any width.
+
+    `return_throat=True` returns `(value, (layer, x_mm, y_mm))` instead. The
+    cell that CLOSED the path is the throat -- the narrowest point on the widest
+    route -- and it was already in hand here (`lay`, `x`, `y` at the moment the
+    seed joins the target) and thrown away at the bare `return float(val)`.
+    Every consumer that wanted to say WHERE the bottleneck was had to go and
+    find it again by eye. `None` throat when there is no path.
     """
     L = len(slacks)
     h, w = slacks[0].shape
@@ -274,8 +283,13 @@ def widest_path(slacks, targets, via_ok, seed_xy, seed_layer, view, step):
                 if other != lay and active[other * n + cell]:
                     union(idx, other * n + cell)
         if active[seed] and find(seed) == find(TARGET):
-            return float(val)
-    return None
+            if not return_throat:
+                return float(val)
+            # `lay`, `y`, `x` are this cell -- the LAST one activated, i.e. the
+            # narrowest on the widest path. Cell centre, not corner.
+            return float(val), (lay, view[0] + (x + 0.5) * step,
+                                view[1] + (y + 0.5) * step)
+    return (None, None) if return_throat else None
 
 
 @dataclass
@@ -295,6 +309,17 @@ class Reachability:
     grid: Tuple[int, int]
     note: str = ''
     open_room_mm: float = 0.0     # the cap free space was clamped to
+    # WHERE the bottleneck is: (layer_index, x_mm, y_mm), or None when there is
+    # no path. Everything below exists because run 20 measured a throat, printed
+    # the number, and then had to hand-assemble the coordinates, the blocking
+    # refs and the relief distance into an English paragraph in a ledger string
+    # -- three tools' stdout, none of it consumable by anything downstream.
+    throat_cell: Optional[Tuple[int, float, float]] = None
+    #: The base clearance the field was built at. Needed to convert between the
+    #: two SPACES this class reports in -- see `gap_mm`.
+    clearance_mm: float = 0.0
+    #: Foreign copper nearest the throat: [{ref, pad, kind, x, y, layer, dist}].
+    near: Tuple[dict, ...] = ()
 
     @property
     def wide_open(self) -> bool:
@@ -333,6 +358,34 @@ class Reachability:
             return None
         return 1000.0 * (self.bottleneck_mm - self.track_mm)
 
+    @property
+    def gap_mm(self) -> Optional[float]:
+        """The bottleneck in GAP space -- the physical edge-to-edge distance.
+
+        `bottleneck_mm` is in SLACK space: `slack = 2 * (dist - clearance)`
+        (see `slack_field`), which is the widest TRACK that fits. The physical
+        gap between the two pieces of copper is `bottleneck + 2 * clearance`.
+
+        The two are different numbers for the same throat and mixing them is
+        easy: run 20's ledger recorded `0.409/0.450mm` (gap space) beside
+        `-37.69um` (track space) in one sentence, as if they described the same
+        measurement. Publishing both, each labelled, is why this property
+        exists.
+        """
+        if self.bottleneck_mm is None:
+            return None
+        return self.bottleneck_mm + 2.0 * self.clearance_mm
+
+    @property
+    def throat(self) -> Optional[dict]:
+        """The throat in world coordinates, or None."""
+        if not self.throat_cell:
+            return None
+        lay, x, y = self.throat_cell
+        return {'x': round(x, 4), 'y': round(y, 4),
+                'layer': self.layers[lay] if lay < len(self.layers)
+                else str(lay)}
+
     def to_dict(self):
         return {'net': self.net, 'seed': list(self.seed),
                 'layers': list(self.layers), 'step_mm': self.step_mm,
@@ -353,7 +406,69 @@ class Reachability:
                 'via_legal_fraction': round(self.via_legal_fraction, 4),
                 'grid': list(self.grid), 'view': [round(v, 3)
                                                   for v in self.view],
-                'note': self.note}
+                'note': self.note,
+                # ADDITIVE. Every key above is unchanged, and a test pins that
+                # -- consumers of this payload predate the defect record.
+                'throat': self.throat,
+                'clearance_mm': self.clearance_mm,
+                'gap_mm': (None if self.gap_mm is None
+                           else round(self.gap_mm, 5)),
+                'near': [dict(n) for n in self.near]}
+
+    def defect_record(self, board=None, board_sha=None, relief=(),
+                      instrument='check_reachability', floors=None):
+        """This measurement as a `defect-record` document -- the shared shape.
+
+        One document, produced by any tool, read by the render, the ledger and
+        the driver. Everything in it was already computed here and thrown away
+        at the point of formatting; this is plumbing, not new measurement.
+
+        Returns None when there is nothing to report (no verdict, or PASSABLE).
+        """
+        if not self.measured or not self.caged:
+            return None
+        thr = self.throat
+        # The two spaces, both stated, both labelled, with what converts them.
+        measure = {'space': 'track_width',
+                   'have_mm': (None if self.bottleneck_mm is None
+                               else round(self.bottleneck_mm, 5)),
+                   'need_mm': self.track_mm,
+                   'short_mm': (None if self.bottleneck_mm is None else
+                                round(self.track_mm - self.bottleneck_mm, 5)),
+                   'resolution_mm': self.step_mm,
+                   'gap_mm': (None if self.gap_mm is None
+                              else round(self.gap_mm, 5)),
+                   'gap_need_mm': round(self.track_mm
+                                        + 2.0 * self.clearance_mm, 5),
+                   'derived_from': 'have_mm + 2 * instrument.floors.'
+                                   'clearance.value'}
+        refs, pads = [], []
+        for n in self.near:
+            if n.get('ref') and n['ref'] not in refs:
+                refs.append(n['ref'])
+            if n.get('pad') and n['pad'] not in pads:
+                pads.append(n['pad'])
+        d = {'kind': 'throat', 'verdict': 'CAGED', 'net': self.net,
+             'seed': {'x': round(self.seed[0], 4), 'y': round(self.seed[1], 4),
+                      'layer': self.layers[0] if self.layers else None},
+             'at': thr, 'refs': refs, 'pads': pads, 'measure': measure,
+             'view': [round(v, 4) for v in self.view],
+             'relief': [dict(r) for r in relief],
+             'instrument': {'source': instrument, 'floors': dict(floors or {}),
+                            'step_mm': self.step_mm,
+                            'search_view': [round(v, 4) for v in self.view]}}
+        if len(self.near) >= 2:
+            d['span'] = {'a': {k: self.near[0].get(k)
+                               for k in ('x', 'y', 'layer', 'kind')},
+                         'b': {k: self.near[1].get(k)
+                               for k in ('x', 'y', 'layer', 'kind')}}
+        doc = {'kind': 'defect-record', 'version': 1, 'count': 1,
+               'defects': [d]}
+        if board:
+            doc['board'] = os.path.abspath(board)
+        if board_sha:
+            doc['board_sha'] = board_sha
+        return doc
 
     def format_text(self):
         lines = [f"net        {self.net} from ({self.seed[0]}, "
@@ -389,6 +504,66 @@ class Reachability:
                 f"VERDICT    {'CAGED' if self.caged else 'PASSABLE'} at track "
                 f"{self.track_mm}mm  (margin {self.margin_um:+.1f} um)")
         return '\n'.join(lines)
+
+
+def nearest_foreign(pcb, x, y, net_id, layers=None, k=2, radius_mm=2.0):
+    """The k nearest pieces of FOREIGN copper to (x, y), nearest first.
+
+    "Which two things form this throat" is the question every reader asks
+    immediately after "how wide is it", and answering it took a second tool and
+    a hand-assembled sentence. Modelled on `net_forensics`' wall inventory,
+    which already does exactly this inventory with `REF.PAD` naming -- this is
+    the same walk with a k-nearest cut instead of a printed table.
+
+    Each entry: {kind, ref, pad, net, x, y, layer, dist}. Distances are to the
+    OBJECT CENTRE (a pad's copper centre, a segment's nearer endpoint), not to
+    its edge: the edge-to-edge number is what `gap_mm` reports, and conflating
+    the two is the error this module keeps trying to make impossible.
+    """
+    lay = set(layers or ())
+    out = []
+    for fp in pcb.footprints.values():
+        for p in fp.pads:
+            if p.net_id == net_id:
+                continue
+            if getattr(p, 'pad_type', '') == 'np_thru_hole':
+                continue
+            if lay and not (p.drill or set(p.layers or ()) & lay):
+                continue
+            d = math.hypot(p.global_x - x, p.global_y - y)
+            if d <= radius_mm:
+                out.append({'kind': 'pad', 'ref': fp.reference,
+                            'pad': f'{fp.reference}.{p.pad_number}',
+                            'net': (pcb.nets[p.net_id].name
+                                    if p.net_id in pcb.nets else None),
+                            'x': round(p.global_x, 4), 'y': round(p.global_y, 4),
+                            'layer': (p.layers or [None])[0],
+                            'dist': round(d, 5)})
+    for v in pcb.vias:
+        if v.net_id == net_id:
+            continue
+        d = math.hypot(v.x - x, v.y - y)
+        if d <= radius_mm:
+            out.append({'kind': 'via', 'ref': None, 'pad': None,
+                        'net': (pcb.nets[v.net_id].name
+                                if v.net_id in pcb.nets else None),
+                        'x': round(v.x, 4), 'y': round(v.y, 4),
+                        'layer': None, 'dist': round(d, 5)})
+    for s in pcb.segments:
+        if s.net_id == net_id:
+            continue
+        if lay and s.layer not in lay:
+            continue
+        d = min(math.hypot(s.start_x - x, s.start_y - y),
+                math.hypot(s.end_x - x, s.end_y - y))
+        if d <= radius_mm:
+            out.append({'kind': 'segment', 'ref': None, 'pad': None,
+                        'net': (pcb.nets[s.net_id].name
+                                if s.net_id in pcb.nets else None),
+                        'x': round(s.start_x, 4), 'y': round(s.start_y, 4),
+                        'layer': s.layer, 'dist': round(d, 5)})
+    out.sort(key=lambda e: e['dist'])
+    return tuple(out[:k])
 
 
 def pad_reachability(pcb, seed_xy, net_name=None, net_id=None, *,
@@ -492,12 +667,17 @@ def pad_reachability(pcb, seed_xy, net_name=None, net_id=None, *,
         note = ("no other island of this net is inside the view -- the pad is "
                 "already joined to everything nearby. Widen --margin, or this "
                 "is not a reachability question")
-    b = (None if n_t == 0
-         else widest_path(slacks, targets, via_ok, seed_xy, 0, view, step))
+    b, throat = ((None, None) if n_t == 0
+                 else widest_path(slacks, targets, via_ok, seed_xy, 0, view,
+                                  step, return_throat=True))
+    near = ()
+    if throat:
+        near = nearest_foreign(pcb, throat[1], throat[2], net_id, layers)
     return Reachability(
         net=name, net_id=net_id, seed=(seed_xy[0], seed_xy[1]), layers=layers,
         step_mm=step, track_mm=track_mm, via_mm=via_mm, view=view,
         bottleneck_mm=b, target_cells=n_t,
         via_legal_fraction=float(via_ok.mean()),
         grid=(slacks[0].shape[1], slacks[0].shape[0]), note=note,
-        open_room_mm=_open_room(view))
+        open_room_mm=_open_room(view),
+        throat_cell=throat, clearance_mm=base_clearance, near=near)
