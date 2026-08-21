@@ -7,6 +7,12 @@ move), a different --seed must actually change the portfolio, and --only N
 must regenerate candidate N byte-identically -- that is the property the
 ledger's replay command rests on.
 """
+
+#: Measured ALONE at 366 s. It was killed at the runner's 600 s
+#: default under -j contention and reported as a timeout, which reads
+#: exactly like a hang; it passes 11/11 every time it is given room.
+RUN_ALL_TIMEOUT = 1200
+
 import json
 import os
 import subprocess

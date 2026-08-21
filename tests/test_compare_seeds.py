@@ -17,6 +17,11 @@ import subprocess
 import sys
 import tempfile
 
+#: Self-budgets its inner subprocess at 3600 s, so the runner's 600 s cap
+#: killed it before its own deadline could fire -- no partial result, no
+#: diagnosis. Still doing real work at 900 s when measured.
+RUN_ALL_TIMEOUT = 3600
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split

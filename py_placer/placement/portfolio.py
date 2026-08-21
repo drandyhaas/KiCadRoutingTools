@@ -156,16 +156,38 @@ def _restore(state, snap: Dict[str, Tuple[float, float, float]]) -> None:
             state.apply_move(ref, x, y, rot)
 
 
-def copy_siblings(src_board: str, dst_board: str) -> None:
+def copy_siblings(src_board: str, dst_board: str, quiet: bool = False) -> None:
     """Carry the project/rules siblings (#441): a board without its .kicad_pro
     grades at the stock netclass, so every written candidate gets the input's
-    siblings -- the probe routes and any later adoption read them."""
+    siblings -- the probe routes and any later adoption read them.
+
+    THE EXTENSION LIST IS `copy_board.SIBLING_EXTS`, not a local copy. Eight
+    sites in this tree spelled it out by hand and three had already drifted:
+    `stage_blind`, `fixture_boards` and `redo_diff_stage` carry
+    `.kicad_pro` + `.kicad_prl` and drop `.kicad_dru` -- the per-layer
+    clearance rules that, per CLAUDE.md #498, OUTRANK `--clearance`. Dropping
+    them is silent by construction: `kicad_dru.read_board_layer_clearances`
+    returns `({}, [])` for an absent file, so the run routes an inner layer
+    at the wrong value with no diagnostic anywhere.
+
+    A missing project is DISCLOSED, never refused. Most of the corpus has no
+    `.kicad_pro` -- a pristine never-routed board legitimately has none -- so
+    refusing would make them unstageable. But staging one used to print
+    nothing at all, and the floor that silently became `fixed default 0.25`
+    is the number every later step grades against.
+    """
+    from copy_board import SIBLING_EXTS
     src_base = os.path.splitext(src_board)[0]
     dst_base = os.path.splitext(dst_board)[0]
-    for ext in ('.kicad_pro', '.kicad_dru', '.kicad_prl'):
+    for ext in SIBLING_EXTS:
         s = src_base + ext
         if os.path.isfile(s):
             shutil.copyfile(s, dst_base + ext)
+    if not quiet and not os.path.isfile(src_base + '.kicad_pro'):
+        print(f"WARNING: '{os.path.basename(src_board)}' has no sibling "
+              f".kicad_pro, so no DRC floor travelled with it. Every later "
+              f"step will resolve its floor from the board's own netclass if "
+              f"it has one, else a fixed default -- grade accordingly.")
 
 
 # --------------------------------------------------------------------------

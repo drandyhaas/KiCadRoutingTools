@@ -79,6 +79,17 @@ Examples:
                         "non-obstacles either way (the existing exclude "
                         "mechanism); this changes only WHO goes first "
                         "(run-4 C)")
+    p.add_argument("--evict-depth", type=int, default=1, metavar="N",
+                   help="When a part has NO legal pose, census the seated "
+                        "neighbours, evict the one that frees the most poses, "
+                        "seat the part, then put the blocker back with it in "
+                        "place -- gated by the same reconstruct measure the "
+                        "anchor rounds use, and reverted whole if it does not "
+                        "improve (#630). 0 disables it and restores the bare "
+                        "'no legal pose' verdict. Only ever fires on a part "
+                        "that was already going to be reported unseated, so "
+                        "a run that seats everything is unaffected. Depth is "
+                        "1: a blocker's own blocker is not chased")
     p.add_argument("--anchor-rounds", type=int, default=1,
                    help="With --anchors-first: gated re-seat passes after "
                         "the first full placement (default 1 = none). Each "
@@ -109,6 +120,17 @@ Examples:
                         "pose being discarded). Composes with --repair and "
                         "runs BEFORE it. Judge it on witnesses_after, not on "
                         "how far anything moved")
+    p.add_argument("--deadline", type=float, default=None, metavar="SECONDS",
+                   help="Wall-clock budget for --repair/--reseat. The repair "
+                        "sweep has no internal bound (violators x caps x 36 "
+                        "ring sweeps x O(parts)); with a budget it stops "
+                        "between violators, keeps the seats it made, reports "
+                        "the rest in deadline_skipped and exits 7. Default: "
+                        "no budget (a wall-clock default would break replay "
+                        "determinism). ANY harness with an external timeout "
+                        "should pass this at ~0.8x its own -- on Windows an "
+                        "external kill is TerminateProcess and leaves NO "
+                        "output at all. Env: KRT_DEADLINE_S")
     p.add_argument("--dry-run", action="store_true",
                    help="With --repair/--reseat: print the move list and "
                         "grades, write nothing")
@@ -171,12 +193,19 @@ Examples:
     if args.repair or args.reseat is not None:
         import math as _math
         import tempfile
+        import krt_deadline
         if st.unplaced:
             print("place_seed: --repair/--reseat need a PLACED board (this "
                   "one is unplaced -- seed it instead).", file=sys.stderr)
             return UNPLACED_EXIT
         summary = {'dry_run': args.dry_run,
                    'output': None if args.dry_run else args.output_file}
+        # Armed BEFORE the passes, so the flush hook covers every return
+        # below -- the refusals above print no summary at all today, which is
+        # how a killed run and a refused one look identical to a scraper.
+        _dl = krt_deadline.arm(args.deadline, tool='place_seed',
+                               on_partial=lambda: summary)
+        _prog = krt_deadline.stdout_progress(deadline=_dl)
 
         # Both passes stage into a temp dir and the finished board is copied
         # to the output path once, at the end. That keeps --dry-run honest
@@ -207,7 +236,8 @@ Examples:
                 refs=(args.reseat or None), group_sources=sources,
                 clearance=args.clearance,
                 board_edge_clearance=args.board_edge_clearance,
-                grid_step=args.grid_step, seed=args.seed)
+                grid_step=args.grid_step, seed=args.seed,
+                deadline=_dl, progress=_prog)
             for note in reseat['notes']:
                 print(f"  NOTE: {note}")
             _rmax = 0.0
@@ -265,7 +295,7 @@ Examples:
                 cur_pcb, cur, intent, group_sources=sources,
                 clearance=args.clearance,
                 board_edge_clearance=args.board_edge_clearance,
-                grid_step=args.grid_step)
+                grid_step=args.grid_step, deadline=_dl, progress=_prog)
             for note in result['notes']:
                 print(f"  NOTE: {note}")
             max_move = 0.0
@@ -284,6 +314,7 @@ Examples:
                 'unrepairable': len(result['unrepairable']),
                 'moved_refs': [m['reference'] for m in result['moves']],
                 'max_move_mm': round(max_move, 3),
+                'deadline_skipped': result.get('deadline_skipped') or [],
             })
             summary.update({f'{k}_before': v
                             for k, v in result['pad_report_before'].items()})
@@ -291,6 +322,19 @@ Examples:
             if result['unrepairable']:
                 exit_rc = 4
 
+        summary['complete'] = ((result or {}).get('complete', True)
+                               and (reseat or {}).get('complete', True))
+        if not summary['complete'] and _dl is not None:
+            # Unlike place_reconstruct, the output IS written on expiry: the
+            # partial is coherent by construction here (a part is either fully
+            # seated, with every seat legality-checked before it was taken, or
+            # untouched), so there is no pre-legalize staging step whose result
+            # would be invalid to hand on.
+            krt_deadline.mark(
+                summary, _dl,
+                reseat_skipped=(reseat or {}).get('deadline_skipped') or [],
+                repair_skipped=(result or {}).get('deadline_skipped') or [],
+                output=None if args.dry_run else args.output_file)
         if not args.dry_run:
             # A no-op still writes a board: the next step in a chain is handed
             # a path, and "nothing needed doing" must not look like "the tool
@@ -313,10 +357,9 @@ Examples:
             if graded.errors:
                 exit_rc = 4
         _stage.cleanup()
-        summary.setdefault('complete', True)
-        summary.setdefault('status', 'ok')
-        print('JSON_SUMMARY: ' + json.dumps(summary, sort_keys=True,
-                                            default=str), flush=True)
+        krt_deadline.emit(summary, deadline=_dl)
+        if not summary['complete']:
+            return krt_deadline.DEADLINE_EXIT
         return exit_rc
 
     if not st.unplaced and not st.partially_unplaced and not args.force:
@@ -378,13 +421,24 @@ Examples:
             return UNPLACED_EXIT
 
     rng = random.Random(f"{args.seed}")
+    # A CLOCK ON THE PLAIN SEED PATH. `--deadline` was accepted here and
+    # threaded only into the --repair/--reseat branch, so a plain seed ran
+    # unbounded while its own help text promised otherwise -- measured: a
+    # 2400s budget on an 85-part pile ran past 50 minutes without firing.
+    # The eviction rung makes that worse, not better: it adds a census sweep
+    # per unseated part to the one path with no budget at all.
+    import krt_deadline
+    _seed_dl = krt_deadline.arm(args.deadline, tool='place_seed')
+    _seed_prog = krt_deadline.stdout_progress(deadline=_seed_dl)
     result = seeder.seed_from_intent(
         pcb, args.input_file, intent, rng, group_sources=sources,
         clearance=args.clearance,
         board_edge_clearance=args.board_edge_clearance,
         grid_step=args.grid_step, seed_refs=seed_refs,
         anchors_first=args.anchors_first,
-        anchor_rounds=args.anchor_rounds)
+        anchor_rounds=args.anchor_rounds,
+        evict_depth=args.evict_depth,
+        deadline=_seed_dl, progress=_seed_prog)
     for note in result['notes']:
         print(f"  NOTE: {note}")
     print(f"Seeded {len(result['placements'])} part(s); "
@@ -490,6 +544,11 @@ Examples:
     after = ratsnest.get('after', {})
     summary = {'placed': len(result['placements']),
                'unseated': len(result['unseated']),
+               # NAMES, not just a count. #629's complaint is that a verdict
+               # you cannot act on is a dead end, and a count names nobody.
+               'unseated_refs': list(result['unseated']),
+               'no_pose_blockers': result.get('no_pose_blockers') or {},
+               'evictions': len(result.get('evictions') or []),
                'locked': n_locked,
                'grade_errors': len(graded.errors),
                'grade_warnings': len(graded.warnings),
@@ -498,6 +557,15 @@ Examples:
                         if after.get('hpwl') is not None else None),
                'output': args.output_file}
     print("JSON_SUMMARY: " + json.dumps(summary, sort_keys=True))
+    if not result.get('complete', True):
+        # A budget that ran out is NOT a graded failure: the parts in
+        # `deadline_skipped` were never tried, and reporting them as unseated
+        # would be a measurement nobody made.
+        print(f"place_seed: the deadline expired with "
+              f"{len(result.get('deadline_skipped') or [])} part(s) never "
+              f"tried -- they are in deadline_skipped, NOT unseated. The "
+              f"partial seed was written.", file=sys.stderr)
+        return krt_deadline.DEADLINE_EXIT
     if result['unseated'] or graded.errors:
         print("place_seed: the seed does NOT satisfy its intent -- see the "
               "errors above. It was still written, for inspection.",
@@ -507,5 +575,11 @@ Examples:
 
 
 if __name__ == "__main__":
-    import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
-    sys.exit(main())
+    # Declare the lever for the WHOLE run, so every pose this CLI
+    # writes carries its name. Nothing called declare_lever outside
+    # tests, so the unaided instrument had no armed state at all:
+    # unarmed it is silent, and armed by hand it refused the engine.
+    from placement.provenance import declare_lever
+    with declare_lever('place_seed.py', sys.argv):
+        import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
+        sys.exit(main())

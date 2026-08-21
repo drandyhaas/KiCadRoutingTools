@@ -42,7 +42,7 @@ import fnmatch
 import math
 import random
 import re
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 # Ring-search enumeration: nearest-first out to this radius, then a FINE ring
 # near the target, then a coarse whole-board sweep. The fine pass exists
@@ -67,10 +67,518 @@ def _rect_inside(rect, outer, tol: float) -> bool:
             and rect[2] <= outer[2] + tol and rect[3] <= outer[3] + tol)
 
 
+def _keepout_entry(entry):
+    """(rect, sides, allow) from either a bare rect or a full declaration.
+
+    A bare 4-tuple stays legal because that is what a plan writes in the
+    common case, and requiring the long form everywhere would make the
+    simple keepout the awkward one.
+    """
+    if isinstance(entry, dict):
+        return (tuple(entry['rect']), entry.get('sides') or None,
+                entry.get('allow') or ())
+    if len(entry) == 4 and all(isinstance(v, (int, float)) for v in entry):
+        return tuple(entry), None, ()
+    rect, sides, allow = entry
+    return tuple(rect), (tuple(sides) if sides else None), tuple(allow or ())
+
+
+def pose_ok(state, ref: str, x: float, y: float, rot: float,
+            exclude: Set[str], forbid: Sequence = ()) -> bool:
+    """THE seat predicate: fully contained, and clear of everything not in
+    `exclude`.
+
+    Lifted out of `_try_place` so a POSE COUNTER can use the identical test.
+    `count_legal_poses` below answers "how many seats would lifting X free",
+    and that answer is only worth anything if a positive count implies the
+    seat would really have been taken -- which needs the same predicate, not
+    a second copy of it that drifts.
+
+    Note `candidate_valid` alone is not enough: for a part whose incumbent
+    pose is off the board, its #456 branch accepts poses that move strictly
+    TOWARD the board while still outside it. Placement from scratch has no
+    incumbent worth improving on, so full containment is demanded explicitly.
+    """
+    part = state.parts[ref]
+    r = part.rect(x, y, rot)
+    if state.edge_gate.rect_outside_amount(r) > 1e-9:
+        return False
+    # DECLARED KEEPOUTS. The intent schema has had a `keepouts` rule since
+    # #549 and it is GRADED and honoured by nothing: `keepout` appears in
+    # floorplan.py's rule and in no seeding module, so a reserved strip could
+    # only ever be reported after the fact. Checked here, in the one predicate
+    # every seat goes through, so it cannot be honoured by some ops and not
+    # others. Default empty, so every existing path is byte-identical.
+    #
+    # Each entry is (rect, sides, allow) with the same meaning the intent's
+    # `keepouts` rule gives them: `sides` limits it to one face, and `allow`
+    # names the refs it does NOT apply to -- a mounting-hole keepout exists
+    # so the mounting hole can sit there, and one that excluded MH1 would be
+    # the wrong shape of correct.
+    for entry in forbid:
+        k, sides, allow = _keepout_entry(entry)
+        if allow and any(fnmatch.fnmatch(ref, pat) for pat in allow):
+            continue
+        if sides and getattr(part, 'side', None) not in sides:
+            continue
+        if not (r[2] <= k[0] or k[2] <= r[0] or r[3] <= k[1] or k[3] <= r[1]):
+            return False
+    return state.candidate_valid(ref, x, y, rot, exclude=exclude)
+
+
+# A pose census is a DIAGNOSTIC, not a search: it answers "is there room"
+# and must cost a fraction of the seat attempt that already failed. The cap
+# is what bounds it -- run 19's measured answers were 46 and 32 poses freed,
+# so a cap well above those still distinguishes "none" from "plenty".
+CENSUS_RADIUS_MM = 16.0
+CENSUS_STEP_MM = 1.0
+CENSUS_CAP = 64
+def zone_gate(part, constraint, tol: float):
+    """`(predicate, anchor_zone)` for "is this pose inside the zone".
+
+    ONE definition, shared by the seat search and the pose census. It used to
+    live as a closure inside `_try_place`, which meant the census -- the
+    thing that tells a plan author WHY a part could not be seated -- had no
+    zone concept at all. Measured on splitflap_driver: three parts packed
+    into a 2x2mm zone parked, and the census answered over an unconstrained
+    3mm disc, so one park read `baseline_poses: 64` ("64 legal poses with
+    nothing lifted") about a part the same op had just refused to seat, and
+    two more advised lifting U1 when the zone was the problem.
+
+    The ANCHOR relaxation is the half that must not be dropped when copying.
+    A zone smaller than the courtyard cannot contain it at any rotation --
+    the spec-COORDINATE pattern -- so containment relaxes to
+    anchor-point-in-zone, which makes such zones satisfiable by
+    construction; `floorplan.rule_zone_containment` grades them the same
+    way. A census that mirrors only the strict branch under-counts exactly
+    where the relaxation applies: C1 into a 0.4mm zone at its own pose
+    censuses 0 with the strict rule and 294 with this one, while
+    `_try_place` seats it either way. That is a confident zero, which is the
+    one census answer worse than no census -- so this returns the same pair
+    of branches to both callers rather than letting a second copy drift.
+    """
+    if constraint is None:
+        return (lambda x, y, rot: True), False
+    from placement.floorplan import zone_fits_courtyard
+    anchor = not any(
+        zone_fits_courtyard(constraint, part.rect(0.0, 0.0, r), tol)
+        for r in (part.rot % 360, (part.rot + 90) % 360))
+
+    if anchor:
+        def _in(x, y, rot):
+            return (constraint[0] - tol <= x <= constraint[2] + tol
+                    and constraint[1] - tol <= y <= constraint[3] + tol)
+    else:
+        def _in(x, y, rot):
+            return _rect_inside(part.rect(x, y, rot), constraint, tol)
+    return _in, anchor
+
+
+# A census sweep never exceeds this many locations. It is the ONLY bound on
+# the cost, so it is stated as a count rather than left to fall out of a
+# radius: (2*25+1)^2 = 2601 locations, x4 rotations = ~10k `pose_ok` calls
+# worst case, for the blocked part that has to exhaust the ladder.
+CENSUS_MAX_LOCATIONS = 2601
+
+
+def census_window(within, grid_step=0.1):
+    """The `(radius, step)` a pose census should sample a budget at.
+
+    Lives here, beside `_try_place`, because it encodes what `_try_place`
+    actually searches and must move with it.
+
+    **Take the FINEST lattice whose sweep fits the budget of locations, and
+    never a lattice coarser than `SEARCH_FINE_STEP_MM`.** The rule this
+    replaces was `within / 8`, which lands on no lattice `_try_place` visits
+    (0.1125 at `within=0.9`, 0.1875 at 1.5, 0.4875 at 3.9), so a park could
+    report "lifting X frees 34 poses" and the retry find not one of them.
+
+    The 1.0mm ring is deliberately excluded even though `_try_place` sweeps
+    it. That ring exists to cross 30mm cheaply, not to decide whether a part
+    fits, and a census that renders a verdict on it produces the one output
+    worse than no census: a confident zero. Measured on splitflap_driver
+    with an earlier "coarsest lattice with >= 6 samples" rule -- which chose
+    1.0mm the moment the budget reached 6.0 -- a part that `_try_place`
+    seats at FULL clearance censused `baseline 0, every blocker 0,
+    censused: true` at `within=6.0`, while `within=5.99` counted 44. The
+    cliff was not removed by that rule, only moved from 4.0 to 6.0.
+
+    **The radius is the budget, clamped twice**: to `SEARCH_RADIUS_MM`,
+    beyond which `_try_place` does not look at all once `max_disp` is set
+    (so counting there is counting poses the retry can never visit); and to
+    whatever `CENSUS_MAX_LOCATIONS` affords. `count_legal_poses` applies
+    `max_disp` as a `continue` AFTER `_offsets` materialises the disc, so an
+    unclamped radius is a list-building cost with nothing to show for it --
+    a fixed 16mm built 103,041 offsets to hand back 81 at `within=0.5`, and
+    an unclamped `within=500` built 1,002,001 (~72MB, 28s) before probing a
+    single pose.
+
+    **A TRUNCATED radius is not an error but it is not the whole answer** --
+    `radius < within` means the census looked at the near field only, and
+    the caller must say so rather than report the count bare.
+
+    A census is not comparable ACROSS budgets -- a coarser lattice counts
+    fewer poses over more ground -- which is why the window is reported with
+    the count. What must be commensurate is baseline vs each blocker, and
+    that holds because one census uses one window throughout.
+
+    **THIS COSTS MORE THAN THE RULE IT REPLACES, AND THAT IS THE TRADE.**
+    Measured, ten censused parks on splitflap_driver, before -> after:
+    `within` 0.5 3.19s -> 1.41s (the radius clamp; 2.3x FASTER), 1.4 3.99 ->
+    5.72, 2.0 5.36 -> 10.99 (the worst, 2.05x), 3.0 10.28 -> 11.16, 5.0
+    16.85 -> 22.52. Total 40.9s -> 53.0s, **1.30x**. The extra time buys a
+    lattice the seat search actually visits and the removal of the confident
+    zero; `CENSUS_CAP` still short-circuits the case where poses exist, so
+    the full price is only paid by the genuinely blocked part -- which is
+    the one whose answer matters.
+    """
+    grid = max(0.05, float(grid_step or 0.1))
+    if within is None:
+        return CENSUS_RADIUS_MM, CENSUS_STEP_MM
+    try:
+        budget = float(within)
+    except (TypeError, ValueError):          # noqa: BLE001
+        budget = 0.0
+    # NaN before the clamp: `min(nan, x)` is nan, and `math.ceil(inf)` raises
+    # OverflowError straight out of `op_place_lift`, which has no census
+    # guard. `plan_ops` validates `within > 0` and json.loads accepts
+    # `Infinity`, so both are plan-reachable.
+    if math.isnan(budget) or budget < 0.0:
+        budget = 0.0
+    budget = min(budget, SEARCH_RADIUS_MM)
+
+    # Finest first. `grid` is what `_try_place` reaches inside
+    # SEARCH_XFINE_RADIUS_MM; SEARCH_FINE_STEP_MM is the floor on coarseness.
+    cands = sorted({s for s in (grid, SEARCH_FINE_STEP_MM) if s >= grid - 1e-9})
+    max_rings = max(1, (math.isqrt(CENSUS_MAX_LOCATIONS) - 1) // 2)
+    step = cands[-1]
+    for s in cands:
+        if max(1, int(math.ceil(budget / s - 1e-9))) <= max_rings:
+            step = s
+            break
+    rings = min(max(1, int(math.ceil(budget / step - 1e-9))), max_rings)
+    return round(rings * step, 6), step
+
+
+def _feasible_centre_box(part, constraint, tol, anchor):
+    """Where `part`'s CENTRE may sit for the zone to hold it, over rotations.
+
+    Derived, not approximated. Containment at rotation r is
+    `zone[0]-tol <= x + b_r[0]` and `x + b_r[2] <= zone[2]+tol`, so
+    `x` in `[zone[0]-tol-b_r[0], zone[2]+tol-b_r[2]]`, and the UNION over
+    rotations is `[zone[0]-tol-max_r(b_r[0]), zone[2]+tol-min_r(b_r[2])]`.
+
+    THE COURTYARD IS NOT CENTRED ON THE FOOTPRINT ORIGIN -- `part.rect` is
+    `(x+b[0], y+b[1], x+b[2], y+b[3])` with `b` the raw local bounds, and 17
+    of 65 parts on splitflap_driver and 6 of 89 on tigard have an offset
+    centre (up to 10.15mm on tigard J3). A symmetric half-extent deflation
+    therefore SHIFTS the box: measured, J18/J19/J20 censused 0 while
+    `_try_place` seated them at full clearance. Two earlier forms of this
+    function were wrong here in opposite directions (max half-extent = a
+    subset, min half-extent = a shifted box), which is why this is now the
+    algebra rather than a bound.
+    """
+    x0, y0, x1, y1 = (float(v) for v in constraint)
+    if anchor:
+        # Anchor zones constrain the ANCHOR POINT, so the centre box is the
+        # zone itself; no courtyard term enters.
+        return x0 - tol, y0 - tol, x1 + tol, y1 + tol
+    max_b0x = max_b0y = -float('inf')
+    min_b2x = min_b2y = float('inf')
+    for rot in (part.rot, part.rot + 90.0, part.rot + 180.0, part.rot + 270.0):
+        b = part.rect(0.0, 0.0, rot % 360)
+        max_b0x = max(max_b0x, b[0])
+        max_b0y = max(max_b0y, b[1])
+        min_b2x = min(min_b2x, b[2])
+        min_b2y = min(min_b2y, b[3])
+    return (x0 - tol - max_b0x, y0 - tol - max_b0y,
+            x1 + tol - min_b2x, y1 + tol - min_b2y)
+
+
+def zone_census_offsets(part, constraint, tol, tx, ty, grid_step=0.1,
+                        max_disp=None):
+    """`(step, [(dx, dy), ...], reach_mm)` for a census under a ZONE.
+
+    A disc of `within` is the wrong sample set once a constraint applies:
+    the reachable poses are bounded by the zone, not by the budget, so
+    `census_window` spends its whole location cap on ground the zone
+    excludes and then has to coarsen the step to afford it. Measured on
+    splitflap_driver, R1 packed into a 2x2mm zone: `census_window(3.0, 0.1)`
+    picks step 0.25, and the zone leaves a feasible x-window for R1's centre
+    **0.07mm wide** -- so a census that filters that disc by the zone counts
+    ZERO with the blocker lifted, while `_try_place` reaches the window on
+    its 0.1mm ring and seats. Threading the constraint without this moves
+    the confident zero from the relaxation axis to the lattice axis instead
+    of removing it.
+
+    So: enumerate the feasible-CENTRE box instead, on the lattices
+    `_try_place` sweeps AT EACH DISTANCE. That last clause is the half an
+    earlier version got wrong: it chose one step by location count alone, so
+    a large zone fell to the 1.0mm ring (the verdict `census_window` refuses
+    to render) and a distant zone was sampled at 0.1mm where the search only
+    reaches 0.25mm -- 4 of 8 parks in one ordinary `place_pack` then promised
+    poses the retry could never collect.
+
+    `reach_mm` is how far from the target the sweep actually got. Smaller
+    than the budget means the near field only, and the caller must say so:
+    `_try_place` skips its whole-board fallback whenever `max_disp` is set,
+    so nothing beyond `SEARCH_FINE_RADIUS_MM` is reachable anyway, and the
+    location cap can bite before even that.
+    """
+    grid = max(0.05, float(grid_step or 0.1))
+    _in, anchor = zone_gate(part, constraint, tol)
+    lo_x, lo_y, hi_x, hi_y = _feasible_centre_box(part, constraint, tol,
+                                                 anchor)
+    # Nothing past the fine ring is reachable once `max_disp` is set, so the
+    # box is clipped there BEFORE it is materialised -- that is also the
+    # guard against a hostile zone (a 2000mm rect used to build a 4,004,001
+    # entry list, ten times per park, uncached).
+    reach = SEARCH_FINE_RADIUS_MM if max_disp is None \
+        else min(float(max_disp), SEARCH_FINE_RADIUS_MM)
+    lo_x, hi_x = max(lo_x, tx - reach), min(hi_x, tx + reach)
+    lo_y, hi_y = max(lo_y, ty - reach), min(hi_y, ty + reach)
+    if hi_x < lo_x or hi_y < lo_y:
+        # The zone cannot hold this part at all, or the budget cannot reach
+        # it. ONE offset, so the caller still evaluates the target itself and
+        # the answer is a measured zero rather than an empty sweep that never
+        # ran -- and `reach_mm` 0.0 says the sweep never left the target.
+        return grid, [(0.0, 0.0)], 0.0
+
+    def _lattice(step, rmax):
+        """Target-aligned points of `step` inside the box and within `rmax`."""
+        i0 = int(math.ceil((lo_x - tx) / step - 1e-9))
+        i1 = int(math.floor((hi_x - tx) / step + 1e-9))
+        j0 = int(math.ceil((lo_y - ty) / step - 1e-9))
+        j1 = int(math.floor((hi_y - ty) / step + 1e-9))
+        pts = []
+        for i in range(i0, i1 + 1):
+            dx = i * step
+            if abs(dx) > rmax + 1e-9:
+                continue
+            for j in range(j0, j1 + 1):
+                dy = j * step
+                if dx * dx + dy * dy <= rmax * rmax + 1e-9:
+                    pts.append((round(dx, 6), round(dy, 6)))
+        return pts
+
+    # TWO lattices, exactly as `_try_place` does it: `grid_step` out to
+    # SEARCH_XFINE_RADIUS_MM, then SEARCH_FINE_STEP_MM out to the reach.
+    # The 1.0mm ring is deliberately excluded -- a census must not render a
+    # verdict on it (see `census_window`).
+    seen, out = set(), []
+    for step, rmax in ((grid, min(reach, SEARCH_XFINE_RADIUS_MM)),
+                       (max(grid, SEARCH_FINE_STEP_MM), reach)):
+        for d in _lattice(step, rmax):
+            if d not in seen:
+                seen.add(d)
+                out.append(d)
+    if not out:
+        return grid, [(0.0, 0.0)], 0.0
+    out.sort(key=lambda d: (d[0] * d[0] + d[1] * d[1]))
+    if len(out) > CENSUS_MAX_LOCATIONS:
+        out = out[:CENSUS_MAX_LOCATIONS]
+    reach = math.sqrt(max(d[0] * d[0] + d[1] * d[1] for d in out))
+    step_used = grid if any(
+        abs(d[0]) <= SEARCH_XFINE_RADIUS_MM
+        and abs(d[1]) <= SEARCH_XFINE_RADIUS_MM for d in out) else \
+        max(grid, SEARCH_FINE_STEP_MM)
+    return step_used, out, round(reach, 6)
+
+
+# How many incumbents one stuck part may censused against. Bounded because
+# each candidate costs a census sweep, and because a part is blocked by its
+# NEIGHBOURS -- a part on the far side of the board cannot be in the way, and
+# the geometry below proves it rather than assuming it.
+EVICT_MAX_BLOCKERS = 8
+
+
+def _evict_candidates(state, ref: str, tx: float, ty: float,
+                      placed: Set[str], lock_refs: Sequence[str],
+                      constraint=None, tol: float = 0.5) -> List[str]:
+    """Seated, movable parts that could possibly be in `ref`'s way at (tx,ty).
+
+    A superset, not a heuristic: the box is every pose `ref` can take within
+    the census radius, inflated by its own reach and the clearance, so a part
+    whose own inflated extent misses it cannot be within clearance of ANY
+    candidate pose and would free exactly zero poses by construction. That is
+    `build_neighbor_lists`' pruning argument (quench.py) with the travel
+    budget replaced by the census radius.
+
+    Then nearest-first, capped: the cap is the only approximation, and it is
+    reported by the caller rather than hidden.
+    """
+    part = state.parts.get(ref)
+    if part is None:
+        return []
+    r = part.rect(tx, ty, part.rot)
+    reach = max(r[2] - r[0], r[3] - r[1]) / 2.0 + CENSUS_RADIUS_MM
+    clr = state.clearance
+    locked = set(lock_refs or ())
+    # UNDER A ZONE THE TARGET IS NOT THE CENTRE OF THE QUESTION. `place_pack`
+    # lays its members out on their own stride, so a member's target can sit
+    # wholly outside the zone (measured: 3.3mm out on a 2x2 zone), and both
+    # the box and the nearest-first cap were keyed on it -- so the 8 chosen
+    # need not be the 8 that overlap the zone the part must actually reach.
+    # Box on the union, rank by distance to the region being contested.
+    bx0, by0, bx1, by1 = tx - reach, ty - reach, tx + reach, ty + reach
+    cx, cy = tx, ty
+    if constraint is not None:
+        bx0 = min(bx0, constraint[0] - tol - reach)
+        by0 = min(by0, constraint[1] - tol - reach)
+        bx1 = max(bx1, constraint[2] + tol + reach)
+        by1 = max(by1, constraint[3] + tol + reach)
+        cx = min(max(tx, constraint[0]), constraint[2])
+        cy = min(max(ty, constraint[1]), constraint[3])
+    out: List[Tuple[float, str]] = []
+    for other in sorted(placed):
+        if other == ref or other not in state.parts:
+            continue
+        op = state.parts[other]
+        if op.locked or other in locked:
+            continue          # not this tool's to move -- see reseat_scope
+        orect = op.rect(op.x, op.y, op.rot)
+        if (orect[2] + clr < bx0 or orect[0] - clr > bx1
+                or orect[3] + clr < by0 or orect[1] - clr > by1):
+            continue
+        out.append((math.hypot(op.x - cx, op.y - cy), other))
+    out.sort()
+    return [b for _d, b in out[:EVICT_MAX_BLOCKERS]]
+
+
+def count_legal_poses(state, ref: str, tx: float, ty: float,
+                      exclude: Set[str], *,
+                      radius: float = CENSUS_RADIUS_MM,
+                      step: float = CENSUS_STEP_MM,
+                      cap: int = CENSUS_CAP,
+                      max_disp: Optional[float] = None,
+                      rotations: Optional[Sequence[float]] = None,
+                      forbid: Sequence = (),
+                      constraint=None, tol: float = 0.5) -> int:
+    """How many legal poses `ref` has near (tx, ty), counting at most `cap`.
+
+    This is issue #629's measurement. Three consecutive sweeps in run 19
+    returned a bare "no legal pose anywhere on the board" for SW17/SW34, and
+    when the same question was finally asked in scoped form the engine
+    answered precisely: with D14 in place 0 poses, with D14 lifted 46; with
+    D31, 0 then 32. A verdict that names its blockers is the next move; a
+    bare verdict is a dead end.
+
+    Counts only -- no `apply_move`, no cost evaluation. It uses `pose_ok`,
+    the same predicate `_try_place` seats on, at the state's own clearance
+    (NOT the relaxed ladder): a count is meant to say whether there is room,
+    and counting poses that only exist at a 0.02mm floor would promise seats
+    the ordinary search does not take. Measured cost of that divergence on
+    splitflap_driver: 4 of 65 movable parts census 0 while `_try_place`
+    seats them on a relaxed rung, 6 of 65 with a zone. Reported, not fixed --
+    see the paragraph above.
+
+    **With a `constraint`, the zone is honoured and the SAMPLE SET comes
+    from the zone too** (`zone_census_offsets`). Both halves are needed: the
+    predicate alone leaves the census answering over a disc the zone
+    excludes, and the disc alone leaves it counting poses that are outside
+    the zone the seat had to satisfy. `radius`/`step` are ignored when a
+    constraint is given -- the zone supersedes them.
+    """
+    from pose_score import _offsets
+    part = state.parts[ref]
+    rots = list(rotations) if rotations is not None \
+        else [part.rot] + [(part.rot + d) % 360 for d in (90.0, 180.0, 270.0)]
+    in_zone, _anchor = zone_gate(part, constraint, tol)
+    if constraint is None:
+        offsets = _offsets(radius, step)
+    else:
+        _step, offsets, _reach = zone_census_offsets(
+            part, constraint, tol, tx, ty,
+            getattr(state, 'grid_step', 0.1), max_disp)
+    n = 0
+    for dx, dy in offsets:
+        if max_disp is not None and math.hypot(dx, dy) > max_disp + 1e-9:
+            continue
+        x, y = round(tx + dx, 3), round(ty + dy, 3)
+        for rot in rots:
+            # Zone first: it is four float compares, where `pose_ok` ends in
+            # `candidate_valid`. Measured 19x faster on a small zone.
+            if not in_zone(x, y, rot):
+                continue
+            if pose_ok(state, ref, x, y, rot, exclude, forbid):
+                n += 1
+                if n >= cap:
+                    return n
+    return n
+
+
+def near_miss_poses(state, ref: str, tx: float, ty: float,
+                    exclude: Set[str], *,
+                    radius: float = CENSUS_RADIUS_MM,
+                    step: float = CENSUS_STEP_MM,
+                    max_disp: Optional[float] = None,
+                    rotations: Optional[Sequence[float]] = None,
+                    forbid: Sequence = (), k: int = 3) -> List[Dict]:
+    """The K nearest-to-legal poses, for a census that just counted ZERO.
+
+    run-23: `count_legal_poses` == 0 was a dead end three times (J5 "0 legal
+    poses in a 20mm disc", U6, J1), and each dead end was resolved by an
+    UNCHECKED place_fixed assert that shipped an overlap. The information
+    that would have resolved it honestly -- "the best pose in budget overlaps
+    only SW1, by 0.8mm2; move SW1 and the seat exists" -- was never computed.
+
+    Report-only: never applies a move. One entry per DISTINCT blocker set
+    (three poses all blocked by the same part teach nothing extra), ranked by
+    residual overlap area, side-aware, off-outline poses skipped (an
+    off-board pose is a different problem, not a near-miss). Same lattice
+    family as count_legal_poses; runs only on its zero path, which is
+    already the slow case.
+    """
+    part = state.parts[ref]
+    from pose_score import _offsets
+    rots = list(rotations) if rotations is not None \
+        else [part.rot] + [(part.rot + d) % 360 for d in (90.0, 180.0, 270.0)]
+    obstacles = []
+    for other, p2 in state.parts.items():
+        if other == ref or other in exclude:
+            continue
+        if not (part.sides & p2.sides):
+            continue
+        obstacles.append((other, p2.rect(p2.x, p2.y, p2.rot)))
+    best = []
+    for dx, dy in _offsets(radius, step):
+        if max_disp is not None and math.hypot(dx, dy) > max_disp + 1e-9:
+            continue
+        x, y = round(tx + dx, 3), round(ty + dy, 3)
+        for rot in rots:
+            r = part.rect(x, y, rot)
+            if state.edge_gate.rect_outside_amount(r) > 1e-9:
+                continue
+            ov = 0.0
+            hits = set()
+            for other, r2 in obstacles:
+                w = min(r[2], r2[2]) - max(r[0], r2[0])
+                h = min(r[3], r2[3]) - max(r[1], r2[1])
+                if w > 0 and h > 0:
+                    ov += w * h
+                    hits.add(other)
+            if ov <= 1e-9:
+                continue      # legal: count_legal_poses' business, not ours
+            best.append((ov, x, y, rot, tuple(sorted(hits))))
+    best.sort(key=lambda t: (t[0], t[1], t[2]))
+    seen = set()
+    out: List[Dict] = []
+    for ov, x, y, rot, hits in best:
+        if hits in seen:
+            continue
+        seen.add(hits)
+        out.append({'pose': [x, y, rot], 'overlap_mm2': round(ov, 3),
+                    'hits': list(hits)})
+        if len(out) >= k:
+            break
+    return out
+
+
 def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
                constraint=None, tol: float = 0.5,
                max_disp: Optional[float] = None,
-               info: Optional[Dict] = None) -> Optional[float]:
+               info: Optional[Dict] = None,
+               deadline=None, forbid: Sequence = ()) -> Optional[float]:
     """Nearest FULLY-CONTAINED legal pose to (tx, ty); applies the move and
     returns True.
 
@@ -108,30 +616,11 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
     part = state.parts[ref]
 
     def _ok(x, y, rot):
-        if state.edge_gate.rect_outside_amount(part.rect(x, y, rot)) > 1e-9:
-            return False
-        return state.candidate_valid(ref, x, y, rot, exclude=exclude)
+        return pose_ok(state, ref, x, y, rot, exclude, forbid)
 
-    # A zone smaller than the courtyard cannot contain it at any rotation --
-    # the spec-COORDINATE pattern. Containment then relaxes to anchor-point-
-    # in-zone, which makes such zones satisfiable by construction; the grader
-    # (floorplan.rule_zone_containment) applies the same relaxation.
-    anchor_zone = False
-    if constraint is not None:
-        from placement.floorplan import zone_fits_courtyard
-        anchor_zone = not any(
-            zone_fits_courtyard(constraint, part.rect(0.0, 0.0, r), tol)
-            for r in (part.rot % 360, (part.rot + 90) % 360))
-        if anchor_zone and info is not None:
-            info['anchor_zone'] = True
-
-    def _in_zone(x, y, rot):
-        if constraint is None:
-            return True
-        if anchor_zone:
-            return (constraint[0] - tol <= x <= constraint[2] + tol
-                    and constraint[1] - tol <= y <= constraint[3] + tol)
-        return _rect_inside(part.rect(x, y, rot), constraint, tol)
+    _in_zone, anchor_zone = zone_gate(part, constraint, tol)
+    if anchor_zone and info is not None:
+        info['anchor_zone'] = True
 
     full = state.clearance
     try:
@@ -158,6 +647,15 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
                     # the `for dx, dy in _offsets(...)` loop below: that is the
                     # innermost loop and _offsets already materialises ~3700
                     # tuples per call, so the band check bounds it adequately.
+                    # Returns None rather than raising, so the caller's existing
+                    # "no legal pose" path handles it with no new control flow --
+                    # but `info` records WHY, because reporting an unfinished
+                    # search as a measured failure is the same silent lie this
+                    # whole change exists to remove.
+                    if deadline is not None and deadline.expired():
+                        if info is not None:
+                            info['deadline'] = True
+                        return None
                     for dx, dy in _offsets(radius, step):
                         if (max_disp is not None
                                 and math.hypot(dx, dy) > max_disp + 1e-9):
@@ -211,18 +709,30 @@ def _edge_pose(part, bounds, edge: str, frac: float, overhang: float
 
 
 def _edge_correct(state, ref: str, edge: str, x: float, y: float,
-                  target: float) -> Tuple[float, float]:
+                  target: float) -> Tuple[float, float, bool]:
     """Walk the pose along the edge normal until the MEASURED overhang hits
     `target`. The analytic pose measures against the bounding box, but the
     grade's rule_edge_connector measures rect_outside_amount against the real
     Edge.Cuts rings -- on a non-rectangular outline the two differ by the
     local inset, and a seed placed by the bbox grades over its declared band
-    (measured on splitflap: 4 connectors 0.1-0.2mm past their max)."""
+    (measured on splitflap: 4 connectors 0.1-0.2mm past their max).
+
+    Returns (x, y, converged). **The third element is not decoration.** This
+    walk moves along ONE axis while `rect_outside_amount` is a SUM over all
+    four sides (`legality.py:438-448`), so any along-edge overshoot is a
+    constant term the walk cannot cancel -- it subtracts it again every
+    iteration and marches the part inland past the far edge. Measured on a
+    41.16mm connector on a 50.8mm edge: frac 0.70 -> y 88.767 (off the
+    opposite side), frac 0.90 -> y -2.443. It used to return that pose
+    indistinguishably from a converged one, and the caller seated it.
+    """
     part = state.parts[ref]
+    converged = False
     for _ in range(4):
         amt = state.edge_gate.rect_outside_amount(part.rect(x, y, part.rot))
         err = target - amt
         if abs(err) < 0.02:
+            converged = True
             break
         if edge == 'north':
             y -= err
@@ -232,11 +742,81 @@ def _edge_correct(state, ref: str, edge: str, x: float, y: float,
             x -= err
         else:
             x += err
-    return x, y
+    else:
+        # Ran out of iterations. One last measurement decides it -- a walk
+        # that happened to land on its target on the final step is converged.
+        amt = state.edge_gate.rect_outside_amount(part.rect(x, y, part.rot))
+        converged = abs(target - amt) < 0.02
+    return x, y, converged
+
+
+def edge_seat_ok(state, part, x: float, y: float, edge: str,
+                 lo: float, hi: float) -> bool:
+    """Is this edge pose a seat, or is the part off the board?
+
+    An edge seat is the one seat in the system that cannot use `pose_ok` --
+    it overhangs by design, so full containment is the wrong predicate. This
+    is the predicate it uses instead, and it has TWO parts because either
+    alone was measured to accept an off-board part:
+
+    * the measured overhang lies in the DECLARED band. Same quantity
+      `floorplan.rule_edge_connector` grades on, so a seat accepted here is
+      not a violation there.
+    * EVERY PAD lands on the board. That is the invariant that actually
+      matters -- CLAUDE.md calls pad copper outside the outline the
+      top-priority placement defect, because it converts 1:1 into unrouted
+      nets -- and it is the one a band cannot argue with. A band is an
+      author's declaration and a wrong one is not rare: `{min: 3, max: 4}` on
+      a 3.0mm-deep connector seated it with 1.7% of its courtyard on the
+      board, and `{min: 20, max: 21}` was accepted on the east and west edges
+      with 8 of 16 pads off.
+
+    The pad test uses the gate's own containment, so a board with cutouts or
+    milled rings is measured properly. A bounding-box test is not enough and
+    was measured dropping 24 of 26 pads into a milled slot while reporting a
+    seat: the pads were inside the bbox and inside a hole.
+
+    An edge connector's BODY overhangs by design; its PADS do not. That
+    asymmetry is what makes this checkable at all.
+    """
+    r = part.rect(x, y, part.rot)
+    amt = state.edge_gate.rect_outside_amount(r)
+    if not ((lo - 0.02) <= amt <= (hi + 0.02)):
+        return False
+    gate = state.edge_gate
+    for px, py, _sz in part.pad_globals(x, y, part.rot):
+        # A zero-size rect at the pad centre: "is this point on the board",
+        # asked through the gate so cutouts and milled rings count.
+        if gate.rect_outside_amount((px, py, px, py)) > 1e-9:
+            return False
+    return True
+
+
+def _edge_frac_bounds(part, bounds, edge: str) -> Tuple[float, float]:
+    """The fractions along `edge` at which the part is still ON the board.
+
+    `_edge_pose` places the part's CENTRE at `frac` along the edge's own span,
+    and the old clamp was a bare [0.05, 0.95] that knew nothing of the part's
+    width -- so a 41.16mm connector on a 50.80mm edge was slid to frac 0.70
+    and hung 5.34mm past the end while reporting a seat. Only
+    **[0.405, 0.595]** keeps that part on the board: the centre may range over
+    span - width = 9.64mm, i.e. (width/2)/span = 0.405 in from each end.
+
+    Returns (lo, hi); lo > hi means the part is wider than the edge, which is
+    a real answer and the caller must treat it as "no legal fraction".
+    """
+    lx0, ly0, lx1, ly1 = part.rect(0.0, 0.0, part.rot)
+    x0, y0, x1, y1 = bounds
+    if edge in ('north', 'south'):
+        span, a, b = (x1 - x0), lx0, lx1
+    else:
+        span, a, b = (y1 - y0), ly0, ly1
+    span = max(1e-9, span)
+    return (-a) / span, 1.0 - (b / span)
 
 
 def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
-               notes: List[str], target=None) -> bool:
+               notes: List[str], target=None, exclude=None) -> bool:
     """Seat a DECLARED edge part on its edge band, minimal-move (run-4 B-6).
 
     Repair could never do this: `_try_place._ok` demands full containment,
@@ -262,26 +842,52 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
         cur = (ax - x0) / max(1e-9, (x1 - x0))
     else:
         cur = (ay - y0) / max(1e-9, (y1 - y0))
-    cur = min(0.95, max(0.05, cur))
+
+    # Clamp by the part's OWN half-extent, not a bare [0.05, 0.95]. A part
+    # wider than its edge has no legal fraction at all; say so rather than
+    # sliding it off the end and reporting a seat.
+    f_lo, f_hi = _edge_frac_bounds(part, state.board, edge)
+    if f_lo > f_hi:
+        notes.append(f"{ref}: is wider than the {edge} edge "
+                     f"({f_lo:.2f} > {f_hi:.2f} of its span), so no along-edge "
+                     f"position keeps it on the board")
+        return False
+    cur = min(f_hi, max(f_lo, cur))
+
+    # The declared band. `hi` None means "no stated maximum" -- allow twice the
+    # midpoint target, which is what `overhang` was derived from, rather than
+    # allowing anything.
+    hi_eff = float(hi) if hi is not None else max(2.0 * overhang, lo + 1.0)
 
     ctx = state.legality_ctx
+    ex = set(exclude or ())
 
     def conflict_free(px, py):
         if ctx is None:
             return True
         for other in ctx.parts:
-            if other == ref or other not in state.parts:
+            # `ex` is the pile: parts whose input coordinates are meaningless.
+            # Without it a pile at the board centre vetoes the honest edge
+            # poses and the loop SLIDES the part along the edge until one is
+            # "free" -- measured, that is how a connector reached frac 0.70
+            # and hung off the end.
+            if other == ref or other in ex or other not in state.parts:
                 continue
             sf = ctx.pair_shortfall(ref, other, pose_a=(px, py, part.rot))
             if sf.pad > 1e-6 or sf.hole > 1e-6:
                 return False
         return True
 
+    def on_board(px, py):
+        return edge_seat_ok(state, part, px, py, edge, lo, hi_eff)
+
     for df in (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
                0.2, -0.2, 0.3, -0.3, 0.4, -0.4):
-        frac = min(0.95, max(0.05, cur + df))
+        frac = min(f_hi, max(f_lo, cur + df))
         x, y = _edge_pose(part, state.board, edge, frac, overhang)
-        x, y = _edge_correct(state, ref, edge, x, y, overhang)
+        x, y, converged = _edge_correct(state, ref, edge, x, y, overhang)
+        if not converged or not on_board(x, y):
+            continue
         if conflict_free(x, y):
             state.apply_move(ref, round(x, 3), round(y, 3), part.rot)
             return True
@@ -332,7 +938,9 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                      grid_step: float = 0.1,
                      seed_refs: Optional[Set[str]] = None,
                      anchors_first: bool = False,
-                     anchor_rounds: int = 1) -> Dict:
+                     anchor_rounds: int = 1,
+                     evict_depth: int = 1,
+                     deadline=None, progress=None) -> Dict:
     """Compute a full placement for an unplaced board from its intent.
 
     Returns {'placements': [...], 'lock_refs': [...], 'unseated': [...],
@@ -346,6 +954,13 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     re-deriving the placed parts would discard someone's work, and the
     LIFT-AND-RE-SEAT case -- see `reseat_scope`).
 
+    `deadline` is an optional `krt_deadline.Deadline`, checked between parts in
+    the connectivity-centroid stage (the only unbounded one -- stages 1/1.5/2
+    are O(declared entries)). The partial is coherent by construction: a part
+    is either fully seated, and in `placements`, or untouched. Untouched parts
+    are named in `deadline_skipped` and are NOT `unseated` -- a search that ran
+    out of clock has measured nothing. `progress` is an optional
+    `(current, total, label)` callback.
     """
     import pose_score
     from placement import floorplan
@@ -369,6 +984,18 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     placed: Set[str] = set()
     unplaced: Set[str] = {r for r, p in state.parts.items()}
     unseated: List[str] = []
+    # Parts a budget ran out before REACHING. Never `unseated`: a search that
+    # never ran has measured nothing, and reporting it as a failure is a
+    # verdict nobody earned. Declared here because the zone stage can fill it
+    # too, long before stage 3.
+    deadline_skipped: List[str] = []
+    # ref -> (target_x, target_y, constraint_rect, tol) for the seat that
+    # failed. The eviction rung (3c) retries at exactly the target the part
+    # was refused at; a rung that re-derived one would be answering a
+    # different question from the one that failed.
+    unseated_ctx: Dict[str, Tuple[float, float, Any, float]] = {}
+    evictions: List[Dict] = []
+    no_pose_blockers: Dict[str, Dict[str, int]] = {}
     # A part locked IN THE FILE is already authoritatively placed -- a caller
     # that pre-placed its spec-fixed parts and stamped them (locked yes) must
     # not have the seeder re-derive them. Treated as placed from the start:
@@ -418,9 +1045,41 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             lo = float(band.get('min', 0.0))
             hi = band.get('max')
             overhang = (lo + float(hi)) / 2.0 if hi is not None else max(lo, 0.5)
+            # Even distribution, but clamped by the part's own half-extent:
+            # 3 connectors on one edge get fracs 0.25/0.5/0.75, and a wide
+            # part at 0.25 hangs off the end. This stage runs no legality
+            # gate at all (by design), so nothing downstream would catch it.
+            f_lo, f_hi = _edge_frac_bounds(part, bounds, edge)
             frac = (k + 1) / (len(specs) + 1)
+            if f_lo > f_hi:
+                notes.append(f"edge connector {ref}: wider than the {edge} "
+                             f"edge, so stage 1 leaves it to the later stages")
+                continue
+            frac = min(f_hi, max(f_lo, frac))
             x, y = _edge_pose(part, bounds, edge, frac, overhang)
-            x, y = _edge_correct(state, ref, edge, x, y, overhang)
+            x, y, converged = _edge_correct(state, ref, edge, x, y, overhang)
+            if not converged:
+                # The walk diverged (it drives a scalar SUM along one axis, so
+                # an along-edge overshoot never cancels). It used to
+                # apply_move unconditionally, which is how a diverged stage-1
+                # seat reached the board silently.
+                notes.append(f"edge connector {ref}: the overhang walk did "
+                             f"not converge on the {edge} edge, so stage 1 "
+                             f"left it for the later stages")
+                continue
+            # The SAME containment predicate _seat_edge uses. Stage 1 got the
+            # fraction clamp and the convergence skip but not this, and was
+            # measured still seating a connector at (159.909, 132.830) with
+            # 16 of 16 pads 18.45mm off a board ending at 114.38 -- the exact
+            # pose the fix elsewhere refuses. Stage 1 runs no legality gate at
+            # all by design, so nothing downstream catches it.
+            hi_eff = float(hi) if hi is not None else max(2.0 * overhang,
+                                                          lo + 1.0)
+            if not edge_seat_ok(state, part, x, y, edge, lo, hi_eff):
+                notes.append(f"edge connector {ref}: the {edge} band would "
+                             f"put it off the board, so stage 1 left it for "
+                             f"the later stages")
+                continue
             state.apply_move(ref, round(x, 3), round(y, 3), part.rot)
             placed.add(ref)
             unplaced.discard(ref)
@@ -445,12 +1104,14 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
         tol = intent.zone_tolerance(z) if z is not None else 0.5
         info: Dict = {}
         clr = _try_place(state, ref, part.x, part.y, unplaced - {ref},
-                         constraint=rect, tol=tol, info=info)
+                         constraint=rect, tol=tol, info=info,
+                         deadline=deadline)
         if clr is None and z is not None:
             zx = (z.rect[0] + z.rect[2]) / 2.0
             zy = (z.rect[1] + z.rect[3]) / 2.0
             clr = _try_place(state, ref, zx, zy, unplaced - {ref},
-                             constraint=rect, tol=tol, info=info)
+                             constraint=rect, tol=tol, info=info,
+                             deadline=deadline)
         if clr is not None:
             placed.add(ref)
             unplaced.discard(ref)
@@ -510,11 +1171,30 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
         cy = (z.rect[1] + z.rect[3]) / 2.0
         tol = intent.zone_tolerance(z)
         for ref in members:
+            # The zone stage was UNBOUNDED. `seed_from_intent`'s contract says
+            # the deadline is checked "between parts in the connectivity-
+            # centroid stage (the only unbounded one -- stages 1/1.5/2 are
+            # O(declared entries))", and the entry COUNT is indeed bounded --
+            # but each entry pays a full `_try_place` ladder, so on a board
+            # whose intent zones every part (run 19's urchin: 85 refs in two
+            # half-blocks) the whole run is stage 2 and the clock never got a
+            # chance to fire. Measured: a 30s budget ran past 200s.
+            if deadline is not None and deadline.expired():
+                for r in members[members.index(ref):]:
+                    if r in unplaced and r not in deadline_skipped:
+                        deadline_skipped.append(r)
+                notes.append(
+                    f"deadline reached in zone {name!r}; "
+                    f"{len(deadline_skipped)} part(s) left at their input "
+                    f"poses and reported in deadline_skipped (NOT unseated -- "
+                    f"they were never tried)")
+                break
             jx, jy = (0.0, 0.0) if len(members) == 1 else _jitter()
             rot_before = state.parts[ref].rot
             zinfo: Dict = {}
             clr = _try_place(state, ref, cx + jx, cy + jy, unplaced - {ref},
-                             constraint=z.rect, tol=tol, info=zinfo)
+                             constraint=z.rect, tol=tol, info=zinfo,
+                             deadline=deadline)
             if clr is not None:
                 placed.add(ref)
                 unplaced.discard(ref)
@@ -531,6 +1211,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                                  f"{state.clearance:g})")
             else:
                 unseated.append(ref)
+                unseated_ctx[ref] = (cx + jx, cy + jy, z.rect, tol)
                 notes.append(f"{ref}: no legal pose inside zone {name!r}")
 
     # ---- 2.5 decap-governed caps: one cap per supply PIN -------------------
@@ -664,7 +1345,21 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                      f"{thr:.2f}mm) seed before {len(unplaced) - len(anchors)}"
                      f" small(s): {', '.join(anchors)}")
         queue = anchors + [r for r in queue if r not in set(anchors)]
-    for ref in queue:
+    for _qi, ref in enumerate(queue):
+        if deadline is not None and deadline.check('seed'):
+            deadline_skipped.extend(r for r in queue[_qi:]
+                                    if r not in deadline_skipped)
+            notes.append(
+                f"deadline reached after {_qi}/{len(queue)} part(s); "
+                f"{len(deadline_skipped)} left at their input poses and "
+                f"reported in deadline_skipped (NOT unseated -- they were "
+                f"never tried)")
+            break
+        if progress is not None:
+            try:
+                progress(_qi, len(queue), f'seat {ref}')
+            except Exception:                                   # noqa: BLE001
+                pass
         target = _partner_centroid(state, ref, placed) or center
         jx, jy = _jitter()
         rot_before = state.parts[ref].rot
@@ -682,7 +1377,146 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                              f"{clr:g} (none at {state.clearance:g})")
         else:
             unseated.append(ref)
+            unseated_ctx[ref] = (target[0] + jx, target[1] + jy, None, 0.5)
             notes.append(f"{ref}: no legal pose anywhere on the board")
+
+    # ---- 3c. eviction rung (#630): census the blockers, evict, retry --------
+    # A part with no legal pose is not necessarily a part with no ROOM. Run 19
+    # measured the difference: three sweeps returned a bare "no legal pose
+    # anywhere on the board" for SW17/SW34, and when the question was finally
+    # asked in scoped form the engine answered precisely -- with D14 in place
+    # 0 poses, with D14 lifted 46; with D31, 0 then 32. One eviction each and
+    # both seated. That verdict was reachable the whole time; nothing asked.
+    #
+    # So: for each part this seed could not seat, count its poses with each
+    # nearby incumbent lifted in turn, evict the one that frees the most, and
+    # retry. THE ORDERING IS LOAD-BEARING -- the blocked part is seated FIRST,
+    # against a board the blocker is lifted out of, and the blocker is
+    # re-seated afterwards with it as an obstacle. Run 19's one-call reseat
+    # got a null three times precisely because its queue re-seated the
+    # blockers first, back into the pockets they block.
+    #
+    # Bounded on every axis: depth 1 (a blocker's own blocker is not chased),
+    # at most EVICT_MAX_BLOCKERS candidates per part, and the census counts to
+    # a cap. Gated exactly like the anchor rounds -- `measure` before and
+    # after, with a snapshot revert -- so a trade that does not improve the
+    # board leaves it byte-identical.
+    # The CENSUS runs whenever anything is unseated; only the EVICTION is
+    # gated on depth. #629 asks for a verdict that names its blockers, and
+    # that is worth having on its own -- `--evict-depth 0` means "tell me
+    # what is in the way, move nothing", which is the honest default for
+    # anyone who wants to make the call themselves.
+    if unseated:
+        from placement.reconstruct import measure
+        still: List[str] = []
+        # DEDUPED, and placed-aware. A zone member that fails its zone stage
+        # stays in `unplaced`, so stage 3 tries it again and appends it a
+        # SECOND time -- `unseated` can name one part twice. Iterating that
+        # raw ran the rung again on a part the first pass had just seated,
+        # where the trade is now a pure loss, and the revert put it back in
+        # `unseated`: a success undone by a duplicate.
+        seen: Set[str] = set()
+        for ref in list(unseated):
+            if ref in seen:
+                continue
+            seen.add(ref)
+            if ref in placed:
+                continue          # an earlier pass of this rung seated it
+            if ref not in unseated_ctx or ref not in state.parts:
+                still.append(ref)
+                continue
+            # Checked between PARTS, like the stage-3 queue: one census is
+            # `1 + candidates` bounded sweeps, so the grain is fine enough,
+            # and a rung that overran its budget would be adding unbounded
+            # work to the one path that had none.
+            if deadline is not None and deadline.expired():
+                still.extend(r for r in list(unseated)
+                             if r not in seen and r not in placed)
+                notes.append(
+                    f"eviction rung: deadline reached; {len(still)} part(s) "
+                    f"left uncensused (their bare verdict stands)")
+                break
+            tx, ty, constraint, tol = unseated_ctx[ref]
+            base_excl = unplaced - {ref}
+            # The constraint has been unpacked here since this rung was
+            # written and was then dropped on the next two lines, so a part
+            # that failed to seat INSIDE A ZONE was censused over the open
+            # board. The retry below already passes it (`constraint=
+            # constraint` at the `_try_place` call), so the measurement and
+            # the retry were answering different questions -- and this one
+            # reaches `place_seed`'s JSON_SUMMARY, which the placement skill
+            # tells an agent to read.
+            zkw = dict(constraint=constraint, tol=tol)
+            baseline = count_legal_poses(state, ref, tx, ty, base_excl, **zkw)
+            cands = _evict_candidates(state, ref, tx, ty, placed, lock_refs,
+                                      constraint=constraint, tol=tol)
+            freed = {b: count_legal_poses(state, ref, tx, ty,
+                                          base_excl | {b}, **zkw)
+                     for b in cands}
+            no_pose_blockers[ref] = dict(freed)
+            useful = sorted((n, b) for b, n in freed.items() if n > baseline)
+            if not evict_depth:
+                still.append(ref)
+                if useful:
+                    notes.append(
+                        f"{ref}: no legal pose, and lifting {useful[-1][1]} "
+                        f"would free {useful[-1][0]} -- not evicted "
+                        f"(--evict-depth 0)")
+                continue
+            if not useful:
+                still.append(ref)
+                if cands:
+                    notes.append(
+                        f"{ref}: censused {len(cands)} neighbour(s); lifting "
+                        f"none of them frees a pose, so they are not what is "
+                        f"in the way")
+                continue
+            best = useful[-1][1]
+            snapshot = {r: (state.parts[r].x, state.parts[r].y,
+                            state.parts[r].rot) for r in (ref, best)}
+            before = measure(state)
+            # Lift, seat the blocked part, then put the blocker back with it
+            # in place.
+            unplaced.add(best)
+            placed.discard(best)
+            ok = _try_place(state, ref, tx, ty, (unplaced - {ref}) | {best},
+                            constraint=constraint, tol=tol) is not None
+            bx, by, brot = snapshot[best]
+            ok = ok and _try_place(state, best, bx, by,
+                                   unplaced - {best}) is not None
+            after = measure(state) if ok else None
+            if ok and after <= before:
+                placed.add(ref)
+                placed.add(best)
+                unplaced.discard(ref)
+                unplaced.discard(best)
+                evictions.append({
+                    'ref': ref, 'blocker': best, 'poses_freed': freed[best],
+                    'poses_before': baseline, 'depth': 1, 'accepted': True,
+                    'gate_before': list(before), 'gate_after': list(after)})
+                notes.append(
+                    f"{ref}: seated after evicting {best} (poses at its "
+                    f"target: {baseline} before, {freed[best]} with {best} "
+                    f"lifted); gate {list(before)} -> {list(after)}")
+            else:
+                for r, pose in snapshot.items():
+                    state.apply_move(r, *pose)
+                placed.add(best)
+                unplaced.discard(best)
+                still.append(ref)
+                evictions.append({
+                    'ref': ref, 'blocker': best, 'poses_freed': freed[best],
+                    'poses_before': baseline, 'depth': 1, 'accepted': False,
+                    'gate_before': list(before),
+                    'gate_after': None if after is None else list(after),
+                    'reason': ('the blocker had nowhere to go' if not ok
+                               else 'the trade did not improve the board')})
+                notes.append(
+                    f"{ref}: evicting {best} REVERTED -- "
+                    + ('it had no legal pose to return to'
+                       if not ok else
+                       f"gate worsened {list(before)} -> {list(after)}"))
+        unseated = still
 
     # ---- 3b. anchor rounds (run-4 C): gated re-seat passes ------------------
     # Round 1 seeded anchors against anchors only; now that the smalls
@@ -731,8 +1565,19 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                    'new_x': state.parts[ref].x, 'new_y': state.parts[ref].y,
                    'new_rotation': state.parts[ref].rot}
                   for ref in sorted(placed)]
+    # Deduped: a zone member that also fails stage 3 is appended twice, and
+    # `unseated: 2` for one part is a miscount every consumer inherits --
+    # place_seed's summary, its exit code, and any gate reading the number.
     return {'placements': placements, 'lock_refs': lock_refs,
-            'unseated': sorted(unseated), 'notes': notes}
+            'unseated': sorted(set(unseated)), 'notes': notes,
+            # #629: a no-pose verdict that NAMES its blockers, with the count
+            # each one frees. An empty dict for a ref means the census ran and
+            # found no movable neighbour; a ref absent from the dict was never
+            # censused (the rung was off, or it had no recorded target).
+            'no_pose_blockers': no_pose_blockers,
+            'evictions': evictions,
+            'deadline_skipped': deadline_skipped,
+            'complete': not deadline_skipped}
 
 
 def stamp_locked(board_file: str, refs: Sequence[str]) -> int:
@@ -770,6 +1615,13 @@ def stamp_locked(board_file: str, refs: Sequence[str]) -> int:
     return count
 
 
+#: What a containment charges. Flat, not area-scaled: a 0402 wholly
+#: inside a TSSOP measures 0.5mm2 and an area charge would floor it to
+#: the 1.0mm budget, while a large part half-swallowed would outrank
+#: it. Containment is a yes/no fact about whether a part can be built.
+#: 2.0 buys the full cap ladder (budget = max(1.0, 8.0 * charge)).
+CONTAINMENT_CHARGE_MM = 2.0
+
 REPAIR_CAPS_MM = (0.5, 1.0, 2.0, 5.0)
 # A repair move must be PROPORTIONATE to the violation it clears. The cap
 # ladder escalates 0.5 -> 5.0mm hunting any legal seat, and on a board damaged
@@ -788,7 +1640,8 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
                      clearance: float = 0.25,
                      board_edge_clearance: float = 0.55,
                      grid_step: float = 0.1,
-                     caps: Sequence[float] = REPAIR_CAPS_MM) -> Dict:
+                     caps: Sequence[float] = REPAIR_CAPS_MM,
+                     deadline=None, progress=None) -> Dict:
     """Violation-driven minimal-move repair of a PLACED board (#place_seed
     --repair). Everything clean freezes; only violators move, worst first,
     each seated by the seeder's own search targeted at its CURRENT pose with
@@ -805,9 +1658,17 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     re-stamping is needed). A file-locked ref OUTSIDE must_lock is not this
     tool's to move: reported in `unrepairable`.
 
-    NOTE this sweep has no internal bound -- its cost is violators x caps x 36
-    ring sweeps x O(parts) per candidate, and on a 217-part board it ran 46
-    minutes (run 9). Scope it with the violator set, not with a clock.
+    `deadline` is an optional `krt_deadline.Deadline`. This sweep has no
+    internal bound -- its cost is violators x caps x 36 ring sweeps x O(parts)
+    per candidate -- and on a 217-part board it ran 46 minutes without
+    terminating (run 9). When a budget is supplied the loop stops between
+    violators, keeps every seat it already made, and reports the untouched ones
+    in `deadline_skipped`. Those are NOT `unrepairable`: a search that ran out
+    of clock has measured nothing, and filing it as a failure is the same class
+    of lie as the silent hang.
+
+    `progress` is an optional `(current, total, label)` callback -- the sweep is
+    otherwise completely silent between its census line and its final line.
     """
     import pose_score
     from placement import floorplan, legality as _leg
@@ -939,6 +1800,50 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         for partner in ordered[1:]:
             partner_of.setdefault(ordered[0], []).append(partner)
 
+    # CONTAINMENT census (run-22). The body census above reads
+    # `blocking_pairs`, which is pad_intersection ONLY -- so a part sitting
+    # WHOLLY INSIDE another part's .Fab body produces no pad-intersection area,
+    # is never charged, and legalize leaves it there. Prevention shipped
+    # (reconstruct._pair_conflicts refuses such a pose, candidate_valid refuses
+    # such a seat); this is the repair half, which did not.
+    #
+    # EXEMPTION: the engine's set, not the pair's `waiver` field.
+    # `containment_pairs` is deliberately unfiltered by `waived` -- that is the
+    # point of that list -- so iterating it raw would try to move orangecrab's
+    # FID2 out from under J5 (frac 1.000, by design). And filtering by
+    # `p.waived` instead would exempt `edge_class`, silently re-admitting the
+    # very defect the channel exists to catch (run 22's D4 wholly inside SW2,
+    # a declared edge_actuator).
+    _cont_exempt = set()
+    try:
+        from placement import reconstruct as _recon
+        _cont_exempt = _recon._body_exempt_refs(state)
+    except Exception:
+        _cont_exempt = set(getattr(state, 'container_refs', ()) or ())
+    _cont = [q for q in body.get('containment_pairs', ())
+             if q.a not in _cont_exempt and q.b not in _cont_exempt]
+    if _cont:
+        print(f"  Containment census: {len(_cont)} part(s) inside another "
+              f"part's body, all listed")
+    for q in _cont:
+        free = [r for r in (q.a, q.b)
+                if r in state.parts and not state.parts[r].locked]
+        if not free:
+            notes.append(f"containment {q.a}<->{q.b} "
+                         f"({q.contained_frac:.0%} of the smaller body): "
+                         f"both file-locked -- not repairable here")
+            continue
+        ordered = sorted(free, key=_mover_key)
+        # CHARGE: the same mm-equivalent scale the body stack above uses, so a
+        # containment buys at least the full cap ladder. Deliberately NOT
+        # area_mm2 -- a 0402 wholly inside a TSSOP measures 0.5mm2 and would
+        # be floored to a 1.0mm budget, while a large part half-swallowed
+        # would outrank it. Containment is a yes/no fact about whether a part
+        # can be built, so it charges a flat strong value rather than a size.
+        _charge(ordered[0], CONTAINMENT_CHARGE_MM)
+        for partner in ordered[1:]:
+            partner_of.setdefault(ordered[0], []).append(partner)
+
     # Off-board census on PAD/HOLE extents at ZERO margin -- copper or drill
     # off the outline is a fab defect; a COURTYARD poking past the edge is
     # cosmetic and common on legitimate boards (tigard's own corner mounting
@@ -1014,7 +1919,24 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     failed: List[str] = []
     zero_move: List[str] = []   # run-7 A2: honesty re-grade candidates
     moves: List[Dict] = []
-    for ref in violators:
+    deadline_skipped: List[str] = []
+    for _vi, ref in enumerate(violators):
+        # Budget check at the VIOLATOR head: one monotonic read per violator,
+        # and each violator costs seconds (caps x 36 ring sweeps x O(parts)).
+        # The partial is coherent by construction -- a violator is either fully
+        # seated, with its move in `moves`, or untouched.
+        if deadline is not None and deadline.check('legalize'):
+            deadline_skipped = list(violators[_vi:])
+            notes.append(
+                f"deadline reached after {_vi}/{len(violators)} violator(s); "
+                f"{len(deadline_skipped)} left untouched and reported in "
+                f"deadline_skipped (NOT unrepairable -- they were never tried)")
+            break
+        if progress is not None:
+            try:
+                progress(_vi, len(violators), f'repair {ref}')
+            except Exception:                                  # noqa: BLE001
+                pass
         part = state.parts[ref]
         was_locked = part.locked      # always False here: locked refs are
                                       # already in `unrepairable` (see above)
@@ -1062,7 +1984,8 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         for cap in caps:
             info: Dict = {}
             clr = _try_place(state, ref, ox, oy, set(), constraint=rect,
-                             tol=tol, max_disp=cap, info=info)
+                             tol=tol, max_disp=cap, info=info,
+                             deadline=deadline)
             if clr is not None:
                 placed_at = cap
                 if info.get('anchor_zone'):
@@ -1074,7 +1997,7 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
             zx = (z.rect[0] + z.rect[2]) / 2.0
             zy = (z.rect[1] + z.rect[3]) / 2.0
             clr = _try_place(state, ref, zx, zy, set(), constraint=rect,
-                             tol=tol)
+                             tol=tol, deadline=deadline)
             if clr is not None:
                 placed_at = 'zone'
         part.locked = was_locked
@@ -1090,7 +2013,8 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
                 pox, poy, porot = pp.x, pp.y, pp.rot
                 for cap in caps:
                     if _try_place(state, partner, pox, poy, set(),
-                                  max_disp=cap) is not None:
+                                  max_disp=cap,
+                                  deadline=deadline) is not None:
                         pd = math.hypot(pp.x - pox, pp.y - poy)
                         if pd > 1e-9:
                             seated_partner = (partner, pd)
@@ -1150,14 +2074,44 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     # board whose pad/body census did not move are UNRESOLVED, so the fix
     # loop can see it stalled instead of believing "repaired" forever.
     unresolved = []
-    if zero_move and state.legality_ctx is not None:
+    if deadline_skipped:
+        # Skip the honesty re-grade on a partial run. It is O(zero_move x parts)
+        # with pair_shortfall, it can only DOWNGRADE `repaired`, and a partial
+        # run's `repaired` is already qualified by complete:false -- so paying
+        # for it here would just spend the clock we already ran out of.
+        notes.append("unresolved re-grade skipped: run stopped on its deadline")
+    elif zero_move and state.legality_ctx is not None:
         # Post-repair poses live on the STATE (pcb_data still holds the
         # file's input poses), so the re-grade uses the state's own pair
         # machinery in the gate currency.
         ctx = state.legality_ctx
         for ref in zero_move:
             still = False
+            # CONTAINMENT is checked FIRST, and it has to be: PairShortfall
+            # carries pad/hole/stack and no body term, so a part charged for
+            # sitting inside another body, which then could not move, would
+            # pass this loop and be reported `repaired`. That is the exact
+            # metric mismatch this re-grade was written to stop, one channel
+            # later.
+            #
+            # It FAILS LOUD. `state` is always a QuenchState (it comes from
+            # pose_score.make_state), so the method always exists, and
+            # fab_rect already swallows its own parse failure and returns None
+            # = UNJUDGED. Anything still raising here is a real bug -- and
+            # swallowing it would convert that bug into exactly the false
+            # `repaired` this check exists to prevent. So an error means NOT
+            # repaired, said out loud, rather than a silent pass.
+            try:
+                if state._body_contained_at(ref, None, None, None):
+                    still = True
+            except Exception as exc:
+                still = True
+                notes.append(f'{ref}: could not verify containment after the '
+                             f'repair ({exc.__class__.__name__}: {exc}) -- '
+                             f'NOT reported repaired')
             for other in sorted(state.parts):
+                if still:
+                    break
                 if other == ref:
                     continue
                 sf = ctx.pair_shortfall(ref, other)
@@ -1174,6 +2128,8 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     return {'moves': moves, 'repaired': repaired, 'unrepairable':
             unrepairable + failed, 'unresolved': unresolved,
             'violators': violators, 'notes': notes,
+            'deadline_skipped': deadline_skipped,
+            'complete': not deadline_skipped,
             'pad_report_before': {k: pads[k] for k in
                                   ('pad_conflicts', 'hole_conflicts',
                                    'oob_pad_count')},
@@ -1188,7 +2144,8 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
                  board_edge_clearance: float = 0.55,
                  grid_step: float = 0.1,
                  seed: int = 0,
-                 edge_bands: Optional[Dict[str, float]] = None) -> Dict:
+                 edge_bands: Optional[Dict[str, float]] = None,
+                 deadline=None, progress=None) -> Dict:
     """LIFT a subset of parts and re-seat them FROM SCRATCH at their net
     centroids, holding every other part fixed as an obstacle.
 
@@ -1253,7 +2210,8 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
 
     Returns `{'moves', 'reseated', 'refused', 'unseated', 'scope',
     'scope_source', 'notes', 'gate_before', 'gate_after', 'accepted',
-    'witnesses_before', 'witnesses_after', 'edge_bands_dropped', 'pruned'}`.
+    'witnesses_before', 'witnesses_after', 'edge_bands_dropped', 'pruned',
+    'deadline_skipped', 'complete'}`.
 
     NOT `placement/reseat.py`, which is a different mechanism for a different
     problem (Hungarian re-assignment of a proximity-tethered decap cluster onto
@@ -1330,7 +2288,8 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
                 'accepted': True, 'pruned': [],
                 'witnesses_before': sorted(witnesses_before),
                 'witnesses_after': sorted(witnesses_before),
-                'edge_bands_dropped': {}}
+                'edge_bands_dropped': {}, 'deadline_skipped': [],
+                'complete': True}
 
     if not scope:
         # A no-op is a RESULT. On a healthy board the auto scope is empty by
@@ -1383,7 +2342,7 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
         pcb_data, pcb_file, intent2, random.Random(f"{seed}"),
         group_sources=group_sources, clearance=clearance,
         board_edge_clearance=board_edge_clearance, grid_step=grid_step,
-        seed_refs=set(scope))
+        seed_refs=set(scope), deadline=deadline, progress=progress)
     notes.extend(res['notes'])
 
     # `placements` covers every PLACED ref -- 101 of 107 on the measured board
@@ -1447,4 +2406,8 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
             'accepted': accepted, 'pruned': sorted(pruned),
             'witnesses_before': sorted(witnesses_before),
             'witnesses_after': sorted(witnesses_after),
-            'edge_bands_dropped': {r: m for r, m in sorted(dropped.items())}}
+            'edge_bands_dropped': {r: m for r, m in sorted(dropped.items())},
+            'deadline_skipped': sorted(r for r in
+                                       res.get('deadline_skipped') or ()
+                                       if r in scope),
+            'complete': res.get('complete', True)}

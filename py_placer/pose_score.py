@@ -31,12 +31,40 @@ from typing import Dict, List, Optional, Sequence
 ROTATIONS: Sequence[float] = (0.0, 90.0, 180.0, 270.0)
 
 
+_OFFSETS_CACHE = {}
+# The cache was unbounded and keyed on raw floats, which was harmless while
+# the key set was the four fixed (radius, step) pairs `_try_place` uses. A
+# pose census derives its step from the caller's `within`, so every distinct
+# budget in a plan minted a new permanent entry -- and the entries are not
+# small (a 16mm radius at 0.1 is 103,041 tuples, ~0.45s to build). LRU rather
+# than a clear-on-full, because the hot fixed pairs are inserted first and a
+# FIFO would evict exactly those.
+_OFFSETS_CACHE_MAX = 64
+_OFFSETS_ORDER: List = []
+
+
 def _offsets(radius: float, step: float):
     """Concentric ring offsets out to `radius`, nearest first.
 
     Nearest-first matters: a tie between two equally-costed poses should go to
     the one that disturbs the board least, and the caller usually stops early.
+
+    CACHED, because the result depends only on (radius, step) and the caller
+    asks for the same few pairs relentlessly: `_try_place` runs 3 clearance
+    levels x 4 rotations, and each pass rebuilt the same lists -- the middle
+    band alone is 16,641 tuples, materialised 12 times per seat attempt and
+    then again for the next part. The returned list is treated as read-only by
+    every caller (they iterate it), so one shared copy is safe.
     """
+    key = (radius, step)
+    hit = _OFFSETS_CACHE.get(key)
+    if hit is not None:
+        try:                                  # keep it hot
+            _OFFSETS_ORDER.remove(key)
+        except ValueError:
+            pass
+        _OFFSETS_ORDER.append(key)
+        return hit
     out = [(0.0, 0.0)]
     n = max(1, int(round(radius / step)))
     for ring in range(1, n + 1):
@@ -50,6 +78,10 @@ def _offsets(radius: float, step: float):
                 ring_pts.append((i * step, j * step))
         ring_pts.sort(key=lambda d: (d[0] * d[0] + d[1] * d[1]))
         out.extend(ring_pts)
+    _OFFSETS_CACHE[key] = out
+    _OFFSETS_ORDER.append(key)
+    while len(_OFFSETS_ORDER) > _OFFSETS_CACHE_MAX:
+        _OFFSETS_CACHE.pop(_OFFSETS_ORDER.pop(0), None)
     return out
 
 

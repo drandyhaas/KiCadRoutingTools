@@ -139,6 +139,34 @@ rotation, and an unlocked load-bearing rotation was never protected from the
 quench either. Explore rotations deliberately with
 `place_portfolio.py --strategy poses`.
 
+### The eviction rung (`--evict-depth`, #630/#629)
+
+A part with no legal pose is not necessarily a part with no **room**. Run 19
+measured the difference: three sweeps returned a bare *"no legal pose anywhere
+on the board"* for two switches, and when the question was finally asked in
+scoped form the engine answered precisely — with D14 in place **0** poses,
+with D14 lifted **46**; with D31, **0** then **32**. One eviction each and both
+seated. That verdict was reachable the whole time and nothing asked for it.
+
+So when a part cannot be seated, the seeder now counts its poses with each
+nearby seated incumbent lifted in turn, evicts the one that frees the most,
+seats the blocked part **first** against the lifted board, and puts the blocker
+back afterwards with it in place. That ordering is the point: `reseat_scope`
+re-seats its scope at their net centroids, which is back into the pockets they
+block, and returned a null three times on exactly this case.
+
+Bounded on every axis — depth 1 (a blocker's own blocker is not chased), at
+most 8 candidates per part (a geometric superset, so a part outside the box
+frees zero poses by construction), and the census counts to a cap. Gated by the
+same `reconstruct.measure` tuple the anchor rounds use, with a snapshot revert,
+and every eviction recorded with both gate tuples so the trade can be checked
+rather than trusted. Locked parts are never candidates.
+
+The JSON_SUMMARY gains `no_pose_blockers` (`{ref: {blocker: poses_freed}}`),
+`unseated_refs` (names, not just a count) and `evictions`. **The census runs
+whenever anything is unseated; only the eviction is gated on depth**, so
+`--evict-depth 0` means *"tell me what is in the way, move nothing"*.
+
 Requires an Edge.Cuts outline (exit 3 without one — the outline is spec-owned
 and will not be invented) and refuses a board that already looks placed
 (use `place_portfolio.py` to explore around an existing placement, or
