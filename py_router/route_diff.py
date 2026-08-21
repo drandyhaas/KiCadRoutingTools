@@ -1442,6 +1442,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print(f"  Polarity swaps denied: {len(state.polarity_swap_denied_pairs)} "
               f"(mismatch found but pair not in --polarity-swap-nets): "
               f"{', '.join(sorted(state.polarity_swap_denied_pairs))}")
+    if state.polarity_flip_unswapped_pairs:
+        print(f"  Side-flipped (unswapped): {len(state.polarity_flip_unswapped_pairs)} "
+              f"(hybrid routed a wrap-around leg; a P/N pad swap may shorten it): "
+              f"{', '.join(sorted(state.polarity_flip_unswapped_pairs))}")
     if target_swaps:
         swap_pairs = summarize_target_swaps(target_swaps)
         print(f"  Target swaps:  {len(swap_pairs)}")
@@ -1484,6 +1488,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         'rerouted_pairs': sorted(rerouted_pairs),
         'polarity_swapped_pairs': sorted(polarity_swapped_pairs),
         'polarity_swap_denied_pairs': sorted(state.polarity_swap_denied_pairs),
+        # #266: pairs the hybrid escape shipped SIDE-FLIPPED (one leg wraps
+        # around its partner). Legal copper, but a P/N pad swap would shorten
+        # it -- see --polarity-swap-nets, and only where a swap is electrically
+        # acceptable for the interface.
+        'polarity_flip_unswapped_pairs': sorted(state.polarity_flip_unswapped_pairs),
         'single_ended_followup_nets': sorted(state.diff_pair_single_ended_nets.values()),
         'skipped_bad_fanout': sorted(skipped_bad_fanout),
         'target_swaps': [{'pair1': k, 'pair2': v} for k, v in summarize_target_swaps(target_swaps)],

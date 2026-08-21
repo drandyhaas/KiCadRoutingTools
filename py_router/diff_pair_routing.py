@@ -2288,7 +2288,9 @@ def _pn_tracks_cross_full(new_segments, pcb_data, p_net_id, n_net_id,
 _DRC_CLEARANCE_MARGIN = 0.05
 
 
-def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id, config):
+def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id, config,
+                                     swap_pad_nets=None,
+                                     p_swap_positions=None, n_swap_positions=None):
     """Issue #165: the pair's connector/setback segments are clearance-checked
     during routing against an obstacle map that excludes BOTH halves of the pair,
     so a connector can graze the PARTNER net's pad/via (or other foreign copper)
@@ -2308,6 +2310,19 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
     TRACK excludes BOTH pair nets (the pair's own P/N legitimately run at diff_pair_gap,
     tighter than clearance); the pad/via checks instead exclude only the segment's own
     net so the PARTNER's pad/via is still caught (#165/#241).
+
+    ``swap_pad_nets`` ({id(pad): net_id}, #266) re-buckets those pads to the net a
+    PENDING polarity pad swap will give them, before any comparison. Without it a
+    swapped route's P leg landing on the (still N-labelled) partner pad reads as a
+    foreign-pad graze and the candidate is rejected; with it, that pad is this
+    leg's own pad and the OTHER swapped pad is still checked as the partner's.
+    ``p_swap_positions`` / ``n_swap_positions`` do the same for VIAS (same kwargs
+    as _pn_tracks_cross_full): apply_polarity_swap relabels every via sitting on a
+    swapped target's connected-copper positions, so a via there must be graded at
+    its POST-swap net. Without this the pads half was taught and the vias half was
+    not, and a via-FANNED target (the ordinary BGA/QFN escape topology) could never
+    produce a swap -- the swapped leg reads its own pending via as a foreign one and
+    every candidate is rejected ("assembled route grazes foreign via").
 
     Returns (kind, obj, segment, overlap_mm) where kind is 'pad', 'via' or 'track',
     or None.
@@ -2336,7 +2351,45 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
             v = _lc(layer, v)
         return v
     pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
+    if swap_pad_nets:
+        # Re-bucket the pads a pending swap renames, so both the own-net skip and
+        # the per-net clearance class below read the POST-swap assignment. A
+        # polarity swap only ever exchanges pads BETWEEN the pair's own two nets,
+        # so only those two buckets can change -- shallow-copy the dict and rebuild
+        # exactly them (this runs twice per _assemble; rebuilding every net's bucket
+        # from every pad on the board was pure waste).
+        _eff_pads = dict(pads_by_net)
+        _moving = {}
+        for _pn in (p_net_id, n_net_id):
+            _stay = []
+            for _pd in pads_by_net.get(_pn, ()):
+                _to = swap_pad_nets.get(id(_pd), _pn)
+                (_stay if _to == _pn else _moving.setdefault(_to, [])).append(_pd)
+            _eff_pads[_pn] = _stay
+        for _to, _pads in _moving.items():
+            _eff_pads[_to] = list(_eff_pads.get(_to, ())) + _pads
+        pads_by_net = _eff_pads
     vias = getattr(pcb_data, 'vias', None) or []
+    # #266: the same PENDING-swap view for vias. apply_polarity_swap relabels every
+    # via whose position is in the swapped target's connected-copper set, so grade
+    # those at the net they are ABOUT to carry, not the one they carry now.
+    # Resolved ONCE into (via, effective_net) here rather than per (segment, via)
+    # in the O(segs x vias) loop below -- the no-swap path pays one list build and
+    # keeps exactly its old inner-loop cost.
+    _vpp = p_swap_positions or ()
+    _vnn = n_swap_positions or ()
+    if _vpp or _vnn:
+        vias_eff = []
+        for _v in vias:
+            _vn = _v.net_id
+            _vk = pos_key(_v.x, _v.y)
+            if _vn == p_net_id and _vk in _vpp:
+                _vn = n_net_id
+            elif _vn == n_net_id and _vk in _vnn:
+                _vn = p_net_id
+            vias_eff.append((_v, _vn))
+    else:
+        vias_eff = [(_v, _v.net_id) for _v in vias]
     # Foreign tracks (not on either pair net), bucketed by layer for a cheap prefilter.
     foreign_tracks_by_layer = {}
     for o in (getattr(pcb_data, 'segments', None) or []):
@@ -2365,10 +2418,10 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
                 if hit:
                     return ('pad', pad, seg, overlap)
         # vs foreign vias (includes the partner net's escape/underpad vias)
-        for via in vias:
-            if via.net_id == seg.net_id:
+        for via, _vn in vias_eff:
+            if _vn == seg.net_id:
                 continue  # the connector legitimately lands on its own-net via
-            vclr = _obs_clr(via.net_id, seg.layer)
+            vclr = _obs_clr(_vn, seg.layer)
             vm = vclr + seg.width / 2 + via.size / 2
             if (via.x < sxmin - vm or via.x > sxmax + vm or
                     via.y < symin - vm or via.y > symax + vm):
@@ -2431,7 +2484,8 @@ def _pad_obstacle_segments(pad, layer_names):
 
 
 def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_names,
-                                 leg_obstacles=None, endpoints=None, terminal_pads=None):
+                                 leg_obstacles=None, endpoints=None, terminal_pads=None,
+                                 allow_polarity_swap=False):
     """Hybrid coupled middle (last resort): route a clean parallel P/N pair
     straight from the source via-midpoint to the target via-midpoint on the
     open layer -- no escape-direction setback, no connectors, no polarity stage.
@@ -2442,6 +2496,15 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     point-to-point single-ended leg (_route_hybrid_leg), which routes around the
     partner copper -- that is where polarity is resolved, at the pads. Returns a
     complete (fully-connected) route dict, or None if no clean route was found.
+
+    ``allow_polarity_swap`` (#266) lets the 2-terminal hybrid also assemble
+    candidates whose TARGET legs are exchanged (the P leg lands on the N pad and
+    vice versa), returning ``polarity_fixed`` / ``swap_target_pads`` so the caller
+    can run ``apply_polarity_swap``. Pass it True ONLY from a call site that
+    consumes those fields -- a swapped route committed without the pad rename
+    lands each half on the wrong pad. It is additionally gated on the pair's own
+    ``polarity_swap_allowed`` policy (#279, deny-by-default), so it is inert
+    unless the pair was named in --polarity-swap-nets.
     """
     if PoseRouter is None:
         return None
@@ -2460,6 +2523,40 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y = tgt[5], tgt[6], tgt[7], tgt[8]
     csx, csy = (p_src_x + n_src_x) / 2, (p_src_y + n_src_y) / 2
     ctx, cty = (p_tgt_x + n_tgt_x) / 2, (p_tgt_y + n_tgt_y) / 2
+
+    # ---- Polarity (P/N pad) swap support, #266 --------------------------------
+    # A SIDE-FLIPPED pair (the P pad sits on the + side of the directed centerline
+    # at one end and on the - side at the other) cannot be assembled without one
+    # terminal leg wrapping around its partner, whichever offset ribbon is called
+    # P. Exchanging the two TARGET pads' nets removes the flip outright. Resolve
+    # the pads and the copper a pending swap would relabel ONCE here; every use
+    # below is behind `swap_end='tgt'`, so all of this is inert by default.
+    #   Gated three ways: the caller must consume the result (allow_polarity_swap),
+    #   the pair must be permitted a swap by policy (#279), and this must be the
+    #   2-terminal hybrid (terminal_pads is None -- a multipoint leg's swap needs
+    #   source/target end policy and an undo on the rip path, out of scope).
+    swap_pad_p = swap_pad_n = None
+    swap_pos_p = swap_pos_n = None
+    swap_term_pads = swap_pad_nets = None
+    polarity_swap_ok = bool(allow_polarity_swap and terminal_pads is None
+                            and getattr(diff_pair, 'polarity_swap_allowed', False))
+    if polarity_swap_ok:
+        from net_queries import find_pad_nearest_to_position
+        from polarity_swap import find_connected_segment_positions
+        swap_pad_p = find_pad_nearest_to_position(pcb_data, p_net_id, p_tgt_x, p_tgt_y)
+        swap_pad_n = find_pad_nearest_to_position(pcb_data, n_net_id, n_tgt_x, n_tgt_y)
+        polarity_swap_ok = swap_pad_p is not None and swap_pad_n is not None
+    if polarity_swap_ok:
+        # Exactly the positions apply_polarity_swap will relabel, so the gates
+        # below judge the copper as the swap will LEAVE it, not as it is now.
+        swap_pos_p = find_connected_segment_positions(pcb_data, p_tgt_x, p_tgt_y, p_net_id)
+        swap_pos_n = find_connected_segment_positions(pcb_data, n_tgt_x, n_tgt_y, n_net_id)
+        _pbn = getattr(pcb_data, 'pads_by_net', None) or {}
+        swap_term_pads = {
+            p_net_id: [pd for pd in _pbn.get(p_net_id, []) if pd is not swap_pad_p] + [swap_pad_n],
+            n_net_id: [pd for pd in _pbn.get(n_net_id, []) if pd is not swap_pad_n] + [swap_pad_p],
+        }
+        swap_pad_nets = {id(swap_pad_p): n_net_id, id(swap_pad_n): p_net_id}
 
     # Terminal ESCAPE directions (issue #244): the pose A* must launch/arrive at each
     # terminal along the heading the stub/pad actually points, exactly as the standard
@@ -2828,6 +2925,11 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             cost_plus = ((_d2((p_src_x, p_src_y), off_plus[0]) > _d2((p_src_x, p_src_y), off_minus[0])) +
                          (_d2((p_tgt_x, p_tgt_y), off_plus[-1]) > _d2((p_tgt_x, p_tgt_y), off_minus[-1])))
             p_sign = 1 if cost_plus <= 1 else -1
+        # #266: the flip the comment above shrugs off ("costs one crossing either
+        # way"). Name it -- it is the condition a polarity pad swap resolves, and
+        # the condition the summary discloses when no swap was applied.
+        side_flipped = (src_plus is not None and tgt_plus is not None
+                        and src_plus != tgt_plus)
         # ---- Assemble BOTH polarities and keep the cleaner/cheaper legs (#248) --
         # The coupled middle is geometrically identical for either polarity: the two
         # offset ribbons occupy the same copper, only which one is labelled P vs N
@@ -2851,10 +2953,23 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                        if _seg_to_seglist_min_edge(s.start_x, s.start_y, s.end_x, s.end_y,
                                                    s.width, s.layer, ns) < config.clearance - 1e-6)
 
-        def _assemble(pol):
+        def _assemble(pol, swap_end=None):
             """Build the full hybrid (coupled middle + 4 legs) for polarity `pol`.
-            Returns (candidate_dict, None) on success or (None, reject_reason)."""
+            Returns (candidate_dict, None) on success or (None, reject_reason).
+
+            ``swap_end='tgt'`` (#266) assembles the PENDING-POLARITY-SWAP variant:
+            the two target terminals are exchanged, so the P leg lands on the N
+            pad and vice versa, and the three gates that read pad nets
+            (_leg_partner_copper, _connector_grazes_foreign_copper,
+            _hybrid_route_connects) plus the crossing check are told about the
+            swap so they judge the POST-swap assignment -- the same trick
+            _pn_tracks_cross_full already uses for the standard path."""
             ps, ns = pol, -pol
+            # Pending-swap views, all None (=inert) unless swap_end is set.
+            _sw_pp = swap_pos_p if swap_end == 'tgt' else None
+            _sw_nn = swap_pos_n if swap_end == 'tgt' else None
+            _sw_pads = swap_pad_nets if swap_end == 'tgt' else None
+            _conn_pads = swap_term_pads if swap_end == 'tgt' else terminal_pads
             # _process_via_positions mutates the float paths in place, so copy the
             # shared off_plus/off_minus (else the second polarity sees corrupted input).
             p_float = list(off_plus if ps == 1 else off_minus)
@@ -2867,9 +2982,13 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                 n_float, n_net_id, None, None, ns, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True,
                 pcb_data=pcb_data)
             mid_segs = p_segs + n_segs
-            if _pn_tracks_cross_full(mid_segs, pcb_data, p_net_id, n_net_id):
+            if _pn_tracks_cross_full(mid_segs, pcb_data, p_net_id, n_net_id,
+                                     p_swap_positions=_sw_pp, n_swap_positions=_sw_nn):
                 return None, "coupled middle P/N tracks cross"
-            _gz = _connector_grazes_foreign_copper(mid_segs, pcb_data, p_net_id, n_net_id, config)
+            _gz = _connector_grazes_foreign_copper(mid_segs, pcb_data, p_net_id, n_net_id, config,
+                                                   swap_pad_nets=_sw_pads,
+                                                   p_swap_positions=_sw_pp,
+                                                   n_swap_positions=_sw_nn)
             if _gz:
                 return None, "coupled middle " + _graze_reason(_gz)
 
@@ -2889,11 +3008,18 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             # own pair's far-end leg committed too early.
             mid_segs_by_net = {p_net_id: p_segs, n_net_id: n_segs}
             mid_vias_by_net = {p_net_id: p_vias, n_net_id: n_vias}
+            # #266: with a pending target polarity swap, each net's TARGET leg
+            # aims at the PARTNER's target pad; apply_polarity_swap renames the
+            # two pads afterwards, so the copper lands on its own net either way.
+            _p_tgt_term = ((n_tgt_x, n_tgt_y, tgt[4]) if swap_end == 'tgt'
+                           else (p_tgt_x, p_tgt_y, tgt[4]))
+            _n_tgt_term = ((p_tgt_x, p_tgt_y, tgt[4]) if swap_end == 'tgt'
+                           else (n_tgt_x, n_tgt_y, tgt[4]))
             term_by = {
                 (p_net_id, 'src'): ((p_src_x, p_src_y, src[4]), p_float[0]),
-                (p_net_id, 'tgt'): ((p_tgt_x, p_tgt_y, tgt[4]), p_float[-1]),
+                (p_net_id, 'tgt'): (_p_tgt_term, p_float[-1]),
                 (n_net_id, 'src'): ((n_src_x, n_src_y, src[4]), n_float[0]),
-                (n_net_id, 'tgt'): ((n_tgt_x, n_tgt_y, tgt[4]), n_float[-1]),
+                (n_net_id, 'tgt'): (_n_tgt_term, n_float[-1]),
             }
             # Mutable per-net committed leg copper, reset per plan; a leg sees the PARTNER's
             # committed legs as obstacles, never its own.
@@ -2902,11 +3028,23 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             def _leg_partner_copper(net_id):
                 partner = n_net_id if net_id == p_net_id else p_net_id
                 ppads = pads_by_net.get(partner, [])
-                pseg = (mid_segs_by_net[partner] + leg_state['s'][partner]
-                        + [s for s in board_segs if s.net_id == partner]
+                _bsegs = [s for s in board_segs if s.net_id == partner]
+                _pvias = [v for v in pair_vias if v.net_id == partner]
+                if swap_end == 'tgt':
+                    # #266: the partner's target pad -- and the stub copper the
+                    # pending swap relabels onto THIS net -- is exactly where this
+                    # leg has to land. Stamping it as partner copper would block
+                    # every swapped leg against its own destination.
+                    _drop = swap_pad_n if net_id == p_net_id else swap_pad_p
+                    _dpos = (swap_pos_n if net_id == p_net_id else swap_pos_p) or set()
+                    ppads = [pd for pd in ppads if pd is not _drop]
+                    _bsegs = [s for s in _bsegs
+                              if pos_key(s.start_x, s.start_y) not in _dpos
+                              and pos_key(s.end_x, s.end_y) not in _dpos]
+                    _pvias = [v for v in _pvias if pos_key(v.x, v.y) not in _dpos]
+                pseg = (mid_segs_by_net[partner] + leg_state['s'][partner] + _bsegs
                         + [seg for pad in ppads for seg in _pad_obstacle_segments(pad, layer_names)])
-                pvia = ([v for v in pair_vias if v.net_id == partner]
-                        + mid_vias_by_net[partner] + leg_state['v'][partner])
+                pvia = (_pvias + mid_vias_by_net[partner] + leg_state['v'][partner])
                 return pseg, pvia, ppads
             P, N = p_net_id, n_net_id
             leg_plans = [
@@ -3003,12 +3141,16 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                 return None, "terminal legs could not attach to the coupled middle"
             all_segs = mid_segs + leg_segs
             all_vias = p_vias + n_vias + leg_vias
-            if _pn_tracks_cross_full(all_segs, pcb_data, p_net_id, n_net_id):
+            if _pn_tracks_cross_full(all_segs, pcb_data, p_net_id, n_net_id,
+                                     p_swap_positions=_sw_pp, n_swap_positions=_sw_nn):
                 return None, "assembled route P/N tracks cross"
             # Airtight foreign-copper gate (#246): the assembled route (coupled-middle
             # offsets + legs) must not graze/cross a foreign pad, via OR track, or the
             # hybrid emits a DRC short unseen (D3_N offset x D2_N). Reject -> try next layer.
-            _gz2 = _connector_grazes_foreign_copper(all_segs, pcb_data, p_net_id, n_net_id, config)
+            _gz2 = _connector_grazes_foreign_copper(all_segs, pcb_data, p_net_id, n_net_id, config,
+                                                    swap_pad_nets=_sw_pads,
+                                                    p_swap_positions=_sw_pp,
+                                                    n_swap_positions=_sw_nn)
             if _gz2:
                 return None, "assembled route " + _graze_reason(_gz2)
             # Connectivity gate: the hybrid validates crossings/grazes but never that
@@ -3020,7 +3162,8 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             # half isn't fully connected -- then this layer is retried / the pair fails
             # honestly instead of counting as routed.
             if not _hybrid_route_connects(pcb_data, p_net_id, n_net_id, all_segs, all_vias,
-                                          terminal_pads=terminal_pads):
+                                          terminal_pads=_conn_pads,
+                                          p_swap_positions=_sw_pp, n_swap_positions=_sw_nn):
                 return None, "assembled route leaves a terminal unconnected"
             # #444 seam dissolution (KICAD_SEAM_REASK=0 disables): each net's
             # assembled copper is a 3-piece composition (escape -> middle ->
@@ -3099,14 +3242,21 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                                    if v.net_id != _net] + _got[1])
                     if _cur_s is all_segs:
                         continue
-                    if _pn_tracks_cross_full(_cur_s, pcb_data, p_net_id, n_net_id):
+                    if _pn_tracks_cross_full(_cur_s, pcb_data, p_net_id, n_net_id,
+                                             p_swap_positions=_sw_pp,
+                                             n_swap_positions=_sw_nn):
                         continue
                     if _connector_grazes_foreign_copper(_cur_s, pcb_data,
-                                                        p_net_id, n_net_id, config):
+                                                        p_net_id, n_net_id, config,
+                                                        swap_pad_nets=_sw_pads,
+                                                        p_swap_positions=_sw_pp,
+                                                        n_swap_positions=_sw_nn):
                         continue
                     if not _hybrid_route_connects(pcb_data, p_net_id, n_net_id,
                                                   _cur_s, _cur_v,
-                                                  terminal_pads=terminal_pads):
+                                                  terminal_pads=_conn_pads,
+                                                  p_swap_positions=_sw_pp,
+                                                  n_swap_positions=_sw_nn):
                         continue
                     _sc = _joint_score(_cur_s, _cur_v)
                     if _best_joint is None or _sc < _best_joint[0]:
@@ -3137,6 +3287,24 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                 cands.append(_res)
             elif _reject_reason is None:
                 _reject_reason = _why
+        # #266: a side-flipped pair pays a wrap-around leg in EVERY unswapped
+        # polarity, so when the pair is permitted a P/N pad swap, also assemble
+        # the target-swapped variants. They are APPENDED, and the selector below
+        # keeps the first candidate on a tie, so a swap only wins by being the
+        # cleaner/shorter CANDIDATE -- and the list is unchanged when the swap is
+        # not permitted (the #279 default), which is the inertness guarantee.
+        # NOTE the scope of that comparison: it ranks candidates for THIS pair on
+        # THIS layer combination. The pad rename it implies is permanent and
+        # re-shapes the board for every pair routed afterwards, so a per-candidate
+        # win is not a board-level win (glasgow_revC --polarity-swap-nets '*':
+        # 4 pairs swap, 2 shrink, 2 grow, board copper +13.6 mm net). Gate the
+        # flag per pair; do not read it as a free optimization.
+        if polarity_swap_ok and side_flipped:
+            for _pol in (p_sign, -p_sign):
+                _res, _why = _assemble(_pol, swap_end='tgt')
+                if _res is not None:
+                    _res['polarity_swap'] = True
+                    cands.append(_res)
         if not cands:
             _rej(a_layer, b_layer, _reject_reason or "hybrid assembly failed")
             continue
@@ -3161,6 +3329,24 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         _pol_note = "" if best['p_sign'] == p_sign else " [polarity flipped: cleaner/shorter legs]"
         _result = {'new_segments': best['all_segs'], 'new_vias': best['all_vias'],
                    'iterations': best['iters'], 'path_length': len(simplified)}
+        # #266: hand the caller the pad rename this route depends on -- the exact
+        # shape apply_polarity_swap reads (polarity_swap.py). Without these keys
+        # the hybrid could never produce a physical swap, which is the bug.
+        if best.get('polarity_swap'):
+            _result['polarity_fixed'] = True
+            _result['swap_target_pads'] = {
+                'p_pos': (p_tgt_x, p_tgt_y),   # P target stub/pad position
+                'n_pos': (n_tgt_x, n_tgt_y),   # N target stub/pad position
+                'p_net_id': p_net_id,
+                'n_net_id': n_net_id,
+            }
+            _pol_note += " [polarity pad swap at target]"
+        elif side_flipped:
+            # Disclosure: the pair genuinely needs a P/N swap to avoid a
+            # wrap-around leg and did not get one (policy denied it, the caller
+            # cannot consume one, or no swap candidate survived the gates).
+            _result['polarity_flip_unswapped'] = True
+            _pol_note += " [side-flipped: a leg wraps; no P/N pad swap applied]"
         _msg = (f"  DIRECT HYBRID: coupled middle on {_mid_desc} + "
                 f"{len(leg_segs)} leg seg(s) ({best['iters']} iters){_pol_note}")
         # #269: reject a coupled middle that self-grazes (its own P/N pinch below
@@ -3188,7 +3374,8 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
 
 
 def _hybrid_route_connects(pcb_data, p_net_id, n_net_id, new_segs, new_vias,
-                           terminal_pads=None) -> bool:
+                           terminal_pads=None,
+                           p_swap_positions=None, n_swap_positions=None) -> bool:
     """True only if BOTH halves of the pair connect terminal-to-terminal with the
     new hybrid copper added to the pair's existing (fanout-stub) copper. Used to
     reject a hybrid route that left a terminal orphaned (#215).
@@ -3200,16 +3387,36 @@ def _hybrid_route_connects(pcb_data, p_net_id, n_net_id, new_segs, new_vias,
     check would wrongly fail because those aren't connected yet (HDMI TMDS on
     fpga_sdram: the U1<->J3 leg coupled fine but the deferred J3->U7 ESD tap left
     U7 'unconnected', rejecting the good coupled leg). When None (the 2-terminal
-    hybrid) the whole net IS the leg, so all pads are checked as before."""
+    hybrid) the whole net IS the leg, so all pads are checked as before.
+
+    ``p_swap_positions`` / ``n_swap_positions`` (#266) mirror
+    ``_pn_tracks_cross_full``: EXISTING board copper touching those positions is
+    counted for the net a pending polarity swap will move it to, so a swapped
+    route is graded on the connectivity it will actually have. The caller pairs
+    them with an already-swapped ``terminal_pads``."""
     from check_connected import check_net_connectivity
     board_segs = getattr(pcb_data, 'segments', None) or []
     board_vias = getattr(pcb_data, 'vias', None) or []
     pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
+    _pp = p_swap_positions or set()
+    _nn = n_swap_positions or set()
+
+    def _eff(net_id, *keys):
+        """Net this piece of EXISTING copper carries once the pending swap lands."""
+        if net_id == p_net_id and any(k in _pp for k in keys):
+            return n_net_id
+        if net_id == n_net_id and any(k in _nn for k in keys):
+            return p_net_id
+        return net_id
     for nid in (p_net_id, n_net_id):
         pads = (terminal_pads.get(nid, []) if terminal_pads is not None
                 else pads_by_net.get(nid, []))
-        segs = [s for s in board_segs if s.net_id == nid] + [s for s in new_segs if s.net_id == nid]
-        vias = [v for v in board_vias if v.net_id == nid] + [v for v in new_vias if v.net_id == nid]
+        segs = ([s for s in board_segs
+                 if _eff(s.net_id, pos_key(s.start_x, s.start_y),
+                         pos_key(s.end_x, s.end_y)) == nid]
+                + [s for s in new_segs if s.net_id == nid])
+        vias = ([v for v in board_vias if _eff(v.net_id, pos_key(v.x, v.y)) == nid]
+                + [v for v in new_vias if v.net_id == nid])
         r = check_net_connectivity(nid, segs, vias, pads)
         if not r.get('connected') or r.get('disconnected_pads'):
             return False

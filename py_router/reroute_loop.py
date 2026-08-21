@@ -1088,6 +1088,16 @@ def run_reroute_loop(
                     if hyb and not hyb.get('failed'):
                         print(f"  {GREEN}HYBRID ESCAPE (reroute): direct coupled middle "
                               f"+ point-to-point terminal legs{RESET}")
+                        if hyb.get('polarity_flip_unswapped'):
+                            # #266 disclosure: side-flipped, one leg wraps, no P/N
+                            # pad swap applied. This site does not opt in to
+                            # allow_polarity_swap (it would have to undo the swap
+                            # on the next rip), but the pair must still be NAMED --
+                            # on a real board this is where MOST of the
+                            # "[side-flipped ...]" console lines come from, and
+                            # dropping the key here left the machine-readable
+                            # summary saying none.
+                            state.polarity_flip_unswapped_pairs.add(ripped_pair_name)
                         results.append(hyb)
                         successful += 1
                         total_iterations += hyb.get('iterations', 0)
