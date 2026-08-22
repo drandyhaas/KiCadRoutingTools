@@ -205,8 +205,11 @@ def test_no_new_test_depends_on_an_untracked_wk_board():
     fresh-clone problem the file exists to prevent.
     """
     here = os.path.dirname(os.path.abspath(__file__))
+    # Recursive: tests/stress/ and tests/gui_parity/ can grow one too. All of
+    # today's are in tests/ itself, so the baseline below is keyed on basename.
     found = {}
-    for path in sorted(glob.glob(os.path.join(here, 'test_*.py'))):
+    for path in sorted(glob.glob(os.path.join(here, '**', 'test_*.py'),
+                                 recursive=True)):
         try:
             with open(path, encoding='utf-8', errors='replace') as fh:
                 tree = ast.parse(fh.read())
