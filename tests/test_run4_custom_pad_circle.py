@@ -3,12 +3,28 @@
 Run 3's DRC verifier lens found a 0.0884mm-vs-0.09 track-to-pad graze that
 kicad-cli flagged and check_drc missed: the pad's copper is a gr_circle
 PRIMITIVE, and the fixed inscribed 32-gon under-reached the true circle by
-~2.4um at r=0.5 -- more than the 1.6um defect. The primitive path now uses
-adaptive tessellation (1um sagitta, capped 64 vertices).
+~2.4um at r=0.5 -- more than the 1.6um defect. Run-4 B6 moved the primitive
+path to adaptive tessellation (1um sagitta, capped 64 vertices); that change
+has since been REVERTED -- see below, which is what this file now pins.
 
 Both directions are pinned: a real sub-floor gap is flagged, and a gap
 safely above the floor is NOT (the polygon stays inscribed, so tightening
 it cannot manufacture phantom violations).
+
+THE ADAPTIVE TESSELLATION WAS REVERTED in 6166a98b ("revert six
+placement-only routing changes that lose to main on the corpus"): the parser
+is back to a fixed inscribed 32-gon, because the adaptive version moved
+obstacle geometry AND DRC grading together on every board with
+circle-primitive custom pads -- a baseline shift no re-grade can separate
+(measured: real DRC 71 -> 49 across 73 boards). `_adaptive_circle_n` is
+RETAINED but WIRED TO NOTHING, per that commit's "restore if the accuracy is
+wanted, but land it as a deliberate, measured baseline change".
+
+So this file pins the SHIPPED geometry, not the reverted one: the 32-gon's
+vertex count and inscribed-ness, and the consequence on the run-3 board --
+the graze is masked at the 0.09 floor and reappears once the floor clears the
+sagitta. Restoring the adaptive path fails these, which is the point: it
+should be a decision, not a drift.
 """
 
 import math
@@ -82,6 +98,13 @@ class TestAdaptivePrimitiveCircle(unittest.TestCase):
                            '--max-print', '0')
 
     def test_sub_floor_gap_is_flagged(self):
+        # NOTE: this pair covers check_drc's custom-pad path, NOT tessellation.
+        # board_with_gap puts the rect due EAST of the circle centre, and the
+        # polygon's vertex k=0 sits at angle 0 -- exactly the true rightmost
+        # point (measured: max_x is 50.500000 at N=32). So the measured gap
+        # equals the true gap for any N and both directions pass whatever the
+        # tessellation does. The vertex count is pinned directly in
+        # TestShippedTessellation below.
         # The run-3 geometry: true gap 0.0884 vs floor 0.09 (1.6um short).
         r = self._drc_at(0.0884)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
@@ -89,12 +112,16 @@ class TestAdaptivePrimitiveCircle(unittest.TestCase):
 
     def test_above_floor_gap_stays_clean(self):
         # Inscribed polygons cannot manufacture phantom grazes: 6um of margin
-        # is far above the 1um sagitta budget.
+        # is far above the shipped 32-gon's 2.4um sagitta at r=0.5.
         r = self._drc_at(0.096)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn('NO DRC VIOLATIONS', r.stdout)
 
-    def test_polygon_radial_error_budget(self):
+    def test_retained_adaptive_helper_still_computes_its_budget(self):
+        """`_adaptive_circle_n` is dead code since 6166a98b -- retained on
+        purpose, called by nothing (asserted in TestShippedTessellation). Its
+        arithmetic is kept under test so restoring it stays a one-line change
+        to a working helper rather than a rewrite."""
         from kicad_parser import _adaptive_circle_n
         # 1um sagitta wherever the 64-vertex cap does not bite (r <= ~0.9)...
         for r in (0.2, 0.5, 0.8):
@@ -108,17 +135,77 @@ class TestAdaptivePrimitiveCircle(unittest.TestCase):
         self.assertLessEqual(s1, 0.0013)
 
 
+class TestShippedTessellation(unittest.TestCase):
+    """The fixed 32-gon 6166a98b went back to, pinned where it is decided."""
+
+    PAD_TEXT = ('(pad "1" smd custom (at 0 0) (size 0.1 0.1) (layers "F.Cu")'
+                ' (net 1 "A")\n'
+                '  (options (clearance outline) (anchor circle))\n'
+                '  (primitives (gr_circle (center 0 0) (end 0.45 0)'
+                ' (width 0.1) (fill yes))))')
+
+    def _outer(self):
+        from kicad_parser import _custom_pad_global_polygons
+        polys = _custom_pad_global_polygons(self.PAD_TEXT, 50.0, 50.0, 0.0)
+        return max(polys, key=len)
+
+    def test_circle_primitive_is_a_fixed_32gon(self):
+        self.assertEqual(len(self._outer()), 32,
+                         'the parser must use the fixed inscribed 32-gon '
+                         'restored by 6166a98b, not the adaptive count')
+
+    def test_the_polygon_is_inscribed(self):
+        """Inscribed = never outside the true copper, so the model can only
+        UNDER-report a graze, never manufacture one."""
+        r_max = max(math.hypot(x - 50.0, y - 50.0) for x, y in self._outer())
+        self.assertLessEqual(r_max, 0.5 + 1e-9, 'polygon escapes the circle')
+        self.assertAlmostEqual(r_max, 0.5, places=6,
+                               msg='vertices must sit ON the circle')
+
+    def test_the_adaptive_helper_is_wired_to_nothing(self):
+        """The revert is only real if nothing calls it."""
+        with open(os.path.join(ROOT, 'py_router', 'kicad_parser.py'),
+                  encoding='utf-8') as f:
+            src = f.read()
+        calls = (src.count('_adaptive_circle_n(')
+                 - src.count('def _adaptive_circle_n('))
+        self.assertEqual(calls, 0,
+                         'kicad_parser calls _adaptive_circle_n again -- that '
+                         'reverses 6166a98b and shifts DRC grading on every '
+                         'circle-primitive board; update this file first')
+
+
 class TestRun3ArchivedBoard(unittest.TestCase):
-    def test_the_shipped_graze_is_now_visible(self):
-        """wk/run3/final2.kicad_pcb is the archived pre-fix board carrying the
-        /ICE_CDONE-vs-JP2.2 0.0884mm graze only kicad-cli saw. It is the
-        regression artifact: check_drc at margin 0 must now report it."""
+    """wk/run3/final2.kicad_pcb is the archived pre-fix board carrying the
+    /ICE_CDONE-vs-JP2.2 0.0884mm graze only kicad-cli saw."""
+
+    def test_the_graze_is_masked_at_the_floor_and_visible_above_it(self):
+        """The defect is still in the copper; the 32-gon cannot see it at 0.09.
+
+        Measured: the true gap is 0.0884 (0.0016 short of the floor) and the
+        32-gon's sagitta at r=0.5 is 0.002408 -- LARGER than the shortfall, so
+        the modelled gap lands at 0.0908 and grades clean. Raise the floor past
+        the sagitta and the same pair reappears.
+
+        This arm asserted exit 1 at 0.09, which was true while the adaptive
+        tessellation shipped. It is re-pinned rather than skipped, so it still
+        fails if either the tessellation or check_drc moves."""
         if not os.path.exists(RUN3_BOARD):
             self.skipTest('run-3 archive board not present')
-        r = run_drc(RUN3_BOARD, '-c', '0.09', '--clearance-margin', '0',
-                    '--max-print', '0')
-        self.assertEqual(r.returncode, 1, r.stdout[-800:])
-        self.assertRegex(r.stdout, r'ICE_CDONE.*SWDIO|SWDIO.*ICE_CDONE')
+        masked = run_drc(RUN3_BOARD, '-c', '0.09', '--clearance-margin', '0',
+                         '--max-print', '0')
+        self.assertEqual(masked.returncode, 0, masked.stdout[-800:])
+        self.assertIn('NO DRC VIOLATIONS', masked.stdout)
+
+        sagitta = 0.5 * (1 - math.cos(math.pi / 32))
+        self.assertGreater(sagitta, 0.09 - 0.0884,
+                           'the masking claim only holds while the sagitta '
+                           'exceeds the shortfall')
+
+        seen = run_drc(RUN3_BOARD, '-c', '0.095', '--clearance-margin', '0',
+                       '--max-print', '0')
+        self.assertEqual(seen.returncode, 1, seen.stdout[-800:])
+        self.assertRegex(seen.stdout, r'ICE_CDONE.*SWDIO|SWDIO.*ICE_CDONE')
 
 
 if __name__ == '__main__':

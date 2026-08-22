@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A net whose NAME starts with '-' must not cost a lap (run 14).
+r"""A net whose NAME starts with '-' must not cost a lap (run 14).
 
 castor_pollux has a net called `-12V`. `route.py --nets ... -12V ...` is
 `nargs='+'`, so argparse read the name as a flag:
@@ -15,6 +15,14 @@ tools share the shape.
 `ArgumentParser.error` once so the hint appears wherever it happens. These tests
 pin that the hint fires, that it does not fire on unrelated errors, that it never
 masks the real error, and that the workaround it recommends actually works.
+
+SINCE #597 (55632d91) THE HINT IS INERT THROUGH THE SHIPPED CLIs, BY DESIGN.
+`cli_nets.pin_dash_digit_values` replaces argparse's negative-number matcher
+with `^-\d` at every net-accepting tool's parse_args, so `--nets ... -12V` is
+read as a VALUE and never reaches `error()` at all. The hint remains the
+backstop for a parser that has NOT been pinned -- which is what the unit tests
+below build -- so both halves are still real: the unit tests pin the hint, and
+the CLI test pins #597's promise that route.py no longer needs it.
 """
 import argparse
 import io
@@ -22,6 +30,7 @@ import contextlib
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -105,14 +114,28 @@ class DashHintCliTest(unittest.TestCase):
                                os.path.join(ROOT, 'py_router', 'route.py')] + args,
                               capture_output=True, text=True, timeout=600)
 
-    @unittest.skipIf(_HINT_NOT_PROVOCABLE, _SKIP_REASON)
-    def test_route_py_emits_the_hint_and_still_exits_2(self):
-        r = self._run([BOARD, os.path.join(ROOT, '_no_such_out.kicad_pcb'),
-                       '--nets', '+12V', '-12V'])
-        self.assertEqual(r.returncode, 2)
+    def test_route_py_takes_the_bare_dash_net_since_597(self):
+        """The BARE form -- `--nets +12V -12V`, no `=` -- now parses.
+
+        This arm used to assert the opposite (exit 2, 'unrecognized
+        arguments', hint present), which was correct when it was written:
+        `git merge-base --is-ancestor 55632d91 4b4098a0` is false, so #597 and
+        this test were developed on parallel branches and each passed alone.
+        Merging both made the assertion describe a route.py that no longer
+        exists. It is inverted here rather than skipped, so it still fails if
+        the pin at route.py's parse_args is ever dropped.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            r = self._run([BOARD, os.path.join(td, 'out.kicad_pcb'),
+                           '--nets', '+12V', '-12V', '--skip-routing'])
         both = r.stdout + r.stderr
-        self.assertIn('--nets=-12V', both)
-        self.assertIn('unrecognized arguments', both)
+        self.assertNotIn('unrecognized arguments', both,
+                         'the #597 pin must keep argparse from reading a '
+                         'dash-named net as an option: ' + both[-300:])
+        self.assertNotIn('begins with', both,
+                         'and the hint must stay silent when nothing failed')
+        self.assertIn('-12V', both,
+                      'the net name must reach the tool as a VALUE')
 
     def test_the_recommended_form_parses(self):
         """The hint must recommend something that actually works.
@@ -123,8 +146,9 @@ class DashHintCliTest(unittest.TestCase):
         argparse -- which is the whole claim. Checking the code alone would
         confuse two different exit 2s.
         """
-        r = self._run([BOARD, os.path.join(ROOT, '_no_such_out.kicad_pcb'),
-                       '--nets=-12V', '--skip-routing'])
+        with tempfile.TemporaryDirectory() as td:
+            r = self._run([BOARD, os.path.join(td, 'out.kicad_pcb'),
+                           '--nets=-12V', '--skip-routing'])
         both = r.stdout + r.stderr
         self.assertNotIn('unrecognized arguments', both,
                          'the documented workaround must not be an argparse '

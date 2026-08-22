@@ -7,15 +7,21 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+from run_utils import tool as _tool, tool_env as _tool_env  # #522: resolve a moved CLI, loudly
 
 POUR = os.path.join(ROOT, 'wk', 'run5', 's1_pour.kicad_pcb')
 
 
 def _run(script, *argv):
-    env = dict(os.environ, PYTHONPATH=ROOT, PYTHONIOENCODING='utf-8',
-               KRT_NO_BANNER='1')
+    # `_tool` resolves the #522 reorg (these CLIs live in py_router/ now) and
+    # RAISES when a tool is missing. Spawning os.path.join(ROOT, script)
+    # directly made python exit 2 with "can't open file" on stderr and an
+    # EMPTY stdout, so every assertIn below failed with a bare message that
+    # read like a product bug. `_tool_env` is the sibling fix: PYTHONPATH=ROOT
+    # alone can no longer import kicad_parser/startup_checks.
+    env = dict(_tool_env(), PYTHONIOENCODING='utf-8', KRT_NO_BANNER='1')
     return subprocess.run(
-        [sys.executable, '-X', 'utf8', os.path.join(ROOT, script), *argv],
+        [sys.executable, '-X', 'utf8', _tool(script), *argv],
         capture_output=True, text=True, env=env, cwd=ROOT)
 
 
@@ -25,8 +31,11 @@ class TestQfnAutoDetect(unittest.TestCase):
         fallback classifies QFN) over the 64-pin U3."""
         if not os.path.exists(POUR):
             self.skipTest('run-5 chain board not present')
-        r = _run('qfn_fanout.py', POUR, '-o', os.devnull,
-                 '--clearance', '0.09', '--width', '0.127')
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            r = _run('qfn_fanout.py', POUR, '-o',
+                     os.path.join(td, 'x.kicad_pcb'),
+                     '--clearance', '0.09', '--width', '0.127')
         self.assertIn('Auto-detected QFN/QFP component: U3', r.stdout)
 
 

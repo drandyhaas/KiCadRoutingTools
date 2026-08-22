@@ -19,6 +19,8 @@ Two invariants, both of which were violated:
    suite left modified tracked files in the working tree.
 """
 
+import ast
+import glob
 import os
 import re
 import subprocess
@@ -140,6 +142,100 @@ def test_no_test_reads_an_untracked_board_directly():
     print("  PASS: no test reads an untracked kicad_files/ board directly")
 
 
+#: Test FILES that read a board out of gitignored `wk/` (issue #718).
+#:
+#: This is a RATCHET, not an approval list. `wk/` is work output -- every board
+#: under it is untracked, so on any machine but the one that produced it these
+#: tests `skipTest` and their file still exits 0: green while covering nothing.
+#: That is how #718 item 3 hid. It was found only because this machine happened
+#: to still have `wk/run3/final2.kicad_pcb`; #716's baseline, on a machine that
+#: did not, reported the file as passing.
+#:
+#: The list may only SHRINK. Adding a new file fails the gate; clearing one and
+#: forgetting to delete its entry fails it too, so the census cannot go stale.
+#: Clearing an entry means a `tests/fixture_boards.py` recipe rooted in a
+#: tracked board, or repointing at a tracked board outright.
+_WK_BOARD_CONSUMERS = {
+    'test_outline_prefilter.py',
+    'test_part_class.py',
+    'test_place_reconstruct.py',
+    'test_placement_pad_legality.py',
+    'test_run4_custom_pad_circle.py',
+    'test_run4_reconstruct.py',
+    'test_run5_emit_guard.py',
+    'test_run5_exchange.py',
+    'test_run6_backlog.py',
+    'test_run6_body_overlap.py',
+    'test_run6_check_assembly.py',
+    'test_run7_vectors.py',
+    'test_run8_airwire_refuted.py',
+    'test_run8_oob_outline.py',
+    'test_run8_rigid_consistency.py',
+}
+
+
+def _reads_a_wk_board(tree):
+    """Line numbers of `os.path.join(..., 'wk', ..., '*.kicad_pcb')` calls.
+
+    AST rather than regex: these paths are built as multi-segment joins
+    (`join(ROOT, 'wk', 'run5', 's1_pour.kicad_pcb')`, and one via
+    `join(dirname(__file__), '..', 'wk', ...)`), which no single literal
+    pattern catches. Anchored on the 'wk' segment plus a .kicad_pcb segment, so
+    a test writing its own board into a tempdir is not swept in.
+    """
+    hits = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'join'):
+            continue
+        lits = [a.value for a in node.args
+                if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+        if 'wk' in lits and any(l.endswith('.kicad_pcb') for l in lits):
+            hits.append(node.lineno)
+    return hits
+
+
+def test_no_new_test_depends_on_an_untracked_wk_board():
+    """The cousin of the kicad_files/ scan above, for `wk/`.
+
+    That scan (test_no_test_reads_an_untracked_board_directly) matches only
+    'kicad_files/x.kicad_pcb', so a board read out of `wk/` was invisible to
+    it -- and `wk/` is gitignored in its entirety, so EVERY such read has the
+    fresh-clone problem the file exists to prevent.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    found = {}
+    for path in sorted(glob.glob(os.path.join(here, 'test_*.py'))):
+        try:
+            with open(path, encoding='utf-8', errors='replace') as fh:
+                tree = ast.parse(fh.read())
+        except SyntaxError:
+            continue
+        hits = _reads_a_wk_board(tree)
+        if hits:
+            found[os.path.basename(path)] = hits
+
+    added = sorted(set(found) - _WK_BOARD_CONSUMERS)
+    assert not added, (
+        "new test(s) reading a board out of gitignored wk/:\n  "
+        + "\n  ".join('%s (line %s)' % (f, ', '.join(map(str, found[f])))
+                      for f in added)
+        + "\nOn any machine without that work output the test skips and the "
+          "file still exits 0 -- green while covering nothing. Add a recipe to "
+          "tests/fixture_boards.py rooted in a TRACKED board and call ensure(), "
+          "or use a tracked board.")
+
+    cleared = sorted(_WK_BOARD_CONSUMERS - set(found))
+    assert not cleared, (
+        "these no longer read a wk/ board -- delete them from "
+        "_WK_BOARD_CONSUMERS so the census stays true:\n  "
+        + "\n  ".join(cleared))
+
+    print("  PASS: %d known wk/-dependent test file(s), none new"
+          % len(found))
+
+
 def test_fixtures_build_from_a_clean_state():
     """End to end: every fixture is producible right now."""
     for name in _RECIPES:
@@ -167,9 +263,30 @@ TESTS = [
     test_no_tracked_project_file_without_its_board,
     test_consumers_do_not_silently_skip_a_missing_fixture,
     test_no_test_reads_an_untracked_board_directly,
+    test_no_new_test_depends_on_an_untracked_wk_board,
     test_fixtures_build_from_a_clean_state,
     test_building_a_fixture_leaves_no_tracked_file_modified,
 ]
+
+
+def test_every_test_in_this_file_is_registered():
+    """TESTS is hand-maintained, so a new test here runs only if someone
+    remembers to list it -- and a test that never runs is indistinguishable
+    from one that passes. (Added after writing
+    test_no_new_test_depends_on_an_untracked_wk_board and watching it not run.)
+    """
+    listed = ({t.__name__ for t in TESTS}
+              | {'test_every_test_in_this_file_is_registered'})
+    defined = {k for k, v in sorted(globals().items())
+               if k.startswith('test_') and callable(v)}
+    missing = sorted(defined - listed)
+    assert not missing, (
+        "test(s) defined in this file but absent from TESTS, so they "
+        "never run:\n  " + "\n  ".join(missing))
+    print(f"  PASS: all {len(defined)} test functions are registered")
+
+
+TESTS.append(test_every_test_in_this_file_is_registered)
 
 
 if __name__ == '__main__':

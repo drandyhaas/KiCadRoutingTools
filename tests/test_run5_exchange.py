@@ -18,6 +18,8 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
 sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # placement split
+from run_utils import tool as _tool, tool_env as _tool_env  # #522: resolve a moved CLI, loudly
+
 SWAP = os.path.join(ROOT, 'wk', 'b2', 'tigard__swap', 'd0',
                     'perturbed.kicad_pcb')
 HEALTHY = os.path.join(ROOT, 'kicad_files', 'tigard.kicad_pcb')
@@ -30,10 +32,15 @@ def _state(board):
 
 
 def _run(script, *argv):
-    env = dict(os.environ, PYTHONPATH=ROOT, PYTHONIOENCODING='utf-8',
-               KRT_NO_BANNER='1')
+    # `_tool` resolves the a241b5ac split (check_floorplan.py -> py_tools/,
+    # place_reconstruct.py -> py_placer/) and RAISES when a tool is missing.
+    # Spawning os.path.join(ROOT, script) directly made python exit 2 with
+    # "can't open file" -- read here as a tool exit code, so the end-to-end
+    # body below never ran at all. `_tool_env` is the sibling fix: a child
+    # launched with PYTHONPATH=ROOT alone can no longer import kicad_parser.
+    env = dict(_tool_env(), PYTHONIOENCODING='utf-8', KRT_NO_BANNER='1')
     return subprocess.run(
-        [sys.executable, '-X', 'utf8', os.path.join(ROOT, script), *argv],
+        [sys.executable, '-X', 'utf8', _tool(script), *argv],
         capture_output=True, text=True, env=env, cwd=ROOT)
 
 

@@ -82,7 +82,8 @@ def sweep_reconstruct(board, workdir):
     """place_reconstruct --dry-run: proposals and would-move must both be empty."""
     out = os.path.join(workdir, 'out.kicad_pcb')
     argv = [sys.executable, '-X', 'utf8',
-            os.path.join(ROOT, 'place_reconstruct.py'), board, out, '--dry-run']
+            os.path.join(ROOT, 'py_placer', 'place_reconstruct.py'),
+            board, out, '--dry-run']
     proc = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
                           errors='replace', cwd=ROOT, timeout=TIMEOUT_S)
     rep = _summary(proc.stdout or '')
@@ -133,7 +134,8 @@ def sweep_repair(board, workdir):
     """
     intent = os.path.join(workdir, 'intent.json')
     emit = subprocess.run(
-        [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'check_floorplan.py'),
+        [sys.executable, '-X', 'utf8',
+         os.path.join(ROOT, 'py_tools', 'check_floorplan.py'),
          board, '--emit-intent', intent],
         capture_output=True, text=True, encoding='utf-8', errors='replace',
         cwd=ROOT, timeout=TIMEOUT_S)
@@ -143,7 +145,8 @@ def sweep_repair(board, workdir):
             None, f'emit-intent rc={emit.returncode} '
                   + (emit.stderr or '')[-140:])
     out = os.path.join(workdir, 'rep.kicad_pcb')
-    argv = [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'place_seed.py'),
+    argv = [sys.executable, '-X', 'utf8',
+            os.path.join(ROOT, 'py_placer', 'place_seed.py'),
             board, out, '--intent', intent, '--repair', '--dry-run']
     proc = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
                           errors='replace', cwd=ROOT, timeout=TIMEOUT_S)
