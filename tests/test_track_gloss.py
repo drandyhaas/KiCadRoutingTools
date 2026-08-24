@@ -260,7 +260,7 @@ def test_native_connection_expansion_stops_at_junction():
     assert expanded == {"seed"}
 
 
-def test_mid_track_t_junction_is_a_fixed_gloss_termination():
+def test_mid_track_t_junction_is_a_sliding_gloss_termination():
     points = [(0, 0), (1, 0), (1, 1), (2, 1),
               (3, 1), (3, 0), (4, 0)]
     selected = [Segment(a[0], a[1], b[0], b[1], 0.2, 0, 1, f"t{i}")
@@ -276,8 +276,9 @@ def test_mid_track_t_junction_is_a_fixed_gloss_termination():
         model, eligible, min_gain=0.01, span_strategy="global", clearance=0.0)
 
     assert result.changed
-    assert any((2, 1) in (addition.start, addition.end)
-               for addition in result.additions)
+    assert any(abs(point[0] - 2) < 1e-9
+               for addition in result.additions
+               for point in (addition.start, addition.end))
     assert "through" not in result.remove_keys
 
 
@@ -298,9 +299,42 @@ def test_connection_between_two_through_tracks_glosses_between_terminations():
     assert result.changed
     surviving = [segment for segment in selected
                  if segment_key(segment) not in result.remove_keys]
-    final_points = {(segment.start_x, segment.start_y) for segment in surviving}
-    final_points.update((segment.end_x, segment.end_y) for segment in surviving)
-    final_points.update(point for addition in result.additions
-                        for point in (addition.start, addition.end))
-    assert {(0, 0), (3, 2)} <= final_points
+    final_segments = [((segment.start_x, segment.start_y),
+                       (segment.end_x, segment.end_y)) for segment in surviving]
+    final_segments.extend((addition.start, addition.end)
+                          for addition in result.additions)
+    assert any(abs(point[0]) < 1e-9 for segment in final_segments for point in segment)
+    assert any(abs(point[0] - 3) < 1e-9 for segment in final_segments for point in segment)
     assert not ({"left-through", "right-through"} & set(result.remove_keys))
+
+
+def test_single_branch_endpoint_slides_to_shortest_track_contact():
+    selected = [
+        Segment(0, 0, 2, 0, 0.2, 0, 1, "s0"),
+        Segment(2, 0, 3, 1, 0.2, 0, 1, "s1"),
+        Segment(3, 1, 4, 1, 0.2, 0, 1, "s2"),
+    ]
+    through = Segment(4, -2, 4, 3, 0.2, 0, 1, "through")
+    model = BoardModel(selected + [through])
+    eligible = {segment_key(segment) for segment in selected}
+    result = smooth_selected_chains(
+        model, eligible, min_gain=0.01, span_strategy="global", clearance=0.0)
+
+    assert result.changed
+    assert set(result.remove_keys) == eligible
+    assert len(result.additions) == 1
+    assert {result.additions[0].start, result.additions[0].end} == {(0, 0), (4, 0)}
+    assert result.saved_mm > 0.4
+
+
+def test_one_segment_can_shorten_by_sliding_its_t_contact():
+    branch = Segment(0, 0, 4, 1, 0.2, 0, 1, "branch")
+    through = Segment(4, -2, 4, 3, 0.2, 0, 1, "through")
+    model = BoardModel([branch, through])
+    result = smooth_selected_chains(
+        model, {"branch"}, min_gain=0.01, span_strategy="global", clearance=0.0)
+
+    assert result.remove_keys == ["branch"]
+    assert len(result.additions) == 1
+    assert {result.additions[0].start, result.additions[0].end} == {(0, 0), (4, 0)}
+    assert result.saved_mm > 0.1

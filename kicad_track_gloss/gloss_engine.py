@@ -25,31 +25,87 @@ def _vertex(x, y):
     return round(x, 6), round(y, 6)
 
 
-def find_track_terminal_vertices(model, eligible_segment_keys, tolerance=1e-5):
+def find_track_terminal_targets(model, eligible_segment_keys, tolerance=1e-5):
     """Find selected vertices electrically terminating on immutable tracks.
 
     KiCad permits a track endpoint to land on the middle of another track
-    without splitting the through-track object. Such a T contact must remain a
-    fixed chain anchor even though it is absent from endpoint incidence counts.
+    without splitting the through-track object. The vertex is a chain boundary,
+    but its contact point may slide along the immutable through-track.
     """
     eligible = {str(key) for key in eligible_segment_keys}
     immutable = [segment for segment in model.segments
                  if segment_key(segment) not in eligible]
-    terminals = set()
+    targets = defaultdict(list)
     for segment in model.segments:
         if segment_key(segment) not in eligible:
             continue
         for point in ((segment.start_x, segment.start_y),
                       (segment.end_x, segment.end_y)):
+            terminal = (segment.net_id, segment.layer, _vertex(*point))
             for other in immutable:
-                if other.net_id != segment.net_id or other.layer != segment.layer:
+                if (other.net_id != segment.net_id or other.layer != segment.layer or
+                        other.arc):
                     continue
                 if point_segment_distance(
                         point, (other.start_x, other.start_y),
                         (other.end_x, other.end_y)) <= tolerance:
-                    terminals.add((segment.net_id, segment.layer, _vertex(*point)))
-                    break
-    return terminals
+                    targets[terminal].append(other)
+    return {terminal: tuple(sorted(found, key=segment_key))
+            for terminal, found in targets.items()}
+
+
+def find_track_terminal_vertices(model, eligible_segment_keys, tolerance=1e-5):
+    return set(find_track_terminal_targets(
+        model, eligible_segment_keys, tolerance))
+
+
+def _project_to_segment(point, segment):
+    a = (segment.start_x, segment.start_y)
+    b = (segment.end_x, segment.end_y)
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    denominator = dx * dx + dy * dy
+    if denominator <= 1e-18:
+        return a
+    t = ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / denominator
+    t = max(0.0, min(1.0, t))
+    return _vertex(a[0] + t * dx, a[1] + t * dy)
+
+
+def _sliding_contact_points(reference, original, targets):
+    """Return deterministic octolinear-critical contacts on target tracks."""
+    contacts = {_vertex(*original)}
+    directions = ((1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0))
+    for target in targets:
+        a = (target.start_x, target.start_y)
+        b = (target.end_x, target.end_y)
+        contacts.update((_vertex(*a), _vertex(*b), _project_to_segment(reference, target)))
+        wx, wy = b[0] - a[0], b[1] - a[1]
+        for vx, vy in directions:
+            denominator = vx * wy - vy * wx
+            if abs(denominator) <= 1e-12:
+                continue
+            cx, cy = a[0] - reference[0], a[1] - reference[1]
+            t = (cx * vy - cy * vx) / denominator
+            if -1e-9 <= t <= 1.0 + 1e-9:
+                contacts.add(_vertex(a[0] + t * wx, a[1] + t * wy))
+    return sorted(contacts)
+
+
+def _movable_endpoint_pairs(start, end, start_targets, end_targets):
+    starts = (_sliding_contact_points(end, start, start_targets)
+              if start_targets else [start])
+    ends = (_sliding_contact_points(start, end, end_targets)
+            if end_targets else [end])
+    if start_targets and end_targets:
+        initial_starts, initial_ends = list(starts), list(ends)
+        starts = sorted(set(starts).union(
+            point for candidate_end in initial_ends
+            for point in _sliding_contact_points(candidate_end, start, start_targets)))
+        ends = sorted(set(ends).union(
+            point for candidate_start in initial_starts
+            for point in _sliding_contact_points(candidate_start, end, end_targets)))
+    return ((candidate_start, candidate_end)
+            for candidate_start in starts for candidate_end in ends)
 
 
 def _path_clear(model, path, moving, replaced_keys, clearance):
@@ -112,7 +168,7 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
     for o in model.obstacles:
         if o.net_id > 0:
             obstacle_vertices[o.net_id].add(_vertex(o.x, o.y))
-    track_terminals = find_track_terminal_vertices(model, eligible)
+    track_terminal_targets = find_track_terminal_targets(model, eligible)
 
     groups = defaultdict(list)
     for s in model.segments:
@@ -130,7 +186,7 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
         def interior(v):
             return (len(adjacency[v]) == 2 and all_incidence[(net_id, v)] == 2 and
                     v not in obstacle_vertices[net_id] and
-                    (net_id, layer, v) not in track_terminals)
+                    (net_id, layer, v) not in track_terminal_targets)
 
         for touching in adjacency.values():
             touching.sort(key=segment_key)
@@ -159,7 +215,7 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                     if not nxt:
                         break
                     seg = nxt[0]
-                if current == anchor or len(chain) < 2:
+                if current == anchor or not chain:
                     continue
                 result.chains_considered += 1
                 cumulative = [0.0]
@@ -167,10 +223,25 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                     cumulative.append(cumulative[-1] + length(a, b))
                 def choices_at(i):
                     choices = []
-                    for j in range(len(chain), i + 1, -1):
+                    for j in range(len(chain), i, -1):
                         old_len = cumulative[j] - cumulative[i]
                         replaced = {segment_key(s) for s in chain[i:j]}
-                        paths = list(octolinear_paths(points[i], points[j]))
+                        start_terminal = (net_id, layer, _vertex(*points[i]))
+                        end_terminal = (net_id, layer, _vertex(*points[j]))
+                        start_targets = (track_terminal_targets.get(start_terminal, ())
+                                         if i == 0 else ())
+                        end_targets = (track_terminal_targets.get(end_terminal, ())
+                                       if j == len(chain) else ())
+                        if j == i + 1 and not (start_targets or end_targets):
+                            continue
+                        paths = []
+                        for candidate_start, candidate_end in _movable_endpoint_pairs(
+                                points[i], points[j], start_targets, end_targets):
+                            if length(candidate_start, candidate_end) <= 1e-9:
+                                continue
+                            for path in octolinear_paths(candidate_start, candidate_end):
+                                if path not in paths:
+                                    paths.append(path)
                         if path_preference:
                             paths.reverse()
                         for path in paths:
@@ -183,10 +254,6 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                             if acceptable and _path_clear(model, path, chain[i], replaced, clearance):
                                 choices.append((j, path, max(0.0, gain), replaced,
                                                 new_count, old_len))
-                                # The other elbow is represented by the other
-                                # path_preference plan evaluated by KiCad.
-                                if span_strategy in ("farthest", "global"):
-                                    break
                         if choices and span_strategy == "farthest":
                             break
                     return choices
@@ -196,7 +263,7 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                     # Weighted interval scheduling: maximize total saved length
                     # over the WHOLE chain, then segment reduction. This avoids
                     # the A-before-B bias of greedy shortcut acceptance.
-                    options = {i: choices_at(i) for i in range(len(chain) - 1)}
+                    options = {i: choices_at(i) for i in range(len(chain))}
                     best = {len(chain): (0.0, 0, [])}
                     for i in range(len(chain) - 1, -1, -1):
                         skip = best.get(i + 1, (0.0, 0, []))
@@ -218,11 +285,13 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                     spans = {start: span for start, span in best[0][2]}
                 else:
                     i = 0
-                    while i < len(chain) - 1:
+                    while i < len(chain):
                         choices = choices_at(i)
                         if choices:
                             if span_strategy == "max_gain":
                                 choices.sort(key=lambda c: (-c[2], c[4], -c[0], tuple(c[1])))
+                            elif span_strategy == "farthest":
+                                choices.sort(key=lambda c: (-c[0], -c[2], c[4], tuple(c[1])))
                             found = choices[0][:4]
                         else:
                             found = None

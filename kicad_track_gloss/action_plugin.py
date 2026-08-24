@@ -117,17 +117,16 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             snapshot.selection_seed_count, snapshot.auto_expanded_count))
         for warning in snapshot.warnings:
             report.append("Protection: " + warning)
-        if len(snapshot.eligible_keys) < 2:
+        track_terminals = find_track_terminal_vertices(
+            snapshot.model, snapshot.eligible_keys)
+        report.append("Sliding track-intersection terminations: " +
+                      str(len(track_terminals)))
+        if len(snapshot.eligible_keys) < 2 and not track_terminals:
             report.append("Result: no modification.")
             report.append(
                 "Reason: automatic connection expansion did not find a second eligible "
-                "straight segment before a pad, via, arc, lock, or junction.")
+                "straight segment or a sliding track-intersection termination.")
             return False
-
-        track_terminals = find_track_terminal_vertices(
-            snapshot.model, snapshot.eligible_keys)
-        report.append("Track-intersection termination anchors: " +
-                      str(len(track_terminals)))
 
         plans = generate_candidate_plans(
             snapshot.model, snapshot.eligible_keys,
