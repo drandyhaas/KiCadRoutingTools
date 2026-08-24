@@ -4,6 +4,12 @@
 
 # KiCad Routing Tools
 
+> **Standalone Track Gloss plugin:** the complete current specification,
+> architecture, invariants, regression baselines, and build procedure are in
+> [`kicad_track_gloss/README.md`](kicad_track_gloss/README.md). Start there when
+> working on KiCad Track Gloss; the rest of this document describes the larger
+> KiCadRoutingTools repository.
+
 A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiCad 9 and KiCad 10**. Available as both a **KiCad Plugin** with full GUI and a **Command-Line Interface** for scripting and automation.
 
 <p align="center">

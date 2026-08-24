@@ -1,88 +1,196 @@
 # KiCad Track Gloss
 
-KiCad Track Gloss is an independent KiCad 10 ActionPlugin that shortens or
-simplifies PCB track connections seeded by the straight segments explicitly
-selected by the user. Each seed is automatically expanded to pads, vias, arcs,
-locked tracks, or junctions; it does not blindly select the entire net.
+KiCad Track Gloss is an independent KiCad 10 ActionPlugin for shortening and
+simplifying existing PCB tracks. It operates directly on straight track
+segments selected in PCB Editor and produces deterministic 0/45/90-degree
+copper while preserving connectivity, geometry constraints, and protected
+board objects.
 
-The smoothing algorithm is derived from KiCadRoutingTools by DrAndyHaas. See
-`NOTICE` and `LICENSE` for attribution and license terms.
+The intended workflow is a single click followed, if necessary, by KiCad
+**Undo**. The plugin does not save the board, create before/after files, show a
+preview, or ask the user to confirm a result.
 
-## Install for testing
+## User-visible contract
 
-Build the PCM archive from the repository root:
+1. The user selects one or more straight track segments. Seeds may belong to
+   different connections or nets.
+2. **KiCad Track Gloss** expands every seed through KiCad's native connectivity
+   up to a pad, via, arc, locked segment, or junction.
+3. The optimizer evaluates the expanded connections as one deterministic batch
+   and applies the highest-saving safe candidate to the current board.
+4. A successful operation returns silently. When no copper is changed for any
+   reason, KiCad's standard warning bell is played exactly once.
+5. **KiCad Track Gloss — Diagnostic** runs the same operation and displays a
+   selectable report containing selection counts, protections, candidates,
+   length saving, and no-op or error details.
+
+Unexpected internal errors display an error report; failures during plan
+application request an in-memory rollback. Normal no-op conditions never open
+a message window.
+
+## Optimization model
+
+Selected seeds are expanded independently, deduplicated, and converted into an
+API-neutral `BoardModel`. Candidate chains are grouped by net, copper layer,
+and width. The engine explores deterministic octolinear shortcuts and uses
+weighted interval scheduling across each chain. Multi-net candidates are
+ranked by saved length, then by segment reduction and a stable geometry
+signature. Isolated group plans remain available when a combined candidate is
+not valid.
+
+An eligible chain that terminates in the middle of an immutable same-net track
+has a sliding T termination. The contact may move along that traversing track
+to the nearest useful 0/45/90-degree location; the traversing track itself is
+not changed. This models the useful effect of manually breaking the last
+segment and finalizing it again in KiCad.
+
+Repeated direction reversals are classified as probable length-tuning
+meanders. Detection is performed per independent unbranched component so a
+meander cannot protect an unrelated route on the same net. A single ordinary
+`A/B/-A` turn is not sufficient to classify a route as tuned.
+
+The engine is deterministic with respect to selection order, track order, and
+net order. Determinism is regression-tested with original, reversed,
+ascending-net, descending-net, and shuffled board inputs.
+
+## KiCad integration and constraints
+
+The KiCad-facing adapter and ActionPlugin use `pcbnew` for:
+
+- native connectivity expansion;
+- board minimum clearance and copper-to-edge clearance;
+- effective netclass and pad-local clearances;
+- pads, vias, tracks, layers, rule-area keepouts, and board bounds;
+- live-board `Add()` and `RemoveNative()` operations;
+- refresh and modified-state notification.
+
+KiCad 10 does not expose the internal C++ `PNS::OPTIMIZER` through the public
+SWIG or IPC plugin APIs. The candidate generator is therefore implemented in
+Python and consumes the constraints that `pcbnew` exposes. The adapter/engine
+boundary is deliberately narrow so an official PNS API could replace the
+candidate generator without changing selection handling or the user workflow.
+
+The following remain immutable or protected:
+
+- copper outside the expanded eligible scope;
+- pads, vias, arcs, and locked tracks;
+- probable differential-pair nets and probable tuned meanders;
+- net identity, layer, and track width;
+- traversing tracks used by sliding T terminations;
+- board edges, foreign-net copper, pads, vias, and track keepouts.
+
+Before live mutation, validation rejects unknown or duplicate removals,
+unselected removals, missing replacement copper, net/layer/width changes,
+inter-net clearance violations, and degraded connectivity between immutable
+terminals. Application verifies track identities again and restores removed
+copper if an exception occurs.
+
+## Code map
+
+- `__init__.py`: registers the normal and diagnostic ActionPlugins in KiCad.
+- `action_plugin.py`: one-click orchestration, reporting, warning bell, and UI
+  contract.
+- `board_adapter.py`: the only SWIG/`pcbnew` boundary; selection expansion,
+  board extraction, native rules, and plan application.
+- `gloss_engine.py`: API-neutral chain discovery, sliding T contacts,
+  octolinear candidate generation, global scheduling, and batch fallbacks.
+- `connectivity.py`: immutable pre-apply safety and connectivity validation.
+- `geometry.py`: dependency-free distance, intersection, polygon, and
+  octolinear geometry kernels.
+- `model.py`: immutable geometry records and `GlossResult` edit plans.
+- `package_pcm.py`: builds the standalone KiCad PCM archive.
+- `metadata.json`: PCM identity, compatibility, and release version.
+- `../tools/diagnose_track_gloss_board.py`: headless inspection and sweep tool
+  for real KiCad boards; `--apply-in-memory` never saves the board.
+- `../tests/test_track_gloss.py`: engine, batching, expansion, T-junction,
+  packaging, and user-contract unit tests.
+- `../tests/run_track_gloss_patterns.py`: KiCad-Python integration replay using
+  the frozen `dispenser_labels` board.
+
+## Reference regression data
+
+The complete KiCad board, project, and design rules are stored byte-for-byte in
+`tests/fixtures/track_gloss/dispenser_labels/`. The fixture README contains the
+SHA-256 fingerprints. Tests must load this fixture in memory and must never save
+over it.
+
+Current required integration results are:
+
+- **All 706 straight tracks selected in one batch:** 4.341542 mm saved and 38
+  net segments removed (100 removed, 62 added). Four meander segments are
+  protected and 702 segments are eligible. Seven input orders must produce the
+  exact same complete plan.
+- **Connections evaluated independently:** 335 unique scopes, 61 improving
+  plans, 9.198662 mm total isolated potential, and 61 successful applications
+  to freshly loaded in-memory boards.
+
+The isolated total is not the expected result of the simultaneous all-track
+batch. T-junction mobility and clearance interactions differ when surrounding
+tracks are eligible at the same time. Treat both figures as separate
+non-regression contracts; neither is a proof of a mathematical global maximum.
+
+## Running validation
+
+From the repository root, run the API-neutral tests with a standard Python that
+has `pytest`:
+
+```text
+py -3.12 -m pytest tests/test_track_gloss.py tests/test_smooth_route.py -q
+```
+
+Run the real-board replay with KiCad's bundled Python so `pcbnew` is available:
+
+```text
+D:\kicad\bin\python.exe tests\run_track_gloss_patterns.py
+```
+
+The integration replay takes several minutes because it recomputes the full
+all-track plan under seven input orders and applies every accepted pattern to a
+fresh in-memory board.
+
+## Building and installing
+
+The release value in `package_pcm.py` and `metadata.json` must always match.
+Build from the repository root:
 
 ```text
 python kicad_track_gloss/package_pcm.py
 ```
 
-The archive is written to `dist/KiCadTrackGloss-0.3.8.zip`. It can be tested
-through a custom KiCad PCM repository, or the `kicad_track_gloss` folder can be
-copied directly into KiCad's scripting plugins directory during development.
+The generated archive is `dist/KiCadTrackGloss-<version>.zip`. Its required PCM
+layout is flat:
 
-The PCM archive intentionally places `__init__.py` and the other Python modules
-directly in its `plugins/` directory. KiCad does not load PCM Python plugins
-that add another package-directory level below `plugins/`.
+```text
+metadata.json
+resources/icon.png
+plugins/__init__.py
+plugins/action_plugin.py
+plugins/...
+```
 
-## Use
+Do not add a `plugins/kicad_track_gloss/` directory level: KiCad will not load
+the ActionPlugin from that PCM layout. For direct development, the complete
+`kicad_track_gloss` directory may instead be copied into KiCad's scripting
+plugins directory.
 
-1. Open a board in PCB Editor.
-2. Select one or more straight track segments as connection seeds.
-3. Run **Tools → External Plugins → KiCad Track Gloss**.
-4. The best deterministic gloss is applied directly to the current board.
+## Maintenance rules
 
-Each selected segment is automatically expanded through KiCad's native
-connectivity to the rest of its connection, stopping at pads, vias, arcs,
-locked tracks, and junctions. Multiple seeds — including seeds on different
-nets — are expanded independently, deduplicated, and optimized as one
-deterministic batch. The visible KiCad selection does not need to be expanded
-manually first.
+- Preserve the silent-success, one-bell-on-no-op interaction contract.
+- Never add automatic board saving, temporary PCB round-trips, or confirmation
+  dialogs to the normal action.
+- Keep selection expansion and meander filtering centralized in
+  `BoardAdapter.expand_eligible_keys()` so the plugin, diagnostic tool, and
+  regression replay cannot diverge.
+- Keep the engine independent of `pcbnew`; KiCad-specific work belongs in the
+  adapter or ActionPlugin layer.
+- Preserve deterministic sorting and signatures whenever adding candidates.
+- Update regression expectations only after inspecting and justifying the
+  geometric change on the frozen board.
+- Run both validation commands before building a PCM archive.
 
-A connection endpoint or intermediate vertex that lands on the middle of an
-immutable same-net track is treated as a sliding termination. The gloss chain
-is split at that T intersection, but the contact may move along the traversing
-segment. Deterministic candidates include the nearest projection and direct
-0/45/90-degree contacts; the traversing track remains unchanged.
+## Attribution and license
 
-Probable length-tuning meanders are protected only when the direction-reversal
-pattern repeats. A single ordinary A/B/-A routing turn is not classified as a
-meander and therefore does not suppress the whole connection.
-
-There is no dialog, preview, temporary board, subprocess, success message, or
-no-op message. If no safe improvement exists for any reason, the action plays
-KiCad's standard warning bell once and returns. Use KiCad **Undo** if the visual
-result is not desired.
-
-For troubleshooting, run **Tools → External Plugins → KiCad Track Gloss —
-Diagnostic**. It performs the same operation and then opens a selectable log
-showing the detected selection, protected objects, number of candidate plans,
-length saving, and the reason for a no-op. The normal action remains silent;
-only an unexpected internal error opens the diagnostic report automatically.
-
-The optimizer reads KiCad's board minimum clearance, copper-to-edge setting,
-effective aggregate netclasses, and pad-local clearance through `pcbnew`.
-It generates a deterministic global plan plus isolated-group fallbacks and
-immediately applies the highest-saving internally valid alternative.
-
-The optimizer uses one exhaustive deterministic global pass; obsolete greedy
-and path-order passes are no longer repeated. Multi-net batches validate
-clearance between newly generated segments before plans can be merged. If a
-combined plan is rejected, deterministic isolated-group fallbacks remain
-available so one difficult connection does not block the rest of the batch.
-
-KiCad's internal C++ `PNS::OPTIMIZER` is not exposed by the public SWIG or IPC
-plugin APIs in KiCad 10, so this package does not pretend to call it. The
-engine/adapter boundary is intentionally kept narrow so a future official PNS
-IPC endpoint can replace the Python candidate generator without changing
-selection scoping, attribution, or the one-click workflow.
-
-## Safety boundaries
-
-The first release treats the following as immutable: copper outside the
-automatically expanded connections, locked tracks, arcs, vias, probable
-differential-pair nets, pads, layer/width changes, junctions, and keepouts.
-All immutable copper remains present in the geometry and connectivity model.
-
-The plugin uses the same `Add()` / `RemoveNative()` ActionPlugin pattern as
-KiCad's official Undo/Redo example. It also performs in-memory rollback if an
-exception occurs while applying the plan.
+The octolinear smoothing foundation comes from KiCadRoutingTools. The active
+project repository is <https://github.com/fca1/KiCadRoutingTools>. `NOTICE` and
+`LICENSE` contain the attribution and MIT license terms that apply to the
+standalone plugin.
