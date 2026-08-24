@@ -15,9 +15,13 @@ Build the PCM archive from the repository root:
 python kicad_track_gloss/package_pcm.py
 ```
 
-The archive is written to `dist/KiCadTrackGloss-0.3.0.zip`. It can be tested
+The archive is written to `dist/KiCadTrackGloss-0.3.1.zip`. It can be tested
 through a custom KiCad PCM repository, or the `kicad_track_gloss` folder can be
 copied directly into KiCad's scripting plugins directory during development.
+
+The PCM archive intentionally places `__init__.py` and the other Python modules
+directly in its `plugins/` directory. KiCad does not load PCM Python plugins
+that add another package-directory level below `plugins/`.
 
 ## Use
 

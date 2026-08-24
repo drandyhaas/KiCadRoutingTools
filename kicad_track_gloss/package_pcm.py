@@ -14,7 +14,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 RUNTIME_FILES = (
     "__init__.py", "action_plugin.py", "board_adapter.py", "connectivity.py",
     "geometry.py", "gloss_engine.py",
@@ -29,16 +29,14 @@ def build(output_dir):
     with tempfile.TemporaryDirectory(prefix="track-gloss-pcm-") as tmp_name:
         tmp = Path(tmp_name)
         plugins = tmp / "plugins"
-        package = plugins / "kicad_track_gloss"
-        package.mkdir(parents=True)
-        (plugins / "__init__.py").write_text(
-            "import kicad_track_gloss  # package __init__ registers the ActionPlugin\n",
-            encoding="utf-8")
+        plugins.mkdir(parents=True)
         for name in RUNTIME_FILES:
             source = ROOT / name
             if not source.exists():
                 raise FileNotFoundError(source)
-            shutil.copy2(source, package / name)
+            # PCM installs the contents of this directory as one plugin package.
+            # KiCad explicitly forbids a second package-directory level here.
+            shutil.copy2(source, plugins / name)
         shutil.copy2(ROOT / "metadata.json", tmp / "metadata.json")
         resources = tmp / "resources"
         resources.mkdir()

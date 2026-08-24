@@ -1,5 +1,7 @@
 import math
 import random
+import tempfile
+import zipfile
 
 from kicad_track_gloss.gloss_engine import generate_candidate_plans, smooth_selected_chains
 from kicad_track_gloss.model import BoardModel, CircleObstacle, Segment, segment_key
@@ -140,3 +142,20 @@ def test_action_plugin_is_silent_and_has_no_file_roundtrip():
     for forbidden in ("MessageBox", "GlossDialog", "SaveBoard", "LoadBoard",
                       "kicad-cli", "choose_best_with_kicad"):
         assert forbidden not in source
+
+
+def test_pcm_archive_uses_kicad_flat_plugin_layout():
+    from pathlib import Path
+    from kicad_track_gloss.package_pcm import build
+
+    with tempfile.TemporaryDirectory() as directory:
+        archive_path = build(directory)
+        with zipfile.ZipFile(archive_path) as archive:
+            names = set(archive.namelist())
+
+    assert "plugins/__init__.py" in names
+    assert "plugins/action_plugin.py" in names
+    assert "plugins/board_adapter.py" in names
+    assert not any(name.startswith("plugins/kicad_track_gloss/") for name in names)
+    assert "metadata.json" in names
+    assert "resources/icon.png" in names
