@@ -8,7 +8,7 @@ import json
 
 from kicad_track_gloss.engine import (find_track_terminal_vertices,
                                       generate_candidate_plans,
-                                      smooth_selected_chains)
+                                      smooth_selected_chains, summarize_plan)
 from kicad_track_gloss.engine.model import (AddedSegment, BoardModel,
                                             CircleObstacle, GlossResult,
                                             PadRegion, Segment, segment_key)
@@ -39,6 +39,13 @@ def test_selected_staircase_shortens():
     assert result.changed
     assert result.saved_mm > 0.5
     assert len(result.additions) < len(result.remove_keys)
+    assert result.transformations
+    assert all(item.mechanism == "fixed_endpoints"
+               for item in result.transformations)
+    assert result.search_counts["paths_evaluated"] > 0
+    summary = summarize_plan(model, {segment_key(s) for s in segs}, result)
+    assert sum(row["segments_saved"] for row in summary["mechanisms"]) == \
+        summary["segments_saved"]
 
 
 def test_unselected_half_is_never_removed():
@@ -254,8 +261,11 @@ def test_pcm_archive_uses_flat_entrypoint_with_internal_packages():
     assert "plugins/action_plugin.py" in names
     assert "plugins/version.py" in names
     assert "plugins/engine/planner.py" in names
+    assert "plugins/engine/pads.py" in names
+    assert "plugins/engine/statistics.py" in names
     assert "plugins/engine/terminals.py" in names
     assert "plugins/kicad/adapter.py" in names
+    assert "plugins/kicad/diagnostics.py" in names
     assert "plugins/kicad/reader.py" in names
     assert not any(name.startswith("plugins/kicad_track_gloss/") for name in names)
     assert "metadata.json" in names
@@ -462,11 +472,52 @@ def test_one_segment_can_shorten_between_two_pad_copper_areas():
     assert result.remove_keys == ["bst"]
     assert result.saved_mm > 0.59
     assert len(result.additions) <= 2
-    from kicad_track_gloss.engine.terminals import _pad_contains
+    from kicad_track_gloss.engine.pads import pad_contains
     endpoints = {point for addition in result.additions
                  for point in (addition.start, addition.end)}
-    assert any(_pad_contains(pads[0], point, 1e-6) for point in endpoints)
-    assert any(_pad_contains(pads[1], point, 1e-6) for point in endpoints)
+    assert any(pad_contains(pads[0], point, 1e-6) for point in endpoints)
+    assert any(pad_contains(pads[1], point, 1e-6) for point in endpoints)
+    assert [item.mechanism for item in result.transformations] == ["pad_slide"]
+    assert [item.geometry for item in result.transformations] == [
+        "corner_relocation"]
+    summary = summarize_plan(model, {"bst"}, result)
+    assert summary["saved_mm"] == result.saved_mm
+    assert summary["fixed_gain"] == 0.0
+    assert summary["terminal_gain"] == result.saved_mm
+    assert summary["mechanisms"][0]["key"] == "pad_slide"
+
+
+def test_diagnostic_collection_does_not_change_the_edit_plan():
+    segments = staircase(12)
+    model = BoardModel(segments)
+    eligible = {segment_key(segment) for segment in segments}
+    diagnostic = smooth_selected_chains(
+        model, eligible, span_strategy="global", collect_statistics=True)
+    normal = smooth_selected_chains(
+        model, eligible, span_strategy="global", collect_statistics=False)
+
+    assert _plan_signature(normal) == _plan_signature(diagnostic)
+    assert diagnostic.transformations and diagnostic.search_counts
+    assert normal.transformations == []
+    assert normal.search_counts == {}
+
+
+def test_diagnostic_report_contains_human_and_machine_readable_statistics():
+    from kicad_track_gloss.kicad.diagnostics import append_plan_statistics
+
+    segments = staircase(12)
+    model = BoardModel(segments)
+    eligible = {segment_key(segment) for segment in segments}
+    plan = smooth_selected_chains(model, eligible, span_strategy="global")
+    report = []
+    append_plan_statistics(report, summarize_plan(model, eligible, plan))
+    text = "\n".join(report)
+
+    assert "Gloss statistics:" in text
+    assert "By optimization mechanism:" in text
+    assert "By geometry pattern:" in text
+    assert "Search statistics:" in text
+    assert "Machine-readable JSON:" in text
 
 
 def test_batch_rejects_colliding_new_copper_on_different_nets():

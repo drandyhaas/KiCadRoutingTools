@@ -10,8 +10,10 @@ import pcbnew
 import wx
 
 from .engine import (find_pad_terminal_targets, find_track_terminal_vertices,
-                     generate_candidate_plans)
+                     generate_candidate_plans, summarize_plan)
 from .kicad import BoardAdapter
+from .kicad.diagnostics import (append_plan_statistics,
+                                append_search_statistics)
 from .version import __version__
 
 
@@ -107,7 +109,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             if not changed:
                 _warning_bell()
 
-    def _run(self, report):
+    def _run(self, report, diagnostic=False):
         report.append("Plugin version: " + __version__)
         board = pcbnew.GetBoard()
         if board is None:
@@ -131,6 +133,8 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         report.append("Eligible straight segments: " + str(len(snapshot.eligible_keys)))
         report.append("Automatic connection expansion: {} seed(s) + {} segment(s).".format(
             snapshot.selection_seed_count, snapshot.auto_expanded_count))
+        report.append("Protected tuned segments: " +
+                      str(snapshot.tuned_protected_count))
         for warning in snapshot.warnings:
             report.append("Protection: " + warning)
         track_terminals = find_track_terminal_vertices(
@@ -153,12 +157,16 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             snapshot.model, snapshot.eligible_keys,
             min_gain=MIN_GAIN_MM,
             allow_equal_length_simpler=ALLOW_EQUAL_LENGTH_SIMPLIFICATION,
-            clearance=snapshot.minimum_clearance)
+            clearance=snapshot.minimum_clearance,
+            collect_statistics=diagnostic)
         report.append("Candidate plans evaluated: " + str(len(plans)))
         report.append("Connected chains considered: " +
                       str(max((plan.chains_considered for plan in plans), default=0)))
+        searched_plan = plans[0] if plans else None
         plans = [plan for plan in plans if plan.changed]
         if not plans:
+            if diagnostic and searched_plan is not None:
+                append_search_statistics(report, searched_plan.search_counts)
             report.append("Result: no safe improvement found.")
             report.append(
                 "Possible reasons: disconnected selection, fixed junction, locked/tuned "
@@ -168,6 +176,9 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         report.append("Chosen plan: remove {} segment(s), add {} segment(s).".format(
             len(best.remove_keys), len(best.additions)))
         report.append("Copper length saved: {:.3f} mm.".format(best.saved_mm))
+        if diagnostic:
+            append_plan_statistics(report, summarize_plan(
+                snapshot.model, snapshot.eligible_keys, best))
         adapter.apply(board, best, rollback_on_error=True)
         try:
             board.SetModified()
@@ -194,7 +205,7 @@ class KiCadTrackGlossDiagnosticPlugin(KiCadTrackGlossPlugin):
     def Run(self):
         report = ["KiCad Track Gloss diagnostic", ""]
         try:
-            changed = self._run(report)
+            changed = self._run(report, diagnostic=True)
         except Exception:
             _warning_bell()
             LOG.exception("Track gloss diagnostic run failed")

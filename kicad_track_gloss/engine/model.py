@@ -75,6 +75,24 @@ class AddedSegment:
     net_id: int
 
 
+@dataclass(frozen=True)
+class Transformation:
+    mechanism: str
+    geometry: str
+    net_id: int
+    net_name: str
+    layer: int
+    width: float
+    before_mm: float
+    after_mm: float
+    before_segments: int
+    after_segments: int
+
+    @property
+    def saved_mm(self):
+        return max(0.0, self.before_mm - self.after_mm)
+
+
 @dataclass
 class GlossResult:
     remove_keys: List[str] = field(default_factory=list)
@@ -83,6 +101,8 @@ class GlossResult:
     chains_considered: int = 0
     chains_changed: int = 0
     warnings: List[str] = field(default_factory=list)
+    transformations: List[Transformation] = field(default_factory=list)
+    search_counts: Dict[str, int] = field(default_factory=dict)
 
     @property
     def changed(self) -> bool:

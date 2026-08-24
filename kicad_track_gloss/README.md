@@ -45,7 +45,9 @@ The active project repository is the fca1 fork:
    reason, KiCad's standard warning bell is played exactly once.
 5. **KiCad Track Gloss — Diagnostic** runs the same operation and displays a
    selectable report containing selection counts, protections, candidates,
-   length saving, and no-op or error details.
+   length and segment savings, categorized transformations, search rejection
+   counts, and no-op or error details. The final JSON block is intended for
+   comparing boards and feeding observations back into autorouter heuristics.
 
 Unexpected internal errors display an error report; failures during plan
 application request an in-memory rollback. Normal no-op conditions never open
@@ -137,10 +139,14 @@ validated against the modeled pad shape rather than that coarse obstacle.
   meander protection.
 - `kicad/rules.py`: board bounds, effective netclasses, and track keepouts.
 - `kicad/writer.py`: live-board plan application and rollback.
+- `kicad/diagnostics.py`: human-readable tables and machine-readable JSON for
+  diagnostic runs.
 - `engine/planner.py`: API-neutral chain discovery, octolinear candidate
   generation, global scheduling, and batch fallbacks.
 - `engine/terminals.py`: detection and movement candidates for sliding T
   terminations.
+- `engine/pads.py`: pad containment and bounded copper-contact geometry.
+- `engine/statistics.py`: transformation classification and aggregate metrics.
 - `engine/validation.py`: immutable pre-apply safety and connectivity checks.
 - `engine/geometry.py`: dependency-free geometry kernels.
 - `engine/model.py`: immutable geometry records and edit plans.
@@ -246,6 +252,9 @@ plugins directory.
   diagnostic tool, and regression replay cannot diverge.
 - Keep the engine independent of `pcbnew`; KiCad-specific work belongs in the
   adapter or ActionPlugin layer.
+- Keep diagnostic collection optional. The normal one-click action must not
+  pay the classification and aggregation cost, and both modes must generate
+  the exact same edit plan.
 - Preserve deterministic sorting and signatures whenever adding candidates.
 - Update regression expectations only after inspecting and justifying the
   geometric change on the frozen board.

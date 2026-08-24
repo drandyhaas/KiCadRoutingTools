@@ -179,6 +179,9 @@ def _pad_sliding_regression(board, adapter, snapshot, records):
     assert round(best.saved_mm, 6) == 0.596798
     assert len(best.remove_keys) == 1
     assert len(best.additions) == 1
+    assert [item.mechanism for item in best.transformations] == ["pad_slide"]
+    assert [item.geometry for item in best.transformations] == [
+        "corner_relocation"]
     fresh = pcbnew.LoadBoard(str(FIXTURE))
     BoardAdapter(pcbnew).apply(fresh, best, rollback_on_error=True)
     print("PAD SLIDING PASS: 0.596798 mm saved between two pad areas")

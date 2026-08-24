@@ -20,6 +20,8 @@ from collections import defaultdict
 from .geometry import (length, octolinear_paths, path_hits_polygon,
                        point_segment_distance, segment_distance)
 from .model import AddedSegment, GlossResult, segment_key
+from .pads import pad_contains
+from .statistics import classify_transformation
 from .terminals import (find_pad_terminal_targets, find_track_terminal_targets,
                         movable_endpoint_pairs, vertex)
 from .validation import validate_result
@@ -60,7 +62,7 @@ def _retain_identity_replacements(model, result):
         result.additions = additions
 
 
-def _path_clear(model, path, moving, replaced_keys, clearance):
+def _path_blocker(model, path, moving, replaced_keys, clearance):
     moving_clearance = max(clearance, model.minimum_clearance,
                            model.net_clearances.get(moving.net_id, 0.0))
     replaced_segments = [segment for segment in model.segments
@@ -89,7 +91,7 @@ def _path_clear(model, path, moving, replaced_keys, clearance):
             if any(not (x0 + edge_margin <= p[0] <= x1 - edge_margin and
                         y0 + edge_margin <= p[1] <= y1 - edge_margin)
                    for p in (a, b)):
-                return False
+                return "board_edge"
         for other in model.segments:
             if segment_key(other) in replaced_keys:
                 continue
@@ -100,7 +102,7 @@ def _path_clear(model, path, moving, replaced_keys, clearance):
             required = pair_clearance + (moving.width + other.width) / 2.0
             if segment_distance(a, b, (other.start_x, other.start_y),
                                 (other.end_x, other.end_y)) < required - 1e-6:
-                return False
+                return "foreign_track_clearance"
         for obstacle in model.obstacles:
             if obstacle.net_id == moving.net_id:
                 continue
@@ -109,19 +111,32 @@ def _path_clear(model, path, moving, replaced_keys, clearance):
             required = max(moving_clearance, obstacle.clearance) + \
                 moving.width / 2.0 + obstacle.radius
             if point_segment_distance((obstacle.x, obstacle.y), a, b) < required - 1e-6:
-                return False
+                return obstacle.kind + "_clearance"
         for keepout in model.keepouts:
             if keepout.layers and moving.layer not in keepout.layers:
                 continue
             if path_hits_polygon(a, b, list(keepout.points), clearance + moving.width / 2.0):
-                return False
-    return True
+                return "keepout"
+    return None
+
+
+def _increment(counts, key):
+    counts[key] = counts.get(key, 0) + 1
+
+
+def _endpoint_moved_into_pad(original, candidate, terminal, pad_targets):
+    """Distinguish an actual pad contact from another movable termination."""
+    if length(original, candidate) <= 1e-6:
+        return False
+    return any(pad_contains(region, candidate, tolerance=1e-6)
+               for region in pad_targets.get(terminal, ()))
 
 
 def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                            allow_equal_length_simpler=False, clearance=0.1,
                            equal_length_tolerance=0.001,
-                           span_strategy="farthest", path_preference=0):
+                           span_strategy="farthest", path_preference=0,
+                           collect_statistics=True):
     """Return an immutable edit plan; never mutates ``model``.
 
     Original octolinear smoothing algorithm: KiCadRoutingTools, DrAndyHaas.
@@ -224,15 +239,28 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                         if path_preference:
                             paths.reverse()
                         for path in paths:
+                            if collect_statistics:
+                                _increment(result.search_counts, "paths_evaluated")
                             new_len = sum(length(a, b) for a, b in zip(path, path[1:]))
                             new_count = len(path) - 1
                             gain = old_len - new_len
                             acceptable = gain >= min_gain or (
                                 allow_equal_length_simpler and abs(gain) <= equal_length_tolerance
                                 and new_count < j - i)
-                            if acceptable and _path_clear(model, path, chain[i], replaced, clearance):
-                                choices.append((j, path, max(0.0, gain), replaced,
-                                                new_count, old_len))
+                            if not acceptable:
+                                if collect_statistics:
+                                    _increment(result.search_counts, "not_improving")
+                                continue
+                            blocker = _path_blocker(
+                                model, path, chain[i], replaced, clearance)
+                            if blocker:
+                                if collect_statistics:
+                                    _increment(result.search_counts, blocker)
+                                continue
+                            if collect_statistics:
+                                _increment(result.search_counts, "accepted_options")
+                            choices.append((j, path, max(0.0, gain), replaced,
+                                            new_count, old_len))
                         if choices and span_strategy == "farthest":
                             break
                     return choices
@@ -288,6 +316,28 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                         k += 1
                         continue
                     j, path, gain, replaced = spans[k]
+                    start_terminal = (net_id, layer, vertex(*points[k]))
+                    end_terminal = (net_id, layer, vertex(*points[j]))
+                    if collect_statistics:
+                        moved_start = length(path[0], points[k]) > 1e-6
+                        moved_end = length(path[-1], points[j]) > 1e-6
+                        pad_moved = (
+                            _endpoint_moved_into_pad(
+                                points[k], path[0], start_terminal,
+                                pad_terminal_targets) or
+                            _endpoint_moved_into_pad(
+                                points[j], path[-1], end_terminal,
+                                pad_terminal_targets))
+                        track_moved = (
+                            (moved_start and
+                             start_terminal in track_terminal_targets) or
+                            (moved_end and
+                             end_terminal in track_terminal_targets))
+                        mechanism = ("pad_slide" if pad_moved else
+                                     "track_slide" if track_moved else
+                                     "fixed_endpoints")
+                        result.transformations.append(classify_transformation(
+                            chain[k:j], path, mechanism, equal_length_tolerance))
                     result.remove_keys.extend(segment_key(s) for s in chain[k:j])
                     result.additions.extend(
                         AddedSegment(a, b, width, layer, net_id)
@@ -362,6 +412,9 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
             merged.chains_considered += plan.chains_considered
             merged.chains_changed += plan.chains_changed
             merged.warnings.extend(plan.warnings)
+            merged.transformations.extend(plan.transformations)
+            for key, value in plan.search_counts.items():
+                merged.search_counts[key] = merged.search_counts.get(key, 0) + value
         validate_result(model, eligible, merged)
         return merged
 
