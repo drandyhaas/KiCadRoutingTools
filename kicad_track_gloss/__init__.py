@@ -9,6 +9,7 @@ except ImportError:
 if pcbnew is not None:
     # Do not hide errors from our own modules: KiCad must report a broken plugin
     # instead of silently omitting it from Tools -> External Plugins.
-    from .action_plugin import KiCadTrackGlossPlugin
+    from .action_plugin import KiCadTrackGlossDiagnosticPlugin, KiCadTrackGlossPlugin
 
     KiCadTrackGlossPlugin().register()
+    KiCadTrackGlossDiagnosticPlugin().register()

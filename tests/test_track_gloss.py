@@ -142,6 +142,8 @@ def test_action_plugin_is_silent_and_has_no_file_roundtrip():
     for forbidden in ("MessageBox", "GlossDialog", "SaveBoard", "LoadBoard",
                       "kicad-cli", "choose_best_with_kicad"):
         assert forbidden not in source
+    assert "KiCadTrackGlossDiagnosticPlugin" in source
+    assert "show_toolbar_button = False" in source
 
 
 def test_pcm_archive_uses_kicad_flat_plugin_layout():

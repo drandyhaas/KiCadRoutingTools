@@ -14,7 +14,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 RUNTIME_FILES = (
     "__init__.py", "action_plugin.py", "board_adapter.py", "connectivity.py",
     "geometry.py", "gloss_engine.py",

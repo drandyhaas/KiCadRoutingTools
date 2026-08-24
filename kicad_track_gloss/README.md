@@ -15,7 +15,7 @@ Build the PCM archive from the repository root:
 python kicad_track_gloss/package_pcm.py
 ```
 
-The archive is written to `dist/KiCadTrackGloss-0.3.1.zip`. It can be tested
+The archive is written to `dist/KiCadTrackGloss-0.3.2.zip`. It can be tested
 through a custom KiCad PCM repository, or the `kicad_track_gloss` folder can be
 copied directly into KiCad's scripting plugins directory during development.
 
@@ -33,6 +33,12 @@ that add another package-directory level below `plugins/`.
 There is no dialog, preview, temporary board, subprocess, success message, or
 no-op message. If no safe improvement exists, the action simply returns. Use
 KiCad **Undo** if the visual result is not desired.
+
+For troubleshooting, run **Tools → External Plugins → KiCad Track Gloss —
+Diagnostic**. It performs the same operation and then opens a selectable log
+showing the detected selection, protected objects, number of candidate plans,
+length saving, and the reason for a no-op. The normal action remains silent;
+only an unexpected internal error opens the diagnostic report automatically.
 
 The optimizer reads KiCad's board minimum clearance, copper-to-edge setting,
 effective aggregate netclasses, and pad-local clearance through `pcbnew`.
