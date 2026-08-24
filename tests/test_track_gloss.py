@@ -161,3 +161,98 @@ def test_pcm_archive_uses_kicad_flat_plugin_layout():
     assert not any(name.startswith("plugins/kicad_track_gloss/") for name in names)
     assert "metadata.json" in names
     assert "resources/icon.png" in names
+
+
+class _NativePoint:
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+
+
+class _NativeUuid:
+    def __init__(self, value):
+        self.value = value
+
+    def AsString(self):
+        return self.value
+
+
+class _NativeTrack:
+    def __init__(self, uuid, start, end, net):
+        self.uuid = uuid
+        self.start = _NativePoint(*start)
+        self.end = _NativePoint(*end)
+        self.net = net
+
+    def GetClass(self): return "PCB_TRACK"
+    def GetStart(self): return self.start
+    def GetEnd(self): return self.end
+    def GetWidth(self): return 0.2
+    def GetLayer(self): return 0
+    def GetNetCode(self): return self.net
+    def GetNetname(self): return "NET" + str(self.net)
+    def GetUuid(self): return _NativeUuid(self.uuid)
+    def IsLocked(self): return False
+
+
+class _NativeConnectivity:
+    def __init__(self, tracks):
+        self.tracks = tracks
+
+    def GetConnectedTracks(self, source):
+        anchors = {(source.start.x, source.start.y), (source.end.x, source.end.y)}
+        return [track for track in self.tracks if track is not source and
+                track.net == source.net and anchors &
+                {(track.start.x, track.start.y), (track.end.x, track.end.y)}]
+
+    def GetConnectedPads(self, _source):
+        return []
+
+
+class _NativeBoard:
+    def __init__(self, tracks):
+        self.connectivity = _NativeConnectivity(tracks)
+
+    def GetConnectivity(self):
+        return self.connectivity
+
+
+class _NativePcbnew:
+    @staticmethod
+    def ToMM(value): return value
+
+
+def _native_records(adapter, tracks):
+    records = {}
+    for track in tracks:
+        segment = adapter._segment_from_item(track)
+        records[segment_key(segment)] = (track, segment)
+    return records
+
+
+def test_native_connection_expansion_batches_multiple_nets():
+    tracks = [
+        _NativeTrack("a1", (0, 0), (1, 0), 1),
+        _NativeTrack("a2", (1, 0), (2, 0), 1),
+        _NativeTrack("a3", (2, 0), (3, 0), 1),
+        _NativeTrack("b1", (0, 10), (1, 10), 2),
+        _NativeTrack("b2", (1, 10), (2, 10), 2),
+    ]
+    adapter = __import__("kicad_track_gloss.board_adapter", fromlist=["BoardAdapter"]).BoardAdapter(
+        _NativePcbnew())
+    records = _native_records(adapter, tracks)
+    seeds = {"a1", "b1"}
+    expanded = adapter._expand_seed_keys(_NativeBoard(tracks), records, seeds, [])
+    assert expanded == {"a1", "a2", "a3", "b1", "b2"}
+
+
+def test_native_connection_expansion_stops_at_junction():
+    tracks = [
+        _NativeTrack("seed", (0, 0), (1, 0), 1),
+        _NativeTrack("straight", (1, 0), (2, 0), 1),
+        _NativeTrack("branch", (1, 0), (1, 1), 1),
+    ]
+    adapter = __import__("kicad_track_gloss.board_adapter", fromlist=["BoardAdapter"]).BoardAdapter(
+        _NativePcbnew())
+    records = _native_records(adapter, tracks)
+    expanded = adapter._expand_seed_keys(_NativeBoard(tracks), records, {"seed"}, [])
+    assert expanded == {"seed"}

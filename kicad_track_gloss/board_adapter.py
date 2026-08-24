@@ -15,6 +15,8 @@ class SelectionSnapshot:
     warnings: list = field(default_factory=list)
     minimum_clearance: float = 0.1
     copper_edge_clearance: float = 0.0
+    selection_seed_count: int = 0
+    auto_expanded_count: int = 0
 
 
 def _uuid(item):
@@ -93,10 +95,94 @@ class BoardAdapter:
         y = int(round(self.pcbnew.FromMM(point[1])))
         return self.pcbnew.VECTOR2I(x, y)
 
+    def _segment_from_item(self, item):
+        start, end = self.point_mm(item.GetStart()), self.point_mm(item.GetEnd())
+        return Segment(start[0], start[1], end[0], end[1],
+                       self.to_mm(item.GetWidth()), int(item.GetLayer()),
+                       int(item.GetNetCode()), _uuid(item), bool(item.IsLocked()),
+                       str(item.GetClass()) == "PCB_ARC", _net_name(item))
+
+    @staticmethod
+    def _touches_anchor(item, anchor):
+        kind = str(item.GetClass())
+        if kind == "PCB_VIA":
+            points = (item.GetPosition(),)
+        else:
+            points = (item.GetStart(), item.GetEnd())
+        return any(point.x == anchor.x and point.y == anchor.y for point in points)
+
+    def _expand_seed_keys(self, board, straight_by_key, seed_keys, warnings):
+        """Expand every selected seed to its KiCad connection, up to boundaries."""
+        if not seed_keys:
+            return set()
+        try:
+            connectivity = board.GetConnectivity()
+        except Exception:
+            warnings.append("KiCad connectivity is unavailable; selection was not expanded.")
+            return set(seed_keys)
+
+        expanded = set()
+        for seed_key in sorted(seed_keys):
+            queue = [seed_key]
+            visited = set()
+            while queue:
+                key = queue.pop(0)
+                if key in visited:
+                    continue
+                visited.add(key)
+                expanded.add(key)
+                item, _segment = straight_by_key[key]
+                try:
+                    native_neighbors = list(connectivity.GetConnectedTracks(item))
+                    native_pads = list(connectivity.GetConnectedPads(item))
+                except Exception:
+                    warnings.append(
+                        "KiCad connectivity query failed; expansion stopped at a selected seed.")
+                    continue
+
+                for anchor in (item.GetStart(), item.GetEnd()):
+                    pads_here = []
+                    for pad in native_pads:
+                        try:
+                            if pad.HitTest(anchor):
+                                pads_here.append(pad)
+                        except Exception:
+                            position = pad.GetPosition()
+                            if position.x == anchor.x and position.y == anchor.y:
+                                pads_here.append(pad)
+                    if pads_here:
+                        continue
+
+                    touching = [neighbor for neighbor in native_neighbors
+                                if self._touches_anchor(neighbor, anchor)]
+                    # Native Select/Expand Connection stops at a junction. Vias
+                    # and arcs are also boundaries because this optimizer only
+                    # replaces straight, single-layer copper segments.
+                    if len(touching) != 1:
+                        continue
+                    neighbor = touching[0]
+                    if str(neighbor.GetClass()) != "PCB_TRACK":
+                        continue
+                    try:
+                        neighbor_segment = self._segment_from_item(neighbor)
+                    except Exception:
+                        continue
+                    neighbor_key = segment_key(neighbor_segment)
+                    record = straight_by_key.get(neighbor_key)
+                    if record is None or neighbor_segment.locked:
+                        continue
+                    if _is_probable_diff_pair(neighbor_segment.net_name):
+                        continue
+                    if neighbor_segment.net_id != _segment.net_id:
+                        continue
+                    if neighbor_key not in visited:
+                        queue.append(neighbor_key)
+        return expanded
+
     def snapshot(self, board, require_selection=True):
         segments, obstacles, warnings = [], [], []
-        eligible = set()
-        selected_straight = 0
+        straight_by_key = {}
+        seed_keys = set()
         for item in board.GetTracks():
             kind = str(item.GetClass())
             if kind == "PCB_VIA":
@@ -113,12 +199,11 @@ class BoardAdapter:
                 continue
             if kind not in ("PCB_TRACK", "PCB_ARC"):
                 continue
-            start, end = self.point_mm(item.GetStart()), self.point_mm(item.GetEnd())
-            seg = Segment(start[0], start[1], end[0], end[1],
-                          self.to_mm(item.GetWidth()), int(item.GetLayer()),
-                          int(item.GetNetCode()), _uuid(item), bool(item.IsLocked()),
-                          kind == "PCB_ARC", _net_name(item))
+            seg = self._segment_from_item(item)
             segments.append(seg)
+            key = segment_key(seg)
+            if kind == "PCB_TRACK":
+                straight_by_key[key] = (item, seg)
             if not item.IsSelected():
                 continue
             if kind == "PCB_ARC":
@@ -128,14 +213,15 @@ class BoardAdapter:
             elif _is_probable_diff_pair(seg.net_name):
                 warnings.append("Probable differential-pair tracks are protected: " + seg.net_name)
             else:
-                eligible.add(segment_key(seg))
-                selected_straight += 1
+                seed_keys.add(key)
+
+        eligible = self._expand_seed_keys(board, straight_by_key, seed_keys, warnings)
+        expanded_count = max(0, len(eligible) - len(seed_keys))
 
         meanders = _meander_keys([s for s in segments if segment_key(s) in eligible])
         if meanders:
             eligible.difference_update(meanders)
             warnings.append("Probable meander/length-tuning tracks are protected.")
-            selected_straight = len(eligible)
 
         try:
             footprints = board.GetFootprints()
@@ -162,7 +248,7 @@ class BoardAdapter:
                                                 tuple(layers), "pad", local_clearance))
 
         keepouts = self._keepouts(board)
-        if require_selection and selected_straight == 0:
+        if require_selection and not seed_keys:
             if warnings:
                 raise ValueError("No eligible straight track is selected. " + " ".join(sorted(set(warnings))))
             raise ValueError("Select at least two connected straight track segments first.")
@@ -170,7 +256,8 @@ class BoardAdapter:
                            minimum_clearance, edge_clearance,
                            self._board_bounds(board))
         return SelectionSnapshot(model, eligible, sorted(set(warnings)),
-                                 minimum_clearance, edge_clearance)
+                                 minimum_clearance, edge_clearance,
+                                 len(seed_keys), expanded_count)
 
     def _board_bounds(self, board):
         try:
@@ -231,11 +318,7 @@ class BoardAdapter:
         for item in board.GetTracks():
             if str(item.GetClass()) != "PCB_TRACK":
                 continue
-            start, end = self.point_mm(item.GetStart()), self.point_mm(item.GetEnd())
-            seg = Segment(start[0], start[1], end[0], end[1],
-                          self.to_mm(item.GetWidth()), int(item.GetLayer()),
-                          int(item.GetNetCode()), _uuid(item), bool(item.IsLocked()),
-                          False, _net_name(item))
+            seg = self._segment_from_item(item)
             mapping[segment_key(seg)] = item
         return mapping
 

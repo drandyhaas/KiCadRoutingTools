@@ -1,4 +1,4 @@
-"""KiCad 10 SWIG ActionPlugin entry point for selected-track gloss."""
+"""KiCad 10 SWIG ActionPlugin entry point for selection-seeded track gloss."""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
     def defaults(self):
         self.name = "KiCad Track Gloss"
         self.category = "Routing"
-        self.description = ("Shorten and simplify selected PCB track chains "
+        self.description = ("Shorten and simplify PCB connections seeded by selected segments "
                             "while preserving connectivity and design rules")
         self.show_toolbar_button = True
         self.icon_file_name = os.path.join(PLUGIN_DIR, "icon_24.png")
@@ -113,13 +113,15 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             report.append("Reason: " + str(error))
             return False
         report.append("Eligible straight segments: " + str(len(snapshot.eligible_keys)))
+        report.append("Automatic connection expansion: {} seed(s) + {} segment(s).".format(
+            snapshot.selection_seed_count, snapshot.auto_expanded_count))
         for warning in snapshot.warnings:
             report.append("Protection: " + warning)
         if len(snapshot.eligible_keys) < 2:
             report.append("Result: no modification.")
             report.append(
-                "Reason: at least two connected straight segments are required; "
-                "one segment has two fixed endpoints and cannot normally be shortened.")
+                "Reason: automatic connection expansion did not find a second eligible "
+                "straight segment before a pad, via, arc, lock, or junction.")
             return False
 
         plans = generate_candidate_plans(

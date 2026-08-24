@@ -1,8 +1,8 @@
 {
   "$schema": "https://go.kicad.org/pcm/schemas/v1",
   "name": "KiCad Track Gloss",
-  "description": "Shorten or simplify explicitly selected PCB track chains.",
-  "description_full": "KiCad Track Gloss is a silent one-click ActionPlugin that replaces safe selected-track staircases with shorter or simpler 0/45/90-degree chains directly on the current board. It reads KiCad board constraints and effective netclasses, generates deterministic global and batch candidates, applies the highest-saving plan, and returns immediately. Unselected copper remains immutable and KiCad Undo can revert the action.",
+  "description": "Shorten or simplify PCB connections seeded by selected track segments.",
+  "description_full": "KiCad Track Gloss is a silent one-click ActionPlugin that automatically expands every selected straight-track seed through KiCad connectivity up to pads, vias, arcs, locks, or junctions, then replaces safe staircases with shorter or simpler 0/45/90-degree chains directly on the current board. It reads KiCad board constraints and effective netclasses, generates deterministic global and multi-net batch candidates, applies the highest-saving plan, and returns immediately. Copper outside the expanded connections remains immutable and KiCad Undo can revert the action.",
   "identifier": "com.github.fca1.kicadtrackgloss",
   "type": "plugin",
   "author": {
@@ -20,7 +20,7 @@
   "tags": ["routing", "tracks", "cleanup", "gloss"],
   "versions": [
     {
-      "version": "0.3.2",
+      "version": "0.3.3",
       "status": "testing",
       "kicad_version": "10.0",
       "runtime": "swig",

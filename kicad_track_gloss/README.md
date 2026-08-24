@@ -1,8 +1,9 @@
 # KiCad Track Gloss
 
 KiCad Track Gloss is an independent KiCad 10 ActionPlugin that shortens or
-simplifies only the straight PCB track segments explicitly selected by the
-user. It never expands a selection to an entire net.
+simplifies PCB track connections seeded by the straight segments explicitly
+selected by the user. Each seed is automatically expanded to pads, vias, arcs,
+locked tracks, or junctions; it does not blindly select the entire net.
 
 The smoothing algorithm is derived from KiCadRoutingTools by DrAndyHaas. See
 `NOTICE` and `LICENSE` for attribution and license terms.
@@ -15,7 +16,7 @@ Build the PCM archive from the repository root:
 python kicad_track_gloss/package_pcm.py
 ```
 
-The archive is written to `dist/KiCadTrackGloss-0.3.2.zip`. It can be tested
+The archive is written to `dist/KiCadTrackGloss-0.3.3.zip`. It can be tested
 through a custom KiCad PCM repository, or the `kicad_track_gloss` folder can be
 copied directly into KiCad's scripting plugins directory during development.
 
@@ -26,9 +27,16 @@ that add another package-directory level below `plugins/`.
 ## Use
 
 1. Open a board in PCB Editor.
-2. Select at least two connected straight track segments.
+2. Select one or more straight track segments as connection seeds.
 3. Run **Tools → External Plugins → KiCad Track Gloss**.
 4. The best deterministic gloss is applied directly to the current board.
+
+Each selected segment is automatically expanded through KiCad's native
+connectivity to the rest of its connection, stopping at pads, vias, arcs,
+locked tracks, and junctions. Multiple seeds — including seeds on different
+nets — are expanded independently, deduplicated, and optimized as one
+deterministic batch. The visible KiCad selection does not need to be expanded
+manually first.
 
 There is no dialog, preview, temporary board, subprocess, success message, or
 no-op message. If no safe improvement exists, the action simply returns. Use
@@ -53,11 +61,10 @@ selection scoping, attribution, or the one-click workflow.
 
 ## Safety boundaries
 
-The first release treats the following as immutable: unselected tracks, locked
-tracks, arcs, vias, probable differential-pair nets, pads, layer/width changes,
-junctions, and keepouts. Non-selected copper remains present in the geometry
-and connectivity model. A single straight segment normally cannot be shortened
-because both endpoints are fixed.
+The first release treats the following as immutable: copper outside the
+automatically expanded connections, locked tracks, arcs, vias, probable
+differential-pair nets, pads, layer/width changes, junctions, and keepouts.
+All immutable copper remains present in the geometry and connectivity model.
 
 The plugin uses the same `Add()` / `RemoveNative()` ActionPlugin pattern as
 KiCad's official Undo/Redo example. It also performs in-memory rollback if an
