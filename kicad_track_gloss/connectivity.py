@@ -30,6 +30,18 @@ def validate_result(model, eligible_keys, result: GlossResult):
     for new in result.additions:
         if new.width <= 0 or new.net_id <= 0 or new.start == new.end:
             raise ValueError("Invalid replacement segment")
+    for index, first in enumerate(result.additions):
+        for second in result.additions[index + 1:]:
+            if first.layer != second.layer or first.net_id == second.net_id:
+                continue
+            clearance = max(
+                model.minimum_clearance,
+                model.net_clearances.get(first.net_id, 0.0),
+                model.net_clearances.get(second.net_id, 0.0))
+            required = clearance + (first.width + second.width) / 2.0
+            if segment_distance(first.start, first.end,
+                                second.start, second.end) < required - 1e-6:
+                raise ValueError("Candidate additions violate inter-net clearance")
     _validate_connectivity(model, eligible_keys, result)
 
 

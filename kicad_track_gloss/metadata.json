@@ -20,7 +20,7 @@
   "tags": ["routing", "tracks", "cleanup", "gloss"],
   "versions": [
     {
-      "version": "0.3.6",
+      "version": "0.3.7",
       "status": "testing",
       "kicad_version": "10.0",
       "runtime": "swig",

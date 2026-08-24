@@ -324,9 +324,10 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
 
 
 def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
-    """Generate deterministic alternatives for selection by KiCad's DRC oracle."""
+    """Generate deterministic global and isolated-group fallback plans."""
     plans = []
     seen = set()
+    rejected = []
 
     def add_plan(plan):
         signature = (
@@ -338,12 +339,15 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
             seen.add(signature)
             plans.append(plan)
 
-    for strategy in ("global", "max_gain", "farthest"):
-        for path_preference in (0, 1):
-            plan = smooth_selected_chains(
-                model, eligible_segment_keys, span_strategy=strategy,
-                path_preference=path_preference, **kwargs)
-            add_plan(plan)
+    # Global weighted interval scheduling now evaluates every endpoint and
+    # elbow candidate deterministically, so the older greedy/path-order passes
+    # cannot improve its objective and only multiply runtime.
+    try:
+        add_plan(smooth_selected_chains(
+            model, eligible_segment_keys, span_strategy="global",
+            path_preference=0, **kwargs))
+    except ValueError as error:
+        rejected.append(str(error))
 
     # Batch fallback pool. If KiCad rejects the combined optimum, try leaving
     # out one independently scoped group, then each group alone. This keeps one
@@ -357,10 +361,14 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
             groups[(segment.net_id, segment.layer, round(segment.width, 6))].add(key)
     group_plans = []
     for group_key in sorted(groups):
-        plan = smooth_selected_chains(model, groups[group_key], span_strategy="global",
-                                      path_preference=0, **kwargs)
-        if plan.changed:
-            group_plans.append(plan)
+        try:
+            plan = smooth_selected_chains(
+                model, groups[group_key], span_strategy="global",
+                path_preference=0, **kwargs)
+            if plan.changed:
+                group_plans.append(plan)
+        except ValueError as error:
+            rejected.append(str(error))
 
     def merge(selected):
         merged = GlossResult()
@@ -375,11 +383,20 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
         return merged
 
     if len(group_plans) > 1:
-        add_plan(merge(group_plans))
+        try:
+            add_plan(merge(group_plans))
+        except ValueError as error:
+            rejected.append(str(error))
         for omitted in range(len(group_plans)):
-            add_plan(merge([p for index, p in enumerate(group_plans) if index != omitted]))
+            try:
+                add_plan(merge([p for index, p in enumerate(group_plans)
+                                if index != omitted]))
+            except ValueError as error:
+                rejected.append(str(error))
     for plan in group_plans:
         add_plan(plan)
     plans.sort(key=lambda p: (-p.saved_mm, len(p.additions),
                               tuple(sorted(p.remove_keys))))
+    if not plans:
+        plans.append(GlossResult(warnings=sorted(set(rejected))))
     return plans

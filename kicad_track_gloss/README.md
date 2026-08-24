@@ -16,7 +16,7 @@ Build the PCM archive from the repository root:
 python kicad_track_gloss/package_pcm.py
 ```
 
-The archive is written to `dist/KiCadTrackGloss-0.3.6.zip`. It can be tested
+The archive is written to `dist/KiCadTrackGloss-0.3.7.zip`. It can be tested
 through a custom KiCad PCM repository, or the `kicad_track_gloss` folder can be
 copied directly into KiCad's scripting plugins directory during development.
 
@@ -60,8 +60,14 @@ only an unexpected internal error opens the diagnostic report automatically.
 
 The optimizer reads KiCad's board minimum clearance, copper-to-edge setting,
 effective aggregate netclasses, and pad-local clearance through `pcbnew`.
-It generates deterministic global and greedy alternatives and immediately
-applies the highest-saving internally valid alternative.
+It generates a deterministic global plan plus isolated-group fallbacks and
+immediately applies the highest-saving internally valid alternative.
+
+The optimizer uses one exhaustive deterministic global pass; obsolete greedy
+and path-order passes are no longer repeated. Multi-net batches validate
+clearance between newly generated segments before plans can be merged. If a
+combined plan is rejected, deterministic isolated-group fallbacks remain
+available so one difficult connection does not block the rest of the batch.
 
 KiCad's internal C++ `PNS::OPTIMIZER` is not exposed by the public SWIG or IPC
 plugin APIs in KiCad 10, so this package does not pretend to call it. The

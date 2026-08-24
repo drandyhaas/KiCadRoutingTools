@@ -6,7 +6,8 @@ import zipfile
 from kicad_track_gloss.gloss_engine import (find_track_terminal_vertices,
                                             generate_candidate_plans,
                                             smooth_selected_chains)
-from kicad_track_gloss.model import BoardModel, CircleObstacle, Segment, segment_key
+from kicad_track_gloss.model import (AddedSegment, BoardModel, CircleObstacle,
+                                     GlossResult, Segment, segment_key)
 from kicad_track_gloss.board_adapter import _meander_keys
 
 
@@ -349,3 +350,43 @@ def test_one_segment_can_shorten_by_sliding_its_t_contact():
     assert len(result.additions) == 1
     assert {result.additions[0].start, result.additions[0].end} == {(0, 0), (4, 0)}
     assert result.saved_mm > 0.1
+
+
+def test_batch_rejects_colliding_new_copper_on_different_nets():
+    from kicad_track_gloss.connectivity import validate_result
+
+    model = BoardModel([], minimum_clearance=0.2,
+                       net_clearances={1: 0.2, 2: 0.25})
+    result = GlossResult(additions=[
+        AddedSegment((0, 0), (2, 2), 0.2, 0, 1),
+        AddedSegment((0, 2), (2, 0), 0.2, 0, 2),
+    ])
+    try:
+        validate_result(model, set(), result)
+    except ValueError as error:
+        assert "inter-net clearance" in str(error)
+    else:
+        raise AssertionError("Crossing additions on different nets were accepted")
+
+
+def test_real_board_two_sliding_t_terminations_choose_nearest_contacts():
+    # Regression extracted from dispenser_labels.kicad_pcb, GND connection
+    # 14370d81... + 82ef7f9e... and its two immutable target tracks.
+    selected = [
+        Segment(158.5, 98.7, 159.1, 98.1, 0.127, 0, 1, "branch-a"),
+        Segment(159.1, 98.1, 159.1, 96.4, 0.127, 0, 1, "branch-b"),
+    ]
+    targets = [
+        Segment(158.5, 101.6, 158.5, 96.0, 0.127, 0, 1, "target-a"),
+        Segment(159.1, 96.4, 158.4, 95.7, 0.25, 0, 1, "target-b"),
+    ]
+    result = smooth_selected_chains(
+        BoardModel(selected + targets), {"branch-a", "branch-b"},
+        min_gain=0.01, span_strategy="global", clearance=0.0)
+
+    assert result.changed
+    assert set(result.remove_keys) == {"branch-a", "branch-b"}
+    assert len(result.additions) == 1
+    assert {result.additions[0].start, result.additions[0].end} == {
+        (158.5, 96.0), (158.6, 95.9)}
+    assert abs(result.saved_mm - 2.40710678118655) < 1e-9
