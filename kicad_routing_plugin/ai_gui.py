@@ -1,5 +1,5 @@
 """
-KiCad Routing Tools - AI (Claude Code / opencode) integration
+KiCad Routing Tools - AI (Claude Code / opencode / Codex) integration
 
 Runs an agent CLI headless to drive the project's AI skills from the GUI
 (GitHub issues #40, #34, #39; configurable backend: #503).
@@ -151,8 +151,9 @@ class AISkillRunner:
         # in the prompt ends the quoted region and any | in it becomes a
         # shell pipe. Claude Code reads the prompt from stdin in -p mode, so
         # hand it over that way and keep the argv quote-free.
-        self._stdin_payload = None
-        if os.name == "nt" and cmd and cmd[0].lower().endswith((".cmd", ".bat")):
+        self._stdin_payload = prompt if self.backend.prompt_via_stdin else None
+        if (self._stdin_payload is None and os.name == "nt" and cmd
+                and cmd[0].lower().endswith((".cmd", ".bat"))):
             try:
                 i = cmd.index("-p")
                 if i + 1 < len(cmd) and cmd[i + 1] == prompt:
@@ -437,9 +438,9 @@ class AITab(wx.Panel):
         self.backend_choice.SetToolTip(
             "Agent CLI used for all AI features (this tab and the other tabs' "
             "'Ask AI' buttons). Claude Code runs Anthropic models; opencode "
-            "(https://opencode.ai) supports many model providers. Both use the "
-            "same skills (.claude/skills/) and need their CLI installed and "
-            "logged in.")
+            "supports many providers; OpenAI Codex can reuse your ChatGPT "
+            "subscription after `codex login`. All three use the same skills "
+            "(.claude/skills/) and need their public CLI installed and logged in.")
         self.backend_choice.Bind(wx.EVT_CHOICE, self._on_backend_change)
         sel_grid.Add(self.backend_choice, 0, wx.EXPAND)
         sel_grid.Add(wx.StaticText(self, label="Model:"), 0, wx.ALIGN_CENTER_VERTICAL)

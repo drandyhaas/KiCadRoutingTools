@@ -242,6 +242,8 @@ def get_dialog_settings(dialog):
         'claude_effort': dialog.ai_tab.get_effort_value_for('claude'),
         'opencode_model': dialog.ai_tab.get_model_value_for('opencode'),
         'opencode_effort': dialog.ai_tab.get_effort_value_for('opencode'),
+        'codex_model': dialog.ai_tab.get_model_value_for('codex'),
+        'codex_effort': dialog.ai_tab.get_effort_value_for('codex'),
         'ai_plan': dialog.ai_tab.get_plan_state(),
 
         # Placement sub-tab of the AI notebook (issue #481). The labels
@@ -733,6 +735,10 @@ def restore_dialog_settings(dialog, settings):
         dialog.ai_tab.set_model_value(settings['opencode_model'], backend_id='opencode')
     if 'opencode_effort' in settings:
         dialog.ai_tab.set_effort_value(settings['opencode_effort'], backend_id='opencode')
+    if 'codex_model' in settings:
+        dialog.ai_tab.set_model_value(settings['codex_model'], backend_id='codex')
+    if 'codex_effort' in settings:
+        dialog.ai_tab.set_effort_value(settings['codex_effort'], backend_id='codex')
     if 'ai_backend' in settings:
         dialog.ai_tab.set_backend_value(settings['ai_backend'])
     # 'claude_plan' is the pre-rename key for the same plan state (settings

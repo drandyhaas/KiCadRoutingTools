@@ -156,7 +156,7 @@ Other useful skills:
 
 See [Claude Skills](docs/claude-skills.md) for what each skill does and how they fit together.
 
-All of these are also available inside KiCad without leaving the plugin - see [AI assistance in the plugin](#ai-assistance-ai-tab) below. The plugin can run the same skills through [opencode](https://opencode.ai) instead of Claude Code (issue #503) - a Backend dropdown on the AI tab selects the agent CLI, and opencode's `provider/model` strings open the door to other model providers. The skills' output contracts are tuned on Claude models; smaller models may follow them less reliably.
+All of these are also available inside KiCad without leaving the plugin - see [AI assistance in the plugin](#ai-assistance-ai-tab) below. A Backend dropdown selects Claude Code, [opencode](https://opencode.ai), or OpenAI Codex. Codex uses the session created by `codex login`, including ChatGPT subscription access, so no OpenAI API key is needed. The skills' output contracts are tuned on Claude models; other models may follow them less reliably.
 
 **Option C: Manual Command Line (For scripting and automation)**
 
@@ -197,7 +197,21 @@ The plugin provides a full graphical interface for all routing features, running
   <img src="docs/claude_tab.png" alt="AI tab: planned steps, controls, and live transcript" width="700">
 </p>
 
-With [Claude Code](https://claude.ai/claude-code) or [opencode](https://opencode.ai) installed, the routing dialog gains AI assistance throughout (the plugin spawns the selected agent CLI headless, streams a live transcript, and fills GUI controls from the results). The **Backend** dropdown on the AI tab picks the CLI: Claude Code runs Anthropic models; opencode takes `provider/model` strings for many providers (including its built-in free tier), with `opencode auth login` adding provider accounts. Both discover the same `.claude/skills/`; opencode runs them under a read-only `pcb-analysis` agent defined in `opencode.json` (the equivalent of the Claude run's read-only tool allowlist):
+With [Claude Code](https://claude.ai/claude-code), [opencode](https://opencode.ai), or the [OpenAI Codex CLI](https://learn.chatgpt.com/docs/codex/cli) installed, the routing dialog gains AI assistance throughout (the plugin spawns the selected agent CLI headless, streams a live transcript, and fills GUI controls from the results). The **Backend** dropdown picks the CLI: Claude Code runs Anthropic models; opencode accepts `provider/model` strings; Codex reuses the saved ChatGPT login and subscription. All three run the same `.claude/skills/`; analysis runs are read-only. For Placement, Claude uses its write-capable tools, while Codex runs without shell access and returns validated JSON decisions that the plugin executes locally inside the staged work directory.
+
+For Codex, install the public CLI and sign in once from a terminal:
+
+```bash
+npm install -g @openai/codex
+codex login
+```
+
+Choose **Sign in with ChatGPT** in the browser flow. The desktop application's private bundled `codex.exe` is not a public CLI launcher and is deliberately ignored by the plugin on Windows.
+
+The Codex backend embeds the selected `SKILL.md` in every request. For **Plan
+Routing**, it also embeds a read-only board summary generated locally and disables
+Codex shell access; this avoids Windows sandbox process-launch failures. Other
+Codex skills can run repository Python tools through `python3.cmd` on Windows.
 
 - **AI tab** - *Plan Routing* runs `/plan-pcb-routing`: the plan fills the parameter fields across the tabs and appears as a checkable step list, which *Run Selected Steps* executes sequentially in-process on the live board with per-step status marks. *Review Routed Board* and *Diagnose Routing Failures* give post-route QA and failure root-causing. Backend, model, and effort selectors control every AI run and persist with the dialog settings (model/effort remembered per backend).
 - **Save / Load a plan** - *Save…* writes the generated step list to a JSON file; *Load…* reads one back and runs it with **no Claude call** — handy for replaying a workflow that worked on another board. A recorded stress-test chain converts to a loadable plan too (`tests/stress/manifest_to_plan.py <board>/redo_commands.sh plan.json`).
@@ -699,7 +713,9 @@ KiCadRoutingTools/
 │   ├── planes_gui.py         # Power/ground planes tab
 │   ├── ai_gui.py             # AI tab (spawns the agent CLI headless, streams transcript)
 │   ├── ai_plan.py            # AI tab routing-plan orchestration
-│   ├── ai_backend.py         # Agent CLI backend selection (Claude Code / opencode)
+│   ├── ai_backend.py         # Agent CLI backends (Claude Code / opencode / Codex)
+│   ├── codex_placement_runner.py # Validated Codex placement decisions + local execution
+│   ├── placement_gui.py      # Placement and combined placement/routing tab
 │   ├── movie_recorder.py     # Routing-movie capture for the GUI
 │   ├── board_swaps.py        # Shared board pad/net swap helpers
 │   ├── deps_check.py         # Plugin dependency checks
@@ -882,4 +898,3 @@ pull requests for open issues are just as welcome. See
 ## License
 
 MIT License
-
