@@ -6,3 +6,6 @@ scipy>=1.7.0
 
 # Geometry operations
 shapely>=1.8.0
+
+# Board renders and placement movies
+Pillow>=9.0.0

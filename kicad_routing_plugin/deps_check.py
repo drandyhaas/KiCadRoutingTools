@@ -32,6 +32,7 @@ IMPORT_TESTS = {
     "numpy": "import numpy",
     "scipy": "from scipy.optimize import linear_sum_assignment",
     "shapely": "from shapely.geometry import Polygon",
+    "Pillow": "from PIL import Image",
 }
 
 # Pattern matching the package name at the start of a requirements line.
@@ -161,7 +162,7 @@ def _pip_install_threaded(packages, progress):
 
 
 def ensure_dependencies(parent=None):
-    """Verify that scipy and shapely are importable. If not, prompt the user
+    """Verify required packages are importable. If not, prompt the user
     to install them via pip into KiCad's Python. Returns True if all deps are
     present (after any install), False if the user cancelled or install failed.
     """

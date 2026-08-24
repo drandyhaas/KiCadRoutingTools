@@ -3,8 +3,9 @@ KiCad Routing Tools - AI backend abstraction (issue #503).
 
 The GUI's AI features and the stress harness drive an agent CLI headless.
 Historically that CLI was Claude Code only; this module makes the backend
-pluggable so opencode (https://opencode.ai) can be used as a configurable
-alternative with any model provider it supports.
+pluggable so opencode (https://opencode.ai) or OpenAI Codex can be used as
+configurable alternatives.  Codex reuses the ChatGPT login saved by its CLI,
+so it does not require an API key.
 
 Each backend knows how to:
   - locate its CLI (`find_cli`), including the common install spots KiCad
@@ -53,6 +54,9 @@ class AIBackend:
     effort_tooltip = ""
     # Substrings (lowercased) that mark an error as an auth problem.
     _auth_markers = ()
+    # Some native CLIs accept a prompt argument safely, while others are more
+    # robust when a potentially long prompt is supplied on stdin.
+    prompt_via_stdin = False
 
     def find_cli(self):
         """Return the CLI path, or None if not installed."""
@@ -369,10 +373,227 @@ class OpencodeBackend(AIBackend):
         return _OpencodeStreamState()
 
 
+# --------------------------------------------------------------------- Codex
+
+
+def _codex_error_message(event):
+    """Extract a useful message from Codex's top-level/turn error shapes."""
+    error = event.get("error")
+    if isinstance(error, dict):
+        return str(error.get("message") or error.get("detail")
+                   or error.get("type") or "Codex error")
+    if error:
+        return str(error)
+    return str(event.get("message") or "Codex error")
+
+
+class _CodexStreamState(_StreamState):
+    """Parse the JSONL event stream produced by ``codex exec --json``."""
+
+    def __init__(self):
+        self._texts = []
+        self._errors = []
+
+    def feed(self, event):
+        etype = event.get("type")
+        item = event.get("item") or {}
+        itype = item.get("type")
+
+        if etype == "thread.started":
+            thread_id = event.get("thread_id")
+            return f"Codex | thread: {thread_id}\n\n" if thread_id else None
+
+        if etype == "item.completed" and itype == "agent_message":
+            text = str(item.get("text") or "").strip()
+            if text:
+                self._texts.append(text)
+                return text + "\n"
+            return None
+
+        # Show tool progress once, when it starts.  Agent messages are emitted
+        # only on completion above because their text is not stable earlier.
+        if etype == "item.started":
+            if itype == "command_execution":
+                command = " ".join(str(item.get("command") or "").split())
+                if len(command) > 120:
+                    command = command[:120] + "..."
+                return f"  -> Bash: {command}\n" if command else None
+            if itype == "web_search":
+                query = " ".join(str(item.get("query") or "web search").split())
+                return f"  -> WebSearch: {query}\n"
+            if itype == "mcp_tool_call":
+                name = item.get("tool") or item.get("name") or "MCP tool"
+                return f"  -> {name}\n"
+
+        if etype == "item.completed" and itype == "command_execution" \
+                and item.get("status") == "failed":
+            output = str(item.get("aggregated_output") or "command failed")
+            first = output.strip().splitlines()[0] if output.strip() else "command failed"
+            return f"     [x] {first[:120]}\n"
+
+        if etype in ("turn.failed", "error"):
+            message = _codex_error_message(event)
+            self._errors.append(message)
+            return None
+        return None
+
+    def finish(self, returncode, stderr):
+        if self._errors:
+            return None, "; ".join(self._errors)
+        if returncode:
+            return None, (stderr or "").strip() or \
+                f"codex exited with code {returncode}"
+        if not self._texts:
+            return None, (stderr or "").strip() or \
+                "codex completed without an agent message"
+        # Keeping all messages makes RESULT= extraction robust if a model
+        # emits an informational message before its final answer.
+        return "\n".join(self._texts), None
+
+
+class CodexBackend(AIBackend):
+    id = "codex"
+    label = "OpenAI Codex"
+    cli_name = "codex"
+    install_url = "https://learn.chatgpt.com/docs/codex/cli"
+    login_hint = (
+        "Codex CLI is installed but not logged in: open a terminal, run "
+        "`codex login`, choose Sign in with ChatGPT, then retry. This uses "
+        "your ChatGPT subscription; no API key is required.")
+    candidates = (
+        os.path.expandvars(r"%APPDATA%\npm\codex.cmd"),
+        os.path.expanduser("~/.local/bin/codex"),
+        "/opt/homebrew/bin/codex",
+        "/usr/local/bin/codex",
+        "/usr/bin/codex",
+    )
+    model_suggestions = ("Default",)
+    effort_suggestions = ("Default", "minimal", "low", "medium", "high", "xhigh")
+    model_tooltip = (
+        "Codex model (--model). Default uses your Codex CLI model and ChatGPT "
+        "subscription. The field is editable for model names supported by "
+        "your account.")
+    effort_tooltip = (
+        "Codex reasoning effort: minimal/low/medium/high/xhigh. Default uses "
+        "your Codex CLI configuration; xhigh depends on the selected model.")
+    _auth_markers = ("not logged in", "codex login", "sign in", "unauthorized",
+                     "authentication", "refresh token", "401")
+    prompt_via_stdin = True
+
+    def find_cli(self):
+        """Find the public CLI, not the desktop app's private executable.
+
+        Recent Windows desktop packages contain an internal ``codex.exe`` in
+        Program Files\\WindowsApps.  It may appear on PATH but Windows denies
+        direct launches from other applications, so treating it as the CLI
+        leaves the GUI enabled only to fail with Access Denied.
+        """
+        paths = [shutil.which("codex.cmd"), shutil.which(self.cli_name)]
+        paths.extend(self.candidates)
+        for path in paths:
+            if not path:
+                continue
+            normalized = os.path.normcase(os.path.abspath(path))
+            if ("windowsapps" in normalized
+                    and "openai.codex_" in normalized):
+                continue
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+        return None
+
+    def not_found_message(self):
+        return (
+            "OpenAI Codex CLI not found. Install the public CLI with "
+            "`npm install -g @openai/codex` (the Codex desktop app's internal "
+            "executable is not a CLI launcher), run `codex login`, then reopen "
+            "this dialog.")
+
+    def skill_prompt(self, skill, args, instructions):
+        # Codex does not discover this repository's Claude-format skills
+        # reliably, so pass the selected skill directly on stdin.
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        skill_path = os.path.join(root_dir, ".claude", "skills", skill,
+                                  "SKILL.md")
+        try:
+            with open(skill_path, "r", encoding="utf-8",
+                      errors="replace") as skill_file:
+                skill_text = skill_file.read()
+        except OSError as error:
+            skill_text = (f"[Could not embed local skill {skill_path}: "
+                          f"{error}]")
+        prompt = (f"Follow the embedded local {skill} skill for: "
+                  f"{args} — {instructions}"
+                  "\n\n<LOCAL_SKILL>\n" + skill_text + "\n</LOCAL_SKILL>")
+        if (skill == "plan-pcb-routing" and isinstance(args, str)
+                and os.path.isfile(args)):
+            try:
+                from .codex_plan_context import collect_plan_context
+                board_context = collect_plan_context(args)
+            except Exception as error:
+                board_context = json.dumps({"error": str(error)})
+            prompt += ("\n<LOCAL_BOARD_CONTEXT>\n" + board_context +
+                       "\n</LOCAL_BOARD_CONTEXT>\n"
+                       "<EXECUTION_RULES>\n"
+                       "The plugin already performed the complete read-only "
+                       "board analysis. Ignore command examples in the skill: "
+                       "do not call "
+                       "any shell, local tool, MCP, connector, or repository "
+                       "inspection tool. Derive the report and final RESULT line "
+                       "from the embedded skill and context. Web search may be "
+                       "used for datasheets. Do not modify files.\n"
+                       "</EXECUTION_RULES>")
+        elif os.name == "nt":
+            prompt += (
+                "\nOn Windows, the Codex shell already wraps commands with "
+                "`cmd.exe`; do not invoke a nested shell. Work from the "
+                "requested work directory, use relative artifact paths, and "
+                "invoke the repository's `python3.cmd` directly for Python "
+                "scripts. Do not install Python packages during the run."
+            )
+        return prompt
+
+    def build_cmd(self, cli_path, prompt, model=None, effort=None,
+                  allowed_tools=None, add_dirs=()):
+        # Generic analysis calls omit allowed_tools and remain read-only.
+        # Claude/OpenCode placement may pass an allowlist and isolated workdir;
+        # controlled Codex placement is self-contained and remains read-only.
+        sandbox = "workspace-write" if allowed_tools else "read-only"
+        self_contained = (not allowed_tools and
+                          ("<LOCAL_BOARD_CONTEXT>" in prompt or
+                           "<LOCAL_PLACEMENT_CONTEXT>" in prompt))
+        cmd = [cli_path, "--ask-for-approval", "never"]
+        if "<LOCAL_PLACEMENT_CONTEXT>" not in prompt:
+            cmd += ["--search"]
+        if self_contained:
+            cmd += ["--disable", "shell_tool"]
+        for directory in add_dirs:
+            cmd += ["--add-dir", directory]
+        cmd += [
+            "exec", "--json", "--ephemeral", "--skip-git-repo-check",
+            "--sandbox", sandbox,
+        ]
+        if self_contained:
+            # Auth is still loaded, while user plugins, MCP servers, hooks and
+            # notifications are omitted from this self-contained analysis.
+            cmd += ["--ignore-user-config"]
+        if model:
+            cmd += ["--model", model]
+        if effort:
+            # A bare value is accepted as a literal string by Codex and also
+            # survives Windows npm .cmd shims without nested-quote hazards.
+            cmd += ["--config", f"model_reasoning_effort={effort}"]
+        # AISkillRunner supplies the actual prompt on stdin.
+        cmd += ["-"]
+        return cmd
+
+    def stream_state(self):
+        return _CodexStreamState()
+
+
 # ------------------------------------------------------------------ registry
 
-BACKENDS = {b.id: b for b in (ClaudeBackend(), OpencodeBackend())}
-BACKEND_IDS = tuple(BACKENDS)          # ("claude", "opencode")
+BACKENDS = {b.id: b for b in (ClaudeBackend(), OpencodeBackend(), CodexBackend())}
+BACKEND_IDS = tuple(BACKENDS)          # ("claude", "opencode", "codex")
 DEFAULT_BACKEND_ID = "claude"
 
 

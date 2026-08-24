@@ -1,9 +1,9 @@
 """
 KiCad Routing Tools - Placement sub-tab (AI tab notebook).
 
-Two Claude-Code-driven actions ("Place" via /plan-pcb-placement, "Place +
-Route" via /plan-pcb-placement-and-routing) plus the non-AI "Beautify Labels"
-action (issue #481). The AI runs are headless, write into a persistent
+Two agent-driven actions ("Place" via /plan-pcb-placement, "Place + Route"
+via /plan-pcb-placement-and-routing) plus the non-AI "Beautify Labels" action
+(issue #481). The AI runs are headless, write into a persistent
 workdir (placement_run.create_workdir), take minutes to hours, and are
 observed from outside: a 1 s monitor timer merges the stream-json transcript,
 the converge ledger tail, and newly-appearing board artifacts into an
@@ -11,10 +11,9 @@ elapsed/stage status line, and renders preview frames from new boards while
 the run is going. At the end the movie and REPORT.md are surfaced in the tab
 and the result can be explicitly applied back to the live board.
 
-Claude Code is REQUIRED for the two AI actions: they are pinned to the Claude
-backend regardless of the AI tab's backend selection (the opencode analysis
-agent denies edits, and these skills must write), and the buttons are disabled
-with an install hint when the CLI is missing.
+Claude Code runs the skills directly. Codex instead returns validated JSON
+decisions while the plugin executes local Python tools without giving Codex
+shell or repository access. opencode remains analysis-only.
 """
 
 import os
@@ -446,9 +445,9 @@ class PlacementTab(wx.Panel):
         self.append_log = append_log or (lambda text: None)
         self.sync_pcb_data_callback = sync_pcb_data_callback
         # The backend dropdown shows every harness but only
-        # PLACEMENT_SUPPORTED_BACKENDS can actually be selected (today:
-        # Claude Code - the skills must write, and e.g. opencode's analysis
-        # agent denies edits). self.backend always holds a SUPPORTED backend.
+        # PLACEMENT_SUPPORTED_BACKENDS can actually be selected (Claude Code
+        # and Codex; opencode's analysis agent denies edits). self.backend
+        # always holds a SUPPORTED backend.
         self.backend = BACKENDS[PLACEMENT_SUPPORTED_BACKENDS[0]]
         # Model/effort entries remembered PER BACKEND, exactly as the
         # Routing tab does: without this, switching backend carried the
@@ -520,9 +519,9 @@ class PlacementTab(wx.Panel):
             sw, choices=[BACKENDS[bid].label for bid in BACKEND_IDS])
         self.backend_choice.SetSelection(BACKEND_IDS.index(self.backend.id))
         self.backend_choice.SetToolTip(
-            "Harness that drives the placement skills. Only Claude Code is "
-            "supported today (placement runs must WRITE, and the other "
-            "harnesses' agents deny edits); more harnesses later.")
+            "Harness that drives the placement skills. Claude Code and OpenAI "
+            "Codex are supported; Codex confines writes to its workspace and "
+            "the staged run directory. opencode's analysis agent denies edits.")
         self.backend_choice.Bind(wx.EVT_CHOICE, self._on_backend_choice)
         sel_grid.Add(self.backend_choice, 0, wx.EXPAND)
         sel_grid.Add(wx.StaticText(sw, label="Model:"), 0,
@@ -663,13 +662,14 @@ class PlacementTab(wx.Panel):
         bid = BACKEND_IDS[self.backend_choice.GetSelection()]
         if bid not in PLACEMENT_SUPPORTED_BACKENDS:
             # Revert: shown (greyed) so the roadmap is visible, but placement
-            # runs must WRITE and only this backend's agent may edit.
+            # runs must WRITE and this backend's analysis agent may not edit.
             self.backend_choice.SetSelection(BACKEND_IDS.index(self.backend.id))
+            supported = ", ".join(
+                BACKENDS[supported_id].label
+                for supported_id in PLACEMENT_SUPPORTED_BACKENDS)
             self.set_status(
                 f"{BACKENDS[bid].label} cannot drive placement yet - these "
-                f"runs must write, and only "
-                f"{BACKENDS[PLACEMENT_SUPPORTED_BACKENDS[0]].label} supports "
-                "that today.")
+                f"runs must write. Supported: {supported}.")
             return
         # Remember the OUTGOING backend's entries first (ai_gui parity).
         self._backend_params[self._last_backend.id] = {
@@ -747,27 +747,34 @@ class PlacementTab(wx.Panel):
         self.last_workdir = workdir
         self._mode = mode
         self._pending_result = None
-        prompt = build_placement_prompt(
-            self.backend, workdir, staged, mode,
-            extra=self.extra_instructions.GetValue())
-
         model = self.get_model_value()
         effort = self.get_effort_value()
+        extra = self.extra_instructions.GetValue()
 
         label = MODE_LABELS[mode]
         self._set_running_ui(True)
-        self.set_status(f"{label} — starting Claude Code...")
+        self.set_status(f"{label} — starting {self.backend.label}...")
         self._append_transcript(
             f"=== {label} run ===\nworkdir: {workdir}\n"
             f"model: {model or 'default'}  effort: {effort or 'default'}\n\n")
         self.append_log(f"Placement: {label} run started, workdir {workdir}\n")
 
-        self._runner = AISkillRunner(cli, self._on_transcript,
-                                     self._on_run_done, backend=self.backend,
-                                     on_event=self._on_stream_event)
-        self._runner.run(prompt, model=model, effort=effort,
-                         allowed_tools=PLACEMENT_ALLOWED_TOOLS,
-                         add_dirs=(workdir,))
+        if self.backend.id == "codex":
+            from .codex_placement_runner import CodexPlacementRunner
+            self._runner = CodexPlacementRunner(
+                cli, self.backend, self._on_transcript, self._on_run_done,
+                dispatch=wx.CallAfter)
+            self._runner.run(workdir, staged, mode, model=model, effort=effort,
+                             extra=extra)
+        else:
+            prompt = build_placement_prompt(
+                self.backend, workdir, staged, mode, extra=extra)
+            self._runner = AISkillRunner(
+                cli, self._on_transcript, self._on_run_done,
+                backend=self.backend, on_event=self._on_stream_event)
+            self._runner.run(prompt, model=model, effort=effort,
+                             allowed_tools=PLACEMENT_ALLOWED_TOOLS,
+                             add_dirs=(workdir,))
         self._monitor = PlacementRunMonitor(self, workdir, mode)
         self._monitor.start()
 
@@ -803,12 +810,17 @@ class PlacementTab(wx.Panel):
         if not self or self._monitor is None:
             return
         try:
+            # Claude stream-json shape.
             for block in event.get("message", {}).get("content", []):
                 if (isinstance(block, dict) and block.get("type") == "tool_use"
                         and str(block.get("name", "")).lower() == "bash"):
                     cmd = (block.get("input") or {}).get("command")
                     if cmd:
                         self._monitor.note_transcript(str(cmd))
+            # Codex JSONL shape.
+            item = event.get("item") or {}
+            if item.get("type") == "command_execution" and item.get("command"):
+                self._monitor.note_transcript(str(item["command"]))
         except (AttributeError, TypeError):
             pass
 

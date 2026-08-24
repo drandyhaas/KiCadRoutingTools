@@ -1,7 +1,7 @@
 """
 KiCad Routing Tools - headless placement-run contracts (Placement tab).
 
-The Placement tab drives Claude Code headless with the /plan-pcb-placement or
+The Placement tab drives an agent with the /plan-pcb-placement or
 /plan-pcb-placement-and-routing skill. Unlike the "Ask AI" analysis skills,
 those runs WRITE (lap boards, a converge ledger, REPORT.md, the movie), take
 minutes to hours, and must be observable from the outside while they run.
@@ -44,12 +44,10 @@ PLACEMENT_SKILLS = {
     "place_route": "plan-pcb-placement-and-routing",
 }
 
-# Backends that can drive a placement run today. The tab shows ALL backends
-# in its dropdown (so the UI already communicates future harness support) but
-# reverts any unsupported pick: the skills must WRITE, and e.g. opencode's
-# pcb-analysis agent denies edits. Growing this tuple (plus per-backend
-# allowlist handling in build_cmd) is the whole cost of adding a harness.
-PLACEMENT_SUPPORTED_BACKENDS = ("claude",)
+# Backends that can drive a placement run today. Claude writes through its
+# tool allowlist; Codex only returns JSON decisions and the plugin executes
+# validated local scripts. opencode's pcb-analysis agent remains read-only.
+PLACEMENT_SUPPORTED_BACKENDS = ("claude", "codex")
 
 # Driver stage ids -> human progress text ("which type of work"), from the two
 # skills' driver --list output (placement_driver.py P*, loop_driver.py L*).

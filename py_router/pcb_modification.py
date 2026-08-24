@@ -3540,7 +3540,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
         .kicad_dru layer rule replacing the base clearance on ruled layers
         (#498, which the older graze passes never honored) and a .kicad_dru
         TRACK rule raising the seg-vs-seg term on top of it (#549);
-      * is strictly shorter than the copper it replaces (min_gain);
+      * is strictly shorter than the copper it replaces (min_gain);  #FCA
+      * or has effectively equal length (within 0.001 mm) while using fewer segments;  #FCA
       * strands no same-net copper: mid-span via taps, pad touches, and
         T/X-touching sibling tracks hold their span un-collapsed unless the
         touch sits at a kept endpoint.
@@ -3573,6 +3574,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     from connectivity import COINCIDENCE_TOL
 
     npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
+    equal_length_tol = 0.001  #FCA: allow gloss when length is effectively unchanged but segment count drops
 
     def eff_clr(nid):
         if not net_clearances:
@@ -3968,13 +3970,25 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                 new_len = sum(math.hypot(pts[q + 1][0] - pts[q][0],
                                                          pts[q + 1][1] - pts[q][1])
                                               for q in range(len(pts) - 1))
-                                if new_len > sub_len - min_gain:
-                                    continue
+                                # if new_len > sub_len - min_gain:  #FCA SUPPRIME: ancien critere longueur uniquement
+                                #     continue  #FCA SUPPRIME: bloquait un gloss a longueur egale
+                                gain_candidate = sub_len - new_len  #FCA
+                                new_seg_count = sum(  #FCA
+                                    1 for q in range(len(pts) - 1)  #FCA
+                                    if math.hypot(pts[q + 1][0] - pts[q][0],  #FCA
+                                                  pts[q + 1][1] - pts[q][1]) > 1e-5)  #FCA
+                                old_seg_count = j - i  #FCA
+                                length_better = gain_candidate >= min_gain  #FCA
+                                equal_length_simpler = (  #FCA
+                                    abs(gain_candidate) <= equal_length_tol and  #FCA
+                                    new_seg_count < old_seg_count)  #FCA
+                                if not (length_better or equal_length_simpler):  #FCA
+                                    continue  #FCA
                                 if all(clears(pts[q][0], pts[q][1],
                                               pts[q + 1][0], pts[q + 1][1],
                                               layer, net_id, w)
                                        for q in range(len(pts) - 1)):
-                                    found = (j, pts, sub_len - new_len)
+                                    found = (j, pts, max(0.0, gain_candidate))  #FCA: saved_mm reste un gain, jamais negatif
                                     break
                             if found:
                                 break
