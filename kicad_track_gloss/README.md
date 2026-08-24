@@ -16,7 +16,7 @@ Build the PCM archive from the repository root:
 python kicad_track_gloss/package_pcm.py
 ```
 
-The archive is written to `dist/KiCadTrackGloss-0.3.5.zip`. It can be tested
+The archive is written to `dist/KiCadTrackGloss-0.3.6.zip`. It can be tested
 through a custom KiCad PCM repository, or the `kicad_track_gloss` folder can be
 copied directly into KiCad's scripting plugins directory during development.
 
@@ -43,6 +43,10 @@ immutable same-net track is treated as a sliding termination. The gloss chain
 is split at that T intersection, but the contact may move along the traversing
 segment. Deterministic candidates include the nearest projection and direct
 0/45/90-degree contacts; the traversing track remains unchanged.
+
+Probable length-tuning meanders are protected only when the direction-reversal
+pattern repeats. A single ordinary A/B/-A routing turn is not classified as a
+meander and therefore does not suppress the whole connection.
 
 There is no dialog, preview, temporary board, subprocess, success message, or
 no-op message. If no safe improvement exists, the action simply returns. Use

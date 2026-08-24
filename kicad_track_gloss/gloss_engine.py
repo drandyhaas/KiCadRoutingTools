@@ -35,7 +35,7 @@ def find_track_terminal_targets(model, eligible_segment_keys, tolerance=1e-5):
     eligible = {str(key) for key in eligible_segment_keys}
     immutable = [segment for segment in model.segments
                  if segment_key(segment) not in eligible]
-    targets = defaultdict(list)
+    targets = defaultdict(dict)
     for segment in model.segments:
         if segment_key(segment) not in eligible:
             continue
@@ -49,8 +49,8 @@ def find_track_terminal_targets(model, eligible_segment_keys, tolerance=1e-5):
                 if point_segment_distance(
                         point, (other.start_x, other.start_y),
                         (other.end_x, other.end_y)) <= tolerance:
-                    targets[terminal].append(other)
-    return {terminal: tuple(sorted(found, key=segment_key))
+                    targets[terminal][segment_key(other)] = other
+    return {terminal: tuple(found[key] for key in sorted(found))
             for terminal, found in targets.items()}
 
 

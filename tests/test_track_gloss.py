@@ -88,6 +88,17 @@ def test_meander_direction_reversal_is_protected():
     assert not _meander_keys(staircase(8))
 
 
+def test_single_direction_reversal_is_not_misclassified_as_meander():
+    # Regression from dispenser_labels.kicad_pcb / Net-(U2-VCC): an ordinary
+    # route has one A/B/-A reversal, but no repeated length-tuning serpent.
+    points = [(213.6, 116.7), (213.6, 118.95), (213.05, 119.5),
+              (213.0, 119.55), (211.575, 119.55), (211.575, 118.425),
+              (210.275, 117.125), (207.35, 117.125)]
+    segments = [Segment(a[0], a[1], b[0], b[1], 0.127, 0, 1, f"real{i}")
+                for i, (a, b) in enumerate(zip(points, points[1:]))]
+    assert not _meander_keys(segments)
+
+
 def _plan_signature(plan):
     return (tuple(sorted(plan.remove_keys)),
             tuple(sorted((a.start, a.end, a.width, a.layer, a.net_id)

@@ -71,8 +71,13 @@ def _meander_keys(segments):
                 nxt = start
                 vectors.append((seg.start_x - seg.end_x, seg.start_y - seg.end_y))
             point = nxt
-        if any(vectors[i][0] * vectors[i + 2][0] + vectors[i][1] * vectors[i + 2][1] < -1e-9
-               for i in range(len(vectors) - 2)):
+        reversals = sum(
+            vectors[i][0] * vectors[i + 2][0] +
+            vectors[i][1] * vectors[i + 2][1] < -1e-9
+            for i in range(len(vectors) - 2))
+        # One A/B/-A turn is common in ordinary routing. Length-tuning
+        # meanders repeat the reversal pattern at least twice.
+        if reversals >= 2:
             protected.update(segment_key(seg) for seg in group)
     return protected
 
