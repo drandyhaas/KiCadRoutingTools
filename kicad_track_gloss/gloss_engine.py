@@ -14,7 +14,6 @@ Standalone plugin adaptation and selected-track scoping: KiCad Track Gloss.
 from __future__ import annotations
 
 from collections import defaultdict
-import math
 
 from .connectivity import validate_result
 from .geometry import length, octolinear_paths, path_hits_polygon, point_segment_distance, segment_distance

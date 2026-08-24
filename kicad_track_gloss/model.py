@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Tuple
 
 
 @dataclass(frozen=True)
@@ -43,8 +43,8 @@ class BoardModel:
     segments: List[Segment]
     obstacles: List[CircleObstacle] = field(default_factory=list)
     keepouts: List[PolygonKeepout] = field(default_factory=list)
-    # Values resolved by KiCad's own effective netclass machinery. Conditional
-    # .kicad_dru rules remain authoritative in the native DRC oracle.
+    # Values resolved by KiCad's own effective netclass machinery. Rules that
+    # SWIG does not expose remain outside this conservative geometry model.
     net_clearances: Dict[int, float] = field(default_factory=dict)
     minimum_clearance: float = 0.0
     copper_edge_clearance: float = 0.0

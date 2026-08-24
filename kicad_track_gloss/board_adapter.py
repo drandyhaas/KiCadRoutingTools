@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 import re
 
-from .model import BoardModel, CircleObstacle, PolygonKeepout, Segment, geometry_key, segment_key
+from .model import BoardModel, CircleObstacle, PolygonKeepout, Segment, segment_key
 
 
 @dataclass
@@ -41,44 +42,72 @@ def _is_probable_diff_pair(name):
 
 
 def _meander_keys(segments):
-    """Detect the characteristic A/B/-A direction reversal of tuned meanders."""
+    """Detect repeated reversals in each independent, unbranched track chain."""
     by_group = {}
     for seg in segments:
         by_group.setdefault((seg.net_id, seg.layer, round(seg.width, 6)), []).append(seg)
     protected = set()
     for group in by_group.values():
         adjacency = {}
+        by_key = {segment_key(seg): seg for seg in group}
         for seg in group:
             for point in ((round(seg.start_x, 6), round(seg.start_y, 6)),
                           (round(seg.end_x, 6), round(seg.end_y, 6))):
                 adjacency.setdefault(point, []).append(seg)
-        starts = [point for point, touching in adjacency.items() if len(touching) == 1]
-        if not starts:
-            continue
-        used, vectors = set(), []
-        point = starts[0]
-        while True:
-            options = [seg for seg in adjacency.get(point, ()) if segment_key(seg) not in used]
-            if not options:
-                break
-            seg = options[0]
-            used.add(segment_key(seg))
-            start = (round(seg.start_x, 6), round(seg.start_y, 6))
-            if start == point:
-                nxt = (round(seg.end_x, 6), round(seg.end_y, 6))
-                vectors.append((seg.end_x - seg.start_x, seg.end_y - seg.start_y))
-            else:
-                nxt = start
-                vectors.append((seg.start_x - seg.end_x, seg.start_y - seg.end_y))
-            point = nxt
-        reversals = sum(
-            vectors[i][0] * vectors[i + 2][0] +
-            vectors[i][1] * vectors[i + 2][1] < -1e-9
-            for i in range(len(vectors) - 2))
-        # One A/B/-A turn is common in ordinary routing. Length-tuning
-        # meanders repeat the reversal pattern at least twice.
-        if reversals >= 2:
-            protected.update(segment_key(seg) for seg in group)
+        remaining = set(by_key)
+        while remaining:
+            component = set()
+            pending = [min(remaining)]
+            while pending:
+                key = pending.pop()
+                if key in component:
+                    continue
+                component.add(key)
+                seg = by_key[key]
+                for point in ((round(seg.start_x, 6), round(seg.start_y, 6)),
+                              (round(seg.end_x, 6), round(seg.end_y, 6))):
+                    pending.extend(segment_key(other) for other in adjacency[point]
+                                   if segment_key(other) not in component)
+            remaining.difference_update(component)
+
+            component_adjacency = {
+                point: sorted((seg for seg in touching
+                               if segment_key(seg) in component), key=segment_key)
+                for point, touching in adjacency.items()
+            }
+            component_adjacency = {point: touching
+                                   for point, touching in component_adjacency.items()
+                                   if touching}
+            starts = sorted(point for point, touching in component_adjacency.items()
+                            if len(touching) == 1)
+            if len(starts) != 2 or any(len(touching) > 2
+                                       for touching in component_adjacency.values()):
+                continue
+
+            used, vectors = set(), []
+            point = starts[0]
+            while True:
+                options = [seg for seg in component_adjacency.get(point, ())
+                           if segment_key(seg) not in used]
+                if not options:
+                    break
+                seg = options[0]
+                used.add(segment_key(seg))
+                start = (round(seg.start_x, 6), round(seg.start_y, 6))
+                if start == point:
+                    point = (round(seg.end_x, 6), round(seg.end_y, 6))
+                    vectors.append((seg.end_x - seg.start_x, seg.end_y - seg.start_y))
+                else:
+                    point = start
+                    vectors.append((seg.start_x - seg.end_x, seg.start_y - seg.end_y))
+            reversals = sum(
+                vectors[i][0] * vectors[i + 2][0] +
+                vectors[i][1] * vectors[i + 2][1] < -1e-9
+                for i in range(len(vectors) - 2))
+            # One A/B/-A turn is common in ordinary routing. Length-tuning
+            # meanders repeat the reversal pattern at least twice.
+            if reversals >= 2:
+                protected.update(component)
     return protected
 
 
@@ -128,10 +157,10 @@ class BoardAdapter:
 
         expanded = set()
         for seed_key in sorted(seed_keys):
-            queue = [seed_key]
+            queue = deque([seed_key])
             visited = set()
             while queue:
-                key = queue.pop(0)
+                key = queue.popleft()
                 if key in visited:
                     continue
                 visited.add(key)
@@ -184,6 +213,20 @@ class BoardAdapter:
                         queue.append(neighbor_key)
         return expanded
 
+    def expand_eligible_keys(self, board, straight_by_key, seed_keys, warnings=None):
+        """Return expanded, eligible, and meander-protected keys for seed tracks."""
+        warnings = warnings if warnings is not None else []
+        expanded = self._expand_seed_keys(
+            board, straight_by_key, set(seed_keys), warnings)
+        meanders = _meander_keys([
+            segment for _item, segment in straight_by_key.values()
+            if segment_key(segment) in expanded
+        ])
+        eligible = expanded - meanders
+        if meanders:
+            warnings.append("Probable meander/length-tuning tracks are protected.")
+        return eligible, expanded, meanders
+
     def snapshot(self, board, require_selection=True):
         segments, obstacles, warnings = [], [], []
         straight_by_key = {}
@@ -220,13 +263,9 @@ class BoardAdapter:
             else:
                 seed_keys.add(key)
 
-        eligible = self._expand_seed_keys(board, straight_by_key, seed_keys, warnings)
-        expanded_count = max(0, len(eligible) - len(seed_keys))
-
-        meanders = _meander_keys([s for s in segments if segment_key(s) in eligible])
-        if meanders:
-            eligible.difference_update(meanders)
-            warnings.append("Probable meander/length-tuning tracks are protected.")
+        eligible, expanded, _meanders = self.expand_eligible_keys(
+            board, straight_by_key, seed_keys, warnings)
+        expanded_count = max(0, len(expanded) - len(seed_keys))
 
         try:
             footprints = board.GetFootprints()

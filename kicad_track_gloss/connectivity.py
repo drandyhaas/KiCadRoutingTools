@@ -2,34 +2,32 @@
 
 from __future__ import annotations
 
-from collections import Counter
-
 from .geometry import point_segment_distance, segment_distance
-from .model import AddedSegment, GlossResult, Segment, segment_key
-
-
-def immutable_fingerprint(segments, eligible_keys):
-    return Counter(
-        (segment_key(s), s.start_x, s.start_y, s.end_x, s.end_y,
-         s.width, s.layer, s.net_id, s.locked, s.arc)
-        for s in segments if segment_key(s) not in eligible_keys
-    )
+from .model import GlossResult, Segment, segment_key
 
 
 def validate_result(model, eligible_keys, result: GlossResult):
     known = {segment_key(s): s for s in model.segments}
+    if len(result.remove_keys) != len(set(result.remove_keys)):
+        raise ValueError("The candidate removes the same track more than once")
     if any(key not in eligible_keys for key in result.remove_keys):
         raise ValueError("The candidate attempts to remove an unselected track")
     if any(key not in known for key in result.remove_keys):
         raise ValueError("The candidate references a track no longer present")
     removed = [known[key] for key in result.remove_keys]
-    old_by_net = Counter(s.net_id for s in removed)
-    new_by_net = Counter(s.net_id for s in result.additions)
-    if old_by_net != new_by_net and not result.additions:
+    if removed and not result.additions:
         raise ValueError("The candidate removes copper without replacing it")
+    removed_nets = {segment.net_id for segment in removed}
+    added_nets = {segment.net_id for segment in result.additions}
+    if removed_nets - added_nets:
+        raise ValueError("The candidate does not replace every affected net")
+    allowed_geometry = {(segment.net_id, segment.layer, round(segment.width, 6))
+                        for segment in removed}
     for new in result.additions:
         if new.width <= 0 or new.net_id <= 0 or new.start == new.end:
             raise ValueError("Invalid replacement segment")
+        if removed and (new.net_id, new.layer, round(new.width, 6)) not in allowed_geometry:
+            raise ValueError("Replacement segment changes net, layer, or width")
     for index, first in enumerate(result.additions):
         for second in result.additions[index + 1:]:
             if first.layer != second.layer or first.net_id == second.net_id:

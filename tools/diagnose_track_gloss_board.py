@@ -19,7 +19,6 @@ sys.modules["kicad_track_gloss"] = package
 from kicad_track_gloss.board_adapter import (  # noqa: E402
     BoardAdapter,
     _is_probable_diff_pair,
-    _meander_keys,
 )
 from kicad_track_gloss.gloss_engine import (  # noqa: E402
     find_track_terminal_targets,
@@ -55,13 +54,8 @@ def main():
         raise SystemExit("Track UUID not found: " + str(missing or args.uuid))
 
     warnings = []
-    expanded = adapter._expand_seed_keys(
+    eligible, expanded, meanders = adapter.expand_eligible_keys(
         board, records, set(args.uuid), warnings)
-    meanders = _meander_keys(
-        [segment for _item, segment in records.values()
-         if segment_key(segment) in expanded])
-    eligible = set(expanded)
-    eligible.difference_update(meanders)
     targets = find_track_terminal_targets(snapshot.model, eligible)
     plans = generate_candidate_plans(
         snapshot.model, eligible, min_gain=0.01,
@@ -110,11 +104,9 @@ def sweep(board, adapter, snapshot, records, board_path, verify_apply, max_scope
         if seed_key in assigned:
             continue
         warnings = []
-        expanded = adapter._expand_seed_keys(board, records, {seed_key}, warnings)
-        meanders = _meander_keys(
-            [segment for _track, segment in records.values()
-             if segment_key(segment) in expanded])
-        eligible = frozenset(expanded - meanders)
+        eligible, _expanded, meanders = adapter.expand_eligible_keys(
+            board, records, {seed_key}, warnings)
+        eligible = frozenset(eligible)
         signature = tuple(sorted(eligible))
         if signature and signature not in scopes:
             scopes[signature] = (seed_key, seed.net_name, warnings, len(meanders))

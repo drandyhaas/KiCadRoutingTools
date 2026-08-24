@@ -16,7 +16,7 @@ Build the PCM archive from the repository root:
 python kicad_track_gloss/package_pcm.py
 ```
 
-The archive is written to `dist/KiCadTrackGloss-0.3.7.zip`. It can be tested
+The archive is written to `dist/KiCadTrackGloss-0.3.8.zip`. It can be tested
 through a custom KiCad PCM repository, or the `kicad_track_gloss` folder can be
 copied directly into KiCad's scripting plugins directory during development.
 
@@ -49,8 +49,9 @@ pattern repeats. A single ordinary A/B/-A routing turn is not classified as a
 meander and therefore does not suppress the whole connection.
 
 There is no dialog, preview, temporary board, subprocess, success message, or
-no-op message. If no safe improvement exists, the action simply returns. Use
-KiCad **Undo** if the visual result is not desired.
+no-op message. If no safe improvement exists for any reason, the action plays
+KiCad's standard warning bell once and returns. Use KiCad **Undo** if the visual
+result is not desired.
 
 For troubleshooting, run **Tools → External Plugins → KiCad Track Gloss —
 Diagnostic**. It performs the same operation and then opens a selectable log

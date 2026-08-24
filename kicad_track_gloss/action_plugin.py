@@ -45,6 +45,14 @@ def _show_report(title, lines):
         dialog.Destroy()
 
 
+def _warning_bell():
+    """Use the same native warning bell KiCad invokes for invalid actions."""
+    try:
+        wx.Bell()
+    except Exception:
+        LOG.exception("Could not play the KiCad warning bell")
+
+
 def _selection_counts(board):
     counts = {"segments": 0, "arcs": 0, "vias": 0, "other": 0}
     for item in board.GetTracks():
@@ -79,8 +87,9 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
 
     def Run(self):
         try:
-            self._run([])
+            changed = self._run([])
         except Exception:
+            _warning_bell()
             LOG.exception("Track gloss failed; the board was left unchanged")
             try:
                 _show_report("KiCad Track Gloss — Error", [
@@ -91,6 +100,9 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                 ])
             except Exception:
                 LOG.exception("Could not display the Track Gloss error report")
+        else:
+            if not changed:
+                _warning_bell()
 
     def _run(self, report):
         board = pcbnew.GetBoard()
@@ -173,8 +185,9 @@ class KiCadTrackGlossDiagnosticPlugin(KiCadTrackGlossPlugin):
     def Run(self):
         report = ["KiCad Track Gloss diagnostic", ""]
         try:
-            self._run(report)
+            changed = self._run(report)
         except Exception:
+            _warning_bell()
             LOG.exception("Track gloss diagnostic run failed")
             report.extend([
                 "",
@@ -183,6 +196,9 @@ class KiCadTrackGlossDiagnosticPlugin(KiCadTrackGlossPlugin):
                 "",
                 traceback.format_exc(),
             ])
+        else:
+            if not changed:
+                _warning_bell()
         try:
             _show_report("KiCad Track Gloss — Diagnostic", report)
         except Exception:

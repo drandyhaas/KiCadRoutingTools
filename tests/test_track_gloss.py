@@ -1,6 +1,8 @@
 import math
 import random
+import sys
 import tempfile
+import types
 import zipfile
 
 from kicad_track_gloss.gloss_engine import (find_track_terminal_vertices,
@@ -89,6 +91,15 @@ def test_meander_direction_reversal_is_protected():
     assert not _meander_keys(staircase(8))
 
 
+def test_meander_protection_does_not_spill_into_disconnected_route():
+    meander_points = [(0, 0), (1, 0), (1, 1), (0, 1), (0, 2), (1, 2)]
+    meander = [Segment(a[0], a[1], b[0], b[1], 0.2, 0, 1, f"m{i}")
+               for i, (a, b) in enumerate(zip(meander_points, meander_points[1:]))]
+    ordinary = [Segment(10, 0, 11, 0, 0.2, 0, 1, "ordinary-a"),
+                Segment(11, 0, 12, 1, 0.2, 0, 1, "ordinary-b")]
+    assert _meander_keys(meander + ordinary) == {segment_key(s) for s in meander}
+
+
 def test_single_direction_reversal_is_not_misclassified_as_meander():
     # Regression from dispenser_labels.kicad_pcb / Net-(U2-VCC): an ordinary
     # route has one A/B/-A reversal, but no repeated length-tuning serpent.
@@ -158,10 +169,44 @@ def test_action_plugin_is_silent_and_has_no_file_roundtrip():
         assert forbidden not in source
     assert "KiCadTrackGlossDiagnosticPlugin" in source
     assert "show_toolbar_button = False" in source
+    assert "wx.Bell()" in source
+
+
+def test_normal_action_bells_once_only_on_noop():
+    import importlib
+
+    calls = []
+    fake_pcbnew = types.ModuleType("pcbnew")
+    fake_pcbnew.ActionPlugin = object
+    fake_wx = types.ModuleType("wx")
+    fake_wx.Bell = lambda: calls.append("bell")
+    previous_pcbnew = sys.modules.get("pcbnew")
+    previous_wx = sys.modules.get("wx")
+    sys.modules["pcbnew"] = fake_pcbnew
+    sys.modules["wx"] = fake_wx
+    sys.modules.pop("kicad_track_gloss.action_plugin", None)
+    try:
+        module = importlib.import_module("kicad_track_gloss.action_plugin")
+        plugin = module.KiCadTrackGlossPlugin()
+        plugin._run = lambda _report: False
+        plugin.Run()
+        assert calls == ["bell"]
+        plugin._run = lambda _report: True
+        plugin.Run()
+        assert calls == ["bell"]
+    finally:
+        sys.modules.pop("kicad_track_gloss.action_plugin", None)
+        if previous_pcbnew is None:
+            sys.modules.pop("pcbnew", None)
+        else:
+            sys.modules["pcbnew"] = previous_pcbnew
+        if previous_wx is None:
+            sys.modules.pop("wx", None)
+        else:
+            sys.modules["wx"] = previous_wx
 
 
 def test_pcm_archive_uses_kicad_flat_plugin_layout():
-    from pathlib import Path
     from kicad_track_gloss.package_pcm import build
 
     with tempfile.TemporaryDirectory() as directory:
