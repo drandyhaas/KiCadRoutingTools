@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+import random
 import sys
 import types
 
@@ -37,6 +39,9 @@ EXPECTED_TRACKS = 706
 EXPECTED_SCOPES = 335
 EXPECTED_CHANGES = 61
 EXPECTED_SAVED_MM = 9.198662
+EXPECTED_ALL_SELECTED_SAVED_MM = 4.341542
+EXPECTED_ALL_SELECTED_REMOVED = 100
+EXPECTED_ALL_SELECTED_ADDED = 62
 
 
 def _records(adapter, board):
@@ -63,6 +68,72 @@ def _scopes(board, adapter, records):
     return scopes
 
 
+def _plan_signature(plan):
+    return (
+        tuple(sorted(plan.remove_keys)),
+        tuple(sorted((addition.start, addition.end, addition.width,
+                      addition.layer, addition.net_id)
+                     for addition in plan.additions)),
+        round(plan.saved_mm, 9),
+    )
+
+
+def _all_selected_regression(board, adapter, snapshot, records):
+    seeds = {key for key, (_item, segment) in records.items()
+             if not segment.locked and not _is_probable_diff_pair(segment.net_name)}
+    eligible, expanded, meanders = adapter.expand_eligible_keys(
+        board, records, seeds, [])
+
+    original = list(snapshot.model.segments)
+    variants = {
+        "board order": original,
+        "reverse order": list(reversed(original)),
+        "nets ascending": sorted(
+            original, key=lambda segment: (segment.net_id, segment.layer,
+                                           segment.width, segment_key(segment))),
+        "nets descending": sorted(
+            original, key=lambda segment: (-segment.net_id, -segment.layer,
+                                           -segment.width, segment_key(segment))),
+    }
+    for seed in range(3):
+        shuffled = list(original)
+        random.Random(seed).shuffle(shuffled)
+        variants[f"shuffle {seed}"] = shuffled
+
+    signatures = {}
+    reference_plans = None
+    for label, ordered_segments in variants.items():
+        print(f"all-selected order: {label}", flush=True)
+        model = replace(snapshot.model, segments=ordered_segments)
+        plans = generate_candidate_plans(
+            model, eligible, min_gain=0.01,
+            allow_equal_length_simpler=True,
+            clearance=snapshot.minimum_clearance)
+        signatures[label] = tuple(_plan_signature(plan) for plan in plans)
+        if reference_plans is None:
+            reference_plans = plans
+    assert len(set(signatures.values())) == 1, {
+        label: len(signature) for label, signature in signatures.items()
+    }
+
+    changed = [plan for plan in reference_plans if plan.changed]
+    assert changed
+    best = changed[0]
+    assert round(best.saved_mm, 6) == EXPECTED_ALL_SELECTED_SAVED_MM
+    assert len(best.remove_keys) == EXPECTED_ALL_SELECTED_REMOVED
+    assert len(best.additions) == EXPECTED_ALL_SELECTED_ADDED
+    fresh = pcbnew.LoadBoard(str(FIXTURE))
+    BoardAdapter(pcbnew).apply(fresh, best, rollback_on_error=True)
+    saved_segments = len(best.remove_keys) - len(best.additions)
+    print(
+        "ALL SELECTED PASS:", len(seeds), "seeds,", len(expanded), "expanded,",
+        len(meanders), "meander-protected,", len(eligible), "eligible,",
+        round(best.saved_mm, 6), "mm saved,", saved_segments,
+        "segments saved (", len(best.remove_keys), "removed /",
+        len(best.additions), "added ),", len(variants), "orders identical")
+    return best
+
+
 def main():
     board = pcbnew.LoadBoard(str(FIXTURE))
     adapter = BoardAdapter(pcbnew)
@@ -72,6 +143,8 @@ def main():
 
     assert len(records) == EXPECTED_TRACKS, (len(records), EXPECTED_TRACKS)
     assert len(scopes) == EXPECTED_SCOPES, (len(scopes), EXPECTED_SCOPES)
+
+    _all_selected_regression(board, adapter, snapshot, records)
 
     changed = []
     for index, (eligible, seed) in enumerate(scopes.items(), 1):

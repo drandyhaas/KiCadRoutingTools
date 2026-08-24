@@ -19,3 +19,8 @@ D:\kicad\bin\python.exe tests\run_track_gloss_patterns.py
 
 The replay loads a fresh in-memory board for every accepted modification and
 never writes a PCB file.
+
+It also treats all 706 straight tracks as one simultaneous selection. The
+expected deterministic result is 4.341542 mm of copper saved and a net
+reduction of 38 segments (100 removed, 62 added), invariant under board,
+reverse, ascending-net, descending-net, and shuffled input orders.
