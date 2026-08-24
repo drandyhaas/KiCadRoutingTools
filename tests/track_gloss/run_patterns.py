@@ -37,12 +37,13 @@ from kicad_track_gloss.kicad.selection import (  # noqa: E402
 
 EXPECTED_TRACKS = 706
 EXPECTED_SCOPES = 334
-EXPECTED_CHANGES = 61
-EXPECTED_SAVED_MM = 9.198662
-EXPECTED_ALL_SELECTED_SAVED_MM = 4.341542
-EXPECTED_ALL_SELECTED_REMOVED = 100
-EXPECTED_ALL_SELECTED_ADDED = 62
+EXPECTED_CHANGES = 65
+EXPECTED_SAVED_MM = 10.116686
+EXPECTED_ALL_SELECTED_SAVED_MM = 4.721872
+EXPECTED_ALL_SELECTED_REMOVED = 103
+EXPECTED_ALL_SELECTED_ADDED = 64
 MICRO_JOG_SEED = "58ebb541-fac6-4d02-8a68-65aca50766b5"
+SHORT_VCC_SEED = "cc798608-5e9b-4c2a-9856-dde85f9d85f0"
 
 
 def _records(adapter, board):
@@ -146,6 +147,24 @@ def _dense_micro_jog_regression(board, adapter, records):
     print("DENSE MICRO-JOG PASS: 111 tuned segments protected, 0 planned")
 
 
+def _short_vcc_regression(board, adapter, snapshot, records):
+    eligible, expanded, protected = adapter.expand_eligible_keys(
+        board, records, {SHORT_VCC_SEED}, [])
+    plans = generate_candidate_plans(
+        snapshot.model, eligible, min_gain=0.01,
+        allow_equal_length_simpler=True,
+        clearance=snapshot.minimum_clearance)
+    best = next(plan for plan in plans if plan.changed)
+    assert len(expanded) == 9
+    assert not protected
+    assert round(best.saved_mm, 6) == 0.117157
+    assert len(best.remove_keys) == 9
+    assert len(best.additions) == 5
+    fresh = pcbnew.LoadBoard(str(FIXTURE))
+    BoardAdapter(pcbnew).apply(fresh, best, rollback_on_error=True)
+    print("SHORT VCC PASS: 0.117157 mm saved, 4 net segments removed")
+
+
 def main():
     board = pcbnew.LoadBoard(str(FIXTURE))
     adapter = BoardAdapter(pcbnew)
@@ -155,6 +174,7 @@ def main():
 
     assert len(records) == EXPECTED_TRACKS, (len(records), EXPECTED_TRACKS)
     _dense_micro_jog_regression(board, adapter, records)
+    _short_vcc_regression(board, adapter, snapshot, records)
     assert len(scopes) == EXPECTED_SCOPES, (len(scopes), EXPECTED_SCOPES)
 
     _all_selected_regression(board, adapter, snapshot, records)

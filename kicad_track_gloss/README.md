@@ -109,6 +109,12 @@ inter-net clearance violations, and degraded connectivity between immutable
 terminals. Application verifies track identities again and restores removed
 copper if an exception occurs.
 
+Pad clearance uses conservative enclosing circles when KiCad does not expose a
+more precise shape through the adapter. A candidate portion that is strictly a
+retained subsegment of removed copper is not treated as new copper against that
+coarse approximation; every genuinely new portion remains fully checked.
+Identity replacements are retained as their original native KiCad items.
+
 ## Code map
 
 - `__init__.py`: registers the normal and diagnostic ActionPlugins in KiCad.
@@ -147,16 +153,19 @@ over it.
 
 Current required integration results are:
 
-- **All 706 straight tracks selected in one batch:** 4.341542 mm saved and 38
-  net segments removed (100 removed, 62 added). 116 probable tuned segments
+- **All 706 straight tracks selected in one batch:** 4.721872 mm saved and 39
+  net segments removed (103 removed, 64 added). 116 probable tuned segments
   are protected and 590 segments are eligible. Seven input orders must produce
   the exact same complete plan.
-- **Connections evaluated independently:** 334 unique scopes, 61 improving
-  plans, 9.198662 mm total isolated potential, and 61 successful applications
+- **Connections evaluated independently:** 334 unique scopes, 65 improving
+  plans, 10.116686 mm total isolated potential, and 65 successful applications
   to freshly loaded in-memory boards.
 - **Dense micro-jog regression (`/cpu/~{csn}`):** selecting UUID
   `58ebb541-fac6-4d02-8a68-65aca50766b5` expands to 111 tuned segments; all
   111 must be protected and no geometric candidate may be planned.
+- **Short VCC regression:** selecting UUID
+  `cc798608-5e9b-4c2a-9856-dde85f9d85f0` must save 0.117157 mm and remove four
+  net segments despite conservative pad envelopes around retained copper.
 
 The isolated total is not the expected result of the simultaneous all-track
 batch. T-junction mobility and clearance interactions differ when surrounding

@@ -25,10 +25,64 @@ from .terminals import (find_track_terminal_targets, movable_endpoint_pairs,
 from .validation import validate_result
 
 
+def _copper_signature(start, end, width, layer, net_id):
+    a = (round(start[0], 6), round(start[1], 6))
+    b = (round(end[0], 6), round(end[1], 6))
+    return (min(a, b), max(a, b), round(width, 6), layer, net_id)
+
+
+def _retain_identity_replacements(model, result):
+    """Keep original native items instead of removing and recreating them."""
+    removed = set(result.remove_keys)
+    originals = defaultdict(list)
+    for segment in model.segments:
+        key = segment_key(segment)
+        if key in removed:
+            originals[_copper_signature(
+                (segment.start_x, segment.start_y),
+                (segment.end_x, segment.end_y), segment.width,
+                segment.layer, segment.net_id)].append(key)
+
+    cancelled = set()
+    additions = []
+    for addition in result.additions:
+        signature = _copper_signature(
+            addition.start, addition.end, addition.width,
+            addition.layer, addition.net_id)
+        matches = originals.get(signature)
+        if matches:
+            cancelled.add(matches.pop())
+        else:
+            additions.append(addition)
+    if cancelled:
+        result.remove_keys = [key for key in result.remove_keys
+                              if key not in cancelled]
+        result.additions = additions
+
+
 def _path_clear(model, path, moving, replaced_keys, clearance):
     moving_clearance = max(clearance, model.minimum_clearance,
                            model.net_clearances.get(moving.net_id, 0.0))
+    replaced_segments = [segment for segment in model.segments
+                         if segment_key(segment) in replaced_keys]
+
+    def unchanged_copper(a, b):
+        """True when the candidate only retains part of removed copper.
+
+        Pad obstacles use conservative enclosing circles.  Rechecking an
+        unchanged subsegment against those circles can therefore invent a DRC
+        violation that the original KiCad geometry never had.
+        """
+        return any(
+            point_segment_distance(a, (segment.start_x, segment.start_y),
+                                   (segment.end_x, segment.end_y)) <= 1e-6 and
+            point_segment_distance(b, (segment.start_x, segment.start_y),
+                                   (segment.end_x, segment.end_y)) <= 1e-6
+            for segment in replaced_segments)
+
     for a, b in zip(path, path[1:]):
+        if unchanged_copper(a, b):
+            continue
         if model.board_bounds:
             x0, y0, x1, y1 = model.board_bounds
             edge_margin = model.copper_edge_clearance + moving.width / 2.0
@@ -236,6 +290,7 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                 if chain_changed:
                     result.chains_changed += 1
 
+    _retain_identity_replacements(model, result)
     validate_result(model, eligible, result)
     return result
 

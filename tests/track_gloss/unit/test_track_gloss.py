@@ -69,6 +69,26 @@ def test_foreign_via_blocks_shortcut():
         assert point_segment_distance((obstacle.x, obstacle.y), new.start, new.end) >= 0.475 - 1e-6
 
 
+def test_shortened_existing_copper_is_not_rejected_by_coarse_pad_circle():
+    # Real-board VCC regression: the conservative pad circle overlaps an
+    # already routed horizontal segment.  Shortening that same segment is not
+    # new copper and must not be rejected as a new clearance violation.
+    segments = [
+        Segment(0, 0, 10, 0, 0.25, 0, 1, "horizontal"),
+        Segment(10, 0, 10, 0.2, 0.25, 0, 1, "short"),
+    ]
+    pad = CircleObstacle(5, 1.4, 1.9, 0, (0,), "pad")
+    result = smooth_selected_chains(
+        BoardModel(segments, [pad], minimum_clearance=0.25),
+        {"horizontal", "short"}, min_gain=0.01, clearance=0.25,
+        span_strategy="global")
+    assert result.changed
+    assert set(result.remove_keys) == {"horizontal", "short"}
+    assert result.saved_mm > 0.1
+    assert [(addition.start, addition.end) for addition in result.additions] == [
+        ((0, 0), (9.8, 0)), ((9.8, 0), (10, 0.2))]
+
+
 def test_equal_length_simplification_is_mode_gated():
     segs = [Segment(0, 0, 1, 0, 0.2, 0, 1, "a"),
             Segment(1, 0, 2, 0, 0.2, 0, 1, "b")]
