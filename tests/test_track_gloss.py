@@ -118,57 +118,6 @@ def test_kicad_netclass_clearance_is_honored():
                                 (foreign.end_x, foreign.end_y)) >= 0.95 - 1e-6
 
 
-def test_kicad_drc_oracle_tries_next_best_candidate():
-    import pathlib
-    import kicad_track_gloss.drc_validation as drc
-    from kicad_track_gloss.model import GlossResult
-
-    first = GlossResult(saved_mm=2.0)
-    second = GlossResult(saved_mm=1.0)
-
-    class FakePcbnew:
-        @staticmethod
-        def SaveBoard(path, board):
-            pathlib.Path(path).write_text("board", encoding="ascii")
-
-        @staticmethod
-        def LoadBoard(path):
-            return object()
-
-    class FakeBoard:
-        def GetFileName(self):
-            return ""
-
-    class FakeAdapter:
-        def __init__(self, module):
-            pass
-
-        def apply(self, board, plan, rollback_on_error=False):
-            return None
-
-    calls = []
-
-    def fake_run(cli, board_path, report_path):
-        calls.append(str(board_path))
-        if "baseline" in str(board_path):
-            return [("existing",)]
-        if "candidate-0" in str(board_path):
-            return [("existing",), ("new",)]
-        return [("existing",)]
-
-    saved = drc.find_kicad_cli, drc.BoardAdapter, drc._run
-    try:
-        drc.find_kicad_cli = lambda: "kicad-cli"
-        drc.BoardAdapter = FakeAdapter
-        drc._run = fake_run
-        chosen, comparison, attempt = drc.choose_best_with_kicad(
-            FakePcbnew, FakeBoard(), [first, second])
-        assert chosen is second and attempt == 2
-        assert comparison.new_violations == [] and len(calls) == 3
-    finally:
-        drc.find_kicad_cli, drc.BoardAdapter, drc._run = saved
-
-
 def test_batch_pool_contains_combined_and_isolated_fallbacks():
     first = staircase(12, net=1)
     second = [Segment(s.start_x, s.start_y + 20, s.end_x, s.end_y + 20,
@@ -183,3 +132,11 @@ def test_batch_pool_contains_combined_and_isolated_fallbacks():
     assert any(keys & first_keys and keys & second_keys for keys in removed_sets)
     assert any(keys <= first_keys for keys in removed_sets)
     assert any(keys <= second_keys for keys in removed_sets)
+
+
+def test_action_plugin_is_silent_and_has_no_file_roundtrip():
+    from pathlib import Path
+    source = Path("kicad_track_gloss/action_plugin.py").read_text(encoding="utf-8")
+    for forbidden in ("MessageBox", "GlossDialog", "SaveBoard", "LoadBoard",
+                      "kicad-cli", "choose_best_with_kicad"):
+        assert forbidden not in source

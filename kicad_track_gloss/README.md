@@ -15,7 +15,7 @@ Build the PCM archive from the repository root:
 python kicad_track_gloss/package_pcm.py
 ```
 
-The archive is written to `dist/KiCadTrackGloss-0.2.0.zip`. It can be tested
+The archive is written to `dist/KiCadTrackGloss-0.3.0.zip`. It can be tested
 through a custom KiCad PCM repository, or the `kicad_track_gloss` folder can be
 copied directly into KiCad's scripting plugins directory during development.
 
@@ -24,24 +24,22 @@ copied directly into KiCad's scripting plugins directory during development.
 1. Open a board in PCB Editor.
 2. Select at least two connected straight track segments.
 3. Run **Tools → External Plugins → KiCad Track Gloss**.
-4. Choose **Shorten only** or **Shorten or simplify**.
-5. Review the preview and apply.
+4. The best deterministic gloss is applied directly to the current board.
 
-With DRC validation enabled, the plugin saves temporary baseline and candidate
-copies, refills zones with `kicad-cli`, and rejects the operation if the
-candidate adds any official DRC violation. Existing violations are tolerated.
+There is no dialog, preview, temporary board, subprocess, success message, or
+no-op message. If no safe improvement exists, the action simply returns. Use
+KiCad **Undo** if the visual result is not desired.
 
 The optimizer reads KiCad's board minimum clearance, copper-to-edge setting,
 effective aggregate netclasses, and pad-local clearance through `pcbnew`.
-It generates deterministic global and greedy alternatives, then asks KiCad's
-official DRC oracle to accept the highest-saving valid alternative. A single
-baseline DRC is shared by all alternatives.
+It generates deterministic global and greedy alternatives and immediately
+applies the highest-saving internally valid alternative.
 
 KiCad's internal C++ `PNS::OPTIMIZER` is not exposed by the public SWIG or IPC
 plugin APIs in KiCad 10, so this package does not pretend to call it. The
 engine/adapter boundary is intentionally kept narrow so a future official PNS
 IPC endpoint can replace the Python candidate generator without changing
-selection scoping, preview, attribution, or DRC comparison.
+selection scoping, attribution, or the one-click workflow.
 
 ## Safety boundaries
 
@@ -51,8 +49,6 @@ junctions, and keepouts. Non-selected copper remains present in the geometry
 and connectivity model. A single straight segment normally cannot be shortened
 because both endpoints are fixed.
 
-The SWIG API does not expose a reliable cross-version one-entry Undo transaction.
-This release therefore validates fully before mutation and performs in-memory
-rollback on any application exception. The architecture isolates `BoardAdapter`
-so a future IPC adapter can use `begin_commit()` / `push_commit()` for one-step
-Undo/Redo without rewriting the engine.
+The plugin uses the same `Add()` / `RemoveNative()` ActionPlugin pattern as
+KiCad's official Undo/Redo example. It also performs in-memory rollback if an
+exception occurs while applying the plan.
