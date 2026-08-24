@@ -279,6 +279,9 @@ class Segment:
     # net's copper when any of it is locked (#521 follow-up); locked copper was
     # already an obstacle (#150). Set by BOTH parse paths (text + pcbnew).
     locked: bool = False
+    # True when this straight approximation came from a native PCB_ARC. Track
+    # gloss keeps arcs immutable until curve-preserving replacement is supported.
+    arc: bool = False
 
 
 @dataclass
@@ -4416,6 +4419,10 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     for track in board.GetTracks():
         track_class = track.GetClass()
         if track_class == "PCB_TRACK":
+            try:
+                segment_uuid = track.m_Uuid.AsString()
+            except Exception:
+                segment_uuid = ""
             seg = Segment(
                 start_x=to_mm(track.GetStart().x),
                 start_y=to_mm(track.GetStart().y),
@@ -4424,6 +4431,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 width=to_mm(track.GetWidth()),
                 layer=get_layer_name(track.GetLayer()),
                 net_id=track.GetNetCode(),
+                uuid=segment_uuid,
                 locked=bool(track.IsLocked()),
             )
             segments.append(seg)
@@ -4439,13 +4447,19 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 e = (to_mm(track.GetEnd().x), to_mm(track.GetEnd().y))
             except Exception:
                 continue
+            try:
+                arc_uuid = track.m_Uuid.AsString()
+            except Exception:
+                arc_uuid = ""
             for p0, p1 in _arc_to_segments(s, a_mid, e):
                 segments.append(Segment(
                     start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
                     width=to_mm(track.GetWidth()),
                     layer=get_layer_name(track.GetLayer()),
                     net_id=track.GetNetCode(),
+                    uuid=arc_uuid,
                     locked=bool(track.IsLocked()),
+                    arc=True,
                 ))
         elif track_class == "PCB_VIA":
             # GetFrontWidth() FIRST (#605). KiCad 9/10 padstack vias can

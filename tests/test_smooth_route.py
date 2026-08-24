@@ -58,13 +58,14 @@ def staircase(x0, y0, steps, pitch=0.2, w=0.15):
     segs = []
     x, y = x0, y0
     for i in range(steps):
+        uid = f"seg-{i}"
         if i % 2 == 0:
             segs.append(Segment(start_x=x, start_y=y, end_x=x + pitch, end_y=y,
-                                width=w, layer='F.Cu', net_id=1))
+                                width=w, layer='F.Cu', net_id=1, uuid=uid))
             x += pitch
         else:
             segs.append(Segment(start_x=x, start_y=y, end_x=x, end_y=y + pitch,
-                                width=w, layer='F.Cu', net_id=1))
+                                width=w, layer='F.Cu', net_id=1, uuid=uid))
             y += pitch
     return segs, (x, y)
 
@@ -169,6 +170,26 @@ def test_skip_net_ids_absolute():
                                                           skip_net_ids={1})
     check("skip_net_ids wins", nets == 0 and not strip and not added and
           st['spans'] == 0, st)
+
+
+def test_selection_scope_is_strict():
+    segs, (ex, ey) = staircase(10.0, 10.0, 20)
+    untouched = list(segs[10:])
+    pcb = _board(end_pads(ex, ey), list(segs))
+    smooth_octolinear_chains([], pcb, clearance=0.1,
+                             eligible_segment_uuids={s.uuid for s in segs[:10]})
+    check("unselected segments remain the same objects",
+          all(s in pcb.segments for s in untouched))
+    check("selection boundary remains fixed", segs[10] in pcb.segments)
+
+
+def test_locked_selected_segment_is_immutable():
+    segs, (ex, ey) = staircase(10.0, 10.0, 20)
+    segs[10].locked = True
+    pcb = _board(end_pads(ex, ey), list(segs))
+    smooth_octolinear_chains([], pcb, clearance=0.1,
+                             eligible_segment_uuids={s.uuid for s in segs})
+    check("locked selected segment remains", segs[10] in pcb.segments)
 
 
 def test_smooth_skip_reads_protection_notes():
@@ -293,6 +314,7 @@ if __name__ == '__main__':
     for fn in (test_staircase_collapses, test_blocked_shortcut_keeps_clearance,
                test_dry_run_mutates_nothing, test_via_tap_splits_chain,
                test_writelist_custody, test_skip_net_ids_absolute,
+               test_selection_scope_is_strict, test_locked_selected_segment_is_immutable,
                test_smooth_skip_reads_protection_notes,
                test_keepout_blocks_shortcut, test_pipeline_gate):
         print(fn.__name__)

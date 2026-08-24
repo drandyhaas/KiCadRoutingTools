@@ -1,0 +1,22 @@
+KiCad Track Gloss
+=================
+
+This standalone plugin derives its octolinear track-chain smoothing approach
+from KiCadRoutingTools by DrAndyHaas:
+
+    https://github.com/drandyhaas/KiCadRoutingTools
+
+Derived material includes the chain recognition, 0/45/90-degree shortcut
+search, improvement gate, obstacle checks, and connectivity-preservation
+strategy originally implemented in py_router/pcb_modification.py in
+smooth_octolinear_chains().
+
+The standalone adaptation in the fca1 KiCadRoutingTools fork adds explicit
+selected-track KIID scoping, UUID-less geometric fallback keys, an API-neutral
+engine, SWIG board adaptation, temporary-copy native KiCad DRC comparison,
+preview/settings UI, rollback, independent branding, and PCM packaging.
+
+The original MIT license and copyright notice are preserved in LICENSE.
+Nothing in this adaptation presents the derived smoothing algorithm as an
+entirely new invention.
+

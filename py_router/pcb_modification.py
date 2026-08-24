@@ -3693,6 +3693,7 @@ def _seg_cross_point(ax, ay, bx, by, cx, cy, dx, dy):
 
 
 def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
+                             eligible_segment_uuids=None,
                              clearance: float = 0.1,
                              keep_input_copper: bool = False,
                              net_clearances=None,
@@ -3701,6 +3702,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                              skip_net_ids=None,
                              dry_run: bool = False,
                              min_gain: float = 0.01,
+                             allow_equal_length_simpler: bool = True,
                              max_net_segs: int = 400,
                              max_chain_segs: int = 100):
     """Collapse grid-A* staircase micro-jogs into octolinear shortcuts (#536).
@@ -3738,6 +3740,10 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     concept); callers gate this to the final chain step -- see
     cleanup_pipeline.
 
+    ``eligible_segment_uuids`` makes the pass selection-strict. Only matching
+    segments can enter a chain; all other copper remains immutable context.
+    UUID-less callers may pass the fallback ``geometry_segment_key`` value.
+
     Returns (changed_count, nets_changed, original_segments_to_remove,
     added_segments, stats)."""
     from collections import defaultdict
@@ -3752,6 +3758,30 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
 
     npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
     equal_length_tol = 0.001  #FCA: allow gloss when length is effectively unchanged but segment count drops
+
+    # Original octolinear smoothing algorithm:
+    # KiCadRoutingTools, DrAndyHaas.
+    #
+    # Standalone-plugin adaptation:
+    # restrict candidate chains to explicitly selected KiCad track UUIDs.
+    eligible_segment_uuids = (None if eligible_segment_uuids is None else
+                              {str(v) for v in eligible_segment_uuids})
+
+    def geometry_segment_key(s):
+        """Stable fallback identity for a UUID-less straight track."""
+        a = (round(s.start_x, 6), round(s.start_y, 6))
+        b = (round(s.end_x, 6), round(s.end_y, 6))
+        if b < a:
+            a, b = b, a
+        return "geom:{:.6f},{:.6f}:{:.6f},{:.6f}:{:.6f}:{}:{}".format(
+            a[0], a[1], b[0], b[1], round(s.width, 6), s.layer, s.net_id)
+
+    def selection_eligible(s):
+        if eligible_segment_uuids is None:
+            return True
+        uid = str(getattr(s, 'uuid', '') or '')
+        return ((uid and uid in eligible_segment_uuids) or
+                (not uid and geometry_segment_key(s) in eligible_segment_uuids))
 
     def eff_clr(nid):
         if not net_clearances:
@@ -3951,6 +3981,9 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
 
         candidates = [s for s in net_segs
                       if not getattr(s, 'graphic', False)
+                      and not getattr(s, 'arc', False)
+                      and not getattr(s, 'locked', False)
+                      and selection_eligible(s)
                       and (not keep_input_copper or id(s) in routed_seg_result)
                       and math.hypot(s.end_x - s.start_x, s.end_y - s.start_y) > 1e-6]
         if len(candidates) < 2:
@@ -4159,7 +4192,9 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                 equal_length_simpler = (  #FCA
                                     abs(gain_candidate) <= equal_length_tol and  #FCA
                                     new_seg_count < old_seg_count)  #FCA
-                                if not (length_better or equal_length_simpler):  #FCA
+                                if not (length_better or
+                                        (allow_equal_length_simpler and
+                                         equal_length_simpler)):  #FCA
                                     continue  #FCA
                                 if all(clears(pts[q][0], pts[q][1],
                                               pts[q + 1][0], pts[q + 1][1],
