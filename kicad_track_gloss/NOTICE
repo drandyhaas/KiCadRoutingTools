@@ -1,21 +1,32 @@
 KiCad Track Gloss
 =================
 
-The octolinear smoothing foundation in this package is adapted from
-KiCadRoutingTools by DrAndyHaas:
+IMPORTANT CODE PROVENANCE
+-------------------------
+
+This plugin is directly derived from the work and source code of DrAndyHaas.
+It contains code, algorithms, and implementation patterns reused and adapted
+from KiCadRoutingTools:
 
     https://github.com/drandyhaas/KiCadRoutingTools
+
+This is not merely conceptual inspiration. Derived material includes
+track-chain recognition, 0/45/90-degree octolinear smoothing, shortcut search,
+improvement gating, geometry checks, and connectivity-preservation logic.
+
+The standalone-plugin modifications in this branch were created with
+ChatGPT/Codex (OpenAI), at the project owner's direction. These modifications
+include selection-seeded scoping, the KiCad 10 ActionPlugin and SWIG adapter,
+automatic connection expansion, deterministic batch planning, sliding T
+terminations, additional safety checks, rollback, diagnostics, warning-bell
+behavior, regression fixtures, tests, documentation, branding, and PCM
+packaging.
 
 The active project repository is the fca1 KiCadRoutingTools fork:
 
     https://github.com/fca1/KiCadRoutingTools
 
-Derived concepts include track-chain recognition, 0/45/90-degree shortcut
-search, improvement gating, geometry checks, and connectivity preservation.
-The standalone plugin provides selection-seeded scoping, an API-neutral gloss
-engine, KiCad 10 SWIG adaptation, deterministic batch planning, live-board
-rollback, diagnostics, regression fixtures, branding, and PCM packaging.
-
 The original MIT license and copyright notice are preserved in LICENSE.
-Nothing in this package presents the derived smoothing foundation as an
-entirely new invention.
+The ChatGPT/Codex-assisted modifications build on and do not replace the
+attribution owed to DrAndyHaas for the underlying work and reused code. This
+provenance notice must be retained with redistributed source and packages.

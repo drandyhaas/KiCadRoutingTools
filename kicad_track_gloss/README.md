@@ -10,6 +10,29 @@ The intended workflow is a single click followed, if necessary, by KiCad
 **Undo**. The plugin does not save the board, create before/after files, show a
 preview, or ask the user to confirm a result.
 
+## Code provenance — important
+
+**This plugin is directly derived from the work and source code of
+DrAndyHaas.** It is not an independently invented smoothing engine. It contains
+reused and adapted code, algorithms, and implementation patterns from
+[DrAndyHaas/KiCadRoutingTools](https://github.com/drandyhaas/KiCadRoutingTools),
+including track-chain recognition, octolinear 0/45/90-degree smoothing,
+shortcut evaluation, improvement gating, geometry checks, and connectivity
+preservation. The original MIT copyright and license are preserved in
+`LICENSE`.
+
+**The standalone-plugin modifications in this branch were created with
+ChatGPT/Codex (OpenAI), at the project owner's direction.** This includes the
+selection-seeded KiCad 10 ActionPlugin integration, automatic connection
+expansion, deterministic batch planning, sliding T terminations, additional
+safety validation, diagnostics, warning-bell behavior, regression fixtures,
+tests, documentation, branding, and PCM packaging. Those modifications build
+on and do not replace the attribution owed to DrAndyHaas for the underlying
+work and reused code.
+
+The active project repository is the fca1 fork:
+<https://github.com/fca1/KiCadRoutingTools>.
+
 ## User-visible contract
 
 1. The user selects one or more straight track segments. Seeds may belong to
@@ -190,7 +213,8 @@ plugins directory.
 
 ## Attribution and license
 
-The octolinear smoothing foundation comes from KiCadRoutingTools. The active
-project repository is <https://github.com/fca1/KiCadRoutingTools>. `NOTICE` and
-`LICENSE` contain the attribution and MIT license terms that apply to the
-standalone plugin.
+This package contains code reused and adapted from DrAndyHaas's
+KiCadRoutingTools, plus standalone-plugin modifications generated with
+ChatGPT/Codex at the project owner's direction. This provenance must remain
+visible in redistributed source and packages. `NOTICE` gives the complete
+statement and `LICENSE` preserves the original MIT terms.

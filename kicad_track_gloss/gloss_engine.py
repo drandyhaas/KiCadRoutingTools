@@ -9,6 +9,8 @@ https://github.com/drandyhaas/KiCadRoutingTools
 
 The original copyright notices and license terms remain applicable.
 Standalone plugin adaptation and selected-track scoping: KiCad Track Gloss.
+Standalone modifications in this branch were created with ChatGPT/Codex
+(OpenAI), at the project owner's direction.
 """
 
 from __future__ import annotations
