@@ -113,6 +113,19 @@ def test_single_direction_reversal_is_not_misclassified_as_meander():
     assert not _meander_keys(segments)
 
 
+def test_dense_micro_jog_tuning_is_protected_without_reversals():
+    # Regression for dispenser_labels /cpu/~{csn}: 111 connected segments,
+    # mostly 0.035 mm long, previously triggered ~9,700 clearance checks and
+    # made KiCad look frozen although no candidate was ultimately accepted.
+    segments = staircase(40, pitch=0.025)
+    assert _meander_keys(segments) == {segment_key(s) for s in segments}
+
+
+def test_long_ordinary_route_is_not_dense_micro_jog_tuning():
+    segments = staircase(40, pitch=0.2)
+    assert not _meander_keys(segments)
+
+
 def _plan_signature(plan):
     return (tuple(sorted(plan.remove_keys)),
             tuple(sorted((a.start, a.end, a.width, a.layer, a.net_id)

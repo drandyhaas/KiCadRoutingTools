@@ -24,3 +24,8 @@ It also treats all 706 straight tracks as one simultaneous selection. The
 expected deterministic result is 4.341542 mm of copper saved and a net
 reduction of 38 segments (100 removed, 62 added), invariant under board,
 reverse, ascending-net, descending-net, and shuffled input orders.
+
+The `/cpu/~{csn}` segment UUID
+`58ebb541-fac6-4d02-8a68-65aca50766b5` is also a dedicated responsiveness
+regression: its expanded connection contains 111 dense tuning micro-segments,
+which must all be protected without invoking the geometric planner.

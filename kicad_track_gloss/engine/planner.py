@@ -277,7 +277,10 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
         if key in eligible:
             groups[(segment.net_id, segment.layer, round(segment.width, 6))].add(key)
     group_plans = []
-    for group_key in sorted(groups):
+    # With a single group the global plan above is exactly the same call.  Do
+    # not repeat an expensive no-op search (formerly visible as a GUI freeze
+    # on dense tuned connections).
+    for group_key in sorted(groups) if len(groups) > 1 else ():
         try:
             plan = smooth_selected_chains(
                 model, groups[group_key], span_strategy="global",

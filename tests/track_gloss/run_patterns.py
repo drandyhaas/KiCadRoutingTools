@@ -36,12 +36,13 @@ from kicad_track_gloss.kicad.selection import (  # noqa: E402
 
 
 EXPECTED_TRACKS = 706
-EXPECTED_SCOPES = 335
+EXPECTED_SCOPES = 334
 EXPECTED_CHANGES = 61
 EXPECTED_SAVED_MM = 9.198662
 EXPECTED_ALL_SELECTED_SAVED_MM = 4.341542
 EXPECTED_ALL_SELECTED_REMOVED = 100
 EXPECTED_ALL_SELECTED_ADDED = 62
+MICRO_JOG_SEED = "58ebb541-fac6-4d02-8a68-65aca50766b5"
 
 
 def _records(adapter, board):
@@ -134,6 +135,17 @@ def _all_selected_regression(board, adapter, snapshot, records):
     return best
 
 
+def _dense_micro_jog_regression(board, adapter, records):
+    warnings = []
+    eligible, expanded, protected = adapter.expand_eligible_keys(
+        board, records, {MICRO_JOG_SEED}, warnings)
+    assert len(expanded) == 111, len(expanded)
+    assert protected == expanded
+    assert not eligible
+    assert any("dense micro-jog" in warning for warning in warnings)
+    print("DENSE MICRO-JOG PASS: 111 tuned segments protected, 0 planned")
+
+
 def main():
     board = pcbnew.LoadBoard(str(FIXTURE))
     adapter = BoardAdapter(pcbnew)
@@ -142,6 +154,7 @@ def main():
     scopes = _scopes(board, adapter, records)
 
     assert len(records) == EXPECTED_TRACKS, (len(records), EXPECTED_TRACKS)
+    _dense_micro_jog_regression(board, adapter, records)
     assert len(scopes) == EXPECTED_SCOPES, (len(scopes), EXPECTED_SCOPES)
 
     _all_selected_regression(board, adapter, snapshot, records)

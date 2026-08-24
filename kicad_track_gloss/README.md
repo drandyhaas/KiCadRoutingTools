@@ -67,10 +67,11 @@ to the nearest useful 0/45/90-degree location; the traversing track itself is
 not changed. This models the useful effect of manually breaking the last
 segment and finalizing it again in KiCad.
 
-Repeated direction reversals are classified as probable length-tuning
-meanders. Detection is performed per independent unbranched component so a
-meander cannot protect an unrelated route on the same net. A single ordinary
-`A/B/-A` turn is not sufficient to classify a route as tuned.
+Repeated direction reversals and long runs dominated by dense micro-jogs are
+classified as probable length-tuning geometry. Detection is performed per
+independent unbranched component so tuning cannot protect an unrelated route
+on the same net. A single ordinary `A/B/-A` turn is not sufficient to classify
+a route as tuned.
 
 The engine is deterministic with respect to selection order, track order, and
 net order. Determinism is regression-tested with original, reversed,
@@ -147,12 +148,15 @@ over it.
 Current required integration results are:
 
 - **All 706 straight tracks selected in one batch:** 4.341542 mm saved and 38
-  net segments removed (100 removed, 62 added). Four meander segments are
-  protected and 702 segments are eligible. Seven input orders must produce the
-  exact same complete plan.
-- **Connections evaluated independently:** 335 unique scopes, 61 improving
+  net segments removed (100 removed, 62 added). 116 probable tuned segments
+  are protected and 590 segments are eligible. Seven input orders must produce
+  the exact same complete plan.
+- **Connections evaluated independently:** 334 unique scopes, 61 improving
   plans, 9.198662 mm total isolated potential, and 61 successful applications
   to freshly loaded in-memory boards.
+- **Dense micro-jog regression (`/cpu/~{csn}`):** selecting UUID
+  `58ebb541-fac6-4d02-8a68-65aca50766b5` expands to 111 tuned segments; all
+  111 must be protected and no geometric candidate may be planned.
 
 The isolated total is not the expected result of the simultaneous all-track
 batch. T-junction mobility and clearance interactions differ when surrounding

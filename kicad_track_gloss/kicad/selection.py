@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+import math
 import re
 
 from ..engine.model import segment_key
@@ -13,7 +14,13 @@ def is_probable_diff_pair(name):
 
 
 def meander_keys(segments):
-    """Detect repeated reversals in each independent, unbranched track chain."""
+    """Detect tuning geometry in each independent, unbranched track chain.
+
+    Besides obvious direction reversals, KiCad length tuning can leave long
+    runs of tiny monotonic jogs.  Passing such a run to the geometric planner
+    is both unsafe (it destroys intentional tuning) and disproportionately
+    expensive, so classify the whole connected run as protected.
+    """
     by_group = {}
     for seg in segments:
         by_group.setdefault((seg.net_id, seg.layer, round(seg.width, 6)), []).append(seg)
@@ -40,6 +47,20 @@ def meander_keys(segments):
                     pending.extend(segment_key(other) for other in adjacency[point]
                                    if segment_key(other) not in component)
             remaining.difference_update(component)
+
+            lengths = sorted(
+                math.hypot(by_key[key].end_x - by_key[key].start_x,
+                           by_key[key].end_y - by_key[key].start_y)
+                for key in component)
+            dense_micro_jogs = (
+                len(lengths) >= 32 and
+                lengths[len(lengths) // 2] <= 0.05 + 1e-9 and
+                sum(value <= 0.1 + 1e-9 for value in lengths) * 10 >=
+                len(lengths) * 7
+            )
+            if dense_micro_jogs:
+                protected.update(component)
+                continue
 
             component_adjacency = {
                 point: sorted((seg for seg in touching
@@ -159,5 +180,6 @@ def expand_eligible_keys(adapter, board, straight_by_key, seed_keys, warnings=No
     ])
     eligible = expanded - meanders
     if meanders:
-        warnings.append("Probable meander/length-tuning tracks are protected.")
+        warnings.append(
+            "Probable meander/dense micro-jog length-tuning tracks are protected.")
     return eligible, expanded, meanders
