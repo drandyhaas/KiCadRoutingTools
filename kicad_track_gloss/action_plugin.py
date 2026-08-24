@@ -81,8 +81,8 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
     def defaults(self):
         self.name = "KiCad Track Gloss"
         self.category = "Routing"
-        self.description = ("Shorten and simplify PCB connections seeded by selected segments "
-                            "while preserving connectivity and design rules")
+        self.description = ("Gloss one or more selected track segments, "
+                            "connections, or complete nets")
         self.show_toolbar_button = True
         self.icon_file_name = os.path.join(PLUGIN_DIR, "icon_24.png")
         dark = os.path.join(PLUGIN_DIR, "icon_24_dark.png")
