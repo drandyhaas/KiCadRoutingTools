@@ -25,6 +25,33 @@ def _vertex(x, y):
     return round(x, 6), round(y, 6)
 
 
+def find_track_terminal_vertices(model, eligible_segment_keys, tolerance=1e-5):
+    """Find selected vertices electrically terminating on immutable tracks.
+
+    KiCad permits a track endpoint to land on the middle of another track
+    without splitting the through-track object. Such a T contact must remain a
+    fixed chain anchor even though it is absent from endpoint incidence counts.
+    """
+    eligible = {str(key) for key in eligible_segment_keys}
+    immutable = [segment for segment in model.segments
+                 if segment_key(segment) not in eligible]
+    terminals = set()
+    for segment in model.segments:
+        if segment_key(segment) not in eligible:
+            continue
+        for point in ((segment.start_x, segment.start_y),
+                      (segment.end_x, segment.end_y)):
+            for other in immutable:
+                if other.net_id != segment.net_id or other.layer != segment.layer:
+                    continue
+                if point_segment_distance(
+                        point, (other.start_x, other.start_y),
+                        (other.end_x, other.end_y)) <= tolerance:
+                    terminals.add((segment.net_id, segment.layer, _vertex(*point)))
+                    break
+    return terminals
+
+
 def _path_clear(model, path, moving, replaced_keys, clearance):
     moving_clearance = max(clearance, model.minimum_clearance,
                            model.net_clearances.get(moving.net_id, 0.0))
@@ -85,6 +112,7 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
     for o in model.obstacles:
         if o.net_id > 0:
             obstacle_vertices[o.net_id].add(_vertex(o.x, o.y))
+    track_terminals = find_track_terminal_vertices(model, eligible)
 
     groups = defaultdict(list)
     for s in model.segments:
@@ -101,7 +129,8 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
 
         def interior(v):
             return (len(adjacency[v]) == 2 and all_incidence[(net_id, v)] == 2 and
-                    v not in obstacle_vertices[net_id])
+                    v not in obstacle_vertices[net_id] and
+                    (net_id, layer, v) not in track_terminals)
 
         for touching in adjacency.values():
             touching.sort(key=segment_key)

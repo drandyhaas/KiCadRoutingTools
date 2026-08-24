@@ -16,7 +16,7 @@ Build the PCM archive from the repository root:
 python kicad_track_gloss/package_pcm.py
 ```
 
-The archive is written to `dist/KiCadTrackGloss-0.3.3.zip`. It can be tested
+The archive is written to `dist/KiCadTrackGloss-0.3.4.zip`. It can be tested
 through a custom KiCad PCM repository, or the `kicad_track_gloss` folder can be
 copied directly into KiCad's scripting plugins directory during development.
 
@@ -37,6 +37,11 @@ locked tracks, and junctions. Multiple seeds — including seeds on different
 nets — are expanded independently, deduplicated, and optimized as one
 deterministic batch. The visible KiCad selection does not need to be expanded
 manually first.
+
+A connection endpoint or intermediate vertex that lands on the middle of an
+immutable same-net track is treated as a fixed termination anchor. The gloss
+chain is split at that T intersection, so eligible copper on either side can
+still be optimized without moving or disconnecting the traversing track.
 
 There is no dialog, preview, temporary board, subprocess, success message, or
 no-op message. If no safe improvement exists, the action simply returns. Use

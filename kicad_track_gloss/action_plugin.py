@@ -10,7 +10,7 @@ import pcbnew
 import wx
 
 from .board_adapter import BoardAdapter
-from .gloss_engine import generate_candidate_plans
+from .gloss_engine import find_track_terminal_vertices, generate_candidate_plans
 
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -123,6 +123,11 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                 "Reason: automatic connection expansion did not find a second eligible "
                 "straight segment before a pad, via, arc, lock, or junction.")
             return False
+
+        track_terminals = find_track_terminal_vertices(
+            snapshot.model, snapshot.eligible_keys)
+        report.append("Track-intersection termination anchors: " +
+                      str(len(track_terminals)))
 
         plans = generate_candidate_plans(
             snapshot.model, snapshot.eligible_keys,
