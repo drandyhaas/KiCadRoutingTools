@@ -16,15 +16,15 @@ package = types.ModuleType("kicad_track_gloss")
 package.__path__ = [str(ROOT / "kicad_track_gloss")]
 sys.modules["kicad_track_gloss"] = package
 
-from kicad_track_gloss.board_adapter import (  # noqa: E402
-    BoardAdapter,
-    _is_probable_diff_pair,
-)
-from kicad_track_gloss.gloss_engine import (  # noqa: E402
+from kicad_track_gloss.engine import (  # noqa: E402
     find_track_terminal_targets,
     generate_candidate_plans,
 )
-from kicad_track_gloss.model import segment_key  # noqa: E402
+from kicad_track_gloss.engine.model import segment_key  # noqa: E402
+from kicad_track_gloss.kicad import BoardAdapter  # noqa: E402
+from kicad_track_gloss.kicad.selection import (  # noqa: E402
+    is_probable_diff_pair as _is_probable_diff_pair,
+)
 
 
 def main():

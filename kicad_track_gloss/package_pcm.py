@@ -14,12 +14,12 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent
-VERSION = "0.3.8"
+VERSION = "0.3.9"
 RUNTIME_FILES = (
-    "__init__.py", "action_plugin.py", "board_adapter.py", "connectivity.py",
-    "geometry.py", "gloss_engine.py",
-    "model.py", "icon_24.png", "icon_24_dark.png", "LICENSE", "NOTICE", "README.md",
+    "__init__.py", "action_plugin.py", "icon_24.png", "icon_24_dark.png",
+    "LICENSE", "NOTICE", "README.md",
 )
+RUNTIME_DIRECTORIES = ("engine", "kicad")
 
 
 def build(output_dir):
@@ -34,9 +34,15 @@ def build(output_dir):
             source = ROOT / name
             if not source.exists():
                 raise FileNotFoundError(source)
-            # PCM installs the contents of this directory as one plugin package.
-            # KiCad explicitly forbids a second package-directory level here.
+            # The ActionPlugin entry point stays directly under plugins/.
+            # Internal engine/ and kicad/ support packages are copied below.
             shutil.copy2(source, plugins / name)
+        for name in RUNTIME_DIRECTORIES:
+            source = ROOT / name
+            if not source.is_dir():
+                raise FileNotFoundError(source)
+            shutil.copytree(source, plugins / name,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         shutil.copy2(ROOT / "metadata.json", tmp / "metadata.json")
         resources = tmp / "resources"
         resources.mkdir()

@@ -17,96 +17,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from .connectivity import validate_result
-from .geometry import length, octolinear_paths, path_hits_polygon, point_segment_distance, segment_distance
+from .geometry import (length, octolinear_paths, path_hits_polygon,
+                       point_segment_distance, segment_distance)
 from .model import AddedSegment, GlossResult, segment_key
-
-
-def _vertex(x, y):
-    return round(x, 6), round(y, 6)
-
-
-def find_track_terminal_targets(model, eligible_segment_keys, tolerance=1e-5):
-    """Find selected vertices electrically terminating on immutable tracks.
-
-    KiCad permits a track endpoint to land on the middle of another track
-    without splitting the through-track object. The vertex is a chain boundary,
-    but its contact point may slide along the immutable through-track.
-    """
-    eligible = {str(key) for key in eligible_segment_keys}
-    immutable = [segment for segment in model.segments
-                 if segment_key(segment) not in eligible]
-    targets = defaultdict(dict)
-    for segment in model.segments:
-        if segment_key(segment) not in eligible:
-            continue
-        for point in ((segment.start_x, segment.start_y),
-                      (segment.end_x, segment.end_y)):
-            terminal = (segment.net_id, segment.layer, _vertex(*point))
-            for other in immutable:
-                if (other.net_id != segment.net_id or other.layer != segment.layer or
-                        other.arc):
-                    continue
-                if point_segment_distance(
-                        point, (other.start_x, other.start_y),
-                        (other.end_x, other.end_y)) <= tolerance:
-                    targets[terminal][segment_key(other)] = other
-    return {terminal: tuple(found[key] for key in sorted(found))
-            for terminal, found in targets.items()}
-
-
-def find_track_terminal_vertices(model, eligible_segment_keys, tolerance=1e-5):
-    return set(find_track_terminal_targets(
-        model, eligible_segment_keys, tolerance))
-
-
-def _project_to_segment(point, segment):
-    a = (segment.start_x, segment.start_y)
-    b = (segment.end_x, segment.end_y)
-    dx, dy = b[0] - a[0], b[1] - a[1]
-    denominator = dx * dx + dy * dy
-    if denominator <= 1e-18:
-        return a
-    t = ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / denominator
-    t = max(0.0, min(1.0, t))
-    return _vertex(a[0] + t * dx, a[1] + t * dy)
-
-
-def _sliding_contact_points(reference, original, targets):
-    """Return deterministic octolinear-critical contacts on target tracks."""
-    contacts = {_vertex(*original)}
-    directions = ((1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0))
-    for target in targets:
-        a = (target.start_x, target.start_y)
-        b = (target.end_x, target.end_y)
-        contacts.update((_vertex(*a), _vertex(*b), _project_to_segment(reference, target)))
-        wx, wy = b[0] - a[0], b[1] - a[1]
-        for vx, vy in directions:
-            denominator = vx * wy - vy * wx
-            if abs(denominator) <= 1e-12:
-                continue
-            cx, cy = a[0] - reference[0], a[1] - reference[1]
-            t = (cx * vy - cy * vx) / denominator
-            if -1e-9 <= t <= 1.0 + 1e-9:
-                contacts.add(_vertex(a[0] + t * wx, a[1] + t * wy))
-    return sorted(contacts)
-
-
-def _movable_endpoint_pairs(start, end, start_targets, end_targets):
-    starts = (_sliding_contact_points(end, start, start_targets)
-              if start_targets else [start])
-    ends = (_sliding_contact_points(start, end, end_targets)
-            if end_targets else [end])
-    if start_targets and end_targets:
-        initial_starts, initial_ends = list(starts), list(ends)
-        starts = sorted(set(starts).union(
-            point for candidate_end in initial_ends
-            for point in _sliding_contact_points(candidate_end, start, start_targets)))
-        ends = sorted(set(ends).union(
-            point for candidate_start in initial_starts
-            for point in _sliding_contact_points(candidate_start, end, end_targets)))
-    return ((candidate_start, candidate_end)
-            for candidate_start in starts for candidate_end in ends)
+from .terminals import (find_track_terminal_targets, movable_endpoint_pairs,
+                        vertex)
+from .validation import validate_result
 
 
 def _path_clear(model, path, moving, replaced_keys, clearance):
@@ -162,13 +78,13 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
     result = GlossResult()
     all_incidence = defaultdict(int)
     for s in model.segments:
-        all_incidence[(s.net_id, _vertex(s.start_x, s.start_y))] += 1
-        all_incidence[(s.net_id, _vertex(s.end_x, s.end_y))] += 1
+        all_incidence[(s.net_id, vertex(s.start_x, s.start_y))] += 1
+        all_incidence[(s.net_id, vertex(s.end_x, s.end_y))] += 1
 
     obstacle_vertices = defaultdict(set)
     for o in model.obstacles:
         if o.net_id > 0:
-            obstacle_vertices[o.net_id].add(_vertex(o.x, o.y))
+            obstacle_vertices[o.net_id].add(vertex(o.x, o.y))
     track_terminal_targets = find_track_terminal_targets(model, eligible)
 
     groups = defaultdict(list)
@@ -181,8 +97,8 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
         candidates = sorted(groups[(net_id, layer, width)], key=segment_key)
         adjacency = defaultdict(list)
         for s in candidates:
-            adjacency[_vertex(s.start_x, s.start_y)].append(s)
-            adjacency[_vertex(s.end_x, s.end_y)].append(s)
+            adjacency[vertex(s.start_x, s.start_y)].append(s)
+            adjacency[vertex(s.end_x, s.end_y)].append(s)
 
         def interior(v):
             return (len(adjacency[v]) == 2 and all_incidence[(net_id, v)] == 2 and
@@ -199,16 +115,16 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                     continue
                 chain, points = [], []
                 current, seg = anchor, first
-                points.append((seg.start_x, seg.start_y) if _vertex(seg.start_x, seg.start_y) == current
+                points.append((seg.start_x, seg.start_y) if vertex(seg.start_x, seg.start_y) == current
                               else (seg.end_x, seg.end_y))
                 while True:
                     key = segment_key(seg)
                     used.add(key)
                     chain.append(seg)
-                    next_point = ((seg.end_x, seg.end_y) if _vertex(seg.start_x, seg.start_y) == current
+                    next_point = ((seg.end_x, seg.end_y) if vertex(seg.start_x, seg.start_y) == current
                                   else (seg.start_x, seg.start_y))
                     points.append(next_point)
-                    current = _vertex(*next_point)
+                    current = vertex(*next_point)
                     if current == anchor or not interior(current) or len(chain) >= 100:
                         break
                     nxt = sorted((s for s in adjacency[current] if segment_key(s) not in used),
@@ -227,8 +143,8 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                     for j in range(len(chain), i, -1):
                         old_len = cumulative[j] - cumulative[i]
                         replaced = {segment_key(s) for s in chain[i:j]}
-                        start_terminal = (net_id, layer, _vertex(*points[i]))
-                        end_terminal = (net_id, layer, _vertex(*points[j]))
+                        start_terminal = (net_id, layer, vertex(*points[i]))
+                        end_terminal = (net_id, layer, vertex(*points[j]))
                         start_targets = (track_terminal_targets.get(start_terminal, ())
                                          if i == 0 else ())
                         end_targets = (track_terminal_targets.get(end_terminal, ())
@@ -236,7 +152,7 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                         if j == i + 1 and not (start_targets or end_targets):
                             continue
                         paths = []
-                        for candidate_start, candidate_end in _movable_endpoint_pairs(
+                        for candidate_start, candidate_end in movable_endpoint_pairs(
                                 points[i], points[j], start_targets, end_targets):
                             if length(candidate_start, candidate_end) <= 1e-9:
                                 continue

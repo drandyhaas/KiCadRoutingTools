@@ -14,7 +14,7 @@ SHA-256 fingerprints:
 Run the real-board pattern replay with KiCad's bundled Python:
 
 ```text
-D:\kicad\bin\python.exe tests\run_track_gloss_patterns.py
+D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py
 ```
 
 The replay loads a fresh in-memory board for every accepted modification and

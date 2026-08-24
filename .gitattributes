@@ -2,6 +2,6 @@
 *.py text eol=lf
 
 # Frozen KiCad regression fixtures must remain byte-for-byte reproducible.
-tests/fixtures/track_gloss/dispenser_labels/*.kicad_pcb -text
-tests/fixtures/track_gloss/dispenser_labels/*.kicad_pro -text
-tests/fixtures/track_gloss/dispenser_labels/*.kicad_dru -text
+tests/track_gloss/patterns/dispenser_labels/*.kicad_pcb -text
+tests/track_gloss/patterns/dispenser_labels/*.kicad_pro -text
+tests/track_gloss/patterns/dispenser_labels/*.kicad_dru -text

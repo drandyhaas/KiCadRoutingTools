@@ -13,8 +13,8 @@ import pcbnew
 import wx
 
 
-ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = (ROOT / "tests" / "fixtures" / "track_gloss" /
+ROOT = Path(__file__).resolve().parents[2]
+FIXTURE = (ROOT / "tests" / "track_gloss" / "patterns" /
            "dispenser_labels" / "dispenser_labels.kicad_pcb")
 
 # Avoid ActionPlugin registration when this integration test imports engine
@@ -27,12 +27,12 @@ sys.modules["kicad_track_gloss"] = package
 # handler warning per fixture reload.
 WX_LOG_SILENCER = wx.LogNull()
 
-from kicad_track_gloss.board_adapter import (  # noqa: E402
-    BoardAdapter,
-    _is_probable_diff_pair,
+from kicad_track_gloss.engine import generate_candidate_plans  # noqa: E402
+from kicad_track_gloss.engine.model import segment_key  # noqa: E402
+from kicad_track_gloss.kicad import BoardAdapter  # noqa: E402
+from kicad_track_gloss.kicad.selection import (  # noqa: E402
+    is_probable_diff_pair as _is_probable_diff_pair,
 )
-from kicad_track_gloss.gloss_engine import generate_candidate_plans  # noqa: E402
-from kicad_track_gloss.model import segment_key  # noqa: E402
 
 
 EXPECTED_TRACKS = 706

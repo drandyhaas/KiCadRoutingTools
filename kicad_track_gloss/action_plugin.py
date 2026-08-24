@@ -9,8 +9,8 @@ import traceback
 import pcbnew
 import wx
 
-from .board_adapter import BoardAdapter
-from .gloss_engine import find_track_terminal_vertices, generate_candidate_plans
+from .engine import find_track_terminal_vertices, generate_candidate_plans
+from .kicad import BoardAdapter
 
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))

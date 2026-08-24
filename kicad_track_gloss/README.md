@@ -113,27 +113,32 @@ copper if an exception occurs.
 - `__init__.py`: registers the normal and diagnostic ActionPlugins in KiCad.
 - `action_plugin.py`: one-click orchestration, reporting, warning bell, and UI
   contract.
-- `board_adapter.py`: the only SWIG/`pcbnew` boundary; selection expansion,
-  board extraction, native rules, and plan application.
-- `gloss_engine.py`: API-neutral chain discovery, sliding T contacts,
-  octolinear candidate generation, global scheduling, and batch fallbacks.
-- `connectivity.py`: immutable pre-apply safety and connectivity validation.
-- `geometry.py`: dependency-free distance, intersection, polygon, and
-  octolinear geometry kernels.
-- `model.py`: immutable geometry records and `GlossResult` edit plans.
+- `kicad/adapter.py`: small public `BoardAdapter` facade.
+- `kicad/reader.py`: live-board and selection conversion to `BoardModel`.
+- `kicad/selection.py`: native connection expansion, differential-pair and
+  meander protection.
+- `kicad/rules.py`: board bounds, effective netclasses, and track keepouts.
+- `kicad/writer.py`: live-board plan application and rollback.
+- `engine/planner.py`: API-neutral chain discovery, octolinear candidate
+  generation, global scheduling, and batch fallbacks.
+- `engine/terminals.py`: detection and movement candidates for sliding T
+  terminations.
+- `engine/validation.py`: immutable pre-apply safety and connectivity checks.
+- `engine/geometry.py`: dependency-free geometry kernels.
+- `engine/model.py`: immutable geometry records and edit plans.
 - `package_pcm.py`: builds the standalone KiCad PCM archive.
 - `metadata.json`: PCM identity, compatibility, and release version.
 - `../tools/diagnose_track_gloss_board.py`: headless inspection and sweep tool
   for real KiCad boards; `--apply-in-memory` never saves the board.
-- `../tests/test_track_gloss.py`: engine, batching, expansion, T-junction,
-  packaging, and user-contract unit tests.
-- `../tests/run_track_gloss_patterns.py`: KiCad-Python integration replay using
-  the frozen `dispenser_labels` board.
+- `../tests/track_gloss/unit/`: engine, expansion, T-junction, packaging, and
+  user-contract unit tests.
+- `../tests/track_gloss/run_patterns.py`: KiCad-Python integration replay.
+- `../tests/track_gloss/patterns/`: frozen real-board regression inputs.
 
 ## Reference regression data
 
 The complete KiCad board, project, and design rules are stored byte-for-byte in
-`tests/fixtures/track_gloss/dispenser_labels/`. The fixture README contains the
+`tests/track_gloss/patterns/dispenser_labels/`. Its README contains the
 SHA-256 fingerprints. Tests must load this fixture in memory and must never save
 over it.
 
@@ -158,13 +163,13 @@ From the repository root, run the API-neutral tests with a standard Python that
 has `pytest`:
 
 ```text
-py -3.12 -m pytest tests/test_track_gloss.py tests/test_smooth_route.py -q
+py -3.12 -m pytest tests/track_gloss/unit tests/test_smooth_route.py -q
 ```
 
 Run the real-board replay with KiCad's bundled Python so `pcbnew` is available:
 
 ```text
-D:\kicad\bin\python.exe tests\run_track_gloss_patterns.py
+D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py
 ```
 
 The integration replay takes several minutes because it recomputes the full
@@ -188,7 +193,8 @@ metadata.json
 resources/icon.png
 plugins/__init__.py
 plugins/action_plugin.py
-plugins/...
+plugins/engine/...
+plugins/kicad/...
 ```
 
 Do not add a `plugins/kicad_track_gloss/` directory level: KiCad will not load
@@ -202,8 +208,8 @@ plugins directory.
 - Never add automatic board saving, temporary PCB round-trips, or confirmation
   dialogs to the normal action.
 - Keep selection expansion and meander filtering centralized in
-  `BoardAdapter.expand_eligible_keys()` so the plugin, diagnostic tool, and
-  regression replay cannot diverge.
+  `kicad/selection.py`; expose it through `BoardAdapter` so the plugin,
+  diagnostic tool, and regression replay cannot diverge.
 - Keep the engine independent of `pcbnew`; KiCad-specific work belongs in the
   adapter or ActionPlugin layer.
 - Preserve deterministic sorting and signatures whenever adding candidates.

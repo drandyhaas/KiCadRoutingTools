@@ -5,12 +5,13 @@ import tempfile
 import types
 import zipfile
 
-from kicad_track_gloss.gloss_engine import (find_track_terminal_vertices,
-                                            generate_candidate_plans,
-                                            smooth_selected_chains)
-from kicad_track_gloss.model import (AddedSegment, BoardModel, CircleObstacle,
-                                     GlossResult, Segment, segment_key)
-from kicad_track_gloss.board_adapter import _meander_keys
+from kicad_track_gloss.engine import (find_track_terminal_vertices,
+                                      generate_candidate_plans,
+                                      smooth_selected_chains)
+from kicad_track_gloss.engine.model import (AddedSegment, BoardModel,
+                                            CircleObstacle, GlossResult,
+                                            Segment, segment_key)
+from kicad_track_gloss.kicad.selection import meander_keys as _meander_keys
 
 
 def staircase(count=20, pitch=0.2, net=1):
@@ -63,7 +64,7 @@ def test_foreign_via_blocks_shortcut():
                                     {segment_key(s) for s in segs}, clearance=0.1)
     for new in result.additions:
         # No accepted candidate may pass through the obstacle clearance disk.
-        from kicad_track_gloss.geometry import point_segment_distance
+        from kicad_track_gloss.engine.geometry import point_segment_distance
         assert point_segment_distance((obstacle.x, obstacle.y), new.start, new.end) >= 0.475 - 1e-6
 
 
@@ -138,7 +139,7 @@ def test_kicad_netclass_clearance_is_honored():
                        minimum_clearance=0.2)
     result = smooth_selected_chains(model, {segment_key(s) for s in segs},
                                     clearance=0.0, span_strategy="global")
-    from kicad_track_gloss.geometry import segment_distance
+    from kicad_track_gloss.engine.geometry import segment_distance
     for new in result.additions:
         assert segment_distance(new.start, new.end,
                                 (foreign.start_x, foreign.start_y),
@@ -206,7 +207,7 @@ def test_normal_action_bells_once_only_on_noop():
             sys.modules["wx"] = previous_wx
 
 
-def test_pcm_archive_uses_kicad_flat_plugin_layout():
+def test_pcm_archive_uses_flat_entrypoint_with_internal_packages():
     from kicad_track_gloss.package_pcm import build
 
     with tempfile.TemporaryDirectory() as directory:
@@ -216,7 +217,10 @@ def test_pcm_archive_uses_kicad_flat_plugin_layout():
 
     assert "plugins/__init__.py" in names
     assert "plugins/action_plugin.py" in names
-    assert "plugins/board_adapter.py" in names
+    assert "plugins/engine/planner.py" in names
+    assert "plugins/engine/terminals.py" in names
+    assert "plugins/kicad/adapter.py" in names
+    assert "plugins/kicad/reader.py" in names
     assert not any(name.startswith("plugins/kicad_track_gloss/") for name in names)
     assert "metadata.json" in names
     assert "resources/icon.png" in names
@@ -296,8 +300,8 @@ def test_native_connection_expansion_batches_multiple_nets():
         _NativeTrack("b1", (0, 10), (1, 10), 2),
         _NativeTrack("b2", (1, 10), (2, 10), 2),
     ]
-    adapter = __import__("kicad_track_gloss.board_adapter", fromlist=["BoardAdapter"]).BoardAdapter(
-        _NativePcbnew())
+    from kicad_track_gloss.kicad import BoardAdapter
+    adapter = BoardAdapter(_NativePcbnew())
     records = _native_records(adapter, tracks)
     seeds = {"a1", "b1"}
     expanded = adapter._expand_seed_keys(_NativeBoard(tracks), records, seeds, [])
@@ -310,8 +314,8 @@ def test_native_connection_expansion_stops_at_junction():
         _NativeTrack("straight", (1, 0), (2, 0), 1),
         _NativeTrack("branch", (1, 0), (1, 1), 1),
     ]
-    adapter = __import__("kicad_track_gloss.board_adapter", fromlist=["BoardAdapter"]).BoardAdapter(
-        _NativePcbnew())
+    from kicad_track_gloss.kicad import BoardAdapter
+    adapter = BoardAdapter(_NativePcbnew())
     records = _native_records(adapter, tracks)
     expanded = adapter._expand_seed_keys(_NativeBoard(tracks), records, {"seed"}, [])
     assert expanded == {"seed"}
@@ -398,7 +402,7 @@ def test_one_segment_can_shorten_by_sliding_its_t_contact():
 
 
 def test_batch_rejects_colliding_new_copper_on_different_nets():
-    from kicad_track_gloss.connectivity import validate_result
+    from kicad_track_gloss.engine.validation import validate_result
 
     model = BoardModel([], minimum_clearance=0.2,
                        net_clearances={1: 0.2, 2: 0.25})
