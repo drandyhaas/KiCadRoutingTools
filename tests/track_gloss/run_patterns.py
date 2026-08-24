@@ -37,14 +37,20 @@ from kicad_track_gloss.kicad.selection import (  # noqa: E402
 
 EXPECTED_TRACKS = 706
 EXPECTED_SCOPES = 334
-EXPECTED_CHANGES = 138
-EXPECTED_SAVED_MM = 88.878551
-EXPECTED_ALL_SELECTED_SAVED_MM = 49.68042
-EXPECTED_ALL_SELECTED_REMOVED = 116
-EXPECTED_ALL_SELECTED_ADDED = 98
+EXPECTED_CHANGES = 202
+EXPECTED_SAVED_MM = 108.378809
+EXPECTED_ALL_SELECTED_SAVED_MM = 60.060665
+EXPECTED_ALL_SELECTED_REMOVED = 181
+EXPECTED_ALL_SELECTED_ADDED = 143
 MICRO_JOG_SEED = "58ebb541-fac6-4d02-8a68-65aca50766b5"
 SHORT_VCC_SEED = "cc798608-5e9b-4c2a-9856-dde85f9d85f0"
 PAD_SLIDING_SEED = "54640123-2d45-4136-984c-783155178230"
+PASTE_PAD_SEED = "e149801e-8263-4ee7-8861-6e960836dada"
+DESCENDING_GND_SEED = "4fd6ed29-9fec-4147-a9e1-484055bf19bc"
+MULTI_WIDTH_GND_SEEDS = {
+    "912e3a2c-243d-40fe-9ff5-205898090e6e",
+    "eaa5f084-9cb0-4b63-b93a-cf41c344d3ac",
+}
 
 
 def _records(adapter, board):
@@ -158,12 +164,12 @@ def _short_vcc_regression(board, adapter, snapshot, records):
     best = next(plan for plan in plans if plan.changed)
     assert len(expanded) == 9
     assert not protected
-    assert round(best.saved_mm, 6) == 0.959686
-    assert len(best.remove_keys) == 6
-    assert len(best.additions) == 5
+    assert round(best.saved_mm, 6) == 1.003620
+    assert len(best.remove_keys) == 7
+    assert len(best.additions) == 6
     fresh = pcbnew.LoadBoard(str(FIXTURE))
     BoardAdapter(pcbnew).apply(fresh, best, rollback_on_error=True)
-    print("SHORT VCC PASS: 0.959686 mm saved with pad-area sliding")
+    print("SHORT VCC PASS: 1.003620 mm saved with exact pad-area sliding")
 
 
 def _pad_sliding_regression(board, adapter, snapshot, records):
@@ -187,6 +193,52 @@ def _pad_sliding_regression(board, adapter, snapshot, records):
     print("PAD SLIDING PASS: 0.596798 mm saved between two pad areas")
 
 
+def _reported_clearance_regressions(board, adapter, snapshot, records):
+    # F.Paste-only apertures around A1 must never enter the copper model.
+    assert not any(
+        obstacle.net_id == 0 and
+        abs(obstacle.x - 165.062) < 1e-6 and
+        abs(obstacle.y - 96.774) < 1e-6
+        for obstacle in snapshot.model.obstacles)
+
+    cases = (
+        ({PASTE_PAD_SEED}, 1.453743, 7, 3),
+        ({DESCENDING_GND_SEED}, 0.714108, 3, 2),
+        (MULTI_WIDTH_GND_SEEDS, 2.856996, 9, 3),
+    )
+    results = []
+    for seeds, expected_saved, expected_removed, expected_added in cases:
+        eligible, _expanded, protected = adapter.expand_eligible_keys(
+            board, records, set(seeds), [])
+        assert not protected
+        plan = generate_candidate_plans(
+            snapshot.model, eligible, min_gain=0.01,
+            allow_equal_length_simpler=True,
+            clearance=snapshot.minimum_clearance)[0]
+        assert round(plan.saved_mm, 6) == expected_saved
+        assert len(plan.remove_keys) == expected_removed
+        assert len(plan.additions) == expected_added
+        assert set(seeds) <= set(plan.remove_keys)
+        fresh = pcbnew.LoadBoard(str(FIXTURE))
+        BoardAdapter(pcbnew).apply(fresh, plan, rollback_on_error=True)
+        results.append(plan)
+
+    descending = results[1]
+    assert any(abs(addition.start[1] - 108.3) < 1e-6 and
+               abs(addition.end[1] - 108.3) < 1e-6
+               for addition in descending.additions)
+    multi_width = results[2]
+    assert any({addition.start, addition.end} == {
+        (208.086179, 120.125), (208.5, 120.125)}
+        for addition in multi_width.additions)
+    assert not any(abs(point[0] - 208.6) < 1e-6 and
+                   abs(point[1] - 120.125) < 1e-6
+                   for addition in multi_width.additions
+                   for point in (addition.start, addition.end))
+    print("REPORTED CASES PASS: paste pads ignored, exact pad corridors, "
+          "multi-width T refinement")
+
+
 def main():
     board = pcbnew.LoadBoard(str(FIXTURE))
     adapter = BoardAdapter(pcbnew)
@@ -198,6 +250,7 @@ def main():
     _dense_micro_jog_regression(board, adapter, records)
     _short_vcc_regression(board, adapter, snapshot, records)
     _pad_sliding_regression(board, adapter, snapshot, records)
+    _reported_clearance_regressions(board, adapter, snapshot, records)
     assert len(scopes) == EXPECTED_SCOPES, (len(scopes), EXPECTED_SCOPES)
 
     _all_selected_regression(board, adapter, snapshot, records)

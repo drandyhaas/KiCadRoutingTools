@@ -63,6 +63,12 @@ ranked by saved length, then by segment reduction and a stable geometry
 signature. Isolated group plans remain available when a combined candidate is
 not valid.
 
+For bounded selections, the best combined plan is replayed in the API-neutral
+model for additional convergence passes. Newly created same-net centreline
+intersections become T contacts, cross-width stubs are removed, and the result
+is optimized again. Every composed result is revalidated against the original
+selection. Very large scopes skip this optional pass to keep runtime bounded.
+
 An eligible chain that terminates in the middle of an immutable same-net track
 has a sliding T termination. The contact may move along that traversing track
 to the nearest useful 0/45/90-degree location; the traversing track itself is
@@ -117,14 +123,13 @@ inter-net clearance violations, and degraded connectivity between immutable
 terminals. Application verifies track identities again and restores removed
 copper if an exception occurs.
 
-Pad clearance uses conservative enclosing circles when KiCad does not expose a
-more precise shape through the adapter. A candidate portion that is strictly a
-retained subsegment of removed copper is not treated as new copper against that
-coarse approximation; every genuinely new portion remains fully checked.
-Identity replacements are retained as their original native KiCad items.
-Rectangular pad obstacles use the circumscribed bounding-box radius so their
-corners cannot be mistaken for free space. Same-net pad connectivity is
-validated against the modeled pad shape rather than that coarse obstacle.
+Pad clearance uses the actual rotated circle, rectangle, oval, or rounded-
+rectangle copper shape. Paste/mask-only apertures are ignored. Unsupported and
+custom pads retain a conservative enclosing circle built from KiCad's effective
+bounding box, including all custom primitives. A candidate portion that is
+strictly retained original copper is not treated as new copper against a
+fallback approximation; every genuinely new portion remains checked. Identity
+replacements are retained as their original native KiCad items.
 
 ## Code map
 
@@ -142,7 +147,7 @@ validated against the modeled pad shape rather than that coarse obstacle.
 - `kicad/diagnostics.py`: human-readable tables and machine-readable JSON for
   diagnostic runs.
 - `engine/planner.py`: API-neutral chain discovery, octolinear candidate
-  generation, global scheduling, and batch fallbacks.
+  generation, global scheduling, batch fallbacks, and bounded convergence.
 - `engine/terminals.py`: detection and movement candidates for sliding T
   terminations.
 - `engine/pads.py`: pad containment and bounded copper-contact geometry.
@@ -168,19 +173,23 @@ over it.
 
 Current required integration results are:
 
-- **All 706 straight tracks selected in one batch:** 49.680420 mm saved and 18
-  net segments removed (116 removed, 98 added). 116 probable tuned segments
+- **All 706 straight tracks selected in one batch:** 60.060665 mm saved and 38
+  net segments removed (181 removed, 143 added). 116 probable tuned segments
   are protected and 590 segments are eligible. Seven input orders must produce
   the exact same complete plan.
-- **Connections evaluated independently:** 334 unique scopes, 138 improving
-  plans, 88.878551 mm total isolated potential, and 138 successful applications
+- **Connections evaluated independently:** 334 unique scopes, 202 improving
+  plans, 108.378809 mm total isolated potential, and 202 successful applications
   to freshly loaded in-memory boards.
 - **Dense micro-jog regression (`/cpu/~{csn}`):** selecting UUID
   `58ebb541-fac6-4d02-8a68-65aca50766b5` expands to 111 tuned segments; all
   111 must be protected and no geometric candidate may be planned.
 - **Short VCC regression:** selecting UUID
-  `cc798608-5e9b-4c2a-9856-dde85f9d85f0` must save 0.959686 mm while retaining
+  `cc798608-5e9b-4c2a-9856-dde85f9d85f0` must save 1.003620 mm while retaining
   safe existing copper and moving eligible contacts inside pad areas.
+- **Reported clearance/convergence regressions:** the `/cpu/SW_PULL` paste-pad
+  case saves 1.453743 mm; the GND horizontal at `Y=108.2` moves to `Y=108.3`
+  and saves 0.714108 mm; the mixed-width GND batch replaces its diagonal chain
+  and trailing stub with a horizontal T contact, saving 2.856996 mm.
 - **Pad-area regression (`Net-(U1-BST)`):** selecting UUID
   `54640123-2d45-4136-984c-783155178230` must replace its 3.535534 mm segment
   with one 2.938736 mm diagonal between the two rounded-rectangle pad areas,

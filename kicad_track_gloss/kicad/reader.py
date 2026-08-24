@@ -88,13 +88,15 @@ def read_snapshot(adapter, board, require_selection=True):
                           if str(board.GetLayerName(layer)).endswith(".Cu")]
             except Exception:
                 layers = list(copper_layers)
+            # Paste/mask-only apertures are not copper obstacles. An empty
+            # layer tuple means "all layers" inside the API-neutral model, so
+            # retaining such a pad would incorrectly block every copper layer.
+            if not layers:
+                continue
             try:
                 local_clearance = adapter.to_mm(pad.GetLocalClearance())
             except Exception:
                 local_clearance = 0.0
-            obstacles.append(CircleObstacle(
-                x, y, radius, int(pad.GetNetCode()), tuple(layers),
-                "pad", local_clearance))
             try:
                 corner_radius = adapter.to_mm(pad.GetRoundRectCornerRadius())
             except Exception:
@@ -103,7 +105,26 @@ def read_snapshot(adapter, board, require_selection=True):
                 pad_regions.append(PadRegion(
                     x, y, adapter.to_mm(size.x), adapter.to_mm(size.y),
                     float(pad.GetOrientationDegrees()), shape, corner_radius,
-                    int(pad.GetNetCode()), tuple(layers)))
+                    int(pad.GetNetCode()), tuple(layers), local_clearance))
+            else:
+                # Unsupported/custom pads retain a conservative enclosing
+                # circle, but it must cover their effective primitives rather
+                # than only the usually smaller anchor-pad size.
+                try:
+                    box = pad.GetBoundingBox()
+                    box_width = adapter.to_mm(box.GetWidth())
+                    box_height = adapter.to_mm(box.GetHeight())
+                    obstacle_x = adapter.to_mm(box.GetX()) + box_width / 2.0
+                    obstacle_y = adapter.to_mm(box.GetY()) + box_height / 2.0
+                    obstacle_radius = math.hypot(
+                        box_width / 2.0, box_height / 2.0)
+                except Exception:
+                    obstacle_x, obstacle_y = x, y
+                    obstacle_radius = radius
+                obstacles.append(CircleObstacle(
+                    obstacle_x, obstacle_y, obstacle_radius,
+                    int(pad.GetNetCode()), tuple(layers), "pad",
+                    local_clearance))
 
     if require_selection and not seed_keys:
         if warnings:

@@ -13,6 +13,7 @@ from kicad_track_gloss.engine.model import (AddedSegment, BoardModel,
                                             CircleObstacle, GlossResult,
                                             PadRegion, Segment, segment_key)
 from kicad_track_gloss.kicad.selection import meander_keys as _meander_keys
+from kicad_track_gloss.engine.pads import segment_hits_pad
 
 
 def staircase(count=20, pitch=0.2, net=1):
@@ -74,6 +75,17 @@ def test_foreign_via_blocks_shortcut():
         # No accepted candidate may pass through the obstacle clearance disk.
         from kicad_track_gloss.engine.geometry import point_segment_distance
         assert point_segment_distance((obstacle.x, obstacle.y), new.start, new.end) >= 0.475 - 1e-6
+
+
+def test_roundrect_clearance_uses_real_shape_not_bounding_circle():
+    pad = PadRegion(183.642, 109.474, 3.2, 1.6, 0.0,
+                    "roundrect", 0.8, 68, (0,))
+    path = ((182.3, 108.3), (187.3, 108.3))
+
+    # The real lower edge is 0.374 mm away. The former 1.788854 mm
+    # circumscribed radius incorrectly occupied this entire corridor.
+    assert not segment_hits_pad(pad, *path, margin=0.373)
+    assert segment_hits_pad(pad, *path, margin=0.375)
 
 
 def test_shortened_existing_copper_is_not_rejected_by_coarse_pad_circle():

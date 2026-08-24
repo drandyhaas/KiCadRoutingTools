@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+from .geometry import path_hits_polygon, point_segment_distance
+
 
 def _local_coordinates(region, point):
     angle = math.radians(-region.orientation_degrees)
@@ -73,3 +75,53 @@ def pad_contact_points(reference, original, regions):
                              (point[0] - reference[0]) ** 2 +
                              (point[1] - reference[1]) ** 2))
     return sorted(contacts)
+
+
+def _rectangle(half_width, half_height):
+    return [(-half_width, -half_height), (half_width, -half_height),
+            (half_width, half_height), (-half_width, half_height)]
+
+
+def _segment_hits_rectangle(a, b, half_width, half_height, margin):
+    if half_width <= 0.0 or half_height <= 0.0:
+        return False
+    return path_hits_polygon(
+        a, b, _rectangle(half_width, half_height), margin)
+
+
+def segment_hits_pad(region, a, b, margin=0.0):
+    """Test a track centreline against the real supported pad copper shape."""
+    a = _local_coordinates(region, a)
+    b = _local_coordinates(region, b)
+    half_width, half_height = region.width / 2.0, region.height / 2.0
+    if region.shape == "circle":
+        return point_segment_distance((0.0, 0.0), a, b) < \
+            min(half_width, half_height) + margin - 1e-9
+    if region.shape == "oval":
+        if half_width >= half_height:
+            core = half_width - half_height
+            c, d, radius = (-core, 0.0), (core, 0.0), half_height
+        else:
+            core = half_height - half_width
+            c, d, radius = (0.0, -core), (0.0, core), half_width
+        from .geometry import segment_distance
+        return segment_distance(a, b, c, d) < radius + margin - 1e-9
+    radius = min(max(region.corner_radius, 0.0), half_width, half_height)
+    if region.shape == "rect" or radius <= 1e-9:
+        return _segment_hits_rectangle(
+            a, b, half_width, half_height, margin)
+
+    # A rounded rectangle is the union of two central rectangles and four
+    # corner circles. Testing each primitive with the requested margin gives
+    # the exact Minkowski clearance without a circumscribed-circle false hit.
+    if _segment_hits_rectangle(a, b, half_width - radius,
+                               half_height, margin):
+        return True
+    if _segment_hits_rectangle(a, b, half_width,
+                               half_height - radius, margin):
+        return True
+    for x in (-half_width + radius, half_width - radius):
+        for y in (-half_height + radius, half_height - radius):
+            if point_segment_distance((x, y), a, b) < radius + margin - 1e-9:
+                return True
+    return False

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from .geometry import point_segment_distance, segment_distance
 from .model import GlossResult, Segment, segment_key
-from .pads import pad_contains
+from .pads import segment_hits_pad
 
 
 def validate_result(model, eligible_keys, result: GlossResult):
@@ -84,8 +84,7 @@ def _connectivity_signature(segments, obstacles, pad_regions,
         for j, pad in enumerate(pads):
             if pad.layers and a.layer not in pad.layers:
                 continue
-            if (pad_contains(pad, aa, tolerance=1e-6) or
-                    pad_contains(pad, ab, tolerance=1e-6)):
+            if segment_hits_pad(pad, aa, ab, margin=a.width / 2.0 + 1e-6):
                 union(i, len(segs) + len(obs) + j)
 
     labels = []

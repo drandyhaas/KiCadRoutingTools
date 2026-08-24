@@ -50,6 +50,7 @@ class PadRegion:
     corner_radius: float
     net_id: int
     layers: Tuple[int, ...] = ()
+    clearance: float = 0.0
 
 
 @dataclass
