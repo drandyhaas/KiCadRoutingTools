@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 
-from ..engine.model import BoardModel, CircleObstacle, segment_key
+from ..engine.model import BoardModel, CircleObstacle, PadRegion, segment_key
 from .rules import board_bounds, native_rules, track_keepouts
 from .selection import expand_eligible_keys, is_probable_diff_pair
 
@@ -21,7 +22,7 @@ class SelectionSnapshot:
 
 
 def read_snapshot(adapter, board, require_selection=True):
-    segments, obstacles, warnings = [], [], []
+    segments, obstacles, pad_regions, warnings = [], [], [], []
     straight_by_key = {}
     seed_keys = set()
     for item in board.GetTracks():
@@ -71,7 +72,16 @@ def read_snapshot(adapter, board, require_selection=True):
         for pad in footprint.Pads():
             x, y = adapter.point_mm(pad.GetPosition())
             size = pad.GetSize()
-            radius = max(adapter.to_mm(size.x), adapter.to_mm(size.y)) / 2.0
+            half_width = adapter.to_mm(size.x) / 2.0
+            half_height = adapter.to_mm(size.y) / 2.0
+            shape_names = {
+                0: "circle", 1: "rect", 2: "oval", 3: "fallback",
+                4: "roundrect", 5: "fallback", 6: "fallback",
+            }
+            shape = shape_names.get(int(pad.GetShape()), "fallback")
+            # Circumscribe the full pad bounding box, including rectangular
+            # corners. ``max(width, height) / 2`` is not an enclosing circle.
+            radius = math.hypot(half_width, half_height)
             try:
                 layers = [int(layer) for layer in pad.GetLayerSet().Seq()
                           if str(board.GetLayerName(layer)).endswith(".Cu")]
@@ -84,6 +94,15 @@ def read_snapshot(adapter, board, require_selection=True):
             obstacles.append(CircleObstacle(
                 x, y, radius, int(pad.GetNetCode()), tuple(layers),
                 "pad", local_clearance))
+            try:
+                corner_radius = adapter.to_mm(pad.GetRoundRectCornerRadius())
+            except Exception:
+                corner_radius = 0.0
+            if shape != "fallback":
+                pad_regions.append(PadRegion(
+                    x, y, adapter.to_mm(size.x), adapter.to_mm(size.y),
+                    float(pad.GetOrientationDegrees()), shape, corner_radius,
+                    int(pad.GetNetCode()), tuple(layers)))
 
     if require_selection and not seed_keys:
         if warnings:
@@ -91,6 +110,7 @@ def read_snapshot(adapter, board, require_selection=True):
                              " ".join(sorted(set(warnings))))
         raise ValueError("Select at least two connected straight track segments first.")
     model = BoardModel(segments, obstacles, track_keepouts(adapter, board),
-                       net_clearances, minimum, edge, board_bounds(adapter, board))
+                       net_clearances, minimum, edge, board_bounds(adapter, board),
+                       pad_regions)
     return SelectionSnapshot(model, eligible, sorted(set(warnings)), minimum, edge,
                              len(seed_keys), expanded_count)

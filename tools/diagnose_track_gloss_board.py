@@ -17,6 +17,7 @@ package.__path__ = [str(ROOT / "kicad_track_gloss")]
 sys.modules["kicad_track_gloss"] = package
 
 from kicad_track_gloss.engine import (  # noqa: E402
+    find_pad_terminal_targets,
     find_track_terminal_targets,
     generate_candidate_plans,
 )
@@ -59,6 +60,7 @@ def main():
     eligible, expanded, meanders = adapter.expand_eligible_keys(
         board, records, set(args.uuid), warnings)
     targets = find_track_terminal_targets(snapshot.model, eligible)
+    pad_targets = find_pad_terminal_targets(snapshot.model, eligible)
     plans = generate_candidate_plans(
         snapshot.model, eligible, min_gain=0.01,
         allow_equal_length_simpler=True,
@@ -77,6 +79,11 @@ def main():
     print("sliding terminals:", len(targets))
     for terminal, tracks in sorted(targets.items()):
         print(" ", terminal, "->", [segment_key(track) for track in tracks])
+    print("sliding pad areas:", len(pad_targets))
+    for terminal, regions in sorted(pad_targets.items()):
+        print(" ", terminal, "->", [
+            (region.shape, region.x, region.y, region.width, region.height)
+            for region in regions])
     print("plans:", len(plans))
     for index, plan in enumerate(plans):
         print(index, "changed=", plan.changed, "saved=", round(plan.saved_mm, 6),
@@ -147,6 +154,8 @@ def sweep(board, adapter, snapshot, records, board_path, verify_apply, max_scope
             "net": net_name,
             "eligible": len(eligible),
             "terminals": len(find_track_terminal_targets(snapshot.model, eligible)),
+            "pad_terminals": len(find_pad_terminal_targets(
+                snapshot.model, eligible)),
             "plans": len(plans),
             "changed": best is not None,
             "saved": round(best.saved_mm, 6) if best else 0.0,

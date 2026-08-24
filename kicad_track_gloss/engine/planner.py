@@ -20,8 +20,8 @@ from collections import defaultdict
 from .geometry import (length, octolinear_paths, path_hits_polygon,
                        point_segment_distance, segment_distance)
 from .model import AddedSegment, GlossResult, segment_key
-from .terminals import (find_track_terminal_targets, movable_endpoint_pairs,
-                        vertex)
+from .terminals import (find_pad_terminal_targets, find_track_terminal_targets,
+                        movable_endpoint_pairs, vertex)
 from .validation import validate_result
 
 
@@ -140,6 +140,7 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
         if o.net_id > 0:
             obstacle_vertices[o.net_id].add(vertex(o.x, o.y))
     track_terminal_targets = find_track_terminal_targets(model, eligible)
+    pad_terminal_targets = find_pad_terminal_targets(model, eligible)
 
     groups = defaultdict(list)
     for s in model.segments:
@@ -157,7 +158,8 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
         def interior(v):
             return (len(adjacency[v]) == 2 and all_incidence[(net_id, v)] == 2 and
                     v not in obstacle_vertices[net_id] and
-                    (net_id, layer, v) not in track_terminal_targets)
+                    (net_id, layer, v) not in track_terminal_targets and
+                    (net_id, layer, v) not in pad_terminal_targets)
 
         for touching in adjacency.values():
             touching.sort(key=segment_key)
@@ -203,11 +205,17 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                                          if i == 0 else ())
                         end_targets = (track_terminal_targets.get(end_terminal, ())
                                        if j == len(chain) else ())
-                        if j == i + 1 and not (start_targets or end_targets):
+                        start_pads = (pad_terminal_targets.get(start_terminal, ())
+                                      if i == 0 else ())
+                        end_pads = (pad_terminal_targets.get(end_terminal, ())
+                                    if j == len(chain) else ())
+                        if j == i + 1 and not (
+                                start_targets or end_targets or start_pads or end_pads):
                             continue
                         paths = []
                         for candidate_start, candidate_end in movable_endpoint_pairs(
-                                points[i], points[j], start_targets, end_targets):
+                                points[i], points[j], start_targets, end_targets,
+                                start_pads, end_pads):
                             if length(candidate_start, candidate_end) <= 1e-9:
                                 continue
                             for path in octolinear_paths(candidate_start, candidate_end):

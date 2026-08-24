@@ -11,7 +11,7 @@ from kicad_track_gloss.engine import (find_track_terminal_vertices,
                                       smooth_selected_chains)
 from kicad_track_gloss.engine.model import (AddedSegment, BoardModel,
                                             CircleObstacle, GlossResult,
-                                            Segment, segment_key)
+                                            PadRegion, Segment, segment_key)
 from kicad_track_gloss.kicad.selection import meander_keys as _meander_keys
 
 
@@ -444,6 +444,29 @@ def test_one_segment_can_shorten_by_sliding_its_t_contact():
     assert len(result.additions) == 1
     assert {result.additions[0].start, result.additions[0].end} == {(0, 0), (4, 0)}
     assert result.saved_mm > 0.1
+
+
+def test_one_segment_can_shorten_between_two_pad_copper_areas():
+    segment = Segment(211.7, 94.3, 209.2, 96.8, 0.127, 0, 47, "bst")
+    pads = [
+        PadRegion(212.06, 94.6605, 1.075, 0.95, 90.0,
+                  "roundrect", 0.2375, 47, (0,)),
+        PadRegion(209.1545, 96.793, 1.325, 0.6, 0.0,
+                  "roundrect", 0.15, 47, (0,)),
+    ]
+    model = BoardModel([segment], pad_regions=pads)
+    result = smooth_selected_chains(
+        model, {"bst"}, min_gain=0.01, span_strategy="global", clearance=0.0)
+
+    assert result.changed
+    assert result.remove_keys == ["bst"]
+    assert result.saved_mm > 0.59
+    assert len(result.additions) <= 2
+    from kicad_track_gloss.engine.terminals import _pad_contains
+    endpoints = {point for addition in result.additions
+                 for point in (addition.start, addition.end)}
+    assert any(_pad_contains(pads[0], point, 1e-6) for point in endpoints)
+    assert any(_pad_contains(pads[1], point, 1e-6) for point in endpoints)
 
 
 def test_batch_rejects_colliding_new_copper_on_different_nets():

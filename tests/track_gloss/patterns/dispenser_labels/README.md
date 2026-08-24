@@ -21,8 +21,8 @@ The replay loads a fresh in-memory board for every accepted modification and
 never writes a PCB file.
 
 It also treats all 706 straight tracks as one simultaneous selection. The
-expected deterministic result is 4.721872 mm of copper saved and a net
-reduction of 39 segments (103 removed, 64 added), invariant under board,
+expected deterministic result is 49.680420 mm of copper saved and a net
+reduction of 18 segments (116 removed, 98 added), invariant under board,
 reverse, ascending-net, descending-net, and shuffled input orders.
 
 The `/cpu/~{csn}` segment UUID
@@ -31,6 +31,13 @@ regression: its expanded connection contains 111 dense tuning micro-segments,
 which must all be protected without invoking the geometric planner.
 
 The VCC segment UUID `cc798608-5e9b-4c2a-9856-dde85f9d85f0` is a pad-envelope
-regression. Its expanded connection must save 0.117157 mm and remove four net
-segments while preserving portions of existing copper that overlap only the
-adapter's conservative circular pad representation.
+regression. Its expanded connection must save 0.959686 mm while preserving
+safe portions of existing copper.
+
+The `Net-(U1-BST)` UUID `54640123-2d45-4136-984c-783155178230` validates pad
+area sliding. Its 3.535534 mm segment must become one 2.938736 mm diagonal
+whose endpoints lie inside the two rounded-rectangle pads, saving 0.596798 mm.
+
+An exhaustive KiCad 10.0.5 DRC (`--all-track-errors`) on a temporary copy of
+the all-selected result must preserve the baseline totals: 170 pre-existing
+violations, unchanged category counts, and one pre-existing unconnected item.

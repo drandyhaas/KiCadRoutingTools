@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .geometry import point_segment_distance, segment_distance
 from .model import GlossResult, Segment, segment_key
+from .terminals import _pad_contains
 
 
 def validate_result(model, eligible_keys, result: GlossResult):
@@ -43,10 +44,15 @@ def validate_result(model, eligible_keys, result: GlossResult):
     _validate_connectivity(model, eligible_keys, result)
 
 
-def _connectivity_signature(segments, obstacles, immutable_keys, net_id):
+def _connectivity_signature(segments, obstacles, pad_regions,
+                            immutable_keys, net_id):
     segs = [s for s in segments if s.net_id == net_id]
-    obs = [o for o in obstacles if o.net_id == net_id]
-    count = len(segs) + len(obs)
+    # When exact pad regions are present, do not let their older conservative
+    # obstacle circles prove connectivity outside real pad copper.
+    obs = [o for o in obstacles if o.net_id == net_id and
+           (not pad_regions or o.kind != "pad")]
+    pads = [pad for pad in pad_regions if pad.net_id == net_id]
+    count = len(segs) + len(obs) + len(pads)
     parent = list(range(count))
 
     def find(i):
@@ -75,12 +81,20 @@ def _connectivity_signature(segments, obstacles, immutable_keys, net_id):
             if point_segment_distance((obstacle.x, obstacle.y), aa, ab) <= \
                     obstacle.radius + a.width / 2.0 + 1e-5:
                 union(i, len(segs) + j)
+        for j, pad in enumerate(pads):
+            if pad.layers and a.layer not in pad.layers:
+                continue
+            if (_pad_contains(pad, aa, tolerance=1e-6) or
+                    _pad_contains(pad, ab, tolerance=1e-6)):
+                union(i, len(segs) + len(obs) + j)
 
     labels = []
     for i, s in enumerate(segs):
         if segment_key(s) in immutable_keys:
             labels.append(("track:" + segment_key(s), find(i)))
     labels.extend((f"obstacle:{i}", find(len(segs) + i)) for i in range(len(obs)))
+    labels.extend((f"pad:{i}", find(len(segs) + len(obs) + i))
+                  for i in range(len(pads)))
     connected = set()
     for i, (left, root) in enumerate(labels):
         for right, other_root in labels[i + 1:]:
@@ -97,8 +111,10 @@ def _validate_connectivity(model, eligible_keys, result):
     immutable = {segment_key(s) for s in model.segments if segment_key(s) not in eligible_keys}
     affected_nets = {s.net_id for s in model.segments if segment_key(s) in removed}
     for net_id in affected_nets:
-        before_pairs = _connectivity_signature(model.segments, model.obstacles, immutable, net_id)
-        after_pairs = _connectivity_signature(after, model.obstacles, immutable, net_id)
+        before_pairs = _connectivity_signature(
+            model.segments, model.obstacles, model.pad_regions, immutable, net_id)
+        after_pairs = _connectivity_signature(
+            after, model.obstacles, model.pad_regions, immutable, net_id)
         lost = before_pairs - after_pairs
         if lost:
             raise ValueError("Candidate would degrade connectivity on net {}".format(net_id))

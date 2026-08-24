@@ -9,7 +9,8 @@ import traceback
 import pcbnew
 import wx
 
-from .engine import find_track_terminal_vertices, generate_candidate_plans
+from .engine import (find_pad_terminal_targets, find_track_terminal_vertices,
+                     generate_candidate_plans)
 from .kicad import BoardAdapter
 from .version import __version__
 
@@ -134,13 +135,18 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             report.append("Protection: " + warning)
         track_terminals = find_track_terminal_vertices(
             snapshot.model, snapshot.eligible_keys)
+        pad_terminals = find_pad_terminal_targets(
+            snapshot.model, snapshot.eligible_keys)
         report.append("Sliding track-intersection terminations: " +
                       str(len(track_terminals)))
-        if len(snapshot.eligible_keys) < 2 and not track_terminals:
+        report.append("Sliding pad-area terminations: " +
+                      str(len(pad_terminals)))
+        if (len(snapshot.eligible_keys) < 2 and not track_terminals and
+                not pad_terminals):
             report.append("Result: no modification.")
             report.append(
                 "Reason: automatic connection expansion did not find a second eligible "
-                "straight segment or a sliding track-intersection termination.")
+                "straight segment or a sliding track/pad termination.")
             return False
 
         plans = generate_candidate_plans(

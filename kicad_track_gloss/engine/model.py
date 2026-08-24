@@ -38,6 +38,20 @@ class PolygonKeepout:
     layers: Tuple[int, ...] = ()
 
 
+@dataclass(frozen=True)
+class PadRegion:
+    """Copper area in which a same-net track termination may move."""
+    x: float
+    y: float
+    width: float
+    height: float
+    orientation_degrees: float
+    shape: str
+    corner_radius: float
+    net_id: int
+    layers: Tuple[int, ...] = ()
+
+
 @dataclass
 class BoardModel:
     segments: List[Segment]
@@ -49,6 +63,7 @@ class BoardModel:
     minimum_clearance: float = 0.0
     copper_edge_clearance: float = 0.0
     board_bounds: object = None
+    pad_regions: List[PadRegion] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

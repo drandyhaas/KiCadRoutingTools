@@ -67,6 +67,12 @@ to the nearest useful 0/45/90-degree location; the traversing track itself is
 not changed. This models the useful effect of manually breaking the last
 segment and finalizing it again in KiCad.
 
+An eligible chain ending in same-net pad copper has a sliding pad termination.
+The engine models circle, rectangle, oval, and rounded-rectangle pad areas,
+including size, rotation, copper layers, and rounded corners. It evaluates a
+bounded deterministic set of 0/45/90-degree contacts on the pad boundary. Pad
+copper remains immutable; only the connected track endpoint moves within it.
+
 Repeated direction reversals and long runs dominated by dense micro-jogs are
 classified as probable length-tuning geometry. Detection is performed per
 independent unbranched component so tuning cannot protect an unrelated route
@@ -114,6 +120,9 @@ more precise shape through the adapter. A candidate portion that is strictly a
 retained subsegment of removed copper is not treated as new copper against that
 coarse approximation; every genuinely new portion remains fully checked.
 Identity replacements are retained as their original native KiCad items.
+Rectangular pad obstacles use the circumscribed bounding-box radius so their
+corners cannot be mistaken for free space. Same-net pad connectivity is
+validated against the modeled pad shape rather than that coarse obstacle.
 
 ## Code map
 
@@ -153,24 +162,33 @@ over it.
 
 Current required integration results are:
 
-- **All 706 straight tracks selected in one batch:** 4.721872 mm saved and 39
-  net segments removed (103 removed, 64 added). 116 probable tuned segments
+- **All 706 straight tracks selected in one batch:** 49.680420 mm saved and 18
+  net segments removed (116 removed, 98 added). 116 probable tuned segments
   are protected and 590 segments are eligible. Seven input orders must produce
   the exact same complete plan.
-- **Connections evaluated independently:** 334 unique scopes, 65 improving
-  plans, 10.116686 mm total isolated potential, and 65 successful applications
+- **Connections evaluated independently:** 334 unique scopes, 138 improving
+  plans, 88.878551 mm total isolated potential, and 138 successful applications
   to freshly loaded in-memory boards.
 - **Dense micro-jog regression (`/cpu/~{csn}`):** selecting UUID
   `58ebb541-fac6-4d02-8a68-65aca50766b5` expands to 111 tuned segments; all
   111 must be protected and no geometric candidate may be planned.
 - **Short VCC regression:** selecting UUID
-  `cc798608-5e9b-4c2a-9856-dde85f9d85f0` must save 0.117157 mm and remove four
-  net segments despite conservative pad envelopes around retained copper.
+  `cc798608-5e9b-4c2a-9856-dde85f9d85f0` must save 0.959686 mm while retaining
+  safe existing copper and moving eligible contacts inside pad areas.
+- **Pad-area regression (`Net-(U1-BST)`):** selecting UUID
+  `54640123-2d45-4136-984c-783155178230` must replace its 3.535534 mm segment
+  with one 2.938736 mm diagonal between the two rounded-rectangle pad areas,
+  saving 0.596798 mm.
 
 The isolated total is not the expected result of the simultaneous all-track
 batch. T-junction mobility and clearance interactions differ when surrounding
 tracks are eligible at the same time. Treat both figures as separate
 non-regression contracts; neither is a proof of a mathematical global maximum.
+
+The all-track plan is also applied to a temporary board copy and checked with
+KiCad 10.0.5's exhaustive native DRC. The frozen fixture reports 170 existing
+violations and one existing unconnected item both before and after gloss, with
+identical violation-category counts.
 
 ## Running validation
 

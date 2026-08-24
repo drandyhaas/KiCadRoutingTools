@@ -2,7 +2,7 @@
   "$schema": "https://go.kicad.org/pcm/schemas/v1",
   "name": "KiCad Track Gloss",
   "description": "Shorten or simplify PCB connections seeded by selected track segments.",
-  "description_full": "KiCad Track Gloss is a one-click ActionPlugin that automatically expands every selected straight-track seed through KiCad connectivity up to pads, vias, arcs, locks, or junctions, then replaces safe staircases with shorter or simpler 0/45/90-degree chains directly on the current board. Same-net T contacts may slide along their immutable traversing track to emulate KiCad router finalization. It reads KiCad board constraints and effective netclasses, generates deterministic global and multi-net batch candidates, applies the highest-saving plan, and returns immediately. Successful actions stay silent; a no-op uses KiCad's standard warning bell. Copper outside the expanded connections remains immutable and KiCad Undo can revert the action.",
+  "description_full": "KiCad Track Gloss is a one-click ActionPlugin that automatically expands every selected straight-track seed through KiCad connectivity up to pads, vias, arcs, locks, or junctions, then replaces safe staircases with shorter or simpler 0/45/90-degree chains directly on the current board. Same-net T contacts may slide along their immutable traversing track, and pad terminations may move safely inside the pad copper area, to emulate KiCad router finalization. It reads KiCad board constraints and effective netclasses, generates deterministic global and multi-net batch candidates, applies the highest-saving plan, and returns immediately. Successful actions stay silent; a no-op uses KiCad's standard warning bell. Copper outside the expanded connections remains immutable and KiCad Undo can revert the action.",
   "identifier": "com.github.fca1.kicadtrackgloss",
   "type": "plugin",
   "author": {
@@ -20,7 +20,7 @@
   "tags": ["routing", "tracks", "cleanup", "gloss"],
   "versions": [
     {
-      "version": "0.3.12",
+      "version": "0.3.13",
       "status": "testing",
       "kicad_version": "10.0",
       "runtime": "swig",
