@@ -25,6 +25,7 @@ from kicad_track_gloss.kicad import BoardAdapter  # noqa: E402
 from kicad_track_gloss.kicad.selection import (  # noqa: E402
     is_probable_diff_pair as _is_probable_diff_pair,
 )
+from kicad_track_gloss.version import __version__  # noqa: E402
 
 
 def main():
@@ -37,6 +38,7 @@ def main():
     args = parser.parse_args()
 
     board = pcbnew.LoadBoard(args.board)
+    print("plugin version:", __version__)
     adapter = BoardAdapter(pcbnew)
     snapshot = adapter.snapshot(board, require_selection=False)
     records = {}

@@ -11,13 +11,18 @@ import shutil
 import tempfile
 import zipfile
 
+try:
+    from .version import __version__
+except ImportError:
+    from version import __version__
+
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent
-VERSION = "0.3.9"
+VERSION = __version__
 RUNTIME_FILES = (
     "__init__.py", "action_plugin.py", "icon_24.png", "icon_24_dark.png",
-    "LICENSE", "NOTICE", "README.md",
+    "version.py", "LICENSE", "NOTICE", "README.md",
 )
 RUNTIME_DIRECTORIES = ("engine", "kicad")
 

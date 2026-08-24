@@ -4,6 +4,7 @@ import sys
 import tempfile
 import types
 import zipfile
+import json
 
 from kicad_track_gloss.engine import (find_track_terminal_vertices,
                                       generate_candidate_plans,
@@ -171,6 +172,7 @@ def test_action_plugin_is_silent_and_has_no_file_roundtrip():
     assert "KiCadTrackGlossDiagnosticPlugin" in source
     assert "show_toolbar_button = False" in source
     assert "wx.Bell()" in source
+    assert "Plugin version: " in source
 
 
 def test_normal_action_bells_once_only_on_noop():
@@ -217,6 +219,7 @@ def test_pcm_archive_uses_flat_entrypoint_with_internal_packages():
 
     assert "plugins/__init__.py" in names
     assert "plugins/action_plugin.py" in names
+    assert "plugins/version.py" in names
     assert "plugins/engine/planner.py" in names
     assert "plugins/engine/terminals.py" in names
     assert "plugins/kicad/adapter.py" in names
@@ -224,6 +227,15 @@ def test_pcm_archive_uses_flat_entrypoint_with_internal_packages():
     assert not any(name.startswith("plugins/kicad_track_gloss/") for name in names)
     assert "metadata.json" in names
     assert "resources/icon.png" in names
+
+
+def test_plugin_version_matches_metadata():
+    from pathlib import Path
+    from kicad_track_gloss.version import __version__
+
+    metadata = json.loads(
+        Path("kicad_track_gloss/metadata.json").read_text(encoding="utf-8"))
+    assert metadata["versions"][0]["version"] == __version__
 
 
 class _NativePoint:

@@ -113,6 +113,8 @@ copper if an exception occurs.
 - `__init__.py`: registers the normal and diagnostic ActionPlugins in KiCad.
 - `action_plugin.py`: one-click orchestration, reporting, warning bell, and UI
   contract.
+- `version.py`: single source of truth for the plugin version displayed by the
+  diagnostic and used by the PCM builder.
 - `kicad/adapter.py`: small public `BoardAdapter` facade.
 - `kicad/reader.py`: live-board and selection conversion to `BoardModel`.
 - `kicad/selection.py`: native connection expansion, differential-pair and
@@ -178,7 +180,8 @@ fresh in-memory board.
 
 ## Building and installing
 
-The release value in `package_pcm.py` and `metadata.json` must always match.
+The release value in `version.py` and `metadata.json` must always match;
+`package_pcm.py` imports it from `version.py`.
 Build from the repository root:
 
 ```text

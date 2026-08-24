@@ -11,6 +11,7 @@ import wx
 
 from .engine import find_track_terminal_vertices, generate_candidate_plans
 from .kicad import BoardAdapter
+from .version import __version__
 
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -94,6 +95,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             try:
                 _show_report("KiCad Track Gloss — Error", [
                     "UNEXPECTED ERROR",
+                    "Plugin version: " + __version__,
                     "The operation was aborted; in-memory rollback was requested.",
                     "",
                     traceback.format_exc(),
@@ -105,6 +107,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                 _warning_bell()
 
     def _run(self, report):
+        report.append("Plugin version: " + __version__)
         board = pcbnew.GetBoard()
         if board is None:
             report.append("Result: no active PCB board.")
