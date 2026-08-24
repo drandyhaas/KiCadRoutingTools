@@ -9,8 +9,8 @@ import wx
 
 from .board_adapter import BoardAdapter
 from .dialog import GlossDialog, GlossSettings
-from .drc_validation import validate_on_copy
-from .gloss_engine import smooth_selected_chains
+from .drc_validation import choose_best_with_kicad
+from .gloss_engine import generate_candidate_plans
 
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -54,11 +54,13 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         finally:
             dialog.Destroy()
 
-        result = smooth_selected_chains(
+        plans = generate_candidate_plans(
             snapshot.model, snapshot.eligible_keys,
             min_gain=settings.min_gain,
-            allow_equal_length_simpler=settings.allow_simplify)
-        if not result.changed:
+            allow_equal_length_simpler=settings.allow_simplify,
+            clearance=snapshot.minimum_clearance)
+        plans = [plan for plan in plans if plan.changed]
+        if not plans:
             detail = "\n".join(snapshot.warnings)
             message = "No safe improvement was found; the board was not changed."
             if detail:
@@ -66,26 +68,31 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             wx.MessageBox(message, "KiCad Track Gloss", wx.OK | wx.ICON_INFORMATION)
             return
 
+        if settings.run_drc:
+            result, drc_comparison, attempts = choose_best_with_kicad(pcbnew, board, plans)
+            oracle_line = ("• KiCad DRC oracle: accepted candidate {}/{} "
+                           "({} existing violation(s))\n".format(
+                               attempts, len(plans), drc_comparison.baseline_count))
+        else:
+            result = plans[0]
+            oracle_line = "• KiCad DRC oracle: disabled\n"
+
         summary = ("Candidate result:\n"
                    "• segments removed: {}\n"
                    "• segments added: {}\n"
                    "• length saved: {:.3f} mm\n"
-                   "• chains changed: {}".format(
+                   "• chains changed: {}\n{}".format(
                        len(result.remove_keys), len(result.additions),
-                       result.saved_mm, result.chains_changed))
+                       result.saved_mm, result.chains_changed, oracle_line))
         if snapshot.warnings:
             summary += "\n\nProtected items:\n" + "\n".join(snapshot.warnings)
         if settings.preview:
             if wx.MessageBox(summary + "\n\nApply this gloss?", "KiCad Track Gloss",
                              wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION) != wx.YES:
                 return
-        if settings.run_drc:
-            validate_on_copy(pcbnew, board, result)
-
         # Complete validation precedes mutation. RemoveNative is mandatory in
         # SWIG; BoardAdapter restores every removed track on any exception.
         adapter.apply(board, result, rollback_on_error=True)
         pcbnew.Refresh()
         wx.MessageBox(summary + "\n\nApplied successfully.", "KiCad Track Gloss",
                       wx.OK | wx.ICON_INFORMATION)
-

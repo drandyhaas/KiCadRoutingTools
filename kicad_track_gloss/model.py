@@ -29,6 +29,7 @@ class CircleObstacle:
     net_id: int
     layers: Tuple[int, ...] = ()
     kind: str = "via"
+    clearance: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,12 @@ class BoardModel:
     segments: List[Segment]
     obstacles: List[CircleObstacle] = field(default_factory=list)
     keepouts: List[PolygonKeepout] = field(default_factory=list)
+    # Values resolved by KiCad's own effective netclass machinery. Conditional
+    # .kicad_dru rules remain authoritative in the native DRC oracle.
+    net_clearances: Dict[int, float] = field(default_factory=dict)
+    minimum_clearance: float = 0.0
+    copper_edge_clearance: float = 0.0
+    board_bounds: object = None
 
 
 @dataclass(frozen=True)
@@ -80,4 +87,3 @@ def geometry_key(segment: Segment) -> str:
 
 def segment_key(segment: Segment) -> str:
     return segment.uuid or geometry_key(segment)
-

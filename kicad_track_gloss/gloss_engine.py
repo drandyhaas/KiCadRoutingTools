@@ -26,13 +26,24 @@ def _vertex(x, y):
 
 
 def _path_clear(model, path, moving, replaced_keys, clearance):
+    moving_clearance = max(clearance, model.minimum_clearance,
+                           model.net_clearances.get(moving.net_id, 0.0))
     for a, b in zip(path, path[1:]):
+        if model.board_bounds:
+            x0, y0, x1, y1 = model.board_bounds
+            edge_margin = model.copper_edge_clearance + moving.width / 2.0
+            if any(not (x0 + edge_margin <= p[0] <= x1 - edge_margin and
+                        y0 + edge_margin <= p[1] <= y1 - edge_margin)
+                   for p in (a, b)):
+                return False
         for other in model.segments:
             if segment_key(other) in replaced_keys:
                 continue
             if other.layer != moving.layer or other.net_id == moving.net_id:
                 continue
-            required = clearance + (moving.width + other.width) / 2.0
+            pair_clearance = max(moving_clearance,
+                                 model.net_clearances.get(other.net_id, 0.0))
+            required = pair_clearance + (moving.width + other.width) / 2.0
             if segment_distance(a, b, (other.start_x, other.start_y),
                                 (other.end_x, other.end_y)) < required - 1e-6:
                 return False
@@ -41,7 +52,8 @@ def _path_clear(model, path, moving, replaced_keys, clearance):
                 continue
             if obstacle.layers and moving.layer not in obstacle.layers:
                 continue
-            required = clearance + moving.width / 2.0 + obstacle.radius
+            required = max(moving_clearance, obstacle.clearance) + \
+                moving.width / 2.0 + obstacle.radius
             if point_segment_distance((obstacle.x, obstacle.y), a, b) < required - 1e-6:
                 return False
         for keepout in model.keepouts:
@@ -54,7 +66,8 @@ def _path_clear(model, path, moving, replaced_keys, clearance):
 
 def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                            allow_equal_length_simpler=False, clearance=0.1,
-                           equal_length_tolerance=0.001):
+                           equal_length_tolerance=0.001,
+                           span_strategy="farthest", path_preference=0):
     """Return an immutable edit plan; never mutates ``model``.
 
     Original octolinear smoothing algorithm: KiCadRoutingTools, DrAndyHaas.
@@ -79,7 +92,8 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                 s.net_id > 0 and length((s.start_x, s.start_y), (s.end_x, s.end_y)) > 1e-9):
             groups[(s.net_id, s.layer, round(s.width, 6))].append(s)
 
-    for (net_id, layer, width), candidates in groups.items():
+    for net_id, layer, width in sorted(groups):
+        candidates = sorted(groups[(net_id, layer, width)], key=segment_key)
         adjacency = defaultdict(list)
         for s in candidates:
             adjacency[_vertex(s.start_x, s.start_y)].append(s)
@@ -89,7 +103,9 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
             return (len(adjacency[v]) == 2 and all_incidence[(net_id, v)] == 2 and
                     v not in obstacle_vertices[net_id])
 
-        anchors = [v for v in adjacency if not interior(v)]
+        for touching in adjacency.values():
+            touching.sort(key=segment_key)
+        anchors = sorted(v for v in adjacency if not interior(v))
         used = set()
         for anchor in anchors:
             for first in adjacency[anchor]:
@@ -109,7 +125,8 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                     current = _vertex(*next_point)
                     if current == anchor or not interior(current) or len(chain) >= 100:
                         break
-                    nxt = [s for s in adjacency[current] if segment_key(s) not in used]
+                    nxt = sorted((s for s in adjacency[current] if segment_key(s) not in used),
+                                 key=segment_key)
                     if not nxt:
                         break
                     seg = nxt[0]
@@ -119,14 +136,15 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                 cumulative = [0.0]
                 for a, b in zip(points, points[1:]):
                     cumulative.append(cumulative[-1] + length(a, b))
-                spans = {}
-                i = 0
-                while i < len(chain) - 1:
-                    found = None
+                def choices_at(i):
+                    choices = []
                     for j in range(len(chain), i + 1, -1):
                         old_len = cumulative[j] - cumulative[i]
                         replaced = {segment_key(s) for s in chain[i:j]}
-                        for path in octolinear_paths(points[i], points[j]):
+                        paths = list(octolinear_paths(points[i], points[j]))
+                        if path_preference:
+                            paths.reverse()
+                        for path in paths:
                             new_len = sum(length(a, b) for a, b in zip(path, path[1:]))
                             new_count = len(path) - 1
                             gain = old_len - new_len
@@ -134,15 +152,56 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                                 allow_equal_length_simpler and abs(gain) <= equal_length_tolerance
                                 and new_count < j - i)
                             if acceptable and _path_clear(model, path, chain[i], replaced, clearance):
-                                found = (j, path, max(0.0, gain), replaced)
-                                break
-                        if found:
+                                choices.append((j, path, max(0.0, gain), replaced,
+                                                new_count, old_len))
+                                # The other elbow is represented by the other
+                                # path_preference plan evaluated by KiCad.
+                                if span_strategy in ("farthest", "global"):
+                                    break
+                        if choices and span_strategy == "farthest":
                             break
-                    if found:
-                        spans[i] = found
-                        i = found[0]
-                    else:
-                        i += 1
+                    return choices
+
+                spans = {}
+                if span_strategy == "global":
+                    # Weighted interval scheduling: maximize total saved length
+                    # over the WHOLE chain, then segment reduction. This avoids
+                    # the A-before-B bias of greedy shortcut acceptance.
+                    options = {i: choices_at(i) for i in range(len(chain) - 1)}
+                    best = {len(chain): (0.0, 0, [])}
+                    for i in range(len(chain) - 1, -1, -1):
+                        skip = best.get(i + 1, (0.0, 0, []))
+                        candidates_dp = [skip]
+                        for choice in options.get(i, ()):
+                            j, path, gain, replaced, new_count, _old_len = choice
+                            tail = best.get(j, (0.0, 0, []))
+                            reduction = (j - i) - new_count
+                            candidates_dp.append((gain + tail[0], reduction + tail[1],
+                                                  [(i, choice[:4])] + tail[2]))
+
+                        def dp_key(candidate):
+                            signature = tuple((start, span[0], tuple(span[1]))
+                                              for start, span in candidate[2])
+                            return (round(candidate[0], 9), candidate[1],
+                                    tuple((-a, -b, path) for a, b, path in signature))
+
+                        best[i] = max(candidates_dp, key=dp_key)
+                    spans = {start: span for start, span in best[0][2]}
+                else:
+                    i = 0
+                    while i < len(chain) - 1:
+                        choices = choices_at(i)
+                        if choices:
+                            if span_strategy == "max_gain":
+                                choices.sort(key=lambda c: (-c[2], c[4], -c[0], tuple(c[1])))
+                            found = choices[0][:4]
+                        else:
+                            found = None
+                        if found:
+                            spans[i] = found
+                            i = found[0]
+                        else:
+                            i += 1
                 if not spans:
                     continue
                 k = 0
@@ -165,3 +224,64 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
     validate_result(model, eligible, result)
     return result
 
+
+def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
+    """Generate deterministic alternatives for selection by KiCad's DRC oracle."""
+    plans = []
+    seen = set()
+
+    def add_plan(plan):
+        signature = (
+            tuple(sorted(plan.remove_keys)),
+            tuple(sorted((a.start, a.end, a.width, a.layer, a.net_id)
+                         for a in plan.additions)),
+        )
+        if signature not in seen:
+            seen.add(signature)
+            plans.append(plan)
+
+    for strategy in ("global", "max_gain", "farthest"):
+        for path_preference in (0, 1):
+            plan = smooth_selected_chains(
+                model, eligible_segment_keys, span_strategy=strategy,
+                path_preference=path_preference, **kwargs)
+            add_plan(plan)
+
+    # Batch fallback pool. If KiCad rejects the combined optimum, try leaving
+    # out one independently scoped group, then each group alone. This keeps one
+    # difficult track from blocking every other selected track while retaining
+    # deterministic, gain-ranked behavior.
+    eligible = set(eligible_segment_keys)
+    groups = defaultdict(set)
+    for segment in model.segments:
+        key = segment_key(segment)
+        if key in eligible:
+            groups[(segment.net_id, segment.layer, round(segment.width, 6))].add(key)
+    group_plans = []
+    for group_key in sorted(groups):
+        plan = smooth_selected_chains(model, groups[group_key], span_strategy="global",
+                                      path_preference=0, **kwargs)
+        if plan.changed:
+            group_plans.append(plan)
+
+    def merge(selected):
+        merged = GlossResult()
+        for plan in selected:
+            merged.remove_keys.extend(plan.remove_keys)
+            merged.additions.extend(plan.additions)
+            merged.saved_mm += plan.saved_mm
+            merged.chains_considered += plan.chains_considered
+            merged.chains_changed += plan.chains_changed
+            merged.warnings.extend(plan.warnings)
+        validate_result(model, eligible, merged)
+        return merged
+
+    if len(group_plans) > 1:
+        add_plan(merge(group_plans))
+        for omitted in range(len(group_plans)):
+            add_plan(merge([p for index, p in enumerate(group_plans) if index != omitted]))
+    for plan in group_plans:
+        add_plan(plan)
+    plans.sort(key=lambda p: (-p.saved_mm, len(p.additions),
+                              tuple(sorted(p.remove_keys))))
+    return plans

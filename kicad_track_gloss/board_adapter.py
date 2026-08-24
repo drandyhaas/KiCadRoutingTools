@@ -13,6 +13,8 @@ class SelectionSnapshot:
     model: BoardModel
     eligible_keys: set
     warnings: list = field(default_factory=list)
+    minimum_clearance: float = 0.1
+    copper_edge_clearance: float = 0.0
 
 
 def _uuid(item):
@@ -139,6 +141,7 @@ class BoardAdapter:
             footprints = board.GetFootprints()
         except Exception:
             footprints = ()
+        minimum_clearance, edge_clearance, net_clearances = self._native_rules(board, segments)
         copper_layers = tuple(range(0, 32))
         for footprint in footprints:
             for pad in footprint.Pads():
@@ -151,16 +154,54 @@ class BoardAdapter:
                               if str(board.GetLayerName(layer)).endswith(".Cu")]
                 except Exception:
                     layers = list(copper_layers)
+                try:
+                    local_clearance = self.to_mm(pad.GetLocalClearance())
+                except Exception:
+                    local_clearance = 0.0
                 obstacles.append(CircleObstacle(x, y, radius, int(pad.GetNetCode()),
-                                                tuple(layers), "pad"))
+                                                tuple(layers), "pad", local_clearance))
 
         keepouts = self._keepouts(board)
         if require_selection and selected_straight == 0:
             if warnings:
                 raise ValueError("No eligible straight track is selected. " + " ".join(sorted(set(warnings))))
             raise ValueError("Select at least two connected straight track segments first.")
-        return SelectionSnapshot(BoardModel(segments, obstacles, keepouts), eligible,
-                                 sorted(set(warnings)))
+        model = BoardModel(segments, obstacles, keepouts, net_clearances,
+                           minimum_clearance, edge_clearance,
+                           self._board_bounds(board))
+        return SelectionSnapshot(model, eligible, sorted(set(warnings)),
+                                 minimum_clearance, edge_clearance)
+
+    def _board_bounds(self, board):
+        try:
+            box = board.GetBoardEdgesBoundingBox()
+            x = self.to_mm(box.GetX())
+            y = self.to_mm(box.GetY())
+            return (x, y, x + self.to_mm(box.GetWidth()),
+                    y + self.to_mm(box.GetHeight()))
+        except Exception:
+            return None
+
+    def _native_rules(self, board, segments):
+        """Resolve board floors and effective netclass clearances through KiCad."""
+        minimum = 0.0
+        edge = 0.0
+        by_net = {}
+        try:
+            settings = board.GetDesignSettings()
+            minimum = self.to_mm(settings.m_MinClearance)
+            edge = self.to_mm(settings.m_CopperEdgeClearance)
+            net_settings = settings.m_NetSettings
+            names = {s.net_id: s.net_name for s in segments if s.net_id > 0 and s.net_name}
+            for net_id, name in names.items():
+                try:
+                    netclass = net_settings.GetEffectiveNetClass(name)
+                    by_net[net_id] = max(minimum, self.to_mm(netclass.GetClearance()))
+                except Exception:
+                    by_net[net_id] = minimum
+        except Exception:
+            pass
+        return max(minimum, 0.0), max(edge, 0.0), by_net
 
     def _keepouts(self, board):
         result = []

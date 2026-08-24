@@ -2,7 +2,7 @@
   "$schema": "https://go.kicad.org/pcm/schemas/v1",
   "name": "KiCad Track Gloss",
   "description": "Shorten or simplify explicitly selected PCB track chains.",
-  "description_full": "KiCad Track Gloss replaces safe selected-track staircases with shorter or simpler 0/45/90-degree chains. Unselected copper is immutable, connectivity is checked, and optional official KiCad DRC comparison runs on temporary board copies before the live board changes.",
+  "description_full": "KiCad Track Gloss replaces safe selected-track staircases with shorter or simpler 0/45/90-degree chains. It reads KiCad board constraints and effective netclasses, generates deterministic global and fallback batch candidates, and asks the official KiCad DRC engine to select the highest-saving valid candidate on temporary board copies. Unselected copper remains immutable.",
   "identifier": "com.github.fca1.kicadtrackgloss",
   "type": "plugin",
   "author": {
@@ -20,7 +20,7 @@
   "tags": ["routing", "tracks", "cleanup", "gloss"],
   "versions": [
     {
-      "version": "0.1.0",
+      "version": "0.2.0",
       "status": "testing",
       "kicad_version": "10.0",
       "runtime": "swig",
@@ -28,4 +28,3 @@
     }
   ]
 }
-

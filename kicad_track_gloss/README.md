@@ -15,7 +15,7 @@ Build the PCM archive from the repository root:
 python kicad_track_gloss/package_pcm.py
 ```
 
-The archive is written to `dist/KiCadTrackGloss-0.1.0.zip`. It can be tested
+The archive is written to `dist/KiCadTrackGloss-0.2.0.zip`. It can be tested
 through a custom KiCad PCM repository, or the `kicad_track_gloss` folder can be
 copied directly into KiCad's scripting plugins directory during development.
 
@@ -31,6 +31,18 @@ With DRC validation enabled, the plugin saves temporary baseline and candidate
 copies, refills zones with `kicad-cli`, and rejects the operation if the
 candidate adds any official DRC violation. Existing violations are tolerated.
 
+The optimizer reads KiCad's board minimum clearance, copper-to-edge setting,
+effective aggregate netclasses, and pad-local clearance through `pcbnew`.
+It generates deterministic global and greedy alternatives, then asks KiCad's
+official DRC oracle to accept the highest-saving valid alternative. A single
+baseline DRC is shared by all alternatives.
+
+KiCad's internal C++ `PNS::OPTIMIZER` is not exposed by the public SWIG or IPC
+plugin APIs in KiCad 10, so this package does not pretend to call it. The
+engine/adapter boundary is intentionally kept narrow so a future official PNS
+IPC endpoint can replace the Python candidate generator without changing
+selection scoping, preview, attribution, or DRC comparison.
+
 ## Safety boundaries
 
 The first release treats the following as immutable: unselected tracks, locked
@@ -44,4 +56,3 @@ This release therefore validates fully before mutation and performs in-memory
 rollback on any application exception. The architecture isolates `BoardAdapter`
 so a future IPC adapter can use `begin_commit()` / `push_commit()` for one-step
 Undo/Redo without rewriting the engine.
-

@@ -87,8 +87,21 @@ def _run(cli, board_path, report_path):
     return [_signature(record) for record in _violation_records(data)]
 
 
-def validate_on_copy(pcbnew, board, result):
-    """Raise if applying ``result`` adds any official KiCad DRC violation."""
+def _copy_sidecars(board, baseline_board, candidate_boards):
+    source_name = str(board.GetFileName() or "")
+    if not source_name:
+        return
+    source = Path(source_name)
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        sidecar = source.with_suffix(suffix)
+        if sidecar.exists():
+            shutil.copy2(sidecar, baseline_board.with_suffix(suffix))
+            for candidate_board in candidate_boards:
+                shutil.copy2(sidecar, candidate_board.with_suffix(suffix))
+
+
+def choose_best_with_kicad(pcbnew, board, plans):
+    """Use KiCad's official DRC as an oracle and return the best valid plan."""
     cli = find_kicad_cli()
     if not cli:
         raise RuntimeError("kicad-cli was not found; disable DRC validation only for an explicit manual test.")
@@ -96,25 +109,29 @@ def validate_on_copy(pcbnew, board, result):
     with tempfile.TemporaryDirectory(prefix="kicad-track-gloss-") as tmp:
         tmp = Path(tmp)
         baseline_board = tmp / "baseline.kicad_pcb"
-        candidate_board = tmp / "candidate.kicad_pcb"
+        candidate_boards = [tmp / "candidate-{}.kicad_pcb".format(i)
+                            for i in range(len(plans))]
         pcbnew.SaveBoard(str(baseline_board), board)
         # KiCad resolves project settings and custom .kicad_dru rules by board
         # basename. Preserve them for both temporary copies.
-        source_name = str(board.GetFileName() or "")
-        if source_name:
-            source = Path(source_name)
-            for suffix in (".kicad_pro", ".kicad_dru"):
-                sidecar = source.with_suffix(suffix)
-                if sidecar.exists():
-                    shutil.copy2(sidecar, baseline_board.with_suffix(suffix))
-                    shutil.copy2(sidecar, candidate_board.with_suffix(suffix))
-        candidate = pcbnew.LoadBoard(str(baseline_board))
-        adapter.apply(candidate, result, rollback_on_error=False)
-        pcbnew.SaveBoard(str(candidate_board), candidate)
+        _copy_sidecars(board, baseline_board, candidate_boards)
         before = _run(cli, baseline_board, tmp / "baseline-drc.json")
-        after = _run(cli, candidate_board, tmp / "candidate-drc.json")
-        delta = Counter(after) - Counter(before)
-        new = [signature for signature, count in delta.items() for _ in range(count)]
-        if new:
-            raise ValueError("Gloss rejected: official KiCad DRC reports {} new violation(s).".format(len(new)))
-        return DrcComparison(len(before), len(after), new)
+        rejected = []
+        for attempt, (plan, candidate_board) in enumerate(zip(plans, candidate_boards), 1):
+            candidate = pcbnew.LoadBoard(str(baseline_board))
+            adapter.apply(candidate, plan, rollback_on_error=False)
+            pcbnew.SaveBoard(str(candidate_board), candidate)
+            after = _run(cli, candidate_board, tmp / "candidate-{}-drc.json".format(attempt))
+            delta = Counter(after) - Counter(before)
+            new = [signature for signature, count in delta.items() for _ in range(count)]
+            if not new:
+                return plan, DrcComparison(len(before), len(after), new), attempt
+            rejected.append(len(new))
+        raise ValueError("Gloss rejected: KiCad found new DRC violations in every "
+                         "candidate ({}).".format(", ".join(map(str, rejected))))
+
+
+def validate_on_copy(pcbnew, board, result):
+    """Raise if applying ``result`` adds any official KiCad DRC violation."""
+    _plan, comparison, _attempts = choose_best_with_kicad(pcbnew, board, [result])
+    return comparison
