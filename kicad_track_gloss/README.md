@@ -200,6 +200,8 @@ replacements are retained as their original native KiCad items.
 - `engine/model.py`: immutable geometry records and edit plans.
 - `package_pcm.py`: builds the standalone KiCad PCM archive.
 - `metadata.json`: PCM identity, compatibility, and release version.
+- `../tools/score_track_gloss.py`: read-only whole-board score CLI compatible
+  with `place_route_loop --accept-cmd`.
 - `../tools/diagnose_track_gloss_board.py`: headless inspection and sweep tool
   for real KiCad boards; `--apply-in-memory` never saves the board.
 - `../tests/track_gloss/unit/`: engine, expansion, T-junction, packaging, and
@@ -276,6 +278,67 @@ D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --full-sweep
 The first compares all seven deterministic input orders. The second generates
 all connection scopes and applies every changed plan to fresh in-memory boards.
 Combine the flags only when a complete deep validation is needed.
+
+## Headless score CLI and `place_route_loop`
+
+`tools/score_track_gloss.py` grades a complete route without changing or
+saving the input board. It treats every unlocked, non-differential straight
+track as selected in one simultaneous batch; connection expansion and tuned
+track protection are the same as in the ActionPlugin. Safe all-track passes
+are applied to the in-memory board until a geometric fixed point is reached.
+The process aborts on a repeated geometry or after 16 changed passes instead
+of returning a falsely converged score. It prints detailed compact JSON
+followed by the protocol line required by `place_route_loop`:
+
+```text
+GLOSS_SCORE_JSON={...}
+SCORE=1046.286691506
+```
+
+The score is the total straight-track copper length, in millimetres, after the
+best safe virtual all-track gloss. Lower is better. The JSON also reports the
+original copper length, total saved length and percentage, segment gain,
+convergence-pass count, eligible count, and protected tuned-track count. Using the virtual post-gloss
+length prevents a needlessly untidy but easily glossable route from being
+rewarded merely because it contains more removable copper.
+
+Run it with KiCad's Python interpreter so `pcbnew` is available. A project path
+may be passed directly; the matching `.kicad_pcb` is then inferred:
+
+```powershell
+D:\kicad\bin\python.exe tools\score_track_gloss.py design.kicad_pro
+D:\kicad\bin\python.exe tools\score_track_gloss.py --project design.kicad_pro candidate.kicad_pcb
+D:\kicad\bin\python.exe tools\score_track_gloss.py --project design.kicad_pro --output glossed.kicad_pcb candidate.kicad_pcb
+```
+
+The second form is intended for generated boards whose filename differs from
+the original project. The CLI makes a temporary same-stem copy of the board,
+`.kicad_pro`, and sibling `.kicad_dru`, allowing KiCad to evaluate the original
+project rules without touching any source file.
+
+`--output` is the only mode that writes copper. It saves the already converged
+in-memory result to a different `.kicad_pcb` and refuses to overwrite either
+the input or an existing output unless `--force` is explicit. Re-running the
+CLI on that output must report zero changed passes, zero saved length, and the
+same score: A0 → A1 is therefore a fixed point and A1 → A2 leaves the route
+geometry unchanged. Byte-for-byte identity is not promised because KiCad may
+reorder records or regenerate identifiers when serializing a board.
+
+For `place_route_loop`, use the scorer as the acceptance command and add
+`--place-route-loop`. The loop appends its placed PCB, routed PCB, and
+`route.json`; the scorer deliberately grades the second (routed) PCB:
+
+```powershell
+python py_placer\place_route_loop.py <its normal arguments> `
+  --accept-cmd 'D:/kicad/bin/python.exe tools/score_track_gloss.py --place-route-loop --project design.kicad_pro'
+```
+
+`place_route_loop` accepts a candidate only when its numeric score is strictly
+lower. This score is a routing-quality comparator, not a validity certificate:
+it does not replace DRC, connectivity, placement, assembly, or project-specific
+specification gates. Keep those independent checks in the route loop.
+`--output` is forbidden in this mode so the acceptance judge cannot mutate a
+candidate owned by the loop.
 
 ## Building and installing
 

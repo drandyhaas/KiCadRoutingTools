@@ -18,10 +18,36 @@ JSON. Normal operation remains silent unless no modification is possible.
 - `tests/track_gloss/patterns/`: frozen KiCad board/project/rule fixture.
 - `tests/track_gloss/run_patterns.py`: KiCad-Python integration, determinism,
   and full-scope regression runner.
+- `tools/score_track_gloss.py`: read-only whole-board score CLI compatible
+  with `place_route_loop`.
 - `tools/diagnose_track_gloss_board.py`: read-only headless board diagnosis.
 
 The implementation does not import or require the autorouter modules from the
 main KiCadRoutingTools branch. The generated PCM archive is self-contained.
+
+## Whole-board CLI score
+
+The repository also provides a read-only CLI for automated routing loops. It
+selects all admissible straight tracks together, repeats safe gloss passes to
+a geometric fixed point in memory, and prints a final `SCORE=<float>` line compatible with
+`place_route_loop --accept-cmd`. The score is the virtual post-gloss total
+straight-track copper length in millimetres, so a lower value is better.
+
+```powershell
+D:\kicad\bin\python.exe tools\score_track_gloss.py design.kicad_pro
+D:\kicad\bin\python.exe tools\score_track_gloss.py --project design.kicad_pro candidate.kicad_pcb
+D:\kicad\bin\python.exe tools\score_track_gloss.py --project design.kicad_pro --output glossed.kicad_pcb candidate.kicad_pcb
+```
+
+For `place_route_loop`, add `--place-route-loop` to the acceptance command; the
+loop-provided routed PCB is graded and the placed PCB plus `route.json` are
+recorded in `GLOSS_SCORE_JSON`. The input board is never modified or saved.
+Writing a converged board requires the explicit `--output` option; the CLI
+refuses to overwrite its input.
+This is a quality score only and must be combined with separate DRC,
+connectivity, and specification checks. Full CLI details and an acceptance
+command example are in
+[`kicad_track_gloss/README.md`](kicad_track_gloss/README.md#headless-score-cli-and-place_route_loop).
 
 ## Validation
 
