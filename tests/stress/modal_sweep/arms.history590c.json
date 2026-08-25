@@ -1,0 +1,13 @@
+[
+  {
+    "name": "base2127",
+    "note": "control arm, no overrides. Fresh name: the results volume banks rows BY ARM NAME, so reusing a prior campaign's control name would satisfy the resume check with rows from another commit and poison the anchor. First in the list, so check_sweep and rank_arms take it as the base.",
+    "keep_artifacts": true
+  },
+  {
+    "name": "hist2127",
+    "note": "#590 at the settings that won sets 1-10 and sets 11-20: flat diffuse field, dose 0.1 / cap 0.5, rip stamps at full weight, raw frontier at 0.25, NO escalation. Deliberately the ONLY armed arm -- see PREREG_590_sets21_27.md. The dose ladder and ingredient attribution were settled on the earlier waves; re-running them here would reintroduce the multiplicity that makes a marginal p-value meaningless.",
+    "env": {"KICAD_HISTORY_COST": "0.1", "KICAD_HISTORY_CAP": "0.5", "KICAD_HISTORY_RIP_WEIGHT": "1.0", "KICAD_HISTORY_BLOCKED_WEIGHT": "0.25", "KICAD_HISTORY_ESCALATE": "0"},
+    "keep_artifacts": true
+  }
+]

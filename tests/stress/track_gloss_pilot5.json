@@ -1,0 +1,10 @@
+{
+  "description": "Five medium stress-corpus boards for the first Track Gloss/oracle evaluation.",
+  "board_ids": [
+    "set10/zosko__noahfc.kicad_pcb",
+    "set14/tx_band_splitter.kicad_pcb",
+    "set15/moco_bkd8316.kicad_pcb",
+    "set17/rfswitch01.kicad_pcb",
+    "set22/reaction_wheel_foc.kicad_pcb"
+  ]
+}

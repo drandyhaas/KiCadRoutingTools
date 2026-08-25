@@ -1,0 +1,26 @@
+[
+  {
+    "name": "baseline",
+    "note": "committed defaults, no overrides. NEVER omit this: without an anchor, corpus or commit drift reads as 'every arm regressed'."
+  },
+  {
+    "name": "tpc_0p5",
+    "note": "TRACK_PROXIMITY_COST sweep, low",
+    "defaults": {"TRACK_PROXIMITY_COST": 0.5}
+  },
+  {
+    "name": "tpc_2",
+    "note": "the value under live experiment in the working tree as of 2026-08-09",
+    "defaults": {"TRACK_PROXIMITY_COST": 2.0}
+  },
+  {
+    "name": "tpc_4",
+    "note": "high, to bracket the response -- a monotone trend across 0.5/2/4 is far stronger evidence than a single point beating baseline",
+    "defaults": {"TRACK_PROXIMITY_COST": 4.0}
+  },
+  {
+    "name": "tpc_2_rra_3",
+    "note": "the OTHER uncommitted experiment paired with it -- two constants at once, to check they are not simply additive",
+    "defaults": {"TRACK_PROXIMITY_COST": 2.0, "RIPPED_ROUTE_AVOIDANCE_COST": 3.0}
+  }
+]

@@ -1,0 +1,1401 @@
+{
+ "generated_from": "/private/tmp/claude-501/-Users-andy-Documents-KiCadRoutingTools/271b5ae5-1237-4275-ba5e-81b756160bee/scratchpad/cloudfinal",
+ "boards_scored": 148,
+ "screen": [
+  "esp_prog",
+  "olimex_lora",
+  "stm32_datalogger",
+  "hhkb_ctrl",
+  "usbgpib",
+  "vis_nir_spec",
+  "throwing_star",
+  "usb_fm_radio",
+  "watchy",
+  "rp2350_dev",
+  "core1106_cam",
+  "uhk_trackball"
+ ],
+ "exclude": [
+  "meshtastic_solar",
+  "ackack_rover",
+  "dc_poe_injector",
+  "picoprobe_tester",
+  "nudac",
+  "atf1502_cpld",
+  "ch32v203_ev",
+  "kbic65",
+  "free_dap",
+  "mantis_kb",
+  "minisolarmesh",
+  "can_shield",
+  "vfo_ctrl",
+  "a20_can",
+  "system76_launch",
+  "ice5lp4k_hat",
+  "ch32v006_dev",
+  "bfo9000",
+  "usb_sniffer",
+  "pinci",
+  "stm32g474_fc",
+  "nitrokey_pro",
+  "castor_pollux",
+  "bread_dcmotor",
+  "esp32cam_pcb",
+  "urchin_kb",
+  "co2_monitor",
+  "cc1101_rf_module",
+  "urchin",
+  "chocofi",
+  "esp32s3_ref",
+  "fusb302_pd_dev",
+  "daplink",
+  "bitaxe_ultra",
+  "thatmicpre",
+  "ble02_rf_module",
+  "zigbee_sensor",
+  "micro_ox_vco",
+  "lora_v3",
+  "stm32_rfm95_lora",
+  "corax56",
+  "noahfc",
+  "starlighteye_cam",
+  "helium_mult",
+  "ch32v003_usb",
+  "ethersweep",
+  "ghoul"
+ ],
+ "table": [
+  {
+   "board": "esp_prog",
+   "arms": 24,
+   "cost_h": 0.006,
+   "spread": 14,
+   "stdev": 2.8,
+   "info_per_h": 279.8,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "olimex_lora",
+   "arms": 25,
+   "cost_h": 0.012,
+   "spread": 10,
+   "stdev": 1.96,
+   "info_per_h": 157.5,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "stm32_datalogger",
+   "arms": 25,
+   "cost_h": 0.013,
+   "spread": 7,
+   "stdev": 1.9,
+   "info_per_h": 147.2,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "hhkb_ctrl",
+   "arms": 25,
+   "cost_h": 0.02,
+   "spread": 8,
+   "stdev": 2.66,
+   "info_per_h": 133.9,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "usbgpib",
+   "arms": 25,
+   "cost_h": 0.016,
+   "spread": 6,
+   "stdev": 1.98,
+   "info_per_h": 124.8,
+   "baseline_verdict": 1
+  },
+  {
+   "board": "vis_nir_spec",
+   "arms": 25,
+   "cost_h": 0.019,
+   "spread": 8,
+   "stdev": 2.04,
+   "info_per_h": 109.6,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "throwing_star",
+   "arms": 25,
+   "cost_h": 0.01,
+   "spread": 4,
+   "stdev": 1.09,
+   "info_per_h": 107.3,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "usb_fm_radio",
+   "arms": 25,
+   "cost_h": 0.013,
+   "spread": 6,
+   "stdev": 1.22,
+   "info_per_h": 92.9,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "watchy",
+   "arms": 25,
+   "cost_h": 0.017,
+   "spread": 6,
+   "stdev": 1.55,
+   "info_per_h": 89.3,
+   "baseline_verdict": 4
+  },
+  {
+   "board": "rp2350_dev",
+   "arms": 25,
+   "cost_h": 0.009,
+   "spread": 4,
+   "stdev": 0.86,
+   "info_per_h": 86.2,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "core1106_cam",
+   "arms": 25,
+   "cost_h": 0.02,
+   "spread": 6,
+   "stdev": 1.66,
+   "info_per_h": 83.1,
+   "baseline_verdict": 1
+  },
+  {
+   "board": "uhk_trackball",
+   "arms": 25,
+   "cost_h": 0.027,
+   "spread": 9,
+   "stdev": 2.14,
+   "info_per_h": 78.4,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "mod_bme280",
+   "arms": 25,
+   "cost_h": 0.007,
+   "spread": 4,
+   "stdev": 0.78,
+   "info_per_h": 78.4,
+   "baseline_verdict": 4
+  },
+  {
+   "board": "upduino",
+   "arms": 25,
+   "cost_h": 0.051,
+   "spread": 14,
+   "stdev": 3.71,
+   "info_per_h": 72.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "openstint",
+   "arms": 25,
+   "cost_h": 0.015,
+   "spread": 5,
+   "stdev": 1.04,
+   "info_per_h": 68.2,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "bread_stepper",
+   "arms": 25,
+   "cost_h": 0.006,
+   "spread": 2,
+   "stdev": 0.65,
+   "info_per_h": 65.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "datalogger",
+   "arms": 25,
+   "cost_h": 0.005,
+   "spread": 2,
+   "stdev": 0.65,
+   "info_per_h": 65.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "hid_remapper",
+   "arms": 25,
+   "cost_h": 0.01,
+   "spread": 2,
+   "stdev": 0.65,
+   "info_per_h": 65.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "unl_flight_computer",
+   "arms": 25,
+   "cost_h": 0.016,
+   "spread": 5,
+   "stdev": 0.98,
+   "info_per_h": 61.9,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "tinytapeout_qfn",
+   "arms": 25,
+   "cost_h": 0.071,
+   "spread": 20,
+   "stdev": 3.91,
+   "info_per_h": 55.2,
+   "baseline_verdict": 1
+  },
+  {
+   "board": "hex_gateway",
+   "arms": 25,
+   "cost_h": 0.016,
+   "spread": 4,
+   "stdev": 0.86,
+   "info_per_h": 54.8,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "drawbot_ctrl",
+   "arms": 25,
+   "cost_h": 0.017,
+   "spread": 2,
+   "stdev": 0.9,
+   "info_per_h": 54.4,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "pedal_404",
+   "arms": 25,
+   "cost_h": 0.007,
+   "spread": 2,
+   "stdev": 0.54,
+   "info_per_h": 54.3,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "tigard",
+   "arms": 25,
+   "cost_h": 0.04,
+   "spread": 8,
+   "stdev": 2.12,
+   "info_per_h": 52.7,
+   "baseline_verdict": 4
+  },
+  {
+   "board": "eurorack_pmod",
+   "arms": 25,
+   "cost_h": 0.048,
+   "spread": 6,
+   "stdev": 2.51,
+   "info_per_h": 52.0,
+   "baseline_verdict": 6
+  },
+  {
+   "board": "teensy4_galvos",
+   "arms": 25,
+   "cost_h": 0.025,
+   "spread": 4,
+   "stdev": 1.29,
+   "info_per_h": 51.8,
+   "baseline_verdict": 1
+  },
+  {
+   "board": "picodvi",
+   "arms": 25,
+   "cost_h": 0.014,
+   "spread": 2,
+   "stdev": 0.74,
+   "info_per_h": 51.4,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "fomu",
+   "arms": 25,
+   "cost_h": 0.038,
+   "spread": 9,
+   "stdev": 1.92,
+   "info_per_h": 51.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "eis",
+   "arms": 25,
+   "cost_h": 0.074,
+   "spread": 14,
+   "stdev": 3.43,
+   "info_per_h": 46.1,
+   "baseline_verdict": 4
+  },
+  {
+   "board": "quickfeather",
+   "arms": 25,
+   "cost_h": 0.038,
+   "spread": 6,
+   "stdev": 1.7,
+   "info_per_h": 44.4,
+   "baseline_verdict": 2
+  },
+  {
+   "board": "mdfpga_hub75",
+   "arms": 25,
+   "cost_h": 0.026,
+   "spread": 3,
+   "stdev": 1.08,
+   "info_per_h": 41.5,
+   "baseline_verdict": 1
+  },
+  {
+   "board": "polykit_x",
+   "arms": 25,
+   "cost_h": 0.019,
+   "spread": 4,
+   "stdev": 0.78,
+   "info_per_h": 41.2,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "rotten_pedal",
+   "arms": 25,
+   "cost_h": 0.009,
+   "spread": 2,
+   "stdev": 0.39,
+   "info_per_h": 39.2,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "lna3030",
+   "arms": 25,
+   "cost_h": 0.006,
+   "spread": 2,
+   "stdev": 0.39,
+   "info_per_h": 39.2,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "rp2040_dev",
+   "arms": 25,
+   "cost_h": 0.014,
+   "spread": 2,
+   "stdev": 0.54,
+   "info_per_h": 38.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "steppenprobe",
+   "arms": 25,
+   "cost_h": 0.028,
+   "spread": 5,
+   "stdev": 1.04,
+   "info_per_h": 36.7,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "ft2232h_jtag",
+   "arms": 25,
+   "cost_h": 0.016,
+   "spread": 2,
+   "stdev": 0.59,
+   "info_per_h": 36.6,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "macropad4l",
+   "arms": 25,
+   "cost_h": 0.011,
+   "spread": 2,
+   "stdev": 0.39,
+   "info_per_h": 35.6,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "icepi_zero",
+   "arms": 25,
+   "cost_h": 0.085,
+   "spread": 9,
+   "stdev": 2.79,
+   "info_per_h": 32.9,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "splitflap_driver",
+   "arms": 12,
+   "cost_h": 0.078,
+   "spread": 9,
+   "stdev": 2.49,
+   "info_per_h": 31.7,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "fpga_sdram",
+   "arms": 25,
+   "cost_h": 0.06,
+   "spread": 5,
+   "stdev": 1.86,
+   "info_per_h": 31.1,
+   "baseline_verdict": 5
+  },
+  {
+   "board": "smartknob_base",
+   "arms": 25,
+   "cost_h": 0.09,
+   "spread": 8,
+   "stdev": 2.49,
+   "info_per_h": 27.6,
+   "baseline_verdict": 4
+  },
+  {
+   "board": "ecp5_mini",
+   "arms": 25,
+   "cost_h": 0.078,
+   "spread": 7,
+   "stdev": 2.12,
+   "info_per_h": 27.1,
+   "baseline_verdict": 4
+  },
+  {
+   "board": "usb_pd",
+   "arms": 25,
+   "cost_h": 0.02,
+   "spread": 2,
+   "stdev": 0.54,
+   "info_per_h": 27.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "dilemma",
+   "arms": 25,
+   "cost_h": 0.067,
+   "spread": 4,
+   "stdev": 1.71,
+   "info_per_h": 25.7,
+   "baseline_verdict": 4
+  },
+  {
+   "board": "dsp_adau1452",
+   "arms": 25,
+   "cost_h": 0.016,
+   "spread": 2,
+   "stdev": 0.39,
+   "info_per_h": 25.3,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "kuchen",
+   "arms": 25,
+   "cost_h": 0.074,
+   "spread": 7,
+   "stdev": 1.81,
+   "info_per_h": 24.4,
+   "baseline_verdict": 2
+  },
+  {
+   "board": "haxophone",
+   "arms": 25,
+   "cost_h": 0.106,
+   "spread": 12,
+   "stdev": 2.4,
+   "info_per_h": 22.7,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "neptune",
+   "arms": 25,
+   "cost_h": 0.064,
+   "spread": 4,
+   "stdev": 1.4,
+   "info_per_h": 22.0,
+   "baseline_verdict": 4
+  },
+  {
+   "board": "qmtech_k7",
+   "arms": 23,
+   "cost_h": 0.008,
+   "spread": 1,
+   "stdev": 0.2,
+   "info_per_h": 20.4,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "rp2040_numpad",
+   "arms": 25,
+   "cost_h": 0.007,
+   "spread": 1,
+   "stdev": 0.2,
+   "info_per_h": 19.6,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "microzed_carrier",
+   "arms": 25,
+   "cost_h": 0.038,
+   "spread": 3,
+   "stdev": 0.73,
+   "info_per_h": 19.5,
+   "baseline_verdict": 1
+  },
+  {
+   "board": "nrfmicro",
+   "arms": 25,
+   "cost_h": 0.094,
+   "spread": 6,
+   "stdev": 1.74,
+   "info_per_h": 18.5,
+   "baseline_verdict": 4
+  },
+  {
+   "board": "cryologger_aws",
+   "arms": 25,
+   "cost_h": 0.03,
+   "spread": 2,
+   "stdev": 0.54,
+   "info_per_h": 18.3,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "upsy_desky",
+   "arms": 25,
+   "cost_h": 0.085,
+   "spread": 7,
+   "stdev": 1.47,
+   "info_per_h": 17.2,
+   "baseline_verdict": 2
+  },
+  {
+   "board": "lily58",
+   "arms": 25,
+   "cost_h": 0.07,
+   "spread": 6,
+   "stdev": 1.18,
+   "info_per_h": 16.9,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "orbiter_kb",
+   "arms": 25,
+   "cost_h": 0.206,
+   "spread": 9,
+   "stdev": 3.17,
+   "info_per_h": 15.4,
+   "baseline_verdict": 12
+  },
+  {
+   "board": "nano_eeprom_prog",
+   "arms": 25,
+   "cost_h": 0.026,
+   "spread": 2,
+   "stdev": 0.39,
+   "info_per_h": 15.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "ottercast_audio",
+   "arms": 25,
+   "cost_h": 0.272,
+   "spread": 11,
+   "stdev": 3.95,
+   "info_per_h": 14.6,
+   "baseline_verdict": 2
+  },
+  {
+   "board": "tsuraragb",
+   "arms": 25,
+   "cost_h": 0.06,
+   "spread": 4,
+   "stdev": 0.87,
+   "info_per_h": 14.6,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "open_weather_station",
+   "arms": 25,
+   "cost_h": 0.067,
+   "spread": 5,
+   "stdev": 0.98,
+   "info_per_h": 14.5,
+   "baseline_verdict": 5
+  },
+  {
+   "board": "orbtrace_bob",
+   "arms": 25,
+   "cost_h": 0.027,
+   "spread": 2,
+   "stdev": 0.39,
+   "info_per_h": 14.4,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "crkbd",
+   "arms": 25,
+   "cost_h": 0.227,
+   "spread": 16,
+   "stdev": 3.15,
+   "info_per_h": 13.9,
+   "baseline_verdict": 2
+  },
+  {
+   "board": "bus_pirate5",
+   "arms": 25,
+   "cost_h": 0.049,
+   "spread": 2,
+   "stdev": 0.65,
+   "info_per_h": 13.2,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "ch32v303_dev",
+   "arms": 25,
+   "cost_h": 0.015,
+   "spread": 1,
+   "stdev": 0.2,
+   "info_per_h": 12.9,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "kevinbot_v3",
+   "arms": 25,
+   "cost_h": 0.128,
+   "spread": 4,
+   "stdev": 1.65,
+   "info_per_h": 12.9,
+   "baseline_verdict": 2
+  },
+  {
+   "board": "nebula_watch",
+   "arms": 25,
+   "cost_h": 0.035,
+   "spread": 2,
+   "stdev": 0.43,
+   "info_per_h": 12.3,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "schoko",
+   "arms": 25,
+   "cost_h": 0.046,
+   "spread": 2,
+   "stdev": 0.54,
+   "info_per_h": 11.9,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "megadesk",
+   "arms": 24,
+   "cost_h": 0.053,
+   "spread": 2,
+   "stdev": 0.58,
+   "info_per_h": 10.9,
+   "baseline_verdict": 2
+  },
+  {
+   "board": "lumenpnp_mobo",
+   "arms": 25,
+   "cost_h": 0.276,
+   "spread": 9,
+   "stdev": 2.93,
+   "info_per_h": 10.6,
+   "baseline_verdict": 2
+  },
+  {
+   "board": "eth_tap",
+   "arms": 25,
+   "cost_h": 0.069,
+   "spread": 2,
+   "stdev": 0.73,
+   "info_per_h": 10.6,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "usbc_liion_charger",
+   "arms": 25,
+   "cost_h": 0.038,
+   "spread": 2,
+   "stdev": 0.39,
+   "info_per_h": 10.3,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "sofle_pico",
+   "arms": 25,
+   "cost_h": 0.206,
+   "spread": 10,
+   "stdev": 1.98,
+   "info_per_h": 9.6,
+   "baseline_verdict": 2
+  },
+  {
+   "board": "ulx3s",
+   "arms": 25,
+   "cost_h": 0.635,
+   "spread": 25,
+   "stdev": 6.09,
+   "info_per_h": 9.6,
+   "baseline_verdict": 7
+  },
+  {
+   "board": "scalenode_cm4",
+   "arms": 25,
+   "cost_h": 0.147,
+   "spread": 4,
+   "stdev": 1.35,
+   "info_per_h": 9.2,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "neo6502",
+   "arms": 25,
+   "cost_h": 0.433,
+   "spread": 14,
+   "stdev": 3.89,
+   "info_per_h": 9.0,
+   "baseline_verdict": 2
+  },
+  {
+   "board": "cynthion",
+   "arms": 25,
+   "cost_h": 0.3,
+   "spread": 11,
+   "stdev": 2.67,
+   "info_per_h": 8.9,
+   "baseline_verdict": 6
+  },
+  {
+   "board": "glasgow_revC",
+   "arms": 25,
+   "cost_h": 0.339,
+   "spread": 9,
+   "stdev": 2.68,
+   "info_per_h": 7.9,
+   "baseline_verdict": 2
+  },
+  {
+   "board": "ulx5m_gatemate",
+   "arms": 25,
+   "cost_h": 0.512,
+   "spread": 16,
+   "stdev": 4.0,
+   "info_per_h": 7.8,
+   "baseline_verdict": 10
+  },
+  {
+   "board": "robotics_psu",
+   "arms": 25,
+   "cost_h": 0.102,
+   "spread": 4,
+   "stdev": 0.8,
+   "info_per_h": 7.8,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "osprey_kb",
+   "arms": 25,
+   "cost_h": 0.036,
+   "spread": 1,
+   "stdev": 0.27,
+   "info_per_h": 7.6,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "mokya_lora_phone",
+   "arms": 25,
+   "cost_h": 0.141,
+   "spread": 4,
+   "stdev": 1.06,
+   "info_per_h": 7.5,
+   "baseline_verdict": 2
+  },
+  {
+   "board": "openairscope",
+   "arms": 25,
+   "cost_h": 0.074,
+   "spread": 2,
+   "stdev": 0.54,
+   "info_per_h": 7.4,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "zynq_ad9364",
+   "arms": 24,
+   "cost_h": 0.958,
+   "spread": 19,
+   "stdev": 6.77,
+   "info_per_h": 7.1,
+   "baseline_verdict": 19
+  },
+  {
+   "board": "keks",
+   "arms": 25,
+   "cost_h": 0.309,
+   "spread": 8,
+   "stdev": 2.13,
+   "info_per_h": 6.9,
+   "baseline_verdict": 3
+  },
+  {
+   "board": "sechzig",
+   "arms": 25,
+   "cost_h": 0.179,
+   "spread": 4,
+   "stdev": 1.23,
+   "info_per_h": 6.9,
+   "baseline_verdict": 1
+  },
+  {
+   "board": "zynq7020_som",
+   "arms": 25,
+   "cost_h": 0.654,
+   "spread": 19,
+   "stdev": 4.17,
+   "info_per_h": 6.4,
+   "baseline_verdict": 6
+  },
+  {
+   "board": "butterstick",
+   "arms": 25,
+   "cost_h": 1.233,
+   "spread": 26,
+   "stdev": 6.78,
+   "info_per_h": 5.5,
+   "baseline_verdict": 25
+  },
+  {
+   "board": "nrf51_ble_module",
+   "arms": 25,
+   "cost_h": 0.082,
+   "spread": 2,
+   "stdev": 0.43,
+   "info_per_h": 5.3,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "lpddr4_testbed",
+   "arms": 25,
+   "cost_h": 0.385,
+   "spread": 7,
+   "stdev": 1.92,
+   "info_per_h": 5.0,
+   "baseline_verdict": 9
+  },
+  {
+   "board": "orangecrab",
+   "arms": 25,
+   "cost_h": 1.305,
+   "spread": 26,
+   "stdev": 6.45,
+   "info_per_h": 4.9,
+   "baseline_verdict": 65
+  },
+  {
+   "board": "rp2040_motorctrl",
+   "arms": 25,
+   "cost_h": 0.08,
+   "spread": 2,
+   "stdev": 0.39,
+   "info_per_h": 4.9,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "cparti_fpga",
+   "arms": 25,
+   "cost_h": 0.98,
+   "spread": 16,
+   "stdev": 4.16,
+   "info_per_h": 4.2,
+   "baseline_verdict": 18
+  },
+  {
+   "board": "piantor",
+   "arms": 25,
+   "cost_h": 0.096,
+   "spread": 2,
+   "stdev": 0.39,
+   "info_per_h": 4.1,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "caravel_nucleo",
+   "arms": 25,
+   "cost_h": 0.141,
+   "spread": 2,
+   "stdev": 0.54,
+   "info_per_h": 3.9,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "eit_mux",
+   "arms": 25,
+   "cost_h": 0.276,
+   "spread": 3,
+   "stdev": 1.02,
+   "info_per_h": 3.7,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "hackrf_one",
+   "arms": 24,
+   "cost_h": 1.582,
+   "spread": 14,
+   "stdev": 4.61,
+   "info_per_h": 2.9,
+   "baseline_verdict": 6
+  },
+  {
+   "board": "sata_sniffer",
+   "arms": 25,
+   "cost_h": 0.269,
+   "spread": 2,
+   "stdev": 0.65,
+   "info_per_h": 2.4,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "linht_radio",
+   "arms": 25,
+   "cost_h": 0.458,
+   "spread": 3,
+   "stdev": 1.01,
+   "info_per_h": 2.2,
+   "baseline_verdict": 1
+  },
+  {
+   "board": "daisho",
+   "arms": 25,
+   "cost_h": 1.374,
+   "spread": 10,
+   "stdev": 2.65,
+   "info_per_h": 1.9,
+   "baseline_verdict": 3
+  },
+  {
+   "board": "duet2_3dp",
+   "arms": 25,
+   "cost_h": 0.416,
+   "spread": 2,
+   "stdev": 0.73,
+   "info_per_h": 1.8,
+   "baseline_verdict": 2
+  },
+  {
+   "board": "meshtastic_solar",
+   "arms": 25,
+   "cost_h": 0.006,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "ackack_rover",
+   "arms": 25,
+   "cost_h": 0.013,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "dc_poe_injector",
+   "arms": 25,
+   "cost_h": 0.008,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "picoprobe_tester",
+   "arms": 25,
+   "cost_h": 0.01,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "nudac",
+   "arms": 25,
+   "cost_h": 0.009,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "atf1502_cpld",
+   "arms": 25,
+   "cost_h": 0.002,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "ch32v203_ev",
+   "arms": 25,
+   "cost_h": 0.004,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "kbic65",
+   "arms": 25,
+   "cost_h": 0.011,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "free_dap",
+   "arms": 25,
+   "cost_h": 0.018,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "mantis_kb",
+   "arms": 25,
+   "cost_h": 0.014,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "minisolarmesh",
+   "arms": 25,
+   "cost_h": 0.053,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "can_shield",
+   "arms": 25,
+   "cost_h": 0.005,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "vfo_ctrl",
+   "arms": 25,
+   "cost_h": 0.008,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "a20_can",
+   "arms": 25,
+   "cost_h": 0.002,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "system76_launch",
+   "arms": 25,
+   "cost_h": 0.012,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "ice5lp4k_hat",
+   "arms": 22,
+   "cost_h": 0.004,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "ch32v006_dev",
+   "arms": 25,
+   "cost_h": 0.003,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "bfo9000",
+   "arms": 25,
+   "cost_h": 0.056,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "usb_sniffer",
+   "arms": 25,
+   "cost_h": 0.041,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "pinci",
+   "arms": 25,
+   "cost_h": 0.026,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "stm32g474_fc",
+   "arms": 25,
+   "cost_h": 0.024,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "nitrokey_pro",
+   "arms": 25,
+   "cost_h": 0.01,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "castor_pollux",
+   "arms": 25,
+   "cost_h": 0.036,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "bread_dcmotor",
+   "arms": 25,
+   "cost_h": 0.007,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "esp32cam_pcb",
+   "arms": 25,
+   "cost_h": 0.025,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "urchin_kb",
+   "arms": 25,
+   "cost_h": 0.012,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "co2_monitor",
+   "arms": 25,
+   "cost_h": 0.005,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "cc1101_rf_module",
+   "arms": 25,
+   "cost_h": 0.002,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "urchin",
+   "arms": 25,
+   "cost_h": 0.056,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "chocofi",
+   "arms": 25,
+   "cost_h": 0.01,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "esp32s3_ref",
+   "arms": 25,
+   "cost_h": 0.005,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "fusb302_pd_dev",
+   "arms": 25,
+   "cost_h": 0.008,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "daplink",
+   "arms": 25,
+   "cost_h": 0.004,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "bitaxe_ultra",
+   "arms": 25,
+   "cost_h": 0.087,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "thatmicpre",
+   "arms": 25,
+   "cost_h": 0.009,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "ble02_rf_module",
+   "arms": 25,
+   "cost_h": 0.002,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "zigbee_sensor",
+   "arms": 25,
+   "cost_h": 0.004,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "micro_ox_vco",
+   "arms": 25,
+   "cost_h": 0.023,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "lora_v3",
+   "arms": 25,
+   "cost_h": 0.013,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "stm32_rfm95_lora",
+   "arms": 25,
+   "cost_h": 0.025,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "corax56",
+   "arms": 25,
+   "cost_h": 0.021,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "noahfc",
+   "arms": 25,
+   "cost_h": 0.027,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "starlighteye_cam",
+   "arms": 25,
+   "cost_h": 0.021,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "helium_mult",
+   "arms": 25,
+   "cost_h": 0.006,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "ch32v003_usb",
+   "arms": 25,
+   "cost_h": 0.004,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "ethersweep",
+   "arms": 25,
+   "cost_h": 0.014,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  },
+  {
+   "board": "ghoul",
+   "arms": 18,
+   "cost_h": 0.06,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
+  }
+ ]
+}

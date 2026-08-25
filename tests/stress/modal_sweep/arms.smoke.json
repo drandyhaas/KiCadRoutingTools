@@ -1,0 +1,11 @@
+[
+  {
+    "name": "baseline",
+    "note": "control arm, no overrides. A sweep without one has no anchor: corpus or commit drift then reads as 'every arm regressed'."
+  },
+  {
+    "name": "tp2",
+    "note": "one routing_defaults constant, patched into the container's own repo copy. Chosen for the smoke test because it MEASURABLY changes runtime on tiny boards, so 'the arms differ' is a real check rather than a coin flip.",
+    "defaults": {"TRACK_PROXIMITY_COST": 2.0}
+  }
+]
