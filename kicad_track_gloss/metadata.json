@@ -1,12 +1,18 @@
 {
-  "$schema": "https://go.kicad.org/pcm/schemas/v1",
+  "$schema": "https://go.kicad.org/pcm/schemas/v2",
   "name": "KiCad Track Gloss",
   "description": "Gloss one or more selected PCB tracks in a single click.",
-  "description_full": "Select one or more track segments, connections, or complete nets in PCB Editor, then run KiCad Track Gloss. The plugin automatically expands the selection and shortens or simplifies the selected routing directly on the current board. A successful gloss is applied silently and can be reverted with KiCad Undo. For detailed results or troubleshooting, run KiCad Track Gloss - Diagnostic from Tools > External Plugins.",
+  "description_full": "Alpha release for KiCad 10. Select one or more track segments, connections, or complete nets in PCB Editor, then run KiCad Track Gloss. The plugin automatically expands the selection and shortens or simplifies the selected routing directly on the current board. A successful gloss is applied silently and can be reverted with KiCad Undo. For detailed results or troubleshooting, run KiCad Track Gloss - Diagnostic from Tools > External Plugins. The diagnostic dialog labels are currently in French; logs and JSON field names are in English. This plugin is based primarily on work and source code by DrAndyHaas, with Frantz as co-author of this standalone adaptation.",
   "identifier": "com.github.fca1.kicadtrackgloss",
   "type": "plugin",
   "author": {
-    "name": "KiCad Track Gloss contributors",
+    "name": "DrAndyHaas and Frantz",
+    "contact": {
+      "github": "https://github.com/fca1/KiCadRoutingTools"
+    }
+  },
+  "maintainer": {
+    "name": "Frantz",
     "contact": {
       "github": "https://github.com/fca1/KiCadRoutingTools"
     }
@@ -20,9 +26,10 @@
   "tags": ["routing", "tracks", "cleanup", "gloss"],
   "versions": [
     {
-      "version": "0.3.25",
+      "version": "0.3.26",
       "status": "testing",
       "kicad_version": "10.0",
+      "kicad_version_max": "10.99",
       "runtime": "swig",
       "platforms": ["linux", "macos", "windows"]
     }

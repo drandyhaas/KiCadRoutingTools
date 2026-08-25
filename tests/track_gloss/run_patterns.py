@@ -31,7 +31,10 @@ sys.modules["kicad_track_gloss"] = package
 WX_LOG_SILENCER = wx.LogNull()
 
 from kicad_track_gloss.engine import generate_converged_plan  # noqa: E402
+from kicad_track_gloss.engine.geometry import point_segment_distance  # noqa: E402
 from kicad_track_gloss.engine.model import segment_key  # noqa: E402
+from kicad_track_gloss.engine.pads import pad_contains  # noqa: E402
+from kicad_track_gloss.engine.planner import _apply_to_model  # noqa: E402
 from kicad_track_gloss.kicad import BoardAdapter  # noqa: E402
 from kicad_track_gloss.kicad.selection import (  # noqa: E402
     is_probable_diff_pair as _is_probable_diff_pair,
@@ -40,9 +43,9 @@ from kicad_track_gloss.kicad.selection import (  # noqa: E402
 
 EXPECTED_TRACKS = 706
 EXPECTED_SCOPES = 334
-EXPECTED_ALL_SELECTED_SAVED_MM = 64.029515
-EXPECTED_ALL_SELECTED_REMOVED = 227
-EXPECTED_ALL_SELECTED_ADDED = 192
+EXPECTED_ALL_SELECTED_SAVED_MM = 64.073413
+EXPECTED_ALL_SELECTED_REMOVED = 221
+EXPECTED_ALL_SELECTED_ADDED = 189
 MICRO_JOG_SEED = "58ebb541-fac6-4d02-8a68-65aca50766b5"
 SHORT_VCC_SEED = "cc798608-5e9b-4c2a-9856-dde85f9d85f0"
 PAD_SLIDING_SEED = "54640123-2d45-4136-984c-783155178230"
@@ -86,6 +89,135 @@ def _plan_signature(plan):
                      for addition in plan.additions)),
         round(plan.saved_mm, 9),
     )
+
+
+def _subdivide_eligible(model, eligible, fractions, label):
+    """Return the same copper with every eligible segment split identically."""
+    segments = []
+    subdivided_eligible = set()
+    cuts = (0.0,) + tuple(fractions) + (1.0,)
+    for segment in model.segments:
+        key = segment_key(segment)
+        if key not in eligible or segment.arc:
+            segments.append(segment)
+            continue
+        candidate_points = [(
+            round(segment.start_x +
+                  (segment.end_x - segment.start_x) * fraction, 6),
+            round(segment.start_y +
+                  (segment.end_y - segment.start_y) * fraction, 6),
+        ) for fraction in cuts]
+        points = [candidate_points[0]]
+        for point in candidate_points[1:-1]:
+            if point_segment_distance(
+                    point, candidate_points[0], candidate_points[-1]) > 1e-7:
+                # A fractional cut which cannot be represented on KiCad's
+                # integer-nanometre grid is a geometry perturbation, not a
+                # neutral subdivision, and therefore does not belong here.
+                continue
+            track_anchor = any(
+                candidate is not segment and
+                candidate.net_id == segment.net_id and
+                candidate.layer == segment.layer and
+                point_segment_distance(
+                    point,
+                    (candidate.start_x, candidate.start_y),
+                    (candidate.end_x, candidate.end_y)) <= 1e-7
+                for candidate in model.segments)
+            via_anchor = any(
+                obstacle.net_id == segment.net_id and
+                (not obstacle.layers or segment.layer in obstacle.layers) and
+                ((point[0] - obstacle.x) ** 2 +
+                 (point[1] - obstacle.y) ** 2) ** 0.5 <=
+                obstacle.radius + 1e-7
+                for obstacle in model.obstacles)
+            pad_anchor = any(
+                pad.net_id == segment.net_id and
+                (not pad.layers or segment.layer in pad.layers) and
+                pad_contains(pad, point)
+                for pad in model.pad_regions)
+            if not (track_anchor or via_anchor or pad_anchor):
+                points.append(point)
+        points.append(candidate_points[-1])
+        if len(points) == 2:
+            segments.append(segment)
+            subdivided_eligible.add(key)
+            continue
+        for index, (start, end) in enumerate(zip(points, points[1:])):
+            if start == end:
+                continue
+            part = replace(
+                segment, start_x=start[0], start_y=start[1],
+                end_x=end[0], end_y=end[1],
+                uuid="__subdivision__{}-{}-{}".format(label, key, index))
+            segments.append(part)
+            subdivided_eligible.add(segment_key(part))
+    return replace(model, segments=segments), subdivided_eligible
+
+
+def _normalized_geometry_signature(model):
+    """Describe the physical octolinear copper union, not its segmentation."""
+    groups = {}
+    for segment in model.segments:
+        start = (round(segment.start_x, 6), round(segment.start_y, 6))
+        end = (round(segment.end_x, 6), round(segment.end_y, 6))
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        attributes = (round(segment.width, 6), segment.layer, segment.net_id,
+                      bool(segment.locked), bool(segment.arc),
+                      round(segment.clearance, 6))
+        if abs(dy) <= 1e-6:
+            line, interval = ("h", start[1]), sorted((start[0], end[0]))
+        elif abs(dx) <= 1e-6:
+            line, interval = ("v", start[0]), sorted((start[1], end[1]))
+        elif abs(abs(dx) - abs(dy)) <= 1e-6 and dx * dy > 0:
+            line, interval = ("d+", round(start[1] - start[0], 6)), \
+                sorted((start[0], end[0]))
+        elif abs(abs(dx) - abs(dy)) <= 1e-6:
+            line, interval = ("d-", round(start[1] + start[0], 6)), \
+                sorted((start[0], end[0]))
+        else:
+            line = ("other", min(start, end), max(start, end))
+            interval = (0.0, 0.0)
+        groups.setdefault((line, attributes), []).append(tuple(interval))
+
+    rows = []
+    for group, intervals in sorted(groups.items()):
+        merged = []
+        for start, end in sorted(intervals):
+            if merged and start <= merged[-1][1] + 1e-6:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        rows.append((group, tuple(merged)))
+    return tuple(rows)
+
+
+def _segment_subdivision_regression(snapshot, eligible, reference_plan):
+    """Deep optional proof that artificial collinear splits do not matter."""
+    variants = {
+        "original": (snapshot.model, set(eligible), reference_plan),
+        "halves": _subdivide_eligible(
+            snapshot.model, eligible, (0.5,), "halves") + (None,),
+        "thirds": _subdivide_eligible(
+            snapshot.model, eligible, (1.0 / 3.0, 2.0 / 3.0), "thirds") +
+        (None,),
+    }
+    signatures = {}
+    results = {}
+    for label, (model, variant_eligible, plan) in variants.items():
+        if plan is None:
+            print("segment subdivision:", label, flush=True)
+            plan = generate_converged_plan(
+                model, variant_eligible, min_gain=0.01,
+                allow_equal_length_simpler=True,
+                clearance=snapshot.minimum_clearance, parallel=True)
+        final_model, _final_eligible = _apply_to_model(
+            model, variant_eligible, plan, 999)
+        signatures[label] = _normalized_geometry_signature(final_model)
+        results[label] = (round(plan.saved_mm, 6), len(signatures[label]))
+    assert len(set(signatures.values())) == 1, results
+    assert len({saved for saved, _segments in results.values()}) == 1, results
+    print("SEGMENT SUBDIVISION INVARIANCE PASS:", results, flush=True)
 
 
 def _all_selected_regression(board, adapter, snapshot, records,
@@ -192,8 +324,10 @@ def _short_vcc_regression(board, adapter, snapshot, records):
     assert len(expanded) == 9
     assert not protected
     assert round(best.saved_mm, 6) == 1.003620
-    assert len(best.remove_keys) == 8
-    assert len(best.additions) == 6
+    assert len(best.remove_keys) == 7, (
+        len(best.remove_keys), len(best.additions), best.saved_mm)
+    assert len(best.additions) == 6, (
+        len(best.remove_keys), len(best.additions), best.saved_mm)
     fresh = pcbnew.LoadBoard(str(FIXTURE))
     BoardAdapter(pcbnew).apply(fresh, best, rollback_on_error=True)
     print("SHORT VCC PASS: 1.003620 mm saved with exact pad-area sliding")
@@ -228,7 +362,7 @@ def _reported_clearance_regressions(board, adapter, snapshot, records):
         for obstacle in snapshot.model.obstacles)
 
     cases = (
-        ({PASTE_PAD_SEED}, 1.453743, 7, 3),
+        ({PASTE_PAD_SEED}, 1.453743, 5, 2),
         # The mixed-width engine now moves the 0.127/0.25 transition instead
         # of retaining it as a fixed anchor, so all four originals are
         # replaced by three exact-width octolinear segments.
@@ -245,8 +379,10 @@ def _reported_clearance_regressions(board, adapter, snapshot, records):
             allow_equal_length_simpler=True,
             clearance=snapshot.minimum_clearance, parallel=True)
         assert round(plan.saved_mm, 6) == expected_saved
-        assert len(plan.remove_keys) == expected_removed
-        assert len(plan.additions) == expected_added
+        assert len(plan.remove_keys) == expected_removed, (
+            seeds, len(plan.remove_keys), len(plan.additions), plan.saved_mm)
+        assert len(plan.additions) == expected_added, (
+            seeds, len(plan.remove_keys), len(plan.additions), plan.saved_mm)
         assert set(seeds) <= set(plan.remove_keys)
         fresh = pcbnew.LoadBoard(str(FIXTURE))
         BoardAdapter(pcbnew).apply(fresh, plan, rollback_on_error=True)
@@ -278,6 +414,10 @@ def main():
         "--full-sweep", action="store_true",
         help="also generate every scope and apply every changed plan "
              "(slow, disabled by default)")
+    parser.add_argument(
+        "--segment-subdivisions", action="store_true",
+        help="also prove invariance under half/third collinear subdivisions "
+             "(slow, disabled by default)")
     args = parser.parse_args()
 
     board = pcbnew.LoadBoard(str(FIXTURE))
@@ -291,8 +431,20 @@ def main():
     _pad_sliding_regression(board, adapter, snapshot, records)
     _reported_clearance_regressions(board, adapter, snapshot, records)
 
-    _all_selected_regression(
+    all_selected = _all_selected_regression(
         board, adapter, snapshot, records, check_all_orders=args.all_orders)
+
+    if args.segment_subdivisions:
+        seeds = {key for key, (_item, segment) in records.items()
+                 if not segment.locked and
+                 not _is_probable_diff_pair(segment.net_name)}
+        eligible, _expanded, _meanders = adapter.expand_eligible_keys(
+            board, records, seeds, [])
+        _segment_subdivision_regression(snapshot, eligible, all_selected)
+    else:
+        print("SEGMENT SUBDIVISION CHECK SUSPENDED: use "
+              "--segment-subdivisions for the deep alpha validation",
+              flush=True)
 
     if not args.full_sweep:
         print("FULL SCOPE SWEEP SUSPENDED: use --full-sweep to generate every "

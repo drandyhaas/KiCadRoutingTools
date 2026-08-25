@@ -33,6 +33,11 @@ work and reused code.
 The active project repository is the fca1 fork:
 <https://github.com/fca1/KiCadRoutingTools>.
 
+**Frantz is co-author and maintainer of this standalone adaptation.** The
+plugin nevertheless remains based primarily on the work and source code of
+DrAndyHaas; that primary provenance must remain visible in redistributed
+source and packages.
+
 ## User-visible contract
 
 1. The user selects one or more straight track segments. Seeds may belong to
@@ -228,8 +233,8 @@ over it.
 Current required integration results are:
 
 - **All 706 straight tracks selected in one batch:** the shared fixed-point
-  engine saves 63.481723 mm and 31 net segments (219 removed, 188 added) in
-  three changed passes. 116 probable tuned segments are protected and 590
+  engine saves 64.073413 mm and 32 net segments (221 removed, 189 added) in
+  two changed passes. 116 probable tuned segments are protected and 590
   segments are eligible. A real selected-board snapshot and CLI `ALL` resolve
   the same scope and therefore the same plan.
 - **Connections evaluated independently (optional deep sweep):** every unique
@@ -257,9 +262,12 @@ tracks are eligible at the same time. Treat both figures as separate
 non-regression contracts; neither is a proof of a mathematical global maximum.
 
 The all-track plan is also applied to a temporary board copy and checked with
-KiCad 10.0.5's exhaustive native DRC. The frozen fixture reports 170 existing
-violations and one existing unconnected item both before and after gloss, with
-identical violation-category counts.
+KiCad 10.0.5's exhaustive native DRC. This deliberately imperfect frozen
+fixture reports 156 violations and one unconnected item both before and after
+gloss. Two existing generic clearance reports are reclassified as two
+hole-clearance reports after the affected tracks move; the total violation and
+unconnected counts do not increase. DRC-clean boards remain the preferred
+manual alpha-test inputs.
 
 ## Running validation
 
@@ -276,19 +284,22 @@ Run the real-board replay with KiCad's bundled Python so `pcbnew` is available:
 D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py
 ```
 
-The routine integration replay evaluates the all-selected board once. Two
+The routine integration replay evaluates the all-selected board once. Three
 costly deep checks are retained but suspended by default:
 
 ```text
 D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --all-orders
 D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --full-sweep
+D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --segment-subdivisions
 ```
 
 The first compares the final fixed-point signature for seven deterministic
 input orders. It detects accidental order dependence; equality is explicitly
 not evidence of a mathematical global optimum. The second generates all
 connection scopes and applies every changed plan to fresh in-memory boards.
-Combine the flags only when a complete deep validation is needed.
+The third proves that neutral collinear subdivisions at KiCad-representable
+coordinates converge to the same physical copper union. Combine the flags only
+when a complete deep validation is needed.
 
 ## Headless score CLI and `place_route_loop`
 
@@ -303,7 +314,7 @@ followed by the protocol line required by `place_route_loop`:
 
 ```text
 GLOSS_SCORE_JSON={...}
-SCORE=1045.961827184
+SCORE=1045.370136582
 ```
 
 The score is the total straight-track copper length, in millimetres, after the

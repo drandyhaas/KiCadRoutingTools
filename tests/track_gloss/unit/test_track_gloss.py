@@ -5,6 +5,7 @@ import tempfile
 import types
 import zipfile
 import json
+from pathlib import Path
 
 from kicad_track_gloss.engine import (find_track_terminal_vertices,
                                       generate_candidate_plans,
@@ -629,9 +630,16 @@ def test_pcm_archive_uses_flat_entrypoint_with_internal_packages():
     from kicad_track_gloss.package_pcm import build
 
     with tempfile.TemporaryDirectory() as directory:
-        archive_path = build(directory)
+        archive_path = build(directory, "v-test-alpha")
         with zipfile.ZipFile(archive_path) as archive:
             names = set(archive.namelist())
+            packaged_metadata = json.loads(
+                archive.read("metadata.json").decode("utf-8"))
+        official_path = (Path(directory) / "kicad-official" / "packages" /
+                         "com.github.fca1.kicadtrackgloss" / "metadata.json")
+        official_metadata = json.loads(
+            official_path.read_text(encoding="utf-8"))
+        archive_size = archive_path.stat().st_size
 
     assert "plugins/__init__.py" in names
     assert "plugins/action_plugin.py" in names
@@ -648,6 +656,15 @@ def test_pcm_archive_uses_flat_entrypoint_with_internal_packages():
     assert not any(name.startswith("plugins/kicad_track_gloss/") for name in names)
     assert "metadata.json" in names
     assert "resources/icon.png" in names
+    assert packaged_metadata["$schema"].endswith("/v2")
+    assert "download_url" not in packaged_metadata["versions"][0]
+    official_version = official_metadata["versions"][0]
+    assert official_version["status"] == "testing"
+    assert official_version["download_url"].endswith(
+        "/v-test-alpha/" + archive_path.name)
+    assert len(official_version["download_sha256"]) == 64
+    assert official_version["download_size"] == archive_size
+    assert official_metadata["maintainer"]["name"] == "Frantz"
 
 
 def test_plugin_version_matches_metadata():

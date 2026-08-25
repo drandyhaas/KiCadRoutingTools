@@ -1259,6 +1259,116 @@ def _canonicalize_model_segments(model):
     return replace(model, segments=ordered)
 
 
+def _canonicalize_eligible_subdivisions(model, eligible):
+    """Merge collinear eligible input pieces for subdivision-invariant search.
+
+    The returned expansion map lets the caller restore every canonical segment
+    that survives planning unchanged.  Consequently artificial input
+    breakpoints cannot alter candidate generation, while an untouched route is
+    not gratuitously rewritten on the live board.
+    """
+    segments = list(model.segments)
+    eligible = set(eligible)
+    expansions = {}
+    counter = 0
+    while True:
+        merged = None
+        for index, first in enumerate(segments):
+            first_key = segment_key(first)
+            if first_key not in eligible or first.locked or first.arc:
+                continue
+            first_ends = ((first.start_x, first.start_y),
+                          (first.end_x, first.end_y))
+            for second in segments[index + 1:]:
+                second_key = segment_key(second)
+                if (second_key not in eligible or second.locked or second.arc or
+                        (first.net_id, first.layer, round(first.width, 6),
+                         round(first.clearance, 6)) !=
+                        (second.net_id, second.layer, round(second.width, 6),
+                         round(second.clearance, 6))):
+                    continue
+                second_ends = ((second.start_x, second.start_y),
+                               (second.end_x, second.end_y))
+                shared = set(first_ends) & set(second_ends)
+                if len(shared) != 1:
+                    continue
+                joint = next(iter(shared))
+                # A collinear breakpoint at a real same-net T, pad, or via is
+                # semantic. Merge only a pure degree-two continuation;
+                # arbitrary subdivision must not erase a junction boundary.
+                touching_branch = any(
+                    candidate is not first and candidate is not second and
+                    candidate.net_id == first.net_id and
+                    candidate.layer == first.layer and
+                    point_segment_distance(
+                        joint,
+                        (candidate.start_x, candidate.start_y),
+                        (candidate.end_x, candidate.end_y)) <= 1e-7
+                    for candidate in segments)
+                touching_anchor = any(
+                    obstacle.net_id == first.net_id and
+                    (not obstacle.layers or first.layer in obstacle.layers) and
+                    ((joint[0] - obstacle.x) ** 2 +
+                     (joint[1] - obstacle.y) ** 2) ** 0.5 <=
+                    obstacle.radius + 1e-7
+                    for obstacle in model.obstacles)
+                touching_anchor = touching_anchor or any(
+                    pad.net_id == first.net_id and
+                    (not pad.layers or first.layer in pad.layers) and
+                    pad_contains(pad, joint)
+                    for pad in model.pad_regions)
+                if touching_branch or touching_anchor:
+                    continue
+                outer_first = first_ends[1] if first_ends[0] == joint else first_ends[0]
+                outer_second = second_ends[1] if second_ends[0] == joint else second_ends[0]
+                cross = ((joint[0] - outer_first[0]) *
+                         (outer_second[1] - joint[1]) -
+                         (joint[1] - outer_first[1]) *
+                         (outer_second[0] - joint[0]))
+                if abs(cross) > 1e-7 or outer_first == outer_second:
+                    continue
+                key = "{}input-{}".format(_SYNTHETIC_PREFIX, counter)
+                counter += 1
+                originals = (expansions.pop(first_key, [first]) +
+                             expansions.pop(second_key, [second]))
+                replacement = Segment(
+                    outer_first[0], outer_first[1],
+                    outer_second[0], outer_second[1], first.width,
+                    first.layer, first.net_id, key, False, False,
+                    first.net_name, first.clearance)
+                merged = (first, second, replacement, originals)
+                break
+            if merged is not None:
+                break
+        if merged is None:
+            break
+        first, second, replacement, originals = merged
+        segments.remove(first)
+        segments.remove(second)
+        eligible.discard(segment_key(first))
+        eligible.discard(segment_key(second))
+        segments.append(replacement)
+        eligible.add(segment_key(replacement))
+        expansions[segment_key(replacement)] = originals
+    return replace(model, segments=segments), eligible, expansions
+
+
+def _restore_unchanged_subdivisions(model, eligible, expansions):
+    """Expand canonical input segments which survived the search unchanged."""
+    segments = []
+    eligible = set(eligible)
+    for segment in model.segments:
+        key = segment_key(segment)
+        originals = expansions.get(key)
+        if originals is None:
+            segments.append(segment)
+            continue
+        segments.extend(originals)
+        eligible.discard(key)
+        eligible.update(segment_key(original) for original in originals)
+    return replace(model, segments=segments), eligible
+
+
 def _convergence_state(model, pass_index, initial_mm, previous_mm, event,
                        step=None):
     """Return a compact, identity-free diagnostic for one global pass."""
@@ -1307,7 +1417,10 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
     """
     if max_passes < 1:
         raise ValueError("max_passes must be at least one")
-    original_eligible = set(eligible_segment_keys)
+    source_model = _canonicalize_model_segments(model)
+    source_eligible = set(eligible_segment_keys)
+    model, original_eligible, input_expansions = \
+        _canonicalize_eligible_subdivisions(source_model, source_eligible)
     model = _canonicalize_model_segments(model)
     current_model = model
     current_eligible = set(original_eligible)
@@ -1383,10 +1496,21 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
             proposed_model, proposed_eligible = _merge_final_collinear(
                 proposed_model, set(proposed_eligible))
             proposed_model = _canonicalize_model_segments(proposed_model)
+            if (_model_geometry_signature(proposed_model) ==
+                    _model_geometry_signature(current_model)):
+                rejected_steps.append(
+                    "Candidate changes identities but not copper geometry")
+                continue
             try:
                 composed = _compose_refined_plan(
                     model, original_eligible, proposed_model,
                     proposed_eligible, changed_steps + [step], [])
+                source_proposed, source_proposed_eligible = \
+                    _restore_unchanged_subdivisions(
+                        proposed_model, proposed_eligible, input_expansions)
+                _compose_refined_plan(
+                    source_model, source_eligible, source_proposed,
+                    source_proposed_eligible, changed_steps + [step], [])
             except ValueError as error:
                 rejected_steps.append(str(error))
                 continue
@@ -1423,8 +1547,10 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
         final_search.fixed_point = True
         return final_search
 
-    result = last_composed or _compose_refined_plan(
-        model, original_eligible, current_model, current_eligible,
+    current_model, current_eligible = _restore_unchanged_subdivisions(
+        current_model, current_eligible, input_expansions)
+    result = _compose_refined_plan(
+        source_model, source_eligible, current_model, current_eligible,
         changed_steps, [])
     # Nanometre quantization can collapse an analytical micro-adjustment back
     # to identity. Report applied passes, not discarded internal exploration.

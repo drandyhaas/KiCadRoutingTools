@@ -44,6 +44,21 @@ D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --full-sweep
 Both optional checks can be combined when a complete deep validation is
 actually required.
 
+Artificial collinear subdivision invariance is another deliberately optional
+alpha/deep check. It splits every eligible real-board segment into halves and
+then thirds wherever the artificial cut is not a pad, via, or track-junction
+anchor. It converges all representations independently, removes artificial
+degree-two breakpoints, and requires the complete final copper geometry and
+saved length to be identical:
+
+```text
+D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --segment-subdivisions
+```
+
+This check is disabled during routine release validation, just like the seven
+input-order replay, because it performs two additional all-board fixed-point
+searches.
+
 Smoke-test the all-track read-only score CLI with the frozen board, project,
 and design rules:
 
@@ -51,10 +66,10 @@ and design rules:
 D:\kicad\bin\python.exe tools\score_track_gloss.py --project tests\track_gloss\patterns\dispenser_labels\dispenser_labels.kicad_pro tests\track_gloss\patterns\dispenser_labels\dispenser_labels.kicad_pcb
 ```
 
-The final stdout line must be `SCORE=1045.961827184`. The preceding
+The final stdout line must be `SCORE=1045.370136582`. The preceding
 `GLOSS_SCORE_JSON=` document must report 706 selected seeds, 590 eligible
-tracks, 116 protected tuned tracks, three changed convergence passes,
-63.481722542 mm of actual copper saved, and 31 segments saved. Saving with `--output`
+tracks, 116 protected tuned tracks, two changed convergence passes,
+64.073413144 mm of actual copper saved, and 32 segments saved. Saving with `--output`
 and rescoring that output must report zero changed passes and the same score.
 The fixture must remain byte-for-byte unchanged.
 

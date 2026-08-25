@@ -27,7 +27,7 @@ RUNTIME_FILES = (
 RUNTIME_DIRECTORIES = ("engine", "kicad")
 
 
-def build(output_dir):
+def build(output_dir, release_tag=None):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     out = output_dir / f"KiCadTrackGloss-{VERSION}.zip"
@@ -59,17 +59,42 @@ def build(output_dir):
                 if path.is_file():
                     archive.write(path, path.relative_to(tmp).as_posix())
     digest = hashlib.sha256(out.read_bytes()).hexdigest()
+    with zipfile.ZipFile(out) as archive:
+        install_size = sum(item.file_size for item in archive.infolist())
     sidecar = out.with_suffix(".meta.json")
     sidecar.write_text(json.dumps({"version": VERSION, "sha256": digest,
-                                   "download_size": out.stat().st_size}, indent=2) + "\n",
+                                   "download_size": out.stat().st_size,
+                                   "install_size": install_size}, indent=2) + "\n",
                        encoding="utf-8")
+    release_tag = release_tag or "v{}-alpha".format(VERSION)
+    submission = json.loads((ROOT / "metadata.json").read_text(encoding="utf-8"))
+    release = submission["versions"][0]
+    release.update({
+        "download_sha256": digest,
+        "download_size": out.stat().st_size,
+        "install_size": install_size,
+        "download_url": (
+            "https://github.com/fca1/KiCadRoutingTools/releases/download/"
+            "{}/{}".format(release_tag, out.name)),
+    })
+    official = (output_dir / "kicad-official" / "packages" /
+                submission["identifier"])
+    official.mkdir(parents=True, exist_ok=True)
+    (official / "metadata.json").write_text(
+        json.dumps(submission, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8")
+    shutil.copy2(ROOT / "icon_64.png", official / "icon.png")
     print(out)
     print("sha256=" + digest)
+    print("official_metadata=" + str(official / "metadata.json"))
     return out
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", default=str(REPO / "dist"))
+    parser.add_argument(
+        "--release-tag", default=None,
+        help="public GitHub release tag used by official PCM metadata")
     args = parser.parse_args()
-    build(args.output_dir)
+    build(args.output_dir, args.release_tag)

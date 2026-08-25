@@ -6,6 +6,10 @@ expands each selected connection, searches for a shorter or simpler safe
 0/45/90-degree route, applies the result directly to the current board, and
 then exits. KiCad Undo remains the normal way to reject a result.
 
+Frantz is co-author and maintainer of the standalone adaptation. The project
+is based primarily on the work and source code of DrAndyHaas, whose original
+copyright, MIT license, algorithms, and code provenance are retained.
+
 The separate diagnostic action reports affected nets, length and segment
 gains, optimization mechanisms, rejected candidates, and machine-readable
 JSON. Normal operation remains silent unless no modification is possible.
@@ -79,6 +83,7 @@ Run the frozen real-board regression with KiCad's Python interpreter:
 ```powershell
 D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py
 D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --all-orders --full-sweep
+D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --segment-subdivisions
 ```
 
 Build the Plugin and Content Manager archive:
