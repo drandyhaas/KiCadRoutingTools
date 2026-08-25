@@ -769,6 +769,28 @@ def test_adapter_rounds_millimetres_to_exact_integer_nanometres():
     assert adapter.vector((130.2, 0.25)) == (130_200_000, 250_000)
 
 
+def test_via_obstacle_uses_native_non_contiguous_copper_layer_set():
+    class LayerSet:
+        @staticmethod
+        def Seq():
+            return [0, 2, 4, 6, 5]
+
+    class Via:
+        @staticmethod
+        def GetLayerSet():
+            return LayerSet()
+
+    class Board:
+        @staticmethod
+        def GetLayerName(layer):
+            return {0: "F.Cu", 2: "B.Cu", 4: "In1.Cu",
+                    6: "In2.Cu", 5: "F.Silkscreen"}[int(layer)]
+
+    from kicad_track_gloss.kicad.reader import _via_copper_layers
+
+    assert _via_copper_layers(Board(), Via()) == (0, 2, 4, 6)
+
+
 def test_native_connection_expansion_stops_at_junction():
     tracks = [
         _NativeTrack("seed", (0, 0), (1, 0), 1),

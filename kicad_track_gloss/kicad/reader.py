@@ -23,6 +23,19 @@ class SelectionSnapshot:
     tuned_protected_count: int = 0
 
 
+def _via_copper_layers(board, item):
+    try:
+        return tuple(
+            int(layer) for layer in item.GetLayerSet().Seq()
+            if str(board.GetLayerName(layer)).endswith(".Cu"))
+    except Exception:
+        # Older SWIG builds may not expose the via layer set. Keep the
+        # endpoints as a conservative fallback, without inventing a
+        # contiguous PCB_LAYER_ID range (internal copper IDs are not
+        # contiguous in KiCad).
+        return tuple(sorted({int(item.TopLayer()), int(item.BottomLayer())}))
+
+
 def read_snapshot(adapter, board, require_selection=True):
     segments, obstacles, pad_regions, warnings = [], [], [], []
     straight_by_key = {}
@@ -40,7 +53,7 @@ def read_snapshot(adapter, board, require_selection=True):
                 diameter = adapter.to_mm(item.GetFrontWidth())
             except Exception:
                 diameter = adapter.to_mm(item.GetWidth())
-            layers = tuple(range(int(item.TopLayer()), int(item.BottomLayer()) + 1))
+            layers = _via_copper_layers(board, item)
             obstacles.append(CircleObstacle(x, y, diameter / 2.0,
                                             int(item.GetNetCode()), layers, "via"))
             if via_hole_clearance > 0.0:
