@@ -1,66 +1,27 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+.pytest_cache/
+.coverage
+htmlcov/
 
-# IDE
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+
+# Editors and operating systems
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# OS
 .DS_Store
 Thumbs.db
-/.claude/settings.local.json
 
-# Rust build outputs
-rust_*/target/
-*.pyd
-
-# KiCad outputs (routed files, backups, project files)
-/kicad_files/test_diffpair*kicad_pcb
-/kicad_files/fanout_output*.kicad_pcb
-/kicad_files/~*.kicad_pcb.lck
-/kicad_files/routed_output*.kicad_pcb
-/kicad_files/qfn_fanned_out.kicad_pcb
-/kicad_files/fanout_starting_point.kicad_pcb
-/kicad_files/routed_output_diff12.pcb
-/kicad_files/fp-info-cache
-/kicad_files/kit-out*.kicad_pcb
-/kicad_files/flat_hierarchy_*.kicad_pcb
-/kicad_files/interf_u_*.kicad_pcb
-/kicad_files/sonde_u_*.kicad_pcb
-kicad_files/.history/
-/kicad_files/*kicad_pro
-/*.kicad_prl
-/kicad_files/*.kicad_prl
-
-# Test-fixture boards used as INPUT by tests/ - keep tracked despite the broad
-# output patterns above (test_bga_fanout_summary, test_diff_pair_route).
-!/kicad_files/interf_u_unrouted_placed.kicad_pcb
-!/kicad_files/routed_output.kicad_pcb
-
-#Other
-/git_version*
-
-# #411 perturbation working dirs -- boards and scoreboards, never committed
-wk/
+# KiCad transient files
+~*.kicad_pcb.lck
+~*.kicad_sch.lck
+*.kicad_pcb-bak
+*.kicad_sch-bak
+*-backups/

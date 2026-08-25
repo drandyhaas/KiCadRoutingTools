@@ -256,7 +256,7 @@ From the repository root, run the API-neutral tests with a standard Python that
 has `pytest`:
 
 ```text
-py -3.12 -m pytest tests/track_gloss/unit tests/test_smooth_route.py -q
+py -3.12 -m pytest tests/track_gloss/unit -q
 ```
 
 Run the real-board replay with KiCad's bundled Python so `pcbnew` is available:

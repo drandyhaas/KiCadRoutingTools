@@ -14,7 +14,7 @@ track_gloss/
 Run the fast tests from the repository root:
 
 ```text
-py -3.12 -m pytest tests/track_gloss/unit tests/test_smooth_route.py -q
+py -3.12 -m pytest tests/track_gloss/unit -q
 ```
 
 Run real-board validation without saving any PCB:
