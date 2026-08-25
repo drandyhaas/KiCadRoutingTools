@@ -11,9 +11,11 @@ import wx
 
 from .engine import (find_pad_terminal_targets, find_track_terminal_vertices,
                      generate_candidate_plans, summarize_plan)
+from .engine.model import segment_key
 from .kicad import BoardAdapter
 from .kicad.diagnostics import (append_plan_statistics,
-                                append_search_statistics)
+                                 append_search_statistics,
+                                 split_diagnostic_report)
 from .version import __version__
 
 
@@ -28,19 +30,117 @@ ALLOW_EQUAL_LENGTH_SIMPLIFICATION = True
 
 def _show_report(title, lines):
     """Show a selectable, resizable diagnostic report inside KiCad."""
+    text = "\n".join(lines)
     dialog = wx.Dialog(None, title=title, size=(760, 520),
                        style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
     layout = wx.BoxSizer(wx.VERTICAL)
-    report = wx.TextCtrl(dialog, value="\n".join(lines),
+    report = wx.TextCtrl(dialog, value=text,
                          style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL)
     try:
         report.SetFont(wx.Font(wx.FontInfo(9).Family(wx.FONTFAMILY_TELETYPE)))
     except Exception:
         pass
     layout.Add(report, 1, wx.EXPAND | wx.ALL, 10)
-    buttons = dialog.CreateButtonSizer(wx.OK)
-    if buttons is not None:
-        layout.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+    buttons = wx.BoxSizer(wx.HORIZONTAL)
+    copy_button = wx.Button(dialog, label="Copier")
+    ok_button = wx.Button(dialog, wx.ID_OK)
+    try:
+        ok_button.SetDefault()
+    except Exception:
+        pass
+
+    def copy_report(_event):
+        if not wx.TheClipboard.Open():
+            _warning_bell()
+            return
+        try:
+            wx.TheClipboard.SetData(wx.TextDataObject(text))
+            try:
+                wx.TheClipboard.Flush()
+            except Exception:
+                pass
+        finally:
+            wx.TheClipboard.Close()
+
+    copy_button.Bind(wx.EVT_BUTTON, copy_report)
+    buttons.Add(copy_button, 0)
+    buttons.AddStretchSpacer(1)
+    buttons.Add(ok_button, 0)
+    layout.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+    dialog.SetSizer(layout)
+    dialog.CentreOnParent()
+    try:
+        dialog.ShowModal()
+    finally:
+        dialog.Destroy()
+
+
+def _show_diagnostic_report(title, lines):
+    """Show result, human-readable details, and JSON in separate tabs."""
+    summary, details, json_lines = split_diagnostic_report(lines)
+    tabs = (
+        ("Résultat", "\n".join(summary)),
+        ("Détails", "\n".join(details)),
+        ("JSON", "\n".join(json_lines)),
+    )
+    all_text = "\n\n".join(
+        "=== {} ===\n{}".format(label, text) for label, text in tabs)
+    dialog = wx.Dialog(None, title=title, size=(820, 600),
+                       style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+    layout = wx.BoxSizer(wx.VERTICAL)
+    notebook = wx.Notebook(dialog)
+    controls = []
+    for label, text in tabs:
+        panel = wx.Panel(notebook)
+        panel_layout = wx.BoxSizer(wx.VERTICAL)
+        control = wx.TextCtrl(
+            panel, value=text,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL)
+        try:
+            control.SetFont(wx.Font(
+                wx.FontInfo(9).Family(wx.FONTFAMILY_TELETYPE)))
+        except Exception:
+            pass
+        panel_layout.Add(control, 1, wx.EXPAND | wx.ALL, 8)
+        panel.SetSizer(panel_layout)
+        notebook.AddPage(panel, label)
+        controls.append(control)
+    layout.Add(notebook, 1, wx.EXPAND | wx.ALL, 10)
+
+    buttons = wx.BoxSizer(wx.HORIZONTAL)
+    copy_tab_button = wx.Button(dialog, label="Copier l'onglet")
+    copy_all_button = wx.Button(dialog, label="Copier tout")
+    ok_button = wx.Button(dialog, wx.ID_OK)
+    try:
+        ok_button.SetDefault()
+    except Exception:
+        pass
+
+    def copy_text(text):
+        if not wx.TheClipboard.Open():
+            _warning_bell()
+            return
+        try:
+            wx.TheClipboard.SetData(wx.TextDataObject(text))
+            try:
+                wx.TheClipboard.Flush()
+            except Exception:
+                pass
+        finally:
+            wx.TheClipboard.Close()
+
+    def copy_tab(_event):
+        selection = notebook.GetSelection()
+        if 0 <= selection < len(controls):
+            copy_text(controls[selection].GetValue())
+
+    copy_tab_button.Bind(wx.EVT_BUTTON, copy_tab)
+    copy_all_button.Bind(wx.EVT_BUTTON, lambda _event: copy_text(all_text))
+    buttons.Add(copy_tab_button, 0)
+    buttons.Add(copy_all_button, 0, wx.LEFT, 6)
+    buttons.AddStretchSpacer(1)
+    buttons.Add(ok_button, 0)
+    layout.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
     dialog.SetSizer(layout)
     dialog.CentreOnParent()
     try:
@@ -74,7 +174,37 @@ def _selection_counts(board):
             counts["vias"] += 1
         else:
             counts["other"] += 1
+
+    other_collections = []
+    for alternatives in (("GetFootprints",), ("GetDrawings",),
+                         ("Zones", "GetZones")):
+        for accessor in alternatives:
+            try:
+                other_collections.append(getattr(board, accessor)())
+                break
+            except Exception:
+                continue
+    try:
+        other_collections.extend(footprint.Pads()
+                                 for footprint in board.GetFootprints())
+    except Exception:
+        pass
+    for values in other_collections:
+        for item in values:
+            try:
+                if item.IsSelected():
+                    counts["other"] += 1
+            except Exception:
+                continue
     return counts
+
+
+def _eligible_net_names(model, eligible_keys):
+    eligible = set(eligible_keys)
+    labels = {segment.net_name or "net {}".format(segment.net_id)
+              for segment in model.segments
+              if segment_key(segment) in eligible}
+    return sorted(labels)
 
 
 class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
@@ -119,6 +249,8 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             report.append("KiCad version: " + str(pcbnew.Version()))
         except Exception:
             pass
+        report.append(
+            "Optimization coordinates: exact copper geometry; active KiCad grid not used.")
         counts = _selection_counts(board)
         report.append(
             "Selected objects: {segments} straight segment(s), {arcs} arc(s), "
@@ -131,6 +263,9 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             report.append("Reason: " + str(error))
             return False
         report.append("Eligible straight segments: " + str(len(snapshot.eligible_keys)))
+        net_names = _eligible_net_names(snapshot.model, snapshot.eligible_keys)
+        report.append("Eligible net(s) ({}): {}".format(
+            len(net_names), ", ".join(net_names) if net_names else "none"))
         report.append("Automatic connection expansion: {} seed(s) + {} segment(s).".format(
             snapshot.selection_seed_count, snapshot.auto_expanded_count))
         report.append("Protected tuned segments: " +
@@ -158,7 +293,8 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             min_gain=MIN_GAIN_MM,
             allow_equal_length_simpler=ALLOW_EQUAL_LENGTH_SIMPLIFICATION,
             clearance=snapshot.minimum_clearance,
-            collect_statistics=diagnostic)
+            collect_statistics=diagnostic,
+            parallel=True)
         report.append("Candidate plans evaluated: " + str(len(plans)))
         report.append("Connected chains considered: " +
                       str(max((plan.chains_considered for plan in plans), default=0)))
@@ -166,7 +302,9 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         plans = [plan for plan in plans if plan.changed]
         if not plans:
             if diagnostic and searched_plan is not None:
-                append_search_statistics(report, searched_plan.search_counts)
+                append_search_statistics(
+                    report, searched_plan.search_counts,
+                    searched_plan.blocking_nets)
             report.append("Result: no safe improvement found.")
             report.append(
                 "Possible reasons: disconnected selection, fixed junction, locked/tuned "
@@ -176,6 +314,8 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         report.append("Chosen plan: remove {} segment(s), add {} segment(s).".format(
             len(best.remove_keys), len(best.additions)))
         report.append("Copper length saved: {:.3f} mm.".format(best.saved_mm))
+        report.append("Non-octolinear segments corrected: {}.".format(
+            best.angle_corrections))
         if diagnostic:
             append_plan_statistics(report, summarize_plan(
                 snapshot.model, snapshot.eligible_keys, best))
@@ -185,8 +325,6 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         except Exception:
             pass
         pcbnew.Refresh()
-        report.append("Result: modification applied to the current board.")
-        report.append("Use KiCad Undo to revert it.")
         return True
 
 
@@ -220,6 +358,6 @@ class KiCadTrackGlossDiagnosticPlugin(KiCadTrackGlossPlugin):
             if not changed:
                 _warning_bell()
         try:
-            _show_report("KiCad Track Gloss — Diagnostic", report)
+            _show_diagnostic_report("KiCad Track Gloss — Diagnostic", report)
         except Exception:
             LOG.exception("Could not display the Track Gloss diagnostic report")

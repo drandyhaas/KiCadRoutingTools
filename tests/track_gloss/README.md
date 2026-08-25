@@ -23,6 +23,25 @@ Run real-board validation without saving any PCB:
 D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py
 ```
 
+The default real-board run evaluates the all-selected board once. The costly
+order-independence replay is deliberately suspended from routine validation.
+Run its seven input orders only when specifically investigating determinism:
+
+```text
+D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --all-orders
+```
+
+The exhaustive generation of every connection scope and the corresponding
+fresh-board applications are also suspended by default. Enable that separate
+deep check only when changing the planner or KiCad writer:
+
+```text
+D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --full-sweep
+```
+
+Both optional checks can be combined when a complete deep validation is
+actually required.
+
 Boards tested manually should not be added automatically. When a board becomes
 a useful non-regression case, copy its `.kicad_pcb` and, when available, its
 matching `.kicad_pro` and `.kicad_dru` into a named directory under `patterns/`.

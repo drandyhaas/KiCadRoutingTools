@@ -47,10 +47,15 @@ class BoardAdapter:
 
     def segment_from_item(self, item):
         start, end = self.point_mm(item.GetStart()), self.point_mm(item.GetEnd())
+        try:
+            clearance = self.to_mm(item.GetOwnClearance(item.GetLayer()))
+        except Exception:
+            clearance = -1.0
         return Segment(start[0], start[1], end[0], end[1],
                        self.to_mm(item.GetWidth()), int(item.GetLayer()),
                        int(item.GetNetCode()), _uuid(item), bool(item.IsLocked()),
-                       str(item.GetClass()) == "PCB_ARC", _net_name(item))
+                       str(item.GetClass()) == "PCB_ARC", _net_name(item),
+                       clearance)
 
     # Compatibility alias kept for existing diagnostic/test callers.
     _segment_from_item = segment_from_item

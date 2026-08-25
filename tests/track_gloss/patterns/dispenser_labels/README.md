@@ -21,9 +21,11 @@ The replay loads a fresh in-memory board for every accepted modification and
 never writes a PCB file.
 
 It also treats all 706 straight tracks as one simultaneous selection. The
-expected deterministic result is 60.060665 mm of copper saved and a net
-reduction of 38 segments (181 removed, 143 added), invariant under board,
-reverse, ascending-net, descending-net, and shuffled input orders.
+expected deterministic result is 62.419635 mm of copper saved, 39
+arbitrary-angle segments normalized, and a net reduction of 18 segments
+(211 removed, 193 added), invariant under board, reverse, ascending-net,
+descending-net, and shuffled input orders when the optional order replay is
+requested.
 
 The `/cpu/~{csn}` segment UUID
 `58ebb541-fac6-4d02-8a68-65aca50766b5` is also a dedicated responsiveness

@@ -19,6 +19,9 @@ class Segment:
     locked: bool = False
     arc: bool = False
     net_name: str = ""
+    # KiCad's rule-engine result for this item/layer. A negative value means
+    # the API-neutral caller did not provide one and net-level fallback applies.
+    clearance: float = -1.0
 
 
 @dataclass(frozen=True)
@@ -58,8 +61,8 @@ class BoardModel:
     segments: List[Segment]
     obstacles: List[CircleObstacle] = field(default_factory=list)
     keepouts: List[PolygonKeepout] = field(default_factory=list)
-    # Values resolved by KiCad's own effective netclass machinery. Rules that
-    # SWIG does not expose remain outside this conservative geometry model.
+    # Netclass fallback used by API-neutral callers and older KiCad APIs.
+    # Live KiCad snapshots normally carry the rule-engine result per Segment.
     net_clearances: Dict[int, float] = field(default_factory=dict)
     minimum_clearance: float = 0.0
     copper_edge_clearance: float = 0.0
@@ -74,6 +77,7 @@ class AddedSegment:
     width: float
     layer: int
     net_id: int
+    clearance: float = -1.0
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,11 @@ class Transformation:
     def saved_mm(self):
         return max(0.0, self.before_mm - self.after_mm)
 
+    @property
+    def net_gain_mm(self):
+        """Signed copper gain; negative values expose local length increases."""
+        return self.before_mm - self.after_mm
+
 
 @dataclass
 class GlossResult:
@@ -104,6 +113,8 @@ class GlossResult:
     warnings: List[str] = field(default_factory=list)
     transformations: List[Transformation] = field(default_factory=list)
     search_counts: Dict[str, int] = field(default_factory=dict)
+    blocking_nets: Dict[str, int] = field(default_factory=dict)
+    angle_corrections: int = 0
 
     @property
     def changed(self) -> bool:

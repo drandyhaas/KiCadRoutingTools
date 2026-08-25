@@ -17,7 +17,11 @@ def board_bounds(adapter, board):
 
 
 def native_rules(adapter, board, segments):
-    """Resolve board floors and effective netclass clearances through KiCad."""
+    """Resolve board floors and netclass fallback clearances through KiCad.
+
+    Per-track rule-engine results, including custom ``.kicad_dru`` rules, are
+    captured by :meth:`BoardAdapter.segment_from_item` instead.
+    """
     minimum = 0.0
     edge = 0.0
     by_net = {}

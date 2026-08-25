@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import replace
 
+from .context import PlannerContext
 from .geometry import (length, octolinear_paths, path_hits_polygon,
                        point_segment_distance, segment_distance)
 from .model import AddedSegment, GlossResult, Segment, Transformation, segment_key
@@ -26,6 +27,13 @@ from .statistics import classify_transformation
 from .terminals import (find_pad_terminal_targets, find_track_terminal_targets,
                         movable_endpoint_pairs, vertex)
 from .validation import validate_result
+
+
+def _effective_clearance(model, segment):
+    if segment.clearance >= 0.0:
+        return max(model.minimum_clearance, segment.clearance)
+    return max(model.minimum_clearance,
+               model.net_clearances.get(segment.net_id, 0.0))
 
 
 def _copper_signature(start, end, width, layer, net_id):
@@ -63,11 +71,99 @@ def _retain_identity_replacements(model, result):
         result.additions = additions
 
 
-def _path_blocker(model, path, moving, replaced_keys, clearance):
-    moving_clearance = max(clearance, model.minimum_clearance,
-                           model.net_clearances.get(moving.net_id, 0.0))
-    replaced_segments = [segment for segment in model.segments
-                         if segment_key(segment) in replaced_keys]
+def _capsule_interval(a, b, target_a, target_b, radius):
+    """Parameter interval where ``a->b`` lies inside a target-track capsule."""
+    if radius < -1e-12:
+        return None
+    radius = max(0.0, radius)
+
+    def distance_at(t):
+        point = (a[0] + t * (b[0] - a[0]),
+                 a[1] + t * (b[1] - a[1]))
+        return point_segment_distance(point, target_a, target_b)
+
+    low, high = 0.0, 1.0
+    for _ in range(64):
+        left = (2.0 * low + high) / 3.0
+        right = (low + 2.0 * high) / 3.0
+        if distance_at(left) <= distance_at(right):
+            high = right
+        else:
+            low = left
+    minimum = (low + high) / 2.0
+    if distance_at(minimum) > radius + 1e-9:
+        return None
+
+    if distance_at(0.0) <= radius + 1e-9:
+        interval_start = 0.0
+    else:
+        outside, inside = 0.0, minimum
+        for _ in range(64):
+            middle = (outside + inside) / 2.0
+            if distance_at(middle) <= radius + 1e-9:
+                inside = middle
+            else:
+                outside = middle
+        interval_start = inside
+
+    if distance_at(1.0) <= radius + 1e-9:
+        interval_end = 1.0
+    else:
+        inside, outside = minimum, 1.0
+        for _ in range(64):
+            middle = (inside + outside) / 2.0
+            if distance_at(middle) <= radius + 1e-9:
+                inside = middle
+            else:
+                outside = middle
+        interval_end = inside
+    return interval_start, interval_end
+
+
+def _interval_is_covered(required, covers):
+    if required is None:
+        return True
+    cursor = required[0]
+    for start, end in sorted(covers):
+        if end < cursor - 1e-9:
+            continue
+        if start > cursor + 1e-9:
+            return False
+        cursor = max(cursor, end)
+        if cursor >= required[1] - 1e-9:
+            return True
+    return False
+
+
+def _clearance_violation_is_preexisting(a, b, moving, foreign, required,
+                                         immutable_cover_keys, context):
+    """Whether all newly conflicting copper is inside immutable same-net copper."""
+    violation = _capsule_interval(
+        a, b, (foreign.start_x, foreign.start_y),
+        (foreign.end_x, foreign.end_y), required - 1e-6)
+    covers = []
+    for existing in context.nearby_segments(a, b, 0.0, moving.width):
+        if segment_key(existing) not in immutable_cover_keys:
+            continue
+        if existing.net_id != moving.net_id or existing.layer != moving.layer:
+            continue
+        if existing.width + 1e-9 < moving.width:
+            continue
+        cover_radius = (existing.width - moving.width) / 2.0
+        interval = _capsule_interval(
+            a, b, (existing.start_x, existing.start_y),
+            (existing.end_x, existing.end_y), cover_radius)
+        if interval is not None:
+            covers.append(interval)
+    return _interval_is_covered(violation, covers)
+
+
+def _path_blocker(model, path, moving, replaced_keys, clearance, context=None,
+                  immutable_cover_keys=()):
+    context = context or PlannerContext(model)
+    moving_clearance = max(clearance, _effective_clearance(model, moving))
+    replaced_segments = [context.segment_by_key[key] for key in replaced_keys
+                         if key in context.segment_by_key]
 
     def unchanged_copper(a, b):
         """True when the candidate only retains part of removed copper.
@@ -77,6 +173,7 @@ def _path_blocker(model, path, moving, replaced_keys, clearance):
         violation that the original KiCad geometry never had.
         """
         return any(
+            moving.width <= segment.width + 1e-6 and
             point_segment_distance(a, (segment.start_x, segment.start_y),
                                    (segment.end_x, segment.end_y)) <= 1e-6 and
             point_segment_distance(b, (segment.start_x, segment.start_y),
@@ -92,19 +189,25 @@ def _path_blocker(model, path, moving, replaced_keys, clearance):
             if any(not (x0 + edge_margin <= p[0] <= x1 - edge_margin and
                         y0 + edge_margin <= p[1] <= y1 - edge_margin)
                    for p in (a, b)):
-                return "board_edge"
-        for other in model.segments:
+                return "board_edge", 0
+        for other in context.nearby_segments(
+                a, b, moving_clearance, moving.width):
             if segment_key(other) in replaced_keys:
                 continue
             if other.layer != moving.layer or other.net_id == moving.net_id:
                 continue
-            pair_clearance = max(moving_clearance,
-                                 model.net_clearances.get(other.net_id, 0.0))
+            pair_clearance = max(
+                moving_clearance, _effective_clearance(model, other))
             required = pair_clearance + (moving.width + other.width) / 2.0
             if segment_distance(a, b, (other.start_x, other.start_y),
                                 (other.end_x, other.end_y)) < required - 1e-6:
-                return "foreign_track_clearance"
-        for obstacle in model.obstacles:
+                if _clearance_violation_is_preexisting(
+                        a, b, moving, other, required,
+                        immutable_cover_keys, context):
+                    continue
+                return "foreign_track_clearance", other.net_id
+        for obstacle in context.nearby_obstacles(
+                a, b, moving_clearance, moving.width):
             if obstacle.net_id == moving.net_id:
                 continue
             if obstacle.layers and moving.layer not in obstacle.layers:
@@ -112,8 +215,9 @@ def _path_blocker(model, path, moving, replaced_keys, clearance):
             required = max(moving_clearance, obstacle.clearance) + \
                 moving.width / 2.0 + obstacle.radius
             if point_segment_distance((obstacle.x, obstacle.y), a, b) < required - 1e-6:
-                return obstacle.kind + "_clearance"
-        for pad in model.pad_regions:
+                return obstacle.kind + "_clearance", obstacle.net_id
+        for pad in context.nearby_pads(
+                a, b, moving_clearance, moving.width):
             if pad.net_id == moving.net_id:
                 continue
             if pad.layers and moving.layer not in pad.layers:
@@ -128,17 +232,97 @@ def _path_blocker(model, path, moving, replaced_keys, clearance):
                 continue
             if segment_hits_pad(
                     pad, a, b, margin=margin):
-                return "pad_clearance"
-        for keepout in model.keepouts:
+                return "pad_clearance", pad.net_id
+        for keepout in context.nearby_keepouts(
+                a, b, clearance, moving.width):
             if keepout.layers and moving.layer not in keepout.layers:
                 continue
             if path_hits_polygon(a, b, list(keepout.points), clearance + moving.width / 2.0):
-                return "keepout"
+                return "keepout", 0
     return None
 
 
 def _increment(counts, key):
     counts[key] = counts.get(key, 0) + 1
+
+
+def _is_octolinear(a, b, tolerance=1e-6):
+    """Return whether a segment follows a 0/45/90-degree direction."""
+    dx, dy = abs(b[0] - a[0]), abs(b[1] - a[1])
+    return (dx <= tolerance or dy <= tolerance or
+            abs(dx - dy) <= tolerance)
+
+
+def _non_octolinear_count(segments):
+    return sum(not _is_octolinear(
+        (segment.start_x, segment.start_y),
+        (segment.end_x, segment.end_y)) for segment in segments)
+
+
+def _path_additions(path, originals, layer, net_id):
+    """Map every original width run onto a movable replacement path.
+
+    Width changes are electrical/routing properties, not fixed geometric
+    anchors.  Their order and exact values are preserved, while their position
+    is allowed to slide along the new octolinear path.
+    """
+    runs = []
+    for segment in originals:
+        segment_length = length(
+            (segment.start_x, segment.start_y),
+            (segment.end_x, segment.end_y))
+        run = (segment.width, segment.clearance)
+        run_key = (round(run[0], 6), round(run[1], 6))
+        if (runs and
+                (round(runs[-1][0][0], 6),
+                 round(runs[-1][0][1], 6)) == run_key):
+            runs[-1] = (runs[-1][0], runs[-1][1] + segment_length)
+        else:
+            runs.append((run, segment_length))
+    if not runs:
+        return []
+
+    edge_lengths = [length(a, b) for a, b in zip(path, path[1:])]
+    new_total = sum(edge_lengths)
+    old_total = sum(run_length for _run, run_length in runs)
+    if new_total <= 1e-9 or old_total <= 1e-9:
+        return []
+
+    transitions = []
+    accumulated = 0.0
+    for _run, run_length in runs[:-1]:
+        accumulated += run_length
+        transitions.append(new_total * accumulated / old_total)
+
+    additions = []
+    travelled = 0.0
+    run_index = 0
+    for a, b, edge_length in zip(path, path[1:], edge_lengths):
+        if edge_length <= 1e-9:
+            continue
+        cuts = [travelled]
+        cuts.extend(value for value in transitions
+                    if travelled + 1e-9 < value < travelled + edge_length - 1e-9)
+        cuts.append(travelled + edge_length)
+        for start_distance, end_distance in zip(cuts, cuts[1:]):
+            midpoint = (start_distance + end_distance) / 2.0
+            while (run_index < len(transitions) and
+                   midpoint > transitions[run_index] - 1e-9):
+                run_index += 1
+            local_start = (start_distance - travelled) / edge_length
+            local_end = (end_distance - travelled) / edge_length
+            start = a if local_start <= 1e-12 else (
+                a[0] + (b[0] - a[0]) * local_start,
+                a[1] + (b[1] - a[1]) * local_start)
+            end = b if local_end >= 1.0 - 1e-12 else (
+                a[0] + (b[0] - a[0]) * local_end,
+                a[1] + (b[1] - a[1]) * local_end)
+            if length(start, end) > 1e-9:
+                additions.append(AddedSegment(
+                    start, end, runs[run_index][0][0], layer, net_id,
+                    runs[run_index][0][1]))
+        travelled += edge_length
+    return additions
 
 
 def _endpoint_moved_into_pad(original, candidate, terminal, pad_targets):
@@ -206,7 +390,8 @@ def _split_eligible_intersections(model, eligible, pass_index):
             counter += 1
             segments.append(Segment(
                 a[0], a[1], b[0], b[1], moving.width, moving.layer,
-                moving.net_id, synthetic, False, False, moving.net_name))
+                moving.net_id, synthetic, False, False, moving.net_name,
+                moving.clearance))
             next_eligible.add(synthetic)
     return replace(model, segments=segments), next_eligible
 
@@ -227,15 +412,51 @@ def _point_is_terminal(model, segment, point, excluded_key):
         for pad in model.pad_regions)
 
 
-def _crosses_wider_track(model, segment, point, excluded_key):
+def _point_has_copper_terminal(model, segment, point, excluded_key):
+    """Return whether the outer end still touches useful same-net copper."""
+    for other in model.segments:
+        if (segment_key(other) == excluded_key or
+                other.net_id != segment.net_id or
+                other.layer != segment.layer):
+            continue
+        if point_segment_distance(
+                point, (other.start_x, other.start_y),
+                (other.end_x, other.end_y)) <= (
+                    segment.width + other.width) / 2.0 + 1e-6:
+            return True
     return any(
-        segment_key(other) != excluded_key and
-        other.net_id == segment.net_id and other.layer == segment.layer and
-        other.width > segment.width + 1e-6 and
-        point_segment_distance(
-            point, (other.start_x, other.start_y),
-            (other.end_x, other.end_y)) <= 1e-6
-        for other in model.segments)
+        pad.net_id == segment.net_id and
+        (not pad.layers or segment.layer in pad.layers) and
+        segment_hits_pad(pad, point, point, margin=segment.width / 2.0 + 1e-6)
+        for pad in model.pad_regions)
+
+
+def _stub_pruning_contact(model, segment, point, excluded_key):
+    """Classify the same-net contact that may make this a removable T tail.
+
+    Preserve the original safe case (the tail terminates on wider through
+    copper), and also accept the reported inverse-width case only when the
+    narrower track itself terminates exactly at the T.  Merely touching the
+    interior of a narrower track is not enough: accepting every same-net
+    contact can recursively consume legitimate analytical split pieces.
+    """
+    inverse_width_endpoint = False
+    for other in model.segments:
+        if (segment_key(other) == excluded_key or
+                other.net_id != segment.net_id or
+                other.layer != segment.layer or
+                point_segment_distance(
+                    point, (other.start_x, other.start_y),
+                    (other.end_x, other.end_y)) > 1e-6):
+            continue
+        if other.width > segment.width + 1e-6:
+            return "wider_through_track"
+        if (other.width < segment.width - 1e-6 and
+                vertex(*point) in {
+                    vertex(other.start_x, other.start_y),
+                    vertex(other.end_x, other.end_y)}):
+            inverse_width_endpoint = True
+    return "narrower_endpoint" if inverse_width_endpoint else None
 
 
 def _prune_generated_stubs(model, eligible):
@@ -264,12 +485,18 @@ def _prune_generated_stubs(model, eligible):
                     (segment.net_id, segment.layer, vertex(*junction))]
                 junction_crossing = _point_is_terminal(
                     current_model, segment, junction, key)
+                contact = _stub_pruning_contact(
+                    current_model, segment, junction, key)
                 outer_terminal = _point_is_terminal(
                     current_model, segment, outer, key)
-                if (outer_count == 1 and not outer_terminal and
-                        (junction_count >= 3 or junction_crossing) and
-                        _crosses_wider_track(
-                            current_model, segment, junction, key)):
+                if contact == "narrower_endpoint":
+                    # The inverse-width case needs the stronger copper-area
+                    # check; otherwise nearby useful copper can look detached
+                    # merely because its centrelines do not meet exactly.
+                    outer_terminal = _point_has_copper_terminal(
+                        current_model, segment, outer, key)
+                if (outer_count == 1 and not outer_terminal and contact and
+                        (junction_count >= 3 or junction_crossing)):
                     removed = segment
                     break
             if removed is not None:
@@ -293,7 +520,8 @@ def _apply_to_model(model, eligible, plan, pass_index):
         segments.append(Segment(
             addition.start[0], addition.start[1], addition.end[0],
             addition.end[1], addition.width, addition.layer, addition.net_id,
-            key, False, False, names.get(addition.net_id, "")))
+            key, False, False, names.get(addition.net_id, ""),
+            addition.clearance))
         next_eligible.add(key)
     return replace(model, segments=segments), next_eligible
 
@@ -314,8 +542,10 @@ def _merge_final_collinear(model, eligible):
                 second_key = segment_key(second)
                 if (second_key not in eligible or
                         not second_key.startswith(_SYNTHETIC_PREFIX) or
-                        (first.net_id, first.layer, round(first.width, 6)) !=
-                        (second.net_id, second.layer, round(second.width, 6))):
+                        (first.net_id, first.layer, round(first.width, 6),
+                         round(first.clearance, 6)) !=
+                        (second.net_id, second.layer, round(second.width, 6),
+                         round(second.clearance, 6))):
                     continue
                 second_ends = ((second.start_x, second.start_y),
                                (second.end_x, second.end_y))
@@ -336,7 +566,7 @@ def _merge_final_collinear(model, eligible):
                 merged = (first, second, Segment(
                     outer_first[0], outer_first[1], outer_second[0],
                     outer_second[1], first.width, first.layer, first.net_id,
-                    key, False, False, first.net_name))
+                    key, False, False, first.net_name, first.clearance))
                 break
             if merged is not None:
                 break
@@ -366,7 +596,7 @@ def _compose_refined_plan(original_model, original_eligible, final_model,
             result.additions.append(AddedSegment(
                 (segment.start_x, segment.start_y),
                 (segment.end_x, segment.end_y), segment.width,
-                segment.layer, segment.net_id))
+                segment.layer, segment.net_id, segment.clearance))
     before_mm = sum(
         length((segment.start_x, segment.start_y),
                (segment.end_x, segment.end_y))
@@ -380,11 +610,14 @@ def _compose_refined_plan(original_model, original_eligible, final_model,
     result.saved_mm = max(0.0, before_mm - after_mm)
     result.chains_considered = sum(plan.chains_considered for plan in passes)
     result.chains_changed = sum(plan.chains_changed for plan in passes)
+    result.angle_corrections = sum(plan.angle_corrections for plan in passes)
     for plan in passes:
         result.warnings.extend(plan.warnings)
         result.transformations.extend(plan.transformations)
         for key, value in plan.search_counts.items():
             result.search_counts[key] = result.search_counts.get(key, 0) + value
+        for key, value in plan.blocking_nets.items():
+            result.blocking_nets[key] = result.blocking_nets.get(key, 0) + value
     for stub in pruned_stubs:
         stub_mm = length((stub.start_x, stub.start_y),
                          (stub.end_x, stub.end_y))
@@ -417,15 +650,26 @@ def _refine_plan(model, eligible, initial, planner_kwargs, max_passes=3):
         passes.append(step)
         simulated, current_eligible = _apply_to_model(
             simulated, current_eligible, step, pass_index)
-    return _compose_refined_plan(
+    refined = _compose_refined_plan(
         model, eligible, simulated, current_eligible, passes, pruned_stubs)
+
+    def objective(plan):
+        return (
+            plan.angle_corrections, round(plan.saved_mm, 9),
+            len(plan.remove_keys) - len(plan.additions),
+            -len(plan.additions))
+
+    # A newly available safe candidate can alter a later refinement pass, but
+    # it must never make the final answer worse than the already-valid initial
+    # optimum. This also makes relaxing an over-conservative rule monotonic.
+    return refined if objective(refined) > objective(initial) else initial
 
 
 def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                            allow_equal_length_simpler=False, clearance=0.1,
                            equal_length_tolerance=0.001,
                            span_strategy="farthest", path_preference=0,
-                           collect_statistics=True):
+                           collect_statistics=True, planner_context=None):
     """Return an immutable edit plan; never mutates ``model``.
 
     Original octolinear smoothing algorithm: KiCadRoutingTools, DrAndyHaas.
@@ -433,7 +677,12 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
     Non-selected copper remains in incidence and obstacle calculations.
     """
     eligible = {str(key) for key in eligible_segment_keys}
+    planner_context = (planner_context if planner_context is not None and
+                       planner_context.model is model else PlannerContext(model))
+    immutable_cover_keys = set(planner_context.segment_by_key) - eligible
     result = GlossResult()
+    net_names = {segment.net_id: segment.net_name
+                 for segment in model.segments if segment.net_id > 0}
     all_incidence = defaultdict(int)
     for s in model.segments:
         all_incidence[(s.net_id, vertex(s.start_x, s.start_y))] += 1
@@ -450,10 +699,10 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
     for s in model.segments:
         if (segment_key(s) in eligible and not s.locked and not s.arc and
                 s.net_id > 0 and length((s.start_x, s.start_y), (s.end_x, s.end_y)) > 1e-9):
-            groups[(s.net_id, s.layer, round(s.width, 6))].append(s)
+            groups[(s.net_id, s.layer)].append(s)
 
-    for net_id, layer, width in sorted(groups):
-        candidates = sorted(groups[(net_id, layer, width)], key=segment_key)
+    for net_id, layer in sorted(groups):
+        candidates = sorted(groups[(net_id, layer)], key=segment_key)
         adjacency = defaultdict(list)
         for s in candidates:
             adjacency[vertex(s.start_x, s.start_y)].append(s)
@@ -502,6 +751,8 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                     choices = []
                     for j in range(len(chain), i, -1):
                         old_len = cumulative[j] - cumulative[i]
+                        span = chain[i:j]
+                        angle_corrections = _non_octolinear_count(span)
                         replaced = {segment_key(s) for s in chain[i:j]}
                         start_terminal = (net_id, layer, vertex(*points[i]))
                         end_terminal = (net_id, layer, vertex(*points[j]))
@@ -513,8 +764,9 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                                       if i == 0 else ())
                         end_pads = (pad_terminal_targets.get(end_terminal, ())
                                     if j == len(chain) else ())
-                        if j == i + 1 and not (
-                                start_targets or end_targets or start_pads or end_pads):
+                        if (j == i + 1 and not angle_corrections and not
+                                (start_targets or end_targets or
+                                 start_pads or end_pads)):
                             continue
                         paths = []
                         for candidate_start, candidate_end in movable_endpoint_pairs(
@@ -531,25 +783,40 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                             if collect_statistics:
                                 _increment(result.search_counts, "paths_evaluated")
                             new_len = sum(length(a, b) for a, b in zip(path, path[1:]))
-                            new_count = len(path) - 1
+                            additions = _path_additions(
+                                path, span, layer, net_id)
+                            new_count = len(additions)
                             gain = old_len - new_len
-                            acceptable = gain >= min_gain or (
+                            acceptable = angle_corrections > 0 or gain >= min_gain or (
                                 allow_equal_length_simpler and abs(gain) <= equal_length_tolerance
                                 and new_count < j - i)
                             if not acceptable:
                                 if collect_statistics:
                                     _increment(result.search_counts, "not_improving")
                                 continue
-                            blocker = _path_blocker(
-                                model, path, chain[i], replaced, clearance)
+                            blocker = None
+                            for addition in additions:
+                                moving = replace(chain[i], width=addition.width)
+                                blocker = _path_blocker(
+                                    model, (addition.start, addition.end),
+                                    moving, replaced, clearance, planner_context,
+                                    immutable_cover_keys)
+                                if blocker:
+                                    break
                             if blocker:
                                 if collect_statistics:
-                                    _increment(result.search_counts, blocker)
+                                    reason, blocker_net_id = blocker
+                                    _increment(result.search_counts, reason)
+                                    if blocker_net_id > 0:
+                                        label = (net_names.get(blocker_net_id) or
+                                                 "net {}".format(blocker_net_id))
+                                        _increment(result.blocking_nets, label)
                                 continue
                             if collect_statistics:
                                 _increment(result.search_counts, "accepted_options")
-                            choices.append((j, path, max(0.0, gain), replaced,
-                                            new_count, old_len))
+                            choices.append((j, path, gain, replaced,
+                                            new_count, old_len,
+                                            angle_corrections, additions))
                         if choices and span_strategy == "farthest":
                             break
                     return choices
@@ -560,35 +827,39 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                     # over the WHOLE chain, then segment reduction. This avoids
                     # the A-before-B bias of greedy shortcut acceptance.
                     options = {i: choices_at(i) for i in range(len(chain))}
-                    best = {len(chain): (0.0, 0, [])}
+                    best = {len(chain): (0, 0.0, 0, [])}
                     for i in range(len(chain) - 1, -1, -1):
-                        skip = best.get(i + 1, (0.0, 0, []))
+                        skip = best.get(i + 1, (0, 0.0, 0, []))
                         candidates_dp = [skip]
                         for choice in options.get(i, ()):
-                            j, path, gain, replaced, new_count, _old_len = choice
-                            tail = best.get(j, (0.0, 0, []))
+                            (j, path, gain, replaced, new_count, _old_len,
+                             corrections, _additions) = choice
+                            tail = best.get(j, (0, 0.0, 0, []))
                             reduction = (j - i) - new_count
-                            candidates_dp.append((gain + tail[0], reduction + tail[1],
-                                                  [(i, choice[:4])] + tail[2]))
+                            candidates_dp.append((
+                                corrections + tail[0], gain + tail[1],
+                                reduction + tail[2], [(i, choice)] + tail[3]))
 
                         def dp_key(candidate):
-                            signature = tuple((start, span[0], tuple(span[1]))
-                                              for start, span in candidate[2])
-                            return (round(candidate[0], 9), candidate[1],
+                            signature = tuple((start, selected[0], tuple(selected[1]))
+                                              for start, selected in candidate[3])
+                            return (candidate[0], round(candidate[1], 9), candidate[2],
                                     tuple((-a, -b, path) for a, b, path in signature))
 
                         best[i] = max(candidates_dp, key=dp_key)
-                    spans = {start: span for start, span in best[0][2]}
+                    spans = {start: selected for start, selected in best[0][3]}
                 else:
                     i = 0
                     while i < len(chain):
                         choices = choices_at(i)
                         if choices:
                             if span_strategy == "max_gain":
-                                choices.sort(key=lambda c: (-c[2], c[4], -c[0], tuple(c[1])))
+                                choices.sort(key=lambda c: (-c[6], -c[2], c[4],
+                                                           -c[0], tuple(c[1])))
                             elif span_strategy == "farthest":
-                                choices.sort(key=lambda c: (-c[0], -c[2], c[4], tuple(c[1])))
-                            found = choices[0][:4]
+                                choices.sort(key=lambda c: (-c[6], -c[0], -c[2],
+                                                           c[4], tuple(c[1])))
+                            found = choices[0]
                         else:
                             found = None
                         if found:
@@ -604,7 +875,8 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                     if k not in spans:
                         k += 1
                         continue
-                    j, path, gain, replaced = spans[k]
+                    (j, path, gain, replaced, _new_count, _old_len,
+                     corrections, additions) = spans[k]
                     start_terminal = (net_id, layer, vertex(*points[k]))
                     end_terminal = (net_id, layer, vertex(*points[j]))
                     if collect_statistics:
@@ -626,17 +898,18 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                                      "track_slide" if track_moved else
                                      "fixed_endpoints")
                         result.transformations.append(classify_transformation(
-                            chain[k:j], path, mechanism, equal_length_tolerance))
+                            chain[k:j], path, mechanism, equal_length_tolerance,
+                            after_segments=len(additions)))
                     result.remove_keys.extend(segment_key(s) for s in chain[k:j])
-                    result.additions.extend(
-                        AddedSegment(a, b, width, layer, net_id)
-                        for a, b in zip(path, path[1:]) if length(a, b) > 1e-6)
+                    result.additions.extend(additions)
                     result.saved_mm += gain
+                    result.angle_corrections += corrections
                     chain_changed = True
                     k = j
                 if chain_changed:
                     result.chains_changed += 1
 
+    result.saved_mm = max(0.0, result.saved_mm)
     _retain_identity_replacements(model, result)
     validate_result(model, eligible, result)
     return result
@@ -645,11 +918,33 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
 def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
     """Generate deterministic global and isolated-group fallback plans."""
     max_refinement_passes = kwargs.pop("max_refinement_passes", 3)
+    parallel = kwargs.pop("parallel", False)
+    allow_netclass_seed = kwargs.pop("_allow_netclass_seed", True)
+    kwargs.setdefault("planner_context", PlannerContext(model))
     plans = []
     seen = set()
     rejected = []
 
-    def add_plan(plan):
+    known_segments = {segment_key(segment): segment
+                      for segment in model.segments}
+
+    def measured_gain(plan):
+        removed_mm = sum(
+            length((known_segments[key].start_x, known_segments[key].start_y),
+                   (known_segments[key].end_x, known_segments[key].end_y))
+            for key in set(plan.remove_keys) if key in known_segments)
+        added_mm = sum(length(addition.start, addition.end)
+                       for addition in plan.additions)
+        return max(0.0, removed_mm - added_mm)
+
+    def add_plan(plan, already_validated=False):
+        # Every route into the candidate pool uses the same complete safety
+        # gate. In particular, independently safe width/net plans are not
+        # necessarily safe after being combined.
+        if not already_validated:
+            validate_result(model, set(eligible_segment_keys), plan,
+                            check_connectivity=True)
+        plan.saved_mm = measured_gain(plan)
         signature = (
             tuple(sorted(plan.remove_keys)),
             tuple(sorted((a.start, a.end, a.width, a.layer, a.net_id)
@@ -659,70 +954,129 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
             seen.add(signature)
             plans.append(plan)
 
-    # Global weighted interval scheduling now evaluates every endpoint and
-    # elbow candidate deterministically, so the older greedy/path-order passes
-    # cannot improve its objective and only multiply runtime.
-    try:
-        add_plan(smooth_selected_chains(
-            model, eligible_segment_keys, span_strategy="global",
-            path_preference=0, **kwargs))
-    except ValueError as error:
-        rejected.append(str(error))
-
-    # Batch fallback pool. If KiCad rejects the combined optimum, try leaving
-    # out one independently scoped group, then each group alone. This keeps one
-    # difficult track from blocking every other selected track while retaining
-    # deterministic, gain-ranked behavior.
     eligible = set(eligible_segment_keys)
     groups = defaultdict(set)
+    primary_groups = defaultdict(set)
     for segment in model.segments:
         key = segment_key(segment)
         if key in eligible:
-            groups[(segment.net_id, segment.layer, round(segment.width, 6))].add(key)
-    group_plans = []
-    # With a single group the global plan above is exactly the same call.  Do
-    # not repeat an expensive no-op search (formerly visible as a GUI freeze
-    # on dense tuned connections).
-    for group_key in sorted(groups) if len(groups) > 1 else ():
-        try:
-            plan = smooth_selected_chains(
-                model, groups[group_key], span_strategy="global",
-                path_preference=0, **kwargs)
-            if plan.changed:
-                group_plans.append(plan)
-        except ValueError as error:
-            rejected.append(str(error))
+            primary_groups[(segment.net_id, segment.layer)].add(key)
+            groups[(segment.net_id, segment.layer,
+                    round(segment.width, 6))].add(key)
+    group_keys = sorted(groups) if len(groups) > 1 else []
+    primary_keys = sorted(primary_groups)
+    parallel_rows = None
+    # Process startup is intentionally reserved for substantial selections;
+    # ordinary one-connection glosses stay in-process and avoid IPC latency.
+    if (parallel and len(eligible) >= 64 and
+            len(primary_keys) + len(group_keys) > 1):
+        from .parallel import run_parallel_group_plans
+        tasks = [(('primary',) + key,
+                  tuple(sorted(primary_groups[key]))) for key in primary_keys]
+        # A single-width net/layer fallback is byte-for-byte the same search as
+        # its primary task. Reuse that result instead of sending duplicate work
+        # to a subprocess; only mixed-width subgroups need separate searches.
+        tasks.extend(
+            (('fallback',) + key, tuple(sorted(groups[key])))
+            for key in group_keys
+            if groups[key] != primary_groups[key[:2]])
+        parallel_rows = run_parallel_group_plans(model, tasks, kwargs)
+        if parallel_rows is not None and any(row[2] for row in parallel_rows):
+            rejected.extend(row[2] for row in parallel_rows if row[2])
+            parallel_rows = None
 
     def merge(selected):
         merged = GlossResult()
         for plan in selected:
             merged.remove_keys.extend(plan.remove_keys)
             merged.additions.extend(plan.additions)
-            merged.saved_mm += plan.saved_mm
             merged.chains_considered += plan.chains_considered
             merged.chains_changed += plan.chains_changed
+            merged.angle_corrections += plan.angle_corrections
             merged.warnings.extend(plan.warnings)
             merged.transformations.extend(plan.transformations)
             for key, value in plan.search_counts.items():
                 merged.search_counts[key] = merged.search_counts.get(key, 0) + value
-        validate_result(model, eligible, merged)
+            for key, value in plan.blocking_nets.items():
+                merged.blocking_nets[key] = merged.blocking_nets.get(key, 0) + value
+        merged.saved_mm = measured_gain(merged)
         return merged
 
-    if len(group_plans) > 1:
+    # Global weighted interval scheduling now evaluates every endpoint and
+    # elbow candidate deterministically, so the older greedy/path-order passes
+    # cannot improve its objective and only multiply runtime.
+    if parallel_rows is not None:
+        primary_results = {row[0][1:]: row[1] for row in parallel_rows
+                           if row[0][0] == 'primary'}
         try:
-            add_plan(merge(group_plans))
+            add_plan(merge([primary_results[key] for key in primary_keys]))
         except ValueError as error:
             rejected.append(str(error))
-        for omitted in range(len(group_plans)):
+    else:
+        try:
+            add_plan(smooth_selected_chains(
+                model, eligible_segment_keys, span_strategy="global",
+                path_preference=0, **kwargs), already_validated=True)
+        except ValueError as error:
+            rejected.append(str(error))
+
+    # Batch fallback pool. If KiCad rejects the combined optimum, try leaving
+    # out one independently scoped group, then each group alone. This keeps one
+    # difficult track from blocking every other selected track while retaining
+    # deterministic, gain-ranked behavior.
+    group_plans = []
+    # With a single group the global plan above is exactly the same call.  Do
+    # not repeat an expensive no-op search (formerly visible as a GUI freeze
+    # on dense tuned connections).
+    if parallel_rows is not None:
+        primary_results = {row[0][1:]: row[1] for row in parallel_rows
+                           if row[0][0] == 'primary'}
+        for group_key, plan, _error in parallel_rows:
+            if (group_key[0] == 'fallback' and plan is not None and
+                    plan.changed):
+                group_plans.append(plan)
+        for group_key in group_keys:
+            if groups[group_key] == primary_groups[group_key[:2]]:
+                plan = primary_results.get(group_key[:2])
+                if plan is not None and plan.changed:
+                    group_plans.append(plan)
+    else:
+        for group_key in group_keys:
             try:
-                add_plan(merge([p for index, p in enumerate(group_plans)
-                                if index != omitted]))
+                plan = smooth_selected_chains(
+                    model, groups[group_key], span_strategy="global",
+                    path_preference=0, **kwargs)
+                if plan.changed:
+                    group_plans.append(plan)
             except ValueError as error:
                 rejected.append(str(error))
+
+    if len(group_plans) > 1:
+        merged_fallback_valid = False
+        try:
+            add_plan(merge(group_plans))
+            merged_fallback_valid = True
+        except ValueError as error:
+            rejected.append(str(error))
+        # Leave-one-out plans only add value when the full combination is
+        # unsafe. Avoid O(group_count) whole-board connectivity validations on
+        # the normal path where all independent groups combine successfully.
+        if not merged_fallback_valid:
+            for omitted in range(len(group_plans)):
+                try:
+                    add_plan(merge([p for index, p in enumerate(group_plans)
+                                    if index != omitted]))
+                except ValueError as error:
+                    rejected.append(str(error))
     for plan in group_plans:
-        add_plan(plan)
-    plans.sort(key=lambda p: (-p.saved_mm, len(p.additions),
-                              tuple(sorted(p.remove_keys))))
+        try:
+            add_plan(plan, already_validated=True)
+        except ValueError as error:
+            rejected.append(str(error))
+    plans.sort(key=lambda p: (
+        -p.angle_corrections, -round(p.saved_mm, 9),
+        -(len(p.remove_keys) - len(p.additions)), len(p.additions),
+        tuple(sorted(p.remove_keys))))
     if not plans:
         plans.append(GlossResult(warnings=sorted(set(rejected))))
     elif (plans[0].changed and max_refinement_passes and
@@ -731,8 +1085,50 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
             plans[0] = _refine_plan(
                 model, eligible_segment_keys, plans[0], dict(kwargs),
                 max_refinement_passes)
-            plans.sort(key=lambda p: (-p.saved_mm, len(p.additions),
-                                      tuple(sorted(p.remove_keys))))
+            plans.sort(key=lambda p: (
+                -p.angle_corrections, -round(p.saved_mm, 9),
+                -(len(p.remove_keys) - len(p.additions)), len(p.additions),
+                tuple(sorted(p.remove_keys))))
         except ValueError as error:
             plans[0].warnings.append("Refinement rejected: " + str(error))
+
+    # With mixed widths, relaxing a clearance can expose a different first
+    # refinement and occasionally lead the local search to a worse basin. A
+    # second, more conservative netclass seed preserves the former safe
+    # solution as a candidate. It is intentionally limited to mixed-width
+    # scopes, where width-run topology makes this useful, and cannot recurse.
+    selected_segments = [
+        segment for segment in model.segments
+        if segment_key(segment) in eligible]
+    mixed_width = any(
+        len({round(segment.width, 6) for segment in selected_segments
+             if (segment.net_id, segment.layer) == group}) > 1
+        for group in {(segment.net_id, segment.layer)
+                      for segment in selected_segments})
+    resolved_differs = any(
+        segment.clearance >= 0.0 and
+        abs(segment.clearance - max(
+            model.minimum_clearance,
+            model.net_clearances.get(segment.net_id, 0.0))) > 1e-9
+        for segment in selected_segments)
+    if allow_netclass_seed and mixed_width and resolved_differs:
+        fallback_model = replace(
+            model, segments=[replace(segment, clearance=-1.0)
+                             for segment in model.segments])
+        fallback_kwargs = dict(kwargs)
+        fallback_kwargs.pop("planner_context", None)
+        try:
+            fallback = generate_candidate_plans(
+                fallback_model, eligible_segment_keys,
+                max_refinement_passes=max_refinement_passes,
+                parallel=False, _allow_netclass_seed=False,
+                **fallback_kwargs)[0]
+            if fallback.changed:
+                add_plan(fallback)
+        except ValueError as error:
+            rejected.append(str(error))
+        plans.sort(key=lambda p: (
+            -p.angle_corrections, -round(p.saved_mm, 9),
+            -(len(p.remove_keys) - len(p.additions)), len(p.additions),
+            tuple(sorted(p.remove_keys))))
     return plans

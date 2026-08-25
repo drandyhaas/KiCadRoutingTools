@@ -44,10 +44,11 @@ The active project repository is the fca1 fork:
 4. A successful operation returns silently. When no copper is changed for any
    reason, KiCad's standard warning bell is played exactly once.
 5. **KiCad Track Gloss — Diagnostic** runs the same operation and displays a
-   selectable report containing selection counts, protections, candidates,
-   length and segment savings, categorized transformations, search rejection
-   counts, and no-op or error details. The final JSON block is intended for
-   comparing boards and feeding observations back into autorouter heuristics.
+   three-tab report. **Résultat** prominently states the saved length in mm and
+   the before/after segment count, **Détails** contains selection, protection,
+   transformation, rejection, and blocking-net information, and **JSON** keeps
+   the machine-readable payload separate. **Copier l'onglet** copies only the
+   visible tab; **Copier tout** copies the complete report for troubleshooting.
 
 Unexpected internal errors display an error report; failures during plan
 application request an in-memory rollback. Normal no-op conditions never open
@@ -56,18 +57,49 @@ a message window.
 ## Optimization model
 
 Selected seeds are expanded independently, deduplicated, and converted into an
-API-neutral `BoardModel`. Candidate chains are grouped by net, copper layer,
-and width. The engine explores deterministic octolinear shortcuts and uses
+API-neutral `BoardModel`. Candidate chains are grouped by net and copper layer;
+exact width values and their order remain attached to the replacement copper,
+but a width-transition point may move during optimization. The engine explores
+deterministic octolinear shortcuts and uses
 weighted interval scheduling across each chain. Multi-net candidates are
 ranked by saved length, then by segment reduction and a stable geometry
 signature. Isolated group plans remain available when a combined candidate is
 not valid.
 
+A shared planner context precomputes track identities, maximum rule envelopes,
+pad rotations, and conservative spatial indexes. Candidate clearance and
+connectivity checks query only nearby geometry before running the same exact
+kernels. Whole-board validations are retained for the chosen combined plan;
+redundant leave-one-out connectivity replays are avoided after their component
+plans have already passed the complete checks.
+
+Selections of at least 64 eligible segments may distribute independent
+net/layer and exact-width fallback searches over as many as four local Python
+worker processes. Results are serialized without `pcbnew`, sorted
+deterministically, and required to match sequential planning. If KiCad has no
+safe sibling Python interpreter or a worker fails, planning automatically
+continues sequentially. Small selections never start workers, avoiding process
+startup latency during ordinary one-connection glosses.
+
+Every changed path is octolinear. Removing a non-0/45/90-degree segment takes
+priority over length reduction, so the engine may accept a small length increase
+when that is required to normalize imported or manually drawn arbitrary-angle
+copper. Among safe octolinear solutions it then maximizes saved length.
+
+Optimization uses exact existing copper geometry and intersection coordinates,
+not PCB Editor's active drawing grid. This preserves connections to tracks and
+pads that may themselves be off-grid. The diagnostic states this explicitly;
+grid snapping must not be added as a hard constraint without checking that a
+snapped terminal remains on its target copper.
+
 For bounded selections, the best combined plan is replayed in the API-neutral
 model for additional convergence passes. Newly created same-net centreline
-intersections become T contacts, cross-width stubs are removed, and the result
-is optimized again. Every composed result is revalidated against the original
-selection. Very large scopes skip this optional pass to keep runtime bounded.
+intersections become T contacts. A generated free tail is removed when it
+terminates on wider through-copper, or when a narrower track terminates exactly
+at its T contact; copper-area checks protect nearby useful continuations. The
+result is optimized again. Every composed result is revalidated against the
+original selection. Very large scopes skip this optional pass to keep runtime
+bounded.
 
 An eligible chain that terminates in the middle of an immutable same-net track
 has a sliding T termination. The contact may move along that traversing track
@@ -97,7 +129,9 @@ The KiCad-facing adapter and ActionPlugin use `pcbnew` for:
 
 - native connectivity expansion;
 - board minimum clearance and copper-to-edge clearance;
-- effective netclass and pad-local clearances;
+- KiCad's evaluated per-track clearance for the current layer (including
+  matching custom `.kicad_dru` rules), with netclass fallback, plus pad-local
+  clearances;
 - pads, vias, tracks, layers, rule-area keepouts, and board bounds;
 - live-board `Add()` and `RemoveNative()` operations;
 - refresh and modified-state notification.
@@ -123,6 +157,12 @@ inter-net clearance violations, and degraded connectivity between immutable
 terminals. Application verifies track identities again and restores removed
 copper if an exception occurs.
 
+Clearance search distinguishes genuinely new copper from a candidate portion
+already fully contained inside a wider immutable track of the same net. A
+pre-existing nearby foreign-net condition is not counted as a new violation
+when the replacement adds no copper to that clearance envelope; any part that
+extends beyond the same-net cover remains subject to the full effective rule.
+
 Pad clearance uses the actual rotated circle, rectangle, oval, or rounded-
 rectangle copper shape. Paste/mask-only apertures are ignored. Unsupported and
 custom pads retain a conservative enclosing circle built from KiCad's effective
@@ -142,12 +182,15 @@ replacements are retained as their original native KiCad items.
 - `kicad/reader.py`: live-board and selection conversion to `BoardModel`.
 - `kicad/selection.py`: native connection expansion, differential-pair and
   meander protection.
-- `kicad/rules.py`: board bounds, effective netclasses, and track keepouts.
+- `kicad/rules.py`: board bounds, netclass fallbacks, and track keepouts.
 - `kicad/writer.py`: live-board plan application and rollback.
 - `kicad/diagnostics.py`: human-readable tables and machine-readable JSON for
   diagnostic runs.
 - `engine/planner.py`: API-neutral chain discovery, octolinear candidate
   generation, global scheduling, batch fallbacks, and bounded convergence.
+- `engine/context.py`: reusable spatial indexes and rule envelopes.
+- `engine/parallel.py`: deterministic local worker orchestration and sequential
+  fallback.
 - `engine/terminals.py`: detection and movement candidates for sliding T
   terminations.
 - `engine/pads.py`: pad containment and bounded copper-contact geometry.
@@ -173,13 +216,15 @@ over it.
 
 Current required integration results are:
 
-- **All 706 straight tracks selected in one batch:** 60.060665 mm saved and 38
-  net segments removed (181 removed, 143 added). 116 probable tuned segments
+- **All 706 straight tracks selected in one batch:** 62.419635 mm saved, 18 net
+  segments removed (211 removed, 193 added), and 39 arbitrary-angle segments
+  normalized. 116 probable tuned segments
   are protected and 590 segments are eligible. Seven input orders must produce
   the exact same complete plan.
-- **Connections evaluated independently:** 334 unique scopes, 202 improving
-  plans, 108.378809 mm total isolated potential, and 202 successful applications
-  to freshly loaded in-memory boards.
+- **Connections evaluated independently (optional deep sweep):** every unique
+  connection scope is generated and every changed plan is applied to a freshly
+  loaded in-memory board. This costly inventory is suspended during routine
+  release builds and is enabled explicitly with `--full-sweep`.
 - **Dense micro-jog regression (`/cpu/~{csn}`):** selecting UUID
   `58ebb541-fac6-4d02-8a68-65aca50766b5` expands to 111 tuned segments; all
   111 must be protected and no geometric candidate may be planned.
@@ -220,9 +265,17 @@ Run the real-board replay with KiCad's bundled Python so `pcbnew` is available:
 D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py
 ```
 
-The integration replay takes several minutes because it recomputes the full
-all-track plan under seven input orders and applies every accepted pattern to a
-fresh in-memory board.
+The routine integration replay evaluates the all-selected board once. Two
+costly deep checks are retained but suspended by default:
+
+```text
+D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --all-orders
+D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --full-sweep
+```
+
+The first compares all seven deterministic input orders. The second generates
+all connection scopes and applies every changed plan to fresh in-memory boards.
+Combine the flags only when a complete deep validation is needed.
 
 ## Building and installing
 

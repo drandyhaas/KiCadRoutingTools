@@ -32,18 +32,20 @@ SEARCH_LABELS = {
     "pad_clearance": "Rejected: pad clearance",
     "via_clearance": "Rejected: via clearance",
     "keepout": "Rejected: track keepout",
-    "accepted_options": "Safe improving options",
+    "accepted_options": "Safe candidate options",
 }
 
 
-def classify_transformation(segments, path, mechanism, equal_tolerance=0.001):
+def classify_transformation(segments, path, mechanism, equal_tolerance=0.001,
+                            after_segments=None):
     before_mm = sum(length((segment.start_x, segment.start_y),
                            (segment.end_x, segment.end_y))
                     for segment in segments)
     path_edges = [(a, b) for a, b in zip(path, path[1:])
                   if length(a, b) > 1e-6]
     after_mm = sum(length(a, b) for a, b in path_edges)
-    before_count, after_count = len(segments), len(path_edges)
+    before_count = len(segments)
+    after_count = len(path_edges) if after_segments is None else after_segments
     gain = before_mm - after_mm
     if abs(gain) <= equal_tolerance and after_count < before_count:
         geometry = "equal_length_merge"
@@ -69,15 +71,17 @@ def _category_rows(transformations, attribute, labels):
         grouped[getattr(transformation, attribute)].append(transformation)
     rows = []
     for key, values in grouped.items():
+        net_gain = sum(value.net_gain_mm for value in values)
         rows.append({
             "key": key,
             "label": labels.get(key, key),
             "count": len(values),
-            "saved_mm": sum(value.saved_mm for value in values),
+            "saved_mm": max(0.0, net_gain),
+            "net_gain_mm": net_gain,
             "segments_saved": sum(value.before_segments - value.after_segments
                                   for value in values),
         })
-    return sorted(rows, key=lambda row: (-row["saved_mm"], row["key"]))
+    return sorted(rows, key=lambda row: (-row["net_gain_mm"], row["key"]))
 
 
 def summarize_plan(model, eligible_keys, plan):
@@ -88,23 +92,35 @@ def summarize_plan(model, eligible_keys, plan):
     before_mm = sum(length((segment.start_x, segment.start_y),
                            (segment.end_x, segment.end_y))
                     for segment in scoped)
-    saved_mm = plan.saved_mm
-    gains = [transformation.saved_mm for transformation in plan.transformations]
-    by_net = defaultdict(lambda: {"count": 0, "saved_mm": 0.0})
+    removed = set(plan.remove_keys)
+    removed_mm = sum(length((segment.start_x, segment.start_y),
+                            (segment.end_x, segment.end_y))
+                     for segment in scoped if segment_key(segment) in removed)
+    added_mm = sum(length(addition.start, addition.end)
+                   for addition in plan.additions)
+    after_mm = before_mm - removed_mm + added_mm
+    saved_mm = max(0.0, before_mm - after_mm)
+    gains = [transformation.net_gain_mm for transformation in plan.transformations]
+    by_net = defaultdict(
+        lambda: {"count": 0, "saved_mm": 0.0, "net_gain_mm": 0.0})
     for transformation in plan.transformations:
         label = transformation.net_name or "net {}".format(transformation.net_id)
         by_net[label]["count"] += 1
-        by_net[label]["saved_mm"] += transformation.saved_mm
+        by_net[label]["net_gain_mm"] += transformation.net_gain_mm
+        by_net[label]["saved_mm"] = max(
+            0.0, by_net[label]["net_gain_mm"])
     top_nets = sorted(
         ({"net": net, **values} for net, values in by_net.items()),
-        key=lambda row: (-row["saved_mm"], row["net"]))
-    fixed_gain = sum(t.saved_mm for t in plan.transformations
+        key=lambda row: (-row["net_gain_mm"], row["net"]))
+    fixed_gain = sum(t.net_gain_mm for t in plan.transformations
                      if t.mechanism == "fixed_endpoints")
-    terminal_gain = max(0.0, saved_mm - fixed_gain)
+    terminal_gain = sum(t.net_gain_mm for t in plan.transformations
+                        if t.mechanism != "fixed_endpoints")
     return {
         "eligible_segments": len(scoped),
         "before_mm": before_mm,
-        "after_mm": max(0.0, before_mm - saved_mm),
+        "after_mm": max(0.0, after_mm),
+        "length_change_mm": after_mm - before_mm,
         "saved_mm": saved_mm,
         "saved_percent": 100.0 * saved_mm / before_mm if before_mm else 0.0,
         "segments_after": len(scoped) - len(plan.remove_keys) + len(plan.additions),
@@ -112,6 +128,7 @@ def summarize_plan(model, eligible_keys, plan):
         "segment_percent": (100.0 * (len(plan.remove_keys) - len(plan.additions)) /
                             len(scoped) if scoped else 0.0),
         "chains_changed": plan.chains_changed,
+        "angle_corrections": plan.angle_corrections,
         "transformations": len(plan.transformations),
         "gain_mean": statistics.fmean(gains) if gains else 0.0,
         "gain_median": statistics.median(gains) if gains else 0.0,
@@ -124,4 +141,6 @@ def summarize_plan(model, eligible_keys, plan):
             plan.transformations, "geometry", GEOMETRY_LABELS),
         "top_nets": top_nets,
         "search_counts": dict(plan.search_counts),
+        "blocking_nets": dict(sorted(
+            plan.blocking_nets.items(), key=lambda item: (-item[1], item[0]))),
     }

@@ -215,6 +215,253 @@ def test_batch_pool_contains_combined_and_isolated_fallbacks():
     assert any(keys <= second_keys for keys in removed_sets)
 
 
+def test_parallel_and_sequential_planning_are_identical():
+    first = staircase(40, net=1)
+    second = [Segment(s.start_x, s.start_y + 20, s.end_x, s.end_y + 20,
+                      s.width, s.layer, 2, "p" + s.uuid)
+              for s in staircase(40, net=2)]
+    segments = first + second
+    eligible = {segment_key(segment) for segment in segments}
+    sequential = generate_candidate_plans(
+        BoardModel(segments), eligible, parallel=False)
+    parallel = generate_candidate_plans(
+        BoardModel(segments), eligible, parallel=True)
+
+    assert [_plan_signature(plan) for plan in parallel] == [
+        _plan_signature(plan) for plan in sequential]
+
+
+def test_mixed_width_fallback_combinations_keep_connectivity():
+    """Individually safe width plans can be unsafe after they are merged."""
+    from kicad_track_gloss.engine.validation import validate_result
+
+    segments = [
+        Segment(-6, -4, 0, 0, 0.1, 0, 1, "a"),
+        Segment(-4, 6, 0, 0, 0.2, 0, 1, "b"),
+    ]
+    pads = [
+        PadRegion(-6, -4, 0.6, 0.6, 0, "circle", 0.15, 1, (0,)),
+        PadRegion(-4, 6, 0.6, 0.6, 0, "circle", 0.15, 1, (0,)),
+    ]
+    model = BoardModel(segments, pad_regions=pads)
+    eligible = {"a", "b"}
+    plans = generate_candidate_plans(
+        model, eligible, min_gain=0.01, clearance=0.0,
+        max_refinement_passes=0)
+
+    assert plans
+    for plan in plans:
+        validate_result(model, eligible, plan, check_connectivity=True)
+        removed_mm = sum(total_length([segment]) for segment in segments
+                         if segment.uuid in plan.remove_keys)
+        added_mm = sum(math.dist(addition.start, addition.end)
+                       for addition in plan.additions)
+        assert abs(plan.saved_mm - max(0.0, removed_mm - added_mm)) < 1e-9
+
+
+def test_failed_worker_is_killed_and_reaped():
+    import subprocess
+    from kicad_track_gloss.engine.parallel import _stop_processes
+
+    class StuckProcess:
+        def __init__(self):
+            self.killed = False
+            self.waited_after_kill = False
+
+        def poll(self):
+            return 1 if self.killed else None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout):
+            if not self.killed:
+                raise subprocess.TimeoutExpired("worker", timeout)
+            self.waited_after_kill = True
+            return 1
+
+        def kill(self):
+            self.killed = True
+
+    process = StuckProcess()
+    _stop_processes([process])
+    assert process.killed
+    assert process.waited_after_kill
+
+
+def test_spatial_blocker_queries_match_exhaustive_search():
+    from kicad_track_gloss.engine.context import PlannerContext
+    from kicad_track_gloss.engine.model import PolygonKeepout
+    from kicad_track_gloss.engine.planner import _path_blocker
+
+    rng = random.Random(20260825)
+    for trial in range(100):
+        segments = []
+        for index in range(24):
+            x, y = rng.uniform(-20, 20), rng.uniform(-20, 20)
+            segments.append(Segment(
+                x, y, x + rng.uniform(-5, 5), y + rng.uniform(-5, 5),
+                rng.choice((0.1, 0.2, 0.5)), rng.choice((0, 2)),
+                rng.choice((2, 3)), "foreign-{}-{}".format(trial, index)))
+        obstacles = [CircleObstacle(
+            rng.uniform(-20, 20), rng.uniform(-20, 20),
+            rng.uniform(0.1, 1.5), rng.choice((2, 3)), (0, 2), "via",
+            rng.uniform(0, 0.4)) for _ in range(12)]
+        pads = [PadRegion(
+            rng.uniform(-20, 20), rng.uniform(-20, 20),
+            rng.uniform(0.2, 3), rng.uniform(0.2, 3), rng.uniform(0, 180),
+            rng.choice(("circle", "rect", "oval", "roundrect")), 0.1,
+            rng.choice((2, 3)), (0, 2), rng.uniform(0, 0.4))
+                for _ in range(12)]
+        keepouts = []
+        for _ in range(8):
+            x, y = rng.uniform(-20, 20), rng.uniform(-20, 20)
+            width, height = rng.uniform(0.2, 3), rng.uniform(0.2, 3)
+            keepouts.append(PolygonKeepout(
+                ((x, y), (x + width, y), (x + width, y + height),
+                 (x, y + height)), (rng.choice((0, 2)),)))
+        model = BoardModel(
+            segments=segments, obstacles=obstacles, keepouts=keepouts,
+            net_clearances={1: 0.1, 2: 0.25, 3: 0.4},
+            minimum_clearance=0.1, pad_regions=pads)
+        moving = Segment(0, 0, 1, 1, rng.choice((0.1, 0.25, 0.6)),
+                         rng.choice((0, 2)), 1, "moving")
+        path = [(rng.uniform(-20, 20), rng.uniform(-20, 20)),
+                (rng.uniform(-20, 20), rng.uniform(-20, 20))]
+
+        class ExhaustiveContext:
+            segment_by_key = {segment_key(item): item for item in model.segments}
+
+            def nearby_segments(self, *_args):
+                return model.segments
+
+            def nearby_obstacles(self, *_args):
+                return model.obstacles
+
+            def nearby_pads(self, *_args):
+                return model.pad_regions
+
+            def nearby_keepouts(self, *_args):
+                return model.keepouts
+
+        expected = _path_blocker(
+            model, path, moving, set(), 0.1, ExhaustiveContext())
+        actual = _path_blocker(
+            model, path, moving, set(), 0.1, PlannerContext(model))
+        assert actual == expected
+
+
+def test_mixed_width_chain_is_glossed_without_merging_width_values():
+    segments = [
+        Segment(0, 0, 0, 3, 0.0889, 0, 1, "thin"),
+        Segment(0, 3, 3, 0, 0.09, 0, 1, "wide"),
+    ]
+    result = smooth_selected_chains(
+        BoardModel(segments), {segment.uuid for segment in segments},
+        min_gain=0.01, span_strategy="global", clearance=0.0)
+
+    assert result.changed
+    assert set(result.remove_keys) == {"thin", "wide"}
+    assert {round(addition.width, 6) for addition in result.additions} == {
+        0.0889, 0.09}
+    assert all(abs(addition.start[1]) < 1e-9 and
+               abs(addition.end[1]) < 1e-9
+               for addition in result.additions)
+    assert result.saved_mm > 4.2
+
+
+def test_non_octolinear_copper_is_normalized_even_when_length_increases():
+    segments = [
+        Segment(0, 0, 0.5, 1.0, 0.2, 0, 1, "a"),
+        Segment(0.5, 1.0, 1.0, 2.0, 0.2, 0, 1, "b"),
+    ]
+    before = sum(((s.end_x - s.start_x) ** 2 +
+                  (s.end_y - s.start_y) ** 2) ** 0.5 for s in segments)
+    result = smooth_selected_chains(
+        BoardModel(segments), {segment.uuid for segment in segments},
+        min_gain=0.01, span_strategy="global", clearance=0.0)
+    after = sum(((a.end[0] - a.start[0]) ** 2 +
+                 (a.end[1] - a.start[1]) ** 2) ** 0.5
+                for a in result.additions)
+
+    assert result.changed
+    assert result.angle_corrections == 2
+    assert result.saved_mm == 0.0
+    assert after > before
+    assert all(
+        abs(a.end[0] - a.start[0]) < 1e-9 or
+        abs(a.end[1] - a.start[1]) < 1e-9 or
+        abs(abs(a.end[0] - a.start[0]) -
+            abs(a.end[1] - a.start[1])) < 1e-9
+        for a in result.additions)
+
+
+def test_rp2350_uart_mixed_width_pad_route_is_jointly_glossed():
+    # Extracted from rp2350_fpga_eensy_prePlane.kicad_pcb,
+    # /RP2354A/RP.UART0_TX. The 0.0889/0.09 transition must move; neither
+    # width may be rounded into the other.
+    selected = [
+        Segment(146.05, 110.6275, 146.05, 111.1275,
+                0.0889, 0, 50, "uart-a"),
+        Segment(146.05, 111.1275, 144.75, 112.45,
+                0.0889, 0, 50, "uart-b"),
+        Segment(144.75, 112.45, 141.1, 108.8,
+                0.09, 0, 50, "uart-c"),
+    ]
+    pads = [
+        PadRegion(146.05, 110.6275, 0.2, 0.8, 0.0,
+                  "roundrect", 0.05, 50, (0,)),
+        PadRegion(140.88, 108.815, 1.6, 1.6, 270.0,
+                  "circle", 0.4, 50, (0,)),
+    ]
+    result = generate_candidate_plans(
+        BoardModel(selected, pad_regions=pads),
+        {segment.uuid for segment in selected}, min_gain=0.01,
+        allow_equal_length_simpler=True, clearance=0.0)[0]
+
+    assert result.saved_mm > 2.5
+    assert result.angle_corrections == 1
+    assert set(result.remove_keys) == {segment.uuid for segment in selected}
+    assert {round(addition.width, 6) for addition in result.additions} == {
+        0.0889, 0.09}
+
+
+def test_rp2350_vreg_lx_arbitrary_angle_becomes_octolinear():
+    # Extracted from the same board, Net-(U6-VREG_LX). The original -54.98
+    # degree segment must not survive merely because it is shorter.
+    selected = [
+        Segment(150.85, 103.7275, 150.85, 103.2275,
+                0.0889, 0, 74, "vreg-a"),
+        Segment(150.85, 103.2275, 151.5, 102.3,
+                0.0889, 0, 74, "vreg-b"),
+        Segment(151.5, 102.3, 152.0, 101.8,
+                0.09, 0, 74, "vreg-c"),
+        Segment(152.0, 101.8, 152.0, 100.4,
+                0.09, 0, 74, "vreg-d"),
+    ]
+    continuation = Segment(
+        152.0, 100.4, 151.975, 100.415, 0.09, 0, 74, "immutable")
+    pads = [
+        PadRegion(150.85, 103.7275, 0.2, 0.8, 0.0,
+                  "roundrect", 0.05, 74, (0,)),
+        PadRegion(151.975, 100.415, 0.8, 1.8, 0.0,
+                  "roundrect", 0.2, 74, (0,)),
+    ]
+    result = generate_candidate_plans(
+        BoardModel(selected + [continuation], pad_regions=pads),
+        {segment.uuid for segment in selected}, min_gain=0.01,
+        allow_equal_length_simpler=True, clearance=0.0)[0]
+
+    assert result.saved_mm > 1.3
+    assert result.angle_corrections == 1
+    assert all(
+        abs(a.end[0] - a.start[0]) < 1e-6 or
+        abs(a.end[1] - a.start[1]) < 1e-6 or
+        abs(abs(a.end[0] - a.start[0]) -
+            abs(a.end[1] - a.start[1])) < 1e-6
+        for a in result.additions)
+
+
 def test_action_plugin_is_silent_and_has_no_file_roundtrip():
     from pathlib import Path
     source = Path("kicad_track_gloss/action_plugin.py").read_text(encoding="utf-8")
@@ -225,6 +472,9 @@ def test_action_plugin_is_silent_and_has_no_file_roundtrip():
     assert "show_toolbar_button = False" in source
     assert "wx.Bell()" in source
     assert "Plugin version: " in source
+    assert 'label="Copier"' in source
+    assert "Use KiCad Undo to revert it." not in source
+    assert "Result: modification applied to the current board." not in source
 
 
 def test_normal_action_bells_once_only_on_noop():
@@ -242,6 +492,43 @@ def test_normal_action_bells_once_only_on_noop():
     sys.modules.pop("kicad_track_gloss.action_plugin", None)
     try:
         module = importlib.import_module("kicad_track_gloss.action_plugin")
+        named = Segment(0, 0, 1, 0, 0.2, 0, 17, "named",
+                        net_name="Net-(U2A-DATA_8)")
+        unnamed = Segment(0, 1, 1, 1, 0.2, 0, 18, "unnamed")
+        assert module._eligible_net_names(
+            BoardModel([named, unnamed]), {"named", "unnamed"}) == [
+                "Net-(U2A-DATA_8)", "net 18"]
+
+        class SelectedItem:
+            def __init__(self, kind="OTHER", selected=True):
+                self.kind = kind
+                self.selected = selected
+
+            def GetClass(self):
+                return self.kind
+
+            def IsSelected(self):
+                return self.selected
+
+        footprint = SelectedItem()
+        footprint.Pads = lambda: [SelectedItem()]
+
+        class SelectedBoard:
+            def GetTracks(self):
+                return [SelectedItem("PCB_TRACK"), SelectedItem("PCB_ARC"),
+                        SelectedItem("PCB_VIA")]
+
+            def GetFootprints(self):
+                return [footprint]
+
+            def GetDrawings(self):
+                return [SelectedItem()]
+
+            def Zones(self):
+                return [SelectedItem()]
+
+        assert module._selection_counts(SelectedBoard()) == {
+            "segments": 1, "arcs": 1, "vias": 1, "other": 4}
         plugin = module.KiCadTrackGlossPlugin()
         plugin._run = lambda _report: False
         plugin.Run()
@@ -273,6 +560,8 @@ def test_pcm_archive_uses_flat_entrypoint_with_internal_packages():
     assert "plugins/action_plugin.py" in names
     assert "plugins/version.py" in names
     assert "plugins/engine/planner.py" in names
+    assert "plugins/engine/context.py" in names
+    assert "plugins/engine/parallel.py" in names
     assert "plugins/engine/pads.py" in names
     assert "plugins/engine/statistics.py" in names
     assert "plugins/engine/terminals.py" in names
@@ -307,11 +596,12 @@ class _NativeUuid:
 
 
 class _NativeTrack:
-    def __init__(self, uuid, start, end, net):
+    def __init__(self, uuid, start, end, net, clearance=0.127):
         self.uuid = uuid
         self.start = _NativePoint(*start)
         self.end = _NativePoint(*end)
         self.net = net
+        self.clearance = clearance
 
     def GetClass(self): return "PCB_TRACK"
     def GetStart(self): return self.start
@@ -321,6 +611,7 @@ class _NativeTrack:
     def GetNetCode(self): return self.net
     def GetNetname(self): return "NET" + str(self.net)
     def GetUuid(self): return _NativeUuid(self.uuid)
+    def GetOwnClearance(self, _layer): return self.clearance
     def IsLocked(self): return False
 
 
@@ -373,6 +664,15 @@ def test_native_connection_expansion_batches_multiple_nets():
     seeds = {"a1", "b1"}
     expanded = adapter._expand_seed_keys(_NativeBoard(tracks), records, seeds, [])
     assert expanded == {"a1", "a2", "a3", "b1", "b2"}
+
+
+def test_native_segment_uses_kicad_resolved_track_clearance():
+    from kicad_track_gloss.kicad import BoardAdapter
+    adapter = BoardAdapter(_NativePcbnew())
+    segment = adapter._segment_from_item(
+        _NativeTrack("rule", (0, 0), (1, 0), 1, clearance=0.127))
+
+    assert segment.clearance == 0.127
 
 
 def test_native_connection_expansion_stops_at_junction():
@@ -514,8 +814,22 @@ def test_diagnostic_collection_does_not_change_the_edit_plan():
     assert normal.search_counts == {}
 
 
+def test_transformation_statistics_use_real_addition_count_and_signed_gain():
+    from kicad_track_gloss.engine.statistics import classify_transformation
+
+    segments = [Segment(0, 0, 1, 0, 0.1, 0, 1, "one")]
+    transformation = classify_transformation(
+        segments, [(0, 0), (1, 1)], "fixed_endpoints",
+        after_segments=2)
+
+    assert transformation.after_segments == 2
+    assert transformation.net_gain_mm < 0
+    assert transformation.saved_mm == 0
+
+
 def test_diagnostic_report_contains_human_and_machine_readable_statistics():
-    from kicad_track_gloss.kicad.diagnostics import append_plan_statistics
+    from kicad_track_gloss.kicad.diagnostics import (append_plan_statistics,
+                                                      split_diagnostic_report)
 
     segments = staircase(12)
     model = BoardModel(segments)
@@ -529,7 +843,95 @@ def test_diagnostic_report_contains_human_and_machine_readable_statistics():
     assert "By optimization mechanism:" in text
     assert "By geometry pattern:" in text
     assert "Search statistics:" in text
+    assert "Non-octolinear segments corrected:" in text
     assert "Machine-readable JSON:" in text
+
+    summary, details, json_lines = split_diagnostic_report([
+        "KiCad Track Gloss diagnostic", "Plugin version: 0.3.20",
+        "KiCad version: 10.0.5", "Eligible net(s) (1): TEST",
+        "Optimization coordinates: exact copper geometry; active KiCad grid not used.",
+    ] + report)
+    assert "Length saved: {:.6f} mm".format(plan.saved_mm) in "\n".join(summary)
+    assert "Machine-readable JSON:" not in details
+    assert json.loads("\n".join(json_lines))["saved_mm"] == plan.saved_mm
+    assert any("active KiCad grid not used" in line for line in summary)
+
+
+def test_diagnostic_reports_the_foreign_net_blocking_a_shortcut():
+    from kicad_track_gloss.kicad.diagnostics import append_search_statistics
+
+    selected = [
+        Segment(211.4, 95.0, 211.7, 94.7, 0.177693, 0, 8, "a",
+                net_name="Net-(U2A-DATA_8)"),
+        Segment(211.7, 94.7, 214.3, 94.7, 0.177693, 0, 8, "b",
+                net_name="Net-(U2A-DATA_8)"),
+        Segment(214.3, 94.7, 214.6, 95.0, 0.177693, 0, 8, "c",
+                net_name="Net-(U2A-DATA_8)"),
+        Segment(214.6, 95.0, 214.7, 95.0, 0.177693, 0, 8, "d",
+                net_name="Net-(U2A-DATA_8)"),
+    ]
+    blocker = Segment(
+        212.7, 95.2, 213.5, 95.2, 0.177693, 0, 11, "blocker",
+        net_name="Net-(U2A-DATA_11)")
+    result = smooth_selected_chains(
+        BoardModel(selected + [blocker],
+                   net_clearances={8: 0.2, 11: 0.2}),
+        {segment.uuid for segment in selected}, min_gain=0.01,
+        allow_equal_length_simpler=False, clearance=0.2)
+
+    assert not result.changed
+    assert result.search_counts["foreign_track_clearance"] > 0
+    assert result.blocking_nets == {
+        "Net-(U2A-DATA_11)":
+        result.search_counts["foreign_track_clearance"]}
+    report = []
+    append_search_statistics(report, result.search_counts, result.blocking_nets)
+    text = "\n".join(report)
+    assert "Blocking nets:" in text
+    assert "Net-(U2A-DATA_11)" in text
+
+
+def test_refinement_prunes_a_wider_generated_tail_after_same_net_t():
+    selected = [
+        Segment(219.2, 97.5, 218.8, 97.5, 0.177693, 0, 1,
+                "wide-tail", net_name="N"),
+        Segment(218.8, 97.925, 219.2, 97.5, 0.1, 0, 1,
+                "narrow-a", net_name="N"),
+        Segment(218.8, 97.5, 218.2, 96.9, 0.177693, 0, 1,
+                "wide-kept", net_name="N"),
+        Segment(218.8, 98.4625, 218.8, 97.925, 0.1, 0, 1,
+                "narrow-b", net_name="N"),
+    ]
+    immutable_continuation = Segment(
+        218.2, 96.9, 214.9, 100.2, 0.111346, 0, 1,
+        "immutable", net_name="N")
+    pad = PadRegion(
+        218.8, 98.4625, 0.875, 0.2, 0.0,
+        "roundrect", 0.05, 1, (0,))
+    result = generate_candidate_plans(
+        BoardModel(selected + [immutable_continuation], pad_regions=[pad]),
+        {segment.uuid for segment in selected}, min_gain=0.01,
+        allow_equal_length_simpler=True, clearance=0.0)[0]
+
+    assert result.changed
+    assert "wide-tail" in result.remove_keys
+    # The mixed-width optimizer may now replace wide-kept as part of a shorter
+    # route, but its useful continuation must remain connected rather than
+    # being mistaken for the removable free tail.
+    assert ("wide-kept" not in result.remove_keys or any(
+        abs((addition.start[0] + addition.start[1]) - 315.1) < 1e-6 or
+        abs((addition.end[0] + addition.end[1]) - 315.1) < 1e-6
+        for addition in result.additions))
+    assert not any(
+        point == (219.006061, 97.706061)
+        for addition in result.additions
+        for point in (addition.start, addition.end))
+    assert any(
+        segment_hits_pad(pad, point, point, margin=0.0)
+        for addition in result.additions
+        for point in (addition.start, addition.end))
+    assert {round(addition.width, 6) for addition in result.additions} == {
+        0.1, 0.177693}
 
 
 def test_batch_rejects_colliding_new_copper_on_different_nets():
@@ -570,3 +972,93 @@ def test_real_board_two_sliding_t_terminations_choose_nearest_contacts():
     assert {result.additions[0].start, result.additions[0].end} == {
         (158.5, 96.0), (158.6, 95.9)}
     assert abs(result.saved_mm - 2.40710678118655) < 1e-9
+
+
+def test_preexisting_same_net_copper_allows_shorter_horizontal_t_contact():
+    # Regression from dispenser_labels VCC. The final 0.041 mm of the shortest
+    # horizontal candidate is inside an immutable 0.25 mm VCC target track.
+    # Rechecking that already-existing copper against U3-VBUS must not invent a
+    # new violation and force the longer 45-degree alternative.
+    selected = [
+        Segment(159.275, 96.325, 159.275, 98.34, 0.127, 0, 7,
+                "vcc-selected-a", net_name="VCC"),
+        Segment(159.275, 98.34, 159.587, 98.652, 0.127, 0, 7,
+                "vcc-selected-b", net_name="VCC"),
+    ]
+    same_net_targets = [
+        Segment(159.275, 96.325, 159.3, 96.325, 0.127, 0, 7,
+                "vcc-start-horizontal", net_name="VCC"),
+        Segment(159.275, 96.325, 158.4, 97.2, 0.127, 0, 7,
+                "vcc-start-diagonal", net_name="VCC"),
+        Segment(159.587, 95.413, 159.587, 98.652, 0.25, 0, 7,
+                "vcc-wide-target", net_name="VCC"),
+        Segment(159.3, 98.939, 159.587, 98.652, 0.25, 0, 7,
+                "vcc-upper-target", net_name="VCC"),
+    ]
+    foreign = [
+        Segment(159.9025, 98.341696, 159.9025, 96.4475, 0.127,
+                0, 41, "vbus-vertical", net_name="Net-(U3-VBUS)"),
+        Segment(159.9025, 96.4475, 160.65, 95.7, 0.127,
+                0, 41, "vbus-diagonal", net_name="Net-(U3-VBUS)"),
+    ]
+    model = BoardModel(
+        selected + same_net_targets + foreign,
+        net_clearances={7: 0.25, 41: 0.12}, minimum_clearance=0.12)
+    result = generate_candidate_plans(
+        model, {segment.uuid for segment in selected}, min_gain=0.01,
+        clearance=0.12, collect_statistics=True)[0]
+
+    assert result.changed
+    assert len(result.additions) == 1
+    assert result.additions[0].start == (159.3, 96.325)
+    assert result.additions[0].end == (159.587, 96.325)
+    assert abs(result.saved_mm - 2.169234631460415) < 1e-9
+    assert result.blocking_nets == {}
+
+
+def test_same_net_cover_does_not_hide_truly_new_clearance_violation():
+    from kicad_track_gloss.engine.context import PlannerContext
+    from kicad_track_gloss.engine.planner import _path_blocker
+
+    moving = Segment(159.3, 96.325, 159.7, 96.325, 0.127,
+                     0, 7, "moving", net_name="VCC")
+    cover = Segment(159.587, 95.413, 159.587, 98.652, 0.25,
+                    0, 7, "cover", net_name="VCC")
+    foreign = Segment(159.9025, 98.341696, 159.9025, 96.4475, 0.127,
+                      0, 41, "foreign", net_name="Net-(U3-VBUS)")
+    model = BoardModel(
+        [cover, foreign], net_clearances={7: 0.25, 41: 0.12},
+        minimum_clearance=0.12)
+
+    blocker = _path_blocker(
+        model, ((159.3, 96.325), (159.7, 96.325)), moving, set(), 0.12,
+        PlannerContext(model), {"cover", "foreign"})
+    assert blocker == ("foreign_track_clearance", 41)
+
+
+def test_kicad_resolved_track_rule_overrides_larger_netclass_fallback():
+    """Regression for dispenser_labels U3-VBUS after a clean KiCad DRC.
+
+    Its netclass clearance is 0.25 mm, but the custom outer-track rule resolved
+    by KiCad is 0.127 mm. A safe route must use that evaluated item value.
+    """
+    from kicad_track_gloss.engine.context import PlannerContext
+    from kicad_track_gloss.engine.planner import _path_blocker
+
+    moving = Segment(0, 0, 0, 10, 0.127, 0, 41, "moving",
+                     net_name="Net-(U3-VBUS)", clearance=0.127)
+    foreign = Segment(0.3, 0, 0.3, 10, 0.127, 0, 7, "foreign",
+                      net_name="VCC", clearance=0.127)
+    model = BoardModel(
+        [foreign], net_clearances={7: 0.25, 41: 0.25},
+        minimum_clearance=0.12)
+
+    assert _path_blocker(
+        model, ((0, 0), (0, 10)), moving, set(), 0.12,
+        PlannerContext(model)) is None
+
+    fallback_moving = Segment(
+        0, 0, 0, 10, 0.127, 0, 41, "fallback-moving")
+    assert _path_blocker(
+        model, ((0, 0), (0, 10)), fallback_moving, set(), 0.12,
+        PlannerContext(model)) == ("foreign_track_clearance", 7)

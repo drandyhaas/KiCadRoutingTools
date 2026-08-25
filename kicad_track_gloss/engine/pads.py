@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 
 from .geometry import path_hits_polygon, point_segment_distance
 
 
+@lru_cache(maxsize=1024)
+def _rotation(orientation_degrees):
+    angle = math.radians(-orientation_degrees)
+    return math.cos(angle), math.sin(angle)
+
+
 def _local_coordinates(region, point):
-    angle = math.radians(-region.orientation_degrees)
-    cosine, sine = math.cos(angle), math.sin(angle)
+    cosine, sine = _rotation(region.orientation_degrees)
     dx, dy = point[0] - region.x, point[1] - region.y
     return dx * cosine - dy * sine, dx * sine + dy * cosine
 
@@ -43,7 +49,8 @@ def _vertex(point):
     return round(point[0], 6), round(point[1], 6)
 
 
-def pad_contact_points(reference, original, regions):
+@lru_cache(maxsize=16384)
+def _pad_contact_points_cached(reference, original, regions):
     """Return bounded 0/45/90 boundary contacts nearest ``reference``."""
     contacts = {_vertex(original)}
     directions = ((1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0))
@@ -61,7 +68,10 @@ def pad_contact_points(reference, original, regions):
             for sign in (-1.0, 1.0):
                 inside_t = center_t
                 outside_t = center_t + sign * extent
-                for _iteration in range(50):
+                # Contacts are stored at micrometre precision. Thirty-two
+                # bisections already resolve a board-sized pad far below one
+                # nanometre, so further iterations only repeat identical work.
+                for _iteration in range(32):
                     middle = (inside_t + outside_t) / 2.0
                     point = (reference[0] + middle * dx,
                              reference[1] + middle * dy)
@@ -75,6 +85,11 @@ def pad_contact_points(reference, original, regions):
                              (point[0] - reference[0]) ** 2 +
                              (point[1] - reference[1]) ** 2))
     return sorted(contacts)
+
+
+def pad_contact_points(reference, original, regions):
+    return _pad_contact_points_cached(
+        tuple(reference), tuple(original), tuple(regions))
 
 
 def _rectangle(half_width, half_height):

@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+from .context import SpatialIndex, line_bbox
 from .geometry import point_segment_distance, segment_distance
 from .model import GlossResult, Segment, segment_key
 from .pads import segment_hits_pad
 
 
-def validate_result(model, eligible_keys, result: GlossResult):
+def _addition_clearance(model, addition):
+    if addition.clearance >= 0.0:
+        return max(model.minimum_clearance, addition.clearance)
+    return max(model.minimum_clearance,
+               model.net_clearances.get(addition.net_id, 0.0))
+
+
+def validate_result(model, eligible_keys, result: GlossResult,
+                    check_connectivity=True):
     known = {segment_key(s): s for s in model.segments}
     if len(result.remove_keys) != len(set(result.remove_keys)):
         raise ValueError("The candidate removes the same track more than once")
@@ -29,19 +38,31 @@ def validate_result(model, eligible_keys, result: GlossResult):
             raise ValueError("Invalid replacement segment")
         if removed and (new.net_id, new.layer, round(new.width, 6)) not in allowed_geometry:
             raise ValueError("Replacement segment changes net, layer, or width")
-    for index, first in enumerate(result.additions):
-        for second in result.additions[index + 1:]:
+    additions = list(result.additions)
+    addition_positions = {id(item): index for index, item in enumerate(additions)}
+    max_width = max([item.width for item in additions] + [0.0])
+    max_clearance = max(
+        [model.minimum_clearance] + list(model.net_clearances.values()) +
+        [_addition_clearance(model, item) for item in additions] + [0.0])
+    addition_index = SpatialIndex(
+        additions, lambda item: line_bbox(item.start, item.end), 5.0)
+    for index, first in enumerate(additions):
+        margin = max_clearance + (first.width + max_width) / 2.0
+        for second in addition_index.query(
+                line_bbox(first.start, first.end, margin)):
+            if addition_positions[id(second)] <= index:
+                continue
             if first.layer != second.layer or first.net_id == second.net_id:
                 continue
             clearance = max(
-                model.minimum_clearance,
-                model.net_clearances.get(first.net_id, 0.0),
-                model.net_clearances.get(second.net_id, 0.0))
+                _addition_clearance(model, first),
+                _addition_clearance(model, second))
             required = clearance + (first.width + second.width) / 2.0
             if segment_distance(first.start, first.end,
                                 second.start, second.end) < required - 1e-6:
                 raise ValueError("Candidate additions violate inter-net clearance")
-    _validate_connectivity(model, eligible_keys, result)
+    if check_connectivity:
+        _validate_connectivity(model, eligible_keys, result)
 
 
 def _connectivity_signature(segments, obstacles, pad_regions,
@@ -66,10 +87,18 @@ def _connectivity_signature(segments, obstacles, pad_regions,
         if a != b:
             parent[b] = a
 
+    segment_positions = {id(item): index for index, item in enumerate(segs)}
+    max_width = max([item.width for item in segs] + [0.0])
+    spatial = SpatialIndex(
+        segs, lambda item: line_bbox(
+            (item.start_x, item.start_y), (item.end_x, item.end_y)), 5.0)
     for i, a in enumerate(segs):
         aa, ab = (a.start_x, a.start_y), (a.end_x, a.end_y)
-        for j in range(i + 1, len(segs)):
-            b = segs[j]
+        margin = (a.width + max_width) / 2.0 + 1e-5
+        for b in spatial.query(line_bbox(aa, ab, margin)):
+            j = segment_positions[id(b)]
+            if j <= i:
+                continue
             if a.layer != b.layer:
                 continue
             if segment_distance(aa, ab, (b.start_x, b.start_y),
@@ -105,8 +134,9 @@ def _connectivity_signature(segments, obstacles, pad_regions,
 def _validate_connectivity(model, eligible_keys, result):
     removed = set(result.remove_keys)
     after = [s for s in model.segments if segment_key(s) not in removed]
-    after.extend(Segment(a.start[0], a.start[1], a.end[0], a.end[1], a.width,
-                         a.layer, a.net_id) for a in result.additions)
+    after.extend(Segment(
+        a.start[0], a.start[1], a.end[0], a.end[1], a.width,
+        a.layer, a.net_id, clearance=a.clearance) for a in result.additions)
     immutable = {segment_key(s) for s in model.segments if segment_key(s) not in eligible_keys}
     affected_nets = {s.net_id for s in model.segments if segment_key(s) in removed}
     for net_id in affected_nets:

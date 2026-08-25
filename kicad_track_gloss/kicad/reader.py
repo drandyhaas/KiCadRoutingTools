@@ -26,6 +26,10 @@ def read_snapshot(adapter, board, require_selection=True):
     segments, obstacles, pad_regions, warnings = [], [], [], []
     straight_by_key = {}
     seed_keys = set()
+    try:
+        board.InitializeClearanceCache()
+    except Exception:
+        pass
     for item in board.GetTracks():
         kind = str(item.GetClass())
         if kind == "PCB_VIA":
