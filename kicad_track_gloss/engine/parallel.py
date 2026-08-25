@@ -26,11 +26,13 @@ if not __package__:
     from kicad_track_gloss.engine.model import (
         AddedSegment, BoardModel, CircleObstacle, GlossResult, PadRegion,
         PolygonKeepout, Segment, Transformation)
-    from kicad_track_gloss.engine.planner import smooth_selected_chains
+    from kicad_track_gloss.engine.planner import (generate_converged_plan,
+                                                   smooth_selected_chains)
 else:
     from .context import PlannerContext
     from .model import (AddedSegment, BoardModel, CircleObstacle, GlossResult,
                         PadRegion, PolygonKeepout, Segment, Transformation)
+    from .planner import generate_converged_plan
 
 
 def _encode_model(model):
@@ -134,10 +136,19 @@ def _worker(input_path, output_path):
     rows = []
     for group_key, eligible in payload["groups"]:
         try:
-            plan = smooth_selected_chains(
-                model, set(eligible), span_strategy="global",
-                path_preference=0, planner_context=context,
-                **payload["kwargs"])
+            if payload.get("converge"):
+                worker_kwargs = dict(payload["kwargs"])
+                worker_kwargs.pop("planner_context", None)
+                plan = generate_converged_plan(
+                    model, set(eligible),
+                    max_passes=payload.get("max_passes", 6),
+                    return_partial_on_limit=True, parallel=False,
+                    **worker_kwargs)
+            else:
+                plan = smooth_selected_chains(
+                    model, set(eligible), span_strategy="global",
+                    path_preference=0, planner_context=context,
+                    **payload["kwargs"])
             rows.append((group_key, _encode_plan(plan), ""))
         except Exception as error:
             rows.append((group_key, None,
@@ -193,7 +204,8 @@ class ParallelPlanJob:
                 LOG.exception("Could not remove Track Gloss worker files")
 
 
-def start_parallel_group_plans(model, group_items, kwargs, max_workers=0):
+def start_parallel_group_plans(model, group_items, kwargs, max_workers=0,
+                               converge=False, max_passes=6):
     """Start deterministic workers, or return ``None`` for safe fallback."""
     executable = _python_executable()
     items = list(group_items)
@@ -233,7 +245,9 @@ def start_parallel_group_plans(model, group_items, kwargs, max_workers=0):
             output_path = directory / ("output-{}.pickle".format(index))
             with open(input_path, "wb") as stream:
                 pickle.dump({"model": encoded_model, "groups": chunk,
-                             "kwargs": primitive_kwargs}, stream,
+                             "kwargs": primitive_kwargs,
+                             "converge": bool(converge),
+                             "max_passes": max_passes}, stream,
                             protocol=pickle.HIGHEST_PROTOCOL)
             process = subprocess.Popen(
                 [str(executable), "-c", worker_bootstrap, package_parent,
@@ -254,8 +268,10 @@ def start_parallel_group_plans(model, group_items, kwargs, max_workers=0):
         return None
 
 
-def run_parallel_group_plans(model, group_items, kwargs, max_workers=0):
-    job = start_parallel_group_plans(model, group_items, kwargs, max_workers)
+def run_parallel_group_plans(model, group_items, kwargs, max_workers=0,
+                             converge=False, max_passes=6):
+    job = start_parallel_group_plans(
+        model, group_items, kwargs, max_workers, converge, max_passes)
     return job.collect() if job is not None else None
 
 

@@ -39,14 +39,43 @@ A relative copper threshold alone is not a valid convergence criterion:
 - stopping at the length plateau around pass 41 would discard subsequent
   equal-length segment simplifications.
 
-The long run is serial cleanup, not a geometry cycle. The preferable engine
-improvement is to batch independent safe net/layer transformations into a
-complete sweep. Convergence should then mean that a complete sweep produces no
-lexicographic improvement: first angle correctness and copper length, then
-segment/corner complexity. A time/work/pass guard remains necessary; reaching
-it must report `fixed_point=false` rather than claim convergence.
+The long run was serial cleanup, not a geometry cycle. The engine now converges
+independent net/layer work inside deterministic worker batches and validates a
+cumulative safe batch before applying it. Synthetic segment identifiers remain
+unique across nested convergence passes; without that property, recomposition
+could falsely interpret new copper as an existing segment and reject the batch.
 
-The score CLI now accepts `--max-passes N`. `--trace-passes` emits each state as
+## Batched result
+
+The optimized engine was replayed on the same 850-track input, using the CLI's
+default 16-pass hard guard and full pass tracing:
+
+| Metric | Serial baseline | Batched engine |
+| --- | ---: | ---: |
+| Wall time | about 100 s | 13.553 s |
+| Changed global passes | 54 | 7 |
+| Final copper | 1859.331792 mm | 1857.813380 mm |
+| Copper saved | 186.654951 mm | 188.173363 mm |
+| Copper saved | 9.122979% | 9.197194% |
+| Final segments | 669 | 667 |
+| Segments saved | 181 | 183 |
+
+The batched run reached a real in-memory fixed point before the guard. It is
+therefore about 7.4 times faster on this board while also finding 1.518409 mm more copper
+gain and removing two additional segments. Its traced global copper sequence
+was monotonically decreasing:
+
+`2045.986743 → 1874.479044 → 1863.018365 → 1861.813109 → 1860.291286 →
+1858.610079 → 1858.129704 → 1857.813380 mm`.
+
+The interactive plugin deliberately uses a smaller work budget than the CLI:
+four global passes and two local passes per batch. On this unusually broad
+850-track selection, that bounded path reached 1860.291286 mm after four
+passes (185.695457 mm saved) and returned a validated partial result. Ordinary
+one-connection plugin selections are much smaller and normally reach a fixed
+point within the interactive guard.
+
+The score CLI accepts `--max-passes N`. `--trace-passes` emits each state as
 `GLOSS_PASS_JSON` on stderr while preserving the final `SCORE=` stdout
 contract. The default remains 16 until the second failing board and the batching
 strategy have been evaluated.

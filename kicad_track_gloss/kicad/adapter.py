@@ -40,9 +40,16 @@ class BoardAdapter:
     def point_mm(self, point):
         return self.to_mm(point.x), self.to_mm(point.y)
 
+    def from_mm(self, value):
+        # KiCad PCB internal units are integer nanometres. pcbnew.FromMM first
+        # converts the binary float and can truncate an exact existing point
+        # one IU low (for example 130.2 mm -> 130199999 nm). Round the scaled
+        # value directly so engine geometry survives an apply/save/reload.
+        return int(round(float(value) * 1_000_000.0))
+
     def vector(self, point):
-        x = int(round(self.pcbnew.FromMM(point[0])))
-        y = int(round(self.pcbnew.FromMM(point[1])))
+        x = self.from_mm(point[0])
+        y = self.from_mm(point[1])
         return self.pcbnew.VECTOR2I(x, y)
 
     def segment_from_item(self, item):

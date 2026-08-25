@@ -26,6 +26,11 @@ LOG = logging.getLogger("KiCadTrackGloss")
 # success/no-op popup. KiCad's native rules still constrain candidate search.
 MIN_GAIN_MM = 0.01
 ALLOW_EQUAL_LENGTH_SIMPLIFICATION = True
+# Interactive work must remain responsive. Independent net/layer groups are
+# converged inside parallel workers; these passes are only global reconciliation
+# rounds. A safe partial result is applied if this guard is reached.
+INTERACTIVE_MAX_PASSES = 4
+INTERACTIVE_GROUP_MAX_PASSES = 2
 
 
 class NoTrackSelection(ValueError):
@@ -314,6 +319,9 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
 
         best = generate_converged_plan(
             snapshot.model, snapshot.eligible_keys,
+            max_passes=INTERACTIVE_MAX_PASSES,
+            return_partial_on_limit=True,
+            group_max_passes=INTERACTIVE_GROUP_MAX_PASSES,
             min_gain=MIN_GAIN_MM,
             allow_equal_length_simpler=ALLOW_EQUAL_LENGTH_SIMPLIFICATION,
             clearance=snapshot.minimum_clearance,

@@ -18,7 +18,7 @@ def add_track(adapter, board, start, end, width, layer, net_id):
     track = adapter.pcbnew.PCB_TRACK(board)
     track.SetStart(adapter.vector(start))
     track.SetEnd(adapter.vector(end))
-    track.SetWidth(int(round(adapter.pcbnew.FromMM(width))))
+    track.SetWidth(adapter.from_mm(width))
     track.SetLayer(layer)
     track.SetNetCode(net_id)
     board.Add(track)

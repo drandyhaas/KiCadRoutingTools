@@ -56,6 +56,11 @@ refuses to overwrite its input.
 `--max-passes N` controls the hard convergence guard (default 16), while
 `--trace-passes` emits machine-readable `GLOSS_PASS_JSON` records to stderr
 for convergence analysis without changing the final stdout score contract.
+The CLI uses the complete fixed-point search intended for offline scoring.
+The interactive plugin has a separate responsiveness guard: four global
+reconciliation passes and two local passes per independent batch. If that
+guard is reached, it applies only the already validated partial improvement;
+the CLI instead reports that its requested fixed point was not reached.
 This is a quality score only and must be combined with separate DRC,
 connectivity, and specification checks. Full CLI details and an acceptance
 command example are in

@@ -43,6 +43,14 @@ def _copper_signature(start, end, width, layer, net_id):
     return (min(a, b), max(a, b), round(width, 6), layer, net_id)
 
 
+def _segment_order_key(segment):
+    """Geometry-first ordering; UUID is only an exact-duplicate tie-break."""
+    return _copper_signature(
+        (segment.start_x, segment.start_y),
+        (segment.end_x, segment.end_y), segment.width,
+        segment.layer, segment.net_id) + (segment_key(segment),)
+
+
 def _retain_identity_replacements(model, result):
     """Keep original native items instead of removing and recreating them."""
     removed = set(result.remove_keys)
@@ -516,11 +524,23 @@ def _apply_to_model(model, eligible, plan, pass_index):
     segments = [segment for segment in model.segments
                 if segment_key(segment) not in removed]
     next_eligible = set(eligible) - removed
+    occupied_keys = {segment_key(segment) for segment in segments}
     for index, addition in enumerate(plan.additions):
         key = "{}pass-{}-{}".format(_SYNTHETIC_PREFIX, pass_index, index)
+        collision = 0
+        while key in occupied_keys:
+            collision += 1
+            key = "{}pass-{}-{}-{}".format(
+                _SYNTHETIC_PREFIX, pass_index, index, collision)
+        occupied_keys.add(key)
+        # KiCad stores board coordinates as integer nanometres. Quantize every
+        # in-memory replacement at the same boundary so a reported fixed point
+        # remains a fixed point after BoardAdapter applies and saves it.
+        start_x, start_y = (round(value, 6) for value in addition.start)
+        end_x, end_y = (round(value, 6) for value in addition.end)
         segments.append(Segment(
-            addition.start[0], addition.start[1], addition.end[0],
-            addition.end[1], addition.width, addition.layer, addition.net_id,
+            start_x, start_y, end_x, end_y,
+            round(addition.width, 6), addition.layer, addition.net_id,
             key, False, False, names.get(addition.net_id, ""),
             addition.clearance))
         next_eligible.add(key)
@@ -750,7 +770,7 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
             groups[(s.net_id, s.layer)].append(s)
 
     for net_id, layer in sorted(groups):
-        candidates = sorted(groups[(net_id, layer)], key=segment_key)
+        candidates = sorted(groups[(net_id, layer)], key=_segment_order_key)
         adjacency = defaultdict(list)
         for s in candidates:
             adjacency[vertex(s.start_x, s.start_y)].append(s)
@@ -763,7 +783,7 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                     (net_id, layer, v) not in pad_terminal_targets)
 
         for touching in adjacency.values():
-            touching.sort(key=segment_key)
+            touching.sort(key=_segment_order_key)
         anchors = sorted(v for v in adjacency if not interior(v))
         used = set()
         for anchor in anchors:
@@ -784,8 +804,10 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                     current = vertex(*next_point)
                     if current == anchor or not interior(current) or len(chain) >= 100:
                         break
-                    nxt = sorted((s for s in adjacency[current] if segment_key(s) not in used),
-                                 key=segment_key)
+                    nxt = sorted(
+                        (s for s in adjacency[current]
+                         if segment_key(s) not in used),
+                        key=_segment_order_key)
                     if not nxt:
                         break
                     seg = nxt[0]
@@ -967,6 +989,8 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
     """Generate deterministic global and isolated-group fallback plans."""
     max_refinement_passes = kwargs.pop("max_refinement_passes", 3)
     parallel = kwargs.pop("parallel", False)
+    converge_groups = kwargs.pop("converge_groups", False)
+    group_max_passes = kwargs.pop("group_max_passes", 6)
     allow_netclass_seed = kwargs.pop("_allow_netclass_seed", True)
     kwargs.setdefault("planner_context", PlannerContext(model))
     plans = []
@@ -975,6 +999,11 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
 
     known_segments = {segment_key(segment): segment
                       for segment in model.segments}
+
+    def removal_signature(plan):
+        return tuple(sorted(
+            _segment_order_key(known_segments[key])[:-1]
+            for key in set(plan.remove_keys) if key in known_segments))
 
     def measured_gain(plan):
         removed_mm = sum(
@@ -994,7 +1023,7 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
                             check_connectivity=True)
         plan.saved_mm = measured_gain(plan)
         signature = (
-            tuple(sorted(plan.remove_keys)),
+            removal_signature(plan),
             tuple(sorted((a.start, a.end, a.width, a.layer, a.net_id)
                          for a in plan.additions)),
         )
@@ -1028,7 +1057,9 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
             (('fallback',) + key, tuple(sorted(groups[key])))
             for key in group_keys
             if groups[key] != primary_groups[key[:2]])
-        parallel_rows = run_parallel_group_plans(model, tasks, kwargs)
+        parallel_rows = run_parallel_group_plans(
+            model, tasks, kwargs, converge=converge_groups,
+            max_passes=group_max_passes)
         if parallel_rows is not None and any(row[2] for row in parallel_rows):
             rejected.extend(row[2] for row in parallel_rows if row[2])
             parallel_rows = None
@@ -1056,10 +1087,38 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
     if parallel_rows is not None:
         primary_results = {row[0][1:]: row[1] for row in parallel_rows
                            if row[0][0] == 'primary'}
+        ranked_primary = sorted(
+            ((key, primary_results[key]) for key in primary_keys
+             if primary_results.get(key) is not None and
+             primary_results[key].changed),
+            key=lambda row: (
+                -row[1].angle_corrections,
+                -round(row[1].saved_mm, 9),
+                -(len(row[1].remove_keys) - len(row[1].additions)),
+                row[0]))
         try:
             add_plan(merge([primary_results[key] for key in primary_keys]))
         except ValueError as error:
             rejected.append(str(error))
+
+        # Locally converged groups can expose more than one simultaneous
+        # cross-net conflict, so leave-one-out is not sufficient. Build a
+        # deterministic maximal safe batch by adding gain-ranked independent
+        # groups only while the complete connectivity/clearance gate passes.
+        selected_primary = []
+        for _key, plan in ranked_primary:
+            candidate = merge(selected_primary + [plan])
+            try:
+                validate_result(model, eligible, candidate,
+                                check_connectivity=True)
+            except ValueError as error:
+                rejected.append(str(error))
+                continue
+            selected_primary.append(plan)
+        if selected_primary:
+            add_plan(merge(selected_primary), already_validated=True)
+        for _key, plan in ranked_primary:
+            add_plan(plan, already_validated=True)
     else:
         try:
             add_plan(smooth_selected_chains(
@@ -1124,7 +1183,7 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
     plans.sort(key=lambda p: (
         -p.angle_corrections, -round(p.saved_mm, 9),
         -(len(p.remove_keys) - len(p.additions)), len(p.additions),
-        tuple(sorted(p.remove_keys))))
+        removal_signature(p)))
     if not plans:
         plans.append(GlossResult(warnings=sorted(set(rejected))))
     elif (plans[0].changed and max_refinement_passes and
@@ -1136,7 +1195,7 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
             plans.sort(key=lambda p: (
                 -p.angle_corrections, -round(p.saved_mm, 9),
                 -(len(p.remove_keys) - len(p.additions)), len(p.additions),
-                tuple(sorted(p.remove_keys))))
+                removal_signature(p)))
         except ValueError as error:
             plans[0].warnings.append("Refinement rejected: " + str(error))
 
@@ -1178,7 +1237,7 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
         plans.sort(key=lambda p: (
             -p.angle_corrections, -round(p.saved_mm, 9),
             -(len(p.remove_keys) - len(p.additions)), len(p.additions),
-            tuple(sorted(p.remove_keys))))
+            removal_signature(p)))
     return plans
 
 
@@ -1192,6 +1251,12 @@ def _model_geometry_signature(model):
         rows.append((first, second, round(segment.width, 6), segment.layer,
                      segment.net_id, bool(segment.locked), bool(segment.arc)))
     return tuple(sorted(rows))
+
+
+def _canonicalize_model_segments(model):
+    """Remove pcbnew/serialization order from every planning decision."""
+    ordered = sorted(model.segments, key=_segment_order_key)
+    return replace(model, segments=ordered)
 
 
 def _convergence_state(model, pass_index, initial_mm, previous_mm, event,
@@ -1230,7 +1295,9 @@ def _convergence_state(model, pass_index, initial_mm, previous_mm, event,
 
 
 def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
-                            pass_observer=None, **kwargs):
+                            pass_observer=None, return_partial_on_limit=False,
+                            batch_group_convergence=True,
+                            **kwargs):
     """Compose repeated global plans into one validated fixed-point edit.
 
     The authorized scope never grows: replacement segments inherit eligibility,
@@ -1241,12 +1308,14 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
     if max_passes < 1:
         raise ValueError("max_passes must be at least one")
     original_eligible = set(eligible_segment_keys)
+    model = _canonicalize_model_segments(model)
     current_model = model
     current_eligible = set(original_eligible)
     changed_steps = []
     seen = set()
     final_search = None
     last_composed = None
+    bounded = False
     initial_mm = previous_mm = 0.0
     if pass_observer is not None:
         initial_state = _convergence_state(
@@ -1268,15 +1337,25 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
                     previous_mm, "cycle"))
             raise ValueError("Gloss convergence entered a geometry cycle")
         seen.add(signature)
+        pass_kwargs = dict(kwargs)
+        if batch_group_convergence and "converge_groups" not in pass_kwargs:
+            # Preserve the established first-pass basin. Once that broad
+            # global edit has opened local simplifications, converge each
+            # independent net/layer group in its worker before reconciling the
+            # next global state.
+            pass_kwargs["converge_groups"] = pass_index > 0
         plans = generate_candidate_plans(
-            current_model, current_eligible, **kwargs)
+            current_model, current_eligible, **pass_kwargs)
         changed_plans = [plan for plan in plans if plan.changed]
         if not changed_plans:
             final_search = plans[0]
             if pass_observer is not None:
-                pass_observer(_convergence_state(
+                fixed_state = _convergence_state(
                     current_model, len(changed_steps), initial_mm,
-                    previous_mm, "fixed_point"))
+                    previous_mm, "fixed_point")
+                if final_search.warnings:
+                    fixed_state["warnings"] = list(final_search.warnings)
+                pass_observer(fixed_state)
             break
         if pass_index == max_passes:
             if pass_observer is not None:
@@ -1285,14 +1364,25 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
                     previous_mm, "max_passes")
                 limited["next_plan_saved_mm"] = changed_plans[0].saved_mm
                 pass_observer(limited)
-            raise ValueError(
-                "Gloss did not reach a fixed point in {} changed passes".format(
-                    max_passes))
+            if not return_partial_on_limit:
+                raise ValueError(
+                    "Gloss did not reach a fixed point in {} changed passes".format(
+                        max_passes))
+            bounded = True
+            final_search = plans[0]
+            break
         accepted = None
         rejected_steps = []
         for step in changed_plans:
             proposed_model, proposed_eligible = _apply_to_model(
                 current_model, current_eligible, step, pass_index)
+            # The live adapter writes each collinear replacement as the
+            # compact final track set. Continue searching on that same
+            # topology; otherwise a final-only merge can expose an A1 -> A2
+            # simplification after the engine has already claimed A1 fixed.
+            proposed_model, proposed_eligible = _merge_final_collinear(
+                proposed_model, set(proposed_eligible))
+            proposed_model = _canonicalize_model_segments(proposed_model)
             try:
                 composed = _compose_refined_plan(
                     model, original_eligible, proposed_model,
@@ -1308,7 +1398,16 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
                 "No cumulatively safe convergence step remained: " +
                 "; ".join(sorted(set(rejected_steps))))
             break
-        step, current_model, current_eligible, last_composed = accepted
+        step, _proposed_model, _proposed_eligible, last_composed = accepted
+        # Normalize the next search state to the exact one-shot edit returned
+        # to KiCad, rather than to the internal history of incremental edits.
+        # This makes recursive openings in the compact route visible before
+        # declaring an in-memory fixed point.
+        current_model, current_eligible = _apply_to_model(
+            model, original_eligible, last_composed, pass_index)
+        current_model, current_eligible = _merge_final_collinear(
+            current_model, set(current_eligible))
+        current_model = _canonicalize_model_segments(current_model)
         changed_steps.append(step)
         if pass_observer is not None:
             state = _convergence_state(
@@ -1330,7 +1429,11 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
     # Nanometre quantization can collapse an analytical micro-adjustment back
     # to identity. Report applied passes, not discarded internal exploration.
     result.convergence_passes = len(changed_steps) if result.changed else 0
-    result.fixed_point = True
+    result.fixed_point = not bounded
+    if bounded:
+        result.warnings.append(
+            "Gloss stopped at the {}-pass interactive guard before reaching "
+            "a fixed point.".format(max_passes))
     if final_search is not None:
         result.chains_considered += final_search.chains_considered
         for key, value in final_search.search_counts.items():

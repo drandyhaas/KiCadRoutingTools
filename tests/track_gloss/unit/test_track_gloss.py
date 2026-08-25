@@ -16,6 +16,7 @@ from kicad_track_gloss.engine.model import (AddedSegment, BoardModel,
 from kicad_track_gloss.kicad.selection import meander_keys as _meander_keys
 from kicad_track_gloss.engine.pads import segment_hits_pad
 from kicad_track_gloss.kicad.rules import via_track_hole_clearance
+from kicad_track_gloss.engine.planner import _apply_to_model
 
 
 def test_custom_via_track_hole_clearance_uses_matching_active_rule(tmp_path):
@@ -94,6 +95,23 @@ def test_convergence_observer_reports_monotone_states_and_fixed_point():
     changed = [state for state in states if state["event"] == "changed"]
     assert len(changed) == result.convergence_passes
     assert all(state["geometry_signature"] for state in states)
+
+
+def test_nested_convergence_uses_unique_synthetic_segment_keys():
+    existing = Segment(
+        0.0, 0.0, 1.0, 0.0, 0.2, 0, 1,
+        "__track_gloss__pass-0-0", net_name="VCC")
+    plan = GlossResult(additions=[
+        AddedSegment((1.0, 0.0), (2.0, 0.0), 0.2, 0, 1)])
+
+    updated, eligible = _apply_to_model(
+        BoardModel([existing]), {segment_key(existing)}, plan, 0)
+    keys = [segment_key(segment) for segment in updated.segments]
+
+    assert len(keys) == len(set(keys)) == 2
+    assert "__track_gloss__pass-0-0" in keys
+    assert "__track_gloss__pass-0-0-1" in keys
+    assert set(keys) == eligible
 
 
 def test_unselected_half_is_never_removed():
@@ -732,6 +750,23 @@ def test_native_segment_uses_kicad_resolved_track_clearance():
         _NativeTrack("rule", (0, 0), (1, 0), 1, clearance=0.127))
 
     assert segment.clearance == 0.127
+
+
+def test_adapter_rounds_millimetres_to_exact_integer_nanometres():
+    class Pcbnew:
+        @staticmethod
+        def FromMM(_value):
+            return 130_199_999  # Demonstrate the SWIG conversion truncation.
+
+        @staticmethod
+        def VECTOR2I(x, y):
+            return x, y
+
+    from kicad_track_gloss.kicad import BoardAdapter
+    adapter = BoardAdapter(Pcbnew())
+
+    assert adapter.from_mm(130.2) == 130_200_000
+    assert adapter.vector((130.2, 0.25)) == (130_200_000, 250_000)
 
 
 def test_native_connection_expansion_stops_at_junction():

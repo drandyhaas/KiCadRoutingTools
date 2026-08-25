@@ -331,18 +331,25 @@ For convergence research, `--max-passes N` changes the hard guard (default
 stderr. Standard `GLOSS_SCORE_JSON` and `SCORE=` output remains unchanged on
 stdout, so the tracing option does not break `place_route_loop` consumers.
 
+The CLI and plugin use the same planning and safety algorithms, but not the
+same work guard. The CLI is an offline scorer and requires a fixed point within
+its configurable bound. The interactive plugin is bounded to four global
+reconciliation passes and two local passes per independent batch. At that
+interactive bound it applies the safe improvement already found, marks the
+result as non-fixed-point internally, and returns control to KiCad. Small
+single-connection selections normally converge before either bound matters.
+
 The second form is intended for generated boards whose filename differs from
 the original project. The CLI makes a temporary same-stem copy of the board,
 `.kicad_pro`, and sibling `.kicad_dru`, allowing KiCad to evaluate the original
 project rules without touching any source file.
 
-`--output` is the only mode that writes copper. It saves the already converged
-in-memory result to a different `.kicad_pcb` and refuses to overwrite either
-the input or an existing output unless `--force` is explicit. Re-running the
-CLI on that output must report zero changed passes, zero saved length, and the
-same score: A0 → A1 is therefore a fixed point and A1 → A2 leaves the route
-geometry unchanged. Byte-for-byte identity is not promised because KiCad may
-reorder records or regenerate identifiers when serializing a board.
+`--output` is the only mode that writes copper. It saves the converged in-memory
+result to a different `.kicad_pcb` and refuses to overwrite either the input or
+an existing output unless `--force` is explicit. KiCad may reorder or split
+records when serializing a board; a later all-track run can consequently expose
+a new local opening even though the prior in-memory scope reached its fixed
+point. Byte-for-byte identity is not promised.
 
 For `place_route_loop`, use the scorer as the acceptance command and add
 `--place-route-loop`. The loop appends its placed PCB, routed PCB, and
