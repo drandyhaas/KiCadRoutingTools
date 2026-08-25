@@ -54,6 +54,13 @@ def _parser():
     parser.add_argument(
         "--scope-file", metavar="SCOPE.json",
         help='JSON manifest containing {"scopes":["net:VCC", ...]}')
+    parser.add_argument(
+        "--max-passes", type=int, default=16, metavar="N",
+        help="maximum changed convergence passes; default 16")
+    parser.add_argument(
+        "--trace-passes", action="store_true",
+        help=("print one GLOSS_PASS_JSON record per convergence state to "
+              "stderr, including the terminal fixed-point or limit record"))
     return parser
 
 
@@ -221,7 +228,7 @@ def _save_output(pcbnew, board, input_path, output_path, force=False):
 
 
 def evaluate(board_path, project_path=None, parallel=True, output_path=None,
-             force=False, max_passes=16, scopes=None):
+             force=False, max_passes=16, scopes=None, pass_observer=None):
     (pcbnew, BoardAdapter, generate_converged_plan, length,
      segment_key, is_probable_diff_pair, version) = _bootstrap_engine()
     with prepared_board(board_path, project_path) as (load_path, used_project):
@@ -250,7 +257,8 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
         best = generate_converged_plan(
             initial.model, eligible, max_passes=max_passes, min_gain=0.01,
             allow_equal_length_simpler=True,
-            clearance=initial.minimum_clearance, parallel=parallel)
+            clearance=initial.minimum_clearance, parallel=parallel,
+            pass_observer=pass_observer)
         if best.changed:
             adapter.apply(board, best, rollback_on_error=True)
 
@@ -281,6 +289,7 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             "eligible_tracks": len(eligible),
             "protected_tuned_tracks": len(meanders),
             "convergence_passes": best.convergence_passes,
+            "max_passes": max_passes,
             "fixed_point": best.fixed_point,
             "before_mm": before_mm,
             "potential_saved_mm": saved_mm,
@@ -297,6 +306,8 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
 def main(argv=None):
     args = _parser().parse_args(argv)
     try:
+        if args.max_passes < 1:
+            raise ValueError("--max-passes must be at least one")
         if args.place_route_loop and args.output:
             raise ValueError("--output is forbidden with --place-route-loop")
         if args.force and not args.output:
@@ -305,9 +316,16 @@ def main(argv=None):
             args.paths, args.place_route_loop)
         board, project = resolve_board_project(board, args.project)
         scopes = resolve_scopes(args.scope, args.scope_file)
+        observer = None
+        if args.trace_passes:
+            def observer(state):
+                print("GLOSS_PASS_JSON=" + json.dumps(
+                    state, sort_keys=True, separators=(",", ":")),
+                    file=sys.stderr, flush=True)
         payload = evaluate(
             board, project, parallel=not args.no_parallel,
-            output_path=args.output, force=args.force, scopes=scopes)
+            output_path=args.output, force=args.force, scopes=scopes,
+            max_passes=args.max_passes, pass_observer=observer)
         if placed is not None:
             payload["placed_board"] = str(placed.resolve())
             payload["route_json"] = str(route_json.resolve())

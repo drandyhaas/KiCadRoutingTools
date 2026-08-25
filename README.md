@@ -45,6 +45,7 @@ D:\kicad\bin\python.exe tools\score_track_gloss.py design.kicad_pro
 D:\kicad\bin\python.exe tools\score_track_gloss.py --project design.kicad_pro candidate.kicad_pcb
 D:\kicad\bin\python.exe tools\score_track_gloss.py --scope net:VCC --project design.kicad_pro candidate.kicad_pcb
 D:\kicad\bin\python.exe tools\score_track_gloss.py --project design.kicad_pro --output glossed.kicad_pcb candidate.kicad_pcb
+D:\kicad\bin\python.exe tools\score_track_gloss.py --max-passes 32 --trace-passes --project design.kicad_pro candidate.kicad_pcb
 ```
 
 For `place_route_loop`, add `--place-route-loop` to the acceptance command; the
@@ -52,6 +53,9 @@ loop-provided routed PCB is graded and the placed PCB plus `route.json` are
 recorded in `GLOSS_SCORE_JSON`. The input board is never modified or saved.
 Writing a converged board requires the explicit `--output` option; the CLI
 refuses to overwrite its input.
+`--max-passes N` controls the hard convergence guard (default 16), while
+`--trace-passes` emits machine-readable `GLOSS_PASS_JSON` records to stderr
+for convergence analysis without changing the final stdout score contract.
 This is a quality score only and must be combined with separate DRC,
 connectivity, and specification checks. Full CLI details and an acceptance
 command example are in

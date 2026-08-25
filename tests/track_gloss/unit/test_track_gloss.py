@@ -80,6 +80,22 @@ def test_converged_plan_reaches_a_reported_fixed_point():
     assert result.convergence_passes >= 1
 
 
+def test_convergence_observer_reports_monotone_states_and_fixed_point():
+    segs = staircase()
+    states = []
+    result = generate_converged_plan(
+        BoardModel(segs), {segment_key(segment) for segment in segs},
+        min_gain=0.01, allow_equal_length_simpler=True, clearance=0.0,
+        pass_observer=states.append)
+    assert result.fixed_point
+    assert states[0]["event"] == "initial"
+    assert states[0]["pass_gain_mm"] == 0.0
+    assert states[-1]["event"] == "fixed_point"
+    changed = [state for state in states if state["event"] == "changed"]
+    assert len(changed) == result.convergence_passes
+    assert all(state["geometry_signature"] for state in states)
+
+
 def test_unselected_half_is_never_removed():
     segs = staircase()
     selected = {segment_key(s) for s in segs[:10]}

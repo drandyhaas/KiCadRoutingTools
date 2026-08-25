@@ -83,3 +83,10 @@ def test_scope_resolves_exact_nets_and_segments():
         records, ["segment:b"], not_diff) == {"b"}
     with pytest.raises(ValueError):
         CLI.seed_keys_for_scopes(records, ["net:vcc"], not_diff)
+
+
+def test_cli_exposes_convergence_pass_limit_and_trace():
+    args = CLI._parser().parse_args([
+        "--max-passes", "7", "--trace-passes", "candidate.kicad_pcb"])
+    assert args.max_passes == 7
+    assert args.trace_passes

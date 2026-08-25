@@ -323,7 +323,13 @@ D:\kicad\bin\python.exe tools\score_track_gloss.py --scope net:VCC --project des
 D:\kicad\bin\python.exe tools\score_track_gloss.py --scope segment:UUID --project design.kicad_pro candidate.kicad_pcb
 D:\kicad\bin\python.exe tools\score_track_gloss.py --scope-file scope.json --project design.kicad_pro candidate.kicad_pcb
 D:\kicad\bin\python.exe tools\score_track_gloss.py --project design.kicad_pro --output glossed.kicad_pcb candidate.kicad_pcb
+D:\kicad\bin\python.exe tools\score_track_gloss.py --max-passes 32 --trace-passes --project design.kicad_pro candidate.kicad_pcb
 ```
+
+For convergence research, `--max-passes N` changes the hard guard (default
+16) and `--trace-passes` emits one `GLOSS_PASS_JSON` record per state to
+stderr. Standard `GLOSS_SCORE_JSON` and `SCORE=` output remains unchanged on
+stdout, so the tracing option does not break `place_route_loop` consumers.
 
 The second form is intended for generated boards whose filename differs from
 the original project. The CLI makes a temporary same-stem copy of the board,

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import replace
+import hashlib
 
 from .context import PlannerContext
 from .geometry import (length, octolinear_paths, path_hits_polygon,
@@ -1193,8 +1194,43 @@ def _model_geometry_signature(model):
     return tuple(sorted(rows))
 
 
+def _convergence_state(model, pass_index, initial_mm, previous_mm, event,
+                       step=None):
+    """Return a compact, identity-free diagnostic for one global pass."""
+    straight = [segment for segment in model.segments if not segment.arc]
+    current_mm = sum(length(
+        (segment.start_x, segment.start_y),
+        (segment.end_x, segment.end_y)) for segment in straight)
+    signature = _model_geometry_signature(model)
+    gain_mm = previous_mm - current_mm
+    result = {
+        "event": event,
+        "pass": pass_index,
+        "copper_mm": current_mm,
+        "segments": len(straight),
+        "pass_gain_mm": gain_mm,
+        "pass_gain_percent": (
+            100.0 * gain_mm / previous_mm if previous_mm else 0.0),
+        "cumulative_gain_mm": initial_mm - current_mm,
+        "cumulative_gain_percent": (
+            100.0 * (initial_mm - current_mm) / initial_mm
+            if initial_mm else 0.0),
+        "geometry_signature": hashlib.sha256(
+            repr(signature).encode("utf-8")).hexdigest()[:16],
+    }
+    if step is not None:
+        result.update({
+            "removed": len(step.remove_keys),
+            "added": len(step.additions),
+            "changed_nets": sorted({
+                transformation.net_name
+                for transformation in step.transformations}),
+        })
+    return result
+
+
 def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
-                            **kwargs):
+                            pass_observer=None, **kwargs):
     """Compose repeated global plans into one validated fixed-point edit.
 
     The authorized scope never grows: replacement segments inherit eligibility,
@@ -1211,10 +1247,25 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
     seen = set()
     final_search = None
     last_composed = None
+    initial_mm = previous_mm = 0.0
+    if pass_observer is not None:
+        initial_state = _convergence_state(
+            current_model, 0, 0.0, 0.0, "initial")
+        initial_mm = initial_state["copper_mm"]
+        initial_state["pass_gain_mm"] = 0.0
+        initial_state["pass_gain_percent"] = 0.0
+        initial_state["cumulative_gain_mm"] = 0.0
+        initial_state["cumulative_gain_percent"] = 0.0
+        previous_mm = initial_mm
+        pass_observer(initial_state)
 
     for pass_index in range(max_passes + 1):
         signature = _model_geometry_signature(current_model)
         if signature in seen:
+            if pass_observer is not None:
+                pass_observer(_convergence_state(
+                    current_model, len(changed_steps), initial_mm,
+                    previous_mm, "cycle"))
             raise ValueError("Gloss convergence entered a geometry cycle")
         seen.add(signature)
         plans = generate_candidate_plans(
@@ -1222,8 +1273,18 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
         changed_plans = [plan for plan in plans if plan.changed]
         if not changed_plans:
             final_search = plans[0]
+            if pass_observer is not None:
+                pass_observer(_convergence_state(
+                    current_model, len(changed_steps), initial_mm,
+                    previous_mm, "fixed_point"))
             break
         if pass_index == max_passes:
+            if pass_observer is not None:
+                limited = _convergence_state(
+                    current_model, len(changed_steps), initial_mm,
+                    previous_mm, "max_passes")
+                limited["next_plan_saved_mm"] = changed_plans[0].saved_mm
+                pass_observer(limited)
             raise ValueError(
                 "Gloss did not reach a fixed point in {} changed passes".format(
                     max_passes))
@@ -1249,6 +1310,12 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
             break
         step, current_model, current_eligible, last_composed = accepted
         changed_steps.append(step)
+        if pass_observer is not None:
+            state = _convergence_state(
+                current_model, len(changed_steps), initial_mm, previous_mm,
+                "changed", step)
+            pass_observer(state)
+            previous_mm = state["copper_mm"]
     else:  # pragma: no cover - the bounded loop always breaks or raises.
         raise ValueError("Gloss convergence ended unexpectedly")
 
