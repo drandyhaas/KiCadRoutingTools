@@ -19,7 +19,7 @@ sys.modules["kicad_track_gloss"] = package
 from kicad_track_gloss.engine import (  # noqa: E402
     find_pad_terminal_targets,
     find_track_terminal_targets,
-    generate_candidate_plans,
+    generate_converged_plan,
 )
 from kicad_track_gloss.engine.model import segment_key  # noqa: E402
 from kicad_track_gloss.kicad import BoardAdapter  # noqa: E402
@@ -61,7 +61,7 @@ def main():
         board, records, set(args.uuid), warnings)
     targets = find_track_terminal_targets(snapshot.model, eligible)
     pad_targets = find_pad_terminal_targets(snapshot.model, eligible)
-    plans = generate_candidate_plans(
+    plan = generate_converged_plan(
         snapshot.model, eligible, min_gain=0.01,
         allow_equal_length_simpler=True,
         clearance=snapshot.minimum_clearance)
@@ -84,19 +84,19 @@ def main():
         print(" ", terminal, "->", [
             (region.shape, region.x, region.y, region.width, region.height)
             for region in regions])
-    print("plans:", len(plans))
-    for index, plan in enumerate(plans):
-        print(index, "changed=", plan.changed, "saved=", round(plan.saved_mm, 6),
-              "remove=", len(plan.remove_keys), "add=", len(plan.additions),
-              "chains=", plan.chains_considered)
-        for addition in plan.additions:
-            print("   ", addition.start, "->", addition.end)
+    print("converged plan: changed=", plan.changed,
+          "fixed_point=", plan.fixed_point,
+          "passes=", plan.convergence_passes,
+          "saved=", round(plan.saved_mm, 6),
+          "remove=", len(plan.remove_keys), "add=", len(plan.additions),
+          "chains=", plan.chains_considered)
+    for addition in plan.additions:
+        print("   ", addition.start, "->", addition.end)
     if args.apply_in_memory:
-        changed = [plan for plan in plans if plan.changed]
-        if not changed:
+        if not plan.changed:
             raise SystemExit("No changed plan to apply")
         before = len(list(board.GetTracks()))
-        created = adapter.apply(board, changed[0], rollback_on_error=True)
+        created = adapter.apply(board, plan, rollback_on_error=True)
         after = len(list(board.GetTracks()))
         print("in-memory apply: passed; tracks", before, "->", after,
               "created", len(created), "(board was not saved)")
@@ -132,15 +132,15 @@ def sweep(board, adapter, snapshot, records, board_path, verify_apply, max_scope
         seed_key, net_name, warnings, meander_count = scope_data
         eligible = set(signature)
         try:
-            plans = generate_candidate_plans(
+            best = generate_converged_plan(
                 snapshot.model, eligible, min_gain=0.01,
                 allow_equal_length_simpler=True,
                 clearance=snapshot.minimum_clearance)
-            changed = [plan for plan in plans if plan.changed]
-            best = changed[0] if changed else None
+            if not best.changed:
+                best = None
             error = ""
         except Exception as exception:
-            plans, best = [], None
+            best = None
             error = type(exception).__name__ + ": " + str(exception)
         apply_error = ""
         if verify_apply and best is not None:
@@ -156,7 +156,6 @@ def sweep(board, adapter, snapshot, records, board_path, verify_apply, max_scope
             "terminals": len(find_track_terminal_targets(snapshot.model, eligible)),
             "pad_terminals": len(find_pad_terminal_targets(
                 snapshot.model, eligible)),
-            "plans": len(plans),
             "changed": best is not None,
             "saved": round(best.saved_mm, 6) if best else 0.0,
             "remove": len(best.remove_keys) if best else 0,

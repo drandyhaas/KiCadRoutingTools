@@ -10,7 +10,7 @@ import pcbnew
 import wx
 
 from .engine import (find_pad_terminal_targets, find_track_terminal_vertices,
-                     generate_candidate_plans, summarize_plan)
+                     generate_converged_plan, summarize_plan)
 from .engine.model import segment_key
 from .kicad import BoardAdapter
 from .kicad.diagnostics import (append_plan_statistics,
@@ -26,6 +26,22 @@ LOG = logging.getLogger("KiCadTrackGloss")
 # success/no-op popup. KiCad's native rules still constrain candidate search.
 MIN_GAIN_MM = 0.01
 ALLOW_EQUAL_LENGTH_SIMPLIFICATION = True
+
+
+class NoTrackSelection(ValueError):
+    """Normal user condition handled by a focused selection warning."""
+
+
+def _show_selection_warning():
+    dialog = wx.MessageDialog(
+        None,
+        "Select at least one straight track segment before running Track Gloss.",
+        "KiCad Track Gloss",
+        wx.OK | wx.ICON_WARNING)
+    try:
+        dialog.ShowModal()
+    finally:
+        dialog.Destroy()
 
 
 def _show_report(title, lines):
@@ -222,6 +238,11 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
     def Run(self):
         try:
             changed = self._run([])
+        except NoTrackSelection:
+            try:
+                _show_selection_warning()
+            except Exception:
+                LOG.exception("Could not display the track-selection warning")
         except Exception:
             _warning_bell()
             LOG.exception("Track gloss failed; the board was left unchanged")
@@ -255,6 +276,9 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         report.append(
             "Selected objects: {segments} straight segment(s), {arcs} arc(s), "
             "{vias} via(s), {other} other.".format(**counts))
+        if counts["segments"] == 0 and not diagnostic:
+            raise NoTrackSelection(
+                "Select at least one straight track segment before running Track Gloss.")
         adapter = BoardAdapter(pcbnew)
         try:
             snapshot = adapter.snapshot(board)
@@ -288,29 +312,27 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                 "straight segment or a sliding track/pad termination.")
             return False
 
-        plans = generate_candidate_plans(
+        best = generate_converged_plan(
             snapshot.model, snapshot.eligible_keys,
             min_gain=MIN_GAIN_MM,
             allow_equal_length_simpler=ALLOW_EQUAL_LENGTH_SIMPLIFICATION,
             clearance=snapshot.minimum_clearance,
             collect_statistics=diagnostic,
             parallel=True)
-        report.append("Candidate plans evaluated: " + str(len(plans)))
+        report.append("Convergence passes: " + str(best.convergence_passes))
+        report.append("Fixed point reached: " +
+                      ("yes" if best.fixed_point else "no"))
         report.append("Connected chains considered: " +
-                      str(max((plan.chains_considered for plan in plans), default=0)))
-        searched_plan = plans[0] if plans else None
-        plans = [plan for plan in plans if plan.changed]
-        if not plans:
-            if diagnostic and searched_plan is not None:
+                      str(best.chains_considered))
+        if not best.changed:
+            if diagnostic:
                 append_search_statistics(
-                    report, searched_plan.search_counts,
-                    searched_plan.blocking_nets)
+                    report, best.search_counts, best.blocking_nets)
             report.append("Result: no safe improvement found.")
             report.append(
                 "Possible reasons: disconnected selection, fixed junction, locked/tuned "
                 "track, insufficient length gain, clearance, pad, via, keepout, or board edge.")
             return False
-        best = plans[0]
         report.append("Chosen plan: remove {} segment(s), add {} segment(s).".format(
             len(best.remove_keys), len(best.additions)))
         report.append("Copper length saved: {:.3f} mm.".format(best.saved_mm))

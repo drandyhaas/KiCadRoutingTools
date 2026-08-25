@@ -104,6 +104,8 @@ def _encode_plan(plan):
         "search_counts": dict(plan.search_counts),
         "blocking_nets": dict(plan.blocking_nets),
         "angle_corrections": plan.angle_corrections,
+        "convergence_passes": plan.convergence_passes,
+        "fixed_point": plan.fixed_point,
     }
 
 
@@ -119,7 +121,9 @@ def _decode_plan(data):
                          for item in data["transformations"]],
         search_counts=dict(data["search_counts"]),
         blocking_nets=dict(data["blocking_nets"]),
-        angle_corrections=data["angle_corrections"])
+        angle_corrections=data["angle_corrections"],
+        convergence_passes=data.get("convergence_passes", 0),
+        fixed_point=data.get("fixed_point", False))
 
 
 def _worker(input_path, output_path):

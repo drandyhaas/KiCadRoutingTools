@@ -23,9 +23,11 @@ Run real-board validation without saving any PCB:
 D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py
 ```
 
-The default real-board run evaluates the all-selected board once. The costly
-order-independence replay is deliberately suspended from routine validation.
-Run its seven input orders only when specifically investigating determinism:
+The default real-board run evaluates the all-selected board to its shared
+fixed point once. The costly order-independence replay is deliberately
+suspended from routine validation. Run its seven input orders only when
+specifically investigating determinism. Equality checks order independence,
+not mathematical optimality:
 
 ```text
 D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --all-orders
@@ -49,10 +51,10 @@ and design rules:
 D:\kicad\bin\python.exe tools\score_track_gloss.py --project tests\track_gloss\patterns\dispenser_labels\dispenser_labels.kicad_pro tests\track_gloss\patterns\dispenser_labels\dispenser_labels.kicad_pcb
 ```
 
-The final stdout line must be `SCORE=1045.942508997`. The preceding
+The final stdout line must be `SCORE=1045.961827184`. The preceding
 `GLOSS_SCORE_JSON=` document must report 706 selected seeds, 590 eligible
 tracks, 116 protected tuned tracks, three changed convergence passes,
-63.501040729 mm of copper saved, and 32 segments saved. Saving with `--output`
+63.481722542 mm of actual copper saved, and 31 segments saved. Saving with `--output`
 and rescoring that output must report zero changed passes and the same score.
 The fixture must remain byte-for-byte unchanged.
 

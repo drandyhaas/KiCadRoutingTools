@@ -115,6 +115,8 @@ class GlossResult:
     search_counts: Dict[str, int] = field(default_factory=dict)
     blocking_nets: Dict[str, int] = field(default_factory=dict)
     angle_corrections: int = 0
+    convergence_passes: int = 0
+    fixed_point: bool = False
 
     @property
     def changed(self) -> bool:

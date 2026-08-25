@@ -7,7 +7,9 @@ import argparse
 from dataclasses import replace
 from pathlib import Path
 import random
+import shutil
 import sys
+import tempfile
 import types
 
 import pcbnew
@@ -28,7 +30,7 @@ sys.modules["kicad_track_gloss"] = package
 # handler warning per fixture reload.
 WX_LOG_SILENCER = wx.LogNull()
 
-from kicad_track_gloss.engine import generate_candidate_plans  # noqa: E402
+from kicad_track_gloss.engine import generate_converged_plan  # noqa: E402
 from kicad_track_gloss.engine.model import segment_key  # noqa: E402
 from kicad_track_gloss.kicad import BoardAdapter  # noqa: E402
 from kicad_track_gloss.kicad.selection import (  # noqa: E402
@@ -38,9 +40,9 @@ from kicad_track_gloss.kicad.selection import (  # noqa: E402
 
 EXPECTED_TRACKS = 706
 EXPECTED_SCOPES = 334
-EXPECTED_ALL_SELECTED_SAVED_MM = 63.156858
-EXPECTED_ALL_SELECTED_REMOVED = 215
-EXPECTED_ALL_SELECTED_ADDED = 194
+EXPECTED_ALL_SELECTED_SAVED_MM = 63.481723
+EXPECTED_ALL_SELECTED_REMOVED = 219
+EXPECTED_ALL_SELECTED_ADDED = 188
 MICRO_JOG_SEED = "58ebb541-fac6-4d02-8a68-65aca50766b5"
 SHORT_VCC_SEED = "cc798608-5e9b-4c2a-9856-dde85f9d85f0"
 PAD_SLIDING_SEED = "54640123-2d45-4136-984c-783155178230"
@@ -92,6 +94,22 @@ def _all_selected_regression(board, adapter, snapshot, records,
              if not segment.locked and not _is_probable_diff_pair(segment.net_name)}
     eligible, expanded, meanders = adapter.expand_eligible_keys(
         board, records, seeds, [])
+    with tempfile.TemporaryDirectory(prefix="track-gloss-selection-") as name:
+        temporary = Path(name)
+        selected_path = temporary / "selected.kicad_pcb"
+        shutil.copy2(FIXTURE, selected_path)
+        for suffix in (".kicad_pro", ".kicad_dru"):
+            sibling = FIXTURE.with_suffix(suffix)
+            if sibling.is_file():
+                shutil.copy2(sibling, selected_path.with_suffix(suffix))
+        selected_board = pcbnew.LoadBoard(str(selected_path))
+        selected_adapter = BoardAdapter(pcbnew)
+        selected_records = _records(selected_adapter, selected_board)
+        for item, _segment in selected_records.values():
+            item.SetSelected()
+        plugin_snapshot = selected_adapter.snapshot(selected_board)
+        assert plugin_snapshot.eligible_keys == eligible
+        assert plugin_snapshot.selection_seed_count == len(seeds)
 
     original = list(snapshot.model.segments)
     variants = {"board order": original}
@@ -113,25 +131,27 @@ def _all_selected_regression(board, adapter, snapshot, records,
             variants[f"shuffle {seed}"] = shuffled
 
     signatures = {}
-    reference_plans = None
+    reference_plan = None
     for label, ordered_segments in variants.items():
         print(f"all-selected order: {label}", flush=True)
         model = replace(snapshot.model, segments=ordered_segments)
-        plans = generate_candidate_plans(
+        plan = generate_converged_plan(
             model, eligible, min_gain=0.01,
             allow_equal_length_simpler=True,
             clearance=snapshot.minimum_clearance, parallel=True)
-        signatures[label] = tuple(_plan_signature(plan) for plan in plans)
-        if reference_plans is None:
-            reference_plans = plans
+        signatures[label] = _plan_signature(plan)
+        if reference_plan is None:
+            reference_plan = plan
     if check_all_orders:
         assert len(set(signatures.values())) == 1, {
             label: len(signature) for label, signature in signatures.items()
         }
 
-    changed = [plan for plan in reference_plans if plan.changed]
-    assert changed
-    best = changed[0]
+    best = reference_plan
+    print("all-selected result:", round(best.saved_mm, 6), "mm,",
+          len(best.remove_keys), "removed,", len(best.additions), "added",
+          flush=True)
+    assert best.changed and best.fixed_point
     assert round(best.saved_mm, 6) == EXPECTED_ALL_SELECTED_SAVED_MM
     assert len(best.remove_keys) == EXPECTED_ALL_SELECTED_REMOVED
     assert len(best.additions) == EXPECTED_ALL_SELECTED_ADDED
@@ -143,7 +163,8 @@ def _all_selected_regression(board, adapter, snapshot, records,
         len(meanders), "meander-protected,", len(eligible), "eligible,",
         round(best.saved_mm, 6), "mm saved,", saved_segments,
         "segments saved (", len(best.remove_keys), "removed /",
-        len(best.additions), "added ),", len(variants), "orders identical")
+        len(best.additions), "added ), plugin/CLI scopes identical,",
+        len(variants), "orders identical")
     if not check_all_orders:
         print("ORDER INDEPENDENCE CHECK SUSPENDED: use --all-orders to replay "
               "all 7 input orders", flush=True)
@@ -164,11 +185,10 @@ def _dense_micro_jog_regression(board, adapter, records):
 def _short_vcc_regression(board, adapter, snapshot, records):
     eligible, expanded, protected = adapter.expand_eligible_keys(
         board, records, {SHORT_VCC_SEED}, [])
-    plans = generate_candidate_plans(
+    best = generate_converged_plan(
         snapshot.model, eligible, min_gain=0.01,
         allow_equal_length_simpler=True,
         clearance=snapshot.minimum_clearance, parallel=True)
-    best = next(plan for plan in plans if plan.changed)
     assert len(expanded) == 9
     assert not protected
     assert round(best.saved_mm, 6) == 1.003620
@@ -182,11 +202,10 @@ def _short_vcc_regression(board, adapter, snapshot, records):
 def _pad_sliding_regression(board, adapter, snapshot, records):
     eligible, expanded, protected = adapter.expand_eligible_keys(
         board, records, {PAD_SLIDING_SEED}, [])
-    plans = generate_candidate_plans(
+    best = generate_converged_plan(
         snapshot.model, eligible, min_gain=0.01,
         allow_equal_length_simpler=True,
         clearance=snapshot.minimum_clearance, parallel=True)
-    best = next(plan for plan in plans if plan.changed)
     assert len(expanded) == 1
     assert not protected
     assert round(best.saved_mm, 6) == 0.596798
@@ -221,10 +240,10 @@ def _reported_clearance_regressions(board, adapter, snapshot, records):
         eligible, _expanded, protected = adapter.expand_eligible_keys(
             board, records, set(seeds), [])
         assert not protected
-        plan = generate_candidate_plans(
+        plan = generate_converged_plan(
             snapshot.model, eligible, min_gain=0.01,
             allow_equal_length_simpler=True,
-            clearance=snapshot.minimum_clearance, parallel=True)[0]
+            clearance=snapshot.minimum_clearance, parallel=True)
         assert round(plan.saved_mm, 6) == expected_saved
         assert len(plan.remove_keys) == expected_removed
         assert len(plan.additions) == expected_added
@@ -285,12 +304,11 @@ def main():
     assert len(scopes) == EXPECTED_SCOPES, (len(scopes), EXPECTED_SCOPES)
     changed = []
     for index, (eligible, seed) in enumerate(scopes.items(), 1):
-        plans = generate_candidate_plans(
+        best = generate_converged_plan(
             snapshot.model, set(eligible), min_gain=0.01,
             allow_equal_length_simpler=True,
             clearance=snapshot.minimum_clearance, parallel=True)
-        best = next((plan for plan in plans if plan.changed), None)
-        if best is not None:
+        if best.changed:
             changed.append((seed, best))
         if index % 50 == 0:
             print(f"generated {index}/{len(scopes)} scopes", flush=True)

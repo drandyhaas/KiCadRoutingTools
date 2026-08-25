@@ -95,6 +95,9 @@ def append_plan_statistics(report, summary):
             summary["segments_saved"], summary["segment_percent"]),
         "  Changed chains / transformations: {} / {}".format(
             summary["chains_changed"], summary["transformations"]),
+        "  Convergence passes / fixed point: {} / {}".format(
+            summary["convergence_passes"],
+            "yes" if summary["fixed_point"] else "no"),
         "  Gain per transformation (mean / median / max): "
         "{:.6f} / {:.6f} / {:.6f} mm".format(
             summary["gain_mean"], summary["gain_median"], summary["gain_max"]),

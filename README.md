@@ -9,6 +9,9 @@ then exits. KiCad Undo remains the normal way to reject a result.
 The separate diagnostic action reports affected nets, length and segment
 gains, optimization mechanisms, rejected candidates, and machine-readable
 JSON. Normal operation remains silent unless no modification is possible.
+Launching the normal action without any straight segment selected displays a
+single focused selection warning; an eligible no-op still uses only KiCad's
+warning bell.
 
 ## Repository layout
 
@@ -21,21 +24,26 @@ JSON. Normal operation remains silent unless no modification is possible.
 - `tools/score_track_gloss.py`: read-only whole-board score CLI compatible
   with `place_route_loop`.
 - `tools/diagnose_track_gloss_board.py`: read-only headless board diagnosis.
+- `codex/`: isolated experimental Codex agent, prompt, scope/result schemas,
+  examples, and executable-ready launcher.
 
 The implementation does not import or require the autorouter modules from the
 main KiCadRoutingTools branch. The generated PCM archive is self-contained.
 
-## Whole-board CLI score
+## Scoped CLI score
 
 The repository also provides a read-only CLI for automated routing loops. It
-selects all admissible straight tracks together, repeats safe gloss passes to
-a geometric fixed point in memory, and prints a final `SCORE=<float>` line compatible with
-`place_route_loop --accept-cmd`. The score is the virtual post-gloss total
-straight-track copper length in millimetres, so a lower value is better.
+uses the same fixed-point function as the plugin and prints a final
+`SCORE=<float>` line compatible with `place_route_loop --accept-cmd`. The score
+is the virtual post-gloss total straight-track copper length in millimetres,
+so a lower value is better. The default scope is `ALL`; narrower experiments
+use repeatable `--scope net:<name>`, `--scope segment:<uuid>`, or
+`--scope-file manifest.json` arguments.
 
 ```powershell
 D:\kicad\bin\python.exe tools\score_track_gloss.py design.kicad_pro
 D:\kicad\bin\python.exe tools\score_track_gloss.py --project design.kicad_pro candidate.kicad_pcb
+D:\kicad\bin\python.exe tools\score_track_gloss.py --scope net:VCC --project design.kicad_pro candidate.kicad_pcb
 D:\kicad\bin\python.exe tools\score_track_gloss.py --project design.kicad_pro --output glossed.kicad_pcb candidate.kicad_pcb
 ```
 

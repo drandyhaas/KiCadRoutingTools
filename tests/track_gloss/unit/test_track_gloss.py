@@ -8,12 +8,33 @@ import json
 
 from kicad_track_gloss.engine import (find_track_terminal_vertices,
                                       generate_candidate_plans,
+                                      generate_converged_plan,
                                       smooth_selected_chains, summarize_plan)
 from kicad_track_gloss.engine.model import (AddedSegment, BoardModel,
                                             CircleObstacle, GlossResult,
                                             PadRegion, Segment, segment_key)
 from kicad_track_gloss.kicad.selection import meander_keys as _meander_keys
 from kicad_track_gloss.engine.pads import segment_hits_pad
+from kicad_track_gloss.kicad.rules import via_track_hole_clearance
+
+
+def test_custom_via_track_hole_clearance_uses_matching_active_rule(tmp_path):
+    board_path = tmp_path / "board.kicad_pcb"
+    board_path.write_text("(kicad_pcb)", encoding="utf-8")
+    board_path.with_suffix(".kicad_dru").write_text(
+        """
+# (rule "disabled" (constraint hole_clearance (min 9mm))
+#   (condition "A.Type == 'via' && B.Type == 'track'"))
+(rule "via-track"
+  (constraint hole_clearance (min 0.254mm))
+  (condition "A.Type == 'via' && B.Type == 'track'"))
+(rule "pth-track"
+  (constraint hole_clearance (min 0.33mm))
+  (condition "A.Type != 'Via' && B.Type == 'track'"))
+""", encoding="utf-8")
+
+    board = types.SimpleNamespace(GetFileName=lambda: str(board_path))
+    assert via_track_hole_clearance(None, board) == 0.254
 
 
 def staircase(count=20, pitch=0.2, net=1):
@@ -47,6 +68,16 @@ def test_selected_staircase_shortens():
     summary = summarize_plan(model, {segment_key(s) for s in segs}, result)
     assert sum(row["segments_saved"] for row in summary["mechanisms"]) == \
         summary["segments_saved"]
+
+
+def test_converged_plan_reaches_a_reported_fixed_point():
+    segs = staircase()
+    result = generate_converged_plan(
+        BoardModel(segs), {segment_key(segment) for segment in segs},
+        min_gain=0.01, allow_equal_length_simpler=True, clearance=0.0)
+    assert result.changed
+    assert result.fixed_point
+    assert result.convergence_passes >= 1
 
 
 def test_unselected_half_is_never_removed():
@@ -471,6 +502,8 @@ def test_action_plugin_is_silent_and_has_no_file_roundtrip():
     assert "KiCadTrackGlossDiagnosticPlugin" in source
     assert "show_toolbar_button = False" in source
     assert "wx.Bell()" in source
+    assert "wx.MessageDialog" in source
+    assert "Select at least one straight track segment" in source
     assert "Plugin version: " in source
     assert 'label="Copier"' in source
     assert "Use KiCad Undo to revert it." not in source
@@ -535,6 +568,16 @@ def test_normal_action_bells_once_only_on_noop():
         assert calls == ["bell"]
         plugin._run = lambda _report: True
         plugin.Run()
+        assert calls == ["bell"]
+        warnings = []
+        module._show_selection_warning = lambda: warnings.append("warning")
+
+        def no_selection(_report):
+            raise module.NoTrackSelection()
+
+        plugin._run = no_selection
+        plugin.Run()
+        assert warnings == ["warning"]
         assert calls == ["bell"]
     finally:
         sys.modules.pop("kicad_track_gloss.action_plugin", None)

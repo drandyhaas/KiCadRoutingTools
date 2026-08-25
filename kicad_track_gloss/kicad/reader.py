@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 import math
 
 from ..engine.model import BoardModel, CircleObstacle, PadRegion, segment_key
-from .rules import board_bounds, native_rules, track_keepouts
+from .rules import (board_bounds, native_rules, track_keepouts,
+                    via_track_hole_clearance)
 from .selection import expand_eligible_keys, is_probable_diff_pair
 
 
@@ -30,6 +31,7 @@ def read_snapshot(adapter, board, require_selection=True):
         board.InitializeClearanceCache()
     except Exception:
         pass
+    via_hole_clearance = via_track_hole_clearance(adapter, board)
     for item in board.GetTracks():
         kind = str(item.GetClass())
         if kind == "PCB_VIA":
@@ -41,6 +43,15 @@ def read_snapshot(adapter, board, require_selection=True):
             layers = tuple(range(int(item.TopLayer()), int(item.BottomLayer()) + 1))
             obstacles.append(CircleObstacle(x, y, diameter / 2.0,
                                             int(item.GetNetCode()), layers, "via"))
+            if via_hole_clearance > 0.0:
+                try:
+                    drill_radius = adapter.to_mm(item.GetDrillValue()) / 2.0
+                except Exception:
+                    drill_radius = 0.0
+                if drill_radius > 0.0:
+                    obstacles.append(CircleObstacle(
+                        x, y, drill_radius, int(item.GetNetCode()), layers,
+                        "via", via_hole_clearance))
             if item.IsSelected():
                 warnings.append("Selected vias are protected and will not be modified.")
             continue

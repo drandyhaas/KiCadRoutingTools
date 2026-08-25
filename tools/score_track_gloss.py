@@ -47,6 +47,13 @@ def _parser():
     parser.add_argument(
         "--force", action="store_true",
         help="allow --output to replace an existing file (never the input)")
+    parser.add_argument(
+        "--scope", action="append", metavar="SCOPE",
+        help=("authorized seed scope; repeat ALL, net:<exact-name>, or "
+              "segment:<uuid>; defaults to ALL"))
+    parser.add_argument(
+        "--scope-file", metavar="SCOPE.json",
+        help='JSON manifest containing {"scopes":["net:VCC", ...]}')
     return parser
 
 
@@ -82,6 +89,70 @@ def score_stdout(payload):
     document = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return "GLOSS_SCORE_JSON=" + document + "\nSCORE={:.9f}".format(
         payload["score"])
+
+
+def resolve_scopes(values=None, scope_file=None):
+    """Normalize CLI and manifest scopes without requiring pcbnew."""
+    scopes = list(values or [])
+    if scope_file:
+        manifest_path = Path(scope_file)
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError("cannot read scope manifest: " + str(error))
+        if not isinstance(manifest, dict) or not isinstance(
+                manifest.get("scopes"), list):
+            raise ValueError('scope manifest must contain a "scopes" array')
+        scopes.extend(manifest["scopes"])
+    if not scopes:
+        scopes = ["ALL"]
+    normalized = []
+    for raw in scopes:
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError("every scope must be a non-empty string")
+        value = raw.strip()
+        if value.upper() == "ALL":
+            normalized.append("ALL")
+            continue
+        prefix, separator, target = value.partition(":")
+        if not separator or prefix.lower() not in ("net", "segment") or not target:
+            raise ValueError(
+                "scope must be ALL, net:<exact-name>, or segment:<uuid>: " +
+                value)
+        normalized.append(prefix.lower() + ":" + target)
+    normalized = list(dict.fromkeys(normalized))
+    if "ALL" in normalized and len(normalized) != 1:
+        raise ValueError("ALL cannot be combined with narrower scopes")
+    return normalized
+
+
+def seed_keys_for_scopes(records, scopes, is_probable_diff_pair):
+    """Resolve scope strings to the same admissible seeds as the plugin."""
+    matched = set()
+    if scopes == ["ALL"]:
+        matched.update(records)
+    else:
+        for scope in scopes:
+            kind, target = scope.split(":", 1)
+            if kind == "segment":
+                if target not in records:
+                    raise ValueError("scope segment was not found: " + target)
+                matched.add(target)
+            else:
+                net_keys = {
+                    key for key, (_item, segment) in records.items()
+                    if segment.net_name == target}
+                if not net_keys:
+                    raise ValueError("scope net was not found: " + target)
+                matched.update(net_keys)
+    seeds = {
+        key for key in matched
+        if (not records[key][1].locked and
+            not is_probable_diff_pair(records[key][1].net_name))}
+    if not seeds:
+        raise ValueError(
+            "scope contains no admissible unlocked non-differential track")
+    return seeds
 
 
 @contextmanager
@@ -120,24 +191,15 @@ def _bootstrap_engine():
     package = types.ModuleType("kicad_track_gloss")
     package.__path__ = [str(ROOT / "kicad_track_gloss")]
     sys.modules["kicad_track_gloss"] = package
-    from kicad_track_gloss.engine import generate_candidate_plans
+    from kicad_track_gloss.engine import generate_converged_plan
     from kicad_track_gloss.engine.geometry import length
     from kicad_track_gloss.engine.model import segment_key
     from kicad_track_gloss.kicad import BoardAdapter
     from kicad_track_gloss.kicad.selection import is_probable_diff_pair
     from kicad_track_gloss.version import __version__
 
-    return (pcbnew, BoardAdapter, generate_candidate_plans, length,
+    return (pcbnew, BoardAdapter, generate_converged_plan, length,
             segment_key, is_probable_diff_pair, __version__)
-
-
-def _geometry_signature(model):
-    return tuple(sorted(
-        (round(segment.start_x, 9), round(segment.start_y, 9),
-         round(segment.end_x, 9), round(segment.end_y, 9),
-         round(segment.width, 9), segment.layer, segment.net_id,
-         bool(segment.locked), bool(segment.arc))
-        for segment in model.segments))
 
 
 def _save_output(pcbnew, board, input_path, output_path, force=False):
@@ -159,8 +221,8 @@ def _save_output(pcbnew, board, input_path, output_path, force=False):
 
 
 def evaluate(board_path, project_path=None, parallel=True, output_path=None,
-             force=False, max_passes=16):
-    (pcbnew, BoardAdapter, generate_candidate_plans, length,
+             force=False, max_passes=16, scopes=None):
+    (pcbnew, BoardAdapter, generate_converged_plan, length,
      segment_key, is_probable_diff_pair, version) = _bootstrap_engine()
     with prepared_board(board_path, project_path) as (load_path, used_project):
         board = pcbnew.LoadBoard(str(load_path))
@@ -172,45 +234,25 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             for segment in initial.model.segments if not segment.arc)
         before_segments = sum(
             not segment.arc for segment in initial.model.segments)
-        first_counts = None
-        seen = set()
-        changed_passes = 0
-
-        for _pass_index in range(max_passes):
-            snapshot = adapter.snapshot(board, require_selection=False)
-            signature = _geometry_signature(snapshot.model)
-            if signature in seen:
-                raise RuntimeError("gloss convergence entered a geometry cycle")
-            seen.add(signature)
-            records = {}
-            for item in board.GetTracks():
-                if str(item.GetClass()) != "PCB_TRACK":
-                    continue
-                segment = adapter.segment_from_item(item)
-                records[segment_key(segment)] = (item, segment)
-            seeds = {
-                key for key, (_item, segment) in records.items()
-                if (not segment.locked and
-                    not is_probable_diff_pair(segment.net_name))
-            }
-            eligible, expanded, meanders = adapter.expand_eligible_keys(
-                board, records, seeds, [])
-            if first_counts is None:
-                first_counts = (len(seeds), len(expanded), len(eligible),
-                                len(meanders))
-            plans = generate_candidate_plans(
-                snapshot.model, eligible, min_gain=0.01,
-                allow_equal_length_simpler=True,
-                clearance=snapshot.minimum_clearance, parallel=parallel)
-            best = next((plan for plan in plans if plan.changed), plans[0])
-            if not best.changed:
-                break
+        records = {}
+        for item in board.GetTracks():
+            if str(item.GetClass()) != "PCB_TRACK":
+                continue
+            segment = adapter.segment_from_item(item)
+            records[segment_key(segment)] = (item, segment)
+        scopes = resolve_scopes(scopes)
+        seeds = seed_keys_for_scopes(
+            records, scopes, is_probable_diff_pair)
+        eligible, expanded, meanders = adapter.expand_eligible_keys(
+            board, records, seeds, [])
+        if not eligible:
+            raise ValueError("scope contains no eligible track after protection")
+        best = generate_converged_plan(
+            initial.model, eligible, max_passes=max_passes, min_gain=0.01,
+            allow_equal_length_simpler=True,
+            clearance=initial.minimum_clearance, parallel=parallel)
+        if best.changed:
             adapter.apply(board, best, rollback_on_error=True)
-            changed_passes += 1
-        else:
-            raise RuntimeError(
-                "gloss did not reach a fixed point in {} passes".format(
-                    max_passes))
 
         final = adapter.snapshot(board, require_selection=False)
         after_mm = sum(length(
@@ -220,7 +262,6 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
         after_segments = sum(
             not segment.arc for segment in final.model.segments)
         saved_mm = max(0.0, before_mm - after_mm)
-        selected_seeds, expanded_tracks, eligible_tracks, protected = first_counts
         output = _save_output(
             pcbnew, board, board_path, output_path, force=force)
         return {
@@ -234,12 +275,13 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
                 "virtual post-gloss straight-track copper length in mm; lower "
                 "is better"),
             "straight_tracks": before_segments,
-            "selected_seeds": selected_seeds,
-            "expanded_tracks": expanded_tracks,
-            "eligible_tracks": eligible_tracks,
-            "protected_tuned_tracks": protected,
-            "convergence_passes": changed_passes,
-            "fixed_point": True,
+            "scopes": scopes,
+            "selected_seeds": len(seeds),
+            "expanded_tracks": len(expanded),
+            "eligible_tracks": len(eligible),
+            "protected_tuned_tracks": len(meanders),
+            "convergence_passes": best.convergence_passes,
+            "fixed_point": best.fixed_point,
             "before_mm": before_mm,
             "potential_saved_mm": saved_mm,
             "potential_saved_percent": (
@@ -247,7 +289,7 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             "after_mm": after_mm,
             "segments_after": after_segments,
             "segments_saved": before_segments - after_segments,
-            "changed": changed_passes > 0,
+            "changed": best.changed,
             "output": str(output) if output else None,
         }
 
@@ -262,9 +304,10 @@ def main(argv=None):
         board, placed, route_json = resolve_inputs(
             args.paths, args.place_route_loop)
         board, project = resolve_board_project(board, args.project)
+        scopes = resolve_scopes(args.scope, args.scope_file)
         payload = evaluate(
             board, project, parallel=not args.no_parallel,
-            output_path=args.output, force=args.force)
+            output_path=args.output, force=args.force, scopes=scopes)
         if placed is not None:
             payload["placed_board"] = str(placed.resolve())
             payload["route_json"] = str(route_json.resolve())

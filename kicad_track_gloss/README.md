@@ -39,11 +39,15 @@ The active project repository is the fca1 fork:
    different connections or nets.
 2. **KiCad Track Gloss** expands every seed through KiCad's native connectivity
    up to a pad, via, arc, locked segment, or junction.
-3. The optimizer evaluates the expanded connections as one deterministic batch
-   and applies the highest-saving safe candidate to the current board.
+3. The optimizer evaluates the expanded connections as one deterministic batch,
+   follows newly opened simplifications to a fixed point, and applies one
+   composed atomic plan to the current board.
 4. A successful operation returns silently. When no copper is changed for any
    reason, KiCad's standard warning bell is played exactly once.
-5. **KiCad Track Gloss — Diagnostic** runs the same operation and displays a
+5. If no straight segment is selected, the normal action displays a warning
+   asking for at least one segment instead of treating this user-input error as
+   an ordinary no-op.
+6. **KiCad Track Gloss — Diagnostic** runs the same operation and displays a
    three-tab report. **Résultat** prominently states the saved length in mm and
    the before/after segment count, **Détails** contains selection, protection,
    transformation, rejection, and blocking-net information, and **JSON** keeps
@@ -92,14 +96,17 @@ pads that may themselves be off-grid. The diagnostic states this explicitly;
 grid snapping must not be added as a hard constraint without checking that a
 snapped terminal remains on its target copper.
 
-For bounded selections, the best combined plan is replayed in the API-neutral
-model for additional convergence passes. Newly created same-net centreline
-intersections become T contacts. A generated free tail is removed when it
-terminates on wider through-copper, or when a narrower track terminates exactly
-at its T contact; copper-area checks protect nearby useful continuations. The
-result is optimized again. Every composed result is revalidated against the
-original selection. Very large scopes skip this optional pass to keep runtime
-bounded.
+Every scope uses the same API-neutral fixed-point orchestration. The best
+combined plan is replayed, newly opened simplifications are searched again,
+and all changed passes are composed back into one plan against the original
+scope. Newly created same-net centreline intersections become T contacts. A
+generated free tail is removed when it terminates on wider through-copper, or
+when a narrower track terminates exactly at its T contact; copper-area checks
+protect nearby useful continuations. The search rejects geometry cycles and
+fails rather than claiming convergence if 16 changed passes are exhausted.
+The composed result is revalidated once against the original selection and is
+applied as one KiCad Undo operation. The CLI calls this exact function; it no
+longer owns a separate convergence loop.
 
 An eligible chain that terminates in the middle of an immutable same-net track
 has a sliding T termination. The contact may move along that traversing track
@@ -187,7 +194,7 @@ replacements are retained as their original native KiCad items.
 - `kicad/diagnostics.py`: human-readable tables and machine-readable JSON for
   diagnostic runs.
 - `engine/planner.py`: API-neutral chain discovery, octolinear candidate
-  generation, global scheduling, batch fallbacks, and bounded convergence.
+  generation, global scheduling, batch fallbacks, and fixed-point composition.
 - `engine/context.py`: reusable spatial indexes and rule envelopes.
 - `engine/parallel.py`: deterministic local worker orchestration and sequential
   fallback.
@@ -208,6 +215,8 @@ replacements are retained as their original native KiCad items.
   user-contract unit tests.
 - `../tests/track_gloss/run_patterns.py`: KiCad-Python integration replay.
 - `../tests/track_gloss/patterns/`: frozen real-board regression inputs.
+- `../codex/`: independent Codex-oracle prompt, contracts, launcher, and
+  examples; it must not import the Track Gloss engine.
 
 ## Reference regression data
 
@@ -218,11 +227,11 @@ over it.
 
 Current required integration results are:
 
-- **All 706 straight tracks selected in one batch:** 62.419635 mm saved, 18 net
-  segments removed (211 removed, 193 added), and 39 arbitrary-angle segments
-  normalized. 116 probable tuned segments
-  are protected and 590 segments are eligible. Seven input orders must produce
-  the exact same complete plan.
+- **All 706 straight tracks selected in one batch:** the shared fixed-point
+  engine saves 63.481723 mm and 31 net segments (219 removed, 188 added) in
+  three changed passes. 116 probable tuned segments are protected and 590
+  segments are eligible. A real selected-board snapshot and CLI `ALL` resolve
+  the same scope and therefore the same plan.
 - **Connections evaluated independently (optional deep sweep):** every unique
   connection scope is generated and every changed plan is applied to a freshly
   loaded in-memory board. This costly inventory is suspended during routine
@@ -275,24 +284,26 @@ D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --all-orders
 D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --full-sweep
 ```
 
-The first compares all seven deterministic input orders. The second generates
-all connection scopes and applies every changed plan to fresh in-memory boards.
+The first compares the final fixed-point signature for seven deterministic
+input orders. It detects accidental order dependence; equality is explicitly
+not evidence of a mathematical global optimum. The second generates all
+connection scopes and applies every changed plan to fresh in-memory boards.
 Combine the flags only when a complete deep validation is needed.
 
 ## Headless score CLI and `place_route_loop`
 
-`tools/score_track_gloss.py` grades a complete route without changing or
-saving the input board. It treats every unlocked, non-differential straight
-track as selected in one simultaneous batch; connection expansion and tuned
-track protection are the same as in the ActionPlugin. Safe all-track passes
-are applied to the in-memory board until a geometric fixed point is reached.
+`tools/score_track_gloss.py` grades a route without changing or saving the
+input board. Its default `ALL` scope treats every unlocked,
+non-differential straight track as selected in one simultaneous batch;
+connection expansion and tuned-track protection are the same as in the
+ActionPlugin. It calls the same engine fixed-point function as the plugin.
 The process aborts on a repeated geometry or after 16 changed passes instead
 of returning a falsely converged score. It prints detailed compact JSON
 followed by the protocol line required by `place_route_loop`:
 
 ```text
 GLOSS_SCORE_JSON={...}
-SCORE=1046.286691506
+SCORE=1045.961827184
 ```
 
 The score is the total straight-track copper length, in millimetres, after the
@@ -308,6 +319,9 @@ may be passed directly; the matching `.kicad_pcb` is then inferred:
 ```powershell
 D:\kicad\bin\python.exe tools\score_track_gloss.py design.kicad_pro
 D:\kicad\bin\python.exe tools\score_track_gloss.py --project design.kicad_pro candidate.kicad_pcb
+D:\kicad\bin\python.exe tools\score_track_gloss.py --scope net:VCC --project design.kicad_pro candidate.kicad_pcb
+D:\kicad\bin\python.exe tools\score_track_gloss.py --scope segment:UUID --project design.kicad_pro candidate.kicad_pcb
+D:\kicad\bin\python.exe tools\score_track_gloss.py --scope-file scope.json --project design.kicad_pro candidate.kicad_pcb
 D:\kicad\bin\python.exe tools\score_track_gloss.py --project design.kicad_pro --output glossed.kicad_pcb candidate.kicad_pcb
 ```
 

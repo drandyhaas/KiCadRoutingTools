@@ -128,6 +128,8 @@ def summarize_plan(model, eligible_keys, plan):
         "segment_percent": (100.0 * (len(plan.remove_keys) - len(plan.additions)) /
                             len(scoped) if scoped else 0.0),
         "chains_changed": plan.chains_changed,
+        "convergence_passes": plan.convergence_passes,
+        "fixed_point": plan.fixed_point,
         "angle_corrections": plan.angle_corrections,
         "transformations": len(plan.transformations),
         "gain_mean": statistics.fmean(gains) if gains else 0.0,

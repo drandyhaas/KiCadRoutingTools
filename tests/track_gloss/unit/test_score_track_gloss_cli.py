@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from kicad_track_gloss.engine.model import BoardModel, Segment
+from kicad_track_gloss.engine.model import Segment
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -57,15 +57,29 @@ def test_stdout_has_json_then_place_route_loop_score_line():
     assert score_line == "SCORE=87.500000000"
 
 
-def test_geometry_signature_is_independent_of_uuid_and_track_order():
-    first = Segment(0, 0, 1, 0, 0.2, 0, 1, "first")
-    second = Segment(1, 0, 2, 1, 0.2, 0, 1, "second")
-    rewritten_first = Segment(0, 0, 1, 0, 0.2, 0, 1, "new-uuid")
-    assert CLI._geometry_signature(BoardModel([first, second])) == \
-        CLI._geometry_signature(BoardModel([second, rewritten_first]))
+def test_scope_defaults_to_all_and_rejects_ambiguous_mix():
+    assert CLI.resolve_scopes() == ["ALL"]
+    assert CLI.resolve_scopes([" net:VCC ", "segment:abc"]) == [
+        "net:VCC", "segment:abc"]
+    with pytest.raises(ValueError):
+        CLI.resolve_scopes(["ALL", "net:VCC"])
 
 
-def test_geometry_signature_detects_a_real_route_change():
-    before = BoardModel([Segment(0, 0, 1, 0, 0.2, 0, 1, "a")])
-    after = BoardModel([Segment(0, 0, 2, 0, 0.2, 0, 1, "b")])
-    assert CLI._geometry_signature(before) != CLI._geometry_signature(after)
+def test_scope_manifest_is_merged_with_command_line(tmp_path):
+    manifest = tmp_path / "scope.json"
+    manifest.write_text('{"scopes":["segment:abc"]}', encoding="utf-8")
+    assert CLI.resolve_scopes(["net:VCC"], manifest) == [
+        "net:VCC", "segment:abc"]
+
+
+def test_scope_resolves_exact_nets_and_segments():
+    records = {
+        "a": (None, Segment(0, 0, 1, 0, 0.2, 0, 1, "a", net_name="VCC")),
+        "b": (None, Segment(0, 1, 1, 1, 0.2, 0, 2, "b", net_name="GND")),
+    }
+    not_diff = lambda _name: False
+    assert CLI.seed_keys_for_scopes(records, ["net:VCC"], not_diff) == {"a"}
+    assert CLI.seed_keys_for_scopes(
+        records, ["segment:b"], not_diff) == {"b"}
+    with pytest.raises(ValueError):
+        CLI.seed_keys_for_scopes(records, ["net:vcc"], not_diff)

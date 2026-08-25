@@ -334,7 +334,7 @@ def _endpoint_moved_into_pad(original, candidate, terminal, pad_targets):
 
 
 _SYNTHETIC_PREFIX = "__track_gloss__"
-_PAD_CLEARANCE_TOLERANCE_MM = 0.002
+_PAD_CLEARANCE_TOLERANCE_MM = 0.000001
 _REFINEMENT_SCOPE_LIMIT = 128
 
 
@@ -625,6 +625,53 @@ def _compose_refined_plan(original_model, original_eligible, final_model,
             "track_slide", "segment_simplification", stub.net_id,
             stub.net_name, stub.layer, stub.width, stub_mm, 0.0, 1, 0))
     _retain_identity_replacements(original_model, result)
+    context = PlannerContext(original_model)
+    immutable_cover_keys = set(context.segment_by_key) - set(original_eligible)
+    replaced_keys = set(result.remove_keys)
+    for index, addition in enumerate(result.additions):
+        validation_clearance = addition.clearance
+        if validation_clearance < 0.0:
+            validation_clearance = max(
+                [_effective_clearance(original_model, segment)
+                 for segment in original_model.segments
+                 if segment_key(segment) in original_eligible and
+                 segment.net_id == addition.net_id and
+                 segment.layer == addition.layer] +
+                [original_model.minimum_clearance])
+        moving = Segment(
+            addition.start[0], addition.start[1],
+            addition.end[0], addition.end[1], addition.width,
+            addition.layer, addition.net_id, "composed:{}".format(index),
+            clearance=validation_clearance)
+        # Preserve original breakpoints while validating a collinearly merged
+        # result.  This lets unchanged copper retain its pre-existing status
+        # without exempting the genuinely new portion of the same addition.
+        ax, ay = addition.start
+        bx, by = addition.end
+        denominator = (bx - ax) ** 2 + (by - ay) ** 2
+        cuts = [(0.0, addition.start), (1.0, addition.end)]
+        if denominator > 0.0:
+            for key in replaced_keys:
+                existing = context.segment_by_key.get(key)
+                if existing is None:
+                    continue
+                for point in ((existing.start_x, existing.start_y),
+                              (existing.end_x, existing.end_y)):
+                    if point_segment_distance(point, addition.start,
+                                              addition.end) > 1e-6:
+                        continue
+                    parameter = ((point[0] - ax) * (bx - ax) +
+                                 (point[1] - ay) * (by - ay)) / denominator
+                    if 1e-9 < parameter < 1.0 - 1e-9:
+                        cuts.append((parameter, point))
+        path = [point for _parameter, point in sorted(set(cuts))]
+        blocker = _path_blocker(
+            original_model, path, moving,
+            replaced_keys, original_model.minimum_clearance, context,
+            immutable_cover_keys)
+        if blocker:
+            raise ValueError(
+                "Composed candidate violates {}".format(blocker[0]))
     validate_result(original_model, set(original_eligible), result)
     return result
 
@@ -1132,3 +1179,96 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
             -(len(p.remove_keys) - len(p.additions)), len(p.additions),
             tuple(sorted(p.remove_keys))))
     return plans
+
+
+def _model_geometry_signature(model):
+    """Stable identity-free route signature used by fixed-point search."""
+    rows = []
+    for segment in model.segments:
+        start = (round(segment.start_x, 6), round(segment.start_y, 6))
+        end = (round(segment.end_x, 6), round(segment.end_y, 6))
+        first, second = sorted((start, end))
+        rows.append((first, second, round(segment.width, 6), segment.layer,
+                     segment.net_id, bool(segment.locked), bool(segment.arc)))
+    return tuple(sorted(rows))
+
+
+def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
+                            **kwargs):
+    """Compose repeated global plans into one validated fixed-point edit.
+
+    The authorized scope never grows: replacement segments inherit eligibility,
+    while immutable copper remains an obstacle or a sliding termination target.
+    The returned plan always addresses ``model`` directly, so KiCad can apply it
+    as one operation and preserve a single Undo step.
+    """
+    if max_passes < 1:
+        raise ValueError("max_passes must be at least one")
+    original_eligible = set(eligible_segment_keys)
+    current_model = model
+    current_eligible = set(original_eligible)
+    changed_steps = []
+    seen = set()
+    final_search = None
+    last_composed = None
+
+    for pass_index in range(max_passes + 1):
+        signature = _model_geometry_signature(current_model)
+        if signature in seen:
+            raise ValueError("Gloss convergence entered a geometry cycle")
+        seen.add(signature)
+        plans = generate_candidate_plans(
+            current_model, current_eligible, **kwargs)
+        changed_plans = [plan for plan in plans if plan.changed]
+        if not changed_plans:
+            final_search = plans[0]
+            break
+        if pass_index == max_passes:
+            raise ValueError(
+                "Gloss did not reach a fixed point in {} changed passes".format(
+                    max_passes))
+        accepted = None
+        rejected_steps = []
+        for step in changed_plans:
+            proposed_model, proposed_eligible = _apply_to_model(
+                current_model, current_eligible, step, pass_index)
+            try:
+                composed = _compose_refined_plan(
+                    model, original_eligible, proposed_model,
+                    proposed_eligible, changed_steps + [step], [])
+            except ValueError as error:
+                rejected_steps.append(str(error))
+                continue
+            accepted = (step, proposed_model, proposed_eligible, composed)
+            break
+        if accepted is None:
+            final_search = GlossResult()
+            final_search.warnings.append(
+                "No cumulatively safe convergence step remained: " +
+                "; ".join(sorted(set(rejected_steps))))
+            break
+        step, current_model, current_eligible, last_composed = accepted
+        changed_steps.append(step)
+    else:  # pragma: no cover - the bounded loop always breaks or raises.
+        raise ValueError("Gloss convergence ended unexpectedly")
+
+    if not changed_steps:
+        final_search.convergence_passes = 0
+        final_search.fixed_point = True
+        return final_search
+
+    result = last_composed or _compose_refined_plan(
+        model, original_eligible, current_model, current_eligible,
+        changed_steps, [])
+    # Nanometre quantization can collapse an analytical micro-adjustment back
+    # to identity. Report applied passes, not discarded internal exploration.
+    result.convergence_passes = len(changed_steps) if result.changed else 0
+    result.fixed_point = True
+    if final_search is not None:
+        result.chains_considered += final_search.chains_considered
+        for key, value in final_search.search_counts.items():
+            result.search_counts[key] = result.search_counts.get(key, 0) + value
+        for key, value in final_search.blocking_nets.items():
+            result.blocking_nets[key] = result.blocking_nets.get(key, 0) + value
+        result.warnings.extend(final_search.warnings)
+    return result
