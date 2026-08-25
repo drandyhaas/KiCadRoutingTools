@@ -830,13 +830,60 @@ def test_via_obstacle_uses_native_non_contiguous_copper_layer_set():
 
     class Board:
         @staticmethod
-        def GetLayerName(layer):
-            return {0: "F.Cu", 2: "B.Cu", 4: "In1.Cu",
-                    6: "In2.Cu", 5: "F.Silkscreen"}[int(layer)]
+        def GetEnabledLayers():
+            return LayerSet()
+
+    class Pcbnew:
+        @staticmethod
+        def IsCopperLayer(layer):
+            return int(layer) in (0, 2, 4, 6)
+
+    class Adapter:
+        pcbnew = Pcbnew()
 
     from kicad_track_gloss.kicad.reader import _via_copper_layers
 
-    assert _via_copper_layers(Board(), Via()) == (0, 2, 4, 6)
+    assert _via_copper_layers(Adapter(), Board(), Via()) == (0, 2, 4, 6)
+
+
+def test_exact_board_outline_rejects_concave_shortcut_and_hole():
+    from kicad_track_gloss.engine.geometry import segment_inside_board
+    from kicad_track_gloss.engine.model import BoardOutline
+
+    outline = BoardOutline(
+        (((0, 0), (10, 0), (10, 10), (6, 10), (6, 4),
+          (4, 4), (4, 10), (0, 10)),),
+        (((1, 1), (3, 1), (3, 3), (1, 3)),))
+    assert segment_inside_board((7, 2), (9, 8), outline, 0.1)
+    assert not segment_inside_board((3, 8), (7, 8), outline, 0.1)
+    assert not segment_inside_board((0.5, 2), (3.5, 2), outline, 0.1)
+
+
+def test_native_drc_report_counts_rule_categories():
+    from kicad_track_gloss.kicad.native_validation import (
+        _json_report_counts, _json_report_summary)
+
+    counts = _json_report_counts(json.dumps({
+        "violations": [{"type": "clearance"}, {"type": "clearance"}],
+        "unconnected_items": [{"type": "unconnected_items"}],
+    }))
+    assert counts == {"clearance": 2, "unconnected_items": 1}
+    before = json.dumps({
+        "violations": [],
+        "unconnected_items": [{
+            "type": "unconnected_items", "description": "Missing A",
+            "items": [{"description": "Pad A", "pos": {"x": 1, "y": 2}}],
+        }],
+    })
+    after = json.dumps({
+        "violations": [],
+        "unconnected_items": [{
+            "type": "unconnected_items", "description": "Missing B",
+            "items": [{"description": "Pad B", "pos": {"x": 3, "y": 4}}],
+        }],
+    })
+    assert (_json_report_summary(after)[1] -
+            _json_report_summary(before)[1])
 
 
 def test_native_connection_expansion_stops_at_junction():

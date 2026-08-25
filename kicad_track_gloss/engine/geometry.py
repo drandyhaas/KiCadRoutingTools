@@ -87,3 +87,24 @@ def path_hits_polygon(a, b, polygon, margin=0.0):
             return True
     return False
 
+
+def segment_inside_board(a, b, board_outline, margin=0.0):
+    """Return whether a complete copper capsule stays inside Edge.Cuts."""
+    if board_outline is None or not board_outline.outlines:
+        return True
+    for outer in board_outline.outlines:
+        if not (point_in_polygon(a, outer) and point_in_polygon(b, outer)):
+            continue
+        if any(segment_distance(a, b, c, d) < margin + EPS
+               for c, d in zip(outer, outer[1:] + outer[:1])):
+            continue
+        blocked = False
+        for hole in board_outline.holes:
+            if (point_in_polygon(a, hole) or point_in_polygon(b, hole) or
+                    any(segment_distance(a, b, c, d) < margin + EPS
+                        for c, d in zip(hole, hole[1:] + hole[:1]))):
+                blocked = True
+                break
+        if not blocked:
+            return True
+    return False

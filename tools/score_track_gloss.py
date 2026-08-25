@@ -191,6 +191,11 @@ def prepared_board(board_path, project_path=None):
 
 
 def _bootstrap_engine():
+    try:
+        import wx
+        wx.Log.SetActiveTarget(wx.LogStderr())
+    except Exception:
+        pass
     import pcbnew
 
     # Import engine modules without registering the GUI ActionPlugins in a
@@ -259,8 +264,13 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             allow_equal_length_simpler=True,
             clearance=initial.minimum_clearance, parallel=parallel,
             pass_observer=pass_observer)
+        native = None
+        applied = False
         if best.changed:
+            native = adapter.validate_plan(board, best)
+        if best.changed and native.allowed:
             adapter.apply(board, best, rollback_on_error=True)
+            applied = True
 
         final = adapter.snapshot(board, require_selection=False)
         after_mm = sum(length(
@@ -298,7 +308,14 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             "after_mm": after_mm,
             "segments_after": after_segments,
             "segments_saved": before_segments - after_segments,
-            "changed": best.changed,
+            "changed": applied,
+            "native_drc_gate": (
+                "passed" if native and native.allowed else
+                "rejected" if native else "not_needed"),
+            "native_drc_increases": (
+                native.increases if native is not None else {}),
+            "native_drc_error": (
+                native.error if native is not None else ""),
             "output": str(output) if output else None,
         }
 

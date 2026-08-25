@@ -5,7 +5,54 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
-from ..engine.model import PolygonKeepout
+from ..engine.model import BoardOutline, PolygonKeepout
+
+
+def copper_layers(adapter, board, layer_set):
+    """Return enabled copper layer IDs without relying on display names."""
+    try:
+        enabled = {int(layer) for layer in board.GetEnabledLayers().Seq()}
+    except Exception:
+        enabled = None
+    result = []
+    for layer in layer_set.Seq():
+        layer_id = int(layer)
+        try:
+            is_copper = bool(adapter.pcbnew.IsCopperLayer(layer))
+        except Exception:
+            is_copper = 0 <= layer_id <= 62 and layer_id % 2 == 0
+        if is_copper and (enabled is None or layer_id in enabled):
+            result.append(layer_id)
+    return tuple(sorted(set(result)))
+
+
+def _chain_points(adapter, chain):
+    return tuple(adapter.point_mm(chain.CPoint(index))
+                 for index in range(chain.PointCount()))
+
+
+def exact_board_outline(adapter, board):
+    """Extract KiCad's chained Edge.Cuts polygon, including internal holes."""
+    try:
+        polygons = adapter.pcbnew.SHAPE_POLY_SET()
+        if not board.GetBoardPolygonOutlines(
+                polygons, True, None, False, True):
+            return None
+        outlines, holes = [], []
+        for index in range(polygons.OutlineCount()):
+            points = _chain_points(adapter, polygons.Outline(index))
+            if len(points) >= 3:
+                outlines.append(points)
+            for hole_index in range(polygons.HoleCount(index)):
+                points = _chain_points(
+                    adapter, polygons.Hole(index, hole_index))
+                if len(points) >= 3:
+                    holes.append(points)
+        if outlines:
+            return BoardOutline(tuple(outlines), tuple(holes))
+    except Exception:
+        pass
+    return None
 
 
 def via_track_hole_clearance(adapter, board):
@@ -105,6 +152,57 @@ def track_keepouts(adapter, board):
                                for i in range(chain.PointCount()))
                 if len(points) >= 3:
                     result.append(PolygonKeepout(points, layers))
+        except Exception:
+            continue
+    return result
+
+
+def mask_graphic_keepouts(adapter, board):
+    """Protect explicit solder-mask graphics from newly routed copper.
+
+    Automatic pad apertures are intentionally excluded: pads already have
+    exact copper geometry and are legitimate track terminals.  Explicit mask
+    drawings can expose unrelated copper, so moving a track beneath one may
+    create a solder-mask bridge even when copper clearance remains valid.
+    """
+    result = []
+    layer_map = {}
+    for mask_name, copper_name in (("F.Mask", "F.Cu"), ("B.Mask", "B.Cu")):
+        try:
+            layer_map[int(board.GetLayerID(mask_name))] = int(
+                board.GetLayerID(copper_name))
+        except Exception:
+            continue
+    if not layer_map:
+        return result
+
+    drawings = []
+    try:
+        drawings.extend(board.GetDrawings())
+    except Exception:
+        pass
+    try:
+        for footprint in board.GetFootprints():
+            drawings.extend(footprint.GraphicalItems())
+    except Exception:
+        pass
+    for item in drawings:
+        try:
+            if str(item.GetClass()) not in ("PCB_SHAPE", "FP_SHAPE"):
+                continue
+            copper_layer = layer_map.get(int(item.GetLayer()))
+            if copper_layer is None:
+                continue
+            box = item.GetBoundingBox()
+            x0 = adapter.to_mm(box.GetX())
+            y0 = adapter.to_mm(box.GetY())
+            x1 = x0 + adapter.to_mm(box.GetWidth())
+            y1 = y0 + adapter.to_mm(box.GetHeight())
+            if x1 <= x0 or y1 <= y0:
+                continue
+            result.append(PolygonKeepout(
+                ((x0, y0), (x1, y0), (x1, y1), (x0, y1)),
+                (copper_layer,), "solder_mask"))
         except Exception:
             continue
     return result

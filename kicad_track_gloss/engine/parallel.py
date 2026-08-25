@@ -24,14 +24,15 @@ if not __package__:
     sys.modules["kicad_track_gloss"] = package
     from kicad_track_gloss.engine.context import PlannerContext
     from kicad_track_gloss.engine.model import (
-        AddedSegment, BoardModel, CircleObstacle, GlossResult, PadRegion,
-        PolygonKeepout, Segment, Transformation)
+        AddedSegment, BoardModel, BoardOutline, CircleObstacle, GlossResult,
+        PadRegion, PolygonKeepout, Segment, Transformation)
     from kicad_track_gloss.engine.planner import (generate_converged_plan,
                                                    smooth_selected_chains)
 else:
     from .context import PlannerContext
-    from .model import (AddedSegment, BoardModel, CircleObstacle, GlossResult,
-                        PadRegion, PolygonKeepout, Segment, Transformation)
+    from .model import (AddedSegment, BoardModel, BoardOutline, CircleObstacle,
+                        GlossResult, PadRegion, PolygonKeepout, Segment,
+                        Transformation)
     from .planner import generate_converged_plan
 
 
@@ -45,6 +46,8 @@ def _encode_model(model):
         "minimum_clearance": model.minimum_clearance,
         "copper_edge_clearance": model.copper_edge_clearance,
         "board_bounds": model.board_bounds,
+        "board_outline": (asdict(model.board_outline)
+                          if model.board_outline is not None else None),
     }
 
 
@@ -62,6 +65,13 @@ def _decode_model(data):
     for item in data["pad_regions"]:
         item["layers"] = tuple(item["layers"])
         pads.append(PadRegion(**item))
+    outline = data.get("board_outline")
+    if outline is not None:
+        outline = BoardOutline(
+            tuple(tuple(tuple(point) for point in polygon)
+                  for polygon in outline.get("outlines", ())),
+            tuple(tuple(tuple(point) for point in polygon)
+                  for polygon in outline.get("holes", ())))
     return BoardModel(
         segments=[Segment(**item) for item in data["segments"]],
         obstacles=obstacles,
@@ -70,7 +80,8 @@ def _decode_model(data):
         minimum_clearance=data["minimum_clearance"],
         copper_edge_clearance=data["copper_edge_clearance"],
         board_bounds=data["board_bounds"],
-        pad_regions=pads)
+        pad_regions=pads,
+        board_outline=outline)
 
 
 def _stop_processes(processes):

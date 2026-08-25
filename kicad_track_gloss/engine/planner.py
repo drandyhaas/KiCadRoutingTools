@@ -21,7 +21,8 @@ import hashlib
 
 from .context import PlannerContext
 from .geometry import (length, octolinear_paths, path_hits_polygon,
-                       point_segment_distance, segment_distance)
+                       point_segment_distance, segment_distance,
+                       segment_inside_board)
 from .model import AddedSegment, GlossResult, Segment, Transformation, segment_key
 from .pads import pad_contains, segment_hits_pad
 from .statistics import classify_transformation
@@ -192,9 +193,13 @@ def _path_blocker(model, path, moving, replaced_keys, clearance, context=None,
     for a, b in zip(path, path[1:]):
         if unchanged_copper(a, b):
             continue
-        if model.board_bounds:
+        edge_margin = model.copper_edge_clearance + moving.width / 2.0
+        if model.board_outline:
+            if not segment_inside_board(
+                    a, b, model.board_outline, edge_margin):
+                return "board_edge", 0
+        elif model.board_bounds:
             x0, y0, x1, y1 = model.board_bounds
-            edge_margin = model.copper_edge_clearance + moving.width / 2.0
             if any(not (x0 + edge_margin <= p[0] <= x1 - edge_margin and
                         y0 + edge_margin <= p[1] <= y1 - edge_margin)
                    for p in (a, b)):
@@ -247,7 +252,7 @@ def _path_blocker(model, path, moving, replaced_keys, clearance, context=None,
             if keepout.layers and moving.layer not in keepout.layers:
                 continue
             if path_hits_polygon(a, b, list(keepout.points), clearance + moving.width / 2.0):
-                return "keepout", 0
+                return keepout.kind, 0
     return None
 
 

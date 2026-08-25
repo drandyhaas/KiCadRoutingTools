@@ -39,6 +39,14 @@ class CircleObstacle:
 class PolygonKeepout:
     points: Tuple[Tuple[float, float], ...]
     layers: Tuple[int, ...] = ()
+    kind: str = "keepout"
+
+
+@dataclass(frozen=True)
+class BoardOutline:
+    """Exact closed Edge.Cuts regions and their internal holes."""
+    outlines: Tuple[Tuple[Tuple[float, float], ...], ...] = ()
+    holes: Tuple[Tuple[Tuple[float, float], ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -68,6 +76,7 @@ class BoardModel:
     copper_edge_clearance: float = 0.0
     board_bounds: object = None
     pad_regions: List[PadRegion] = field(default_factory=list)
+    board_outline: object = None
 
 
 @dataclass(frozen=True)

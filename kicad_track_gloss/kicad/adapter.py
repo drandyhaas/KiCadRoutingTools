@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ..engine.model import Segment
 from .reader import read_snapshot
+from .native_validation import validate_native_plan
 from .selection import expand_eligible_keys, expand_seed_keys
 from .writer import add_track, apply_plan
 
@@ -80,6 +81,9 @@ class BoardAdapter:
 
     def apply(self, board, result, rollback_on_error=True):
         return apply_plan(self, board, result, rollback_on_error)
+
+    def validate_plan(self, board, result):
+        return validate_native_plan(self, board, result)
 
     def _add_track(self, board, start, end, width, layer, net_id):
         return add_track(self, board, start, end, width, layer, net_id)

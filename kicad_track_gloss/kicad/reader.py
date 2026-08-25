@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 import math
 
 from ..engine.model import BoardModel, CircleObstacle, PadRegion, segment_key
-from .rules import (board_bounds, native_rules, track_keepouts,
+from .rules import (board_bounds, copper_layers, exact_board_outline,
+                    mask_graphic_keepouts, native_rules, track_keepouts,
                     via_track_hole_clearance)
 from .selection import expand_eligible_keys, is_probable_diff_pair
 
@@ -23,11 +24,9 @@ class SelectionSnapshot:
     tuned_protected_count: int = 0
 
 
-def _via_copper_layers(board, item):
+def _via_copper_layers(adapter, board, item):
     try:
-        return tuple(
-            int(layer) for layer in item.GetLayerSet().Seq()
-            if str(board.GetLayerName(layer)).endswith(".Cu"))
+        return copper_layers(adapter, board, item.GetLayerSet())
     except Exception:
         # Older SWIG builds may not expose the via layer set. Keep the
         # endpoints as a conservative fallback, without inventing a
@@ -53,7 +52,7 @@ def read_snapshot(adapter, board, require_selection=True):
                 diameter = adapter.to_mm(item.GetFrontWidth())
             except Exception:
                 diameter = adapter.to_mm(item.GetWidth())
-            layers = _via_copper_layers(board, item)
+            layers = _via_copper_layers(adapter, board, item)
             obstacles.append(CircleObstacle(x, y, diameter / 2.0,
                                             int(item.GetNetCode()), layers, "via"))
             if via_hole_clearance > 0.0:
@@ -96,7 +95,7 @@ def read_snapshot(adapter, board, require_selection=True):
     except Exception:
         footprints = ()
     minimum, edge, net_clearances = native_rules(adapter, board, segments)
-    copper_layers = tuple(range(0, 32))
+    fallback_copper_layers = tuple(range(0, 32))
     for footprint in footprints:
         for pad in footprint.Pads():
             x, y = adapter.point_mm(pad.GetPosition())
@@ -112,10 +111,10 @@ def read_snapshot(adapter, board, require_selection=True):
             # corners. ``max(width, height) / 2`` is not an enclosing circle.
             radius = math.hypot(half_width, half_height)
             try:
-                layers = [int(layer) for layer in pad.GetLayerSet().Seq()
-                          if str(board.GetLayerName(layer)).endswith(".Cu")]
+                layers = list(copper_layers(
+                    adapter, board, pad.GetLayerSet()))
             except Exception:
-                layers = list(copper_layers)
+                layers = list(fallback_copper_layers)
             # Paste/mask-only apertures are not copper obstacles. An empty
             # layer tuple means "all layers" inside the API-neutral model, so
             # retaining such a pad would incorrectly block every copper layer.
@@ -159,8 +158,10 @@ def read_snapshot(adapter, board, require_selection=True):
             raise ValueError("No eligible straight track is selected. " +
                              " ".join(sorted(set(warnings))))
         raise ValueError("Select at least two connected straight track segments first.")
-    model = BoardModel(segments, obstacles, track_keepouts(adapter, board),
+    keepouts = track_keepouts(adapter, board)
+    keepouts.extend(mask_graphic_keepouts(adapter, board))
+    model = BoardModel(segments, obstacles, keepouts,
                        net_clearances, minimum, edge, board_bounds(adapter, board),
-                       pad_regions)
+                       pad_regions, exact_board_outline(adapter, board))
     return SelectionSnapshot(model, eligible, sorted(set(warnings)), minimum, edge,
                              len(seed_keys), expanded_count, len(meanders))

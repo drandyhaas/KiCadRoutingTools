@@ -26,7 +26,7 @@
   "tags": ["routing", "tracks", "cleanup", "gloss"],
   "versions": [
     {
-      "version": "0.3.27",
+      "version": "0.3.28",
       "status": "testing",
       "kicad_version": "10.0",
       "kicad_version_max": "10.99",

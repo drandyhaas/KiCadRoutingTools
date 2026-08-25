@@ -87,6 +87,23 @@ kernels. Whole-board validations are retained for the chosen combined plan;
 redundant leave-one-out connectivity replays are avoided after their component
 plans have already passed the complete checks.
 
+Copper layers are identified through KiCad's semantic layer API, never from
+their display names. Renaming internal layers to names such as `Gnd` or `3V3`
+therefore cannot hide through-vias or through-hole pads from clearance and
+connectivity validation. Candidate copper is also checked against the chained
+Edge.Cuts polygon, including curved boundaries and internal holes, rather than
+only against the board bounding box. Explicit F.Mask/B.Mask graphics are
+protected from newly routed copper.
+
+After the API-neutral engine has selected and composed one final plan, a
+single KiCad-native DRC gate validates it on private temporary snapshots. Both
+snapshots have their zones refilled by `kicad-cli`; the plan is rejected if any
+new semantic DRC finding or unconnected-item relationship appears, even when
+another finding of the same category disappeared. Temporary boards and reports
+are deleted before the operation returns, and the current PCB is never saved
+or modified by validation. Candidate search itself remains API-neutral and
+does not run DRC per option.
+
 Selections of at least 64 eligible segments may distribute independent
 net/layer and exact-width fallback searches over as many as four local Python
 worker processes. Results are serialized without `pcbnew`, sorted

@@ -385,6 +385,18 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                 "Possible reasons: disconnected selection, fixed junction, locked/tuned "
                 "track, insufficient length gain, clearance, pad, via, keepout, or board edge.")
             return False
+        native = adapter.validate_plan(board, best)
+        if not native.allowed:
+            report.append("Native KiCad DRC gate: plan rejected.")
+            if native.increases:
+                report.append("New native DRC findings: " + ", ".join(
+                    "{} +{}".format(key, value)
+                    for key, value in native.increases.items()))
+            if native.error:
+                report.append("Native DRC error: " + native.error)
+            report.append("Result: no safe improvement found.")
+            return False
+        report.append("Native KiCad DRC gate: no category increase.")
         report.append("Chosen plan: remove {} segment(s), add {} segment(s).".format(
             len(best.remove_keys), len(best.additions)))
         report.append("Copper length saved: {:.3f} mm.".format(best.saved_mm))
