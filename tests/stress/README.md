@@ -16,6 +16,9 @@ every available board with the Track Gloss CLI, and launches the independent
 Codex oracle only when the CLI reports at least 5% straight-track copper saved.
 Every board result is checkpointed, so an interrupted run resumes without
 repeating completed CLI scores or oracle calls.  Outputs live outside the repo.
+Use `--retry-invalid-oracle` after fixing an oracle execution problem: previous
+failed or byte-identical attempts are moved under `oracle-attempts/` before the
+new run, so their transcripts remain available.
 
 ```powershell
 py -3.12 tests\stress\track_gloss_oracle_corpus.py `

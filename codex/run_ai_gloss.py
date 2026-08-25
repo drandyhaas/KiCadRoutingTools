@@ -93,6 +93,19 @@ def render_prompt(template_path, replacements):
     return text
 
 
+def codex_exec_command(executable):
+    """Build the non-interactive command using the native Windows sandbox.
+
+    The operator's Codex configuration carries the local execution policy that
+    provisions the Windows sandbox.  Ignoring that configuration causes native
+    commands to be rejected before they start on current Codex CLI releases.
+    """
+    return [
+        executable, "--ask-for-approval", "never", "exec", "--ephemeral",
+        "--sandbox", "workspace-write", "--json", "-",
+    ]
+
+
 def drc_summary(kicad_cli, board, report):
     command = [
         str(kicad_cli), "pcb", "drc", "--format", "json",
@@ -168,11 +181,7 @@ def run(args):
         subprocess.run(
             ["git", "init", "--quiet"], cwd=work, check=True,
             capture_output=True)
-        command = [
-            args.codex_command, "exec", "--ephemeral",
-            "--sandbox", "workspace-write", "--ignore-user-config",
-            "--ignore-rules", "--json", "-",
-        ]
+        command = codex_exec_command(args.codex_command)
         completed = subprocess.run(
             command, cwd=work, input=prompt, capture_output=True, text=True,
             encoding="utf-8", errors="replace")
@@ -195,6 +204,7 @@ def run(args):
         unconnected_delta = (
             after["unconnected_items"] - before["unconnected_items"])
         valid = not new_categories and unconnected_delta <= 0
+        candidate_changed = file_digest(candidate_board) != source_digest
         report = {
             "valid": valid,
             "input": str(board),
@@ -205,6 +215,7 @@ def run(args):
             "drc_after": after,
             "new_drc_categories": new_categories,
             "unconnected_delta": unconnected_delta,
+            "candidate_changed": candidate_changed,
         }
         result_path.write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n",

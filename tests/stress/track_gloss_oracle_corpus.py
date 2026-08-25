@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -49,6 +50,9 @@ def parser():
     result.add_argument("--skip-fetch", action="store_true")
     result.add_argument("--skip-score", action="store_true")
     result.add_argument("--skip-oracle", action="store_true")
+    result.add_argument(
+        "--retry-invalid-oracle", action="store_true",
+        help="archive and retry cached failed or unchanged oracle attempts")
     return result
 
 
@@ -214,8 +218,33 @@ def score_corpus(args, root, rows):
     return sorted(results, key=lambda row: row["id"])
 
 
+def oracle_artifacts(root, row):
+    result = root / "oracle-results" / row["set"] / (row["file"] + ".json")
+    board = root / "oracle" / row["set"] / row["file"]
+    return result, board, [
+        result, board, Path(str(board) + ".codex.jsonl"),
+        Path(str(board) + ".codex-result.json"),
+    ]
+
+
+def archive_oracle_attempt(root, row, artifacts):
+    present = [path for path in artifacts if path.exists()]
+    if not present:
+        return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archive = root / "oracle-attempts" / row["set"] / row["file"] / stamp
+    suffix = 1
+    while archive.exists():
+        archive = archive.with_name(stamp + "-{}".format(suffix))
+        suffix += 1
+    archive.mkdir(parents=True)
+    for path in present:
+        shutil.move(str(path), str(archive / path.name))
+    return archive
+
+
 def run_oracle_one(args, root, row, score):
-    result_path = root / "oracle-results" / row["set"] / (row["file"] + ".json")
+    result_path, oracle_board, artifacts = oracle_artifacts(root, row)
     if result_path.is_file():
         cached = json.loads(result_path.read_text(encoding="utf-8"))
         if (cached.get("status") == "oracle_complete" and
@@ -225,9 +254,13 @@ def run_oracle_one(args, root, row, score):
                 "Oracle returned an unchanged board despite a qualifying CLI "
                 "gain; its transcript must be inspected before retrying.")
             atomic_json(result_path, cached)
-        return cached, False
+        retryable = cached.get("status") in {
+            "oracle_failed", "oracle_invalid_no_change"}
+        if not args.retry_invalid_oracle or not retryable:
+            return cached, False
+        archived = archive_oracle_attempt(root, row, artifacts)
+        print("ARCHIVED {} -> {}".format(row["id"], archived), flush=True)
     board, project, rules = source_paths(root, row)
-    oracle_board = root / "oracle" / row["set"] / row["file"]
     oracle_board.parent.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable, str(REPO / "codex" / "run_ai_gloss.py"),
@@ -253,23 +286,27 @@ def run_oracle_one(args, root, row, score):
         if scored.returncode != 0:
             raise RuntimeError((scored.stderr or scored.stdout)[-1000:])
         oracle_score = parse_score(scored.stdout)
+        host_report_path = Path(str(oracle_board) + ".codex-result.json")
+        host_report = json.loads(host_report_path.read_text(encoding="utf-8"))
         oracle_mm = oracle_score["before_mm"]
         oracle_saved_mm = score["before_mm"] - oracle_mm
         outcome = {
             **score, "status": "oracle_complete",
             "oracle_seconds": seconds, "oracle_score_seconds": score_seconds,
             "oracle_board": str(oracle_board), "oracle_mm": oracle_mm,
+            "oracle_candidate_changed": bool(
+                host_report.get("candidate_changed")),
             "oracle_saved_mm": oracle_saved_mm,
             "oracle_saved_percent": (
                 100.0 * (score["before_mm"] - oracle_mm) / score["before_mm"]
                 if score["before_mm"] else 0.0),
             "oracle_vs_cli_mm": oracle_mm - score["cli_after_mm"],
         }
-        if abs(oracle_saved_mm) <= 1e-9:
+        if not outcome["oracle_candidate_changed"]:
             outcome["status"] = "oracle_invalid_no_change"
             outcome["error"] = (
-                "Oracle returned an unchanged board despite a qualifying CLI "
-                "gain; inspect the Codex JSONL transcript.")
+                "Oracle returned a byte-identical board despite a qualifying "
+                "CLI gain; inspect the Codex JSONL transcript.")
     except Exception as error:
         outcome = {**score, "status": "oracle_failed",
                    "error": "{}: {}".format(type(error).__name__, error)}

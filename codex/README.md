@@ -26,6 +26,12 @@ Codex normally requires one. The candidate starts as a copy of the input and
 the user's original is never exposed as a writable agent path. The launcher
 also rejects the run if the isolated source-board copy changes.
 
+On native Windows, the launcher retains the operator's Codex configuration and
+execution rules because they provision the bounded command policy used by the
+sandbox. It does not use full-access mode. Approval requests are disabled for
+the non-interactive run, so a command outside the configured policy fails
+closed instead of pausing the batch.
+
 The official Codex documentation describes `codex exec`, JSONL output,
 ephemeral runs, explicit sandboxes, and automation authentication:
 <https://learn.chatgpt.com/docs/non-interactive-mode>. The Codex SDK is the

@@ -38,6 +38,16 @@ def test_agent_prompt_has_no_unresolved_contract_tokens(tmp_path):
     assert rendered == "A0.kicad_pcb -> Aia.kicad_pcb"
 
 
+def test_agent_uses_bounded_native_sandbox_with_local_policy():
+    command = AGENT.codex_exec_command("codex")
+    assert command == [
+        "codex", "--ask-for-approval", "never", "exec", "--ephemeral",
+        "--sandbox", "workspace-write", "--json", "-",
+    ]
+    assert "--ignore-user-config" not in command
+    assert "--ignore-rules" not in command
+
+
 def test_versioned_prompt_forbids_track_gloss_reuse():
     prompt = (ROOT / "codex" / "prompts" / "kicad_ai_gloss.md").read_text(
         encoding="utf-8")
