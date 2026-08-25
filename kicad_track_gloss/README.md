@@ -58,6 +58,11 @@ source and packages.
    transformation, rejection, and blocking-net information, and **JSON** keeps
    the machine-readable payload separate. **Copier l'onglet** copies only the
    visible tab; **Copier tout** copies the complete report for troubleshooting.
+7. Calculations that finish in less than three seconds do not change the
+   cursor. If planning is still running after three seconds, KiCad displays its
+   busy cursor until planning finishes or fails. Only the API-neutral planner
+   runs in the background; board reading and modification stay on KiCad's main
+   thread.
 
 Unexpected internal errors display an error report; failures during plan
 application request an in-memory rollback. Normal no-op conditions never open

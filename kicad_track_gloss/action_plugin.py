@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 import traceback
 
 import pcbnew
@@ -31,6 +33,8 @@ ALLOW_EQUAL_LENGTH_SIMPLIFICATION = True
 # rounds. A safe partial result is applied if this guard is reached.
 INTERACTIVE_MAX_PASSES = 4
 INTERACTIVE_GROUP_MAX_PASSES = 2
+BUSY_CURSOR_DELAY_SECONDS = 3.0
+BUSY_CURSOR_POLL_SECONDS = 0.05
 
 
 class NoTrackSelection(ValueError):
@@ -178,6 +182,46 @@ def _warning_bell():
         LOG.exception("Could not play the KiCad warning bell")
 
 
+def _plan_with_delayed_busy_cursor(function, delay_seconds=None):
+    """Run API-neutral planning off-thread and show BusyCursor only if slow."""
+    delay = (BUSY_CURSOR_DELAY_SECONDS if delay_seconds is None
+             else max(0.0, float(delay_seconds)))
+    completed = threading.Event()
+    outcome = {}
+
+    def worker():
+        try:
+            outcome["result"] = function()
+        except BaseException as error:
+            outcome["error"] = error
+            outcome["traceback"] = error.__traceback__
+        finally:
+            completed.set()
+
+    thread = threading.Thread(
+        target=worker, name="KiCadTrackGlossPlanner", daemon=True)
+    started = time.monotonic()
+    busy_started = False
+    thread.start()
+    try:
+        while not completed.wait(BUSY_CURSOR_POLL_SECONDS):
+            if not busy_started and time.monotonic() - started >= delay:
+                try:
+                    wx.BeginBusyCursor()
+                    busy_started = True
+                except Exception:
+                    LOG.exception("Could not display the Track Gloss busy cursor")
+        if "error" in outcome:
+            raise outcome["error"].with_traceback(outcome["traceback"])
+        return outcome["result"]
+    finally:
+        if busy_started:
+            try:
+                wx.EndBusyCursor()
+            except Exception:
+                LOG.exception("Could not restore the Track Gloss cursor")
+
+
 def _selection_counts(board):
     counts = {"segments": 0, "arcs": 0, "vias": 0, "other": 0}
     for item in board.GetTracks():
@@ -317,7 +361,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                 "straight segment or a sliding track/pad termination.")
             return False
 
-        best = generate_converged_plan(
+        best = _plan_with_delayed_busy_cursor(lambda: generate_converged_plan(
             snapshot.model, snapshot.eligible_keys,
             max_passes=INTERACTIVE_MAX_PASSES,
             return_partial_on_limit=True,
@@ -326,7 +370,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             allow_equal_length_simpler=ALLOW_EQUAL_LENGTH_SIMPLIFICATION,
             clearance=snapshot.minimum_clearance,
             collect_statistics=diagnostic,
-            parallel=True)
+            parallel=True))
         report.append("Convergence passes: " + str(best.convergence_passes))
         report.append("Fixed point reached: " +
                       ("yes" if best.fixed_point else "no"))

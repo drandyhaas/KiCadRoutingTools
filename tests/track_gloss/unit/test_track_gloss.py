@@ -2,6 +2,7 @@ import math
 import random
 import sys
 import tempfile
+import time
 import types
 import zipfile
 import json
@@ -541,6 +542,9 @@ def test_action_plugin_is_silent_and_has_no_file_roundtrip():
     assert "Select at least one straight track segment" in source
     assert "Plugin version: " in source
     assert 'label="Copier"' in source
+    assert "BUSY_CURSOR_DELAY_SECONDS = 3.0" in source
+    assert "wx.BeginBusyCursor()" in source
+    assert "wx.EndBusyCursor()" in source
     assert "Use KiCad Undo to revert it." not in source
     assert "Result: modification applied to the current board." not in source
 
@@ -553,6 +557,8 @@ def test_normal_action_bells_once_only_on_noop():
     fake_pcbnew.ActionPlugin = object
     fake_wx = types.ModuleType("wx")
     fake_wx.Bell = lambda: calls.append("bell")
+    fake_wx.BeginBusyCursor = lambda: calls.append("busy-begin")
+    fake_wx.EndBusyCursor = lambda: calls.append("busy-end")
     previous_pcbnew = sys.modules.get("pcbnew")
     previous_wx = sys.modules.get("wx")
     sys.modules["pcbnew"] = fake_pcbnew
@@ -614,6 +620,31 @@ def test_normal_action_bells_once_only_on_noop():
         plugin.Run()
         assert warnings == ["warning"]
         assert calls == ["bell"]
+
+        assert module._plan_with_delayed_busy_cursor(
+            lambda: "fast", delay_seconds=0.01) == "fast"
+        assert calls == ["bell"]
+
+        def slow_result():
+            time.sleep(0.08)
+            return "slow"
+
+        assert module._plan_with_delayed_busy_cursor(
+            slow_result, delay_seconds=0.001) == "slow"
+        assert calls[-2:] == ["busy-begin", "busy-end"]
+
+        def slow_failure():
+            time.sleep(0.08)
+            raise RuntimeError("planning failed")
+
+        try:
+            module._plan_with_delayed_busy_cursor(
+                slow_failure, delay_seconds=0.001)
+        except RuntimeError as error:
+            assert str(error) == "planning failed"
+        else:
+            raise AssertionError("the planning error was not propagated")
+        assert calls[-2:] == ["busy-begin", "busy-end"]
     finally:
         sys.modules.pop("kicad_track_gloss.action_plugin", None)
         if previous_pcbnew is None:
