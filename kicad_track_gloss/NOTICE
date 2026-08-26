@@ -22,10 +22,9 @@ terminations, additional safety checks, rollback, diagnostics, warning-bell
 behavior, regression fixtures, tests, documentation, branding, and PCM
 packaging.
 
-Frantz is co-author and maintainer of this standalone KiCad Track Gloss
-adaptation. The project remains based primarily on DrAndyHaas's work and
-source code; co-authorship of the adaptation does not diminish or replace that
-primary provenance.
+The standalone adaptation was created by ChatGPT/Codex (OpenAI), inspired by
+and reusing part of DrAndyHaas's code, and is maintained by Frantz. This
+adaptation does not diminish or replace that primary provenance.
 
 The active project repository is the fca1 KiCadRoutingTools fork:
 

@@ -2,11 +2,11 @@
   "$schema": "https://go.kicad.org/pcm/schemas/v2",
   "name": "KiCad Track Gloss",
   "description": "Gloss one or more selected PCB tracks in a single click.",
-  "description_full": "Alpha release for KiCad 10. Select one or more track segments, connections, or complete nets in PCB Editor, then run KiCad Track Gloss. The plugin automatically expands the selection and shortens or simplifies the selected routing directly on the current board. A successful gloss is applied silently and can be reverted with KiCad Undo. For detailed results or troubleshooting, run KiCad Track Gloss - Diagnostic from Tools > External Plugins. The diagnostic dialog labels are currently in French; logs and JSON field names are in English. This plugin is based primarily on work and source code by DrAndyHaas, with Frantz as co-author of this standalone adaptation.",
+  "description_full": "Alpha release for KiCad 10. Select one or more track segments, connections, or complete nets in PCB Editor, then run KiCad Track Gloss. The plugin automatically expands the selection and shortens or simplifies the selected routing directly on the current board. Run either action with no selected track to edit tooltip-documented settings for the current KiCad session. Its safety system uses KiCad's native DRC; this check can add noticeable response time. A successful gloss is applied silently and can be reverted with KiCad Undo. For detailed results or troubleshooting, run KiCad Track Gloss - Diagnostic from Tools > External Plugins. The diagnostic report, logs, and JSON field names are in English. The standalone adaptation was created by ChatGPT/Codex (OpenAI), inspired by and reusing part of DrAndyHaas's code, and is maintained by Frantz.",
   "identifier": "com.github.fca1.kicadtrackgloss",
   "type": "plugin",
   "author": {
-    "name": "DrAndyHaas and Frantz",
+    "name": "ChatGPT/Codex (OpenAI)",
     "contact": {
       "github": "https://github.com/fca1/KiCadRoutingTools"
     }
@@ -26,7 +26,7 @@
   "tags": ["routing", "tracks", "cleanup", "gloss"],
   "versions": [
     {
-      "version": "0.3.28",
+      "version": "0.3.38",
       "status": "testing",
       "kicad_version": "10.0",
       "kicad_version_max": "10.99",

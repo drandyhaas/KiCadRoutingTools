@@ -62,6 +62,12 @@ class PadRegion:
     net_id: int
     layers: Tuple[int, ...] = ()
     clearance: float = 0.0
+    # Custom pads are represented by KiCad's already-unioned effective copper
+    # polygons in absolute board coordinates.  Each entry is
+    # ``(outer_contour, hole_contours)``.
+    polygons: Tuple[Tuple[
+        Tuple[Tuple[float, float], ...],
+        Tuple[Tuple[Tuple[float, float], ...], ...]], ...] = ()
 
 
 @dataclass

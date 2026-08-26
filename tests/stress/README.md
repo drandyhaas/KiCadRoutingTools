@@ -8,35 +8,6 @@ upstream GitHub projects each time.
 All artifacts live outside the repo in `$STRESS_DIR`
 (default: `~/Documents/kicad_stress_test`).
 
-## Track Gloss CLI versus independent Codex oracle
-
-`track_gloss_oracle_corpus.py` uses the exact routed-board corpus declared by
-all versioned `manifest_set*.json` files.  It downloads those sources, scores
-every available board with the Track Gloss CLI, and launches the independent
-Codex oracle only when the CLI reports at least 5% straight-track copper saved.
-Every board result is checkpointed, so an interrupted run resumes without
-repeating completed CLI scores or oracle calls.  Outputs live outside the repo.
-Use `--retry-invalid-oracle` after fixing an oracle execution problem: previous
-failed or byte-identical attempts are moved under `oracle-attempts/` before the
-new run, so their transcripts remain available.
-
-```powershell
-py -3.12 tests\stress\track_gloss_oracle_corpus.py `
-  --root "$HOME\Documents\kicad_track_gloss_stress" `
-  --threshold 5 `
-  --codex-command C:\path\to\codex.cmd
-```
-
-The final `track-gloss-oracle-summary.json` and `.csv` compare original copper,
-the deterministic CLI result, and the independently generated oracle board.
-The oracle candidate is published only after the host-side before/after KiCad
-DRC gate in `codex/run_ai_gloss.py` accepts it.
-
-For a short intermediate evaluation, `track_gloss_pilot5.json` records five
-medium boards spanning instrumentation, power, RF, SBC, and motor-control
-layouts. Pass each entry with repeatable `--board-id set/file` arguments; no
-other downloaded board will be scored or sent to the oracle.
-
 ## Pipeline
 
 ```bash

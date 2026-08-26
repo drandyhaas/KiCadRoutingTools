@@ -33,10 +33,9 @@ work and reused code.
 The active project repository is the fca1 fork:
 <https://github.com/fca1/KiCadRoutingTools>.
 
-**Frantz is co-author and maintainer of this standalone adaptation.** The
-plugin nevertheless remains based primarily on the work and source code of
-DrAndyHaas; that primary provenance must remain visible in redistributed
-source and packages.
+The standalone adaptation was created by ChatGPT/Codex (OpenAI), inspired by
+and reusing part of DrAndyHaas's code, and is maintained by Frantz. That
+primary provenance must remain visible in redistributed source and packages.
 
 ## User-visible contract
 
@@ -49,15 +48,20 @@ source and packages.
    composed atomic plan to the current board.
 4. A successful operation returns silently. When no copper is changed for any
    reason, KiCad's standard warning bell is played exactly once.
-5. If no straight segment is selected, the normal action displays a warning
-   asking for at least one segment instead of treating this user-input error as
-   an ordinary no-op.
+5. If no straight segment is selected, either action opens the shared session
+   settings dialog, whose title includes the plugin version. The single-track
+   native DRC switch appears first and clearly identifies the faster, smoother
+   unchecked mode. Minimum saving starts at 0.1 mm and advances in 0.1 mm
+   steps; convergence-pass guards remain internal and are not displayed.
+   Tooltips explain every field. **Close** applies the values in memory until
+   KiCad exits; **Cancel** discards the edits. Running the action again with
+   selected copper performs the gloss normally.
 6. **KiCad Track Gloss — Diagnostic** runs the same operation and displays a
-   three-tab report. **Résultat** prominently states the saved length in mm and
-   the before/after segment count, **Détails** contains selection, protection,
+   three-tab report. **Result** prominently states the saved length in mm and
+   the before/after segment count, **Details** contains selection, protection,
    transformation, rejection, and blocking-net information, and **JSON** keeps
-   the machine-readable payload separate. **Copier l'onglet** copies only the
-   visible tab; **Copier tout** copies the complete report for troubleshooting.
+   the machine-readable payload separate. **Copy tab** copies only the visible
+   tab; **Copy all** copies the complete report for troubleshooting.
 7. Calculations that finish in less than three seconds do not change the
    cursor. If planning is still running after three seconds, KiCad displays its
    busy cursor until planning finishes or fails. Only the API-neutral planner
@@ -97,12 +101,29 @@ protected from newly routed copper.
 
 After the API-neutral engine has selected and composed one final plan, a
 single KiCad-native DRC gate validates it on private temporary snapshots. Both
-snapshots have their zones refilled by `kicad-cli`; the plan is rejected if any
-new semantic DRC finding or unconnected-item relationship appears, even when
-another finding of the same category disappeared. Temporary boards and reports
+snapshots have their zones refilled by `kicad-cli`; strict finding identities
+are compared for geometric DRC categories. KiCad can nondeterministically
+describe the same ratsnest gap through a tiny track in one refill and a via in
+the next, so `unconnected_items` uses a count increase rather than unstable
+item fingerprints. Temporary boards and reports
 are deleted before the operation returns, and the current PCB is never saved
 or modified by validation. Candidate search itself remains API-neutral and
-does not run DRC per option.
+does not run DRC per option. The baseline DRC starts while the candidate board
+is constructed, then baseline and candidate DRC processes run concurrently.
+An exact-content, bounded in-process cache avoids repeating a baseline or an
+identical rejected plan while the board, project, rules, and KiCad executable
+remain unchanged. A native DRC is skipped only for the provable special case
+where a board has no zones and every added segment lies wholly on the removed
+copper; normal corner cutting and endpoint sliding always retain the full gate.
+Diagnostic reports and CLI JSON expose planning, candidate construction, both
+DRC-process durations, total validation time, cache state, and validation mode.
+On Windows, the candidate helper and both `kicad-cli` processes are launched
+without console windows or transient taskbar entries.
+
+If the most aggressively refined plan is genuinely rejected by native DRC,
+the plugin and CLI retry a conservative one-pass, unrefined candidate when the
+remaining time budget permits. That candidate is applied only after its own
+complete DRC succeeds; otherwise the board remains unchanged.
 
 Selections of at least 64 eligible segments may distribute independent
 net/layer and exact-width fallback searches over as many as four local Python
@@ -111,6 +132,12 @@ deterministically, and required to match sequential planning. If KiCad has no
 safe sibling Python interpreter or a worker fails, planning automatically
 continues sequentially. Small selections never start workers, avoiding process
 startup latency during ordinary one-connection glosses.
+
+For local scopes of at most 16 eligible segments, a bounded junction search
+also retains up to four branch-local alternatives. Selection remains an
+authorization boundary: adding a branch at a T cannot remove a better safe
+solution that was available when only the neighbouring branch was selected.
+Larger scopes keep the established global algorithm and runtime.
 
 Every changed path is octolinear. Removing a non-0/45/90-degree segment takes
 priority over length reduction, so the engine may accept a small length increase
@@ -191,6 +218,13 @@ inter-net clearance violations, and degraded connectivity between immutable
 terminals. Application verifies track identities again and restores removed
 copper if an exception occurs.
 
+The interactive safety system uses KiCad's native DRC on private before and
+after snapshots before applying plans that require native validation. This
+safety gate is fundamental, but process startup and complete DRC evaluation
+can dominate response time and add seconds even for one selected connection.
+The live board is not changed by these snapshots, and native DRC remains
+enabled for a single-track selection by the packaged internal policy.
+
 Clearance search distinguishes genuinely new copper from a candidate portion
 already fully contained inside a wider immutable track of the same net. A
 pre-existing nearby foreign-net condition is not counted as a new violation
@@ -198,9 +232,11 @@ when the replacement adds no copper to that clearance envelope; any part that
 extends beyond the same-net cover remains subject to the full effective rule.
 
 Pad clearance uses the actual rotated circle, rectangle, oval, or rounded-
-rectangle copper shape. Paste/mask-only apertures are ignored. Unsupported and
-custom pads retain a conservative enclosing circle built from KiCad's effective
-bounding box, including all custom primitives. A candidate portion that is
+rectangle copper shape. Custom pads use KiCad's effective, already-unioned
+copper polygons on each layer, including holes; their vertices also open
+topology-preserving lead-in/lead-out candidates around irregular copper.
+Paste/mask-only apertures are ignored. Unsupported shapes retain a conservative
+enclosing circle built from KiCad's effective bounding box. A candidate portion that is
 strictly retained original copper is not treated as new copper against a
 fallback approximation; every genuinely new portion remains checked. Identity
 replacements are retained as their original native KiCad items.
@@ -208,10 +244,17 @@ replacements are retained as their original native KiCad items.
 ## Code map
 
 - `__init__.py`: registers the normal and diagnostic ActionPlugins in KiCad.
-- `action_plugin.py`: one-click orchestration, reporting, warning bell, and UI
+- `action_plugin.py`: one-click orchestration and interactive time-budget
   contract.
 - `version.py`: single source of truth for the plugin version displayed by the
   diagnostic and used by the PCM builder.
+- `internal_config.json`: versioned defaults; it is never rewritten by the
+  session dialog.
+- `configuration.py`: strict defaults plus the process-local session policy.
+- `kicad/settings_dialog.py`: shared no-selection session-settings dialog and
+  field tooltips.
+- `kicad/report_dialog.py`: resizable result/diagnostic dialogs, tabs, copy
+  actions, and the KiCad warning bell.
 - `kicad/adapter.py`: small public `BoardAdapter` facade.
 - `kicad/reader.py`: live-board and selection conversion to `BoardModel`.
 - `kicad/selection.py`: native connection expansion, differential-pair and
@@ -220,11 +263,20 @@ replacements are retained as their original native KiCad items.
 - `kicad/writer.py`: live-board plan application and rollback.
 - `kicad/diagnostics.py`: human-readable tables and machine-readable JSON for
   diagnostic runs.
+- `kicad/drc_report.py`: pure parsing, stable fingerprints, and regression
+  comparison for KiCad JSON DRC reports.
 - `engine/planner.py`: API-neutral chain discovery, octolinear candidate
   generation, global scheduling, batch fallbacks, and fixed-point composition.
-- `engine/context.py`: reusable spatial indexes and rule envelopes.
+- `engine/candidate_geometry.py`: exact local candidate identity, clearance,
+  pad, keepout, and board-edge safety checks.
+- `engine/context.py`: reusable spatial indexes, rule envelopes, and indexed
+  Edge.Cuts queries followed by exact geometry checks.
+- `engine/workflow.py`: shared plugin/CLI candidate identity and conservative
+  native-DRC fallback policy.
 - `engine/parallel.py`: deterministic local worker orchestration and sequential
-  fallback.
+  fallback. Workers bootstrap from the actual PCM installation directory, not
+  from the repository name; an infrastructure failure automatically returns
+  to in-process planning instead of producing a false no-op.
 - `engine/terminals.py`: detection and movement candidates for sliding T
   terminations.
 - `engine/pads.py`: pad containment and bounded copper-contact geometry.
@@ -242,9 +294,6 @@ replacements are retained as their original native KiCad items.
   user-contract unit tests.
 - `../tests/track_gloss/run_patterns.py`: KiCad-Python integration replay.
 - `../tests/track_gloss/patterns/`: frozen real-board regression inputs.
-- `../codex/`: independent Codex-oracle prompt, contracts, launcher, and
-  examples; it must not import the Track Gloss engine.
-
 ## Reference regression data
 
 The complete KiCad board, project, and design rules are stored byte-for-byte in
@@ -357,19 +406,25 @@ D:\kicad\bin\python.exe tools\score_track_gloss.py --scope segment:UUID --projec
 D:\kicad\bin\python.exe tools\score_track_gloss.py --scope-file scope.json --project design.kicad_pro candidate.kicad_pcb
 D:\kicad\bin\python.exe tools\score_track_gloss.py --project design.kicad_pro --output glossed.kicad_pcb candidate.kicad_pcb
 D:\kicad\bin\python.exe tools\score_track_gloss.py --max-passes 32 --trace-passes --project design.kicad_pro candidate.kicad_pcb
+D:\kicad\bin\python.exe tools\score_track_gloss.py --time-budget 900 --project design.kicad_pro candidate.kicad_pcb
 ```
 
 For convergence research, `--max-passes N` changes the hard guard (default
 16) and `--trace-passes` emits one `GLOSS_PASS_JSON` record per state to
-stderr. Standard `GLOSS_SCORE_JSON` and `SCORE=` output remains unchanged on
-stdout, so the tracing option does not break `place_route_loop` consumers.
+stderr. The CLI has no elapsed-time limit by default because it is intended
+for unattended routing loops. `--time-budget N` optionally limits the combined
+planning and native-DRC work to `N` seconds; it does not change the pass guard.
+Standard `GLOSS_SCORE_JSON` and `SCORE=` output remains unchanged on stdout, so
+these options do not break `place_route_loop` consumers.
 
 The CLI and plugin use the same planning and safety algorithms, but not the
-same work guard. The CLI is an offline scorer and requires a fixed point within
-its configurable bound. The interactive plugin is bounded to four global
-reconciliation passes and two local passes per independent batch. At that
-interactive bound it applies the safe improvement already found, marks the
-result as non-fixed-point internally, and returns control to KiCad. Small
+same work guard. The CLI is an offline scorer: its pass bound is configurable
+and its time budget is unlimited unless `--time-budget` is supplied. The
+interactive plugin is bounded to 5 seconds of planning, 10 seconds for the
+complete operation, four global reconciliation passes, and two local passes
+per independent batch. At an interactive bound it applies only a safe result
+whose complete validation already finished, marks a partial result as
+non-fixed-point internally, and returns control to KiCad. Small
 single-connection selections normally converge before either bound matters.
 
 The second form is intended for generated boards whose filename differs from

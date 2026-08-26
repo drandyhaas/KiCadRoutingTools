@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 import math
 
+from .geometry import EPS, point_in_polygon, segment_distance
 from .model import segment_key
 
 
@@ -73,6 +74,7 @@ class PlannerContext:
             cell_size = max(1.0, min(10.0, math.sqrt(area / len(model.segments))))
         else:
             cell_size = 5.0
+        self.cell_size = cell_size
 
         self.segments = SpatialIndex(
             model.segments,
@@ -93,6 +95,45 @@ class PlannerContext:
                 max((point[0] for point in item.points), default=0.0),
                 max((point[1] for point in item.points), default=0.0)),
             cell_size)
+        outline = model.board_outline
+        self.outline_edges = []
+        self.hole_edges = []
+        if outline:
+            for polygon in outline.outlines:
+                edges = tuple(zip(polygon, polygon[1:] + polygon[:1]))
+                self.outline_edges.append(SpatialIndex(
+                    edges, lambda edge: line_bbox(*edge), cell_size))
+            for polygon in outline.holes:
+                edges = tuple(zip(polygon, polygon[1:] + polygon[:1]))
+                self.hole_edges.append(SpatialIndex(
+                    edges, lambda edge: line_bbox(*edge), cell_size))
+
+    @staticmethod
+    def _near_edge(a, b, margin, edge_index):
+        bounds = line_bbox(a, b, margin + EPS)
+        return any(segment_distance(a, b, c, d) < margin + EPS
+                   for c, d in edge_index.query(bounds))
+
+    def segment_inside_board(self, a, b, margin=0.0):
+        """Indexed equivalent of geometry.segment_inside_board()."""
+        outline = self.model.board_outline
+        if outline is None or not outline.outlines:
+            return True
+        for polygon, edges in zip(outline.outlines, self.outline_edges):
+            if not (point_in_polygon(a, polygon) and
+                    point_in_polygon(b, polygon)):
+                continue
+            if self._near_edge(a, b, margin, edges):
+                continue
+            blocked = False
+            for hole, hole_edges in zip(outline.holes, self.hole_edges):
+                if (point_in_polygon(a, hole) or point_in_polygon(b, hole) or
+                        self._near_edge(a, b, margin, hole_edges)):
+                    blocked = True
+                    break
+            if not blocked:
+                return True
+        return False
 
     def nearby_segments(self, a, b, moving_clearance, moving_width):
         margin = (max(moving_clearance, self.max_net_clearance) +

@@ -10,14 +10,47 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import json
+import math
 from pathlib import Path
 import shutil
 import sys
 import tempfile
+import time
 import types
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _internal_cli_max_passes():
+    """Read the CLI default without importing the GUI plugin package."""
+    path = ROOT / "kicad_track_gloss" / "internal_config.json"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        value = document["convergence"]["cli_max_passes"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise RuntimeError(
+            "cannot read Track Gloss internal CLI policy: {}".format(error))
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("convergence.cli_max_passes must be at least one")
+    return value
+
+
+def _internal_cli_time_budget():
+    """Return the optional offline limit; null deliberately means unlimited."""
+    path = ROOT / "kicad_track_gloss" / "internal_config.json"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        value = document["timing"]["cli_total_time_budget_seconds"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise RuntimeError(
+            "cannot read Track Gloss internal CLI timing policy: {}".format(error))
+    if value is not None and (
+            isinstance(value, bool) or not isinstance(value, (int, float)) or
+            not math.isfinite(value) or value <= 0.0):
+        raise ValueError(
+            "timing.cli_total_time_budget_seconds must be positive or null")
+    return None if value is None else float(value)
 
 
 def _parser():
@@ -55,8 +88,13 @@ def _parser():
         "--scope-file", metavar="SCOPE.json",
         help='JSON manifest containing {"scopes":["net:VCC", ...]}')
     parser.add_argument(
-        "--max-passes", type=int, default=16, metavar="N",
-        help="maximum changed convergence passes; default 16")
+        "--max-passes", type=int, default=_internal_cli_max_passes(), metavar="N",
+        help="maximum changed convergence passes; default from internal policy")
+    parser.add_argument(
+        "--time-budget", type=float, default=_internal_cli_time_budget(),
+        metavar="SECONDS",
+        help=("optional total planning and DRC time budget; the internal "
+              "default is unlimited"))
     parser.add_argument(
         "--trace-passes", action="store_true",
         help=("print one GLOSS_PASS_JSON record per convergence state to "
@@ -203,15 +241,20 @@ def _bootstrap_engine():
     package = types.ModuleType("kicad_track_gloss")
     package.__path__ = [str(ROOT / "kicad_track_gloss")]
     sys.modules["kicad_track_gloss"] = package
-    from kicad_track_gloss.engine import generate_converged_plan
+    from kicad_track_gloss.engine import (
+        generate_conservative_candidate, generate_converged_plan,
+        plan_identity)
+    from kicad_track_gloss.configuration import CONFIG
     from kicad_track_gloss.engine.geometry import length
     from kicad_track_gloss.engine.model import segment_key
     from kicad_track_gloss.kicad import BoardAdapter
     from kicad_track_gloss.kicad.selection import is_probable_diff_pair
+    from kicad_track_gloss.kicad.types import is_straight_track
     from kicad_track_gloss.version import __version__
 
-    return (pcbnew, BoardAdapter, generate_converged_plan, length,
-            segment_key, is_probable_diff_pair, __version__)
+    return (pcbnew, BoardAdapter, generate_conservative_candidate,
+            generate_converged_plan, plan_identity, length, segment_key,
+            is_probable_diff_pair, is_straight_track, __version__, CONFIG)
 
 
 def _save_output(pcbnew, board, input_path, output_path, force=False):
@@ -233,9 +276,24 @@ def _save_output(pcbnew, board, input_path, output_path, force=False):
 
 
 def evaluate(board_path, project_path=None, parallel=True, output_path=None,
-             force=False, max_passes=16, scopes=None, pass_observer=None):
-    (pcbnew, BoardAdapter, generate_converged_plan, length,
-     segment_key, is_probable_diff_pair, version) = _bootstrap_engine()
+             force=False, max_passes=None, scopes=None, pass_observer=None,
+             time_budget_seconds=None):
+    (pcbnew, BoardAdapter, generate_conservative_candidate,
+     generate_converged_plan, plan_identity, length, segment_key,
+     is_probable_diff_pair, is_straight_track,
+     version, config) = _bootstrap_engine()
+    if max_passes is None:
+        max_passes = config.convergence.cli_max_passes
+    if time_budget_seconds is None:
+        time_budget_seconds = config.timing.cli_total_time_budget_seconds
+    if (time_budget_seconds is not None and
+            (not math.isfinite(time_budget_seconds) or
+             time_budget_seconds <= 0.0)):
+        raise ValueError("time budget must be positive")
+    operation_started = time.monotonic()
+    operation_deadline = (
+        None if time_budget_seconds is None else
+        operation_started + float(time_budget_seconds))
     with prepared_board(board_path, project_path) as (load_path, used_project):
         board = pcbnew.LoadBoard(str(load_path))
         adapter = BoardAdapter(pcbnew)
@@ -248,7 +306,7 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             not segment.arc for segment in initial.model.segments)
         records = {}
         for item in board.GetTracks():
-            if str(item.GetClass()) != "PCB_TRACK":
+            if not is_straight_track(pcbnew, item):
                 continue
             segment = adapter.segment_from_item(item)
             records[segment_key(segment)] = (item, segment)
@@ -260,14 +318,44 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
         if not eligible:
             raise ValueError("scope contains no eligible track after protection")
         best = generate_converged_plan(
-            initial.model, eligible, max_passes=max_passes, min_gain=0.01,
+            initial.model, eligible, max_passes=max_passes,
+            min_gain=config.gloss.minimum_saved_length_mm,
             allow_equal_length_simpler=True,
             clearance=initial.minimum_clearance, parallel=parallel,
-            pass_observer=pass_observer)
+            pass_observer=pass_observer, deadline=operation_deadline,
+            cancellation_grace_seconds=(
+                config.timing.interactive_cancellation_grace_seconds))
         native = None
         applied = False
+        fallback_used = False
         if best.changed:
-            native = adapter.validate_plan(board, best)
+            remaining = (None if operation_deadline is None else
+                         max(0.0, operation_deadline - time.monotonic()))
+            native = adapter.validate_plan(
+                board, best, timeout_seconds=remaining)
+        if (best.changed and native is not None and not native.allowed and
+                native.validation_mode != "native_timeout" and
+                (operation_deadline is None or
+                 time.monotonic() < operation_deadline)):
+            conservative = generate_conservative_candidate(
+                initial.model, eligible,
+                min_gain=config.gloss.minimum_saved_length_mm,
+                clearance=initial.minimum_clearance,
+                deadline=operation_deadline,
+                cancellation_grace_seconds=(
+                    config.timing.interactive_cancellation_grace_seconds))
+            if (conservative.changed and
+                    plan_identity(conservative) != plan_identity(best)):
+                remaining = (None if operation_deadline is None else
+                             max(0.0, operation_deadline - time.monotonic()))
+                fallback_native = adapter.validate_plan(
+                    board, conservative, timeout_seconds=remaining)
+                if fallback_native.allowed:
+                    best = conservative
+                    native = fallback_native
+                    fallback_used = True
+                elif fallback_native.validation_mode == "native_timeout":
+                    native = fallback_native
         if best.changed and native.allowed:
             adapter.apply(board, best, rollback_on_error=True)
             applied = True
@@ -300,6 +388,7 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             "protected_tuned_tracks": len(meanders),
             "convergence_passes": best.convergence_passes,
             "max_passes": max_passes,
+            "time_budget_seconds": time_budget_seconds,
             "fixed_point": best.fixed_point,
             "before_mm": before_mm,
             "potential_saved_mm": saved_mm,
@@ -309,13 +398,24 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             "segments_after": after_segments,
             "segments_saved": before_segments - after_segments,
             "changed": applied,
+            "candidate_ladder_fallback": fallback_used,
             "native_drc_gate": (
                 "passed" if native and native.allowed else
                 "rejected" if native else "not_needed"),
             "native_drc_increases": (
                 native.increases if native is not None else {}),
+            "native_drc_before": (
+                native.before if native is not None else {}),
+            "native_drc_after": (
+                native.after if native is not None else {}),
             "native_drc_error": (
                 native.error if native is not None else ""),
+            "native_drc_timings_ms": (
+                native.timings_ms if native is not None else {}),
+            "native_drc_validation_mode": (
+                native.validation_mode if native is not None else "not_needed"),
+            "native_drc_baseline_cached": (
+                native.baseline_cached if native is not None else False),
             "output": str(output) if output else None,
         }
 
@@ -325,6 +425,10 @@ def main(argv=None):
     try:
         if args.max_passes < 1:
             raise ValueError("--max-passes must be at least one")
+        if (args.time_budget is not None and
+                (not math.isfinite(args.time_budget) or
+                 args.time_budget <= 0.0)):
+            raise ValueError("--time-budget must be positive")
         if args.place_route_loop and args.output:
             raise ValueError("--output is forbidden with --place-route-loop")
         if args.force and not args.output:
@@ -333,16 +437,18 @@ def main(argv=None):
             args.paths, args.place_route_loop)
         board, project = resolve_board_project(board, args.project)
         scopes = resolve_scopes(args.scope, args.scope_file)
-        observer = None
+        pass_observer = None
         if args.trace_passes:
-            def observer(state):
+            def emit_pass(state):
                 print("GLOSS_PASS_JSON=" + json.dumps(
                     state, sort_keys=True, separators=(",", ":")),
                     file=sys.stderr, flush=True)
+            pass_observer = emit_pass
         payload = evaluate(
             board, project, parallel=not args.no_parallel,
             output_path=args.output, force=args.force, scopes=scopes,
-            max_passes=args.max_passes, pass_observer=observer)
+            max_passes=args.max_passes, pass_observer=pass_observer,
+            time_budget_seconds=args.time_budget)
         if placed is not None:
             payload["placed_board"] = str(placed.resolve())
             payload["route_json"] = str(route_json.resolve())

@@ -11,6 +11,7 @@ import pickle
 import subprocess
 import sys
 import tempfile
+import time
 import types
 
 
@@ -33,7 +34,7 @@ else:
     from .model import (AddedSegment, BoardModel, BoardOutline, CircleObstacle,
                         GlossResult, PadRegion, PolygonKeepout, Segment,
                         Transformation)
-    from .planner import generate_converged_plan
+    from .planner import generate_converged_plan, smooth_selected_chains
 
 
 def _encode_model(model):
@@ -64,6 +65,10 @@ def _decode_model(data):
     pads = []
     for item in data["pad_regions"]:
         item["layers"] = tuple(item["layers"])
+        item["polygons"] = tuple(
+            (tuple(tuple(point) for point in outer),
+             tuple(tuple(tuple(point) for point in hole) for hole in holes))
+            for outer, holes in item.get("polygons", ()))
         pads.append(PadRegion(**item))
     outline = data.get("board_outline")
     if outline is not None:
@@ -84,8 +89,9 @@ def _decode_model(data):
         board_outline=outline)
 
 
-def _stop_processes(processes):
+def _stop_processes(processes, grace_seconds=2.0):
     """Reap every worker before Windows temporary files are removed."""
+    deadline = time.monotonic() + max(0.0, float(grace_seconds))
     for process in processes:
         if process.poll() is None:
             try:
@@ -96,11 +102,11 @@ def _stop_processes(processes):
         if process.poll() is not None:
             continue
         try:
-            process.wait(timeout=2)
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             try:
                 process.kill()
-                process.wait(timeout=2)
+                process.wait(timeout=max(0.1, deadline - time.monotonic()))
             except Exception:
                 LOG.exception("Could not kill Track Gloss worker")
 
@@ -145,6 +151,13 @@ def _worker(input_path, output_path):
     model = _decode_model(payload["model"])
     context = PlannerContext(model)
     rows = []
+
+    def publish():
+        temporary = Path(str(output_path) + ".tmp-{}".format(os.getpid()))
+        with open(temporary, "wb") as stream:
+            pickle.dump(rows, stream, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(temporary, output_path)
+
     for group_key, eligible in payload["groups"]:
         try:
             if payload.get("converge"):
@@ -164,8 +177,10 @@ def _worker(input_path, output_path):
         except Exception as error:
             rows.append((group_key, None,
                          type(error).__name__ + ": " + str(error)))
-    with open(output_path, "wb") as stream:
-        pickle.dump(rows, stream, protocol=pickle.HIGHEST_PROTOCOL)
+        # Publish after every deterministic group. The parent can retain work
+        # completed before an interactive deadline instead of discarding the
+        # whole worker batch and restarting sequentially.
+        publish()
 
 
 def _python_executable():
@@ -191,23 +206,47 @@ class ParallelPlanJob:
         self.processes = processes
         self.outputs = outputs
 
-    def collect(self):
+    def collect(self, timeout_seconds=None, cancellation_grace_seconds=1.0):
+        deadline = (None if timeout_seconds is None else
+                    time.monotonic() + max(0.0, float(timeout_seconds)))
+        timed_out = False
         try:
+            while any(process.poll() is None for process in self.processes):
+                if deadline is not None and time.monotonic() >= deadline:
+                    timed_out = True
+                    break
+                time.sleep(0.02)
+            if timed_out:
+                _stop_processes(
+                    self.processes, cancellation_grace_seconds)
             rows = []
+            infrastructure_failed = False
             for process, output_path in zip(self.processes, self.outputs):
-                _stdout, stderr = process.communicate(timeout=60)
-                if process.returncode or not output_path.exists():
-                    raise RuntimeError(stderr.decode("utf-8", "replace"))
+                if not timed_out and process.returncode:
+                    _stdout, stderr = process.communicate()
+                    LOG.error("Parallel Track Gloss worker failed: %s",
+                              stderr.decode("utf-8", "replace"))
+                    infrastructure_failed = True
+                    continue
+                if not output_path.exists():
+                    if not timed_out:
+                        infrastructure_failed = True
+                    continue
                 with open(output_path, "rb") as stream:
                     rows.extend(pickle.load(stream))
+            if infrastructure_failed:
+                # ``None`` explicitly asks the planner to use its in-process
+                # path.  An empty list would look like a valid no-op and could
+                # suppress every candidate search for a large selection.
+                return None
             decoded = [(tuple(group_key),
                         _decode_plan(plan) if plan is not None else None, error)
                        for group_key, plan, error in rows]
-            return sorted(decoded, key=lambda row: row[0])
+            return sorted(decoded, key=lambda row: row[0]), timed_out
         except Exception:
-            LOG.exception("Parallel Track Gloss planning failed; using sequential fallback")
+            LOG.exception("Parallel Track Gloss planning failed; retaining no partial work")
             _stop_processes(self.processes)
-            return None
+            return [], timed_out
         finally:
             try:
                 self.temporary.cleanup()
@@ -231,7 +270,10 @@ def start_parallel_group_plans(model, group_items, kwargs, max_workers=0,
     for item in sorted(items, key=lambda row: (-len(row[1]), row[0])):
         index = min(range(workers), key=lambda value: (loads[value], value))
         chunks[index].append(item)
-        loads[index] += len(item[1])
+        # Candidate spans grow faster than linearly with chain size. Squared
+        # weights avoid placing several expensive long connections in the
+        # same static worker batch.
+        loads[index] += max(1, len(item[1])) ** 2
     primitive_kwargs = {key: value for key, value in kwargs.items()
                         if key != "planner_context"}
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -242,12 +284,15 @@ def start_parallel_group_plans(model, group_items, kwargs, max_workers=0,
         directory = Path(temporary.name)
         outputs = []
         encoded_model = _encode_model(model)
-        package_parent = str(Path(__file__).resolve().parents[2])
+        plugin_root = str(Path(__file__).resolve().parents[1])
         worker_bootstrap = (
             "import pathlib,runpy,sys,types; "
-            "root=pathlib.Path(sys.argv.pop(1)); "
+            "root=pathlib.Path(sys.argv.pop(1)).resolve(); "
+            "engine=(root/'engine').resolve(); "
+            "sys.path[:]=[p for p in sys.path "
+            "if pathlib.Path(p or '.').resolve()!=engine]; "
             "package=types.ModuleType('kicad_track_gloss'); "
-            "package.__path__=[str(root/'kicad_track_gloss')]; "
+            "package.__path__=[str(root)]; "
             "sys.modules['kicad_track_gloss']=package; "
             "runpy.run_module('kicad_track_gloss.engine.parallel', "
             "run_name='__main__')")
@@ -261,7 +306,7 @@ def start_parallel_group_plans(model, group_items, kwargs, max_workers=0,
                              "max_passes": max_passes}, stream,
                             protocol=pickle.HIGHEST_PROTOCOL)
             process = subprocess.Popen(
-                [str(executable), "-c", worker_bootstrap, package_parent,
+                [str(executable), "-c", worker_bootstrap, plugin_root,
                  "--worker", str(input_path), str(output_path)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 creationflags=creationflags)
@@ -280,10 +325,13 @@ def start_parallel_group_plans(model, group_items, kwargs, max_workers=0,
 
 
 def run_parallel_group_plans(model, group_items, kwargs, max_workers=0,
-                             converge=False, max_passes=6):
+                             converge=False, max_passes=6,
+                             timeout_seconds=None,
+                             cancellation_grace_seconds=1.0):
     job = start_parallel_group_plans(
         model, group_items, kwargs, max_workers, converge, max_passes)
-    return job.collect() if job is not None else None
+    return (job.collect(timeout_seconds, cancellation_grace_seconds)
+            if job is not None else None)
 
 
 if __name__ == "__main__":

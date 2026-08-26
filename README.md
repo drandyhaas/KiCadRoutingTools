@@ -6,16 +6,23 @@ expands each selected connection, searches for a shorter or simpler safe
 0/45/90-degree route, applies the result directly to the current board, and
 then exits. KiCad Undo remains the normal way to reject a result.
 
-Frantz is co-author and maintainer of the standalone adaptation. The project
-is based primarily on the work and source code of DrAndyHaas, whose original
-copyright, MIT license, algorithms, and code provenance are retained.
+The standalone adaptation was created by ChatGPT/Codex (OpenAI), inspired by
+and reusing part of DrAndyHaas's code, and is maintained by Frantz. The
+original copyright, MIT license, algorithms, and code provenance are retained.
 
 The separate diagnostic action reports affected nets, length and segment
 gains, optimization mechanisms, rejected candidates, and machine-readable
 JSON. Normal operation remains silent unless no modification is possible.
-Launching the normal action without any straight segment selected displays a
-single focused selection warning; an eligible no-op still uses only KiCad's
-warning bell.
+Launching the normal or diagnostic action without any straight segment
+selected opens a session-settings dialog. **Close** applies the edited values
+until KiCad exits; **Cancel** leaves them unchanged. Each setting has a tooltip
+explaining its effect. An eligible no-op still uses only KiCad's warning bell.
+
+Safety takes precedence over latency. The gloss safety system uses KiCad's
+native DRC on private before/after board snapshots. Starting KiCad's DRC
+processes can therefore dominate response time and add seconds even when only
+one connection is selected. This validation is intentional; neither source
+board nor zone fills are modified by the check.
 
 ## Repository layout
 
@@ -28,8 +35,13 @@ warning bell.
 - `tools/score_track_gloss.py`: read-only whole-board score CLI compatible
   with `place_route_loop`.
 - `tools/diagnose_track_gloss_board.py`: read-only headless board diagnosis.
-- `codex/`: isolated experimental Codex agent, prompt, scope/result schemas,
-  examples, and executable-ready launcher.
+
+The optimization engine is deliberately independent from `pcbnew`. Candidate
+search remains in `engine/planner.py`; exact local copper/clearance checks are
+isolated in `engine/candidate_geometry.py`; reusable spatial indexes (including
+Edge.Cuts indexing) live in `engine/context.py`; and the plugin/CLI candidate
+ladder is shared by `engine/workflow.py`. KiCad-specific board conversion,
+native DRC, report parsing, dialogs, and writes remain under `kicad/`.
 
 The implementation does not import or require the autorouter modules from the
 main KiCadRoutingTools branch. The generated PCM archive is self-contained.
@@ -50,6 +62,7 @@ D:\kicad\bin\python.exe tools\score_track_gloss.py --project design.kicad_pro ca
 D:\kicad\bin\python.exe tools\score_track_gloss.py --scope net:VCC --project design.kicad_pro candidate.kicad_pcb
 D:\kicad\bin\python.exe tools\score_track_gloss.py --project design.kicad_pro --output glossed.kicad_pcb candidate.kicad_pcb
 D:\kicad\bin\python.exe tools\score_track_gloss.py --max-passes 32 --trace-passes --project design.kicad_pro candidate.kicad_pcb
+D:\kicad\bin\python.exe tools\score_track_gloss.py --time-budget 900 --project design.kicad_pro candidate.kicad_pcb
 ```
 
 For `place_route_loop`, add `--place-route-loop` to the acceptance command; the
@@ -60,15 +73,26 @@ refuses to overwrite its input.
 `--max-passes N` controls the hard convergence guard (default 16), while
 `--trace-passes` emits machine-readable `GLOSS_PASS_JSON` records to stderr
 for convergence analysis without changing the final stdout score contract.
-The CLI uses the complete fixed-point search intended for offline scoring.
-The interactive plugin has a separate responsiveness guard: four global
-reconciliation passes and two local passes per independent batch. If that
-guard is reached, it applies only the already validated partial improvement;
-the CLI instead reports that its requested fixed point was not reached.
+The CLI uses the complete fixed-point search intended for offline scoring and
+has no time limit by default. Automated callers can add `--time-budget N` to
+set an explicit total planning-and-DRC budget in seconds; this is independent
+from `--max-passes`. The interactive plugin has a separate responsiveness
+guard: 5 seconds for planning, 10 seconds for the complete operation, four
+global reconciliation passes, and two local passes per independent batch. If
+an interactive guard is reached, only an already validated partial improvement
+may be applied; the CLI instead reports that its requested fixed point was not
+reached.
 This is a quality score only and must be combined with separate DRC,
 connectivity, and specification checks. Full CLI details and an acceptance
 command example are in
 [`kicad_track_gloss/README.md`](kicad_track_gloss/README.md#headless-score-cli-and-place_route_loop).
+
+Engine policy values are centralized in
+`kicad_track_gloss/internal_config.json`. This packaged JSON records validated
+defaults for minimum saving, interactive and CLI time and convergence limits,
+and one-track DRC. The no-selection settings dialog can override the
+interactive values in memory for the current KiCad session; it never rewrites
+the packaged JSON.
 
 ## Validation
 

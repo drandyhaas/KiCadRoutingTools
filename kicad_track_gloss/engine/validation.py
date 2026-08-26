@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+import math
+
 from .context import SpatialIndex, line_bbox
 from .geometry import point_segment_distance, segment_distance
 from .model import GlossResult, Segment, segment_key
@@ -65,8 +68,21 @@ def validate_result(model, eligible_keys, result: GlossResult,
         _validate_connectivity(model, eligible_keys, result)
 
 
-def _connectivity_signature(segments, obstacles, pad_regions,
+# A complete planning round can validate hundreds of composed candidates.  The
+# unchanged-board partitions are shared, while each candidate contributes a
+# short-lived "after" state; a tiny cache evicted the reusable baseline before
+# later candidates reached it.  This bound keeps the cache finite while
+# covering normal whole-board rounds.
+@lru_cache(maxsize=1024)
+def _connectivity_partition(segments, obstacles, pad_regions,
                             immutable_keys, net_id):
+    """Return stable connected terminal groups for one net.
+
+    Arguments are immutable tuples/frozensets so the unchanged-board side of
+    repeated candidate checks is calculated once.  Spatial indexes only prune
+    impossible contacts; the existing exact geometry predicates still decide
+    every union.
+    """
     segs = [s for s in segments if s.net_id == net_id]
     # When exact pad regions are present, do not let their older conservative
     # obstacle circles prove connectivity outside real pad copper.
@@ -92,6 +108,15 @@ def _connectivity_signature(segments, obstacles, pad_regions,
     spatial = SpatialIndex(
         segs, lambda item: line_bbox(
             (item.start_x, item.start_y), (item.end_x, item.end_y)), 5.0)
+    obstacle_spatial = SpatialIndex(
+        obs, lambda item: (item.x, item.y, item.x, item.y), 5.0)
+    pad_spatial = SpatialIndex(
+        pads, lambda item: (item.x, item.y, item.x, item.y), 5.0)
+    obstacle_positions = {id(item): index for index, item in enumerate(obs)}
+    pad_positions = {id(item): index for index, item in enumerate(pads)}
+    max_obstacle_radius = max([item.radius for item in obs] + [0.0])
+    max_pad_radius = max(
+        [math.hypot(item.width, item.height) / 2.0 for item in pads] + [0.0])
     for i, a in enumerate(segs):
         aa, ab = (a.start_x, a.start_y), (a.end_x, a.end_y)
         margin = (a.width + max_width) / 2.0 + 1e-5
@@ -104,17 +129,20 @@ def _connectivity_signature(segments, obstacles, pad_regions,
             if segment_distance(aa, ab, (b.start_x, b.start_y),
                                 (b.end_x, b.end_y)) <= (a.width + b.width) / 2.0 + 1e-5:
                 union(i, j)
-        for j, obstacle in enumerate(obs):
+        obstacle_margin = max_obstacle_radius + a.width / 2.0 + 1e-5
+        for obstacle in obstacle_spatial.query(
+                line_bbox(aa, ab, obstacle_margin)):
             if obstacle.layers and a.layer not in obstacle.layers:
                 continue
             if point_segment_distance((obstacle.x, obstacle.y), aa, ab) <= \
                     obstacle.radius + a.width / 2.0 + 1e-5:
-                union(i, len(segs) + j)
-        for j, pad in enumerate(pads):
+                union(i, len(segs) + obstacle_positions[id(obstacle)])
+        pad_margin = max_pad_radius + a.width / 2.0 + 1e-6
+        for pad in pad_spatial.query(line_bbox(aa, ab, pad_margin)):
             if pad.layers and a.layer not in pad.layers:
                 continue
             if segment_hits_pad(pad, aa, ab, margin=a.width / 2.0 + 1e-6):
-                union(i, len(segs) + len(obs) + j)
+                union(i, len(segs) + len(obs) + pad_positions[id(pad)])
 
     labels = []
     for i, s in enumerate(segs):
@@ -123,12 +151,20 @@ def _connectivity_signature(segments, obstacles, pad_regions,
     labels.extend((f"obstacle:{i}", find(len(segs) + i)) for i in range(len(obs)))
     labels.extend((f"pad:{i}", find(len(segs) + len(obs) + i))
                   for i in range(len(pads)))
-    connected = set()
-    for i, (left, root) in enumerate(labels):
-        for right, other_root in labels[i + 1:]:
-            if root == other_root:
-                connected.add(tuple(sorted((left, right))))
-    return connected
+    groups = {}
+    for label, root in labels:
+        groups.setdefault(root, set()).add(label)
+    return tuple(sorted(
+        (frozenset(group) for group in groups.values() if len(group) > 1),
+        key=lambda group: tuple(sorted(group))))
+
+
+def _connectivity_signature(segments, obstacles, pad_regions,
+                            immutable_keys, net_id):
+    """Compatibility wrapper returning the cached connectivity partition."""
+    return _connectivity_partition(
+        tuple(segments), tuple(obstacles), tuple(pad_regions),
+        frozenset(immutable_keys), net_id)
 
 
 def _validate_connectivity(model, eligible_keys, result):
@@ -140,10 +176,16 @@ def _validate_connectivity(model, eligible_keys, result):
     immutable = {segment_key(s) for s in model.segments if segment_key(s) not in eligible_keys}
     affected_nets = {s.net_id for s in model.segments if segment_key(s) in removed}
     for net_id in affected_nets:
-        before_pairs = _connectivity_signature(
+        before_groups = _connectivity_signature(
             model.segments, model.obstacles, model.pad_regions, immutable, net_id)
-        after_pairs = _connectivity_signature(
+        after_groups = _connectivity_signature(
             after, model.obstacles, model.pad_regions, immutable, net_id)
-        lost = before_pairs - after_pairs
+        after_by_label = {
+            label: group for group in after_groups for label in group
+        }
+        lost = any(
+            not before_group.issubset(after_by_label.get(label, frozenset()))
+            for before_group in before_groups
+            for label in (next(iter(before_group)),))
         if lost:
             raise ValueError("Candidate would degrade connectivity on net {}".format(net_id))

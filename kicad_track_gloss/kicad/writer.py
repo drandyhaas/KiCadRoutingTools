@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from ..engine.model import segment_key
+from .types import is_straight_track
 
 
 def _track_map(adapter, board):
     mapping = {}
     for item in board.GetTracks():
-        if str(item.GetClass()) == "PCB_TRACK":
+        if is_straight_track(adapter.pcbnew, item):
             segment = adapter.segment_from_item(item)
             mapping[segment_key(segment)] = item
     return mapping

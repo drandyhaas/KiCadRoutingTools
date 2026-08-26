@@ -90,3 +90,17 @@ def test_cli_exposes_convergence_pass_limit_and_trace():
         "--max-passes", "7", "--trace-passes", "candidate.kicad_pcb"])
     assert args.max_passes == 7
     assert args.trace_passes
+
+
+def test_cli_default_pass_limit_comes_from_internal_policy():
+    document = json.loads((
+        ROOT / "kicad_track_gloss" / "internal_config.json").read_text(
+            encoding="utf-8"))
+    args = CLI._parser().parse_args(["candidate.kicad_pcb"])
+    assert args.max_passes == document["convergence"]["cli_max_passes"]
+
+
+def test_cli_time_budget_is_unlimited_by_default_and_overridable():
+    assert CLI._parser().parse_args(["candidate.kicad_pcb"]).time_budget is None
+    assert CLI._parser().parse_args([
+        "--time-budget", "900", "candidate.kicad_pcb"]).time_budget == 900.0

@@ -18,11 +18,16 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import replace
 import hashlib
+import time
 
+from .candidate_geometry import (
+    copper_signature as _copper_signature,
+    effective_clearance as _effective_clearance,
+    path_blocker as _path_blocker,
+    retain_identity_replacements as _retain_identity_replacements,
+    segment_order_key as _segment_order_key)
 from .context import PlannerContext
-from .geometry import (length, octolinear_paths, path_hits_polygon,
-                       point_segment_distance, segment_distance,
-                       segment_inside_board)
+from .geometry import length, octolinear_paths, point_segment_distance
 from .model import AddedSegment, GlossResult, Segment, Transformation, segment_key
 from .pads import pad_contains, segment_hits_pad
 from .statistics import classify_transformation
@@ -31,229 +36,17 @@ from .terminals import (find_pad_terminal_targets, find_track_terminal_targets,
 from .validation import validate_result
 
 
-def _effective_clearance(model, segment):
-    if segment.clearance >= 0.0:
-        return max(model.minimum_clearance, segment.clearance)
-    return max(model.minimum_clearance,
-               model.net_clearances.get(segment.net_id, 0.0))
+class PlanningDeadlineExceeded(RuntimeError):
+    """Internal cooperative stop for the interactive planning budget."""
 
 
-def _copper_signature(start, end, width, layer, net_id):
-    a = (round(start[0], 6), round(start[1], 6))
-    b = (round(end[0], 6), round(end[1], 6))
-    return (min(a, b), max(a, b), round(width, 6), layer, net_id)
+_INTERACTIVE_CANONICALIZATION_LIMIT = 512
 
 
-def _segment_order_key(segment):
-    """Geometry-first ordering; UUID is only an exact-duplicate tie-break."""
-    return _copper_signature(
-        (segment.start_x, segment.start_y),
-        (segment.end_x, segment.end_y), segment.width,
-        segment.layer, segment.net_id) + (segment_key(segment),)
-
-
-def _retain_identity_replacements(model, result):
-    """Keep original native items instead of removing and recreating them."""
-    removed = set(result.remove_keys)
-    originals = defaultdict(list)
-    for segment in model.segments:
-        key = segment_key(segment)
-        if key in removed:
-            originals[_copper_signature(
-                (segment.start_x, segment.start_y),
-                (segment.end_x, segment.end_y), segment.width,
-                segment.layer, segment.net_id)].append(key)
-
-    cancelled = set()
-    additions = []
-    for addition in result.additions:
-        signature = _copper_signature(
-            addition.start, addition.end, addition.width,
-            addition.layer, addition.net_id)
-        matches = originals.get(signature)
-        if matches:
-            cancelled.add(matches.pop())
-        else:
-            additions.append(addition)
-    if cancelled:
-        result.remove_keys = [key for key in result.remove_keys
-                              if key not in cancelled]
-        result.additions = additions
-
-
-def _capsule_interval(a, b, target_a, target_b, radius):
-    """Parameter interval where ``a->b`` lies inside a target-track capsule."""
-    if radius < -1e-12:
-        return None
-    radius = max(0.0, radius)
-
-    def distance_at(t):
-        point = (a[0] + t * (b[0] - a[0]),
-                 a[1] + t * (b[1] - a[1]))
-        return point_segment_distance(point, target_a, target_b)
-
-    low, high = 0.0, 1.0
-    for _ in range(64):
-        left = (2.0 * low + high) / 3.0
-        right = (low + 2.0 * high) / 3.0
-        if distance_at(left) <= distance_at(right):
-            high = right
-        else:
-            low = left
-    minimum = (low + high) / 2.0
-    if distance_at(minimum) > radius + 1e-9:
-        return None
-
-    if distance_at(0.0) <= radius + 1e-9:
-        interval_start = 0.0
-    else:
-        outside, inside = 0.0, minimum
-        for _ in range(64):
-            middle = (outside + inside) / 2.0
-            if distance_at(middle) <= radius + 1e-9:
-                inside = middle
-            else:
-                outside = middle
-        interval_start = inside
-
-    if distance_at(1.0) <= radius + 1e-9:
-        interval_end = 1.0
-    else:
-        inside, outside = minimum, 1.0
-        for _ in range(64):
-            middle = (inside + outside) / 2.0
-            if distance_at(middle) <= radius + 1e-9:
-                inside = middle
-            else:
-                outside = middle
-        interval_end = inside
-    return interval_start, interval_end
-
-
-def _interval_is_covered(required, covers):
-    if required is None:
-        return True
-    cursor = required[0]
-    for start, end in sorted(covers):
-        if end < cursor - 1e-9:
-            continue
-        if start > cursor + 1e-9:
-            return False
-        cursor = max(cursor, end)
-        if cursor >= required[1] - 1e-9:
-            return True
-    return False
-
-
-def _clearance_violation_is_preexisting(a, b, moving, foreign, required,
-                                         immutable_cover_keys, context):
-    """Whether all newly conflicting copper is inside immutable same-net copper."""
-    violation = _capsule_interval(
-        a, b, (foreign.start_x, foreign.start_y),
-        (foreign.end_x, foreign.end_y), required - 1e-6)
-    covers = []
-    for existing in context.nearby_segments(a, b, 0.0, moving.width):
-        if segment_key(existing) not in immutable_cover_keys:
-            continue
-        if existing.net_id != moving.net_id or existing.layer != moving.layer:
-            continue
-        if existing.width + 1e-9 < moving.width:
-            continue
-        cover_radius = (existing.width - moving.width) / 2.0
-        interval = _capsule_interval(
-            a, b, (existing.start_x, existing.start_y),
-            (existing.end_x, existing.end_y), cover_radius)
-        if interval is not None:
-            covers.append(interval)
-    return _interval_is_covered(violation, covers)
-
-
-def _path_blocker(model, path, moving, replaced_keys, clearance, context=None,
-                  immutable_cover_keys=()):
-    context = context or PlannerContext(model)
-    moving_clearance = max(clearance, _effective_clearance(model, moving))
-    replaced_segments = [context.segment_by_key[key] for key in replaced_keys
-                         if key in context.segment_by_key]
-
-    def unchanged_copper(a, b):
-        """True when the candidate only retains part of removed copper.
-
-        Pad obstacles use conservative enclosing circles.  Rechecking an
-        unchanged subsegment against those circles can therefore invent a DRC
-        violation that the original KiCad geometry never had.
-        """
-        return any(
-            moving.width <= segment.width + 1e-6 and
-            point_segment_distance(a, (segment.start_x, segment.start_y),
-                                   (segment.end_x, segment.end_y)) <= 1e-6 and
-            point_segment_distance(b, (segment.start_x, segment.start_y),
-                                   (segment.end_x, segment.end_y)) <= 1e-6
-            for segment in replaced_segments)
-
-    for a, b in zip(path, path[1:]):
-        if unchanged_copper(a, b):
-            continue
-        edge_margin = model.copper_edge_clearance + moving.width / 2.0
-        if model.board_outline:
-            if not segment_inside_board(
-                    a, b, model.board_outline, edge_margin):
-                return "board_edge", 0
-        elif model.board_bounds:
-            x0, y0, x1, y1 = model.board_bounds
-            if any(not (x0 + edge_margin <= p[0] <= x1 - edge_margin and
-                        y0 + edge_margin <= p[1] <= y1 - edge_margin)
-                   for p in (a, b)):
-                return "board_edge", 0
-        for other in context.nearby_segments(
-                a, b, moving_clearance, moving.width):
-            if segment_key(other) in replaced_keys:
-                continue
-            if other.layer != moving.layer or other.net_id == moving.net_id:
-                continue
-            pair_clearance = max(
-                moving_clearance, _effective_clearance(model, other))
-            required = pair_clearance + (moving.width + other.width) / 2.0
-            if segment_distance(a, b, (other.start_x, other.start_y),
-                                (other.end_x, other.end_y)) < required - 1e-6:
-                if _clearance_violation_is_preexisting(
-                        a, b, moving, other, required,
-                        immutable_cover_keys, context):
-                    continue
-                return "foreign_track_clearance", other.net_id
-        for obstacle in context.nearby_obstacles(
-                a, b, moving_clearance, moving.width):
-            if obstacle.net_id == moving.net_id:
-                continue
-            if obstacle.layers and moving.layer not in obstacle.layers:
-                continue
-            required = max(moving_clearance, obstacle.clearance) + \
-                moving.width / 2.0 + obstacle.radius
-            if point_segment_distance((obstacle.x, obstacle.y), a, b) < required - 1e-6:
-                return obstacle.kind + "_clearance", obstacle.net_id
-        for pad in context.nearby_pads(
-                a, b, moving_clearance, moving.width):
-            if pad.net_id == moving.net_id:
-                continue
-            if pad.layers and moving.layer not in pad.layers:
-                continue
-            pad_clearance = max(moving_clearance, pad.clearance)
-            margin = max(0.0, pad_clearance + moving.width / 2.0 -
-                         _PAD_CLEARANCE_TOLERANCE_MM)
-            enclosing_radius = (pad.width * pad.width +
-                                pad.height * pad.height) ** 0.5 / 2.0
-            if point_segment_distance((pad.x, pad.y), a, b) >= \
-                    enclosing_radius + margin:
-                continue
-            if segment_hits_pad(
-                    pad, a, b, margin=margin):
-                return "pad_clearance", pad.net_id
-        for keepout in context.nearby_keepouts(
-                a, b, clearance, moving.width):
-            if keepout.layers and moving.layer not in keepout.layers:
-                continue
-            if path_hits_polygon(a, b, list(keepout.points), clearance + moving.width / 2.0):
-                return keepout.kind, 0
-    return None
+def _check_deadline(deadline):
+    if deadline is not None and time.monotonic() >= deadline:
+        raise PlanningDeadlineExceeded(
+            "Interactive planning time budget reached")
 
 
 def _increment(counts, key):
@@ -271,6 +64,53 @@ def _non_octolinear_count(segments):
     return sum(not _is_octolinear(
         (segment.start_x, segment.start_y),
         (segment.end_x, segment.end_y)) for segment in segments)
+
+
+def _project_point_to_segment(point, a, b):
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    denominator = dx * dx + dy * dy
+    if denominator <= 1e-18:
+        return a
+    ratio = ((point[0] - a[0]) * dx +
+             (point[1] - a[1]) * dy) / denominator
+    ratio = max(0.0, min(1.0, ratio))
+    return (a[0] + ratio * dx, a[1] + ratio * dy)
+
+
+def _custom_pad_event_paths(points, i, j, span, context, clearance):
+    """Keep an existing lead-in/out and turn beside exact custom-pad copper."""
+    if j - i < 2 or len({(round(item.width, 6),
+                          round(item.clearance, 6)) for item in span}) != 1:
+        return []
+    start, end = points[i], points[j]
+    first_next, last_previous = points[i + 1], points[j - 1]
+    width = span[0].width
+    candidates = []
+    pads = context.nearby_pads(start, end, clearance, width)
+    for region in pads:
+        if not region.polygons:
+            continue
+        vertices = sorted({point for outer, holes in region.polygons
+                           for polygon in (outer,) + tuple(holes)
+                           for point in polygon})
+        for vertex_point in vertices:
+            lead = _project_point_to_segment(
+                vertex_point, start, first_next)
+            if (length(start, lead) > 1e-7 and
+                    length(lead, first_next) > 1e-7):
+                for tail in octolinear_paths(lead, end):
+                    candidate = (start,) + tuple(tail)
+                    if candidate not in candidates:
+                        candidates.append(candidate)
+            trail = _project_point_to_segment(
+                vertex_point, last_previous, end)
+            if (length(last_previous, trail) > 1e-7 and
+                    length(trail, end) > 1e-7):
+                for head in octolinear_paths(start, trail):
+                    candidate = tuple(head) + (end,)
+                    if candidate not in candidates:
+                        candidates.append(candidate)
+    return candidates
 
 
 def _path_additions(path, originals, layer, net_id):
@@ -348,7 +188,6 @@ def _endpoint_moved_into_pad(original, candidate, terminal, pad_targets):
 
 
 _SYNTHETIC_PREFIX = "__track_gloss__"
-_PAD_CLEARANCE_TOLERANCE_MM = 0.000001
 _REFINEMENT_SCOPE_LIMIT = 128
 
 
@@ -742,7 +581,8 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                            allow_equal_length_simpler=False, clearance=0.1,
                            equal_length_tolerance=0.001,
                            span_strategy="farthest", path_preference=0,
-                           collect_statistics=True, planner_context=None):
+                           collect_statistics=True, planner_context=None,
+                           deadline=None):
     """Return an immutable edit plan; never mutates ``model``.
 
     Original octolinear smoothing algorithm: KiCadRoutingTools, DrAndyHaas.
@@ -775,6 +615,7 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
             groups[(s.net_id, s.layer)].append(s)
 
     for net_id, layer in sorted(groups):
+        _check_deadline(deadline)
         candidates = sorted(groups[(net_id, layer)], key=_segment_order_key)
         adjacency = defaultdict(list)
         for s in candidates:
@@ -792,6 +633,7 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
         anchors = sorted(v for v in adjacency if not interior(v))
         used = set()
         for anchor in anchors:
+            _check_deadline(deadline)
             for first in adjacency[anchor]:
                 if segment_key(first) in used:
                     continue
@@ -823,8 +665,10 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                 for a, b in zip(points, points[1:]):
                     cumulative.append(cumulative[-1] + length(a, b))
                 def choices_at(i):
+                    _check_deadline(deadline)
                     choices = []
                     for j in range(len(chain), i, -1):
+                        _check_deadline(deadline)
                         old_len = cumulative[j] - cumulative[i]
                         span = chain[i:j]
                         angle_corrections = _non_octolinear_count(span)
@@ -852,9 +696,15 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                             for path in octolinear_paths(candidate_start, candidate_end):
                                 if path not in paths:
                                     paths.append(path)
+                        for path in _custom_pad_event_paths(
+                                points, i, j, span, planner_context,
+                                clearance):
+                            if path not in paths:
+                                paths.append(path)
                         if path_preference:
                             paths.reverse()
                         for path in paths:
+                            _check_deadline(deadline)
                             if collect_statistics:
                                 _increment(result.search_counts, "paths_evaluated")
                             new_len = sum(length(a, b) for a, b in zip(path, path[1:]))
@@ -990,13 +840,83 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
     return result
 
 
+_MAX_LOCAL_JUNCTION_SCOPES = 4
+_LOCAL_JUNCTION_ELIGIBLE_LIMIT = 16
+
+
+def _junction_branch_scopes(model, eligible_segment_keys,
+                            limit=_MAX_LOCAL_JUNCTION_SCOPES):
+    """Return deterministic proper branch scopes around selected junctions.
+
+    Only endpoint incidence is used here, matching chain construction. Each
+    walk moves away from a junction through pure degree-two continuation and
+    stops at the next anchor. The hard cap prevents whole-board selections
+    from turning into a combinatorial subset search.
+    """
+    eligible = set(eligible_segment_keys)
+    if len(eligible) < 2 or len(eligible) > _LOCAL_JUNCTION_ELIGIBLE_LIMIT:
+        return ()
+    selected = [segment for segment in model.segments
+                if segment_key(segment) in eligible and
+                not segment.locked and not segment.arc]
+    selected_by_key = {segment_key(segment): segment for segment in selected}
+    selected_incidence = defaultdict(list)
+    all_incidence = defaultdict(int)
+    for segment in model.segments:
+        for point in (vertex(segment.start_x, segment.start_y),
+                      vertex(segment.end_x, segment.end_y)):
+            all_incidence[(segment.net_id, point)] += 1
+    for segment in selected:
+        for point in (vertex(segment.start_x, segment.start_y),
+                      vertex(segment.end_x, segment.end_y)):
+            selected_incidence[(segment.net_id, segment.layer, point)].append(
+                segment_key(segment))
+
+    scopes = set()
+    junctions = sorted(
+        (node, tuple(sorted(keys)))
+        for node, keys in selected_incidence.items()
+        if len(keys) >= 2 and all_incidence[(node[0], node[2])] >= 3)
+    for (net_id, layer, junction), incident_keys in junctions:
+        for first_key in incident_keys:
+            branch = set()
+            previous = junction
+            current_key = first_key
+            while current_key not in branch:
+                branch.add(current_key)
+                segment = selected_by_key[current_key]
+                start = vertex(segment.start_x, segment.start_y)
+                end = vertex(segment.end_x, segment.end_y)
+                current = end if start == previous else start
+                node = (net_id, layer, current)
+                continuations = [
+                    key for key in selected_incidence.get(node, ())
+                    if key != current_key and key not in branch]
+                if (all_incidence[(net_id, current)] != 2 or
+                        len(continuations) != 1):
+                    break
+                previous, current_key = current, continuations[0]
+            frozen = frozenset(branch)
+            if frozen and frozen != frozenset(eligible):
+                scopes.add(frozen)
+    return tuple(sorted(scopes, key=lambda scope: (
+        -len(scope), tuple(sorted(scope)))))[:max(0, int(limit))]
+
+
 def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
     """Generate deterministic global and isolated-group fallback plans."""
+    deadline = kwargs.get("deadline")
+    cancellation_grace_seconds = kwargs.pop(
+        "cancellation_grace_seconds", 1.0)
+    _check_deadline(deadline)
     max_refinement_passes = kwargs.pop("max_refinement_passes", 3)
     parallel = kwargs.pop("parallel", False)
     converge_groups = kwargs.pop("converge_groups", False)
     group_max_passes = kwargs.pop("group_max_passes", 6)
     allow_netclass_seed = kwargs.pop("_allow_netclass_seed", True)
+    allow_junction_scopes = kwargs.pop(
+        "_allow_junction_scopes",
+        len(set(eligible_segment_keys)) <= _LOCAL_JUNCTION_ELIGIBLE_LIMIT)
     kwargs.setdefault("planner_context", PlannerContext(model))
     plans = []
     seen = set()
@@ -1048,9 +968,16 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
     group_keys = sorted(groups) if len(groups) > 1 else []
     primary_keys = sorted(primary_groups)
     parallel_rows = None
+    parallel_timed_out = False
     # Process startup is intentionally reserved for substantial selections;
     # ordinary one-connection glosses stay in-process and avoid IPC latency.
-    if (parallel and len(eligible) >= 64 and
+    # The historical offline first pass is the whole-scope global search. Its
+    # basin is part of the frozen CLI/plugin equivalence contract; parallel
+    # workers join later opening passes. Bounded interactive work parallelizes
+    # immediately because responsiveness takes priority over exhausting that
+    # first global basin.
+    if (parallel and (deadline is not None or converge_groups) and
+            len(eligible) >= 64 and
             len(primary_keys) + len(group_keys) > 1):
         from .parallel import run_parallel_group_plans
         tasks = [(('primary',) + key,
@@ -1062,11 +989,32 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
             (('fallback',) + key, tuple(sorted(groups[key])))
             for key in group_keys
             if groups[key] != primary_groups[key[:2]])
-        parallel_rows = run_parallel_group_plans(
-            model, tasks, kwargs, converge=converge_groups,
-            max_passes=group_max_passes)
+        parallel_kwargs = dict(kwargs)
+        if converge_groups:
+            parallel_kwargs["_allow_junction_scopes"] = allow_junction_scopes
+        remaining = (None if deadline is None else
+                     max(0.0, deadline - time.monotonic()))
+        # Keep a deterministic fraction of the interactive budget for merging
+        # and validating completed groups. Spending the entire deadline inside
+        # workers would leave no safe composed plan to return.
+        worker_timeout = (None if remaining is None else remaining * 0.75)
+        parallel_result = run_parallel_group_plans(
+            model, tasks, parallel_kwargs, converge=converge_groups,
+            max_passes=group_max_passes, timeout_seconds=worker_timeout,
+            cancellation_grace_seconds=cancellation_grace_seconds)
+        if parallel_result is not None:
+            parallel_rows, parallel_timed_out = parallel_result
+        if parallel_timed_out:
+            rejected.append(
+                "Interactive planning time budget reached; retained {} "
+                "completed group result(s)".format(len(parallel_rows)))
         if parallel_rows is not None and any(row[2] for row in parallel_rows):
             rejected.extend(row[2] for row in parallel_rows if row[2])
+        if (parallel_rows is not None and
+                not any(row[1] is not None for row in parallel_rows)):
+            rejected.append(
+                "Parallel workers returned no usable group; sequential "
+                "planning fallback used")
             parallel_rows = None
 
     def merge(selected):
@@ -1091,7 +1039,7 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
     # cannot improve its objective and only multiply runtime.
     if parallel_rows is not None:
         primary_results = {row[0][1:]: row[1] for row in parallel_rows
-                           if row[0][0] == 'primary'}
+                           if row[0][0] == 'primary' and row[1] is not None}
         ranked_primary = sorted(
             ((key, primary_results[key]) for key in primary_keys
              if primary_results.get(key) is not None and
@@ -1101,10 +1049,14 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
                 -round(row[1].saved_mm, 9),
                 -(len(row[1].remove_keys) - len(row[1].additions)),
                 row[0]))
-        try:
-            add_plan(merge([primary_results[key] for key in primary_keys]))
-        except ValueError as error:
-            rejected.append(str(error))
+        completed_primary_keys = [
+            key for key in primary_keys if key in primary_results]
+        if completed_primary_keys and deadline is None:
+            try:
+                add_plan(merge([
+                    primary_results[key] for key in completed_primary_keys]))
+            except ValueError as error:
+                rejected.append(str(error))
 
         # Locally converged groups can expose more than one simultaneous
         # cross-net conflict, so leave-one-out is not sufficient. Build a
@@ -1112,6 +1064,10 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
         # groups only while the complete connectivity/clearance gate passes.
         selected_primary = []
         for _key, plan in ranked_primary:
+            if deadline is not None and time.monotonic() >= deadline:
+                rejected.append(
+                    "Interactive planning time budget reached during plan composition")
+                break
             candidate = merge(selected_primary + [plan])
             try:
                 validate_result(model, eligible, candidate,
@@ -1123,7 +1079,20 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
         if selected_primary:
             add_plan(merge(selected_primary), already_validated=True)
         for _key, plan in ranked_primary:
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             add_plan(plan, already_validated=True)
+        if deadline is None:
+            # Offline/CLI quality remains anchored to the historical global
+            # search result. Parallel groups add candidates and throughput but
+            # must never replace a better whole-scope basin merely because the
+            # old worker failure used to fall back to this search implicitly.
+            try:
+                add_plan(smooth_selected_chains(
+                    model, eligible_segment_keys, span_strategy="global",
+                    path_preference=0, **kwargs), already_validated=True)
+            except ValueError as error:
+                rejected.append(str(error))
     else:
         try:
             add_plan(smooth_selected_chains(
@@ -1131,6 +1100,29 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
                 path_preference=0, **kwargs), already_validated=True)
         except ValueError as error:
             rejected.append(str(error))
+
+    # Eligibility is authorization, not an obligation to move every selected
+    # segment. At a selected T, treating every authorized branch as mutable can
+    # remove a sliding target and make a larger selection worse than a smaller
+    # one. Preserve a bounded set of branch-local alternatives, with all other
+    # authorized copper temporarily immutable for that candidate.
+    if allow_junction_scopes:
+        for branch_scope in _junction_branch_scopes(model, eligible):
+            branch_kwargs = dict(kwargs)
+            branch_kwargs.pop("planner_context", None)
+            try:
+                branch_plan = generate_converged_plan(
+                    model, branch_scope,
+                    max_passes=max(1, min(group_max_passes, 4)),
+                    return_partial_on_limit=True,
+                    batch_group_convergence=False,
+                    parallel=False,
+                    _allow_junction_scopes=False,
+                    **branch_kwargs)
+                if branch_plan.changed:
+                    add_plan(branch_plan)
+            except ValueError as error:
+                rejected.append(str(error))
 
     # Batch fallback pool. If KiCad rejects the combined optimum, try leaving
     # out one independently scoped group, then each group alone. This keeps one
@@ -1163,7 +1155,7 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
             except ValueError as error:
                 rejected.append(str(error))
 
-    if len(group_plans) > 1:
+    if len(group_plans) > 1 and deadline is None:
         merged_fallback_valid = False
         try:
             add_plan(merge(group_plans))
@@ -1181,6 +1173,10 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
                 except ValueError as error:
                     rejected.append(str(error))
     for plan in group_plans:
+        if deadline is not None and time.monotonic() >= deadline:
+            rejected.append(
+                "Interactive planning time budget reached during fallback composition")
+            break
         try:
             add_plan(plan, already_validated=True)
         except ValueError as error:
@@ -1191,7 +1187,12 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
         removal_signature(p)))
     if not plans:
         plans.append(GlossResult(warnings=sorted(set(rejected))))
+    elif parallel_timed_out:
+        plans[0].warnings.append(
+            "Interactive planning time budget reached; a validated partial "
+            "group plan was retained.")
     elif (plans[0].changed and max_refinement_passes and
+          (deadline is None or time.monotonic() < deadline) and
           len(set(eligible_segment_keys)) <= _REFINEMENT_SCOPE_LIMIT):
         try:
             plans[0] = _refine_plan(
@@ -1212,18 +1213,20 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
     selected_segments = [
         segment for segment in model.segments
         if segment_key(segment) in eligible]
-    mixed_width = any(
-        len({round(segment.width, 6) for segment in selected_segments
-             if (segment.net_id, segment.layer) == group}) > 1
-        for group in {(segment.net_id, segment.layer)
-                      for segment in selected_segments})
+    widths_by_group = defaultdict(set)
+    for segment in selected_segments:
+        widths_by_group[(segment.net_id, segment.layer)].add(
+            round(segment.width, 6))
+    mixed_width = any(len(widths) > 1
+                      for widths in widths_by_group.values())
     resolved_differs = any(
         segment.clearance >= 0.0 and
         abs(segment.clearance - max(
             model.minimum_clearance,
             model.net_clearances.get(segment.net_id, 0.0))) > 1e-9
         for segment in selected_segments)
-    if allow_netclass_seed and mixed_width and resolved_differs:
+    if (allow_netclass_seed and mixed_width and resolved_differs and
+            (deadline is None or time.monotonic() < deadline)):
         fallback_model = replace(
             model, segments=[replace(segment, clearance=-1.0)
                              for segment in model.segments])
@@ -1298,9 +1301,6 @@ def _canonicalize_eligible_subdivisions(model, eligible):
                 if len(shared) != 1:
                     continue
                 joint = next(iter(shared))
-                # A collinear breakpoint at a real same-net T, pad, or via is
-                # semantic. Merge only a pure degree-two continuation;
-                # arbitrary subdivision must not erase a junction boundary.
                 touching_branch = any(
                     candidate is not first and candidate is not second and
                     candidate.net_id == first.net_id and
@@ -1422,10 +1422,19 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
     """
     if max_passes < 1:
         raise ValueError("max_passes must be at least one")
+    deadline = kwargs.get("deadline")
+    _check_deadline(deadline)
     source_model = _canonicalize_model_segments(model)
     source_eligible = set(eligible_segment_keys)
-    model, original_eligible, input_expansions = \
-        _canonicalize_eligible_subdivisions(source_model, source_eligible)
+    subdivision_canonicalization_skipped = (
+        deadline is not None and
+        len(source_eligible) > _INTERACTIVE_CANONICALIZATION_LIMIT)
+    if subdivision_canonicalization_skipped:
+        model, original_eligible, input_expansions = (
+            source_model, set(source_eligible), {})
+    else:
+        model, original_eligible, input_expansions = \
+            _canonicalize_eligible_subdivisions(source_model, source_eligible)
     model = _canonicalize_model_segments(model)
     current_model = model
     current_eligible = set(original_eligible)
@@ -1433,7 +1442,9 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
     seen = set()
     final_search = None
     last_composed = None
+    last_source_composed = None
     bounded = False
+    deadline_reached = False
     initial_mm = previous_mm = 0.0
     if pass_observer is not None:
         initial_state = _convergence_state(
@@ -1447,6 +1458,12 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
         pass_observer(initial_state)
 
     for pass_index in range(max_passes + 1):
+        if deadline is not None and time.monotonic() >= deadline:
+            deadline_reached = True
+            bounded = True
+            final_search = GlossResult(warnings=[
+                "Interactive planning time budget reached"])
+            break
         signature = _model_geometry_signature(current_model)
         if signature in seen:
             if pass_observer is not None:
@@ -1462,8 +1479,14 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
             # independent net/layer group in its worker before reconciling the
             # next global state.
             pass_kwargs["converge_groups"] = pass_index > 0
-        plans = generate_candidate_plans(
-            current_model, current_eligible, **pass_kwargs)
+        try:
+            plans = generate_candidate_plans(
+                current_model, current_eligible, **pass_kwargs)
+        except PlanningDeadlineExceeded as error:
+            deadline_reached = True
+            bounded = True
+            final_search = GlossResult(warnings=[str(error)])
+            break
         changed_plans = [plan for plan in plans if plan.changed]
         if not changed_plans:
             final_search = plans[0]
@@ -1513,13 +1536,14 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
                 source_proposed, source_proposed_eligible = \
                     _restore_unchanged_subdivisions(
                         proposed_model, proposed_eligible, input_expansions)
-                _compose_refined_plan(
+                source_composed = _compose_refined_plan(
                     source_model, source_eligible, source_proposed,
                     source_proposed_eligible, changed_steps + [step], [])
             except ValueError as error:
                 rejected_steps.append(str(error))
                 continue
-            accepted = (step, proposed_model, proposed_eligible, composed)
+            accepted = (step, proposed_model, proposed_eligible, composed,
+                        source_composed)
             break
         if accepted is None:
             final_search = GlossResult()
@@ -1527,7 +1551,22 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
                 "No cumulatively safe convergence step remained: " +
                 "; ".join(sorted(set(rejected_steps))))
             break
-        step, _proposed_model, _proposed_eligible, last_composed = accepted
+        (step, proposed_model, proposed_eligible, last_composed,
+         last_source_composed) = accepted
+        changed_steps.append(step)
+        if (deadline is not None and
+                time.monotonic() >= deadline - 0.25):
+            # The accepted proposed model and its composed one-shot plan have
+            # already passed the complete engine gate. Do not spend additional
+            # interactive time rebuilding the same topology solely to open a
+            # later convergence pass.
+            current_model = proposed_model
+            current_eligible = proposed_eligible
+            deadline_reached = True
+            bounded = True
+            final_search = GlossResult(warnings=[
+                "Interactive planning time budget reached"])
+            break
         # Normalize the next search state to the exact one-shot edit returned
         # to KiCad, rather than to the internal history of incremental edits.
         # This makes recursive openings in the compact route visible before
@@ -1537,7 +1576,6 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
         current_model, current_eligible = _merge_final_collinear(
             current_model, set(current_eligible))
         current_model = _canonicalize_model_segments(current_model)
-        changed_steps.append(step)
         if pass_observer is not None:
             state = _convergence_state(
                 current_model, len(changed_steps), initial_mm, previous_mm,
@@ -1549,22 +1587,34 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
 
     if not changed_steps:
         final_search.convergence_passes = 0
-        final_search.fixed_point = True
+        final_search.fixed_point = not deadline_reached
+        if subdivision_canonicalization_skipped:
+            final_search.warnings.append(
+                "Large interactive scope used bounded group planning; exhaustive "
+                "segment-subdivision canonicalization is reserved for the CLI.")
         return final_search
 
-    current_model, current_eligible = _restore_unchanged_subdivisions(
-        current_model, current_eligible, input_expansions)
-    result = _compose_refined_plan(
-        source_model, source_eligible, current_model, current_eligible,
-        changed_steps, [])
+    if deadline_reached and last_source_composed is not None:
+        result = last_source_composed
+    else:
+        current_model, current_eligible = _restore_unchanged_subdivisions(
+            current_model, current_eligible, input_expansions)
+        result = _compose_refined_plan(
+            source_model, source_eligible, current_model, current_eligible,
+            changed_steps, [])
     # Nanometre quantization can collapse an analytical micro-adjustment back
     # to identity. Report applied passes, not discarded internal exploration.
     result.convergence_passes = len(changed_steps) if result.changed else 0
     result.fixed_point = not bounded
     if bounded:
-        result.warnings.append(
-            "Gloss stopped at the {}-pass interactive guard before reaching "
-            "a fixed point.".format(max_passes))
+        if deadline_reached:
+            result.warnings.append(
+                "Gloss stopped at the interactive planning time budget before "
+                "reaching a fixed point.")
+        else:
+            result.warnings.append(
+                "Gloss stopped at the {}-pass interactive guard before reaching "
+                "a fixed point.".format(max_passes))
     if final_search is not None:
         result.chains_considered += final_search.chains_considered
         for key, value in final_search.search_counts.items():
@@ -1572,4 +1622,8 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
         for key, value in final_search.blocking_nets.items():
             result.blocking_nets[key] = result.blocking_nets.get(key, 0) + value
         result.warnings.extend(final_search.warnings)
+    if subdivision_canonicalization_skipped:
+        result.warnings.append(
+            "Large interactive scope used bounded group planning; exhaustive "
+            "segment-subdivision canonicalization is reserved for the CLI.")
     return result

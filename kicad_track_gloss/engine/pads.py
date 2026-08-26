@@ -5,7 +5,8 @@ from __future__ import annotations
 import math
 from functools import lru_cache
 
-from .geometry import path_hits_polygon, point_segment_distance
+from .geometry import (EPS, path_hits_polygon, point_in_polygon,
+                       point_segment_distance, segment_distance)
 
 
 @lru_cache(maxsize=1024)
@@ -22,6 +23,11 @@ def _local_coordinates(region, point):
 
 def pad_contains(region, point, tolerance=1e-9):
     """Return whether a point lies in a supported pad copper shape."""
+    if region.shape == "custom":
+        return any(
+            point_in_polygon(point, outer) and
+            not any(point_in_polygon(point, hole) for hole in holes)
+            for outer, holes in region.polygons)
     x, y = _local_coordinates(region, point)
     half_width, half_height = region.width / 2.0, region.height / 2.0
     ax, ay = abs(x), abs(y)
@@ -106,6 +112,23 @@ def _segment_hits_rectangle(a, b, half_width, half_height, margin):
 
 def segment_hits_pad(region, a, b, margin=0.0):
     """Test a track centreline against the real supported pad copper shape."""
+    if region.shape == "custom":
+        for outer, holes in region.polygons:
+            if not path_hits_polygon(a, b, list(outer), margin):
+                continue
+            # Copper is ``outer - holes``.  A segment is clear only when it is
+            # wholly inside one hole and remains at least ``margin`` from that
+            # hole's copper boundary.  Treat ambiguous cases as copper.
+            safely_inside_hole = False
+            for hole in holes:
+                if (point_in_polygon(a, hole) and point_in_polygon(b, hole) and
+                        all(segment_distance(a, b, c, d) >= margin + EPS
+                            for c, d in zip(hole, hole[1:] + hole[:1]))):
+                    safely_inside_hole = True
+                    break
+            if not safely_inside_hole:
+                return True
+        return False
     a = _local_coordinates(region, a)
     b = _local_coordinates(region, b)
     half_width, half_height = region.width / 2.0, region.height / 2.0
@@ -119,7 +142,6 @@ def segment_hits_pad(region, a, b, margin=0.0):
         else:
             core = half_height - half_width
             c, d, radius = (0.0, -core), (0.0, core), half_width
-        from .geometry import segment_distance
         return segment_distance(a, b, c, d) < radius + margin - 1e-9
     radius = min(max(region.corner_radius, 0.0), half_width, half_height)
     if region.shape == "rect" or radius <= 1e-9:

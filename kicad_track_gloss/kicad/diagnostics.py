@@ -123,5 +123,30 @@ def append_plan_statistics(report, summary):
             row["net"], row["net_gain_mm"], row["count"]))
     append_search_statistics(
         report, summary["search_counts"], summary["blocking_nets"])
+    timings = summary.get("timings_ms", {})
+    if timings:
+        report.extend(["", "Performance timings:"])
+        labels = {
+            "selection_scan": "Selection scan",
+            "snapshot": "Board snapshot",
+            "terminal_analysis": "Terminal analysis",
+            "planning": "Gloss planning",
+            "native_drc_gate": "Native DRC gate (wall time)",
+            "native_snapshot": "Native board snapshot",
+            "native_candidate_snapshot": "Candidate construction",
+            "native_before_drc": "Baseline DRC process",
+            "native_after_drc": "Candidate DRC process",
+            "native_total": "Native validation total",
+            "native_cache_lookup": "Native validation cache lookup",
+            "apply": "Apply to current board",
+            "total": "Total operation",
+        }
+        for key, value in timings.items():
+            report.append("  {}: {:.3f} ms".format(
+                labels.get(key, key.replace("_", " ").title()), value))
+        report.append("  Baseline DRC cache: {}".format(
+            "hit" if summary.get("native_baseline_cached") else "miss"))
+        report.append("  Validation mode: {}".format(
+            summary.get("validation_mode", "native_parallel")))
     report.extend(["", "Machine-readable JSON:"])
     report.extend(json.dumps(summary, indent=2, sort_keys=True).splitlines())

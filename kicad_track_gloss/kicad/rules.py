@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 
 from ..engine.model import BoardOutline, PolygonKeepout
+from .types import is_shape
 
 
 def copper_layers(adapter, board, layer_set):
@@ -20,10 +21,20 @@ def copper_layers(adapter, board, layer_set):
         try:
             is_copper = bool(adapter.pcbnew.IsCopperLayer(layer))
         except Exception:
-            is_copper = 0 <= layer_id <= 62 and layer_id % 2 == 0
+            # Unknown layers must fail closed; inferring copper from a numeric
+            # PCB_LAYER_ID layout is not stable across KiCad API versions.
+            is_copper = False
         if is_copper and (enabled is None or layer_id in enabled):
             result.append(layer_id)
     return tuple(sorted(set(result)))
+
+
+def enabled_copper_layers(adapter, board):
+    """Return the board's enabled copper layers using KiCad semantics only."""
+    try:
+        return copper_layers(adapter, board, board.GetEnabledLayers())
+    except Exception:
+        return ()
 
 
 def _chain_points(adapter, chain):
@@ -166,13 +177,13 @@ def mask_graphic_keepouts(adapter, board):
     create a solder-mask bridge even when copper clearance remains valid.
     """
     result = []
-    layer_map = {}
-    for mask_name, copper_name in (("F.Mask", "F.Cu"), ("B.Mask", "B.Cu")):
-        try:
-            layer_map[int(board.GetLayerID(mask_name))] = int(
-                board.GetLayerID(copper_name))
-        except Exception:
-            continue
+    try:
+        layer_map = {
+            int(adapter.pcbnew.F_Mask): int(adapter.pcbnew.F_Cu),
+            int(adapter.pcbnew.B_Mask): int(adapter.pcbnew.B_Cu),
+        }
+    except (AttributeError, TypeError, ValueError):
+        layer_map = {}
     if not layer_map:
         return result
 
@@ -188,7 +199,7 @@ def mask_graphic_keepouts(adapter, board):
         pass
     for item in drawings:
         try:
-            if str(item.GetClass()) not in ("PCB_SHAPE", "FP_SHAPE"):
+            if not is_shape(adapter.pcbnew, item):
                 continue
             copper_layer = layer_map.get(int(item.GetLayer()))
             if copper_layer is None:

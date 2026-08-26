@@ -22,7 +22,8 @@ REPO = ROOT.parent
 VERSION = __version__
 RUNTIME_FILES = (
     "__init__.py", "action_plugin.py", "icon_24.png", "icon_24_dark.png",
-    "version.py", "LICENSE", "NOTICE", "README.md",
+    "version.py", "configuration.py", "internal_config.json",
+    "LICENSE", "NOTICE", "README.md",
 )
 RUNTIME_DIRECTORIES = ("engine", "kicad")
 

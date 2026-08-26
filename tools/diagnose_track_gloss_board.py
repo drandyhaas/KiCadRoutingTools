@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
+import statistics
 import sys
+import time
 import types
 
 import pcbnew
@@ -21,11 +24,13 @@ from kicad_track_gloss.engine import (  # noqa: E402
     find_track_terminal_targets,
     generate_converged_plan,
 )
+from kicad_track_gloss.configuration import CONFIG  # noqa: E402
 from kicad_track_gloss.engine.model import segment_key  # noqa: E402
 from kicad_track_gloss.kicad import BoardAdapter  # noqa: E402
 from kicad_track_gloss.kicad.selection import (  # noqa: E402
     is_probable_diff_pair as _is_probable_diff_pair,
 )
+from kicad_track_gloss.kicad.types import is_straight_track  # noqa: E402
 from kicad_track_gloss.version import __version__  # noqa: E402
 
 
@@ -44,7 +49,7 @@ def main():
     snapshot = adapter.snapshot(board, require_selection=False)
     records = {}
     for item in board.GetTracks():
-        if str(item.GetClass()) != "PCB_TRACK":
+        if not is_straight_track(pcbnew, item):
             continue
         segment = adapter._segment_from_item(item)
         records[segment_key(segment)] = (item, segment)
@@ -62,7 +67,8 @@ def main():
     targets = find_track_terminal_targets(snapshot.model, eligible)
     pad_targets = find_pad_terminal_targets(snapshot.model, eligible)
     plan = generate_converged_plan(
-        snapshot.model, eligible, min_gain=0.01,
+        snapshot.model, eligible,
+        min_gain=CONFIG.gloss.minimum_saved_length_mm,
         allow_equal_length_simpler=True,
         clearance=snapshot.minimum_clearance)
 
@@ -131,9 +137,11 @@ def sweep(board, adapter, snapshot, records, board_path, verify_apply, max_scope
     for scope_index, (signature, scope_data) in enumerate(scope_items, 1):
         seed_key, net_name, warnings, meander_count = scope_data
         eligible = set(signature)
+        planning_started = time.monotonic()
         try:
             best = generate_converged_plan(
-                snapshot.model, eligible, min_gain=0.01,
+                snapshot.model, eligible,
+                min_gain=CONFIG.gloss.minimum_saved_length_mm,
                 allow_equal_length_simpler=True,
                 clearance=snapshot.minimum_clearance)
             if not best.changed:
@@ -142,6 +150,7 @@ def sweep(board, adapter, snapshot, records, board_path, verify_apply, max_scope
         except Exception as exception:
             best = None
             error = type(exception).__name__ + ": " + str(exception)
+        planning_ms = (time.monotonic() - planning_started) * 1000.0
         apply_error = ""
         if verify_apply and best is not None:
             try:
@@ -164,6 +173,7 @@ def sweep(board, adapter, snapshot, records, board_path, verify_apply, max_scope
             "warnings": warnings,
             "error": error,
             "apply_error": apply_error,
+            "planning_ms": planning_ms,
         })
         if scope_index % 10 == 0:
             print("evaluated", scope_index, "/", len(scope_items), flush=True)
@@ -177,6 +187,12 @@ def sweep(board, adapter, snapshot, records, board_path, verify_apply, max_scope
     print("unique eligible connections:", len(rows))
     print("changed:", len(changed), "no-op:", len(rows) - len(changed) - len(errors))
     print("generation errors:", len(errors), "apply errors:", len(apply_errors))
+    durations = sorted(row["planning_ms"] for row in rows)
+    if durations:
+        p90 = durations[min(len(durations) - 1,
+                            math.ceil(0.9 * len(durations)) - 1)]
+        print("planning ms: median {:.3f}, p90 {:.3f}, max {:.3f}".format(
+            statistics.median(durations), p90, durations[-1]))
     print("total potential saving mm:", round(sum(row["saved"] for row in changed), 6))
     for label, selected in (("ERRORS", errors), ("APPLY ERRORS", apply_errors),
                             ("TOP CHANGES", changed[:25])):

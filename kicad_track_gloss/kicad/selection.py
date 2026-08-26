@@ -7,6 +7,7 @@ import math
 import re
 
 from ..engine.model import segment_key
+from .types import is_straight_track, is_via
 
 
 def is_probable_diff_pair(name):
@@ -101,8 +102,8 @@ def meander_keys(segments):
     return protected
 
 
-def _touches_anchor(item, anchor):
-    points = ((item.GetPosition(),) if str(item.GetClass()) == "PCB_VIA"
+def _touches_anchor(pcbnew, item, anchor):
+    points = ((item.GetPosition(),) if is_via(pcbnew, item)
               else (item.GetStart(), item.GetEnd()))
     return any(point.x == anchor.x and point.y == anchor.y for point in points)
 
@@ -150,11 +151,11 @@ def expand_seed_keys(adapter, board, straight_by_key, seed_keys, warnings):
                     continue
 
                 touching = [neighbor for neighbor in native_neighbors
-                            if _touches_anchor(neighbor, anchor)]
+                            if _touches_anchor(adapter.pcbnew, neighbor, anchor)]
                 if len(touching) != 1:
                     continue
                 neighbor = touching[0]
-                if str(neighbor.GetClass()) != "PCB_TRACK":
+                if not is_straight_track(adapter.pcbnew, neighbor):
                     continue
                 try:
                     neighbor_segment = adapter.segment_from_item(neighbor)

@@ -11,175 +11,43 @@ import traceback
 import pcbnew
 import wx
 
+from .configuration import get_session_config
 from .engine import (find_pad_terminal_targets, find_track_terminal_vertices,
-                     generate_converged_plan, summarize_plan)
+                     generate_conservative_candidate,
+                     generate_converged_plan, plan_identity, summarize_plan)
 from .engine.model import segment_key
 from .kicad import BoardAdapter
-from .kicad.diagnostics import (append_plan_statistics,
-                                 append_search_statistics,
-                                 split_diagnostic_report)
+from .kicad.diagnostics import append_plan_statistics, append_search_statistics
+from .kicad.report_dialog import (show_diagnostic_report as _show_diagnostic_report,
+                                  show_report as _show_report,
+                                  warning_bell as _warning_bell)
+from .kicad.settings_dialog import show_session_settings
+from .kicad.types import is_arc, is_straight_track, is_via
 from .version import __version__
 
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG = logging.getLogger("KiCadTrackGloss")
 
-# One-click policy: no dialog, preview, temporary board, DRC subprocess, or
-# success/no-op popup. KiCad's native rules still constrain candidate search.
-MIN_GAIN_MM = 0.01
+# One-click policy: no preview or success/no-op popup. Session settings are
+# intentionally reachable only by invoking either action with no track seed.
+# Native KiCad DRC validation is intentionally retained as a safety gate and
+# can dominate response time even for a single selected connection.
 ALLOW_EQUAL_LENGTH_SIMPLIFICATION = True
 # Interactive work must remain responsive. Independent net/layer groups are
 # converged inside parallel workers; these passes are only global reconciliation
 # rounds. A safe partial result is applied if this guard is reached.
-INTERACTIVE_MAX_PASSES = 4
-INTERACTIVE_GROUP_MAX_PASSES = 2
 BUSY_CURSOR_DELAY_SECONDS = 3.0
 BUSY_CURSOR_POLL_SECONDS = 0.05
 
 
 class NoTrackSelection(ValueError):
-    """Normal user condition handled by a focused selection warning."""
+    """Normal user condition which opens process-local session settings."""
 
 
-def _show_selection_warning():
-    dialog = wx.MessageDialog(
-        None,
-        "Select at least one straight track segment before running Track Gloss.",
-        "KiCad Track Gloss",
-        wx.OK | wx.ICON_WARNING)
-    try:
-        dialog.ShowModal()
-    finally:
-        dialog.Destroy()
-
-
-def _show_report(title, lines):
-    """Show a selectable, resizable diagnostic report inside KiCad."""
-    text = "\n".join(lines)
-    dialog = wx.Dialog(None, title=title, size=(760, 520),
-                       style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
-    layout = wx.BoxSizer(wx.VERTICAL)
-    report = wx.TextCtrl(dialog, value=text,
-                         style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL)
-    try:
-        report.SetFont(wx.Font(wx.FontInfo(9).Family(wx.FONTFAMILY_TELETYPE)))
-    except Exception:
-        pass
-    layout.Add(report, 1, wx.EXPAND | wx.ALL, 10)
-    buttons = wx.BoxSizer(wx.HORIZONTAL)
-    copy_button = wx.Button(dialog, label="Copier")
-    ok_button = wx.Button(dialog, wx.ID_OK)
-    try:
-        ok_button.SetDefault()
-    except Exception:
-        pass
-
-    def copy_report(_event):
-        if not wx.TheClipboard.Open():
-            _warning_bell()
-            return
-        try:
-            wx.TheClipboard.SetData(wx.TextDataObject(text))
-            try:
-                wx.TheClipboard.Flush()
-            except Exception:
-                pass
-        finally:
-            wx.TheClipboard.Close()
-
-    copy_button.Bind(wx.EVT_BUTTON, copy_report)
-    buttons.Add(copy_button, 0)
-    buttons.AddStretchSpacer(1)
-    buttons.Add(ok_button, 0)
-    layout.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
-    dialog.SetSizer(layout)
-    dialog.CentreOnParent()
-    try:
-        dialog.ShowModal()
-    finally:
-        dialog.Destroy()
-
-
-def _show_diagnostic_report(title, lines):
-    """Show result, human-readable details, and JSON in separate tabs."""
-    summary, details, json_lines = split_diagnostic_report(lines)
-    tabs = (
-        ("Résultat", "\n".join(summary)),
-        ("Détails", "\n".join(details)),
-        ("JSON", "\n".join(json_lines)),
-    )
-    all_text = "\n\n".join(
-        "=== {} ===\n{}".format(label, text) for label, text in tabs)
-    dialog = wx.Dialog(None, title=title, size=(820, 600),
-                       style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
-    layout = wx.BoxSizer(wx.VERTICAL)
-    notebook = wx.Notebook(dialog)
-    controls = []
-    for label, text in tabs:
-        panel = wx.Panel(notebook)
-        panel_layout = wx.BoxSizer(wx.VERTICAL)
-        control = wx.TextCtrl(
-            panel, value=text,
-            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL)
-        try:
-            control.SetFont(wx.Font(
-                wx.FontInfo(9).Family(wx.FONTFAMILY_TELETYPE)))
-        except Exception:
-            pass
-        panel_layout.Add(control, 1, wx.EXPAND | wx.ALL, 8)
-        panel.SetSizer(panel_layout)
-        notebook.AddPage(panel, label)
-        controls.append(control)
-    layout.Add(notebook, 1, wx.EXPAND | wx.ALL, 10)
-
-    buttons = wx.BoxSizer(wx.HORIZONTAL)
-    copy_tab_button = wx.Button(dialog, label="Copier l'onglet")
-    copy_all_button = wx.Button(dialog, label="Copier tout")
-    ok_button = wx.Button(dialog, wx.ID_OK)
-    try:
-        ok_button.SetDefault()
-    except Exception:
-        pass
-
-    def copy_text(text):
-        if not wx.TheClipboard.Open():
-            _warning_bell()
-            return
-        try:
-            wx.TheClipboard.SetData(wx.TextDataObject(text))
-            try:
-                wx.TheClipboard.Flush()
-            except Exception:
-                pass
-        finally:
-            wx.TheClipboard.Close()
-
-    def copy_tab(_event):
-        selection = notebook.GetSelection()
-        if 0 <= selection < len(controls):
-            copy_text(controls[selection].GetValue())
-
-    copy_tab_button.Bind(wx.EVT_BUTTON, copy_tab)
-    copy_all_button.Bind(wx.EVT_BUTTON, lambda _event: copy_text(all_text))
-    buttons.Add(copy_tab_button, 0)
-    buttons.Add(copy_all_button, 0, wx.LEFT, 6)
-    buttons.AddStretchSpacer(1)
-    buttons.Add(ok_button, 0)
-    layout.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
-    dialog.SetSizer(layout)
-    dialog.CentreOnParent()
-    try:
-        dialog.ShowModal()
-    finally:
-        dialog.Destroy()
-
-
-def _warning_bell():
-    """Use the same native warning bell KiCad invokes for invalid actions."""
-    try:
-        wx.Bell()
-    except Exception:
-        LOG.exception("Could not play the KiCad warning bell")
+def _show_session_settings():
+    """Indirection kept small so the no-selection path is easy to test."""
+    return show_session_settings()
 
 
 def _plan_with_delayed_busy_cursor(function, delay_seconds=None):
@@ -228,14 +96,13 @@ def _selection_counts(board):
         try:
             if not item.IsSelected():
                 continue
-            kind = str(item.GetClass())
         except Exception:
             continue
-        if kind == "PCB_TRACK":
+        if is_straight_track(pcbnew, item):
             counts["segments"] += 1
-        elif kind == "PCB_ARC":
+        elif is_arc(pcbnew, item):
             counts["arcs"] += 1
-        elif kind == "PCB_VIA":
+        elif is_via(pcbnew, item):
             counts["vias"] += 1
         else:
             counts["other"] += 1
@@ -272,6 +139,37 @@ def _eligible_net_names(model, eligible_keys):
     return sorted(labels)
 
 
+def _append_performance_timings(report, timings, operation_started):
+    timings["total"] = (time.monotonic() - operation_started) * 1000.0
+    report.extend(["", "Performance timings:"] + [
+        "  {}: {:.3f} ms".format(
+            key.replace("_", " ").title(), value)
+        for key, value in timings.items()
+    ])
+
+
+def _validate_with_busy_cursor(adapter, board, plan, *, force_native,
+                               skip_native, timeout_seconds):
+    busy_started = False
+    try:
+        # pcbnew SWIG snapshots must remain on KiCad's main thread. The native
+        # validator itself runs the expensive DRC work in hidden subprocesses.
+        try:
+            wx.BeginBusyCursor()
+            busy_started = True
+        except Exception:
+            LOG.exception("Could not display the Track Gloss DRC cursor")
+        return adapter.validate_plan(
+            board, plan, force_native=force_native,
+            skip_native=skip_native, timeout_seconds=timeout_seconds)
+    finally:
+        if busy_started:
+            try:
+                wx.EndBusyCursor()
+            except Exception:
+                LOG.exception("Could not restore the Track Gloss DRC cursor")
+
+
 class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
     def defaults(self):
         self.name = "KiCad Track Gloss"
@@ -289,9 +187,9 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             changed = self._run([])
         except NoTrackSelection:
             try:
-                _show_selection_warning()
+                _show_session_settings()
             except Exception:
-                LOG.exception("Could not display the track-selection warning")
+                LOG.exception("Could not display Track Gloss session settings")
         except Exception:
             _warning_bell()
             LOG.exception("Track gloss failed; the board was left unchanged")
@@ -310,6 +208,12 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                 _warning_bell()
 
     def _run(self, report, diagnostic=False):
+        config = get_session_config()
+        operation_started = time.monotonic()
+        operation_deadline = (
+            operation_started +
+            config.timing.interactive_total_time_budget_seconds)
+        timings = {}
         report.append("Plugin version: " + __version__)
         board = pcbnew.GetBoard()
         if board is None:
@@ -321,19 +225,39 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             pass
         report.append(
             "Optimization coordinates: exact copper geometry; active KiCad grid not used.")
+        report.append(
+            "Session policy: minimum saving {:.6f} mm; interactive passes {} "
+            "(group {}); single-track KiCad DRC {}; time budget {:.1f} s "
+            "(planning {:.1f} s).".format(
+                config.gloss.minimum_saved_length_mm,
+                config.convergence.interactive_max_passes,
+                config.convergence.interactive_group_max_passes,
+                "enabled" if config.safety.kicad_drc_for_single_track
+                else "disabled",
+                config.timing.interactive_total_time_budget_seconds,
+                config.timing.interactive_planning_time_budget_seconds))
+        stage_started = time.monotonic()
         counts = _selection_counts(board)
+        timings["selection_scan"] = (
+            time.monotonic() - stage_started) * 1000.0
         report.append(
             "Selected objects: {segments} straight segment(s), {arcs} arc(s), "
             "{vias} via(s), {other} other.".format(**counts))
-        if counts["segments"] == 0 and not diagnostic:
+        if counts["segments"] == 0:
             raise NoTrackSelection(
                 "Select at least one straight track segment before running Track Gloss.")
         adapter = BoardAdapter(pcbnew)
         try:
+            stage_started = time.monotonic()
             snapshot = adapter.snapshot(board)
+            timings["snapshot"] = (
+                time.monotonic() - stage_started) * 1000.0
         except ValueError as error:
             report.append("Result: selection rejected.")
             report.append("Reason: " + str(error))
+            if diagnostic:
+                _append_performance_timings(
+                    report, timings, operation_started)
             return False
         report.append("Eligible straight segments: " + str(len(snapshot.eligible_keys)))
         net_names = _eligible_net_names(snapshot.model, snapshot.eligible_keys)
@@ -345,10 +269,13 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                       str(snapshot.tuned_protected_count))
         for warning in snapshot.warnings:
             report.append("Protection: " + warning)
+        stage_started = time.monotonic()
         track_terminals = find_track_terminal_vertices(
             snapshot.model, snapshot.eligible_keys)
         pad_terminals = find_pad_terminal_targets(
             snapshot.model, snapshot.eligible_keys)
+        timings["terminal_analysis"] = (
+            time.monotonic() - stage_started) * 1000.0
         report.append("Sliding track-intersection terminations: " +
                       str(len(track_terminals)))
         report.append("Sliding pad-area terminations: " +
@@ -359,58 +286,172 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             report.append(
                 "Reason: automatic connection expansion did not find a second eligible "
                 "straight segment or a sliding track/pad termination.")
+            if diagnostic:
+                _append_performance_timings(
+                    report, timings, operation_started)
             return False
 
+        stage_started = time.monotonic()
+        planning_deadline = min(
+            operation_deadline,
+            stage_started +
+            config.timing.interactive_planning_time_budget_seconds)
         best = _plan_with_delayed_busy_cursor(lambda: generate_converged_plan(
             snapshot.model, snapshot.eligible_keys,
-            max_passes=INTERACTIVE_MAX_PASSES,
+            max_passes=config.convergence.interactive_max_passes,
             return_partial_on_limit=True,
-            group_max_passes=INTERACTIVE_GROUP_MAX_PASSES,
-            min_gain=MIN_GAIN_MM,
+            group_max_passes=config.convergence.interactive_group_max_passes,
+            min_gain=config.gloss.minimum_saved_length_mm,
             allow_equal_length_simpler=ALLOW_EQUAL_LENGTH_SIMPLIFICATION,
             clearance=snapshot.minimum_clearance,
             collect_statistics=diagnostic,
-            parallel=True))
+            parallel=True,
+            deadline=planning_deadline,
+            cancellation_grace_seconds=(
+                config.timing.interactive_cancellation_grace_seconds)))
+        timings["planning"] = (
+            time.monotonic() - stage_started) * 1000.0
         report.append("Convergence passes: " + str(best.convergence_passes))
         report.append("Fixed point reached: " +
                       ("yes" if best.fixed_point else "no"))
         report.append("Connected chains considered: " +
                       str(best.chains_considered))
+        for warning in best.warnings:
+            if "time budget" in warning.lower():
+                report.append("Planning limit: " + warning)
         if not best.changed:
             if diagnostic:
                 append_search_statistics(
                     report, best.search_counts, best.blocking_nets)
-            report.append("Result: no safe improvement found.")
-            report.append(
-                "Possible reasons: disconnected selection, fixed junction, locked/tuned "
-                "track, insufficient length gain, clearance, pad, via, keepout, or board edge.")
+                _append_performance_timings(
+                    report, timings, operation_started)
+            if not best.fixed_point:
+                report.append("Result: interactive planning time budget reached.")
+                report.append(
+                    "No fully composed improvement was available before the deadline; "
+                    "the current board was left unchanged.")
+            else:
+                report.append("Result: no safe improvement found.")
+                report.append(
+                    "Possible reasons: disconnected selection, fixed junction, locked/tuned "
+                    "track, insufficient length gain, clearance, pad, via, keepout, or board edge.")
             return False
-        native = adapter.validate_plan(board, best)
+        stage_started = time.monotonic()
+        single_track_selection = snapshot.selection_seed_count == 1
+        drc_budget = operation_deadline - time.monotonic()
+        if drc_budget <= 0.0:
+            report.append("Result: interactive total time budget reached.")
+            report.append(
+                "The candidate was not sent to KiCad DRC and the current board "
+                "was left unchanged.")
+            return False
+        force_native = (
+            single_track_selection and
+            config.safety.kicad_drc_for_single_track)
+        skip_native = (
+            single_track_selection and
+            not config.safety.kicad_drc_for_single_track)
+        native = _validate_with_busy_cursor(
+            adapter, board, best, force_native=force_native,
+            skip_native=skip_native, timeout_seconds=drc_budget)
+
+        # Native DRC is the final authority. If the most aggressive refinement
+        # is rejected, retain quality progressively: retry a one-pass,
+        # unrefined candidate which often preserves a terminal that the deeper
+        # local search moved too far. The fallback still receives the complete
+        # native DRC gate and remains inside the same interactive time budget.
+        fallback_used = False
+        primary_native = native
+        if (not native.allowed and
+                native.validation_mode != "native_timeout" and
+                time.monotonic() < planning_deadline):
+            try:
+                conservative = _plan_with_delayed_busy_cursor(
+                    lambda: generate_conservative_candidate(
+                        snapshot.model, snapshot.eligible_keys,
+                        min_gain=config.gloss.minimum_saved_length_mm,
+                        clearance=snapshot.minimum_clearance,
+                        collect_statistics=diagnostic,
+                        deadline=planning_deadline,
+                        cancellation_grace_seconds=(
+                            config.timing.interactive_cancellation_grace_seconds)),
+                    delay_seconds=0.0)
+            except Exception:
+                LOG.exception("Could not build the conservative DRC fallback")
+                conservative = None
+            if (conservative is not None and conservative.changed and
+                    plan_identity(conservative) != plan_identity(best)):
+                remaining = operation_deadline - time.monotonic()
+                if remaining > 0.0:
+                    fallback_native = _validate_with_busy_cursor(
+                        adapter, board, conservative,
+                        force_native=force_native, skip_native=skip_native,
+                        timeout_seconds=remaining)
+                    if fallback_native.allowed:
+                        best = conservative
+                        native = fallback_native
+                        fallback_used = True
+                    elif fallback_native.validation_mode == "native_timeout":
+                        native = fallback_native
+        timings["native_drc_gate"] = (
+            time.monotonic() - stage_started) * 1000.0
+        if fallback_used:
+            for key, value in primary_native.timings_ms.items():
+                timings["native_primary_" + key] = value
+        for key, value in native.timings_ms.items():
+            timings["native_" + key] = value
         if not native.allowed:
-            report.append("Native KiCad DRC gate: plan rejected.")
+            if native.validation_mode == "native_timeout":
+                report.append("Native KiCad DRC gate: interactive time budget reached.")
+            elif native.error:
+                report.append("Native KiCad DRC gate: validation infrastructure failed.")
+            else:
+                report.append("Native KiCad DRC gate: plan rejected.")
             if native.increases:
                 report.append("New native DRC findings: " + ", ".join(
                     "{} +{}".format(key, value)
                     for key, value in native.increases.items()))
             if native.error:
                 report.append("Native DRC error: " + native.error)
+            if diagnostic:
+                _append_performance_timings(
+                    report, timings, operation_started)
             report.append("Result: no safe improvement found.")
             return False
-        report.append("Native KiCad DRC gate: no category increase.")
+        if fallback_used:
+            report.append(
+                "Candidate ladder: aggressive plan rejected; conservative "
+                "candidate accepted by native KiCad DRC.")
+        if native.validation_mode == "geometric_removal_fast_path":
+            report.append(
+                "Safety gate: proven removal-only geometry; native DRC not required.")
+        elif native.validation_mode == "single_track_drc_disabled":
+            report.append(
+                "Safety gate: single-track KiCad DRC disabled by internal policy.")
+        else:
+            report.append("Native KiCad DRC gate: no category increase.")
         report.append("Chosen plan: remove {} segment(s), add {} segment(s).".format(
             len(best.remove_keys), len(best.additions)))
         report.append("Copper length saved: {:.3f} mm.".format(best.saved_mm))
         report.append("Non-octolinear segments corrected: {}.".format(
             best.angle_corrections))
-        if diagnostic:
-            append_plan_statistics(report, summarize_plan(
-                snapshot.model, snapshot.eligible_keys, best))
+        stage_started = time.monotonic()
         adapter.apply(board, best, rollback_on_error=True)
+        timings["apply"] = (time.monotonic() - stage_started) * 1000.0
         try:
             board.SetModified()
         except Exception:
             pass
         pcbnew.Refresh()
+        timings["total"] = (
+            time.monotonic() - operation_started) * 1000.0
+        if diagnostic:
+            summary = summarize_plan(
+                snapshot.model, snapshot.eligible_keys, best)
+            summary["timings_ms"] = timings
+            summary["native_baseline_cached"] = native.baseline_cached
+            summary["validation_mode"] = native.validation_mode
+            append_plan_statistics(report, summary)
         return True
 
 
@@ -430,6 +471,12 @@ class KiCadTrackGlossDiagnosticPlugin(KiCadTrackGlossPlugin):
         report = ["KiCad Track Gloss diagnostic", ""]
         try:
             changed = self._run(report, diagnostic=True)
+        except NoTrackSelection:
+            try:
+                _show_session_settings()
+            except Exception:
+                LOG.exception("Could not display Track Gloss session settings")
+            return
         except Exception:
             _warning_bell()
             LOG.exception("Track gloss diagnostic run failed")

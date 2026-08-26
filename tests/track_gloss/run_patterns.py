@@ -36,6 +36,7 @@ from kicad_track_gloss.engine.model import segment_key  # noqa: E402
 from kicad_track_gloss.engine.pads import pad_contains  # noqa: E402
 from kicad_track_gloss.engine.planner import _apply_to_model  # noqa: E402
 from kicad_track_gloss.kicad import BoardAdapter  # noqa: E402
+from kicad_track_gloss.kicad.types import is_straight_track  # noqa: E402
 from kicad_track_gloss.kicad.selection import (  # noqa: E402
     is_probable_diff_pair as _is_probable_diff_pair,
 )
@@ -60,7 +61,7 @@ MULTI_WIDTH_GND_SEEDS = {
 def _records(adapter, board):
     result = {}
     for item in board.GetTracks():
-        if str(item.GetClass()) == "PCB_TRACK":
+        if is_straight_track(pcbnew, item):
             segment = adapter._segment_from_item(item)
             result[segment_key(segment)] = (item, segment)
     return result

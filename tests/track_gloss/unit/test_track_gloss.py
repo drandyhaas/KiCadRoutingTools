@@ -8,6 +8,8 @@ import zipfile
 import json
 from pathlib import Path
 
+import pytest
+
 from kicad_track_gloss.engine import (find_track_terminal_vertices,
                                       generate_candidate_plans,
                                       generate_converged_plan,
@@ -18,7 +20,16 @@ from kicad_track_gloss.engine.model import (AddedSegment, BoardModel,
 from kicad_track_gloss.kicad.selection import meander_keys as _meander_keys
 from kicad_track_gloss.engine.pads import segment_hits_pad
 from kicad_track_gloss.kicad.rules import via_track_hole_clearance
-from kicad_track_gloss.engine.planner import _apply_to_model
+from kicad_track_gloss.engine.planner import (
+    PlanningDeadlineExceeded, _apply_to_model)
+
+
+def test_expired_planning_deadline_stops_before_candidate_search():
+    model = BoardModel(staircase(8))
+    eligible = {segment_key(segment) for segment in model.segments}
+    with pytest.raises(PlanningDeadlineExceeded):
+        smooth_selected_chains(
+            model, eligible, deadline=time.monotonic() - 1.0)
 
 
 def test_custom_via_track_hole_clearance_uses_matching_active_rule(tmp_path):
@@ -532,16 +543,27 @@ def test_rp2350_vreg_lx_arbitrary_angle_becomes_octolinear():
 def test_action_plugin_is_silent_and_has_no_file_roundtrip():
     from pathlib import Path
     source = Path("kicad_track_gloss/action_plugin.py").read_text(encoding="utf-8")
+    report_source = Path(
+        "kicad_track_gloss/kicad/report_dialog.py").read_text(encoding="utf-8")
     for forbidden in ("MessageBox", "GlossDialog", "SaveBoard", "LoadBoard",
                       "kicad-cli", "choose_best_with_kicad"):
         assert forbidden not in source
     assert "KiCadTrackGlossDiagnosticPlugin" in source
     assert "show_toolbar_button = False" in source
-    assert "wx.Bell()" in source
-    assert "wx.MessageDialog" in source
+    assert "wx.Bell()" in report_source
     assert "Select at least one straight track segment" in source
+    settings_source = Path(
+        "kicad_track_gloss/kicad/settings_dialog.py").read_text(
+            encoding="utf-8")
+    assert "wx.MessageDialog" in settings_source
+    assert 'label="Close"' in settings_source
+    assert 'label="Cancel"' in settings_source
+    assert "SetToolTip" in settings_source
+    assert "current KiCad session" in settings_source
     assert "Plugin version: " in source
-    assert 'label="Copier"' in source
+    assert 'label="Copy"' in report_source
+    for french_label in ("Copier", "Résultat", "Détails"):
+        assert french_label not in source
     assert "BUSY_CURSOR_DELAY_SECONDS = 3.0" in source
     assert "wx.BeginBusyCursor()" in source
     assert "wx.EndBusyCursor()" in source
@@ -555,6 +577,15 @@ def test_normal_action_bells_once_only_on_noop():
     calls = []
     fake_pcbnew = types.ModuleType("pcbnew")
     fake_pcbnew.ActionPlugin = object
+    class FakeTrack:
+        pass
+    class FakeArc(FakeTrack):
+        pass
+    class FakeVia(FakeTrack):
+        pass
+    fake_pcbnew.PCB_TRACK = FakeTrack
+    fake_pcbnew.PCB_ARC = FakeArc
+    fake_pcbnew.PCB_VIA = FakeVia
     fake_wx = types.ModuleType("wx")
     fake_wx.Bell = lambda: calls.append("bell")
     fake_wx.BeginBusyCursor = lambda: calls.append("busy-begin")
@@ -587,10 +618,19 @@ def test_normal_action_bells_once_only_on_noop():
         footprint = SelectedItem()
         footprint.Pads = lambda: [SelectedItem()]
 
+        class SelectedTrack(SelectedItem, FakeTrack):
+            pass
+
+        class SelectedArc(SelectedItem, FakeArc):
+            pass
+
+        class SelectedVia(SelectedItem, FakeVia):
+            pass
+
         class SelectedBoard:
             def GetTracks(self):
-                return [SelectedItem("PCB_TRACK"), SelectedItem("PCB_ARC"),
-                        SelectedItem("PCB_VIA")]
+                return [SelectedTrack("PCB_TRACK"), SelectedArc("PCB_ARC"),
+                        SelectedVia("PCB_VIA")]
 
             def GetFootprints(self):
                 return [footprint]
@@ -610,15 +650,15 @@ def test_normal_action_bells_once_only_on_noop():
         plugin._run = lambda _report: True
         plugin.Run()
         assert calls == ["bell"]
-        warnings = []
-        module._show_selection_warning = lambda: warnings.append("warning")
+        settings = []
+        module._show_session_settings = lambda: settings.append("settings")
 
         def no_selection(_report):
             raise module.NoTrackSelection()
 
         plugin._run = no_selection
         plugin.Run()
-        assert warnings == ["warning"]
+        assert settings == ["settings"]
         assert calls == ["bell"]
 
         assert module._plan_with_delayed_busy_cursor(
@@ -675,6 +715,8 @@ def test_pcm_archive_uses_flat_entrypoint_with_internal_packages():
     assert "plugins/__init__.py" in names
     assert "plugins/action_plugin.py" in names
     assert "plugins/version.py" in names
+    assert "plugins/configuration.py" in names
+    assert "plugins/internal_config.json" in names
     assert "plugins/engine/planner.py" in names
     assert "plugins/engine/context.py" in names
     assert "plugins/engine/parallel.py" in names
@@ -684,6 +726,7 @@ def test_pcm_archive_uses_flat_entrypoint_with_internal_packages():
     assert "plugins/kicad/adapter.py" in names
     assert "plugins/kicad/diagnostics.py" in names
     assert "plugins/kicad/reader.py" in names
+    assert "plugins/kicad/types.py" in names
     assert not any(name.startswith("plugins/kicad_track_gloss/") for name in names)
     assert "metadata.json" in names
     assert "resources/icon.png" in names
@@ -696,6 +739,10 @@ def test_pcm_archive_uses_flat_entrypoint_with_internal_packages():
     assert len(official_version["download_sha256"]) == 64
     assert official_version["download_size"] == archive_size
     assert official_metadata["maintainer"]["name"] == "Frantz"
+    assert official_metadata["author"]["name"] == "ChatGPT/Codex (OpenAI)"
+    assert "co-author" not in packaged_metadata["description_full"].lower()
+    assert "inspired by and reusing part of DrAndyHaas's code" in \
+        packaged_metadata["description_full"]
 
 
 def test_plugin_version_matches_metadata():
@@ -763,6 +810,10 @@ class _NativeBoard:
 
 
 class _NativePcbnew:
+    PCB_TRACK = _NativeTrack
+    PCB_ARC = type("NativeArc", (), {})
+    PCB_VIA = type("NativeVia", (), {})
+
     @staticmethod
     def ToMM(value): return value
 
@@ -802,6 +853,8 @@ def test_native_segment_uses_kicad_resolved_track_clearance():
 
 def test_adapter_rounds_millimetres_to_exact_integer_nanometres():
     class Pcbnew:
+        PCB_IU_PER_MM = 1_000_000
+
         @staticmethod
         def FromMM(_value):
             return 130_199_999  # Demonstrate the SWIG conversion truncation.
@@ -846,7 +899,111 @@ def test_via_obstacle_uses_native_non_contiguous_copper_layer_set():
     assert _via_copper_layers(Adapter(), Board(), Via()) == (0, 2, 4, 6)
 
 
+def test_native_type_ids_classify_generic_swig_wrappers():
+    from kicad_track_gloss.kicad.types import is_arc, is_straight_track, is_via
+
+    class Pcbnew:
+        PCB_TRACE_T = 13
+        PCB_VIA_T = 14
+        PCB_ARC_T = 15
+
+    class GenericTrackWrapper:
+        def __init__(self, native_type):
+            self.native_type = native_type
+
+        def Type(self):
+            return self.native_type
+
+    assert is_straight_track(Pcbnew, GenericTrackWrapper(13))
+    assert is_via(Pcbnew, GenericTrackWrapper(14))
+    assert is_arc(Pcbnew, GenericTrackWrapper(15))
+
+
+def test_unknown_layer_ids_fail_closed_without_kicad_semantics():
+    from kicad_track_gloss.kicad.rules import copper_layers
+
+    class LayerSet:
+        @staticmethod
+        def Seq():
+            return [0, 2, 4, 6]
+
+    class Board:
+        @staticmethod
+        def GetEnabledLayers():
+            return LayerSet()
+
+    class Pcbnew:
+        @staticmethod
+        def IsCopperLayer(_layer):
+            raise RuntimeError("unavailable")
+
+    class Adapter:
+        pcbnew = Pcbnew()
+
+    assert copper_layers(Adapter(), Board(), LayerSet()) == ()
+
+
+def test_via_layer_fallback_asks_kicad_for_each_enabled_copper_layer():
+    from kicad_track_gloss.kicad.reader import _via_copper_layers
+
+    class LayerSet:
+        @staticmethod
+        def Seq():
+            return [0, 3, 5, 31]
+
+    class Board:
+        @staticmethod
+        def GetEnabledLayers():
+            return LayerSet()
+
+    class Via:
+        @staticmethod
+        def GetLayerSet():
+            raise RuntimeError("not exposed")
+
+        @staticmethod
+        def IsOnLayer(layer):
+            return layer in (0, 5, 31)
+
+    class Pcbnew:
+        @staticmethod
+        def IsCopperLayer(layer):
+            return layer in (0, 3, 5, 31)
+
+    class Adapter:
+        pcbnew = Pcbnew()
+
+    assert _via_copper_layers(Adapter(), Board(), Via()) == (0, 5, 31)
+
+
+def test_pad_shapes_use_pcbnew_enum_values():
+    from kicad_track_gloss.kicad.reader import _pad_shape
+
+    class Pcbnew:
+        PAD_SHAPE_CIRCLE = 41
+        PAD_SHAPE_RECT = 42
+        PAD_SHAPE_OVAL = 43
+        PAD_SHAPE_ROUNDRECT = 44
+
+    class Adapter:
+        pcbnew = Pcbnew()
+
+    class Pad:
+        def __init__(self, shape):
+            self.shape = shape
+
+        def GetShape(self):
+            return self.shape
+
+    assert _pad_shape(Adapter(), Pad(41)) == "circle"
+    assert _pad_shape(Adapter(), Pad(42)) == "rect"
+    assert _pad_shape(Adapter(), Pad(43)) == "oval"
+    assert _pad_shape(Adapter(), Pad(44)) == "roundrect"
+    assert _pad_shape(Adapter(), Pad(99)) == "fallback"
+
+
 def test_exact_board_outline_rejects_concave_shortcut_and_hole():
+    from kicad_track_gloss.engine.context import PlannerContext
     from kicad_track_gloss.engine.geometry import segment_inside_board
     from kicad_track_gloss.engine.model import BoardOutline
 
@@ -857,11 +1014,22 @@ def test_exact_board_outline_rejects_concave_shortcut_and_hole():
     assert segment_inside_board((7, 2), (9, 8), outline, 0.1)
     assert not segment_inside_board((3, 8), (7, 8), outline, 0.1)
     assert not segment_inside_board((0.5, 2), (3.5, 2), outline, 0.1)
+    context = PlannerContext(BoardModel([], board_outline=outline))
+    randomizer = random.Random(20260826)
+    cases = [((7, 2), (9, 8)), ((3, 8), (7, 8)),
+             ((0.5, 2), (3.5, 2))]
+    cases.extend(
+        (((randomizer.uniform(-1, 11), randomizer.uniform(-1, 11)),
+          (randomizer.uniform(-1, 11), randomizer.uniform(-1, 11))))
+        for _ in range(200))
+    for start, end in cases:
+        assert context.segment_inside_board(start, end, 0.1) == \
+            segment_inside_board(start, end, outline, 0.1)
 
 
 def test_native_drc_report_counts_rule_categories():
     from kicad_track_gloss.kicad.native_validation import (
-        _json_report_counts, _json_report_summary)
+        _drc_increases, _json_report_counts, _json_report_summary)
 
     counts = _json_report_counts(json.dumps({
         "violations": [{"type": "clearance"}, {"type": "clearance"}],
@@ -882,8 +1050,100 @@ def test_native_drc_report_counts_rule_categories():
             "items": [{"description": "Pad B", "pos": {"x": 3, "y": 4}}],
         }],
     })
-    assert (_json_report_summary(after)[1] -
-            _json_report_summary(before)[1])
+    before_counts, before_fingerprints = _json_report_summary(before)
+    after_counts, after_fingerprints = _json_report_summary(after)
+    assert not _drc_increases(
+        before_counts, after_counts,
+        before_fingerprints, after_fingerprints)
+    added = json.dumps({
+        "violations": [],
+        "unconnected_items": json.loads(after)["unconnected_items"] + [{
+            "type": "unconnected_items", "description": "Missing C",
+            "items": [{"description": "Pad C", "pos": {"x": 5, "y": 6}}],
+        }],
+    })
+    added_counts, added_fingerprints = _json_report_summary(added)
+    assert _drc_increases(
+        before_counts, added_counts,
+        before_fingerprints, added_fingerprints) == {
+            "unconnected_items": 1}
+
+
+def test_native_helpers_are_hidden_on_windows():
+    import os
+    import subprocess
+    from kicad_track_gloss.kicad.native_validation import (
+        _hidden_process_kwargs)
+
+    kwargs = _hidden_process_kwargs()
+    if os.name == "nt":
+        assert kwargs["creationflags"] == subprocess.CREATE_NO_WINDOW
+    else:
+        assert kwargs == {}
+
+
+def test_native_candidate_helper_supports_direct_script_entry_point():
+    """Reproduce the exact subprocess import mode used for candidate boards."""
+    import subprocess
+
+    script = Path(
+        "kicad_track_gloss/kicad/native_validation.py").resolve()
+    process = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True)
+    assert process.returncode != 0
+    assert "expected --apply-plan BASELINE CANDIDATE PLAN" in process.stderr
+    assert "attempted relative import" not in process.stderr
+
+
+def test_connectivity_partition_reuses_unchanged_net_signature():
+    from kicad_track_gloss.engine.validation import (
+        _connectivity_partition, _connectivity_signature)
+
+    _connectivity_partition.cache_clear()
+    segments = [
+        Segment(0, 0, 1, 0, 0.2, 0, 1, "selected"),
+        Segment(1, 0, 2, 0, 0.2, 0, 1, "immutable"),
+    ]
+    pads = [PadRegion(0, 0, 0.5, 0.5, 0, "circle", 0, 1, (0,))]
+    first = _connectivity_signature(
+        segments, [], pads, {"immutable"}, 1)
+    second = _connectivity_signature(
+        segments, [], pads, {"immutable"}, 1)
+
+    assert first == second
+    assert _connectivity_partition.cache_info().hits == 1
+
+
+def test_native_fast_path_only_accepts_existing_copper_without_zones():
+    from kicad_track_gloss.kicad import BoardAdapter
+    from kicad_track_gloss.kicad.native_validation import (
+        _is_strict_removal_only_plan)
+
+    track = _NativeTrack("original", (0, 0), (2, 0), 1)
+
+    class Board:
+        @staticmethod
+        def GetTracks(): return [track]
+
+        @staticmethod
+        def Zones(): return []
+
+    adapter = BoardAdapter(_NativePcbnew())
+    subset = GlossResult(
+        remove_keys=["original"],
+        additions=[AddedSegment((0, 0), (1, 0), 0.2, 0, 1)])
+    diagonal = GlossResult(
+        remove_keys=["original"],
+        additions=[AddedSegment((0, 0), (1, 1), 0.2, 0, 1)])
+
+    assert _is_strict_removal_only_plan(adapter, Board(), subset)
+    assert not _is_strict_removal_only_plan(adapter, Board(), diagonal)
+
+    class ZonedBoard(Board):
+        @staticmethod
+        def Zones(): return [object()]
+
+    assert not _is_strict_removal_only_plan(adapter, ZonedBoard(), subset)
 
 
 def test_native_connection_expansion_stops_at_junction():
@@ -945,6 +1205,37 @@ def test_connection_between_two_through_tracks_glosses_between_terminations():
     assert any(abs(point[0]) < 1e-9 for segment in final_segments for point in segment)
     assert any(abs(point[0] - 3) < 1e-9 for segment in final_segments for point in segment)
     assert not ({"left-through", "right-through"} & set(result.remove_keys))
+
+
+def test_larger_t_selection_preserves_smaller_branch_gloss():
+    # Extracted from tensorrail_mini GND at (13.7517, 16.0). Selecting the
+    # horizontal pad branch used to remove it as a sliding target and reduce
+    # the useful saving from 1.260431 mm to an invisible 0.5 mm inside a pad.
+    main = Segment(13.7517, 16.0, 10.8392, 18.9125,
+                   0.2, 0, 1, "main", net_name="GND")
+    tail = Segment(10.8392, 18.9125, 9.8, 18.9125,
+                   0.2, 0, 1, "tail", net_name="GND")
+    pad_branch = Segment(12.95, 16.0, 13.7517, 16.0,
+                         0.2, 0, 1, "pad-branch", net_name="GND")
+    immutable_branch = Segment(13.7517, 16.0, 14.2517, 16.5,
+                               0.2, 0, 1, "immutable", net_name="GND")
+    pad = PadRegion(12.95, 16.0, 1.0, 1.3, 0.0, "rect", 0.0,
+                    1, (0,))
+    model = BoardModel(
+        [main, tail, pad_branch, immutable_branch], pad_regions=[pad])
+
+    smaller = generate_converged_plan(
+        model, {"main", "tail"}, max_passes=4,
+        return_partial_on_limit=True, group_max_passes=2,
+        min_gain=0.01, clearance=0.0)
+    larger = generate_converged_plan(
+        model, {"main", "tail", "pad-branch"}, max_passes=4,
+        return_partial_on_limit=True, group_max_passes=2,
+        min_gain=0.01, clearance=0.0)
+
+    assert smaller.saved_mm > 1.0
+    assert larger.saved_mm >= smaller.saved_mm - 1e-9
+    assert {"main", "tail"}.issubset(larger.remove_keys)
 
 
 def test_single_branch_endpoint_slides_to_shortest_track_contact():
