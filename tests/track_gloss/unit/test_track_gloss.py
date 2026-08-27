@@ -680,6 +680,8 @@ def test_action_plugin_is_silent_and_has_no_file_roundtrip():
         assert french_label not in source
     assert "PROGRESS_DIALOG_DELAY_SECONDS = 3.0" in source
     assert "wx.ProgressDialog" in source
+    assert "BeginBusyCursor" not in source
+    assert "Native KiCad DRC validation..." in source
     assert '"PD_CAN_ABORT"' in source
     assert "Use KiCad Undo to revert it." not in source
     assert "Result: modification applied to the current board." not in source
@@ -716,6 +718,10 @@ def test_normal_action_bells_once_only_on_noop():
         def Update(self, _value, _message):
             calls.append("progress-update")
             return not fake_wx.abort_progress, False
+
+        def Pulse(self, _message):
+            calls.append("progress-pulse")
+            return True, False
 
         def Destroy(self):
             calls.append("progress-destroy")
@@ -821,6 +827,20 @@ def test_normal_action_bells_once_only_on_noop():
         else:
             raise AssertionError("the planning error was not propagated")
         assert calls[-1] == "progress-destroy"
+
+        before = list(calls)
+        wait_callback, close_progress = module._drc_progress_controller(
+            time.monotonic(), delay_seconds=10.0)
+        wait_callback()
+        close_progress()
+        assert calls == before
+
+        wait_callback, close_progress = module._drc_progress_controller(
+            time.monotonic() - 4.0, delay_seconds=3.0)
+        wait_callback()
+        close_progress()
+        assert calls[-3:] == [
+            "progress-create", "progress-pulse", "progress-destroy"]
 
         fake_wx.abort_progress = True
 

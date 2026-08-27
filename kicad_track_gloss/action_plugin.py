@@ -196,46 +196,79 @@ def _append_performance_timings(report, timings, operation_started):
     ])
 
 
-def _validate_with_busy_cursor(adapter, board, plan, *, force_native,
-                               skip_native, timeout_seconds):
-    busy_started = False
+def _drc_progress_controller(
+        operation_started, delay_seconds=PROGRESS_DIALOG_DELAY_SECONDS):
+    """Create an indeterminate DRC progress dialog after the global delay."""
+    dialog = None
+
+    def wait_callback():
+        nonlocal dialog
+        if (dialog is None and
+                time.monotonic() - operation_started >= delay_seconds):
+            try:
+                style = 0
+                for name in ("PD_APP_MODAL", "PD_ELAPSED_TIME", "PD_SMOOTH"):
+                    style |= getattr(wx, name, 0)
+                dialog = wx.ProgressDialog(
+                    "KiCad Track Gloss",
+                    "Native KiCad DRC validation...",
+                    maximum=100, parent=None, style=style)
+            except Exception:
+                LOG.exception("Could not display Track Gloss DRC progress")
+                dialog = False
+        try:
+            if dialog:
+                if hasattr(dialog, "Pulse"):
+                    dialog.Pulse("Native KiCad DRC validation...")
+                else:
+                    dialog.Update(0, "Native KiCad DRC validation...")
+            if hasattr(wx, "YieldIfNeeded"):
+                wx.YieldIfNeeded()
+        except Exception:
+            LOG.exception("Could not refresh Track Gloss DRC progress")
+
+    def close():
+        if dialog:
+            try:
+                dialog.Destroy()
+            except Exception:
+                LOG.exception("Could not close Track Gloss DRC progress")
+
+    return wait_callback, close
+
+
+def _validate_with_delayed_progress_dialog(
+        adapter, board, plan, *, force_native, skip_native, timeout_seconds,
+        operation_started, delay_seconds=PROGRESS_DIALOG_DELAY_SECONDS):
+    wait_callback, close = _drc_progress_controller(
+        operation_started, delay_seconds)
+
     try:
         # pcbnew SWIG snapshots must remain on KiCad's main thread. The native
-        # validator itself runs the expensive DRC work in hidden subprocesses.
-        try:
-            wx.BeginBusyCursor()
-            busy_started = True
-        except Exception:
-            LOG.exception("Could not display the Track Gloss DRC cursor")
+        # validator runs expensive work in hidden subprocesses and invokes the
+        # callback while waiting. This preserves UI responsiveness without
+        # moving any board object to a secondary Python thread.
         return adapter.validate_plan(
             board, plan, force_native=force_native,
-            skip_native=skip_native, timeout_seconds=timeout_seconds)
+            skip_native=skip_native, timeout_seconds=timeout_seconds,
+            wait_callback=wait_callback)
     finally:
-        if busy_started:
-            try:
-                wx.EndBusyCursor()
-            except Exception:
-                LOG.exception("Could not restore the Track Gloss DRC cursor")
+        close()
 
 
-def _validate_ladder_with_busy_cursor(adapter, board, plans, *, force_native,
-                                      skip_native, timeout_seconds):
-    busy_started = False
+def _validate_ladder_with_delayed_progress_dialog(
+        adapter, board, plans, *, force_native, skip_native, timeout_seconds,
+        operation_started, delay_seconds=PROGRESS_DIALOG_DELAY_SECONDS):
+    wait_callback, close = _drc_progress_controller(
+        operation_started, delay_seconds)
+
     try:
-        try:
-            wx.BeginBusyCursor()
-            busy_started = True
-        except Exception:
-            LOG.exception("Could not display the Track Gloss DRC cursor")
         return adapter.validate_plan_ladder(
             board, plans, force_native=force_native,
-            skip_native=skip_native, timeout_seconds=timeout_seconds)
+            skip_native=skip_native, timeout_seconds=timeout_seconds,
+            wait_callback=wait_callback)
     finally:
-        if busy_started:
-            try:
-                wx.EndBusyCursor()
-            except Exception:
-                LOG.exception("Could not restore the Track Gloss DRC cursor")
+        close()
 
 
 class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
@@ -441,15 +474,17 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                     plan_identity(conservative) != plan_identity(best)):
                 validation_plans.append(conservative)
         if len(validation_plans) > 1:
-            native_results = _validate_ladder_with_busy_cursor(
+            native_results = _validate_ladder_with_delayed_progress_dialog(
                 adapter, board, validation_plans, force_native=force_native,
-                skip_native=skip_native, timeout_seconds=drc_budget)
+                skip_native=skip_native, timeout_seconds=drc_budget,
+                operation_started=operation_started)
             native = native_results[0]
         else:
             native_results = None
-            native = _validate_with_busy_cursor(
+            native = _validate_with_delayed_progress_dialog(
                 adapter, board, best, force_native=force_native,
-                skip_native=skip_native, timeout_seconds=drc_budget)
+                skip_native=skip_native, timeout_seconds=drc_budget,
+                operation_started=operation_started)
 
         # Native DRC is the final authority. If the most aggressive refinement
         # is rejected, retain quality progressively: retry a one-pass,
@@ -498,10 +533,11 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                     plan_identity(conservative) != plan_identity(best)):
                 remaining = operation_deadline - time.monotonic()
                 if remaining > 0.0:
-                    fallback_native = _validate_with_busy_cursor(
+                    fallback_native = _validate_with_delayed_progress_dialog(
                         adapter, board, conservative,
                         force_native=force_native, skip_native=skip_native,
-                        timeout_seconds=remaining)
+                        timeout_seconds=remaining,
+                        operation_started=operation_started)
                     if fallback_native.allowed:
                         best = conservative
                         native = fallback_native

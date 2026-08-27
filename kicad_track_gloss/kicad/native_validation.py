@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -85,6 +85,24 @@ def _state_digest(adapter, board_path):
 def _copy_summary(summary):
     counts, fingerprints = summary
     return Counter(counts), Counter(fingerprints)
+
+
+def _wait_for_future(future, remaining, wait_callback=None):
+    """Wait for a subprocess result while allowing the KiCad UI to advance."""
+    if wait_callback is None:
+        return future.result(timeout=remaining())
+    while True:
+        wait_callback()
+        available = remaining()
+        poll_seconds = (0.05 if available is None else
+                        min(0.05, available))
+        try:
+            return future.result(timeout=poll_seconds)
+        except FutureTimeoutError:
+            # A completed worker may itself have raised TimeoutError. Do not
+            # confuse that failure with the short UI polling timeout.
+            if future.done():
+                return future.result()
 
 
 def _hidden_process_kwargs():
@@ -298,7 +316,8 @@ def _run_drc(adapter, board_path, report_path, timeout_seconds=None,
 
 
 def validate_native_plan_ladder(adapter, board, plans, *, force_native=False,
-                                skip_native=False, timeout_seconds=None):
+                                skip_native=False, timeout_seconds=None,
+                                wait_callback=None):
     """Validate up to two quality-ordered plans in one native DRC wave."""
     plans = list(plans)
     if not plans or len(plans) > 2:
@@ -420,8 +439,8 @@ def validate_native_plan_ladder(adapter, board, plans, *, force_native=False,
                 candidate_errors = {}
                 for index, candidate_path, _plan_path, _plan_key in pending:
                     try:
-                        candidate_snapshot_ms[index] = apply_futures[index].result(
-                            timeout=remaining())
+                        candidate_snapshot_ms[index] = _wait_for_future(
+                            apply_futures[index], remaining, wait_callback)
                         cancel_events[index] = threading.Event()
                         after_futures[index] = pool.submit(
                             timed_drc, candidate_path,
@@ -433,8 +452,8 @@ def validate_native_plan_ladder(adapter, board, plans, *, force_native=False,
                     before, before_fingerprints = _copy_summary(cached_before)
                     before_ms = 0.0
                 else:
-                    before_value, before_ms, _label = before_future.result(
-                        timeout=remaining())
+                    before_value, before_ms, _label = _wait_for_future(
+                        before_future, remaining, wait_callback)
                     before, before_fingerprints = before_value
                     _cache_put(_baseline_cache, baseline_key,
                                _copy_summary(before_value))
@@ -447,8 +466,8 @@ def validate_native_plan_ladder(adapter, board, plans, *, force_native=False,
                     try:
                         if index in candidate_errors:
                             raise candidate_errors[index]
-                        after_value, after_ms, _label = after_futures[index].result(
-                            timeout=remaining())
+                        after_value, after_ms, _label = _wait_for_future(
+                            after_futures[index], remaining, wait_callback)
                         after, after_fingerprints = after_value
                         timings["after_drc"] = after_ms
                         timings["total"] = (
@@ -509,11 +528,13 @@ def validate_native_plan_ladder(adapter, board, plans, *, force_native=False,
 
 
 def validate_native_plan(adapter, board, plan, *, force_native=False,
-                         skip_native=False, timeout_seconds=None):
+                         skip_native=False, timeout_seconds=None,
+                         wait_callback=None):
     """Reject one plan if KiCad reports any increased DRC category."""
     return validate_native_plan_ladder(
         adapter, board, [plan], force_native=force_native,
-        skip_native=skip_native, timeout_seconds=timeout_seconds)[0]
+        skip_native=skip_native, timeout_seconds=timeout_seconds,
+        wait_callback=wait_callback)[0]
 
 
 def _item_uuid(item):

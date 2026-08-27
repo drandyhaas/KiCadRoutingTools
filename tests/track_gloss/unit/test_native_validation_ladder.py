@@ -67,15 +67,17 @@ def test_native_ladder_validates_both_candidates_in_one_parallel_wave(
         lambda _before, after, _before_fp, _after_fp:
         ({"clearance": 1} if after.get("clearance") else {}))
 
+    waits = []
     results = native_validation.validate_native_plan_ladder(
         _FakeAdapter(), object(), [_plan("primary"), _plan("fallback")],
-        timeout_seconds=2.0)
+        timeout_seconds=2.0, wait_callback=lambda: waits.append(True))
 
     assert [result.allowed for result in results] == [False, True]
     assert all(result.validation_mode == "native_portfolio"
                for result in results)
     assert set(calls) == {"baseline", "candidate-0", "candidate-1"}
     assert results[0].before == results[1].before == {}
+    assert waits
 
 
 def test_native_ladder_cancels_fallback_when_primary_is_allowed(monkeypatch):

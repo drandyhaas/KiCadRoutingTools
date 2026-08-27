@@ -91,16 +91,20 @@ class BoardAdapter:
         return apply_plan(self, board, result, rollback_on_error)
 
     def validate_plan(self, board, result, *, force_native=False,
-                      skip_native=False, timeout_seconds=None):
+                      skip_native=False, timeout_seconds=None,
+                      wait_callback=None):
         return validate_native_plan(
             self, board, result, force_native=force_native,
-            skip_native=skip_native, timeout_seconds=timeout_seconds)
+            skip_native=skip_native, timeout_seconds=timeout_seconds,
+            wait_callback=wait_callback)
 
     def validate_plan_ladder(self, board, results, *, force_native=False,
-                             skip_native=False, timeout_seconds=None):
+                             skip_native=False, timeout_seconds=None,
+                             wait_callback=None):
         return validate_native_plan_ladder(
             self, board, results, force_native=force_native,
-            skip_native=skip_native, timeout_seconds=timeout_seconds)
+            skip_native=skip_native, timeout_seconds=timeout_seconds,
+            wait_callback=wait_callback)
 
     def _add_track(self, board, start, end, width, layer, net_id):
         return add_track(self, board, start, end, width, layer, net_id)
