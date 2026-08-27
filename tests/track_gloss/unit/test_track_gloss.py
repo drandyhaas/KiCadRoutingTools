@@ -1140,6 +1140,34 @@ def test_native_helpers_are_hidden_on_windows():
         assert kwargs == {}
 
 
+def test_native_drc_requests_all_track_errors(monkeypatch, tmp_path):
+    """Avoid nondeterministic per-track finding suppression in KiCad DRC."""
+    from kicad_track_gloss.kicad import native_validation
+
+    captured = {}
+
+    class Process:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        report = Path(command[command.index("--output") + 1])
+        report.write_text(
+            '{"violations":[],"unconnected_items":[]}', encoding="utf-8")
+        return Process()
+
+    monkeypatch.setattr(native_validation, "_kicad_cli",
+                        lambda _adapter: Path("kicad-cli"))
+    monkeypatch.setattr(native_validation.subprocess, "run", fake_run)
+
+    native_validation._run_drc(
+        object(), tmp_path / "board.kicad_pcb", tmp_path / "report.json")
+
+    assert "--all-track-errors" in captured["command"]
+
+
 def test_native_candidate_helper_supports_direct_script_entry_point():
     """Reproduce the exact subprocess import mode used for candidate boards."""
     import subprocess

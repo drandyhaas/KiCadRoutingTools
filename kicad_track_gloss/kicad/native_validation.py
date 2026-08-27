@@ -245,6 +245,12 @@ def _run_drc(adapter, board_path, report_path, timeout_seconds=None):
     command = [
         str(_kicad_cli(adapter)), "pcb", "drc", "--format", "json",
         "--severity-all", "--units", "mm", "--refill-zones",
+        # Without this flag KiCad suppresses repeated findings per track.  DRC
+        # providers run concurrently, so the retained representative can vary
+        # between two identical board snapshots and look like a regression.
+        # Complete track findings make geometric fingerprints deterministic;
+        # unconnected-items remain intentionally compared by count.
+        "--all-track-errors",
         "--output", str(report_path), str(board_path),
     ]
     process = subprocess.run(
