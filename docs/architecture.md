@@ -73,7 +73,7 @@ serializable model records and configuration values.
   diagnostic UI.
 - `kicad/adapter.py`: narrow public facade used by actions and CLI.
 
-`action_plugin.py` owns the one-click lifecycle and delayed progress dialog but
+`action_plugin.py` owns the one-click lifecycle and delayed busy cursor but
 does not contain optimization geometry. `configuration.py` validates packaged
 defaults and maintains process-local session overrides. `version.py` is the
 single source of version truth for UI and packaging.

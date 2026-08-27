@@ -69,17 +69,15 @@ the normal action, then opens a report with three tabs:
 The former success footer about applying the board and using Undo is omitted;
 the saved-length result is the prominent outcome.
 
-## Responsiveness and progress
+## Responsiveness and wait cursor
 
 Operations completing in less than three seconds do not display anything. If
-planning is still active after three seconds, a progress dialog reports the
-current convergence pass, maximum pass count, percentage, and cumulative
-copper gain. If the three-second threshold is crossed during native DRC, the
-same dialog uses an indeterminate DRC phase instead; the plugin never replaces
-it with an immediate busy cursor. **Cancel** cooperatively stops planning and
-parallel workers; no partial result is applied after an explicit cancellation.
-Only the API-neutral planner may run off the main thread. All `pcbnew` reads
-and live-board changes remain on KiCad's main thread.
+the complete operation is still active after that cumulative delay, KiCad uses
+only its non-modal busy cursor. Track Gloss does not create a progress window:
+this avoids changing window focus, hiding current dialogs, or moving a modal
+window to the foreground. The same delayed cursor covers planning and native
+DRC. Only the API-neutral planner may run off the main thread. All `pcbnew`
+reads and live-board changes remain on KiCad's main thread.
 
 KiCad's native DRC runs in separate hidden processes on private board copies.
 Process startup, zone refill, and full-board DRC can take seconds even when the

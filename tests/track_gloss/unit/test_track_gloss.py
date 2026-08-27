@@ -678,11 +678,10 @@ def test_action_plugin_is_silent_and_has_no_file_roundtrip():
     assert 'label="Copy"' in report_source
     for french_label in ("Copier", "Résultat", "Détails"):
         assert french_label not in source
-    assert "PROGRESS_DIALOG_DELAY_SECONDS = 3.0" in source
-    assert "wx.ProgressDialog" in source
-    assert "BeginBusyCursor" not in source
-    assert "Native KiCad DRC validation..." in source
-    assert '"PD_CAN_ABORT"' in source
+    assert "BUSY_CURSOR_DELAY_SECONDS = 3.0" in source
+    assert "wx.ProgressDialog" not in source
+    assert "BeginBusyCursor" in source
+    assert "EndBusyCursor" in source
     assert "Use KiCad Undo to revert it." not in source
     assert "Result: modification applied to the current board." not in source
 
@@ -704,29 +703,8 @@ def test_normal_action_bells_once_only_on_noop():
     fake_pcbnew.PCB_VIA = FakeVia
     fake_wx = types.ModuleType("wx")
     fake_wx.Bell = lambda: calls.append("bell")
-    fake_wx.PD_APP_MODAL = 1
-    fake_wx.PD_CAN_ABORT = 2
-    fake_wx.PD_ELAPSED_TIME = 4
-    fake_wx.PD_REMAINING_TIME = 8
-    fake_wx.PD_SMOOTH = 16
-    fake_wx.abort_progress = False
-
-    class FakeProgressDialog:
-        def __init__(self, *_args, **_kwargs):
-            calls.append("progress-create")
-
-        def Update(self, _value, _message):
-            calls.append("progress-update")
-            return not fake_wx.abort_progress, False
-
-        def Pulse(self, _message):
-            calls.append("progress-pulse")
-            return True, False
-
-        def Destroy(self):
-            calls.append("progress-destroy")
-
-    fake_wx.ProgressDialog = FakeProgressDialog
+    fake_wx.BeginBusyCursor = lambda: calls.append("busy-begin")
+    fake_wx.EndBusyCursor = lambda: calls.append("busy-end")
     fake_wx.YieldIfNeeded = lambda: None
     previous_pcbnew = sys.modules.get("pcbnew")
     previous_wx = sys.modules.get("wx")
@@ -799,8 +777,8 @@ def test_normal_action_bells_once_only_on_noop():
         assert settings == ["settings"]
         assert calls == ["bell"]
 
-        assert module._plan_with_progress_dialog(
-            lambda _observer, _cancel: "fast", 4,
+        assert module._run_with_delayed_busy_cursor(
+            lambda: "fast",
             delay_seconds=0.01) == "fast"
         assert calls == ["bell"]
 
@@ -808,39 +786,37 @@ def test_normal_action_bells_once_only_on_noop():
             time.sleep(0.08)
             return "slow"
 
-        assert module._plan_with_progress_dialog(
-            lambda _observer, _cancel: slow_result(), 4,
+        assert module._run_with_delayed_busy_cursor(
+            slow_result,
             delay_seconds=0.001) == "slow"
-        assert "progress-create" in calls
-        assert calls[-1] == "progress-destroy"
+        assert calls[-2:] == ["busy-begin", "busy-end"]
 
         def slow_failure():
             time.sleep(0.08)
             raise RuntimeError("planning failed")
 
         try:
-            module._plan_with_progress_dialog(
-                lambda _observer, _cancel: slow_failure(), 4,
+            module._run_with_delayed_busy_cursor(
+                slow_failure,
                 delay_seconds=0.001)
         except RuntimeError as error:
             assert str(error) == "planning failed"
         else:
             raise AssertionError("the planning error was not propagated")
-        assert calls[-1] == "progress-destroy"
+        assert calls[-2:] == ["busy-begin", "busy-end"]
 
         before = list(calls)
-        wait_callback, close_progress = module._drc_progress_controller(
+        wait_callback, close_cursor = module._busy_cursor_controller(
             time.monotonic(), delay_seconds=10.0)
         wait_callback()
-        close_progress()
+        close_cursor()
         assert calls == before
 
-        wait_callback, close_progress = module._drc_progress_controller(
+        wait_callback, close_cursor = module._busy_cursor_controller(
             time.monotonic() - 4.0, delay_seconds=3.0)
         wait_callback()
-        close_progress()
-        assert calls[-3:] == [
-            "progress-create", "progress-pulse", "progress-destroy"]
+        close_cursor()
+        assert calls[-2:] == ["busy-begin", "busy-end"]
 
         salvage_segments = []
         salvage_additions = []
@@ -881,17 +857,6 @@ def test_normal_action_bells_once_only_on_noop():
         assert attempts == 2
         assert not deadline_reached
 
-        fake_wx.abort_progress = True
-
-        def cancellable(_observer, cancel_check):
-            while not cancel_check():
-                time.sleep(0.005)
-            raise module.PlanningCancelled("cancelled")
-
-        with pytest.raises(module.PlanningCancelled):
-            module._plan_with_progress_dialog(
-                cancellable, 4, delay_seconds=0.001)
-        assert calls[-1] == "progress-destroy"
     finally:
         sys.modules.pop("kicad_track_gloss.action_plugin", None)
         if previous_pcbnew is None:
