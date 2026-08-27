@@ -16,6 +16,7 @@ from .configuration import get_session_config
 from .engine import (find_pad_terminal_targets, find_track_terminal_vertices,
                      generate_conservative_candidate,
                      generate_converged_plan, plan_identity, PlanningCancelled,
+                     plan_net_gain, plan_net_ids, subset_plan_by_nets,
                      summarize_plan)
 from .engine.model import segment_key
 from .kicad import BoardAdapter
@@ -271,6 +272,77 @@ def _validate_ladder_with_delayed_progress_dialog(
         close()
 
 
+def _maximize_safe_native_subset(
+        adapter, board, model, eligible_keys, source_plan, *, force_native,
+        skip_native, operation_started, operation_deadline):
+    """Greedily retain the largest gain-ordered DRC-safe net subset.
+
+    Rejected chunks are bisected. Every accepted candidate becomes the new
+    base immediately, so expiration returns useful work already approved by
+    KiCad instead of reverting to a global no-op.
+    """
+    ranked_nets = tuple(sorted(
+        plan_net_ids(model, source_plan),
+        key=lambda net_id: (-round(
+            plan_net_gain(model, source_plan, net_id), 9), net_id)))
+    if len(ranked_nets) < 2:
+        return None, None, 0, False
+
+    base_nets = frozenset()
+    best_plan = None
+    best_native = None
+    attempts = 0
+    deadline_reached = False
+    pending = [ranked_nets]
+    # The caller has already validated and rejected the complete plan.
+    rejected_sets = {frozenset(ranked_nets)}
+
+    while pending:
+        if time.monotonic() >= operation_deadline:
+            deadline_reached = True
+            break
+        chunk = pending.pop(0)
+        candidate_nets = base_nets.union(chunk)
+        rejected = candidate_nets in rejected_sets
+        infrastructure_error = False
+        if not rejected:
+            try:
+                candidate = subset_plan_by_nets(
+                    model, eligible_keys, source_plan, candidate_nets)
+            except ValueError:
+                rejected = True
+            else:
+                remaining = operation_deadline - time.monotonic()
+                if remaining <= 0.0:
+                    deadline_reached = True
+                    break
+                candidate_native = _validate_with_delayed_progress_dialog(
+                    adapter, board, candidate, force_native=force_native,
+                    skip_native=skip_native, timeout_seconds=remaining,
+                    operation_started=operation_started)
+                attempts += 1
+                if candidate_native.allowed:
+                    base_nets = candidate_nets
+                    best_plan = candidate
+                    best_native = candidate_native
+                    continue
+                rejected_sets.add(candidate_nets)
+                rejected = True
+                if candidate_native.error:
+                    infrastructure_error = (
+                        candidate_native.validation_mode != "native_timeout")
+                    deadline_reached = not infrastructure_error
+        if infrastructure_error or deadline_reached:
+            break
+        if rejected and len(chunk) > 1:
+            midpoint = len(chunk) // 2
+            # Gain-ranked half first. The second half remains available and
+            # can be added later to whatever safe base was already retained.
+            pending[0:0] = [chunk[:midpoint], chunk[midpoint:]]
+
+    return best_plan, best_native, attempts, deadline_reached
+
+
 class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
     def defaults(self):
         self.name = "KiCad Track Gloss"
@@ -432,6 +504,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                       ("yes" if best.fixed_point else "no"))
         report.append("Connected chains considered: " +
                       str(best.chains_considered))
+        aggressive_plan = best
         for warning in best.warnings:
             if "time budget" in warning.lower():
                 report.append("Planning limit: " + warning)
@@ -492,6 +565,9 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         # local search moved too far. The fallback still receives the complete
         # native DRC gate and remains inside the same interactive time budget.
         fallback_used = False
+        partial_subset_used = False
+        partial_subset_attempts = 0
+        partial_subset_deadline = False
         primary_native = native
         if native_results is not None and not native.allowed:
             fallback_native = native_results[1]
@@ -544,9 +620,25 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                         fallback_used = True
                     elif fallback_native.error:
                         native = fallback_native
+        if (not native.allowed and not native.error and
+                native.validation_mode != "native_timeout" and
+                time.monotonic() < operation_deadline and
+                len(plan_net_ids(snapshot.model, aggressive_plan)) > 1):
+            (partial_plan, partial_native, partial_subset_attempts,
+             partial_subset_deadline) = _maximize_safe_native_subset(
+                adapter, board, snapshot.model, snapshot.eligible_keys,
+                aggressive_plan, force_native=force_native,
+                skip_native=skip_native,
+                operation_started=operation_started,
+                operation_deadline=operation_deadline)
+            if (partial_plan is not None and partial_native is not None and
+                    partial_native.allowed):
+                best = partial_plan
+                native = partial_native
+                partial_subset_used = True
         timings["native_drc_gate"] = (
             time.monotonic() - stage_started) * 1000.0
-        if fallback_used:
+        if fallback_used or partial_subset_used:
             for key, value in primary_native.timings_ms.items():
                 timings["native_primary_" + key] = value
         for key, value in native.timings_ms.items():
@@ -573,6 +665,27 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             report.append(
                 "Candidate ladder: aggressive plan rejected; conservative "
                 "candidate accepted by native KiCad DRC.")
+        if partial_subset_used:
+            retained_nets = plan_net_ids(snapshot.model, best)
+            total_nets = plan_net_ids(snapshot.model, aggressive_plan)
+            report.append(
+                "Native DRC salvage: retained {} of {} modified net(s) after "
+                "{} subset validation(s).".format(
+                    len(retained_nets), len(total_nets),
+                    partial_subset_attempts))
+            omitted_ids = set(total_nets) - set(retained_nets)
+            omitted_names = sorted({
+                segment.net_name or "net {}".format(segment.net_id)
+                for segment in snapshot.model.segments
+                if segment.net_id in omitted_ids})
+            if omitted_names:
+                report.append(
+                    "Not retained (rejected or unvalidated before the time "
+                    "budget): " + ", ".join(omitted_names))
+            if partial_subset_deadline:
+                report.append(
+                    "Native DRC salvage stopped at the interactive time "
+                    "budget; the best already validated subset was retained.")
         if native.validation_mode == "geometric_removal_fast_path":
             report.append(
                 "Safety gate: proven removal-only geometry; native DRC not required.")

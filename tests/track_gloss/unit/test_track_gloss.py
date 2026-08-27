@@ -842,6 +842,45 @@ def test_normal_action_bells_once_only_on_noop():
         assert calls[-3:] == [
             "progress-create", "progress-pulse", "progress-destroy"]
 
+        salvage_segments = []
+        salvage_additions = []
+        salvage_keys = set()
+        for net_id in range(1, 5):
+            y = float(net_id * 10)
+            first = Segment(0, y, 1, y, 0.2, 0, net_id,
+                            "salvage-{}-a".format(net_id))
+            second = Segment(1, y, 2, y, 0.2, 0, net_id,
+                             "salvage-{}-b".format(net_id))
+            salvage_segments.extend((first, second))
+            salvage_keys.update((first.uuid, second.uuid))
+            salvage_additions.append(AddedSegment(
+                (0, y), (2, y), 0.2, 0, net_id))
+        salvage_model = BoardModel(salvage_segments)
+        salvage_source = GlossResult(
+            remove_keys=sorted(salvage_keys),
+            additions=salvage_additions, saved_mm=0.0,
+            convergence_passes=1, fixed_point=True)
+
+        class SalvageAdapter:
+            def validate_plan(self, _board, candidate, **kwargs):
+                kwargs["wait_callback"]()
+                allowed = all(item.net_id != 4
+                              for item in candidate.additions)
+                return types.SimpleNamespace(
+                    allowed=allowed, error="", timings_ms={},
+                    validation_mode="native_parallel")
+
+        salvaged, salvaged_native, attempts, deadline_reached = \
+            module._maximize_safe_native_subset(
+                SalvageAdapter(), object(), salvage_model, salvage_keys,
+                salvage_source, force_native=False, skip_native=False,
+                operation_started=time.monotonic(),
+                operation_deadline=time.monotonic() + 5.0)
+        assert salvaged_native.allowed
+        assert {item.net_id for item in salvaged.additions} == {1, 2, 3}
+        assert attempts == 2
+        assert not deadline_reached
+
         fake_wx.abort_progress = True
 
         def cancellable(_observer, cancel_check):

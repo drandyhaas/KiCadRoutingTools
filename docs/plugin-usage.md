@@ -71,18 +71,26 @@ the saved-length result is the prominent outcome.
 
 ## Responsiveness and progress
 
-Calculations completing in less than three seconds do not display anything. If
+Operations completing in less than three seconds do not display anything. If
 planning is still active after three seconds, a progress dialog reports the
 current convergence pass, maximum pass count, percentage, and cumulative
-copper gain. **Cancel** cooperatively stops in-process work and parallel
-workers; no partial result is applied. Only the API-neutral planner may run off
-the main thread. All `pcbnew` reads and live-board changes remain on KiCad's
-main thread.
+copper gain. If the three-second threshold is crossed during native DRC, the
+same dialog uses an indeterminate DRC phase instead; the plugin never replaces
+it with an immediate busy cursor. **Cancel** cooperatively stops planning and
+parallel workers; no partial result is applied after an explicit cancellation.
+Only the API-neutral planner may run off the main thread. All `pcbnew` reads
+and live-board changes remain on KiCad's main thread.
 
 KiCad's native DRC runs in separate hidden processes on private board copies.
 Process startup, zone refill, and full-board DRC can take seconds even when the
 geometric planning itself takes only milliseconds. See
 [Safety and native DRC](safety-and-drc.md).
+
+For a multi-net selection, a native DRC rejection does not discard every
+improvement. Track Gloss bisects the rejected net set in gain order, retains
+each combination already accepted by KiCad, and applies the best validated
+subset available when the interactive time budget is reached. A problematic
+net therefore remains unchanged without blocking unrelated safe nets.
 
 ## Protected and unsupported operations
 
