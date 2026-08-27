@@ -12,8 +12,8 @@ in-memory session override and never writes the file.
 | `convergence.interactive_max_passes` | `4` | integer >= 1 | Plugin, internal | Maximum global reconciliation passes for an interactive run. |
 | `convergence.interactive_group_max_passes` | `2` | integer >= 1 | Plugin, internal | Maximum local passes per independent group. |
 | `convergence.cli_max_passes` | `16` | integer >= 1 | CLI | Default changed-pass convergence guard; overridden by `--max-passes`. |
-| `timing.interactive_total_time_budget_seconds` | `10.0` | seconds > 0 | Plugin, session-editable | Bounds the complete interactive operation, including native validation. |
-| `timing.interactive_planning_time_budget_seconds` | `5.0` | seconds > 0 | Plugin, session-editable | Bounds candidate planning before native DRC. It cannot exceed the total budget. |
+| `timing.interactive_total_time_budget_seconds` | `20.0` | seconds > 0 | Plugin, session-editable | Bounds the complete interactive operation, including native validation. Long planning displays a cancellable progress dialog after three seconds. |
+| `timing.interactive_planning_time_budget_seconds` | `10.0` | seconds > 0 | Plugin, session-editable | Bounds candidate planning before native DRC. It cannot exceed the total budget. |
 | `timing.interactive_cancellation_grace_seconds` | `1.0` | seconds >= 0 | Plugin and worker cancellation | Time allowed for cooperative planner/worker shutdown. |
 | `timing.cli_total_time_budget_seconds` | `null` | seconds > 0 or `null` | CLI | `null` means unlimited offline evaluation; overridden by `--time-budget`. |
 | `safety.kicad_drc_for_single_track` | `true` | boolean | Plugin, session-editable | Enables native before/after KiCad DRC for a one-connection selection. Disabling it improves latency but removes this gate. |

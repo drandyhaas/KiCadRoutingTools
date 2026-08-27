@@ -15,8 +15,8 @@ def test_current_internal_policy_preserves_release_behavior():
     assert CONFIG.convergence.interactive_max_passes == 4
     assert CONFIG.convergence.interactive_group_max_passes == 2
     assert CONFIG.convergence.cli_max_passes == 16
-    assert CONFIG.timing.interactive_total_time_budget_seconds == 10.0
-    assert CONFIG.timing.interactive_planning_time_budget_seconds == 5.0
+    assert CONFIG.timing.interactive_total_time_budget_seconds == 20.0
+    assert CONFIG.timing.interactive_planning_time_budget_seconds == 10.0
     assert CONFIG.timing.interactive_cancellation_grace_seconds == 1.0
     assert CONFIG.timing.cli_total_time_budget_seconds is None
     assert CONFIG.safety.kicad_drc_for_single_track is True
@@ -60,7 +60,7 @@ def test_native_drc_policy_rejects_conflicting_modes():
 def test_internal_policy_rejects_planning_budget_above_total(tmp_path):
     config_path = Path("kicad_track_gloss/internal_config.json")
     document = json.loads(config_path.read_text(encoding="utf-8"))
-    document["timing"]["interactive_planning_time_budget_seconds"] = 11.0
+    document["timing"]["interactive_planning_time_budget_seconds"] = 21.0
     path = tmp_path / "policy.json"
     path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(ValueError, match="cannot exceed"):

@@ -69,12 +69,14 @@ the normal action, then opens a report with three tabs:
 The former success footer about applying the board and using Undo is omitted;
 the saved-length result is the prominent outcome.
 
-## Responsiveness and the busy cursor
+## Responsiveness and progress
 
-Calculations completing in less than three seconds do not change the cursor.
-If planning is still active after three seconds, the editor displays its busy
-cursor until planning completes or stops. Only the API-neutral planner may run
-off the main thread. All `pcbnew` reads and live-board changes remain on KiCad's
+Calculations completing in less than three seconds do not display anything. If
+planning is still active after three seconds, a progress dialog reports the
+current convergence pass, maximum pass count, percentage, and cumulative
+copper gain. **Cancel** cooperatively stops in-process work and parallel
+workers; no partial result is applied. Only the API-neutral planner may run off
+the main thread. All `pcbnew` reads and live-board changes remain on KiCad's
 main thread.
 
 KiCad's native DRC runs in separate hidden processes on private board copies.

@@ -206,12 +206,16 @@ class ParallelPlanJob:
         self.processes = processes
         self.outputs = outputs
 
-    def collect(self, timeout_seconds=None, cancellation_grace_seconds=1.0):
+    def collect(self, timeout_seconds=None, cancellation_grace_seconds=1.0,
+                cancel_check=None):
         deadline = (None if timeout_seconds is None else
                     time.monotonic() + max(0.0, float(timeout_seconds)))
         timed_out = False
         try:
             while any(process.poll() is None for process in self.processes):
+                if cancel_check is not None and cancel_check():
+                    timed_out = True
+                    break
                 if deadline is not None and time.monotonic() >= deadline:
                     timed_out = True
                     break
@@ -327,10 +331,12 @@ def start_parallel_group_plans(model, group_items, kwargs, max_workers=0,
 def run_parallel_group_plans(model, group_items, kwargs, max_workers=0,
                              converge=False, max_passes=6,
                              timeout_seconds=None,
-                             cancellation_grace_seconds=1.0):
+                             cancellation_grace_seconds=1.0,
+                             cancel_check=None):
     job = start_parallel_group_plans(
         model, group_items, kwargs, max_workers, converge, max_passes)
-    return (job.collect(timeout_seconds, cancellation_grace_seconds)
+    return (job.collect(timeout_seconds, cancellation_grace_seconds,
+                        cancel_check)
             if job is not None else None)
 
 

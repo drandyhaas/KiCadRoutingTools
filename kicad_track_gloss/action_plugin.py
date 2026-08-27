@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import threading
 import time
 import traceback
@@ -14,7 +15,8 @@ import wx
 from .configuration import get_session_config
 from .engine import (find_pad_terminal_targets, find_track_terminal_vertices,
                      generate_conservative_candidate,
-                     generate_converged_plan, plan_identity, summarize_plan)
+                     generate_converged_plan, plan_identity, PlanningCancelled,
+                     summarize_plan)
 from .engine.model import segment_key
 from .kicad import BoardAdapter
 from .kicad.diagnostics import append_plan_statistics, append_search_statistics
@@ -37,8 +39,8 @@ ALLOW_EQUAL_LENGTH_SIMPLIFICATION = True
 # Interactive work must remain responsive. Independent net/layer groups are
 # converged inside parallel workers; these passes are only global reconciliation
 # rounds. A safe partial result is applied if this guard is reached.
-BUSY_CURSOR_DELAY_SECONDS = 3.0
-BUSY_CURSOR_POLL_SECONDS = 0.05
+PROGRESS_DIALOG_DELAY_SECONDS = 3.0
+PROGRESS_DIALOG_POLL_SECONDS = 0.05
 
 
 class NoTrackSelection(ValueError):
@@ -50,16 +52,23 @@ def _show_session_settings():
     return show_session_settings()
 
 
-def _plan_with_delayed_busy_cursor(function, delay_seconds=None):
-    """Run API-neutral planning off-thread and show BusyCursor only if slow."""
-    delay = (BUSY_CURSOR_DELAY_SECONDS if delay_seconds is None
+def _plan_with_progress_dialog(function, max_passes, delay_seconds=None):
+    """Run planning off-thread with delayed, cancellable pass progress."""
+    delay = (PROGRESS_DIALOG_DELAY_SECONDS if delay_seconds is None
              else max(0.0, float(delay_seconds)))
     completed = threading.Event()
+    cancelled = threading.Event()
+    states = queue.SimpleQueue()
     outcome = {}
+
+    def observe(state):
+        states.put(dict(state))
+        if cancelled.is_set():
+            raise PlanningCancelled("Track Gloss was cancelled by the user")
 
     def worker():
         try:
-            outcome["result"] = function()
+            outcome["result"] = function(observe, cancelled.is_set)
         except BaseException as error:
             outcome["error"] = error
             outcome["traceback"] = error.__traceback__
@@ -69,25 +78,64 @@ def _plan_with_delayed_busy_cursor(function, delay_seconds=None):
     thread = threading.Thread(
         target=worker, name="KiCadTrackGlossPlanner", daemon=True)
     started = time.monotonic()
-    busy_started = False
+    dialog = None
+    latest = {"pass": 0, "cumulative_gain_mm": 0.0,
+              "event": "initial"}
     thread.start()
     try:
-        while not completed.wait(BUSY_CURSOR_POLL_SECONDS):
-            if not busy_started and time.monotonic() - started >= delay:
+        while not completed.wait(PROGRESS_DIALOG_POLL_SECONDS):
+            while not states.empty():
+                latest = states.get()
+            if dialog is None and time.monotonic() - started >= delay:
                 try:
-                    wx.BeginBusyCursor()
-                    busy_started = True
+                    style = 0
+                    for name in ("PD_APP_MODAL", "PD_CAN_ABORT",
+                                 "PD_ELAPSED_TIME", "PD_REMAINING_TIME",
+                                 "PD_SMOOTH"):
+                        style |= getattr(wx, name, 0)
+                    dialog = wx.ProgressDialog(
+                        "KiCad Track Gloss",
+                        "Preparing routing optimization...",
+                        maximum=max(1, int(max_passes)), parent=None,
+                        style=style)
                 except Exception:
-                    LOG.exception("Could not display the Track Gloss busy cursor")
+                    LOG.exception(
+                        "Could not display the Track Gloss progress dialog")
+                    dialog = False
+            if dialog:
+                completed_passes = min(
+                    max(0, int(latest.get("pass", 0))),
+                    max(1, int(max_passes)))
+                pass_number = min(completed_passes + 1,
+                                  max(1, int(max_passes)))
+                percent = int(round(
+                    100.0 * completed_passes / max(1, int(max_passes))))
+                message = (
+                    "Convergence pass {}/{} ({}%)\n"
+                    "Copper saved: {:.6f} mm".format(
+                        pass_number, max_passes, percent,
+                        float(latest.get("cumulative_gain_mm", 0.0))))
+                try:
+                    response = dialog.Update(completed_passes, message)
+                    keep_going = (response[0] if isinstance(response, tuple)
+                                  else bool(response))
+                    if not keep_going:
+                        cancelled.set()
+                    if hasattr(wx, "YieldIfNeeded"):
+                        wx.YieldIfNeeded()
+                except Exception:
+                    LOG.exception("Could not update Track Gloss progress")
         if "error" in outcome:
             raise outcome["error"].with_traceback(outcome["traceback"])
+        if cancelled.is_set():
+            raise PlanningCancelled("Track Gloss was cancelled by the user")
         return outcome["result"]
     finally:
-        if busy_started:
+        if dialog:
             try:
-                wx.EndBusyCursor()
+                dialog.Destroy()
             except Exception:
-                LOG.exception("Could not restore the Track Gloss cursor")
+                LOG.exception("Could not close Track Gloss progress dialog")
 
 
 def _selection_counts(board):
@@ -204,7 +252,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             except Exception:
                 LOG.exception("Could not display the Track Gloss error report")
         else:
-            if not changed:
+            if changed is False:
                 _warning_bell()
 
     def _run(self, report, diagnostic=False):
@@ -296,19 +344,32 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             operation_deadline,
             stage_started +
             config.timing.interactive_planning_time_budget_seconds)
-        best = _plan_with_delayed_busy_cursor(lambda: generate_converged_plan(
-            snapshot.model, snapshot.eligible_keys,
-            max_passes=config.convergence.interactive_max_passes,
-            return_partial_on_limit=True,
-            group_max_passes=config.convergence.interactive_group_max_passes,
-            min_gain=config.gloss.minimum_saved_length_mm,
-            allow_equal_length_simpler=ALLOW_EQUAL_LENGTH_SIMPLIFICATION,
-            clearance=snapshot.minimum_clearance,
-            collect_statistics=diagnostic,
-            parallel=True,
-            deadline=planning_deadline,
-            cancellation_grace_seconds=(
-                config.timing.interactive_cancellation_grace_seconds)))
+        try:
+            best = _plan_with_progress_dialog(
+                lambda observer, cancel_check: generate_converged_plan(
+                    snapshot.model, snapshot.eligible_keys,
+                    max_passes=config.convergence.interactive_max_passes,
+                    return_partial_on_limit=True,
+                    group_max_passes=(
+                        config.convergence.interactive_group_max_passes),
+                    min_gain=config.gloss.minimum_saved_length_mm,
+                    allow_equal_length_simpler=(
+                        ALLOW_EQUAL_LENGTH_SIMPLIFICATION),
+                    clearance=snapshot.minimum_clearance,
+                    collect_statistics=diagnostic,
+                    parallel=True,
+                    deadline=planning_deadline,
+                    pass_observer=observer,
+                    cancel_check=cancel_check,
+                    cancellation_grace_seconds=(
+                        config.timing.interactive_cancellation_grace_seconds)),
+                config.convergence.interactive_max_passes)
+        except PlanningCancelled:
+            report.append("Result: cancelled by the user; board unchanged.")
+            if diagnostic:
+                _append_performance_timings(
+                    report, timings, operation_started)
+            return None
         timings["planning"] = (
             time.monotonic() - stage_started) * 1000.0
         report.append("Convergence passes: " + str(best.convergence_passes))
@@ -366,16 +427,25 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                 native.validation_mode != "native_timeout" and
                 time.monotonic() < planning_deadline):
             try:
-                conservative = _plan_with_delayed_busy_cursor(
-                    lambda: generate_conservative_candidate(
+                conservative = _plan_with_progress_dialog(
+                    lambda observer, cancel_check:
+                    generate_conservative_candidate(
                         snapshot.model, snapshot.eligible_keys,
                         min_gain=config.gloss.minimum_saved_length_mm,
                         clearance=snapshot.minimum_clearance,
                         collect_statistics=diagnostic,
+                        pass_observer=observer,
+                        cancel_check=cancel_check,
                         deadline=planning_deadline,
                         cancellation_grace_seconds=(
                             config.timing.interactive_cancellation_grace_seconds)),
-                    delay_seconds=0.0)
+                    1)
+            except PlanningCancelled:
+                report.append("Result: cancelled by the user; board unchanged.")
+                if diagnostic:
+                    _append_performance_timings(
+                        report, timings, operation_started)
+                return None
             except Exception:
                 LOG.exception("Could not build the conservative DRC fallback")
                 conservative = None
@@ -488,7 +558,7 @@ class KiCadTrackGlossDiagnosticPlugin(KiCadTrackGlossPlugin):
                 traceback.format_exc(),
             ])
         else:
-            if not changed:
+            if changed is False:
                 _warning_bell()
         try:
             _show_diagnostic_report("KiCad Track Gloss — Diagnostic", report)

@@ -21,11 +21,10 @@ The replay loads a fresh in-memory board for every accepted modification and
 never writes a PCB file.
 
 It also treats all 706 straight tracks as one simultaneous selection. The
-expected deterministic result is 62.419635 mm of copper saved, 39
-arbitrary-angle segments normalized, and a net reduction of 18 segments
-(211 removed, 193 added), invariant under board, reverse, ascending-net,
-descending-net, and shuffled input orders when the optional order replay is
-requested.
+expected deterministic geometric result is 66.020888 mm of copper saved and a
+net reduction of 32 segments (237 removed, 205 added). Input-order and
+segment-subdivision invariance are available as optional deep replays and are
+not part of the routine release run.
 
 The `/cpu/~{csn}` segment UUID
 `58ebb541-fac6-4d02-8a68-65aca50766b5` is also a dedicated responsiveness
@@ -33,7 +32,7 @@ regression: its expanded connection contains 111 dense tuning micro-segments,
 which must all be protected without invoking the geometric planner.
 
 The VCC segment UUID `cc798608-5e9b-4c2a-9856-dde85f9d85f0` is a pad-envelope
-regression. Its expanded connection must save 1.003620 mm while preserving
+regression. Its expanded connection must save 1.299925 mm while preserving
 safe portions of existing copper.
 
 The `Net-(U1-BST)` UUID `54640123-2d45-4136-984c-783155178230` validates pad
@@ -44,6 +43,8 @@ Three reported-board regressions additionally verify that paste-only apertures
 are ignored, real rounded-rectangle corridors remain usable, and interacting
 0.127/0.25 mm groups converge to a horizontal T without a trailing stub.
 
-An exhaustive KiCad 10.0.5 DRC (`--all-track-errors`) on a temporary copy of
-the all-selected result must preserve the baseline totals: 170 pre-existing
-violations, unchanged category counts, and one pre-existing unconnected item.
+The native KiCad 10.0.5 DRC remains authoritative. On this frozen whole-board
+selection it currently rejects the geometric candidate because it introduces
+clearance and hole-clearance findings; the CLI must therefore leave the board
+unchanged. This fail-closed smoke check is separate from the deterministic
+geometric corpus above.

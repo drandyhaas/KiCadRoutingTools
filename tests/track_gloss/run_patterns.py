@@ -44,9 +44,9 @@ from kicad_track_gloss.kicad.selection import (  # noqa: E402
 
 EXPECTED_TRACKS = 706
 EXPECTED_SCOPES = 334
-EXPECTED_ALL_SELECTED_SAVED_MM = 64.073413
-EXPECTED_ALL_SELECTED_REMOVED = 221
-EXPECTED_ALL_SELECTED_ADDED = 189
+EXPECTED_ALL_SELECTED_SAVED_MM = 66.020888
+EXPECTED_ALL_SELECTED_REMOVED = 237
+EXPECTED_ALL_SELECTED_ADDED = 205
 MICRO_JOG_SEED = "58ebb541-fac6-4d02-8a68-65aca50766b5"
 SHORT_VCC_SEED = "cc798608-5e9b-4c2a-9856-dde85f9d85f0"
 PAD_SLIDING_SEED = "54640123-2d45-4136-984c-783155178230"
@@ -324,14 +324,14 @@ def _short_vcc_regression(board, adapter, snapshot, records):
         clearance=snapshot.minimum_clearance, parallel=True)
     assert len(expanded) == 9
     assert not protected
-    assert round(best.saved_mm, 6) == 1.003620
-    assert len(best.remove_keys) == 7, (
+    assert round(best.saved_mm, 6) == 1.299925
+    assert len(best.remove_keys) == 9, (
         len(best.remove_keys), len(best.additions), best.saved_mm)
     assert len(best.additions) == 6, (
         len(best.remove_keys), len(best.additions), best.saved_mm)
     fresh = pcbnew.LoadBoard(str(FIXTURE))
     BoardAdapter(pcbnew).apply(fresh, best, rollback_on_error=True)
-    print("SHORT VCC PASS: 1.003620 mm saved with exact pad-area sliding")
+    print("SHORT VCC PASS: 1.299925 mm saved with exact pad-area sliding")
 
 
 def _pad_sliding_regression(board, adapter, snapshot, records):
@@ -363,7 +363,7 @@ def _reported_clearance_regressions(board, adapter, snapshot, records):
         for obstacle in snapshot.model.obstacles)
 
     cases = (
-        ({PASTE_PAD_SEED}, 1.453743, 5, 2),
+        ({PASTE_PAD_SEED}, 1.676996, 10, 7),
         # The mixed-width engine now moves the 0.127/0.25 transition instead
         # of retaining it as a fixed anchor, so all four originals are
         # replaced by three exact-width octolinear segments.

@@ -161,25 +161,69 @@ def _connectivity_partition(segments, obstacles, pad_regions,
 
 def _connectivity_signature(segments, obstacles, pad_regions,
                             immutable_keys, net_id):
-    """Compatibility wrapper returning the cached connectivity partition."""
+    """Return a cached signature keyed only by the affected net.
+
+    Older callers supplied the entire board, which made both hashing and the
+    cache key proportional to board size even for a one-net candidate.  Keep
+    that public compatibility while normalizing to the relevant net before
+    entering the cached implementation.
+    """
+    net_segments = tuple(segment for segment in segments
+                         if segment.net_id == net_id)
+    net_obstacles = tuple(obstacle for obstacle in obstacles
+                          if obstacle.net_id == net_id)
+    net_pads = tuple(pad for pad in pad_regions if pad.net_id == net_id)
+    net_keys = {segment_key(segment) for segment in net_segments}
     return _connectivity_partition(
-        tuple(segments), tuple(obstacles), tuple(pad_regions),
-        frozenset(immutable_keys), net_id)
+        net_segments, net_obstacles, net_pads,
+        frozenset(key for key in immutable_keys if key in net_keys), net_id)
 
 
 def _validate_connectivity(model, eligible_keys, result):
     removed = set(result.remove_keys)
-    after = [s for s in model.segments if segment_key(s) not in removed]
-    after.extend(Segment(
-        a.start[0], a.start[1], a.end[0], a.end[1], a.width,
-        a.layer, a.net_id, clearance=a.clearance) for a in result.additions)
-    immutable = {segment_key(s) for s in model.segments if segment_key(s) not in eligible_keys}
     affected_nets = {s.net_id for s in model.segments if segment_key(s) in removed}
+    if not affected_nets:
+        return
+
+    # Build compact per-net inputs once.  Candidate composition frequently
+    # validates hundreds of prefixes; rebuilding and hashing a whole-board
+    # after-state for every affected net dominated runtime on large boards.
+    before_by_net = {net_id: [] for net_id in affected_nets}
+    immutable_by_net = {net_id: set() for net_id in affected_nets}
+    for segment in model.segments:
+        if segment.net_id not in affected_nets:
+            continue
+        before_by_net[segment.net_id].append(segment)
+        key = segment_key(segment)
+        if key not in eligible_keys:
+            immutable_by_net[segment.net_id].add(key)
+    obstacles_by_net = {
+        net_id: [item for item in model.obstacles if item.net_id == net_id]
+        for net_id in affected_nets}
+    pads_by_net = {
+        net_id: [item for item in model.pad_regions if item.net_id == net_id]
+        for net_id in affected_nets}
+    additions_by_net = {net_id: [] for net_id in affected_nets}
+    for addition in result.additions:
+        if addition.net_id in additions_by_net:
+            additions_by_net[addition.net_id].append(Segment(
+                addition.start[0], addition.start[1],
+                addition.end[0], addition.end[1], addition.width,
+                addition.layer, addition.net_id,
+                clearance=addition.clearance))
+
     for net_id in affected_nets:
+        before = before_by_net[net_id]
+        after = [segment for segment in before
+                 if segment_key(segment) not in removed]
+        after.extend(additions_by_net[net_id])
+        obstacles = obstacles_by_net[net_id]
+        pads = pads_by_net[net_id]
+        immutable = immutable_by_net[net_id]
         before_groups = _connectivity_signature(
-            model.segments, model.obstacles, model.pad_regions, immutable, net_id)
+            before, obstacles, pads, immutable, net_id)
         after_groups = _connectivity_signature(
-            after, model.obstacles, model.pad_regions, immutable, net_id)
+            after, obstacles, pads, immutable, net_id)
         after_by_label = {
             label: group for group in after_groups for label in group
         }

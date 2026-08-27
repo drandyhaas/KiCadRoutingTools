@@ -9,8 +9,8 @@
     "cli_max_passes": 16
   },
   "timing": {
-    "interactive_total_time_budget_seconds": 10.0,
-    "interactive_planning_time_budget_seconds": 5.0,
+    "interactive_total_time_budget_seconds": 20.0,
+    "interactive_planning_time_budget_seconds": 10.0,
     "interactive_cancellation_grace_seconds": 1.0,
     "cli_total_time_budget_seconds": null
   },
