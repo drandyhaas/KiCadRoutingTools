@@ -344,6 +344,11 @@ représentatifs ; toute nouvelle régression bloque la release.
 4. Ajouter les tests minimaux à chaque fonction critique.
 5. Mesurer les performances séparément pour une connexion et pour un scope
    complet ; ne pas optimiser le gros lot au détriment du clic sur une piste.
+   Le gloss d'un net unique est une voie de latence minimale. Le gloss de
+   plusieurs nets est une recherche bornée par le budget configuré : elle doit
+   conserver et retourner le meilleur sous-ensemble sûr déjà validé. Un retour
+   rapide sans modification n'est pas un objectif et ne doit jamais remplacer
+   un résultat partiel utile disponible dans le temps imparti.
 6. Diagnostiquer les causes, pas seulement les symptômes, lorsque le résultat
    manuel est meilleur.
 7. Nettoyer et découper le code après stabilisation.

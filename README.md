@@ -31,6 +31,11 @@ Starting the helper processes, refilling zones, and running DRC can therefore
 add seconds even for a single connection. The current board is not saved or
 modified by validation.
 
+Performance policy is scope-aware: one-net glosses prioritize minimum latency;
+multi-net glosses use their configured maximum time budget to retain the best
+safe subset found so far. A rejected net does not intentionally cancel safe
+improvements already found on unrelated nets.
+
 ## Repository layout
 
 - `kicad_track_gloss/`: complete ActionPlugin and PCM package source;

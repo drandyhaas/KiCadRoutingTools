@@ -28,6 +28,13 @@ The normal and diagnostic actions differ only in reporting. CLI scope `ALL`
 uses the same engine and convergence function as a complete plugin selection;
 only interactive/offline budgets differ.
 
+Two performance contracts are intentionally distinct. A one-net gloss follows
+the lowest-latency path available while retaining its configured safety gate.
+A multi-net gloss is an anytime optimization: it uses the configured maximum
+budget to improve quality, keeps the best native-DRC-approved subset reached
+so far, and returns that subset when time expires. Fast no-op completion is not
+a valid substitute for already discovered safe work.
+
 ## Engine packages
 
 - `engine/model.py`: immutable board records and edit plans.
@@ -66,7 +73,7 @@ serializable model records and configuration values.
   diagnostic UI.
 - `kicad/adapter.py`: narrow public facade used by actions and CLI.
 
-`action_plugin.py` owns the one-click lifecycle and delayed busy cursor but
+`action_plugin.py` owns the one-click lifecycle and delayed progress dialog but
 does not contain optimization geometry. `configuration.py` validates packaged
 defaults and maintains process-local session overrides. `version.py` is the
 single source of version truth for UI and packaging.
@@ -84,6 +91,12 @@ from suppressing a better valid sub-scope transformation. Larger scopes use
 the global scheduling algorithm to bound runtime. The planner follows newly
 opened simplifications to a fixed point and composes changed passes against the
 original model, so the live board receives one atomic edit plan.
+
+After a native DRC rejection of a multi-net candidate, gain-ranked net subsets
+are added to the current safe base. A rejected chunk is bisected; every
+accepted combination immediately becomes the new retained result. This makes
+the DRC stage interruptible by its deadline without reverting unrelated safe
+improvements to a global no-op.
 
 ## KiCad API boundary
 
