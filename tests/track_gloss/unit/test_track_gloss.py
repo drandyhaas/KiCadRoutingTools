@@ -777,32 +777,37 @@ def test_normal_action_bells_once_only_on_noop():
         assert settings == ["settings"]
         assert calls == ["bell"]
 
-        assert module._run_with_delayed_busy_cursor(
-            lambda: "fast",
-            delay_seconds=0.01) == "fast"
+        assert module._run_api_neutral(
+            lambda: "fast", lambda: calls.append("unexpected-poll")) == "fast"
         assert calls == ["bell"]
 
         def slow_result():
             time.sleep(0.08)
             return "slow"
 
-        assert module._run_with_delayed_busy_cursor(
-            slow_result,
-            delay_seconds=0.001) == "slow"
+        wait_callback, close_cursor = module._busy_cursor_controller(
+            time.monotonic(), delay_seconds=0.001)
+        assert module._run_api_neutral(
+            slow_result, wait_callback) == "slow"
+        # A following stage reuses the same active cursor; it must not flicker.
+        wait_callback()
+        assert calls[-1] == "busy-begin"
+        assert calls.count("busy-begin") == 1
+        assert calls.count("busy-end") == 0
+        close_cursor()
         assert calls[-2:] == ["busy-begin", "busy-end"]
 
         def slow_failure():
             time.sleep(0.08)
             raise RuntimeError("planning failed")
 
+        wait_callback, close_cursor = module._busy_cursor_controller(
+            time.monotonic(), delay_seconds=0.001)
         try:
-            module._run_with_delayed_busy_cursor(
-                slow_failure,
-                delay_seconds=0.001)
-        except RuntimeError as error:
-            assert str(error) == "planning failed"
-        else:
-            raise AssertionError("the planning error was not propagated")
+            with pytest.raises(RuntimeError, match="planning failed"):
+                module._run_api_neutral(slow_failure, wait_callback)
+        finally:
+            close_cursor()
         assert calls[-2:] == ["busy-begin", "busy-end"]
 
         before = list(calls)
@@ -850,8 +855,8 @@ def test_normal_action_bells_once_only_on_noop():
             module._maximize_safe_native_subset(
                 SalvageAdapter(), object(), salvage_model, salvage_keys,
                 salvage_source, force_native=False, skip_native=False,
-                operation_started=time.monotonic(),
-                operation_deadline=time.monotonic() + 5.0)
+                operation_deadline=time.monotonic() + 5.0,
+                wait_callback=lambda: None)
         assert salvaged_native.allowed
         assert {item.net_id for item in salvaged.additions} == {1, 2, 3}
         assert attempts == 2

@@ -82,16 +82,10 @@ def _busy_cursor_controller(
     return wait_callback, close
 
 
-def _run_with_delayed_busy_cursor(
-        function, operation_started=None,
-        delay_seconds=BUSY_CURSOR_DELAY_SECONDS):
-    """Run API-neutral work off-thread and show only a delayed wait cursor."""
-    operation_started = (time.monotonic() if operation_started is None else
-                         operation_started)
+def _run_api_neutral(function, wait_callback):
+    """Run API-neutral work off-thread while the owner services KiCad UI."""
     completed = threading.Event()
     outcome = {}
-    wait_callback, close = _busy_cursor_controller(
-        operation_started, delay_seconds)
 
     def worker():
         try:
@@ -105,14 +99,11 @@ def _run_with_delayed_busy_cursor(
     thread = threading.Thread(
         target=worker, name="KiCadTrackGlossPlanner", daemon=True)
     thread.start()
-    try:
-        while not completed.wait(BUSY_CURSOR_POLL_SECONDS):
-            wait_callback()
-        if "error" in outcome:
-            raise outcome["error"].with_traceback(outcome["traceback"])
-        return outcome["result"]
-    finally:
-        close()
+    while not completed.wait(BUSY_CURSOR_POLL_SECONDS):
+        wait_callback()
+    if "error" in outcome:
+        raise outcome["error"].with_traceback(outcome["traceback"])
+    return outcome["result"]
 
 
 def _selection_counts(board):
@@ -173,43 +164,9 @@ def _append_performance_timings(report, timings, operation_started):
     ])
 
 
-def _validate_with_delayed_busy_cursor(
-        adapter, board, plan, *, force_native, skip_native, timeout_seconds,
-        operation_started, delay_seconds=BUSY_CURSOR_DELAY_SECONDS):
-    wait_callback, close = _busy_cursor_controller(
-        operation_started, delay_seconds)
-
-    try:
-        # pcbnew SWIG snapshots must remain on KiCad's main thread. The native
-        # validator runs expensive work in hidden subprocesses and invokes the
-        # callback while waiting. This preserves UI responsiveness without
-        # moving any board object to a secondary Python thread.
-        return adapter.validate_plan(
-            board, plan, force_native=force_native,
-            skip_native=skip_native, timeout_seconds=timeout_seconds,
-            wait_callback=wait_callback)
-    finally:
-        close()
-
-
-def _validate_ladder_with_delayed_busy_cursor(
-        adapter, board, plans, *, force_native, skip_native, timeout_seconds,
-        operation_started, delay_seconds=BUSY_CURSOR_DELAY_SECONDS):
-    wait_callback, close = _busy_cursor_controller(
-        operation_started, delay_seconds)
-
-    try:
-        return adapter.validate_plan_ladder(
-            board, plans, force_native=force_native,
-            skip_native=skip_native, timeout_seconds=timeout_seconds,
-            wait_callback=wait_callback)
-    finally:
-        close()
-
-
 def _maximize_safe_native_subset(
         adapter, board, model, eligible_keys, source_plan, *, force_native,
-        skip_native, operation_started, operation_deadline):
+        skip_native, operation_deadline, wait_callback):
     """Greedily retain the largest gain-ordered DRC-safe net subset.
 
     Rejected chunks are bisected. Every accepted candidate becomes the new
@@ -251,10 +208,10 @@ def _maximize_safe_native_subset(
                 if remaining <= 0.0:
                     deadline_reached = True
                     break
-                candidate_native = _validate_with_delayed_busy_cursor(
-                    adapter, board, candidate, force_native=force_native,
+                candidate_native = adapter.validate_plan(
+                    board, candidate, force_native=force_native,
                     skip_native=skip_native, timeout_seconds=remaining,
-                    operation_started=operation_started)
+                    wait_callback=wait_callback)
                 attempts += 1
                 if candidate_native.allowed:
                     base_nets = candidate_nets
@@ -316,8 +273,18 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                 _warning_bell()
 
     def _run(self, report, diagnostic=False):
-        config = get_session_config()
         operation_started = time.monotonic()
+        wait_callback, close_cursor = _busy_cursor_controller(
+            operation_started)
+        try:
+            return self._run_operation(
+                report, diagnostic, operation_started, wait_callback)
+        finally:
+            close_cursor()
+
+    def _run_operation(
+            self, report, diagnostic, operation_started, wait_callback):
+        config = get_session_config()
         operation_deadline = (
             operation_started +
             config.timing.interactive_total_time_budget_seconds)
@@ -405,7 +372,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             stage_started +
             config.timing.interactive_planning_time_budget_seconds)
         conservative_ladder = []
-        best = _run_with_delayed_busy_cursor(
+        best = _run_api_neutral(
             lambda: generate_converged_plan(
                 snapshot.model, snapshot.eligible_keys,
                 max_passes=config.convergence.interactive_max_passes,
@@ -422,7 +389,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                 conservative_ladder=conservative_ladder,
                 cancellation_grace_seconds=(
                     config.timing.interactive_cancellation_grace_seconds)),
-            operation_started=operation_started)
+            wait_callback)
         timings["planning"] = (
             time.monotonic() - stage_started) * 1000.0
         report.append("Convergence passes: " + str(best.convergence_passes))
@@ -473,17 +440,17 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                     plan_identity(conservative) != plan_identity(best)):
                 validation_plans.append(conservative)
         if len(validation_plans) > 1:
-            native_results = _validate_ladder_with_delayed_busy_cursor(
-                adapter, board, validation_plans, force_native=force_native,
+            native_results = adapter.validate_plan_ladder(
+                board, validation_plans, force_native=force_native,
                 skip_native=skip_native, timeout_seconds=drc_budget,
-                operation_started=operation_started)
+                wait_callback=wait_callback)
             native = native_results[0]
         else:
             native_results = None
-            native = _validate_with_delayed_busy_cursor(
-                adapter, board, best, force_native=force_native,
+            native = adapter.validate_plan(
+                board, best, force_native=force_native,
                 skip_native=skip_native, timeout_seconds=drc_budget,
-                operation_started=operation_started)
+                wait_callback=wait_callback)
 
         # Native DRC is the final authority. If the most aggressive refinement
         # is rejected, retain quality progressively: retry a one-pass,
@@ -509,7 +476,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                 native.validation_mode != "native_timeout" and
                 time.monotonic() < planning_deadline):
             try:
-                conservative = _run_with_delayed_busy_cursor(
+                conservative = _run_api_neutral(
                     lambda:
                     generate_conservative_candidate(
                         snapshot.model, snapshot.eligible_keys,
@@ -519,7 +486,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                         deadline=planning_deadline,
                         cancellation_grace_seconds=(
                             config.timing.interactive_cancellation_grace_seconds)),
-                    operation_started=operation_started)
+                    wait_callback)
             except Exception:
                 LOG.exception("Could not build the conservative DRC fallback")
                 conservative = None
@@ -527,11 +494,11 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                     plan_identity(conservative) != plan_identity(best)):
                 remaining = operation_deadline - time.monotonic()
                 if remaining > 0.0:
-                    fallback_native = _validate_with_delayed_busy_cursor(
-                        adapter, board, conservative,
+                    fallback_native = adapter.validate_plan(
+                        board, conservative,
                         force_native=force_native, skip_native=skip_native,
                         timeout_seconds=remaining,
-                        operation_started=operation_started)
+                        wait_callback=wait_callback)
                     if fallback_native.allowed:
                         best = conservative
                         native = fallback_native
@@ -547,8 +514,8 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                 adapter, board, snapshot.model, snapshot.eligible_keys,
                 aggressive_plan, force_native=force_native,
                 skip_native=skip_native,
-                operation_started=operation_started,
-                operation_deadline=operation_deadline)
+                operation_deadline=operation_deadline,
+                wait_callback=wait_callback)
             if (partial_plan is not None and partial_native is not None and
                     partial_native.allowed):
                 best = partial_plan
