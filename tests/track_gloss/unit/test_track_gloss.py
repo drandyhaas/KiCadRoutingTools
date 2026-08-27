@@ -21,6 +21,8 @@ from kicad_track_gloss.engine.model import (AddedSegment, BoardModel,
 from kicad_track_gloss.kicad.selection import meander_keys as _meander_keys
 from kicad_track_gloss.engine.pads import segment_hits_pad
 from kicad_track_gloss.kicad.rules import via_track_hole_clearance
+from kicad_track_gloss.kicad.native_salvage import (
+    maximize_safe_native_candidates)
 from kicad_track_gloss.engine.planner import (
     PlanningDeadlineExceeded, _apply_to_model,
     _group_dependency_signature)
@@ -66,6 +68,75 @@ def test_disjoint_local_connection_plans_compose_monotonically():
         additions=[AddedSegment((0, 0), (2, 0), 0.2, 0, 1)],
         saved_mm=first.saved_mm)
     assert rank_candidate_plans([weaker_global, combined])[0] is combined
+
+
+def _native_result(allowed, mode="native_parallel"):
+    return types.SimpleNamespace(
+        allowed=allowed, error="", validation_mode=mode,
+        increases={}, timings_ms={})
+
+
+def _candidate(label, saved_mm):
+    return GlossResult(
+        remove_keys=[label],
+        additions=[AddedSegment((0, 0), (1, 0), 0.2, 0, 1)],
+        saved_mm=saved_mm, convergence_passes=1, fixed_point=True)
+
+
+def test_native_candidate_search_never_drops_safe_third_candidate():
+    global_plan = _candidate("global", 154.0)
+    connection_plan = _candidate("connection", 152.5)
+    conservative = _candidate("conservative", 148.5)
+    ladder_calls = []
+    followups = []
+
+    class Adapter:
+        def validate_plan_ladder(self, _board, plans, **_kwargs):
+            ladder_calls.append(tuple(plan.remove_keys[0] for plan in plans))
+            return [_native_result(False), _native_result(True)]
+
+        def validate_plan(self, _board, plan, **_kwargs):
+            followups.append(plan.remove_keys[0])
+            return _native_result(False)
+
+    decision = maximize_safe_native_candidates(
+        Adapter(), object(), BoardModel([]), set(),
+        [global_plan, connection_plan, conservative],
+        conservative_plan=conservative, connection_plans=[],
+        force_native=False, skip_native=False,
+        operation_deadline=time.monotonic() + 5.0,
+        wait_callback=None)
+
+    assert ladder_calls == [("global", "conservative")]
+    assert followups == ["connection"]
+    assert decision.plan is conservative
+    assert decision.native.allowed
+    assert decision.fallback_used
+
+
+def test_native_candidate_search_does_not_salvage_an_identical_incumbent(
+        monkeypatch):
+    primary = _candidate("primary", 10.0)
+
+    class Adapter:
+        def validate_plan(self, _board, _plan, **_kwargs):
+            return _native_result(True)
+
+    def unexpected_salvage(*_args, **_kwargs):
+        raise AssertionError("identical approved plan must not be salvaged")
+
+    monkeypatch.setattr(
+        "kicad_track_gloss.kicad.native_salvage."
+        "maximize_safe_native_connections", unexpected_salvage)
+    decision = maximize_safe_native_candidates(
+        Adapter(), object(), BoardModel([]), {"primary"}, [primary],
+        conservative_plan=None, connection_plans=[primary],
+        force_native=False, skip_native=False,
+        operation_deadline=time.monotonic() + 5.0,
+        wait_callback=None)
+
+    assert decision.plan is primary
+    assert not decision.salvage_used
 
 
 def test_custom_via_track_hole_clearance_uses_matching_active_rule(tmp_path):
@@ -957,7 +1028,7 @@ def test_pcm_archive_uses_flat_entrypoint_with_internal_packages():
     assert packaged_metadata["$schema"].endswith("/v2")
     assert "download_url" not in packaged_metadata["versions"][0]
     official_version = official_metadata["versions"][0]
-    assert official_version["status"] == "testing"
+    assert official_version["status"] == "stable"
     assert official_version["download_url"].endswith(
         "/v-test-alpha/" + archive_path.name)
     assert len(official_version["download_sha256"]) == 64

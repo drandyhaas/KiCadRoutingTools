@@ -286,8 +286,7 @@ def _bootstrap_engine():
     package.__path__ = [str(ROOT / "kicad_track_gloss")]
     sys.modules["kicad_track_gloss"] = package
     from kicad_track_gloss.engine import (
-        generate_conservative_candidate, generate_converged_plan,
-        plan_identity)
+        generate_converged_plan)
     from kicad_track_gloss.configuration import CONFIG
     from kicad_track_gloss.engine.geometry import length
     from kicad_track_gloss.engine.model import segment_key
@@ -296,8 +295,8 @@ def _bootstrap_engine():
     from kicad_track_gloss.kicad.types import is_straight_track
     from kicad_track_gloss.version import __version__
 
-    return (pcbnew, BoardAdapter, generate_conservative_candidate,
-            generate_converged_plan, plan_identity, length, segment_key,
+    return (pcbnew, BoardAdapter, generate_converged_plan,
+            length, segment_key,
             is_probable_diff_pair, is_straight_track, __version__, CONFIG)
 
 
@@ -322,15 +321,14 @@ def _save_output(pcbnew, board, input_path, output_path, force=False):
 def evaluate(board_path, project_path=None, parallel=True, output_path=None,
              force=False, max_passes=None, scopes=None, pass_observer=None,
              time_budget_seconds=None, minimum_saved_length_mm=None):
-    (pcbnew, BoardAdapter, generate_conservative_candidate,
-     generate_converged_plan, plan_identity, length, segment_key,
+    (pcbnew, BoardAdapter, generate_converged_plan, length, segment_key,
      is_probable_diff_pair, is_straight_track,
      version, config) = _bootstrap_engine()
     from kicad_track_gloss.engine import (
         compose_compatible_connection_plans, generate_connection_candidates,
         rank_candidate_plans)
     from kicad_track_gloss.kicad.native_salvage import (
-        maximize_safe_native_connections)
+        maximize_safe_native_candidates)
     if max_passes is None:
         max_passes = config.convergence.cli_max_passes
     if time_budget_seconds is None:
@@ -432,94 +430,43 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
         native = None
         applied = False
         fallback_used = False
-        fallback_plan_cached = False
+        fallback_plan_cached = bool(
+            conservative_ladder and conservative_ladder[0].changed)
         connection_salvage_used = False
         connection_salvage_attempts = 0
         connections_retained = 0
         connections_planned = 0
         if best.changed:
             stage_started = time.monotonic()
-            remaining = (None if operation_deadline is None else
-                         max(0.0, operation_deadline - time.monotonic()))
-            validation_plans = planning_candidates[:2]
-            if len(validation_plans) > 1:
-                fallback_plan_cached = True
-                timings_ms["planning_fallback"] = 0.0
-            if len(validation_plans) > 1:
-                native_results = adapter.validate_plan_ladder(
-                    board, validation_plans, timeout_seconds=remaining)
-                timings_ms["native_portfolio"] = (
-                    time.monotonic() - stage_started) * 1000.0
-                native = native_results[0]
-                fallback_native = native_results[1]
-                if not native.allowed and fallback_native.allowed:
-                    best = validation_plans[1]
-                    native = fallback_native
-                    fallback_used = True
-                elif not native.allowed:
-                    if native.error:
-                        pass
-                    elif fallback_native.error:
-                        native = fallback_native
+            conservative = (
+                conservative_ladder[0]
+                if conservative_ladder and conservative_ladder[0].changed
+                else None)
+            decision = maximize_safe_native_candidates(
+                adapter, board, initial.model, eligible,
+                planning_candidates, conservative_plan=conservative,
+                connection_plans=connection_plans,
+                force_native=False, skip_native=False,
+                operation_deadline=operation_deadline,
+                wait_callback=None)
+            timings_ms["native_candidate_search"] = (
+                time.monotonic() - stage_started) * 1000.0
+            if decision.initial_portfolio:
+                timings_ms["native_portfolio"] = decision.initial_validation_ms
             else:
-                native = adapter.validate_plan(
-                    board, best, timeout_seconds=remaining)
-                timings_ms["native_primary"] = (
-                    time.monotonic() - stage_started) * 1000.0
-        if (best.changed and native is not None and not native.allowed and
-                native.validation_mode != "native_timeout" and
-                not fallback_plan_cached and
-                (operation_deadline is None or
-                 time.monotonic() < operation_deadline)):
-            stage_started = time.monotonic()
-            conservative = generate_conservative_candidate(
-                initial.model, eligible,
-                min_gain=minimum_saved_length_mm,
-                clearance=initial.minimum_clearance,
-                deadline=operation_deadline,
-                cancellation_grace_seconds=(
-                    config.timing.interactive_cancellation_grace_seconds))
-            timings_ms["planning_fallback"] = (
-                time.monotonic() - stage_started) * 1000.0
-            if (conservative.changed and
-                    plan_identity(conservative) != plan_identity(best)):
-                remaining = (None if operation_deadline is None else
-                             max(0.0, operation_deadline - time.monotonic()))
-                stage_started = time.monotonic()
-                fallback_native = adapter.validate_plan(
-                    board, conservative, timeout_seconds=remaining)
-                timings_ms["native_fallback"] = (
-                    time.monotonic() - stage_started) * 1000.0
-                if fallback_native.allowed:
-                    best = conservative
-                    native = fallback_native
-                    fallback_used = True
-                elif fallback_native.error:
-                    native = fallback_native
-        if (best.changed and native is not None and not native.allowed and
-                not native.error and
-                native.validation_mode != "native_timeout" and
-                connection_plans and
-                (operation_deadline is None or
-                 time.monotonic() < operation_deadline)):
-            stage_started = time.monotonic()
-            (partial_plan, partial_native,
-             connection_salvage_attempts, _salvage_deadline,
-             connections_retained, connections_planned) = \
-                maximize_safe_native_connections(
-                    adapter, board, initial.model, eligible,
-                    connection_plans, force_native=False,
-                    skip_native=False,
-                    operation_deadline=operation_deadline,
-                    wait_callback=None)
-            timings_ms["native_connection_salvage"] = (
-                time.monotonic() - stage_started) * 1000.0
-            if (partial_plan is not None and
-                    partial_native is not None and
-                    partial_native.allowed):
-                best = partial_plan
-                native = partial_native
-                connection_salvage_used = True
+                timings_ms["native_primary"] = decision.initial_validation_ms
+            if decision.followup_validations:
+                timings_ms["native_candidate_followups"] = (
+                    decision.followup_validation_ms)
+            if decision.salvage_attempts:
+                timings_ms["native_connection_salvage"] = decision.salvage_ms
+            best = decision.plan or best
+            native = decision.native
+            fallback_used = decision.fallback_used
+            connection_salvage_used = decision.salvage_used
+            connection_salvage_attempts = decision.salvage_attempts
+            connections_retained = decision.connections_retained
+            connections_planned = decision.connections_planned
         if (best.changed and native is not None and
                 not native.allowed and native.error):
             raise RuntimeError(

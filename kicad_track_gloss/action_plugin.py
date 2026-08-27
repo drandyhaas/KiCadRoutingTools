@@ -14,14 +14,14 @@ import wx
 from .configuration import get_session_config
 from .engine import (find_pad_terminal_targets, find_track_terminal_vertices,
                      compose_compatible_connection_plans,
-                     generate_conservative_candidate,
                      generate_connection_candidates, generate_converged_plan,
-                     plan_identity, plan_net_ids, rank_candidate_plans,
+                     plan_net_ids, rank_candidate_plans,
                      summarize_plan)
 from .engine.model import segment_key
 from .kicad import BoardAdapter
 from .kicad.diagnostics import append_plan_statistics, append_search_statistics
 from .kicad.native_salvage import (
+    maximize_safe_native_candidates as _maximize_safe_native_candidates,
     maximize_safe_native_connections as _shared_maximize_safe_connections)
 from .kicad.report_dialog import (show_diagnostic_report as _show_diagnostic_report,
                                   show_report as _show_report,
@@ -416,96 +416,27 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         skip_native = (
             single_track_selection and
             not config.safety.kicad_drc_for_single_track)
-        validation_plans = planning_candidates[:2]
-        if len(validation_plans) > 1:
-            native_results = adapter.validate_plan_ladder(
-                board, validation_plans, force_native=force_native,
-                skip_native=skip_native, timeout_seconds=drc_budget,
-                wait_callback=wait_callback)
-            native = native_results[0]
-        else:
-            native_results = None
-            native = adapter.validate_plan(
-                board, best, force_native=force_native,
-                skip_native=skip_native, timeout_seconds=drc_budget,
-                wait_callback=wait_callback)
-
-        # Native DRC is the final authority. If the most aggressive refinement
-        # is rejected, retain quality progressively: retry a one-pass,
-        # unrefined candidate which often preserves a terminal that the deeper
-        # local search moved too far. The fallback still receives the complete
-        # native DRC gate and remains inside the same interactive time budget.
-        fallback_used = False
-        partial_subset_used = False
-        partial_subset_attempts = 0
-        partial_subset_deadline = False
-        partial_connections_retained = 0
-        partial_connections_total = 0
-        primary_native = native
-        if native_results is not None and not native.allowed:
-            fallback_native = native_results[1]
-            if fallback_native.allowed:
-                best = validation_plans[1]
-                native = fallback_native
-                fallback_used = True
-            elif native.error:
-                pass
-            elif fallback_native.error:
-                native = fallback_native
-        if (native_results is None and not native.allowed and
-                native.validation_mode != "native_timeout" and
-                time.monotonic() < planning_deadline):
-            try:
-                conservative = _run_api_neutral(
-                    lambda:
-                    generate_conservative_candidate(
-                        snapshot.model, snapshot.eligible_keys,
-                        min_gain=config.gloss.minimum_saved_length_mm,
-                        clearance=snapshot.minimum_clearance,
-                        collect_statistics=diagnostic,
-                        deadline=planning_deadline,
-                        cancellation_grace_seconds=(
-                            config.timing.interactive_cancellation_grace_seconds)),
-                    wait_callback)
-            except Exception:
-                LOG.exception("Could not build the conservative DRC fallback")
-                conservative = None
-            if (conservative is not None and conservative.changed and
-                    plan_identity(conservative) != plan_identity(best)):
-                remaining = operation_deadline - time.monotonic()
-                if remaining > 0.0:
-                    fallback_native = adapter.validate_plan(
-                        board, conservative,
-                        force_native=force_native, skip_native=skip_native,
-                        timeout_seconds=remaining,
-                        wait_callback=wait_callback)
-                    if fallback_native.allowed:
-                        best = conservative
-                        native = fallback_native
-                        fallback_used = True
-                    elif fallback_native.error:
-                        native = fallback_native
-        if (not native.allowed and not native.error and
-                native.validation_mode != "native_timeout" and
-                time.monotonic() < operation_deadline and
-                connection_plans):
-            (partial_plan, partial_native, partial_subset_attempts,
-             partial_subset_deadline, partial_connections_retained,
-             partial_connections_total) = \
-                _shared_maximize_safe_connections(
-                    adapter, board, snapshot.model,
-                    snapshot.eligible_keys, connection_plans,
-                    force_native=force_native,
-                    skip_native=skip_native,
-                    operation_deadline=operation_deadline,
-                    wait_callback=wait_callback)
-            partial_subset_deadline = (
-                partial_subset_deadline or connection_planning_deadline)
-            if (partial_plan is not None and partial_native is not None and
-                    partial_native.allowed):
-                best = partial_plan
-                native = partial_native
-                partial_subset_used = True
+        conservative = (
+            conservative_ladder[0]
+            if conservative_ladder and conservative_ladder[0].changed
+            else None)
+        decision = _maximize_safe_native_candidates(
+            adapter, board, snapshot.model, snapshot.eligible_keys,
+            planning_candidates, conservative_plan=conservative,
+            connection_plans=connection_plans,
+            force_native=force_native, skip_native=skip_native,
+            operation_deadline=operation_deadline,
+            wait_callback=wait_callback)
+        best = decision.plan or best
+        native = decision.native
+        fallback_used = decision.fallback_used
+        partial_subset_used = decision.salvage_used
+        partial_subset_attempts = decision.salvage_attempts
+        partial_subset_deadline = (
+            decision.salvage_deadline or connection_planning_deadline)
+        partial_connections_retained = decision.connections_retained
+        partial_connections_total = decision.connections_planned
+        primary_native = decision.primary_native or native
         timings["native_drc_gate"] = (
             time.monotonic() - stage_started) * 1000.0
         if fallback_used or partial_subset_used:

@@ -5,6 +5,24 @@ Branche de travail : `optimize`
 KiCad mesure : 10.0.5 (`D:\kicad\bin`)
 Fixture : `tests/track_gloss/patterns/dispenser_labels/dispenser_labels.kicad_pro`
 
+## Qualification 1.0.0 : meilleur candidat DRC conserve
+
+La limite fixe aux deux premiers candidats geometriques pouvait exclure le
+candidat conservateur avant meme son passage au DRC. Sur `polykit`, les deux
+premiers plans ajoutaient la meme deconnexion, tandis que le troisieme etait
+sur et economisait 148,567303 mm.
+
+L'arbitre natif commun au CLI et au plugin conserve maintenant un incumbent
+approuve. Il valide d'abord le meilleur plan avec l'ancre conservatrice, explore
+ensuite uniquement les alternatives capables de l'ameliorer et ne le remplace
+jamais par une recuperation locale inferieure. Sans incumbent, il passe
+directement aux connexions unitaires afin de ne pas gaspiller une vague DRC.
+
+Le SET21 cible a 0,2 mm et 20 s donne 332,941 mm et 24 segments sur les quatre
+cartes, toutes sans augmentation DRC. La qualification finale passe 100 tests
+unitaires, sept ordres identiques, les subdivisions en moities et tiers, 334
+scopes reels et 269 applications fraiches en memoire.
+
 ## Correctif 0.3.45 : la connexion locale redevient l'unité fondamentale
 
 La récupération DRC par net pouvait consommer tout le budget sur quelques

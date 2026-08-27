@@ -4,7 +4,25 @@ Date : 2026-08-27
 Branche : `optimize`
 Baseline : commit intermediaire `7df62886`
 KiCad : 10.0.5 (`D:\kicad\bin`)
-Decision actuelle : **PASS — gain cumule SET21 de 37,5 %**
+Decision actuelle : **PASS — qualification fonctionnelle 1.0.0**
+
+## Qualification finale 1.0.0
+
+L'arbitre DRC anytime conserve desormais le meilleur candidat natif valide et
+ne tronque plus le candidat conservateur derriere les deux meilleurs scores
+geometriques. Mesures finales a 0,2 mm et avec un budget de 20 s :
+
+| Carte | Gain applique | Segments sauves | Decision |
+| --- | ---: | ---: | --- |
+| `kivu12` | 107,200000 mm | 0 | DRC accepte |
+| `polykit_x_inputboard` | 148,567303 mm | 15 | fallback conserve |
+| `led_ring_crossbar` | 0,054232 mm | 1 | connexion sure recuperee |
+| `uncutgem_nv` | 77,119131 mm | 8 | 52 connexions retenues |
+| **Total** | **332,940664 mm** | **24** | **4/4 DRC propres** |
+
+La qualification complete passe 100 tests unitaires, sept ordres identiques a
+66,020888 mm, l'invariance des subdivisions en moities et tiers, 334 scopes
+reels et 269 applications fraiches en memoire.
 
 ## Etat de la nouvelle version non qualifiee
 
