@@ -13,13 +13,16 @@ import wx
 
 from .configuration import get_session_config
 from .engine import (find_pad_terminal_targets, find_track_terminal_vertices,
+                     compose_compatible_connection_plans,
                      generate_conservative_candidate,
-                     generate_converged_plan, plan_identity,
-                     plan_net_gain, plan_net_ids, subset_plan_by_nets,
+                     generate_connection_candidates, generate_converged_plan,
+                     plan_identity, plan_net_ids, rank_candidate_plans,
                      summarize_plan)
 from .engine.model import segment_key
 from .kicad import BoardAdapter
 from .kicad.diagnostics import append_plan_statistics, append_search_statistics
+from .kicad.native_salvage import (
+    maximize_safe_native_connections as _shared_maximize_safe_connections)
 from .kicad.report_dialog import (show_diagnostic_report as _show_diagnostic_report,
                                   show_report as _show_report,
                                   warning_bell as _warning_bell)
@@ -162,77 +165,6 @@ def _append_performance_timings(report, timings, operation_started):
             key.replace("_", " ").title(), value)
         for key, value in timings.items()
     ])
-
-
-def _maximize_safe_native_subset(
-        adapter, board, model, eligible_keys, source_plan, *, force_native,
-        skip_native, operation_deadline, wait_callback):
-    """Greedily retain the largest gain-ordered DRC-safe net subset.
-
-    Rejected chunks are bisected. Every accepted candidate becomes the new
-    base immediately, so expiration returns useful work already approved by
-    KiCad instead of reverting to a global no-op.
-    """
-    ranked_nets = tuple(sorted(
-        plan_net_ids(model, source_plan),
-        key=lambda net_id: (-round(
-            plan_net_gain(model, source_plan, net_id), 9), net_id)))
-    if len(ranked_nets) < 2:
-        return None, None, 0, False
-
-    base_nets = frozenset()
-    best_plan = None
-    best_native = None
-    attempts = 0
-    deadline_reached = False
-    pending = [ranked_nets]
-    # The caller has already validated and rejected the complete plan.
-    rejected_sets = {frozenset(ranked_nets)}
-
-    while pending:
-        if time.monotonic() >= operation_deadline:
-            deadline_reached = True
-            break
-        chunk = pending.pop(0)
-        candidate_nets = base_nets.union(chunk)
-        rejected = candidate_nets in rejected_sets
-        infrastructure_error = False
-        if not rejected:
-            try:
-                candidate = subset_plan_by_nets(
-                    model, eligible_keys, source_plan, candidate_nets)
-            except ValueError:
-                rejected = True
-            else:
-                remaining = operation_deadline - time.monotonic()
-                if remaining <= 0.0:
-                    deadline_reached = True
-                    break
-                candidate_native = adapter.validate_plan(
-                    board, candidate, force_native=force_native,
-                    skip_native=skip_native, timeout_seconds=remaining,
-                    wait_callback=wait_callback)
-                attempts += 1
-                if candidate_native.allowed:
-                    base_nets = candidate_nets
-                    best_plan = candidate
-                    best_native = candidate_native
-                    continue
-                rejected_sets.add(candidate_nets)
-                rejected = True
-                if candidate_native.error:
-                    infrastructure_error = (
-                        candidate_native.validation_mode != "native_timeout")
-                    deadline_reached = not infrastructure_error
-        if infrastructure_error or deadline_reached:
-            break
-        if rejected and len(chunk) > 1:
-            midpoint = len(chunk) // 2
-            # Gain-ranked half first. The second half remains available and
-            # can be added later to whatever safe base was already retained.
-            pending[0:0] = [chunk[:midpoint], chunk[midpoint:]]
-
-    return best_plan, best_native, attempts, deadline_reached
 
 
 class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
@@ -392,12 +324,63 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             wait_callback)
         timings["planning"] = (
             time.monotonic() - stage_started) * 1000.0
+        global_plan = best
+        connection_plans = []
+        connection_plan = None
+        connection_planning_deadline = False
+        if (len(snapshot.connection_scopes) > 1 and
+                time.monotonic() < planning_deadline):
+            stage_started = time.monotonic()
+            try:
+                (connection_plans, connection_rejections,
+                 connection_planning_deadline) = _run_api_neutral(
+                    lambda: generate_connection_candidates(
+                        snapshot.model, snapshot.eligible_keys,
+                        snapshot.connection_scopes, global_plan,
+                        min_gain=config.gloss.minimum_saved_length_mm,
+                        allow_equal_length_simpler=(
+                            ALLOW_EQUAL_LENGTH_SIMPLIFICATION),
+                        clearance=snapshot.minimum_clearance,
+                        max_passes=config.convergence.interactive_max_passes,
+                        group_max_passes=(
+                            config.convergence.interactive_group_max_passes),
+                        collect_statistics=diagnostic,
+                        planning_deadline=planning_deadline,
+                        cancellation_grace_seconds=(
+                            config.timing.interactive_cancellation_grace_seconds)),
+                    wait_callback)
+                (connection_plan, _compatible_connection_plans,
+                 connection_composition_rejections) = \
+                    compose_compatible_connection_plans(
+                        snapshot.model, snapshot.eligible_keys,
+                        connection_plans)
+                connection_rejections.extend(
+                    connection_composition_rejections)
+            except Exception:
+                LOG.exception("Could not build connection-local candidates")
+                connection_plans = []
+                connection_rejections = []
+                connection_plan = None
+            timings["connection_planning"] = (
+                time.monotonic() - stage_started) * 1000.0
+            if diagnostic and connection_rejections:
+                report.append(
+                    "Connection-local planning rejected {} candidate(s) "
+                    "internally.".format(len(connection_rejections)))
+
+        planning_candidates = [global_plan]
+        if connection_plan is not None and connection_plan.changed:
+            planning_candidates.append(connection_plan)
+        if conservative_ladder and conservative_ladder[0].changed:
+            planning_candidates.append(conservative_ladder[0])
+        planning_candidates = list(rank_candidate_plans(planning_candidates))
+        best = planning_candidates[0]
+        aggressive_plan = best
         report.append("Convergence passes: " + str(best.convergence_passes))
         report.append("Fixed point reached: " +
                       ("yes" if best.fixed_point else "no"))
         report.append("Connected chains considered: " +
                       str(best.chains_considered))
-        aggressive_plan = best
         for warning in best.warnings:
             if "time budget" in warning.lower():
                 report.append("Planning limit: " + warning)
@@ -433,12 +416,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         skip_native = (
             single_track_selection and
             not config.safety.kicad_drc_for_single_track)
-        validation_plans = [best]
-        if conservative_ladder:
-            conservative = conservative_ladder[0]
-            if (conservative.changed and
-                    plan_identity(conservative) != plan_identity(best)):
-                validation_plans.append(conservative)
+        validation_plans = planning_candidates[:2]
         if len(validation_plans) > 1:
             native_results = adapter.validate_plan_ladder(
                 board, validation_plans, force_native=force_native,
@@ -461,6 +439,8 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         partial_subset_used = False
         partial_subset_attempts = 0
         partial_subset_deadline = False
+        partial_connections_retained = 0
+        partial_connections_total = 0
         primary_native = native
         if native_results is not None and not native.allowed:
             fallback_native = native_results[1]
@@ -508,14 +488,19 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         if (not native.allowed and not native.error and
                 native.validation_mode != "native_timeout" and
                 time.monotonic() < operation_deadline and
-                len(plan_net_ids(snapshot.model, aggressive_plan)) > 1):
+                connection_plans):
             (partial_plan, partial_native, partial_subset_attempts,
-             partial_subset_deadline) = _maximize_safe_native_subset(
-                adapter, board, snapshot.model, snapshot.eligible_keys,
-                aggressive_plan, force_native=force_native,
-                skip_native=skip_native,
-                operation_deadline=operation_deadline,
-                wait_callback=wait_callback)
+             partial_subset_deadline, partial_connections_retained,
+             partial_connections_total) = \
+                _shared_maximize_safe_connections(
+                    adapter, board, snapshot.model,
+                    snapshot.eligible_keys, connection_plans,
+                    force_native=force_native,
+                    skip_native=skip_native,
+                    operation_deadline=operation_deadline,
+                    wait_callback=wait_callback)
+            partial_subset_deadline = (
+                partial_subset_deadline or connection_planning_deadline)
             if (partial_plan is not None and partial_native is not None and
                     partial_native.allowed):
                 best = partial_plan
@@ -548,14 +533,17 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             return False
         if fallback_used:
             report.append(
-                "Candidate ladder: aggressive plan rejected; conservative "
-                "candidate accepted by native KiCad DRC.")
+                "Candidate ladder: highest-quality plan rejected; alternate "
+                "validated candidate accepted by native KiCad DRC.")
         if partial_subset_used:
             retained_nets = plan_net_ids(snapshot.model, best)
             total_nets = plan_net_ids(snapshot.model, aggressive_plan)
             report.append(
-                "Native DRC salvage: retained {} of {} modified net(s) after "
-                "{} subset validation(s).".format(
+                "Native DRC salvage: retained {} of {} planned local "
+                "connection(s), spanning {} of {} modified net(s), after {} "
+                "candidate validation(s).".format(
+                    partial_connections_retained,
+                    partial_connections_total,
                     len(retained_nets), len(total_nets),
                     partial_subset_attempts))
             omitted_ids = set(total_nets) - set(retained_nets)

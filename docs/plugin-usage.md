@@ -45,7 +45,7 @@ session settings dialog. The dialog title includes the plugin version.
   single-connection safety gate. Disabling it makes ordinary one-track glosses
   substantially more responsive, but removes that native before/after check.
 - **Minimum saved length** rejects changes that save less than the configured
-  amount. Its default is 0.1 mm and it is edited in 0.1 mm increments.
+  amount. Its default is 0.2 mm and it is edited in 0.1 mm increments.
 - **Total time budget**, **planning time budget**, and **cancellation grace**
   bound interactive work and prevent the editor from appearing indefinitely
   blocked.
@@ -84,11 +84,13 @@ Process startup, zone refill, and full-board DRC can take seconds even when the
 geometric planning itself takes only milliseconds. See
 [Safety and native DRC](safety-and-drc.md).
 
-For a multi-net selection, a native DRC rejection does not discard every
-improvement. Track Gloss bisects the rejected net set in gain order, retains
-each combination already accepted by KiCad, and applies the best validated
-subset available when the interactive time budget is reached. A problematic
-net therefore remains unchanged without blocking unrelated safe nets.
+For a multi-connection selection, every expanded connection is also planned
+through the exact one-segment workflow. The best compatible local composition
+is compared with the global converged plan before DRC. After a rejection,
+Track Gloss probes local connections in pairs, retains every combination
+already accepted by KiCad, and applies the best validated result available
+when the interactive time budget is reached. One problematic connection does
+not block another safe connection, even when both belong to the same net.
 
 ## Protected and unsupported operations
 

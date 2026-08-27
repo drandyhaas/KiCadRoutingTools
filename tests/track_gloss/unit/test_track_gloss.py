@@ -10,9 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from kicad_track_gloss.engine import (find_track_terminal_vertices,
+from kicad_track_gloss.engine import (combine_plans, find_track_terminal_vertices,
                                       generate_candidate_plans,
                                       generate_converged_plan,
+                                      rank_candidate_plans,
                                       smooth_selected_chains, summarize_plan)
 from kicad_track_gloss.engine.model import (AddedSegment, BoardModel,
                                             CircleObstacle, GlossResult,
@@ -31,6 +32,40 @@ def test_expired_planning_deadline_stops_before_candidate_search():
     with pytest.raises(PlanningDeadlineExceeded):
         smooth_selected_chains(
             model, eligible, deadline=time.monotonic() - 1.0)
+
+
+def test_disjoint_local_connection_plans_compose_monotonically():
+    segments = [
+        Segment(0, 0, 1, 1, 0.2, 0, 1, "a1", net_name="A"),
+        Segment(1, 1, 2, 0, 0.2, 0, 1, "a2", net_name="A"),
+        Segment(0, 10, 1, 11, 0.2, 0, 2, "b1", net_name="B"),
+        Segment(1, 11, 2, 10, 0.2, 0, 2, "b2", net_name="B"),
+    ]
+    model = BoardModel(segments)
+    first = GlossResult(
+        remove_keys=["a1", "a2"],
+        additions=[AddedSegment((0, 0), (2, 0), 0.2, 0, 1)],
+        saved_mm=2 * math.sqrt(2) - 2, convergence_passes=1,
+        fixed_point=True)
+    second = GlossResult(
+        remove_keys=["b1", "b2"],
+        additions=[AddedSegment((0, 10), (2, 10), 0.2, 0, 2)],
+        saved_mm=2 * math.sqrt(2) - 2, convergence_passes=2,
+        fixed_point=True)
+
+    combined = combine_plans(
+        model, {segment.uuid for segment in segments}, [first, second])
+
+    assert set(combined.remove_keys) == {"a1", "a2", "b1", "b2"}
+    assert abs(combined.saved_mm - 2 * (2 * math.sqrt(2) - 2)) < 1e-9
+    assert combined.convergence_passes == 2
+    assert combined.fixed_point
+
+    weaker_global = GlossResult(
+        remove_keys=["a1", "a2"],
+        additions=[AddedSegment((0, 0), (2, 0), 0.2, 0, 1)],
+        saved_mm=first.saved_mm)
+    assert rank_candidate_plans([weaker_global, combined])[0] is combined
 
 
 def test_custom_via_track_hole_clearance_uses_matching_active_rule(tmp_path):
@@ -823,44 +858,56 @@ def test_normal_action_bells_once_only_on_noop():
         close_cursor()
         assert calls[-2:] == ["busy-begin", "busy-end"]
 
-        salvage_segments = []
-        salvage_additions = []
-        salvage_keys = set()
+        local_plans = []
+        local_keys = set()
+        local_segments = []
         for net_id in range(1, 5):
-            y = float(net_id * 10)
-            first = Segment(0, y, 1, y, 0.2, 0, net_id,
-                            "salvage-{}-a".format(net_id))
-            second = Segment(1, y, 2, y, 0.2, 0, net_id,
-                             "salvage-{}-b".format(net_id))
-            salvage_segments.extend((first, second))
-            salvage_keys.update((first.uuid, second.uuid))
-            salvage_additions.append(AddedSegment(
-                (0, y), (2, y), 0.2, 0, net_id))
-        salvage_model = BoardModel(salvage_segments)
-        salvage_source = GlossResult(
-            remove_keys=sorted(salvage_keys),
-            additions=salvage_additions, saved_mm=0.0,
-            convergence_passes=1, fixed_point=True)
+            y = float(net_id * 20)
+            first = Segment(0, y, 1, y + 1, 0.2, 0, net_id,
+                            "local-{}-a".format(net_id))
+            second = Segment(1, y + 1, 2, y, 0.2, 0, net_id,
+                             "local-{}-b".format(net_id))
+            local_segments.extend((first, second))
+            local_keys.update((first.uuid, second.uuid))
+            local_plans.append(GlossResult(
+                remove_keys=[first.uuid, second.uuid],
+                additions=[AddedSegment((0, y), (2, y), 0.2, 0, net_id)],
+                saved_mm=2 * math.sqrt(2) - 2,
+                convergence_passes=1, fixed_point=True))
+        local_model = BoardModel(local_segments)
 
-        class SalvageAdapter:
-            def validate_plan(self, _board, candidate, **kwargs):
-                kwargs["wait_callback"]()
-                allowed = all(item.net_id != 4
-                              for item in candidate.additions)
+        class ConnectionAdapter:
+            @staticmethod
+            def _result(candidate):
+                nets = {item.net_id for item in candidate.additions}
+                allowed = not bool(nets & {1, 2})
                 return types.SimpleNamespace(
                     allowed=allowed, error="", timings_ms={},
                     validation_mode="native_parallel")
 
-        salvaged, salvaged_native, attempts, deadline_reached = \
-            module._maximize_safe_native_subset(
-                SalvageAdapter(), object(), salvage_model, salvage_keys,
-                salvage_source, force_native=False, skip_native=False,
+            def validate_plan(self, _board, candidate, **_kwargs):
+                return self._result(candidate)
+
+            def validate_plan_ladder(self, _board, candidates, **_kwargs):
+                first = self._result(candidates[0])
+                if first.allowed:
+                    return [first, types.SimpleNamespace(
+                        allowed=False, error="", timings_ms={},
+                        validation_mode="not_needed")]
+                return [first, self._result(candidates[1])]
+
+        (connection_plan, connection_native, connection_attempts,
+         connection_deadline, retained, total) = \
+            module._shared_maximize_safe_connections(
+                ConnectionAdapter(), object(), local_model, local_keys,
+                local_plans, force_native=False, skip_native=False,
                 operation_deadline=time.monotonic() + 5.0,
                 wait_callback=lambda: None)
-        assert salvaged_native.allowed
-        assert {item.net_id for item in salvaged.additions} == {1, 2, 3}
-        assert attempts == 2
-        assert not deadline_reached
+        assert connection_native.allowed
+        assert {item.net_id for item in connection_plan.additions} == {3, 4}
+        assert connection_attempts == 4
+        assert (retained, total) == (2, 4)
+        assert not connection_deadline
 
     finally:
         sys.modules.pop("kicad_track_gloss.action_plugin", None)
@@ -1041,6 +1088,12 @@ def test_native_connection_expansion_batches_multiple_nets():
     seeds = {"a1", "b1"}
     expanded = adapter._expand_seed_keys(_NativeBoard(tracks), records, seeds, [])
     assert expanded == {"a1", "a2", "a3", "b1", "b2"}
+    scopes = adapter._expand_seed_scopes(
+        _NativeBoard(tracks), records, seeds, [])
+    assert scopes == (
+        frozenset({"a1", "a2", "a3"}),
+        frozenset({"b1", "b2"}),
+    )
 
 
 def test_native_segment_uses_kicad_resolved_track_clearance():

@@ -5,6 +5,34 @@ Branche de travail : `optimize`
 KiCad mesure : 10.0.5 (`D:\kicad\bin`)
 Fixture : `tests/track_gloss/patterns/dispenser_labels/dispenser_labels.kicad_pro`
 
+## Correctif 0.3.45 : la connexion locale redevient l'unité fondamentale
+
+La récupération DRC par net pouvait consommer tout le budget sur quelques
+nets à fort gain mais fautifs, puis rendre un no-op alors que le gloss d'un
+segment sélectionné trouvait immédiatement une amélioration sûre. Elle
+regroupait aussi plusieurs connexions indépendantes d'un même net.
+
+La version 0.3.45 conserve donc chaque expansion de seed comme un scope local,
+rejoue ces scopes avec le même chemin convergé que la sélection d'un segment,
+et classe leur meilleure composition compatible avec le plan global. Après un
+rejet natif, elle obtient d'abord une base locale sûre, puis valide des lots et
+ne découpe que les lots rejetés. Le meilleur résultat déjà approuvé est rendu
+à l'échéance.
+
+Mesures ciblées avec seuil 0,2 mm et budget total de 20 s :
+
+| Carte | Temps | Gain appliqué | Segments sauvés | Récupération |
+| --- | ---: | ---: | ---: | --- |
+| `mydewcontroller` | 20,11 s | 59,545967 mm | 39 | 31 / 83 connexions |
+| `kivu12` | 2,97 s | 107,200000 mm | 0 | plan direct accepté |
+| `polykit_x_inputboard` | 20,14 s | 103,327366 mm | 18 | 121 / 149 connexions |
+| `led_ring_crossbar` | 20,13 s | 0,054232 mm | 1 | 1 / 160 connexions |
+| `uncutgem_nv` | 20,06 s | 4,156764 mm | 1 | 1 / 103 connexions |
+
+Tous les résultats ont une porte DRC native sans augmentation. La validation
+finale passe 98 tests unitaires, sept ordres identiques à 66,020888 mm, 334
+scopes réels et 269 applications fraîches en mémoire.
+
 ## Conclusion
 
 L'objectif de reduction de 50 % est atteignable pour le CLI `ALL`, mais pas

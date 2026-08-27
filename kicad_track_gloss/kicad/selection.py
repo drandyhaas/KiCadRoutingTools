@@ -108,20 +108,27 @@ def _touches_anchor(pcbnew, item, anchor):
     return any(point.x == anchor.x and point.y == anchor.y for point in points)
 
 
-def expand_seed_keys(adapter, board, straight_by_key, seed_keys, warnings):
-    """Expand every selected seed to its KiCad connection, up to boundaries."""
+def expand_seed_scopes(adapter, board, straight_by_key, seed_keys, warnings):
+    """Return each distinct seed-local KiCad connection independently.
+
+    Keeping these scopes is important after a combined native DRC rejection:
+    the plugin can retry the same bounded connection a user would obtain by
+    selecting one of its segments, rather than treating a complete net as the
+    smallest recoverable unit.
+    """
     if not seed_keys:
-        return set()
+        return ()
     try:
         connectivity = board.GetConnectivity()
     except Exception:
         warnings.append("KiCad connectivity is unavailable; selection was not expanded.")
-        return set(seed_keys)
+        return tuple(frozenset((key,)) for key in sorted(seed_keys))
 
-    expanded = set()
+    scopes = set()
     for seed_key in sorted(seed_keys):
         queue = deque([seed_key])
         visited = set()
+        expanded = set()
         while queue:
             key = queue.popleft()
             if key in visited:
@@ -168,7 +175,16 @@ def expand_seed_keys(adapter, board, straight_by_key, seed_keys, warnings):
                     continue
                 if neighbor_key not in visited:
                     queue.append(neighbor_key)
-    return expanded
+        if expanded:
+            scopes.add(frozenset(expanded))
+    return tuple(sorted(scopes, key=lambda scope: tuple(sorted(scope))))
+
+
+def expand_seed_keys(adapter, board, straight_by_key, seed_keys, warnings):
+    """Expand every selected seed to its KiCad connection, up to boundaries."""
+    scopes = expand_seed_scopes(
+        adapter, board, straight_by_key, seed_keys, warnings)
+    return set().union(*scopes) if scopes else set()
 
 
 def expand_eligible_keys(adapter, board, straight_by_key, seed_keys, warnings=None):
@@ -184,3 +200,23 @@ def expand_eligible_keys(adapter, board, straight_by_key, seed_keys, warnings=No
         warnings.append(
             "Probable meander/dense micro-jog length-tuning tracks are protected.")
     return eligible, expanded, meanders
+
+
+def expand_eligible_scopes(
+        adapter, board, straight_by_key, seed_keys, warnings=None):
+    """Return eligible union plus the distinct protected connection scopes."""
+    warnings = warnings if warnings is not None else []
+    scopes = expand_seed_scopes(
+        adapter, board, straight_by_key, set(seed_keys), warnings)
+    expanded = set().union(*scopes) if scopes else set()
+    meanders = meander_keys([
+        segment for _item, segment in straight_by_key.values()
+        if segment_key(segment) in expanded
+    ])
+    eligible = expanded - meanders
+    eligible_scopes = tuple(
+        frozenset(scope - meanders) for scope in scopes if scope - meanders)
+    if meanders:
+        warnings.append(
+            "Probable meander/dense micro-jog length-tuning tracks are protected.")
+    return eligible, expanded, meanders, eligible_scopes

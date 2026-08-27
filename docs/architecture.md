@@ -92,11 +92,18 @@ the global scheduling algorithm to bound runtime. The planner follows newly
 opened simplifications to a fixed point and composes changed passes against the
 original model, so the live board receives one atomic edit plan.
 
-After a native DRC rejection of a multi-net candidate, gain-ranked net subsets
-are added to the current safe base. A rejected chunk is bisected; every
-accepted combination immediately becomes the new retained result. This makes
-the DRC stage interruptible by its deadline without reverting unrelated safe
-improvements to a global no-op.
+Every selected seed expansion is also retained as a distinct local-connection
+scope. Multi-connection planning rebuilds these scopes through the exact same
+path used by a one-segment selection, composes every mutually compatible local
+optimum, and ranks that composition alongside the global converged plan. A
+larger selection therefore cannot silently replace a better local result with
+a lower-quality plan.
+
+After a native DRC rejection, connection-local candidates are probed two at a
+time until a safe base exists. Later DRC waves validate both the complete
+remaining batch and one incremental extension. Every accepted extension
+immediately becomes the retained result, so expiration returns useful work
+without treating a complete net as the smallest recoverable unit.
 
 ## KiCad API boundary
 

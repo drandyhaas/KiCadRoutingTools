@@ -71,9 +71,17 @@ latency trade-off. When disabled, the internal checks remain active but the
 native before/after gate is skipped for that case. The normal packaged default
 is enabled.
 
-## Conservative fallback
+## Candidate ladder and connection-local recovery
 
 If native DRC rejects the most refined plan and sufficient time remains, the
 shared workflow may try a distinct conservative one-pass candidate. That plan
 must pass its own complete native validation. A rejected fallback leaves the
 live board unchanged.
+
+For a selection spanning several local connections, the engine also rebuilds
+each connection through the same convergence path used when one segment is
+selected. Their best compatible composition is ranked against the global plan
+before DRC. If both leading candidates are rejected, local plans are validated
+in an anytime portfolio: two independent probes first, then a complete-batch
+candidate beside one incremental extension of the already safe base. Only the
+last native-DRC-approved base can be applied when the deadline is reached.

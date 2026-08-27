@@ -25,6 +25,12 @@ compares KiCad DRC reports before and after the candidate. This can add seconds
 even when geometric planning is fast. It neither saves nor modifies the live
 board.
 
+For larger selections, every expanded connection is planned through the same
+workflow as a one-segment selection. The best compatible local composition is
+ranked with the global plan. If native DRC rejects the leading candidates, the
+plugin retains the best connection batches approved before the session time
+budget expires.
+
 ## Documentation
 
 The complete documentation is maintained in the repository:

@@ -68,11 +68,10 @@ D:\kicad\bin\python.exe tools\score_track_gloss.py --project tests\track_gloss\p
 
 The geometric corpus must report 706 selected seeds, 590 eligible tracks, 116
 protected tuned tracks, 66.020888 mm of candidate copper saved, and 32 segments
-saved (237 removed and 205 added). The separate native KiCad DRC smoke test is
-fail-closed: with the current frozen fixture KiCad rejects the whole-board
-candidate for new clearance and hole-clearance findings, the CLI reports
-`changed:false`, and the final line remains `SCORE=1109.443549726`. The fixture
-must remain byte-for-byte unchanged.
+saved (237 removed and 205 added). A native rejection of the whole-board plan
+no longer implies `changed:false`: the CLI rebuilds and validates exact local
+connections, then reports the best approved subset reached within an optional
+`--time-budget`. The fixture must remain byte-for-byte unchanged.
 
 Boards tested manually should not be added automatically. When a board becomes
 a useful non-regression case, copy its `.kicad_pcb` and, when available, its

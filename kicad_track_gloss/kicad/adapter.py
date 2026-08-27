@@ -6,7 +6,8 @@ from ..engine.model import Segment
 from .reader import read_snapshot
 from .native_validation import (validate_native_plan,
                                 validate_native_plan_ladder)
-from .selection import expand_eligible_keys, expand_seed_keys
+from .selection import (expand_eligible_keys, expand_eligible_scopes,
+                        expand_seed_keys, expand_seed_scopes)
 from .types import is_arc
 from .writer import add_track, apply_plan
 
@@ -80,8 +81,17 @@ class BoardAdapter:
         return expand_seed_keys(
             self, board, straight_by_key, seed_keys, warnings)
 
+    def _expand_seed_scopes(self, board, straight_by_key, seed_keys, warnings):
+        return expand_seed_scopes(
+            self, board, straight_by_key, seed_keys, warnings)
+
     def expand_eligible_keys(self, board, straight_by_key, seed_keys, warnings=None):
         return expand_eligible_keys(
+            self, board, straight_by_key, seed_keys, warnings)
+
+    def expand_eligible_scopes(
+            self, board, straight_by_key, seed_keys, warnings=None):
+        return expand_eligible_scopes(
             self, board, straight_by_key, seed_keys, warnings)
 
     def snapshot(self, board, require_selection=True):

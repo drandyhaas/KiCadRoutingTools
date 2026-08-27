@@ -31,10 +31,11 @@ Starting the helper processes, refilling zones, and running DRC can therefore
 add seconds even for a single connection. The current board is not saved or
 modified by validation.
 
-Performance policy is scope-aware: one-net glosses prioritize minimum latency;
-multi-net glosses use their configured maximum time budget to retain the best
-safe subset found so far. A rejected net does not intentionally cancel safe
-improvements already found on unrelated nets.
+Performance policy is scope-aware: one-connection glosses prioritize minimum
+latency; larger selections replay those exact local scopes and use their
+configured maximum time budget to retain the best safe composition found so
+far. A rejected connection does not cancel safe improvements elsewhere, even
+when both connections belong to the same net.
 
 ## Repository layout
 

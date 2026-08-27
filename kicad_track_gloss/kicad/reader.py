@@ -10,7 +10,7 @@ from .rules import (board_bounds, copper_layers, enabled_copper_layers,
                     exact_board_outline,
                     mask_graphic_keepouts, native_rules, track_keepouts,
                     via_track_hole_clearance)
-from .selection import expand_eligible_keys, is_probable_diff_pair
+from .selection import expand_eligible_scopes, is_probable_diff_pair
 from .types import is_arc, is_straight_track, is_via
 
 
@@ -24,6 +24,7 @@ class SelectionSnapshot:
     selection_seed_count: int = 0
     auto_expanded_count: int = 0
     tuned_protected_count: int = 0
+    connection_scopes: tuple = ()
 
 
 def _via_copper_layers(adapter, board, item):
@@ -147,7 +148,7 @@ def read_snapshot(adapter, board, require_selection=True):
         else:
             seed_keys.add(key)
 
-    eligible, expanded, meanders = expand_eligible_keys(
+    eligible, expanded, meanders, connection_scopes = expand_eligible_scopes(
         adapter, board, straight_by_key, seed_keys, warnings)
     expanded_count = max(0, len(expanded) - len(seed_keys))
 
@@ -239,4 +240,5 @@ def read_snapshot(adapter, board, require_selection=True):
                        net_clearances, minimum, edge, board_bounds(adapter, board),
                        pad_regions, exact_board_outline(adapter, board))
     return SelectionSnapshot(model, eligible, sorted(set(warnings)), minimum, edge,
-                             len(seed_keys), expanded_count, len(meanders))
+                             len(seed_keys), expanded_count, len(meanders),
+                             connection_scopes)

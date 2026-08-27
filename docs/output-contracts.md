@@ -59,7 +59,9 @@ The payload currently uses:
 - native DRC status, category counts, errors, timings, cache state, and
   validation mode;
 - output board path when one was requested;
-- conservative candidate-ladder fallback state.
+- candidate-ladder fallback state;
+- connection-local recovery state, DRC attempt count, and retained/planned
+  connection counts.
 
 New optional fields may be added without changing `schema`. Removing or
 renaming a field, changing its type, or changing score semantics requires a

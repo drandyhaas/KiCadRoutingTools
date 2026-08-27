@@ -326,6 +326,11 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
      generate_converged_plan, plan_identity, length, segment_key,
      is_probable_diff_pair, is_straight_track,
      version, config) = _bootstrap_engine()
+    from kicad_track_gloss.engine import (
+        compose_compatible_connection_plans, generate_connection_candidates,
+        rank_candidate_plans)
+    from kicad_track_gloss.kicad.native_salvage import (
+        maximize_safe_native_connections)
     if max_passes is None:
         max_passes = config.convergence.cli_max_passes
     if time_budget_seconds is None:
@@ -347,6 +352,9 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
     operation_deadline = (
         None if time_budget_seconds is None else
         operation_started + float(time_budget_seconds))
+    planning_deadline = (
+        None if time_budget_seconds is None else
+        operation_started + float(time_budget_seconds) * 0.5)
     with prepared_board(board_path, project_path) as (load_path, used_project):
         stage_started = time.monotonic()
         board = pcbnew.LoadBoard(str(load_path))
@@ -371,7 +379,8 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
         scopes = resolve_scopes(scopes)
         seeds = seed_keys_for_scopes(
             records, scopes, is_probable_diff_pair)
-        eligible, expanded, meanders = adapter.expand_eligible_keys(
+        eligible, expanded, meanders, connection_scopes = \
+            adapter.expand_eligible_scopes(
             board, records, seeds, [])
         timings_ms["scope"] = (time.monotonic() - stage_started) * 1000.0
         if not eligible:
@@ -383,28 +392,59 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             min_gain=minimum_saved_length_mm,
             allow_equal_length_simpler=True,
             clearance=initial.minimum_clearance, parallel=parallel,
-            pass_observer=pass_observer, deadline=operation_deadline,
+            pass_observer=pass_observer, deadline=planning_deadline,
             conservative_ladder=conservative_ladder,
             cancellation_grace_seconds=(
                 config.timing.interactive_cancellation_grace_seconds))
         timings_ms["planning_primary"] = (
             time.monotonic() - stage_started) * 1000.0
+        global_plan = best
+        connection_plans = []
+        connection_plan = None
+        if (len(connection_scopes) > 1 and
+                (planning_deadline is None or
+                 time.monotonic() < planning_deadline)):
+            stage_started = time.monotonic()
+            (connection_plans, _connection_rejections,
+             _connection_deadline) = generate_connection_candidates(
+                initial.model, eligible, connection_scopes, global_plan,
+                min_gain=minimum_saved_length_mm,
+                allow_equal_length_simpler=True,
+                clearance=initial.minimum_clearance,
+                max_passes=max_passes,
+                group_max_passes=max_passes,
+                collect_statistics=False,
+                planning_deadline=planning_deadline,
+                cancellation_grace_seconds=(
+                    config.timing.interactive_cancellation_grace_seconds))
+            (connection_plan, _compatible_plans,
+             _composition_rejections) = compose_compatible_connection_plans(
+                initial.model, eligible, connection_plans)
+            timings_ms["planning_connections"] = (
+                time.monotonic() - stage_started) * 1000.0
+        planning_candidates = [global_plan]
+        if connection_plan is not None and connection_plan.changed:
+            planning_candidates.append(connection_plan)
+        if conservative_ladder and conservative_ladder[0].changed:
+            planning_candidates.append(conservative_ladder[0])
+        planning_candidates = list(rank_candidate_plans(planning_candidates))
+        best = planning_candidates[0]
         native = None
         applied = False
         fallback_used = False
         fallback_plan_cached = False
+        connection_salvage_used = False
+        connection_salvage_attempts = 0
+        connections_retained = 0
+        connections_planned = 0
         if best.changed:
             stage_started = time.monotonic()
             remaining = (None if operation_deadline is None else
                          max(0.0, operation_deadline - time.monotonic()))
-            validation_plans = [best]
-            if conservative_ladder:
-                conservative = conservative_ladder[0]
-                if (conservative.changed and
-                        plan_identity(conservative) != plan_identity(best)):
-                    validation_plans.append(conservative)
-                    fallback_plan_cached = True
-                    timings_ms["planning_fallback"] = 0.0
+            validation_plans = planning_candidates[:2]
+            if len(validation_plans) > 1:
+                fallback_plan_cached = True
+                timings_ms["planning_fallback"] = 0.0
             if len(validation_plans) > 1:
                 native_results = adapter.validate_plan_ladder(
                     board, validation_plans, timeout_seconds=remaining)
@@ -456,6 +496,30 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
                     fallback_used = True
                 elif fallback_native.error:
                     native = fallback_native
+        if (best.changed and native is not None and not native.allowed and
+                not native.error and
+                native.validation_mode != "native_timeout" and
+                connection_plans and
+                (operation_deadline is None or
+                 time.monotonic() < operation_deadline)):
+            stage_started = time.monotonic()
+            (partial_plan, partial_native,
+             connection_salvage_attempts, _salvage_deadline,
+             connections_retained, connections_planned) = \
+                maximize_safe_native_connections(
+                    adapter, board, initial.model, eligible,
+                    connection_plans, force_native=False,
+                    skip_native=False,
+                    operation_deadline=operation_deadline,
+                    wait_callback=None)
+            timings_ms["native_connection_salvage"] = (
+                time.monotonic() - stage_started) * 1000.0
+            if (partial_plan is not None and
+                    partial_native is not None and
+                    partial_native.allowed):
+                best = partial_plan
+                native = partial_native
+                connection_salvage_used = True
         if (best.changed and native is not None and
                 not native.allowed and native.error):
             raise RuntimeError(
@@ -520,6 +584,10 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             "changed": applied,
             "candidate_ladder_fallback": fallback_used,
             "candidate_ladder_cached": fallback_plan_cached,
+            "connection_salvage_used": connection_salvage_used,
+            "connection_salvage_attempts": connection_salvage_attempts,
+            "connections_retained": connections_retained,
+            "connections_planned": connections_planned,
             "native_drc_gate": (
                 "passed" if native and native.allowed else
                 "rejected" if native else "not_needed"),

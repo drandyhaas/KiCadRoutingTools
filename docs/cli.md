@@ -57,8 +57,10 @@ silently grade the wrong subset.
   exceptions.
 - `--max-passes N` sets the hard changed-pass guard. The packaged CLI default
   is 16.
-- `--time-budget SECONDS` bounds total planning and DRC time. The packaged CLI
-  default is unlimited because it is intended for offline automation.
+- `--time-budget SECONDS` bounds total planning and DRC time. With a finite
+  budget, half is reserved as the planning ceiling and the remainder stays
+  available for native validation and connection-local recovery. The packaged
+  CLI default is unlimited because it is intended for offline automation.
 - `--no-parallel` disables independent net/layer worker processes.
 - `--trace-passes` sends one `GLOSS_PASS_JSON=` record per convergence state to
   stderr, including the terminal fixed-point, limit, or timeout state.
@@ -68,6 +70,11 @@ different default time budgets: the plugin favors interactive responsiveness;
 the CLI favors a complete fixed point. Selecting all admissible tracks in the
 plugin and using CLI scope `ALL` therefore describe the same optimization,
 provided neither run is stopped by its interactive budget.
+
+For multi-connection scopes, the CLI also ranks the compatible composition of
+the independently converged local connections. If leading plans fail native
+DRC, it retains the best approved connection subset reached before a finite
+budget expires instead of reverting to a global no-op.
 
 ## JSON file output
 
