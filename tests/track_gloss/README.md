@@ -66,8 +66,9 @@ and design rules:
 D:\kicad\bin\python.exe tools\score_track_gloss.py --project tests\track_gloss\patterns\dispenser_labels\dispenser_labels.kicad_pro tests\track_gloss\patterns\dispenser_labels\dispenser_labels.kicad_pcb
 ```
 
-The final stdout line must be `SCORE=1045.370136582`. The preceding
-`GLOSS_SCORE_JSON=` document must report 706 selected seeds, 590 eligible
+The final stdout line must be `SCORE=1045.370136582`. The preceding canonical
+`SCORE_JSON=` document and its legacy `GLOSS_SCORE_JSON=` alias must report 706
+selected seeds, 590 eligible
 tracks, 116 protected tuned tracks, two changed convergence passes,
 64.073413144 mm of actual copper saved, and 32 segments saved. Saving with `--output`
 and rescoring that output must report zero changed passes and the same score.

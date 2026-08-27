@@ -233,11 +233,16 @@ trois chemins ajoutés par `place_route_loop`.
 Le contrat stdout final est :
 
 ```text
+SCORE_JSON={...}
 GLOSS_SCORE_JSON={...}
 SCORE=<float>
 ```
 
-`SCORE=` est toujours la dernière ligne, parsable par
+`SCORE_JSON=` est le contrat structuré canonique homogène avec les instruments
+de notation KiCadRoutingTools. `GLOSS_SCORE_JSON=` en est un alias temporaire
+de rétrocompatibilité portant exactement le même document. Ajouter
+`--json-out` pour écrire ce payload sans préfixe dans un fichier. `SCORE=` est
+toujours la dernière ligne, parsable par
 `place_route_loop --accept-cmd`, et une valeur plus basse est meilleure. Le
 score est la longueur totale virtuelle de pistes droites après gloss, en mm.
 Les traces `GLOSS_PASS_JSON=` et les erreurs vont sur stderr. Un no-op valide
@@ -291,6 +296,12 @@ Produire une structure conforme au Plugin and Content Manager de KiCad :
 cohérentes, archive autonome sans modules inutiles, installation testable par
 le manager et présence dans la barre d'outils ainsi que dans
 **Tools > External Plugins**.
+
+Créer également un répertoire `docs/` comparable à celui de KiCadRoutingTools,
+avec des guides distincts `plugin-usage.md`, `cli.md`, `configuration.md`,
+`output-contracts.md`, `safety-and-drc.md` et `architecture.md`. Le README
+racine sert de page d'entrée courte et renvoie vers ces documents ; ne pas y
+dupliquer toute la référence technique.
 
 ## Validation requise
 

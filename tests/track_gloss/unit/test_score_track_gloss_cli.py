@@ -51,10 +51,26 @@ def test_explicit_project_can_grade_a_differently_named_candidate():
 
 def test_stdout_has_json_then_place_route_loop_score_line():
     output = CLI.score_stdout({"score": 87.5, "changed": True})
-    json_line, score_line = output.splitlines()
-    assert json.loads(json_line.removeprefix("GLOSS_SCORE_JSON=")) == {
+    score_json_line, legacy_json_line, score_line = output.splitlines()
+    expected = {
         "changed": True, "score": 87.5}
+    assert json.loads(score_json_line.removeprefix("SCORE_JSON=")) == expected
+    assert json.loads(
+        legacy_json_line.removeprefix("GLOSS_SCORE_JSON=")) == expected
     assert score_line == "SCORE=87.500000000"
+
+
+def test_json_out_writes_the_canonical_payload(tmp_path):
+    output = tmp_path / "result.json"
+    payload = {"schema": 1, "kind": "track-gloss-score", "score": 12.5}
+    resolved = CLI.write_json_output(payload, output)
+    assert resolved == output.resolve()
+    assert json.loads(output.read_text(encoding="utf-8")) == payload
+
+
+def test_json_out_rejects_a_missing_parent(tmp_path):
+    with pytest.raises(ValueError, match="directory does not exist"):
+        CLI.write_json_output({"score": 1.0}, tmp_path / "missing" / "x.json")
 
 
 def test_scope_defaults_to_all_and_rejects_ambiguous_mix():
@@ -90,6 +106,12 @@ def test_cli_exposes_convergence_pass_limit_and_trace():
         "--max-passes", "7", "--trace-passes", "candidate.kicad_pcb"])
     assert args.max_passes == 7
     assert args.trace_passes
+
+
+def test_cli_exposes_json_output_path():
+    args = CLI._parser().parse_args([
+        "--json-out", "result.json", "candidate.kicad_pcb"])
+    assert args.json_out == "result.json"
 
 
 def test_cli_default_pass_limit_comes_from_internal_policy():

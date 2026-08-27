@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Score a complete KiCad route by its converged all-track gloss result.
 
-The input file is never modified. The final ``SCORE=<float>`` stdout line
-follows ``place_route_loop --accept-cmd``: lower is better.
+The input file is never modified. ``SCORE_JSON=`` follows the score-instrument
+convention used by KiCadRoutingTools, while the final ``SCORE=<float>`` stdout
+line follows ``place_route_loop --accept-cmd``: lower is better.
 """
 
 from __future__ import annotations
@@ -78,6 +79,10 @@ def _parser():
         help=("write the converged gloss result to a new board; omitted for "
               "read-only scoring and forbidden with --place-route-loop"))
     parser.add_argument(
+        "--json-out", metavar="RESULT.json",
+        help=("write the canonical SCORE_JSON payload to a JSON file; this is "
+              "independent from the optional glossed PCB --output"))
+    parser.add_argument(
         "--force", action="store_true",
         help="allow --output to replace an existing file (never the input)")
     parser.add_argument(
@@ -130,10 +135,28 @@ def resolve_board_project(board_or_project, explicit_project=None):
 
 
 def score_stdout(payload):
-    """Stable machine output; the final line is the accept-cmd contract."""
+    """Stable machine output; the final line is the accept-cmd contract.
+
+    ``GLOSS_SCORE_JSON`` remains as a compatibility alias for consumers of
+    releases before 0.3.39. Both prefixes carry the exact same document.
+    """
     document = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return "GLOSS_SCORE_JSON=" + document + "\nSCORE={:.9f}".format(
-        payload["score"])
+    return ("SCORE_JSON=" + document + "\nGLOSS_SCORE_JSON=" + document +
+            "\nSCORE={:.9f}".format(payload["score"]))
+
+
+def write_json_output(payload, output_path):
+    """Write the canonical score document requested by ``--json-out``."""
+    if output_path is None:
+        return None
+    output = Path(output_path).resolve()
+    if not output.parent.is_dir():
+        raise ValueError(
+            "JSON output directory does not exist: " + str(output.parent))
+    output.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
+    return output
 
 
 def resolve_scopes(values=None, scope_file=None):
@@ -452,6 +475,11 @@ def main(argv=None):
         if placed is not None:
             payload["placed_board"] = str(placed.resolve())
             payload["route_json"] = str(route_json.resolve())
+        json_output = write_json_output(payload, args.json_out)
+        if json_output is not None:
+            payload["json_output"] = str(json_output)
+            # Re-write so the file and stdout carry the same final payload.
+            write_json_output(payload, json_output)
         print(score_stdout(payload))
         return 0
     except Exception as error:

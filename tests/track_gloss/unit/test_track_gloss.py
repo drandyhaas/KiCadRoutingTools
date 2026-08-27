@@ -754,6 +754,30 @@ def test_plugin_version_matches_metadata():
     assert metadata["versions"][0]["version"] == __version__
 
 
+def test_repository_documentation_is_split_by_public_contract():
+    root = Path(__file__).resolve().parents[3]
+    required = {
+        "plugin-usage.md",
+        "cli.md",
+        "configuration.md",
+        "output-contracts.md",
+        "safety-and-drc.md",
+        "architecture.md",
+    }
+    docs = root / "docs"
+    assert required <= {path.name for path in docs.glob("*.md")}
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    for name in required:
+        assert "docs/" + name in readme
+
+    output_contract = (docs / "output-contracts.md").read_text(
+        encoding="utf-8")
+    assert "SCORE_JSON=" in output_contract
+    assert "GLOSS_SCORE_JSON=" in output_contract
+    assert "SCORE=<float>" in output_contract
+    assert "stderr" in output_contract
+
+
 class _NativePoint:
     def __init__(self, x, y):
         self.x, self.y = x, y
