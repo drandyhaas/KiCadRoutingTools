@@ -218,6 +218,26 @@ def _validate_with_busy_cursor(adapter, board, plan, *, force_native,
                 LOG.exception("Could not restore the Track Gloss DRC cursor")
 
 
+def _validate_ladder_with_busy_cursor(adapter, board, plans, *, force_native,
+                                      skip_native, timeout_seconds):
+    busy_started = False
+    try:
+        try:
+            wx.BeginBusyCursor()
+            busy_started = True
+        except Exception:
+            LOG.exception("Could not display the Track Gloss DRC cursor")
+        return adapter.validate_plan_ladder(
+            board, plans, force_native=force_native,
+            skip_native=skip_native, timeout_seconds=timeout_seconds)
+    finally:
+        if busy_started:
+            try:
+                wx.EndBusyCursor()
+            except Exception:
+                LOG.exception("Could not restore the Track Gloss DRC cursor")
+
+
 class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
     def defaults(self):
         self.name = "KiCad Track Gloss"
@@ -345,6 +365,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             stage_started +
             config.timing.interactive_planning_time_budget_seconds)
         try:
+            conservative_ladder = []
             best = _plan_with_progress_dialog(
                 lambda observer, cancel_check: generate_converged_plan(
                     snapshot.model, snapshot.eligible_keys,
@@ -360,6 +381,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                     parallel=True,
                     deadline=planning_deadline,
                     pass_observer=observer,
+                    conservative_ladder=conservative_ladder,
                     cancel_check=cancel_check,
                     cancellation_grace_seconds=(
                         config.timing.interactive_cancellation_grace_seconds)),
@@ -412,9 +434,22 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         skip_native = (
             single_track_selection and
             not config.safety.kicad_drc_for_single_track)
-        native = _validate_with_busy_cursor(
-            adapter, board, best, force_native=force_native,
-            skip_native=skip_native, timeout_seconds=drc_budget)
+        validation_plans = [best]
+        if conservative_ladder:
+            conservative = conservative_ladder[0]
+            if (conservative.changed and
+                    plan_identity(conservative) != plan_identity(best)):
+                validation_plans.append(conservative)
+        if len(validation_plans) > 1:
+            native_results = _validate_ladder_with_busy_cursor(
+                adapter, board, validation_plans, force_native=force_native,
+                skip_native=skip_native, timeout_seconds=drc_budget)
+            native = native_results[0]
+        else:
+            native_results = None
+            native = _validate_with_busy_cursor(
+                adapter, board, best, force_native=force_native,
+                skip_native=skip_native, timeout_seconds=drc_budget)
 
         # Native DRC is the final authority. If the most aggressive refinement
         # is rejected, retain quality progressively: retry a one-pass,
@@ -423,7 +458,17 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         # native DRC gate and remains inside the same interactive time budget.
         fallback_used = False
         primary_native = native
-        if (not native.allowed and
+        if native_results is not None and not native.allowed:
+            fallback_native = native_results[1]
+            if fallback_native.allowed:
+                best = validation_plans[1]
+                native = fallback_native
+                fallback_used = True
+            elif native.error:
+                pass
+            elif fallback_native.error:
+                native = fallback_native
+        if (native_results is None and not native.allowed and
                 native.validation_mode != "native_timeout" and
                 time.monotonic() < planning_deadline):
             try:
@@ -461,7 +506,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                         best = conservative
                         native = fallback_native
                         fallback_used = True
-                    elif fallback_native.validation_mode == "native_timeout":
+                    elif fallback_native.error:
                         native = fallback_native
         timings["native_drc_gate"] = (
             time.monotonic() - stage_started) * 1000.0

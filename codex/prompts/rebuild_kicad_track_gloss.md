@@ -194,7 +194,7 @@ Créer un JSON versionné et validé strictement, avec au minimum :
 ```json
 {
   "schema_version": 1,
-  "gloss": {"minimum_saved_length_mm": 0.1},
+  "gloss": {"minimum_saved_length_mm": 0.2},
   "convergence": {
     "interactive_max_passes": 4,
     "interactive_group_max_passes": 2,

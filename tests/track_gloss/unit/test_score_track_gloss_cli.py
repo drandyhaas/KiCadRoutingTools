@@ -122,6 +122,18 @@ def test_cli_default_pass_limit_comes_from_internal_policy():
     assert args.max_passes == document["convergence"]["cli_max_passes"]
 
 
+def test_cli_minimum_saved_length_comes_from_policy_and_is_overridable():
+    document = json.loads((
+        ROOT / "kicad_track_gloss" / "internal_config.json").read_text(
+            encoding="utf-8"))
+    assert CLI._parser().parse_args([
+        "candidate.kicad_pcb"]).minimum_saved_length_mm == pytest.approx(
+            document["gloss"]["minimum_saved_length_mm"])
+    assert CLI._parser().parse_args([
+        "--minimum-saved-length-mm", "0.75",
+        "candidate.kicad_pcb"]).minimum_saved_length_mm == pytest.approx(0.75)
+
+
 def test_cli_time_budget_is_unlimited_by_default_and_overridable():
     assert CLI._parser().parse_args(["candidate.kicad_pcb"]).time_budget is None
     assert CLI._parser().parse_args([

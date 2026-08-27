@@ -21,7 +21,8 @@ from kicad_track_gloss.kicad.selection import meander_keys as _meander_keys
 from kicad_track_gloss.engine.pads import segment_hits_pad
 from kicad_track_gloss.kicad.rules import via_track_hole_clearance
 from kicad_track_gloss.engine.planner import (
-    PlanningDeadlineExceeded, _apply_to_model)
+    PlanningDeadlineExceeded, _apply_to_model,
+    _group_dependency_signature)
 
 
 def test_expired_planning_deadline_stops_before_candidate_search():
@@ -92,6 +93,34 @@ def test_converged_plan_reaches_a_reported_fixed_point():
     assert result.changed
     assert result.fixed_point
     assert result.convergence_passes >= 1
+
+
+def test_large_convergence_preserves_the_exact_conservative_opening_plan():
+    route = staircase(8, pitch=1.0)
+    # The locked records make this a large scope without adding candidate
+    # work. Real selection expansion excludes them; here they exercise only
+    # the refinement-limit contract used by the cached DRC ladder.
+    locked = [Segment(
+        1000.0 + index, 0.0, 1000.5 + index, 0.0,
+        0.2, 0, index + 2, "locked{}".format(index), locked=True)
+        for index in range(121)]
+    model = BoardModel(route + locked)
+    eligible = {segment_key(segment) for segment in model.segments}
+    ladder = []
+
+    generate_converged_plan(
+        model, eligible, min_gain=0.01, clearance=0.0,
+        max_passes=3, parallel=False, conservative_ladder=ladder)
+    expected = generate_converged_plan(
+        model, eligible, min_gain=0.01, clearance=0.0,
+        max_passes=1, return_partial_on_limit=True,
+        max_refinement_passes=0, _allow_junction_scopes=False,
+        parallel=False)
+
+    assert len(ladder) == 1
+    assert _plan_signature(ladder[0]) == _plan_signature(expected)
+    assert ladder[0].convergence_passes == 1
+    assert not ladder[0].fixed_point
 
 
 def test_convergence_observer_reports_monotone_states_and_fixed_point():
@@ -196,6 +225,23 @@ def test_equal_length_simplification_is_mode_gated():
                                        allow_equal_length_simpler=True)
     assert not shorten.changed
     assert simplify.changed and len(simplify.additions) == 1
+
+
+def test_long_collinear_chain_has_no_artificial_split_boundary():
+    segments = [Segment(
+        float(index), 0.0, float(index + 1), 0.0,
+        0.2, 0, 1, "long{}".format(index))
+        for index in range(105)]
+    eligible = {segment_key(segment) for segment in segments}
+
+    result = smooth_selected_chains(
+        BoardModel(segments), eligible,
+        allow_equal_length_simpler=True, span_strategy="farthest")
+
+    assert set(result.remove_keys) == eligible
+    assert len(result.additions) == 1
+    assert {result.additions[0].start, result.additions[0].end} == {
+        (0.0, 0.0), (105.0, 0.0)}
 
 
 def test_no_selection_is_noop():
@@ -307,6 +353,74 @@ def test_parallel_and_sequential_planning_are_identical():
 
     assert [_plan_signature(plan) for plan in parallel] == [
         _plan_signature(plan) for plan in sequential]
+
+
+def test_parallel_group_cache_recomputes_only_changed_influence_zone(
+        monkeypatch):
+    from kicad_track_gloss.engine import parallel as parallel_module
+
+    first = [Segment(index, 0, index + 0.5, 0, 0.2, 0, 1,
+                     "a{}".format(index)) for index in range(32)]
+    second = [Segment(index, 100, index + 0.5, 100, 0.2, 0, 2,
+                      "b{}".format(index)) for index in range(32)]
+    calls = []
+
+    def fake_parallel(_model, tasks, _kwargs, **_options):
+        calls.append(tuple(key for key, _eligible in tasks))
+        return ([(key, GlossResult(), "") for key, _eligible in tasks], False)
+
+    monkeypatch.setattr(
+        parallel_module, "run_parallel_group_plans", fake_parallel)
+    cache = {}
+    eligible = {segment.uuid for segment in first + second}
+
+    generate_candidate_plans(
+        BoardModel(first + second), eligible, parallel=True,
+        converge_groups=True, _group_plan_cache=cache)
+    generate_candidate_plans(
+        BoardModel(first + second), eligible, parallel=True,
+        converge_groups=True, _group_plan_cache=cache)
+
+    moved_second = list(second)
+    moved_second[0] = Segment(
+        0, 101, 0.5, 101, 0.2, 0, 2, "b0")
+    generate_candidate_plans(
+        BoardModel(first + moved_second), eligible, parallel=True,
+        converge_groups=True, _group_plan_cache=cache)
+
+    assert len(calls[0]) == 2
+    assert len(calls) == 2  # The identical middle pass is entirely cached.
+    assert calls[1] == (("primary", 2, 0),)
+
+
+def test_group_dependency_signature_ignores_distant_foreign_copper():
+    from kicad_track_gloss.engine.context import PlannerContext
+
+    selected = Segment(0, 0, 10, 0, 0.2, 0, 1, "selected")
+    distant = Segment(100, 100, 110, 100, 0.2, 0, 2, "distant")
+    first_model = BoardModel([selected, distant], minimum_clearance=0.2)
+    moved_model = BoardModel([
+        selected,
+        Segment(100, 101, 110, 101, 0.2, 0, 2, "distant"),
+    ], minimum_clearance=0.2)
+
+    assert _group_dependency_signature(
+        first_model, {"selected"}, PlannerContext(first_model)) == \
+        _group_dependency_signature(
+            moved_model, {"selected"}, PlannerContext(moved_model))
+
+    near_model = BoardModel([
+        selected,
+        Segment(4, 0.3, 6, 0.3, 0.2, 0, 2, "near"),
+    ], minimum_clearance=0.2)
+    moved_near_model = BoardModel([
+        selected,
+        Segment(4, 0.35, 6, 0.35, 0.2, 0, 2, "near"),
+    ], minimum_clearance=0.2)
+    assert _group_dependency_signature(
+        near_model, {"selected"}, PlannerContext(near_model)) != \
+        _group_dependency_signature(
+            moved_near_model, {"selected"}, PlannerContext(moved_near_model))
 
 
 def test_mixed_width_fallback_combinations_keep_connectivity():

@@ -7,6 +7,7 @@ API-neutral geometry gate used by every candidate and composed result.
 from __future__ import annotations
 
 from collections import defaultdict
+from functools import lru_cache
 
 from .context import PlannerContext
 from .geometry import (path_hits_polygon, point_segment_distance,
@@ -68,6 +69,7 @@ def retain_identity_replacements(model, result):
         result.additions = additions
 
 
+@lru_cache(maxsize=131072)
 def _capsule_interval(a, b, target_a, target_b, radius):
     """Parameter interval where ``a->b`` lies inside a target-track capsule."""
     if radius < -1e-12:

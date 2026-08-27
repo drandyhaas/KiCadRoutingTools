@@ -16,6 +16,7 @@ Standalone modifications in this branch were created with ChatGPT/Codex
 from __future__ import annotations
 
 from collections import defaultdict
+from copy import deepcopy
 from dataclasses import replace
 import hashlib
 import time
@@ -598,7 +599,8 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
     eligible = {str(key) for key in eligible_segment_keys}
     planner_context = (planner_context if planner_context is not None and
                        planner_context.model is model else PlannerContext(model))
-    immutable_cover_keys = set(planner_context.segment_by_key) - eligible
+    immutable_cover_keys = frozenset(
+        set(planner_context.segment_by_key) - eligible)
     result = GlossResult()
     net_names = {segment.net_id: segment.net_name
                  for segment in model.segments if segment.net_id > 0}
@@ -611,8 +613,10 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
     for o in model.obstacles:
         if o.net_id > 0:
             obstacle_vertices[o.net_id].add(vertex(o.x, o.y))
-    track_terminal_targets = find_track_terminal_targets(model, eligible)
-    pad_terminal_targets = find_pad_terminal_targets(model, eligible)
+    track_terminal_targets = find_track_terminal_targets(
+        model, eligible, planner_context=planner_context)
+    pad_terminal_targets = find_pad_terminal_targets(
+        model, eligible, planner_context=planner_context)
 
     groups = defaultdict(list)
     for s in model.segments:
@@ -655,7 +659,11 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                                   else (seg.start_x, seg.start_y))
                     points.append(next_point)
                     current = vertex(*next_point)
-                    if current == anchor or not interior(current) or len(chain) >= 100:
+                    # Every traversed segment enters ``used`` and the next
+                    # edge must be unused, so this walk is already finite.
+                    # A former 100-segment guard split otherwise ordinary long
+                    # routes at an artificial, optimization-visible boundary.
+                    if current == anchor or not interior(current):
                         break
                     nxt = sorted(
                         (s for s in adjacency[current]
@@ -728,10 +736,27 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                             blocker = None
                             for addition in additions:
                                 moving = replace(chain[i], width=addition.width)
-                                blocker = _path_blocker(
-                                    model, (addition.start, addition.end),
-                                    moving, replaced, clearance, planner_context,
+                                blocker_key = (
+                                    addition.start, addition.end,
+                                    round(addition.width, 6), addition.layer,
+                                    addition.net_id,
+                                    round(moving.clearance, 6),
+                                    round(clearance, 6), frozenset(replaced),
                                     immutable_cover_keys)
+                                cache = planner_context.path_blockers
+                                if blocker_key in cache:
+                                    blocker = cache[blocker_key]
+                                else:
+                                    blocker = _path_blocker(
+                                        model, (addition.start, addition.end),
+                                        moving, replaced, clearance,
+                                        planner_context, immutable_cover_keys)
+                                    # Bound per-model memory on generated or
+                                    # adversarial boards. Clearing affects
+                                    # performance only, never search order.
+                                    if len(cache) >= 131072:
+                                        cache.clear()
+                                    cache[blocker_key] = blocker
                                 if blocker:
                                     break
                             if blocker:
@@ -909,6 +934,52 @@ def _junction_branch_scopes(model, eligible_segment_keys,
         -len(scope), tuple(sorted(scope)))))[:max(0, int(limit))]
 
 
+def _group_dependency_signature(model, eligible_segment_keys, context):
+    """Fingerprint every moving or foreign track which can affect a group.
+
+    Candidate vertices stay inside the selected copper bounds, except for pad
+    contacts and sliding same-net track terminals.  Expand those bounds by a
+    deliberately global worst-case clearance/width/radius margin.  A group is
+    reusable only when both its own geometry and every track in that complete
+    influence envelope are byte-for-byte equivalent on a later pass.
+
+    Pads, vias, keepouts and board outlines are immutable during one call to
+    ``generate_converged_plan`` and therefore need not be repeated here.
+    """
+    eligible = {str(key) for key in eligible_segment_keys}
+    selected = [segment for segment in model.segments
+                if segment_key(segment) in eligible]
+    if not selected:
+        return ()
+
+    dependency_segments = {segment_key(segment): segment
+                           for segment in selected}
+    for targets in find_track_terminal_targets(
+            model, eligible, planner_context=context).values():
+        for segment in targets:
+            dependency_segments[segment_key(segment)] = segment
+
+    x_values = []
+    y_values = []
+    for segment in dependency_segments.values():
+        x_values.extend((segment.start_x, segment.end_x))
+        y_values.extend((segment.start_y, segment.end_y))
+    selected_halfwidth = max(segment.width / 2.0 for segment in selected)
+    margin = (context.max_pad_radius + context.max_net_clearance +
+              selected_halfwidth + context.max_segment_halfwidth + 1e-5)
+    bounds = (min(x_values) - margin, min(y_values) - margin,
+              max(x_values) + margin, max(y_values) + margin)
+    nearby = {}
+    for segment in context.segments.query(bounds):
+        nearby[segment_key(segment)] = segment
+    nearby.update(dependency_segments)
+
+    return tuple(sorted(
+        (_segment_order_key(segment), round(segment.clearance, 6),
+         bool(segment.locked), bool(segment.arc))
+        for segment in nearby.values()))
+
+
 def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
     """Generate deterministic global and isolated-group fallback plans."""
     deadline = kwargs.get("deadline")
@@ -920,6 +991,7 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
     parallel = kwargs.pop("parallel", False)
     converge_groups = kwargs.pop("converge_groups", False)
     group_max_passes = kwargs.pop("group_max_passes", 6)
+    group_plan_cache = kwargs.pop("_group_plan_cache", None)
     allow_netclass_seed = kwargs.pop("_allow_netclass_seed", True)
     allow_junction_scopes = kwargs.pop(
         "_allow_junction_scopes",
@@ -993,6 +1065,25 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
             (('fallback',) + key, tuple(sorted(groups[key])))
             for key in group_keys
             if groups[key] != primary_groups[key[:2]])
+        cached_rows = []
+        pending_tasks = []
+        task_cache_metadata = {}
+        if group_plan_cache is not None:
+            for task_key, task_eligible in tasks:
+                cache_key = (task_key, bool(converge_groups),
+                             int(group_max_passes))
+                dependency_signature = _group_dependency_signature(
+                    model, task_eligible, kwargs["planner_context"])
+                task_cache_metadata[task_key] = (
+                    cache_key, dependency_signature)
+                cached = group_plan_cache.get(cache_key)
+                if (cached is not None and
+                        cached[0] == dependency_signature):
+                    cached_rows.append((task_key, deepcopy(cached[1]), ""))
+                else:
+                    pending_tasks.append((task_key, task_eligible))
+        else:
+            pending_tasks = tasks
         parallel_kwargs = dict(kwargs)
         if converge_groups:
             parallel_kwargs["_allow_junction_scopes"] = allow_junction_scopes
@@ -1002,14 +1093,27 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
         # and validating completed groups. Spending the entire deadline inside
         # workers would leave no safe composed plan to return.
         worker_timeout = (None if remaining is None else remaining * 0.75)
-        parallel_result = run_parallel_group_plans(
-            model, tasks, parallel_kwargs, converge=converge_groups,
-            max_passes=group_max_passes, timeout_seconds=worker_timeout,
-            cancellation_grace_seconds=cancellation_grace_seconds,
-            cancel_check=cancel_check)
+        if pending_tasks:
+            parallel_result = run_parallel_group_plans(
+                model, pending_tasks, parallel_kwargs,
+                converge=converge_groups, max_passes=group_max_passes,
+                timeout_seconds=worker_timeout,
+                cancellation_grace_seconds=cancellation_grace_seconds,
+                cancel_check=cancel_check)
+        else:
+            parallel_result = ([], False)
         _check_deadline(deadline, cancel_check)
         if parallel_result is not None:
-            parallel_rows, parallel_timed_out = parallel_result
+            fresh_rows, parallel_timed_out = parallel_result
+            if group_plan_cache is not None:
+                for task_key, plan, error in fresh_rows:
+                    if plan is not None and not error:
+                        cache_key, dependency_signature = \
+                            task_cache_metadata[task_key]
+                        group_plan_cache[cache_key] = (
+                            dependency_signature, deepcopy(plan))
+            parallel_rows = sorted(cached_rows + fresh_rows,
+                                   key=lambda row: row[0])
         if parallel_timed_out:
             rejected.append(
                 "Interactive planning time budget reached; retained {} "
@@ -1471,6 +1575,7 @@ def _convergence_state(model, pass_index, initial_mm, previous_mm, event,
 def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
                             pass_observer=None, return_partial_on_limit=False,
                             batch_group_convergence=True,
+                            conservative_ladder=None,
                             **kwargs):
     """Compose repeated global plans into one validated fixed-point edit.
 
@@ -1486,6 +1591,15 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
     _check_deadline(deadline, cancel_check)
     source_model = _canonicalize_model_segments(model)
     source_eligible = set(eligible_segment_keys)
+    # Scopes above the refinement limit use the exact same unrefined opening
+    # pass as generate_conservative_candidate().  Preserve that already-built
+    # plan for the native-DRC ladder instead of recomputing the whole board
+    # after a rejection.  Small scopes retain the historical fallback because
+    # their opening candidate may have undergone local refinement.
+    preserve_conservative = (
+        conservative_ladder is not None and
+        len(source_eligible) > _REFINEMENT_SCOPE_LIMIT and
+        kwargs.get("max_refinement_passes", 3) != 0)
     subdivision_canonicalization_skipped = (
         deadline is not None and
         len(source_eligible) > _INTERACTIVE_CANONICALIZATION_LIMIT)
@@ -1499,6 +1613,7 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
     current_model = model
     current_eligible = set(original_eligible)
     changed_steps = []
+    group_plan_cache = {}
     seen = set()
     final_search = None
     last_composed = None
@@ -1540,6 +1655,8 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
             # independent net/layer group in its worker before reconciling the
             # next global state.
             pass_kwargs["converge_groups"] = pass_index > 0
+        if batch_group_convergence:
+            pass_kwargs["_group_plan_cache"] = group_plan_cache
         try:
             plans = generate_candidate_plans(
                 current_model, current_eligible, **pass_kwargs)
@@ -1617,6 +1734,18 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
         (step, proposed_model, proposed_eligible, last_composed,
          last_source_composed) = accepted
         changed_steps.append(step)
+        if preserve_conservative and len(changed_steps) == 1:
+            conservative = replace(
+                last_source_composed,
+                remove_keys=list(last_source_composed.remove_keys),
+                additions=list(last_source_composed.additions),
+                warnings=list(last_source_composed.warnings),
+                transformations=list(last_source_composed.transformations),
+                search_counts=dict(last_source_composed.search_counts),
+                blocking_nets=dict(last_source_composed.blocking_nets),
+                convergence_passes=1,
+                fixed_point=False)
+            conservative_ladder.append(conservative)
         if (deadline is not None and
                 time.monotonic() >= deadline - 0.25):
             # The accepted proposed model and its composed one-shot plan have

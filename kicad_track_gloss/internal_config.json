@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "gloss": {
-    "minimum_saved_length_mm": 0.1
+    "minimum_saved_length_mm": 0.2
   },
   "convergence": {
     "interactive_max_passes": 4,

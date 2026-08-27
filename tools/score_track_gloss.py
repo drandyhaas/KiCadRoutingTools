@@ -54,6 +54,22 @@ def _internal_cli_time_budget():
     return None if value is None else float(value)
 
 
+def _internal_minimum_saved_length():
+    """Read the shared plugin/CLI default without importing the GUI package."""
+    path = ROOT / "kicad_track_gloss" / "internal_config.json"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        value = document["gloss"]["minimum_saved_length_mm"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise RuntimeError(
+            "cannot read Track Gloss minimum saved length: {}".format(error))
+    if (isinstance(value, bool) or not isinstance(value, (int, float)) or
+            not math.isfinite(value) or value < 0.0):
+        raise ValueError(
+            "gloss.minimum_saved_length_mm must be finite and non-negative")
+    return float(value)
+
+
 def _parser():
     parser = argparse.ArgumentParser(
         description=(
@@ -100,6 +116,11 @@ def _parser():
         metavar="SECONDS",
         help=("optional total planning and DRC time budget; the internal "
               "default is unlimited"))
+    parser.add_argument(
+        "--minimum-saved-length-mm", type=float,
+        default=_internal_minimum_saved_length(), metavar="MM",
+        help=("minimum saving required for each length-only transformation; "
+              "default from the shared plugin/CLI policy"))
     parser.add_argument(
         "--trace-passes", action="store_true",
         help=("print one GLOSS_PASS_JSON record per convergence state to "
@@ -300,7 +321,7 @@ def _save_output(pcbnew, board, input_path, output_path, force=False):
 
 def evaluate(board_path, project_path=None, parallel=True, output_path=None,
              force=False, max_passes=None, scopes=None, pass_observer=None,
-             time_budget_seconds=None):
+             time_budget_seconds=None, minimum_saved_length_mm=None):
     (pcbnew, BoardAdapter, generate_conservative_candidate,
      generate_converged_plan, plan_identity, length, segment_key,
      is_probable_diff_pair, is_straight_track,
@@ -309,24 +330,38 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
         max_passes = config.convergence.cli_max_passes
     if time_budget_seconds is None:
         time_budget_seconds = config.timing.cli_total_time_budget_seconds
+    if minimum_saved_length_mm is None:
+        minimum_saved_length_mm = config.gloss.minimum_saved_length_mm
     if (time_budget_seconds is not None and
             (not math.isfinite(time_budget_seconds) or
              time_budget_seconds <= 0.0)):
         raise ValueError("time budget must be positive")
+    if (isinstance(minimum_saved_length_mm, bool) or
+            not isinstance(minimum_saved_length_mm, (int, float)) or
+            not math.isfinite(minimum_saved_length_mm) or
+            minimum_saved_length_mm < 0.0):
+        raise ValueError("minimum saved length must be finite and non-negative")
+    minimum_saved_length_mm = float(minimum_saved_length_mm)
     operation_started = time.monotonic()
+    timings_ms = {}
     operation_deadline = (
         None if time_budget_seconds is None else
         operation_started + float(time_budget_seconds))
     with prepared_board(board_path, project_path) as (load_path, used_project):
+        stage_started = time.monotonic()
         board = pcbnew.LoadBoard(str(load_path))
+        timings_ms["load"] = (time.monotonic() - stage_started) * 1000.0
         adapter = BoardAdapter(pcbnew)
+        stage_started = time.monotonic()
         initial = adapter.snapshot(board, require_selection=False)
+        timings_ms["snapshot"] = (time.monotonic() - stage_started) * 1000.0
         before_mm = sum(length(
             (segment.start_x, segment.start_y),
             (segment.end_x, segment.end_y))
             for segment in initial.model.segments if not segment.arc)
         before_segments = sum(
             not segment.arc for segment in initial.model.segments)
+        stage_started = time.monotonic()
         records = {}
         for item in board.GetTracks():
             if not is_straight_track(pcbnew, item):
@@ -338,52 +373,105 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             records, scopes, is_probable_diff_pair)
         eligible, expanded, meanders = adapter.expand_eligible_keys(
             board, records, seeds, [])
+        timings_ms["scope"] = (time.monotonic() - stage_started) * 1000.0
         if not eligible:
             raise ValueError("scope contains no eligible track after protection")
+        conservative_ladder = []
+        stage_started = time.monotonic()
         best = generate_converged_plan(
             initial.model, eligible, max_passes=max_passes,
-            min_gain=config.gloss.minimum_saved_length_mm,
+            min_gain=minimum_saved_length_mm,
             allow_equal_length_simpler=True,
             clearance=initial.minimum_clearance, parallel=parallel,
             pass_observer=pass_observer, deadline=operation_deadline,
+            conservative_ladder=conservative_ladder,
             cancellation_grace_seconds=(
                 config.timing.interactive_cancellation_grace_seconds))
+        timings_ms["planning_primary"] = (
+            time.monotonic() - stage_started) * 1000.0
         native = None
         applied = False
         fallback_used = False
+        fallback_plan_cached = False
         if best.changed:
+            stage_started = time.monotonic()
             remaining = (None if operation_deadline is None else
                          max(0.0, operation_deadline - time.monotonic()))
-            native = adapter.validate_plan(
-                board, best, timeout_seconds=remaining)
+            validation_plans = [best]
+            if conservative_ladder:
+                conservative = conservative_ladder[0]
+                if (conservative.changed and
+                        plan_identity(conservative) != plan_identity(best)):
+                    validation_plans.append(conservative)
+                    fallback_plan_cached = True
+                    timings_ms["planning_fallback"] = 0.0
+            if len(validation_plans) > 1:
+                native_results = adapter.validate_plan_ladder(
+                    board, validation_plans, timeout_seconds=remaining)
+                timings_ms["native_portfolio"] = (
+                    time.monotonic() - stage_started) * 1000.0
+                native = native_results[0]
+                fallback_native = native_results[1]
+                if not native.allowed and fallback_native.allowed:
+                    best = validation_plans[1]
+                    native = fallback_native
+                    fallback_used = True
+                elif not native.allowed:
+                    if native.error:
+                        pass
+                    elif fallback_native.error:
+                        native = fallback_native
+            else:
+                native = adapter.validate_plan(
+                    board, best, timeout_seconds=remaining)
+                timings_ms["native_primary"] = (
+                    time.monotonic() - stage_started) * 1000.0
         if (best.changed and native is not None and not native.allowed and
                 native.validation_mode != "native_timeout" and
+                not fallback_plan_cached and
                 (operation_deadline is None or
                  time.monotonic() < operation_deadline)):
+            stage_started = time.monotonic()
             conservative = generate_conservative_candidate(
                 initial.model, eligible,
-                min_gain=config.gloss.minimum_saved_length_mm,
+                min_gain=minimum_saved_length_mm,
                 clearance=initial.minimum_clearance,
                 deadline=operation_deadline,
                 cancellation_grace_seconds=(
                     config.timing.interactive_cancellation_grace_seconds))
+            timings_ms["planning_fallback"] = (
+                time.monotonic() - stage_started) * 1000.0
             if (conservative.changed and
                     plan_identity(conservative) != plan_identity(best)):
                 remaining = (None if operation_deadline is None else
                              max(0.0, operation_deadline - time.monotonic()))
+                stage_started = time.monotonic()
                 fallback_native = adapter.validate_plan(
                     board, conservative, timeout_seconds=remaining)
+                timings_ms["native_fallback"] = (
+                    time.monotonic() - stage_started) * 1000.0
                 if fallback_native.allowed:
                     best = conservative
                     native = fallback_native
                     fallback_used = True
-                elif fallback_native.validation_mode == "native_timeout":
+                elif fallback_native.error:
                     native = fallback_native
+        if (best.changed and native is not None and
+                not native.allowed and native.error):
+            raise RuntimeError(
+                "native DRC validation failed: {}".format(native.error))
         if best.changed and native.allowed:
             adapter.apply(board, best, rollback_on_error=True)
             applied = True
 
+        planned_saved_mm = best.saved_mm
+        planned_removed = len(best.remove_keys)
+        planned_added = len(best.additions)
+        planned_angle_corrections = best.angle_corrections
+        stage_started = time.monotonic()
         final = adapter.snapshot(board, require_selection=False)
+        timings_ms["final_snapshot"] = (
+            time.monotonic() - stage_started) * 1000.0
         after_mm = sum(length(
             (segment.start_x, segment.start_y),
             (segment.end_x, segment.end_y))
@@ -391,8 +479,12 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
         after_segments = sum(
             not segment.arc for segment in final.model.segments)
         saved_mm = max(0.0, before_mm - after_mm)
+        stage_started = time.monotonic()
         output = _save_output(
             pcbnew, board, board_path, output_path, force=force)
+        timings_ms["save"] = (time.monotonic() - stage_started) * 1000.0
+        timings_ms["total"] = (
+            time.monotonic() - operation_started) * 1000.0
         return {
             "schema": 1,
             "kind": "track-gloss-score",
@@ -412,7 +504,12 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             "convergence_passes": best.convergence_passes,
             "max_passes": max_passes,
             "time_budget_seconds": time_budget_seconds,
+            "minimum_saved_length_mm": minimum_saved_length_mm,
             "fixed_point": best.fixed_point,
+            "planned_saved_mm": planned_saved_mm,
+            "planned_removed": planned_removed,
+            "planned_added": planned_added,
+            "planned_angle_corrections": planned_angle_corrections,
             "before_mm": before_mm,
             "potential_saved_mm": saved_mm,
             "potential_saved_percent": (
@@ -422,6 +519,7 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             "segments_saved": before_segments - after_segments,
             "changed": applied,
             "candidate_ladder_fallback": fallback_used,
+            "candidate_ladder_cached": fallback_plan_cached,
             "native_drc_gate": (
                 "passed" if native and native.allowed else
                 "rejected" if native else "not_needed"),
@@ -439,6 +537,7 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
                 native.validation_mode if native is not None else "not_needed"),
             "native_drc_baseline_cached": (
                 native.baseline_cached if native is not None else False),
+            "timings_ms": timings_ms,
             "output": str(output) if output else None,
         }
 
@@ -452,6 +551,10 @@ def main(argv=None):
                 (not math.isfinite(args.time_budget) or
                  args.time_budget <= 0.0)):
             raise ValueError("--time-budget must be positive")
+        if (not math.isfinite(args.minimum_saved_length_mm) or
+                args.minimum_saved_length_mm < 0.0):
+            raise ValueError(
+                "--minimum-saved-length-mm must be finite and non-negative")
         if args.place_route_loop and args.output:
             raise ValueError("--output is forbidden with --place-route-loop")
         if args.force and not args.output:
@@ -471,7 +574,8 @@ def main(argv=None):
             board, project, parallel=not args.no_parallel,
             output_path=args.output, force=args.force, scopes=scopes,
             max_passes=args.max_passes, pass_observer=pass_observer,
-            time_budget_seconds=args.time_budget)
+            time_budget_seconds=args.time_budget,
+            minimum_saved_length_mm=args.minimum_saved_length_mm)
         if placed is not None:
             payload["placed_board"] = str(placed.resolve())
             payload["route_json"] = str(route_json.resolve())

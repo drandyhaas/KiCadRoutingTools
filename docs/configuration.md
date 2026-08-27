@@ -8,7 +8,7 @@ in-memory session override and never writes the file.
 
 | JSON path | Default | Unit/range | Scope | Effect |
 |---|---:|---|---|---|
-| `gloss.minimum_saved_length_mm` | `0.1` | mm, non-negative | Plugin and CLI | Rejects a length-only change below this saving. Angle normalization and permitted equal-length simplification retain their own explicit rules. |
+| `gloss.minimum_saved_length_mm` | `0.2` | mm, non-negative | Plugin and CLI | Rejects a length-only change below this saving. Angle normalization and permitted equal-length simplification retain their own explicit rules. The CLI can override it with `--minimum-saved-length-mm`. |
 | `convergence.interactive_max_passes` | `4` | integer >= 1 | Plugin, internal | Maximum global reconciliation passes for an interactive run. |
 | `convergence.interactive_group_max_passes` | `2` | integer >= 1 | Plugin, internal | Maximum local passes per independent group. |
 | `convergence.cli_max_passes` | `16` | integer >= 1 | CLI | Default changed-pass convergence guard; overridden by `--max-passes`. |
@@ -39,7 +39,8 @@ optimizer always uses exact copper coordinates and the same objective.
 
 ## CLI overrides
 
-`--max-passes` and `--time-budget` change the current CLI invocation only.
+`--max-passes`, `--time-budget`, and `--minimum-saved-length-mm` change the
+current CLI invocation only.
 They do not mutate `internal_config.json` or affect a running KiCad session.
 `--no-parallel` changes execution strategy but must not change the selected
 plan. Scope options authorize which existing tracks may seed changes; they are

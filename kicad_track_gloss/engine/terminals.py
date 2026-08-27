@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+from .context import line_bbox
 from .geometry import point_segment_distance
 from .model import segment_key
 from .pads import pad_contact_points, pad_contains
@@ -13,11 +14,13 @@ def vertex(x, y):
     return round(x, 6), round(y, 6)
 
 
-def find_track_terminal_targets(model, eligible_segment_keys, tolerance=1e-5):
+def find_track_terminal_targets(model, eligible_segment_keys, tolerance=1e-5,
+                                planner_context=None):
     """Find eligible vertices electrically terminating on immutable tracks."""
     eligible = {str(key) for key in eligible_segment_keys}
     immutable = [segment for segment in model.segments
                  if segment_key(segment) not in eligible]
+    immutable_keys = {segment_key(segment) for segment in immutable}
     targets = defaultdict(dict)
     for segment in model.segments:
         if segment_key(segment) not in eligible:
@@ -25,7 +28,12 @@ def find_track_terminal_targets(model, eligible_segment_keys, tolerance=1e-5):
         for point in ((segment.start_x, segment.start_y),
                       (segment.end_x, segment.end_y)):
             terminal = (segment.net_id, segment.layer, vertex(*point))
-            for other in immutable:
+            nearby = (planner_context.segments.query(
+                line_bbox(point, point, tolerance))
+                if planner_context is not None else immutable)
+            for other in nearby:
+                if segment_key(other) not in immutable_keys:
+                    continue
                 if (other.net_id != segment.net_id or other.layer != segment.layer or
                         other.arc):
                     continue
@@ -42,7 +50,8 @@ def find_track_terminal_vertices(model, eligible_segment_keys, tolerance=1e-5):
         model, eligible_segment_keys, tolerance))
 
 
-def find_pad_terminal_targets(model, eligible_segment_keys):
+def find_pad_terminal_targets(model, eligible_segment_keys,
+                              planner_context=None):
     """Find same-net pad copper regions containing eligible endpoints."""
     eligible = {str(key) for key in eligible_segment_keys}
     targets = defaultdict(list)
@@ -52,7 +61,10 @@ def find_pad_terminal_targets(model, eligible_segment_keys):
         for point in ((segment.start_x, segment.start_y),
                       (segment.end_x, segment.end_y)):
             terminal = (segment.net_id, segment.layer, vertex(*point))
-            for region in model.pad_regions:
+            regions = (planner_context.pads.query(line_bbox(
+                point, point, planner_context.max_pad_radius + 1e-6))
+                if planner_context is not None else model.pad_regions)
+            for region in regions:
                 if (region.net_id == segment.net_id and
                         (not region.layers or segment.layer in region.layers) and
                         pad_contains(region, point, tolerance=1e-6)):

@@ -47,6 +47,10 @@ _validation_cache = OrderedDict()
 _cache_lock = threading.Lock()
 
 
+class _NativeDrcCancelled(RuntimeError):
+    """Internal signal used when a higher-quality candidate already passed."""
+
+
 def _cache_get(cache, key):
     with _cache_lock:
         value = cache.get(key)
@@ -239,7 +243,8 @@ def _apply_plan_process(adapter, baseline_path, candidate_path, plan_path,
                 process.returncode, detail))
 
 
-def _run_drc(adapter, board_path, report_path, timeout_seconds=None):
+def _run_drc(adapter, board_path, report_path, timeout_seconds=None,
+             cancel_event=None):
     timeout = (300.0 if timeout_seconds is None else
                max(0.1, min(300.0, float(timeout_seconds))))
     command = [
@@ -253,30 +258,54 @@ def _run_drc(adapter, board_path, report_path, timeout_seconds=None):
         "--all-track-errors",
         "--output", str(report_path), str(board_path),
     ]
-    process = subprocess.run(
-        command, capture_output=True, text=True, timeout=timeout,
-        **_hidden_process_kwargs())
-    if process.returncode != 0 or not report_path.is_file():
-        detail = (process.stderr or process.stdout).strip()[:500]
+    if cancel_event is None:
+        process = subprocess.run(
+            command, capture_output=True, text=True, timeout=timeout,
+            **_hidden_process_kwargs())
+        returncode, stdout, stderr = (
+            process.returncode, process.stdout, process.stderr)
+    else:
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, **_hidden_process_kwargs())
+        drc_deadline = time.monotonic() + timeout
+        while process.poll() is None:
+            if cancel_event.is_set():
+                process.terminate()
+                try:
+                    process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=1.0)
+                process.communicate()
+                raise _NativeDrcCancelled(
+                    "higher-quality native DRC candidate accepted")
+            if time.monotonic() >= drc_deadline:
+                process.kill()
+                stdout, stderr = process.communicate()
+                raise subprocess.TimeoutExpired(
+                    command, timeout, output=stdout, stderr=stderr)
+            time.sleep(0.02)
+        stdout, stderr = process.communicate()
+        returncode = process.returncode
+    if returncode != 0 or not report_path.is_file():
+        detail = (stderr or stdout).strip()[:500]
         raise RuntimeError(
             "native DRC failed (exit {}): {}".format(
-                process.returncode, detail))
+                returncode, detail))
     return _json_report_summary(report_path.read_text(
         encoding="utf-8", errors="replace"))
 
 
-def validate_native_plan(adapter, board, plan, *, force_native=False,
-                         skip_native=False, timeout_seconds=None):
-    """Reject a plan if KiCad reports any increased DRC category.
-
-    Temporary boards and reports are private implementation artifacts and are
-    removed before returning.  The current PCB and its zone fills are never
-    mutated by this validation.
-    """
+def validate_native_plan_ladder(adapter, board, plans, *, force_native=False,
+                                skip_native=False, timeout_seconds=None):
+    """Validate up to two quality-ordered plans in one native DRC wave."""
+    plans = list(plans)
+    if not plans or len(plans) > 2:
+        raise ValueError("native DRC plan ladder must contain one or two plans")
     started = time.monotonic()
     deadline = (None if timeout_seconds is None else
                 started + max(0.0, float(timeout_seconds)))
-    timings = {}
 
     def remaining():
         if deadline is None:
@@ -288,110 +317,203 @@ def validate_native_plan(adapter, board, plan, *, force_native=False,
     if force_native and skip_native:
         raise ValueError("native DRC cannot be both forced and skipped")
     if skip_native:
-        timings["total"] = (time.monotonic() - started) * 1000.0
-        return NativeDrcResult(
-            True, timings_ms=timings,
-            validation_mode="single_track_drc_disabled")
-    if (not force_native and
-            _is_strict_removal_only_plan(adapter, board, plan)):
-        timings["total"] = (time.monotonic() - started) * 1000.0
-        return NativeDrcResult(
-            True, timings_ms=timings,
-            validation_mode="geometric_removal_fast_path")
+        elapsed = (time.monotonic() - started) * 1000.0
+        return [NativeDrcResult(
+            True, timings_ms={"total": elapsed},
+            validation_mode="single_track_drc_disabled") for _plan in plans]
+
+    results = [None] * len(plans)
+    native_indexes = []
+    for index, plan in enumerate(plans):
+        if (not force_native and
+                _is_strict_removal_only_plan(adapter, board, plan)):
+            elapsed = (time.monotonic() - started) * 1000.0
+            results[index] = NativeDrcResult(
+                True, timings_ms={"total": elapsed},
+                validation_mode="geometric_removal_fast_path")
+            # A proven first candidate wins; lower-quality candidates do not
+            # need speculative construction or validation.
+            if index == 0:
+                return results[:1] + [NativeDrcResult(
+                    False, validation_mode="not_needed")
+                    for _plan in plans[1:]]
+        else:
+            native_indexes.append(index)
+
     try:
         with tempfile.TemporaryDirectory(prefix="kicad-track-gloss-drc-") as name:
             root = Path(name)
             baseline_path = root / "baseline.kicad_pcb"
-            candidate_path = root / "candidate.kicad_pcb"
-            plan_path = root / "plan.json"
             stage = time.monotonic()
             if not adapter.pcbnew.SaveBoard(str(baseline_path), board):
                 raise RuntimeError("KiCad could not snapshot the current board")
             _copy_project_files(board, baseline_path)
-            _copy_project_files(board, candidate_path)
-            _write_plan(plan_path, plan)
             remaining()
-            timings["snapshot"] = (time.monotonic() - stage) * 1000.0
+            snapshot_ms = (time.monotonic() - stage) * 1000.0
             baseline_key = _state_digest(adapter, baseline_path)
-            plan_key = hashlib.sha256(plan_path.read_bytes()).digest()
-            cached_validation = _cache_get(
-                _validation_cache, (baseline_key, plan_key))
-            if cached_validation is not None:
-                elapsed = (time.monotonic() - started) * 1000.0
-                result = NativeDrcResult(
-                    allowed=cached_validation.allowed,
-                    before=dict(cached_validation.before),
-                    after=dict(cached_validation.after),
-                    increases=dict(cached_validation.increases),
-                    error=cached_validation.error,
-                    timings_ms={
-                        "snapshot": timings["snapshot"],
-                        "cache_lookup": elapsed,
-                        "total": elapsed,
-                    },
-                    baseline_cached=True,
-                    validation_mode="native_validation_cache")
-                return result
+            pending = []
+            for index in native_indexes:
+                candidate_path = root / "candidate-{}.kicad_pcb".format(index)
+                plan_path = root / "plan-{}.json".format(index)
+                _copy_project_files(board, candidate_path)
+                _write_plan(plan_path, plans[index])
+                plan_key = hashlib.sha256(plan_path.read_bytes()).digest()
+                cached = _cache_get(
+                    _validation_cache, (baseline_key, plan_key))
+                if cached is not None:
+                    elapsed = (time.monotonic() - started) * 1000.0
+                    results[index] = NativeDrcResult(
+                        allowed=cached.allowed,
+                        before=dict(cached.before), after=dict(cached.after),
+                        increases=dict(cached.increases), error=cached.error,
+                        timings_ms={
+                            "snapshot": snapshot_ms,
+                            "cache_lookup": elapsed,
+                            "total": elapsed,
+                        },
+                        baseline_cached=True,
+                        validation_mode="native_validation_cache")
+                else:
+                    pending.append((index, candidate_path, plan_path, plan_key))
 
+            # A cached first-plan acceptance decides the ladder immediately.
+            if results[0] is not None and results[0].allowed:
+                return [results[0]] + [NativeDrcResult(
+                    False, validation_mode="not_needed")
+                    for _plan in plans[1:]]
+            if not pending:
+                return results
             cached_before = _cache_get(_baseline_cache, baseline_key)
             baseline_cached = cached_before is not None
 
-            def timed_drc(path, report, label):
+            def timed_drc(path, report, label, cancel_event=None):
                 drc_started = time.monotonic()
                 value = _run_drc(
-                    adapter, path, report, timeout_seconds=remaining())
+                    adapter, path, report, timeout_seconds=remaining(),
+                    cancel_event=cancel_event)
                 return value, (time.monotonic() - drc_started) * 1000.0, label
 
-            # Baseline DRC is independent from candidate construction. Start it
-            # immediately and overlap it with both the helper process and the
-            # candidate DRC. kicad-cli runs in separate processes, so this also
-            # uses two CPU cores without exposing pcbnew SWIG objects to threads.
-            with ThreadPoolExecutor(max_workers=2,
+            def timed_apply(candidate_path, plan_path):
+                apply_started = time.monotonic()
+                _apply_plan_process(
+                    adapter, baseline_path, candidate_path, plan_path,
+                    timeout_seconds=remaining())
+                return (time.monotonic() - apply_started) * 1000.0
+
+            # Baseline and both candidate processes are independent. Materialize
+            # candidates in helper subprocesses, then run every DRC in the same
+            # bounded wave; no pcbnew SWIG object crosses a worker thread.
+            workers = len(pending) + (0 if baseline_cached else 1)
+            with ThreadPoolExecutor(max_workers=max(1, workers),
                                     thread_name_prefix="track-gloss-drc") as pool:
                 before_future = None
                 if not baseline_cached:
                     before_future = pool.submit(
                         timed_drc, baseline_path, root / "before.rpt", "before")
-                stage = time.monotonic()
-                _apply_plan_process(
-                    adapter, baseline_path, candidate_path, plan_path,
-                    timeout_seconds=remaining())
-                timings["candidate_snapshot"] = (
-                    time.monotonic() - stage) * 1000.0
-                after_future = pool.submit(
-                    timed_drc, candidate_path, root / "after.rpt", "after")
+                apply_futures = {
+                    index: pool.submit(timed_apply, candidate_path, plan_path)
+                    for index, candidate_path, plan_path, _plan_key in pending
+                }
+                after_futures = {}
+                cancel_events = {}
+                candidate_snapshot_ms = {}
+                candidate_errors = {}
+                for index, candidate_path, _plan_path, _plan_key in pending:
+                    try:
+                        candidate_snapshot_ms[index] = apply_futures[index].result(
+                            timeout=remaining())
+                        cancel_events[index] = threading.Event()
+                        after_futures[index] = pool.submit(
+                            timed_drc, candidate_path,
+                            root / "after-{}.rpt".format(index),
+                            "after-{}".format(index), cancel_events[index])
+                    except Exception as error:
+                        candidate_errors[index] = error
                 if baseline_cached:
                     before, before_fingerprints = _copy_summary(cached_before)
-                    timings["before_drc"] = 0.0
+                    before_ms = 0.0
                 else:
                     before_value, before_ms, _label = before_future.result(
                         timeout=remaining())
                     before, before_fingerprints = before_value
-                    timings["before_drc"] = before_ms
                     _cache_put(_baseline_cache, baseline_key,
                                _copy_summary(before_value))
-                after_value, after_ms, _label = after_future.result(
-                    timeout=remaining())
-                after, after_fingerprints = after_value
-                timings["after_drc"] = after_ms
-            increases = _drc_increases(
-                before, after, before_fingerprints, after_fingerprints)
-            timings["total"] = (time.monotonic() - started) * 1000.0
-            result = NativeDrcResult(
-                allowed=not increases,
-                before=dict(before), after=dict(after),
-                increases=dict(increases),
-                timings_ms=timings, baseline_cached=baseline_cached)
-            _cache_put(_validation_cache, (baseline_key, plan_key), result)
-            return result
+                for index, _candidate_path, _plan_path, plan_key in pending:
+                    timings = {
+                        "snapshot": snapshot_ms,
+                        "candidate_snapshot": candidate_snapshot_ms.get(index, 0.0),
+                        "before_drc": before_ms,
+                    }
+                    try:
+                        if index in candidate_errors:
+                            raise candidate_errors[index]
+                        after_value, after_ms, _label = after_futures[index].result(
+                            timeout=remaining())
+                        after, after_fingerprints = after_value
+                        timings["after_drc"] = after_ms
+                        timings["total"] = (
+                            time.monotonic() - started) * 1000.0
+                        increases = _drc_increases(
+                            before, after, before_fingerprints,
+                            after_fingerprints)
+                        result = NativeDrcResult(
+                            allowed=not increases,
+                            before=dict(before), after=dict(after),
+                            increases=dict(increases), timings_ms=timings,
+                            baseline_cached=baseline_cached,
+                            validation_mode=(
+                                "native_portfolio" if len(plans) > 1 else
+                                "native_parallel"))
+                        _cache_put(
+                            _validation_cache, (baseline_key, plan_key), result)
+                        results[index] = result
+                        if index == 0 and result.allowed:
+                            for lower_index in range(1, len(plans)):
+                                event = cancel_events.get(lower_index)
+                                if event is not None:
+                                    event.set()
+                                results[lower_index] = NativeDrcResult(
+                                    False, baseline_cached=baseline_cached,
+                                    validation_mode="not_needed")
+                            break
+                    except _NativeDrcCancelled:
+                        results[index] = NativeDrcResult(
+                            False, baseline_cached=baseline_cached,
+                            validation_mode="not_needed")
+                    except (TimeoutError, subprocess.TimeoutExpired) as error:
+                        timings["total"] = (
+                            time.monotonic() - started) * 1000.0
+                        results[index] = NativeDrcResult(
+                            False,
+                            error="KiCad DRC time budget reached: {}".format(error),
+                            timings_ms=timings,
+                            baseline_cached=baseline_cached,
+                            validation_mode="native_timeout")
+                    except Exception as error:
+                        timings["total"] = (
+                            time.monotonic() - started) * 1000.0
+                        results[index] = NativeDrcResult(
+                            False, error=str(error), timings_ms=timings,
+                            baseline_cached=baseline_cached)
+            return results
     except (TimeoutError, subprocess.TimeoutExpired) as error:
-        timings["total"] = (time.monotonic() - started) * 1000.0
-        return NativeDrcResult(
+        failure = NativeDrcResult(
             False, error="KiCad DRC time budget reached: {}".format(error),
-            timings_ms=timings, validation_mode="native_timeout")
+            timings_ms={"total": (time.monotonic() - started) * 1000.0},
+            validation_mode="native_timeout")
     except Exception as error:
-        timings["total"] = (time.monotonic() - started) * 1000.0
-        return NativeDrcResult(False, error=str(error), timings_ms=timings)
+        failure = NativeDrcResult(
+            False, error=str(error),
+            timings_ms={"total": (time.monotonic() - started) * 1000.0})
+    return [result if result is not None else failure for result in results]
+
+
+def validate_native_plan(adapter, board, plan, *, force_native=False,
+                         skip_native=False, timeout_seconds=None):
+    """Reject one plan if KiCad reports any increased DRC category."""
+    return validate_native_plan_ladder(
+        adapter, board, [plan], force_native=force_native,
+        skip_native=skip_native, timeout_seconds=timeout_seconds)[0]
 
 
 def _item_uuid(item):

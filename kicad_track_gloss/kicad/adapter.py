@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from ..engine.model import Segment
 from .reader import read_snapshot
-from .native_validation import validate_native_plan
+from .native_validation import (validate_native_plan,
+                                validate_native_plan_ladder)
 from .selection import expand_eligible_keys, expand_seed_keys
 from .types import is_arc
 from .writer import add_track, apply_plan
@@ -93,6 +94,12 @@ class BoardAdapter:
                       skip_native=False, timeout_seconds=None):
         return validate_native_plan(
             self, board, result, force_native=force_native,
+            skip_native=skip_native, timeout_seconds=timeout_seconds)
+
+    def validate_plan_ladder(self, board, results, *, force_native=False,
+                             skip_native=False, timeout_seconds=None):
+        return validate_native_plan_ladder(
+            self, board, results, force_native=force_native,
             skip_native=skip_native, timeout_seconds=timeout_seconds)
 
     def _add_track(self, board, start, end, width, layer, net_id):

@@ -54,7 +54,8 @@ The payload currently uses:
 - `score` and `score_meaning`;
 - `scopes`, selected seeds, expanded and eligible tracks;
 - before/after length and segment metrics;
-- `changed`, `fixed_point`, `convergence_passes`, `max_passes`, and time budget;
+- `changed`, `fixed_point`, `convergence_passes`, `max_passes`, time budget,
+  and `minimum_saved_length_mm`;
 - native DRC status, category counts, errors, timings, cache state, and
   validation mode;
 - output board path when one was requested;

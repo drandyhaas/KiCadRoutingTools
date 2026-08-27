@@ -11,7 +11,7 @@ from kicad_track_gloss.kicad.native_validation import validate_native_plan
 
 def test_current_internal_policy_preserves_release_behavior():
     assert CONFIG.schema_version == 1
-    assert CONFIG.gloss.minimum_saved_length_mm == pytest.approx(0.1)
+    assert CONFIG.gloss.minimum_saved_length_mm == pytest.approx(0.2)
     assert CONFIG.convergence.interactive_max_passes == 4
     assert CONFIG.convergence.interactive_group_max_passes == 2
     assert CONFIG.convergence.cli_max_passes == 16
@@ -82,7 +82,7 @@ def test_session_policy_changes_are_validated_and_not_persisted():
         assert changed.convergence.interactive_max_passes == 6
         assert changed.timing.interactive_total_time_budget_seconds == 20.0
         assert not changed.safety.kicad_drc_for_single_track
-        assert CONFIG.gloss.minimum_saved_length_mm == pytest.approx(0.1)
+        assert CONFIG.gloss.minimum_saved_length_mm == pytest.approx(0.2)
         with pytest.raises(ValueError, match="cannot exceed"):
             update_session_config(
                 minimum_saved_length_mm=0.01,
