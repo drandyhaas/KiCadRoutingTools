@@ -1006,6 +1006,7 @@ def test_pcm_archive_uses_flat_entrypoint_with_internal_packages():
     assert "plugins/configuration.py" in names
     assert "plugins/internal_config.json" in names
     assert "plugins/engine/planner.py" in names
+    assert "plugins/engine/local_operators.py" in names
     assert "plugins/engine/context.py" in names
     assert "plugins/engine/parallel.py" in names
     assert "plugins/engine/pads.py" in names
@@ -1149,6 +1150,8 @@ def _native_records(adapter, tracks):
 
 
 def test_native_connection_expansion_batches_multiple_nets():
+    from kicad_track_gloss.kicad.selection import (expand_seed_keys,
+                                                    expand_seed_scopes)
     tracks = [
         _NativeTrack("a1", (0, 0), (1, 0), 1),
         _NativeTrack("a2", (1, 0), (2, 0), 1),
@@ -1160,10 +1163,11 @@ def test_native_connection_expansion_batches_multiple_nets():
     adapter = BoardAdapter(_NativePcbnew())
     records = _native_records(adapter, tracks)
     seeds = {"a1", "b1"}
-    expanded = adapter._expand_seed_keys(_NativeBoard(tracks), records, seeds, [])
+    expanded = expand_seed_keys(
+        adapter, _NativeBoard(tracks), records, seeds, [])
     assert expanded == {"a1", "a2", "a3", "b1", "b2"}
-    scopes = adapter._expand_seed_scopes(
-        _NativeBoard(tracks), records, seeds, [])
+    scopes = expand_seed_scopes(
+        adapter, _NativeBoard(tracks), records, seeds, [])
     assert scopes == (
         frozenset({"a1", "a2", "a3"}),
         frozenset({"b1", "b2"}),
@@ -1604,6 +1608,7 @@ def test_native_fast_path_only_accepts_existing_copper_without_zones():
 
 
 def test_native_connection_expansion_stops_at_junction():
+    from kicad_track_gloss.kicad.selection import expand_seed_keys
     tracks = [
         _NativeTrack("seed", (0, 0), (1, 0), 1),
         _NativeTrack("straight", (1, 0), (2, 0), 1),
@@ -1612,7 +1617,8 @@ def test_native_connection_expansion_stops_at_junction():
     from kicad_track_gloss.kicad import BoardAdapter
     adapter = BoardAdapter(_NativePcbnew())
     records = _native_records(adapter, tracks)
-    expanded = adapter._expand_seed_keys(_NativeBoard(tracks), records, {"seed"}, [])
+    expanded = expand_seed_keys(
+        adapter, _NativeBoard(tracks), records, {"seed"}, [])
     assert expanded == {"seed"}
 
 

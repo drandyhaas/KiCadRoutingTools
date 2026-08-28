@@ -253,28 +253,8 @@ def compose_compatible_connection_plans(model, eligible_keys, plans):
             tuple(selected), rejected)
 
 
-def generate_conservative_candidate(
-        model, eligible_keys, *, min_gain, clearance, deadline=None,
-        cancellation_grace_seconds=1.0, collect_statistics=False,
-        pass_observer=None, cancel_check=None):
-    """Build the common one-pass fallback used after a native DRC rejection."""
-    return generate_converged_plan(
-        model, eligible_keys, max_passes=1, return_partial_on_limit=True,
-        group_max_passes=1, max_refinement_passes=0,
-        _allow_junction_scopes=False, min_gain=min_gain,
-        allow_equal_length_simpler=True, clearance=clearance,
-        # Large conservative retries are still independent per net/layer.
-        # Reuse the same bounded group workers as the primary planner; small
-        # interactive selections stay in-process below the planner threshold.
-        collect_statistics=collect_statistics, parallel=True,
-        pass_observer=pass_observer, cancel_check=cancel_check,
-        deadline=deadline,
-        cancellation_grace_seconds=cancellation_grace_seconds)
-
-
 __all__ = (
     "combine_plans", "compose_compatible_connection_plans",
     "generate_connection_candidates",
-    "generate_conservative_candidate",
     "generate_single_connection_alternatives", "plan_identity",
     "plan_net_ids", "rank_candidate_plans")

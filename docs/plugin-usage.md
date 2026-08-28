@@ -31,10 +31,13 @@ The plugin follows its same-net connection so that users do not need to run
 KiCad's **Select/Expand Connection** command first. Multiple disconnected
 seeds and multiple nets are expanded and processed in one deterministic batch.
 
-Expansion stops or protects geometry at relevant pads, vias, arcs, locked
-tracks, junctions, probable differential pairs, and probable length-tuning
-meanders. Selection remains an authorization boundary: copper outside the
-eligible expanded scope is immutable.
+Expansion stops at relevant pads, vias, arcs, and electrical junctions. A
+straight segment is protected only when KiCad 10 supplies authoritative state:
+the item or its group is locked, it belongs to a KiCad generator, or KiCad
+recognizes its net as one side of a differential pair. Track shape, direction
+reversals, density, and net names never infer user intent. Selection remains
+an authorization boundary: copper outside the eligible expanded scope is
+immutable.
 
 ## Session settings
 
@@ -87,16 +90,19 @@ geometric planning itself takes only milliseconds. See
 For a multi-connection selection, every expanded connection is also planned
 through the exact one-segment workflow. The best compatible local composition
 is compared with the global converged plan before DRC. After a rejection,
-Track Gloss probes local connections in pairs, retains every combination
-already accepted by KiCad, and applies the best validated result available
-when the interactive time budget is reached. One problematic connection does
-not block another safe connection, even when both belong to the same net.
+Track Gloss probes up to three local candidates in one native DRC wave,
+retains every combination already accepted by KiCad, and applies the best
+validated result available when the interactive time budget is reached. One
+problematic connection does not block another safe connection, even when both
+belong to the same net.
 
 ## Protected and unsupported operations
 
-Track Gloss does not move footprints, pads, vias, arcs, zones, tuned meanders,
-differential pairs, or locked tracks. It does not invoke KiCad's interactive
-router or its **Cleanup Tracks and Vias** dialog. KiCad 10 does not expose its
+Track Gloss does not move footprints, pads, vias, arcs, zones, KiCad-recognized
+differential pairs, or locked/generated tracks. Explicitly selected manual
+meanders and other special-looking straight copper are glossed normally. It
+does not invoke KiCad's interactive router or its **Cleanup Tracks and Vias**
+dialog. KiCad 10 does not expose its
 internal C++ PNS optimizer through the public Python API, so candidate planning
 is performed by the plugin's independent engine using constraints obtained
 from `pcbnew`.

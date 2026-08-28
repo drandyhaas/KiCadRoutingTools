@@ -13,7 +13,3 @@ def is_arc(pcbnew, item):
 
 def is_straight_track(pcbnew, item):
     return int(item.Type()) == int(pcbnew.PCB_TRACE_T)
-
-
-def is_shape(pcbnew, item):
-    return int(item.Type()) == int(pcbnew.PCB_SHAPE_T)

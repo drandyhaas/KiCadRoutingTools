@@ -43,6 +43,8 @@ a valid substitute for already discovered safe work.
   pad rotations, and Edge.Cuts queries.
 - `engine/candidate_geometry.py`: exact local identity, clearance, pad,
   keepout, mask, and edge validation.
+- `engine/local_operators.py`: corridor-preserving corner chamfers and
+  interior-segment translations, independent of convergence orchestration.
 - `engine/terminals.py`: sliding same-net T termination analysis.
 - `engine/pads.py`: pad copper containment and bounded contact candidates.
 - `engine/planner.py`: chain discovery, octolinear generation, scheduling,
@@ -60,8 +62,9 @@ serializable model records and configuration values.
 ## KiCad adapter
 
 - `kicad/reader.py`: converts the board and selection to the pure model.
-- `kicad/selection.py`: native connectivity expansion and protected-track
-  classification.
+- `kicad/selection.py`: native connectivity expansion.
+- `kicad/authority.py`: strict KiCad 10 locked/group/generator/differential-
+  pair edit authority, without geometric intent heuristics.
 - `kicad/rules.py`: semantic layers, rule values, keepouts, board boundaries,
   pads, vias, and masks.
 - `kicad/writer.py`: identity-checked live application and rollback.
@@ -99,9 +102,10 @@ optimum, and ranks that composition alongside the global converged plan. A
 larger selection therefore cannot silently replace a better local result with
 a lower-quality plan.
 
-After a native DRC rejection, connection-local candidates are probed two at a
-time until a safe base exists. Later DRC waves validate both the complete
-remaining batch and one incremental extension. Every accepted extension
+After a native DRC rejection, up to three connection-local candidates are
+probed in one parallel native wave until a safe base exists. Later DRC waves
+validate the complete remaining batch and complementary partial extensions.
+Every accepted extension
 immediately becomes the retained result, so expiration returns useful work
 without treating a complete net as the smallest recoverable unit.
 
