@@ -84,6 +84,7 @@ import argparse
 import concurrent.futures
 import glob
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -802,8 +803,41 @@ def compare_row(row, want):
 
 
 def load_rows(path):
-    d = json.load(open(path, encoding='utf-8'))
-    return d.get('rows') or []
+    """Rows from EITHER a `{rows: [...]}` document or the run's own JSONL.
+
+    The study writes `<out>/rows.jsonl`, one row per line, and both the usage
+    text above and `docs/placement-predictors.md` tell the reader to feed that
+    file straight back in with `--from-rows`. This function only read the
+    document form, so following the documented command crashed with
+    `JSONDecodeError: Extra data: line 2 column 1` -- a tool refusing the file
+    it had just written. Found when the committed rows file was withdrawn and
+    the JSONL became the only path anyone would use.
+    """
+    with open(path, encoding='utf-8') as f:
+        text = f.read()
+    stripped = text.lstrip()
+    if stripped.startswith('{') and '\n{' not in stripped.rstrip():
+        return json.load(io.StringIO(text)).get('rows') or []
+    try:
+        d = json.loads(text)
+    except ValueError:
+        pass
+    else:
+        if isinstance(d, dict):
+            return d.get('rows') or []
+        if isinstance(d, list):
+            return d
+    rows = []
+    for n, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except ValueError as e:
+            raise SystemExit(f'{path}:{n} is neither a rows document nor a '
+                             f'JSONL row: {e}')
+    return rows
 
 
 def read_jsonl(path):

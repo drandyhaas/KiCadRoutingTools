@@ -1,9 +1,11 @@
 # What predicts routed `blocking` — the first measurement (#703)
 
-**Status: MEASURED, on 4 boards of a declared 6. No predictor here is "validated"
-in a strong sense; the acceptance rule's own false-positive rate at N=4 is
-**9.0%–18.0%** (median 11.5%) over the 21 predictors defined on all four
-boards, measured, and that number belongs beside every PASSES below.**
+**Status: MEASURED, on 5 boards of a declared 6, with NO excluded variants.
+The sixth (`kit-dev-coldfire-xilinx_5213`) is routing as of this revision.**
+No predictor here is "validated" in a strong sense; the acceptance rule's own
+false-positive rate at N=5 is **4.5%-8.0%** (median 6.5%) over the 21 predictors
+defined on all five boards, measured, and that number belongs beside every
+PASSES below.
 
 Every correlation number this repo quoted before #703 was measured against
 *distance-to-the-correct-placement* or against *the gap a human left*.
@@ -12,7 +14,7 @@ the corridor law's `r = +0.41 … +0.90` is against the human's gap. CLAUDE.md's
 *"What a placement run is FOR"* says the headline is routed `blocking`, and no
 predictor had ever been correlated with it.
 
-This is that measurement. Nothing in it is a proxy for a proxy: 80 placements
+This is that measurement. Nothing in it is a proxy for a proxy: 100 placements
 were generated, each routed once with an argv frozen before any variant existed,
 and each graded by `board_score`.
 
@@ -56,27 +58,33 @@ adding it would turn a green gate red for a reason unrelated to skills.)*
 classical placement proxies — `crossings`, `hpwl`, `halo`, `overlap_area` — do
 not.**
 
-| predictor | boards right / wrong | median ρ | verdict |
+| predictor | boards right / wrong | median rho | verdict |
 |---|---|---|---|
-| `pad_shortfall` | 4 / 0 | +0.725 | **passes** |
-| `pad_intersection_pairs` | 4 / 0 | +0.724 | **passes** |
-| `pad_overlap_pairs` | 4 / 0 | +0.724 | **passes** |
-| `body_overlap_pairs` | 4 / 0 | +0.724 | **passes** |
-| `pad_conflict_pairs` | 4 / 0 | +0.724 | **passes** |
-| `pad_clearance_pairs` | 4 / 0 | +0.724 | **passes** |
-| `courtyard_blocking_pairs` | 4 / 0 | +0.652 | **passes** |
-| `pad_copper` (off-outline pad copper) | 4 / 0 | +0.615 | **passes** |
-| `hole_shortfall` | 3 / 0 | +0.422 | **passes** |
-| `hole_conflicts` | 3 / 0 | +0.412 | **passes** |
-| `oob_amount` / `oob_area` / `oob_count` | 3 / 1 | +0.45…+0.48 | fails |
-| `halo` | 3 / 1 | +0.409 | fails |
-| **`crossings`** | **3 / 1** | **+0.396** | **fails** |
-| `overlap_area` | 3 / 1 | +0.372 | fails |
-| `length` | 3 / 1 | +0.239 | fails |
-| **`hpwl`** | **2 / 2** | **+0.158** | **fails** |
-| `edge` | 2 / 2 | −0.031 | fails |
-| `cross_side_stacks` | 0 / 1 | — | **no verdict** (defined on 1 board) |
-| `align`, `corridor_cut`, `orient`, `locked_contact_pairs` | 0 / 0 | — | **no verdict** (constant everywhere) |
+| `pad_shortfall` | 5 / 0 | +0.830 | **passes** |
+| `pad_intersection_pairs` | 5 / 0 | +0.828 | **passes** |
+| `pad_overlap_pairs` | 5 / 0 | +0.828 | **passes** |
+| `body_overlap_pairs` | 5 / 0 | +0.828 | **passes** |
+| `pad_conflict_pairs` | 5 / 0 | +0.827 | **passes** |
+| `pad_clearance_pairs` | 5 / 0 | +0.827 | **passes** |
+| `courtyard_blocking_pairs` | 5 / 0 | +0.826 | **passes** |
+| `pad_copper` (off-outline pad copper) | 5 / 0 | +0.568 | **passes** |
+| `hole_shortfall` | 4 / 0 | +0.505 | **passes** |
+| `hole_conflicts` | 4 / 0 | +0.501 | **passes** |
+| `overlap_area` | 4 / 1 | +0.764 | fails |
+| `halo` | 4 / 1 | +0.603 | fails |
+| `courtyard_overlap_mm2` | 4 / 1 | +0.557 | fails |
+| `courtyard_advisory_pairs` | 4 / 1 | +0.516 | fails |
+| `total` | 4 / 1 | +0.487 | fails |
+| **`crossings`** | **4 / 1** | **+0.394** | **fails** |
+| `oob_count` | 4 / 1 | +0.220 | fails |
+| `courtyard_off_outline` | 4 / 1 | +0.220 | fails |
+| `oob_amount` | 4 / 1 | +0.168 | fails |
+| `oob_area` | 3 / 2 | +0.150 | fails |
+| `length` | 3 / 2 | +0.061 | fails |
+| **`hpwl`** | **3 / 2** | **+0.040** | **fails** |
+| `edge` | 2 / 3 | -0.003 | fails |
+| `cross_side_stacks` | 1 / 1 | +0.076 | **no verdict** (defined on 2 boards) |
+| `align`, `corridor_cut`, `orient`, `locked_contact_pairs` | 0 / 0 | - | **no verdict** (constant everywhere) |
 
 The rule is `test_placement_ab.gate()`'s, transposed from marks to signs: right
 direction on ≥ N−1 boards, wrong direction on none, over the boards that
@@ -85,34 +93,35 @@ pooled.
 
 ### Three things this says that the repo did not know
 
-**1. `pad_copper` — the one pre-route number that already refuses — is
+**1. `pad_copper` -- the one pre-route number that already refuses -- is
 validated.** `loop_driver.py`'s L2 gate blocks the first route on
 `checklist.a_off_outline.pad_copper`, and it is the only pre-route quantity in
-this repo that refuses anything. It ranks `blocking` positively on 4 of 4 boards
-(ρ +0.48 / +0.68 / +0.55 / +0.73). The gate was right, and now it is measured.
+this repo that refuses anything. It ranks `blocking` positively on 5 of 5
+boards: +0.481 esp_prog, +0.649 sonde_u, +0.568 splitflap, +0.473 tigard,
++0.622 watchy. The gate was right, and now it is measured.
 
-**2. `hpwl` — which the drivers DO gate on — is the worst of the classical
-trio.** 2 boards right, 2 wrong, median +0.158, two-sided p = 1.0:
+**2. `hpwl` -- which the drivers DO gate on -- barely relates to the routed
+outcome at all.** 3 boards right, 2 wrong, median **+0.040**, two-sided p = 1.0:
 
-| board | ρ(hpwl, blocking) |
+| board | rho(hpwl, blocking) |
 |---|---|
-| esp_prog | **−0.525** [LOO −0.648…−0.443, K=20] |
-| splitflap_driver | +0.739 [LOO +0.683…+0.769, K=19] |
-| tigard | **−0.045** [LOO −0.235…+0.039, K=19] |
-| watchy | +0.360 [LOO +0.184…+0.472, K=13] |
+| esp_prog | **-0.525** [LOO -0.648..-0.443, K=20] |
+| sonde_u | +0.040 [LOO -0.168..+0.345, K=17] |
+| splitflap_driver | +0.429 [LOO +0.352..+0.739, K=20] |
+| tigard | **-0.185** [LOO -0.353..-0.045, K=20] |
+| watchy | +0.079 [LOO -0.080..+0.360, K=14] |
 
-The reasoning behind gating on it — *"hpwl's minimum is at the truth, so it is
-the one that can carry a gate"* — is about distance-to-truth and remains
-untouched. What is new is that its relationship to the routed outcome is a coin
-flip across boards. **This does not license removing that gate**; it means the
-gate is justified by the distance argument alone, and nobody should describe it
-as a routability gate.
+Adding the fifth board moved it from +0.158 to +0.040 -- the more boards, the
+less there is. The reasoning behind gating on it (*"hpwl's minimum is at the
+truth, so it is the one that can carry a gate"*) is about distance-to-truth and
+remains untouched. What is new is that its relationship to the routed outcome is
+a coin flip across boards. **This does not license removing that gate**; it means
+the gate is justified by the distance argument alone, and nobody should describe
+it as a routability gate.
 
-**3. `crossings` fails, and its sign flips.** ρ = −0.179 on esp_prog and
-+0.56 / +0.65 / +0.23 elsewhere. More crossings went with *less* blocking on one
-of four boards.
-
----
+**3. `crossings` fails, and its sign flips.** rho = -0.179 on esp_prog against
++0.017 / +0.636 / +0.705 / +0.394 elsewhere. More crossings went with *less*
+blocking on one of five boards, and sonde_u is indistinguishable from zero.
 
 ## The circularity control changed the answer for `crossings`
 
@@ -122,12 +131,13 @@ statistic is computed twice:
 
 | predictor | quench rows INCLUDED | quench rows EXCLUDED |
 |---|---|---|
-| `pad_copper` | 4/0, +0.615, **passes** | 4/0, +0.735, **passes** |
-| `pad_clearance_pairs` | 4/0, +0.724, **passes** | 4/0, +0.885, **passes** |
-| **`crossings`** | **3/1, +0.396, fails** | **4/0, +0.479, passes** |
-| `halo` | 3/1, +0.409, fails | 4/0, +0.932, passes |
-| `overlap_area` | 3/1, +0.372, fails | 4/0, +0.965, passes |
-| `hpwl` | 2/2, +0.158, fails | 3/1, +0.536, fails |
+| `pad_copper` | 5/0, +0.568, **passes** | 5/0, +0.527, **passes** |
+| `pad_clearance_pairs` | 5/0, +0.827, **passes** | 5/0, +0.959, **passes** |
+| `courtyard_blocking_pairs` | 5/0, +0.826, **passes** | 5/0, +0.950, **passes** |
+| **`crossings`** | **4/1, +0.394, fails** | **5/0, +0.475, passes** |
+| `halo` | 4/1, +0.603, fails | 5/0, +0.945, passes |
+| `overlap_area` | 4/1, +0.764, fails | 5/0, +1.000, passes |
+| `hpwl` | 3/2, +0.040, fails | 3/2, +0.039, fails |
 
 **Whether `crossings` passes depends on whether the sample includes placements
 made by an optimizer that minimises crossings.** That is the circle #703 exists
@@ -143,17 +153,20 @@ Permuting the truth **within each board** and re-running the whole aggregation
 false-positive rate:
 
 ```
-halo                          18.0%
-courtyard_overlap_mm2         17.0%
-hpwl                          15.5%
-length                        15.0%
-crossings                     14.5%
+hole_conflicts                11.5%
+hole_shortfall                11.5%
+hpwl                           8.0%
+length                         8.0%
+courtyard_advisory_pairs       7.5%
+body_overlap_pairs             7.0%
 ...
-cross_side_stacks              0.0%   <- defined on ONE board; see below
+cross_side_stacks              0.0%   <- defined on 2 boards; see below
 ```
 
-Full sweep over the 21 predictors defined on all four boards: **min 9.0%, max
-18.0%, median 11.5%**.
+Full sweep over the 21 predictors defined on all five boards: **min 4.5%, max
+8.0%, median 6.5%**. (`hole_conflicts` and `hole_shortfall` sit above that band
+because they are defined on only four boards, so they are judged by the easier
+N=4 rule.)
 
 Two consequences, both load-bearing:
 
@@ -166,9 +179,12 @@ Two consequences, both load-bearing:
   VERDICT** instead. Its rate in the block above is 0.0% *because that guard is
   in place* — the 100% is what the control measured before it existed, and it
   is why it exists.
-- **At N=4 the rule's empirical false-positive rate is 9–18%**, not the 0.125
+- **At N=5 the rule's empirical false-positive rate is 4.5–8.0%** (median
+  6.5%), against 9–18% at N=4 -- the fifth board roughly halved it, which is the
+  concrete value of running the declared table rather than stopping early. Still
+  not the 0.125
   the two-sided p-value suggests. Ten predictors passing is therefore *evidence*
-  and not proof; the six that share a median of +0.724 are also plainly
+  and not proof; the seven that share a median near +0.83 are also plainly
   measuring one underlying quantity, so they are not ten independent findings.
 
 The control permutes truth over the same deduplicated sample the ρ values use.
@@ -180,12 +196,21 @@ moved individual rates by up to 5.5 points in both directions.
 
 ## The boards and what was actually run
 
-| board | K | classification | `blocking` values observed | excluded |
+| board | K ranked | classification | `blocking` values observed | notes |
 |---|---|---|---|---|
-| esp_prog | 20 | measurable | 0, 2, 3, 6, 14, 32, 466 | — |
-| splitflap_driver | 20 (19 ranked) | measurable | 0, 12, 29, 47, 55, 65 | `perturb-pile` (route timed out at 2400 s) |
-| tigard | 20 (19 ranked) | measurable | 0, 1, 2, 64, 71, 73, 114, 158 | `perturb-pile` (route timed out at 2400 s) |
-| watchy | 20 (13 ranked) | measurable | 1, 3, 5, 44, 94 | `perturb-pile` (timeout) + **6 duplicate placements** |
+| esp_prog | 20 | measurable | 0, 2, 3, 6, 14, 32, 466 | - |
+| splitflap_driver | 20 | measurable | 0, 12, 29, 47, 55, 65, 5424 | - |
+| tigard | 20 | measurable | 0, 1, 2, 64, 71, 73, 114, 158 | - |
+| sonde_u | 17 | measurable | 0, 2, 21, 23, 877 | 3 duplicate placements collapsed |
+| watchy | 14 | measurable | 1, 3, 5, 44, 94, 8521 | 6 duplicate placements collapsed |
+
+**Every variant produced a routed result. There are no excluded rows.** An
+earlier revision reported `perturb-pile` timing out on 3 of 4 boards at a 2400 s
+budget; those were near-misses rather than impossibilities (splitflap needed
+2798 s), and all five boards now carry a pile row: blocking 466 / 877 / 5424 /
+8521 / 13078. Raising a *timeout* is not a protocol change for rows that already
+finished -- a route that completed in 300 s completes identically at any larger
+budget -- so it strictly adds samples.
 
 Every board is git-tracked, so every row is regenerable from this repo.
 `portfolio.generate(..., only=i)` is byte-identical by contract, the route argv
@@ -194,21 +219,18 @@ is frozen per board in `ARGV.json`, and each row carries its
 
 **What is NOT in this run, said plainly:**
 
-- **The declared table is 6 boards; 4 were run.** `sonde_u` and
-  `kit-dev-coldfire-xilinx_5213` are declared in `STUDY_BOARDS` and were not
-  routed. Every p-value and every N above is over the 4 that were — never over
-  the planned count. `predictor_study.py` prints that denominator on the same
-  line as the p-value for exactly this reason.
-- **`perturb-pile` timed out on 3 of 4 boards** at a 2400 s route budget. Piling
-  every free part onto one coordinate produces a board the router cannot finish,
-  which is a true fact about the damage and also a systematic exclusion of the
-  most-damaged sample from three boards.
-- **watchy lost 6 of 20 slots to duplicate placements.** Its `translate` and
-  `scatter` blocks have essentially no feasible travel on that outline, so those
-  variants reproduced the authored board exactly. The duplicate guard collapsed
-  them to one sample and named every drop. Its effective K is 13.
-
----
+- **The declared table is 6 boards; 5 are complete.**
+  `kit-dev-coldfire-xilinx_5213` is routing as of this revision. It is the most
+  expensive board in the set by a wide margin -- its *authored* placement takes
+  **5013 s** to route against tigard's 603 s -- and its first four variants score
+  `blocking` 7, 9, 9, 6, so it is measurable, just slow. Every p-value and every
+  N above is over the 5 that are done, never over the planned count;
+  `predictor_study.py` prints that denominator on the same line as the p-value
+  for exactly this reason.
+- **The duplicate guard cost sonde_u 3 slots and watchy 6.** Their `translate`
+  and `scatter` blocks have little feasible travel on those outlines, so some
+  variants reproduced the authored board exactly. Every drop is named in the
+  report.
 
 ## Pre-registered decision rules
 
