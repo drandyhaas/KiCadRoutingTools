@@ -24,14 +24,7 @@ D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py
 ```
 
 The default real-board run evaluates the all-selected board to its shared
-fixed point once. The costly order-independence replay is deliberately
-suspended from routine validation. Run its seven input orders only when
-specifically investigating determinism. Equality checks order independence,
-not mathematical optimality:
-
-```text
-D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --all-orders
-```
+fixed point once.
 
 The exhaustive generation of every connection scope and the corresponding
 fresh-board applications are also suspended by default. Enable that separate

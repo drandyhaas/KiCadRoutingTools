@@ -12,6 +12,8 @@ import time
 from .geometry import length
 from .model import GlossResult, segment_key
 from .planner import generate_converged_plan
+from .terminals import (find_pad_terminal_targets,
+                        find_track_terminal_targets)
 from .validation import validate_result
 
 
@@ -154,6 +156,76 @@ def generate_connection_candidates(
     return plans, rejected, deadline_reached
 
 
+def generate_single_connection_alternatives(
+        model, eligible_keys, primary_plan, *, min_gain,
+        allow_equal_length_simpler, clearance, group_max_passes,
+        collect_statistics, planning_deadline,
+        cancellation_grace_seconds, maximum_candidates=3):
+    """Return fully converged, electrically complementary local glosses.
+
+    A single selected connection used to expose only the highest-ranked
+    geometry to native DRC.  If that geometry moved a sensitive terminal,
+    rejection ended the operation even when the same connection admitted a
+    safe segment translation.  Build alternative fixed-point basins by
+    retaining respectively the KiCad track junctions, pad contacts, or both.
+    These are explicit gloss constraints, not route-search heuristics.
+    """
+    candidates = []
+    seen = set()
+
+    def retain(plan):
+        if (not plan.changed or not plan.fixed_point or
+                plan_identity(plan) in seen):
+            return
+        seen.add(plan_identity(plan))
+        candidates.append(plan)
+
+    retain(primary_plan)
+    policies = [
+        # First explore genuinely different interior schedules with the same
+        # electrical freedom as the optimum.  Terminal constraints follow as
+        # complementary fallbacks when those schedules collapse to duplicates.
+        (1, True, True),
+        (2, True, True),
+    ]
+    has_track_terminals = bool(find_track_terminal_targets(
+        model, set(eligible_keys)))
+    has_pad_terminals = bool(find_pad_terminal_targets(
+        model, set(eligible_keys)))
+    if has_track_terminals:
+        policies.append((0, False, True))
+    if has_pad_terminals:
+        policies.append((0, True, False))
+    if has_track_terminals or has_pad_terminals:
+        policies.append((0, False, False))
+    for (opening_solution_rank, allow_track_sliding,
+         allow_pad_sliding) in policies:
+        if len(candidates) >= maximum_candidates:
+            break
+        if (planning_deadline is not None and
+                time.monotonic() >= planning_deadline):
+            break
+        try:
+            plan = generate_converged_plan(
+                model, eligible_keys, max_passes=None,
+                return_partial_on_limit=True,
+                batch_group_convergence=False,
+                group_max_passes=group_max_passes,
+                min_gain=min_gain,
+                allow_equal_length_simpler=allow_equal_length_simpler,
+                clearance=clearance,
+                collect_statistics=collect_statistics,
+                parallel=False, deadline=planning_deadline,
+                cancellation_grace_seconds=cancellation_grace_seconds,
+                opening_solution_rank=opening_solution_rank,
+                allow_track_terminal_sliding=allow_track_sliding,
+                allow_pad_terminal_sliding=allow_pad_sliding)
+        except ValueError:
+            continue
+        retain(plan)
+    return rank_candidate_plans(candidates)
+
+
 def compose_compatible_connection_plans(model, eligible_keys, plans):
     """Preserve the best compatible local connections with batch isolation."""
     selected = []
@@ -203,5 +275,6 @@ def generate_conservative_candidate(
 __all__ = (
     "combine_plans", "compose_compatible_connection_plans",
     "generate_connection_candidates",
-    "generate_conservative_candidate", "plan_identity", "plan_net_ids",
-    "rank_candidate_plans")
+    "generate_conservative_candidate",
+    "generate_single_connection_alternatives", "plan_identity",
+    "plan_net_ids", "rank_candidate_plans")

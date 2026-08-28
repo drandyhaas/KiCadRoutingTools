@@ -18,7 +18,6 @@ class GlossPolicy:
 
 @dataclass(frozen=True)
 class ConvergencePolicy:
-    interactive_max_passes: int
     interactive_group_max_passes: int
     cli_max_passes: int
 
@@ -106,9 +105,6 @@ def load_internal_config(path=CONFIG_PATH):
         gloss=GlossPolicy(float(minimum)),
         convergence=ConvergencePolicy(
             _positive_integer(
-                convergence.get("interactive_max_passes"),
-                "convergence.interactive_max_passes"),
-            _positive_integer(
                 convergence.get("interactive_group_max_passes"),
                 "convergence.interactive_group_max_passes"),
             _positive_integer(
@@ -135,7 +131,6 @@ def get_session_config():
 
 
 def update_session_config(*, minimum_saved_length_mm,
-                          interactive_max_passes,
                           interactive_group_max_passes,
                           interactive_total_time_budget_seconds,
                           interactive_planning_time_budget_seconds,
@@ -145,8 +140,6 @@ def update_session_config(*, minimum_saved_length_mm,
     global _SESSION_CONFIG
     minimum = _positive_number(
         minimum_saved_length_mm, "minimum saved length", allow_zero=True)
-    maximum_passes = _positive_integer(
-        interactive_max_passes, "interactive maximum passes")
     group_passes = _positive_integer(
         interactive_group_max_passes, "interactive group maximum passes")
     total_budget = _positive_number(
@@ -169,7 +162,6 @@ def update_session_config(*, minimum_saved_length_mm,
             current.gloss, minimum_saved_length_mm=minimum),
         convergence=replace(
             current.convergence,
-            interactive_max_passes=maximum_passes,
             interactive_group_max_passes=group_passes),
         timing=replace(
             current.timing,

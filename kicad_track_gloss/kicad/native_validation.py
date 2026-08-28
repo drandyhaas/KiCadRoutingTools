@@ -18,14 +18,12 @@ import time
 
 if __package__:
     from .drc_report import (drc_increases as _drc_increases,
-                             json_report_counts as _json_report_counts,
                              json_report_summary as _json_report_summary)
 else:
     # The candidate-board helper deliberately executes this file directly in
     # KiCad's Python process.  Direct scripts have no package parent, but their
     # own directory is importable.  Keep that supported entry point explicit.
     from drc_report import (drc_increases as _drc_increases,
-                            json_report_counts as _json_report_counts,
                             json_report_summary as _json_report_summary)
 
 
@@ -113,13 +111,7 @@ def _hidden_process_kwargs():
 
 
 def _has_zones(board):
-    for accessor in ("Zones", "GetZones"):
-        try:
-            return bool(list(getattr(board, accessor)()))
-        except Exception:
-            continue
-    # Failure to inspect zones must retain the complete native gate.
-    return True
+    return bool(list(board.Zones()))
 
 
 def _point_line_distance(point, a, b):
@@ -131,7 +123,7 @@ def _point_line_distance(point, a, b):
     return cross / squared ** 0.5
 
 
-def _addition_is_existing_copper(addition, removed):
+def _addition_is_existing_copper(addition, removed, tolerance):
     """Prove that the whole addition is covered by removed collinear copper."""
     a, b = addition.start, addition.end
     dx, dy = b[0] - a[0], b[1] - a[1]
@@ -142,12 +134,12 @@ def _addition_is_existing_copper(addition, removed):
     for segment in removed:
         if (segment.net_id != addition.net_id or
                 segment.layer != addition.layer or
-                abs(segment.width - addition.width) > 1e-6):
+                abs(segment.width - addition.width) > tolerance):
             continue
         start = (segment.start_x, segment.start_y)
         end = (segment.end_x, segment.end_y)
-        if (_point_line_distance(start, a, b) > 1e-6 or
-                _point_line_distance(end, a, b) > 1e-6):
+        if (_point_line_distance(start, a, b) > tolerance or
+                _point_line_distance(end, a, b) > tolerance):
             continue
         first = ((start[0] - a[0]) * dx + (start[1] - a[1]) * dy) / squared
         second = ((end[0] - a[0]) * dx + (end[1] - a[1]) * dy) / squared
@@ -185,7 +177,8 @@ def _is_strict_removal_only_plan(adapter, board, plan):
             return False
     if len(removed) != len(wanted):
         return False
-    return all(_addition_is_existing_copper(addition, removed)
+    tolerance = 1.0 / adapter._iu_per_mm()
+    return all(_addition_is_existing_copper(addition, removed, tolerance)
                for addition in plan.additions)
 
 
@@ -318,10 +311,11 @@ def _run_drc(adapter, board_path, report_path, timeout_seconds=None,
 def validate_native_plan_ladder(adapter, board, plans, *, force_native=False,
                                 skip_native=False, timeout_seconds=None,
                                 wait_callback=None):
-    """Validate up to two quality-ordered plans in one native DRC wave."""
+    """Validate up to three quality-ordered plans in one native DRC wave."""
     plans = list(plans)
-    if not plans or len(plans) > 2:
-        raise ValueError("native DRC plan ladder must contain one or two plans")
+    if not plans or len(plans) > 3:
+        raise ValueError(
+            "native DRC plan ladder must contain one, two, or three plans")
     started = time.monotonic()
     deadline = (None if timeout_seconds is None else
                 started + max(0.0, float(timeout_seconds)))
@@ -473,8 +467,8 @@ def validate_native_plan_ladder(adapter, board, plans, *, force_native=False,
                         timings["total"] = (
                             time.monotonic() - started) * 1000.0
                         increases = _drc_increases(
-                            before, after, before_fingerprints,
-                            after_fingerprints)
+                            before, after,
+                            before_fingerprints, after_fingerprints)
                         result = NativeDrcResult(
                             allowed=not increases,
                             before=dict(before), after=dict(after),
@@ -538,34 +532,19 @@ def validate_native_plan(adapter, board, plan, *, force_native=False,
 
 
 def _item_uuid(item):
-    try:
-        return item.m_Uuid.AsString()
-    except Exception:
-        return item.GetUuid().AsString()
+    return item.m_Uuid.AsString()
 
 
 def _headless_apply(baseline_path, candidate_path, plan_path):
-    try:
-        import wx
-        wx.Log.SetActiveTarget(wx.LogStderr())
-    except Exception:
-        pass
+    import wx
+    wx.Log.SetActiveTarget(wx.LogStderr())
     import pcbnew
 
     def from_mm(value):
-        try:
-            scale = float(pcbnew.PCB_IU_PER_MM)
-        except (AttributeError, TypeError, ValueError):
-            return int(pcbnew.FromMM(float(value)))
-        return int(round(float(value) * scale))
+        return int(round(float(value) * float(pcbnew.PCB_IU_PER_MM)))
 
     def is_straight_track(item):
-        try:
-            return int(item.Type()) == int(pcbnew.PCB_TRACE_T)
-        except (AttributeError, TypeError, ValueError):
-            return (isinstance(item, pcbnew.PCB_TRACK) and
-                    not isinstance(item, pcbnew.PCB_VIA) and
-                    not isinstance(item, pcbnew.PCB_ARC))
+        return int(item.Type()) == int(pcbnew.PCB_TRACE_T)
 
     board = pcbnew.LoadBoard(str(baseline_path))
     plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))

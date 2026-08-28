@@ -19,10 +19,10 @@ from collections import defaultdict
 from copy import deepcopy
 from dataclasses import replace
 import hashlib
+import math
 import time
 
 from .candidate_geometry import (
-    copper_signature as _copper_signature,
     effective_clearance as _effective_clearance,
     path_blocker as _path_blocker,
     retain_identity_replacements as _retain_identity_replacements,
@@ -60,17 +60,17 @@ def _increment(counts, key):
     counts[key] = counts.get(key, 0) + 1
 
 
-def _is_octolinear(a, b, tolerance=1e-6):
+def _is_octolinear(a, b, tolerance):
     """Return whether a segment follows a 0/45/90-degree direction."""
     dx, dy = abs(b[0] - a[0]), abs(b[1] - a[1])
     return (dx <= tolerance or dy <= tolerance or
             abs(dx - dy) <= tolerance)
 
 
-def _non_octolinear_count(segments):
+def _non_octolinear_count(segments, tolerance):
     return sum(not _is_octolinear(
         (segment.start_x, segment.start_y),
-        (segment.end_x, segment.end_y)) for segment in segments)
+        (segment.end_x, segment.end_y), tolerance) for segment in segments)
 
 
 def _project_point_to_segment(point, a, b):
@@ -118,6 +118,222 @@ def _custom_pad_event_paths(points, i, j, span, context, clearance):
                     if candidate not in candidates:
                         candidates.append(candidate)
     return candidates
+
+
+def _maximal_corner_chamfer_path(
+        points, i, span, model, context, clearance, replaced_keys,
+        immutable_cover_keys, deadline=None, cancel_check=None):
+    """Cut back both sides of one 90-degree corner as far as safely possible.
+
+    This is a local gloss operation, not a route search: both retained pieces
+    stay on their original centrelines and the only new geometry is the single
+    octolinear chord across their shared corner.  A blocked full cut is reduced
+    to the largest safe cut at KiCad's coordinate quantum.
+    """
+    if len(span) != 2:
+        return None
+    first, second = span
+    tolerance = model.coordinate_quantum_mm
+    if (abs(first.width - second.width) > tolerance or
+            abs(first.clearance - second.clearance) > tolerance):
+        return None
+    a, corner, c = points[i], points[i + 1], points[i + 2]
+    first_length = length(a, corner)
+    second_length = length(corner, c)
+    if first_length <= tolerance or second_length <= tolerance:
+        return None
+    incoming = ((corner[0] - a[0]) / first_length,
+                (corner[1] - a[1]) / first_length)
+    outgoing = ((c[0] - corner[0]) / second_length,
+                (c[1] - corner[1]) / second_length)
+    if abs(incoming[0] * outgoing[0] +
+           incoming[1] * outgoing[1]) > tolerance:
+        return None
+    if (not _is_octolinear(a, corner, tolerance) or
+            not _is_octolinear(corner, c, tolerance)):
+        return None
+
+    moving = replace(first, width=first.width)
+
+    def cut_points(distance):
+        before = (corner[0] - incoming[0] * distance,
+                  corner[1] - incoming[1] * distance)
+        after = (corner[0] + outgoing[0] * distance,
+                 corner[1] + outgoing[1] * distance)
+        return before, after
+
+    def blocked(distance):
+        _check_deadline(deadline, cancel_check)
+        before, after = cut_points(distance)
+        return _path_blocker(
+            model, (before, after), moving, replaced_keys, clearance,
+            context, immutable_cover_keys)
+
+    maximum = min(first_length, second_length)
+    if blocked(maximum) is None:
+        safe = maximum
+    else:
+        safe, unsafe = 0.0, maximum
+        while unsafe - safe > tolerance:
+            middle = (safe + unsafe) / 2.0
+            if blocked(middle) is None:
+                safe = middle
+            else:
+                unsafe = middle
+        # Keep the emitted coordinates on KiCad's IU lattice and on the safe
+        # side of the clearance boundary despite binary floating-point noise.
+        safe = math.floor(safe / tolerance) * tolerance
+        while safe > tolerance and blocked(safe) is not None:
+            safe -= tolerance
+    if safe <= tolerance:
+        return None
+    before, after = cut_points(safe)
+    raw = (a, before, after, c)
+    path = tuple(point for index, point in enumerate(raw)
+                 if index == 0 or length(raw[index - 1], point) > tolerance)
+    return path if len(path) >= 2 else None
+
+
+def _cross(a, b):
+    return a[0] * b[1] - a[1] * b[0]
+
+
+def _line_intersection(point_a, direction_a, point_b, direction_b):
+    denominator = _cross(direction_a, direction_b)
+    if abs(denominator) <= 1e-12:
+        return None
+    delta = (point_b[0] - point_a[0], point_b[1] - point_a[1])
+    scale = _cross(delta, direction_b) / denominator
+    return (point_a[0] + scale * direction_a[0],
+            point_a[1] + scale * direction_a[1])
+
+
+def _internal_segment_translation_paths(
+        points, i, span, model, context, clearance, replaced_keys,
+        immutable_cover_keys, deadline=None, cancel_check=None):
+    """Slide the middle of three segments to its exact useful limits.
+
+    The first and last segment keep their existing supporting lines while the
+    middle segment remains parallel to itself.  The feasible translation
+    interval ends when one of the three pieces vanishes.  Those geometric
+    events, or the last safe position before an obstacle, are the only useful
+    extrema; no grid sampling or route search is involved.
+    """
+    if len(span) != 3:
+        return ()
+    tolerance = model.coordinate_quantum_mm
+    if len({(round(item.width, 6), round(item.clearance, 6))
+            for item in span}) != 1:
+        return ()
+    a, b, c, d = points[i:i + 4]
+    directions = (
+        (b[0] - a[0], b[1] - a[1]),
+        (c[0] - b[0], c[1] - b[1]),
+        (d[0] - c[0], d[1] - c[1]),
+    )
+    lengths = [math.hypot(*direction) for direction in directions]
+    if min(lengths) <= tolerance:
+        return ()
+    first = (directions[0][0] / lengths[0],
+             directions[0][1] / lengths[0])
+    middle = (directions[1][0] / lengths[1],
+              directions[1][1] / lengths[1])
+    last = (directions[2][0] / lengths[2],
+            directions[2][1] / lengths[2])
+    if (abs(_cross(first, middle)) <= 1e-12 or
+            abs(_cross(last, middle)) <= 1e-12):
+        return ()
+    normal = (-middle[1], middle[0])
+
+    def raw_path(offset):
+        shifted = (b[0] + offset * normal[0],
+                   b[1] + offset * normal[1])
+        before = _line_intersection(a, first, shifted, middle)
+        after = _line_intersection(d, last, shifted, middle)
+        if before is None or after is None:
+            return None
+        return a, before, after, d
+
+    def measures(offset):
+        raw = raw_path(offset)
+        if raw is None:
+            return None
+        _a, before, after, _d = raw
+        return (
+            (before[0] - a[0]) * first[0] +
+            (before[1] - a[1]) * first[1],
+            (d[0] - after[0]) * last[0] +
+            (d[1] - after[1]) * last[1],
+            (after[0] - before[0]) * middle[0] +
+            (after[1] - before[1]) * middle[1],
+        )
+
+    base = measures(0.0)
+    shifted = measures(1.0)
+    if base is None or shifted is None or min(base) < -tolerance:
+        return ()
+    lower, upper = -math.inf, math.inf
+    for initial, at_one in zip(base, shifted):
+        slope = at_one - initial
+        if abs(slope) <= 1e-12:
+            if initial < -tolerance:
+                return ()
+            continue
+        root = -initial / slope
+        if slope > 0.0:
+            lower = max(lower, root)
+        else:
+            upper = min(upper, root)
+    targets = [value for value in (lower, upper)
+               if math.isfinite(value) and abs(value) > tolerance]
+    moving = span[0]
+
+    def normalized_path(offset):
+        raw = raw_path(offset)
+        if raw is None:
+            return None
+        path = tuple(point for index, point in enumerate(raw)
+                     if index == 0 or
+                     length(raw[index - 1], point) > tolerance)
+        return path if len(path) >= 2 else None
+
+    def blocked(offset):
+        _check_deadline(deadline, cancel_check)
+        path = normalized_path(offset)
+        if path is None:
+            return True
+        return _path_blocker(
+            model, path, moving, replaced_keys, clearance, context,
+            immutable_cover_keys) is not None
+
+    old_length = sum(length(x, y) for x, y in zip((a, b, c), (b, c, d)))
+    candidates = []
+    for target in targets:
+        _check_deadline(deadline, cancel_check)
+        target_path = normalized_path(target)
+        if target_path is None:
+            continue
+        target_length = sum(length(x, y)
+                            for x, y in zip(target_path, target_path[1:]))
+        if target_length >= old_length - tolerance:
+            continue
+        if blocked(target):
+            safe, unsafe = 0.0, target
+            while abs(unsafe - safe) > tolerance:
+                middle_offset = (safe + unsafe) / 2.0
+                if blocked(middle_offset):
+                    unsafe = middle_offset
+                else:
+                    safe = middle_offset
+            target = safe
+            target_path = normalized_path(target)
+        if target_path is None:
+            continue
+        new_length = sum(length(x, y)
+                         for x, y in zip(target_path, target_path[1:]))
+        if new_length < old_length - tolerance and target_path not in candidates:
+            candidates.append(target_path)
+    return tuple(candidates)
 
 
 def _path_additions(path, originals, layer, net_id):
@@ -186,11 +402,12 @@ def _path_additions(path, originals, layer, net_id):
     return additions
 
 
-def _endpoint_moved_into_pad(original, candidate, terminal, pad_targets):
+def _endpoint_moved_into_pad(
+        original, candidate, terminal, pad_targets, tolerance):
     """Distinguish an actual pad contact from another movable termination."""
-    if length(original, candidate) <= 1e-6:
+    if length(original, candidate) <= tolerance:
         return False
-    return any(pad_contains(region, candidate, tolerance=1e-6)
+    return any(pad_contains(region, candidate, tolerance=tolerance)
                for region in pad_targets.get(terminal, ()))
 
 
@@ -243,7 +460,7 @@ def _split_eligible_intersections(model, eligible, pass_index):
         points.sort(key=lambda point: length(start, point))
         next_eligible.discard(key)
         for a, b in zip([start] + points, points + [end]):
-            if length(a, b) <= 1e-6:
+            if length(a, b) <= model.coordinate_quantum_mm:
                 continue
             synthetic = "{}split-{}-{}".format(
                 _SYNTHETIC_PREFIX, pass_index, counter)
@@ -263,12 +480,12 @@ def _point_is_terminal(model, segment, point, excluded_key):
             continue
         if point_segment_distance(
                 point, (other.start_x, other.start_y),
-                (other.end_x, other.end_y)) <= 1e-6:
+                (other.end_x, other.end_y)) <= model.coordinate_quantum_mm:
             return True
     return any(
         pad.net_id == segment.net_id and
         (not pad.layers or segment.layer in pad.layers) and
-        pad_contains(pad, point, tolerance=1e-6)
+        pad_contains(pad, point, tolerance=model.coordinate_quantum_mm)
         for pad in model.pad_regions)
 
 
@@ -282,12 +499,15 @@ def _point_has_copper_terminal(model, segment, point, excluded_key):
         if point_segment_distance(
                 point, (other.start_x, other.start_y),
                 (other.end_x, other.end_y)) <= (
-                    segment.width + other.width) / 2.0 + 1e-6:
+                    (segment.width + other.width) / 2.0 +
+                    model.coordinate_quantum_mm):
             return True
     return any(
         pad.net_id == segment.net_id and
         (not pad.layers or segment.layer in pad.layers) and
-        segment_hits_pad(pad, point, point, margin=segment.width / 2.0 + 1e-6)
+        segment_hits_pad(
+            pad, point, point,
+            margin=segment.width / 2.0 + model.coordinate_quantum_mm)
         for pad in model.pad_regions)
 
 
@@ -307,11 +527,11 @@ def _stub_pruning_contact(model, segment, point, excluded_key):
                 other.layer != segment.layer or
                 point_segment_distance(
                     point, (other.start_x, other.start_y),
-                    (other.end_x, other.end_y)) > 1e-6):
+                    (other.end_x, other.end_y)) > model.coordinate_quantum_mm):
             continue
-        if other.width > segment.width + 1e-6:
+        if other.width > segment.width + model.coordinate_quantum_mm:
             return "wider_through_track"
-        if (other.width < segment.width - 1e-6 and
+        if (other.width < segment.width - model.coordinate_quantum_mm and
                 vertex(*point) in {
                     vertex(other.start_x, other.start_y),
                     vertex(other.end_x, other.end_y)}):
@@ -530,7 +750,8 @@ def _compose_refined_plan(original_model, original_eligible, final_model,
                 for point in ((existing.start_x, existing.start_y),
                               (existing.end_x, existing.end_y)):
                     if point_segment_distance(point, addition.start,
-                                              addition.end) > 1e-6:
+                                              addition.end) > \
+                            original_model.coordinate_quantum_mm:
                         continue
                     parameter = ((point[0] - ax) * (bx - ax) +
                                  (point[1] - ay) * (by - ay)) / denominator
@@ -561,9 +782,11 @@ def _refine_plan(model, eligible, initial, planner_kwargs, max_passes=3):
         simulated, current_eligible, removed = _prune_generated_stubs(
             simulated, current_eligible)
         pruned_stubs.extend(removed)
+        refinement_kwargs = dict(planner_kwargs)
+        refinement_kwargs["solution_rank"] = 0
         step = smooth_selected_chains(
             simulated, current_eligible, span_strategy="global",
-            path_preference=0, **planner_kwargs)
+            path_preference=0, **refinement_kwargs)
         if not step.changed:
             break
         passes.append(step)
@@ -586,8 +809,12 @@ def _refine_plan(model, eligible, initial, planner_kwargs, max_passes=3):
 
 def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                            allow_equal_length_simpler=False, clearance=0.1,
-                           equal_length_tolerance=0.001,
+                           equal_length_tolerance=None,
                            span_strategy="farthest", path_preference=0,
+                           solution_rank=0,
+                           allow_internal_translations=True,
+                           allow_track_terminal_sliding=True,
+                           allow_pad_terminal_sliding=True,
                            collect_statistics=True, planner_context=None,
                            deadline=None, cancel_check=None):
     """Return an immutable edit plan; never mutates ``model``.
@@ -597,6 +824,8 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
     Non-selected copper remains in incidence and obstacle calculations.
     """
     eligible = {str(key) for key in eligible_segment_keys}
+    if equal_length_tolerance is None:
+        equal_length_tolerance = model.coordinate_quantum_mm
     planner_context = (planner_context if planner_context is not None and
                        planner_context.model is model else PlannerContext(model))
     immutable_cover_keys = frozenset(
@@ -685,18 +914,25 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                         _check_deadline(deadline, cancel_check)
                         old_len = cumulative[j] - cumulative[i]
                         span = chain[i:j]
-                        angle_corrections = _non_octolinear_count(span)
+                        angle_corrections = _non_octolinear_count(
+                            span, model.coordinate_quantum_mm)
                         replaced = {segment_key(s) for s in chain[i:j]}
                         start_terminal = (net_id, layer, vertex(*points[i]))
                         end_terminal = (net_id, layer, vertex(*points[j]))
-                        start_targets = (track_terminal_targets.get(start_terminal, ())
-                                         if i == 0 else ())
-                        end_targets = (track_terminal_targets.get(end_terminal, ())
-                                       if j == len(chain) else ())
-                        start_pads = (pad_terminal_targets.get(start_terminal, ())
-                                      if i == 0 else ())
-                        end_pads = (pad_terminal_targets.get(end_terminal, ())
-                                    if j == len(chain) else ())
+                        start_targets = (
+                            track_terminal_targets.get(start_terminal, ())
+                            if allow_track_terminal_sliding and i == 0 else ())
+                        end_targets = (
+                            track_terminal_targets.get(end_terminal, ())
+                            if allow_track_terminal_sliding and
+                            j == len(chain) else ())
+                        start_pads = (
+                            pad_terminal_targets.get(start_terminal, ())
+                            if allow_pad_terminal_sliding and i == 0 else ())
+                        end_pads = (
+                            pad_terminal_targets.get(end_terminal, ())
+                            if allow_pad_terminal_sliding and
+                            j == len(chain) else ())
                         if (j == i + 1 and not angle_corrections and not
                                 (start_targets or end_targets or
                                  start_pads or end_pads)):
@@ -715,6 +951,20 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                                 clearance):
                             if path not in paths:
                                 paths.append(path)
+                        if j == i + 2:
+                            chamfer = _maximal_corner_chamfer_path(
+                                points, i, span, model, planner_context,
+                                clearance, replaced, immutable_cover_keys,
+                                deadline, cancel_check)
+                            if chamfer is not None and chamfer not in paths:
+                                paths.append(chamfer)
+                        if allow_internal_translations and j == i + 3:
+                            for translated in _internal_segment_translation_paths(
+                                    points, i, span, model, planner_context,
+                                    clearance, replaced, immutable_cover_keys,
+                                    deadline, cancel_check):
+                                if translated not in paths:
+                                    paths.append(translated)
                         if path_preference:
                             paths.reverse()
                         for path in paths:
@@ -783,18 +1033,20 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                     # over the WHOLE chain, then segment reduction. This avoids
                     # the A-before-B bias of greedy shortcut acceptance.
                     options = {i: choices_at(i) for i in range(len(chain))}
-                    best = {len(chain): (0, 0.0, 0, [])}
+                    retained_solutions = max(3, int(solution_rank) + 1)
+                    best = {len(chain): [(0, 0.0, 0, [])]}
                     for i in range(len(chain) - 1, -1, -1):
-                        skip = best.get(i + 1, (0, 0.0, 0, []))
-                        candidates_dp = [skip]
+                        candidates_dp = list(best.get(
+                            i + 1, [(0, 0.0, 0, [])]))
                         for choice in options.get(i, ()):
                             (j, path, gain, replaced, new_count, _old_len,
                              corrections, _additions) = choice
-                            tail = best.get(j, (0, 0.0, 0, []))
                             reduction = (j - i) - new_count
-                            candidates_dp.append((
-                                corrections + tail[0], gain + tail[1],
-                                reduction + tail[2], [(i, choice)] + tail[3]))
+                            for tail in best.get(j, [(0, 0.0, 0, [])]):
+                                candidates_dp.append((
+                                    corrections + tail[0], gain + tail[1],
+                                    reduction + tail[2],
+                                    [(i, choice)] + tail[3]))
 
                         def dp_key(candidate):
                             signature = tuple((start, selected[0], tuple(selected[1]))
@@ -802,8 +1054,22 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                             return (candidate[0], round(candidate[1], 9), candidate[2],
                                     tuple((-a, -b, path) for a, b, path in signature))
 
-                        best[i] = max(candidates_dp, key=dp_key)
-                    spans = {start: selected for start, selected in best[0][3]}
+                        unique_dp = {}
+                        for candidate in candidates_dp:
+                            signature = tuple(
+                                (start, selected[0], tuple(selected[1]))
+                                for start, selected in candidate[3])
+                            previous = unique_dp.get(signature)
+                            if (previous is None or
+                                    dp_key(candidate) > dp_key(previous)):
+                                unique_dp[signature] = candidate
+                        best[i] = sorted(
+                            unique_dp.values(), key=dp_key, reverse=True
+                        )[:retained_solutions]
+                    selected_solution = best[0][min(
+                        max(0, int(solution_rank)), len(best[0]) - 1)]
+                    spans = {start: selected
+                             for start, selected in selected_solution[3]}
                 else:
                     i = 0
                     while i < len(chain):
@@ -836,15 +1102,19 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                     start_terminal = (net_id, layer, vertex(*points[k]))
                     end_terminal = (net_id, layer, vertex(*points[j]))
                     if collect_statistics:
-                        moved_start = length(path[0], points[k]) > 1e-6
-                        moved_end = length(path[-1], points[j]) > 1e-6
+                        moved_start = length(
+                            path[0], points[k]) > model.coordinate_quantum_mm
+                        moved_end = length(
+                            path[-1], points[j]) > model.coordinate_quantum_mm
                         pad_moved = (
                             _endpoint_moved_into_pad(
                                 points[k], path[0], start_terminal,
-                                pad_terminal_targets) or
+                                pad_terminal_targets,
+                                model.coordinate_quantum_mm) or
                             _endpoint_moved_into_pad(
                                 points[j], path[-1], end_terminal,
-                                pad_terminal_targets))
+                                pad_terminal_targets,
+                                model.coordinate_quantum_mm))
                         track_moved = (
                             (moved_start and
                              start_terminal in track_terminal_targets) or
@@ -930,8 +1200,13 @@ def _junction_branch_scopes(model, eligible_segment_keys,
             frozen = frozenset(branch)
             if frozen and frozen != frozenset(eligible):
                 scopes.add(frozen)
+    def scope_geometry(scope):
+        return tuple(sorted(
+            _segment_order_key(selected_by_key[key])[:-1]
+            for key in scope))
+
     return tuple(sorted(scopes, key=lambda scope: (
-        -len(scope), tuple(sorted(scope)))))[:max(0, int(limit))]
+        -len(scope), scope_geometry(scope))))[:max(0, int(limit))]
 
 
 def _group_dependency_signature(model, eligible_segment_keys, context):
@@ -966,7 +1241,8 @@ def _group_dependency_signature(model, eligible_segment_keys, context):
         y_values.extend((segment.start_y, segment.end_y))
     selected_halfwidth = max(segment.width / 2.0 for segment in selected)
     margin = (context.max_pad_radius + context.max_net_clearance +
-              selected_halfwidth + context.max_segment_halfwidth + 1e-5)
+              selected_halfwidth + context.max_segment_halfwidth +
+              model.coordinate_quantum_mm)
     bounds = (min(x_values) - margin, min(y_values) - margin,
               max(x_values) + margin, max(y_values) + margin)
     nearby = {}
@@ -1213,6 +1489,22 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
                 already_validated=True)
         except ValueError as error:
             rejected.append(str(error))
+        if (kwargs.get("allow_internal_translations", True) and
+                len(eligible) >= 3 and
+                (deadline is None or time.monotonic() < deadline)):
+            # New local operators must be monotone with respect to the former
+            # search space. Keep the translation-free optimum beside the new
+            # optimum so a later composition failure cannot erase a safe plan
+            # that was available before translations were introduced.
+            legacy_kwargs = dict(kwargs)
+            legacy_kwargs["allow_internal_translations"] = False
+            try:
+                add_plan(smooth_selected_chains(
+                    model, eligible_segment_keys, span_strategy="global",
+                    path_preference=0, cancel_check=cancel_check,
+                    **legacy_kwargs), already_validated=True)
+            except ValueError as error:
+                rejected.append(str(error))
 
     # Eligibility is authorization, not an obligation to move every selected
     # segment. At a selected T, treating every authorized branch as mutable can
@@ -1408,7 +1700,7 @@ def _canonicalize_eligible_subdivisions(model, eligible):
                       round(segment.clearance, 6))
         for point in ((segment.start_x, segment.start_y),
                       (segment.end_x, segment.end_y)):
-            endpoint_buckets[(attributes, point)].append(segment)
+            endpoint_buckets[(attributes, vertex(*point))].append(segment)
 
     context = PlannerContext(model)
     neighbors = defaultdict(set)
@@ -1417,10 +1709,10 @@ def _canonicalize_eligible_subdivisions(model, eligible):
         if len(bucket) != 2:
             continue
         first, second = bucket
-        first_ends = ((first.start_x, first.start_y),
-                      (first.end_x, first.end_y))
-        second_ends = ((second.start_x, second.start_y),
-                       (second.end_x, second.end_y))
+        first_ends = (vertex(first.start_x, first.start_y),
+                      vertex(first.end_x, first.end_y))
+        second_ends = (vertex(second.start_x, second.start_y),
+                       vertex(second.end_x, second.end_y))
         outer_first = (first_ends[1] if first_ends[0] == joint
                        else first_ends[0])
         outer_second = (second_ends[1] if second_ends[0] == joint
@@ -1490,8 +1782,8 @@ def _canonicalize_eligible_subdivisions(model, eligible):
         members = [by_key[key] for key in component]
         point_counts = defaultdict(int)
         for segment in members:
-            point_counts[(segment.start_x, segment.start_y)] += 1
-            point_counts[(segment.end_x, segment.end_y)] += 1
+            point_counts[vertex(segment.start_x, segment.start_y)] += 1
+            point_counts[vertex(segment.end_x, segment.end_y)] += 1
         outer = sorted(point for point, count in point_counts.items()
                        if count == 1)
         if len(outer) != 2 or outer[0] == outer[1]:
@@ -1584,9 +1876,11 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
     The returned plan always addresses ``model`` directly, so KiCad can apply it
     as one operation and preserve a single Undo step.
     """
-    if max_passes < 1:
+    if max_passes is not None and max_passes < 1:
         raise ValueError("max_passes must be at least one")
     deadline = kwargs.get("deadline")
+    opening_solution_rank = max(
+        0, int(kwargs.pop("opening_solution_rank", 0)))
     cancel_check = kwargs.get("cancel_check")
     _check_deadline(deadline, cancel_check)
     source_model = _canonicalize_model_segments(model)
@@ -1632,7 +1926,8 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
         previous_mm = initial_mm
         pass_observer(initial_state)
 
-    for pass_index in range(max_passes + 1):
+    pass_index = 0
+    while True:
         _check_deadline(deadline, cancel_check)
         if deadline is not None and time.monotonic() >= deadline:
             deadline_reached = True
@@ -1649,6 +1944,16 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
             raise ValueError("Gloss convergence entered a geometry cycle")
         seen.add(signature)
         pass_kwargs = dict(kwargs)
+        pass_kwargs["solution_rank"] = (
+            opening_solution_rank if pass_index == 0 else 0)
+        # One opening refinement is semantically useful: terminal placement
+        # can expose a simplification that disappears after the one-shot plan
+        # is recomposed. Later outer passes already rebuild the whole topology,
+        # so repeating nested refinement there is redundant and expensive.
+        configured_refinement = max(
+            0, int(kwargs.get("max_refinement_passes", 3)))
+        pass_kwargs["max_refinement_passes"] = (
+            min(1, configured_refinement) if pass_index == 0 else 0)
         if batch_group_convergence and "converge_groups" not in pass_kwargs:
             # Preserve the established first-pass basin. Once that broad
             # global edit has opened local simplifications, converge each
@@ -1678,7 +1983,7 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
                     fixed_state["warnings"] = list(final_search.warnings)
                 pass_observer(fixed_state)
             break
-        if pass_index == max_passes:
+        if max_passes is not None and pass_index == max_passes:
             if pass_observer is not None:
                 limited = _convergence_state(
                     current_model, len(changed_steps), initial_mm,
@@ -1695,36 +2000,52 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
         accepted = None
         rejected_steps = []
         for step in changed_plans:
-            proposed_model, proposed_eligible = _apply_to_model(
+            raw_proposed_model, raw_proposed_eligible = _apply_to_model(
                 current_model, current_eligible, step, pass_index)
             # The live adapter writes each collinear replacement as the
             # compact final track set. Continue searching on that same
             # topology; otherwise a final-only merge can expose an A1 -> A2
             # simplification after the engine has already claimed A1 fixed.
-            proposed_model, proposed_eligible = _merge_final_collinear(
-                proposed_model, set(proposed_eligible))
-            proposed_model = _canonicalize_model_segments(proposed_model)
-            if (_model_geometry_signature(proposed_model) ==
-                    _model_geometry_signature(current_model)):
-                rejected_steps.append(
-                    "Candidate changes identities but not copper geometry")
-                continue
-            try:
-                composed = _compose_refined_plan(
-                    model, original_eligible, proposed_model,
-                    proposed_eligible, changed_steps + [step], [])
-                source_proposed, source_proposed_eligible = \
-                    _restore_unchanged_subdivisions(
-                        proposed_model, proposed_eligible, input_expansions)
-                source_composed = _compose_refined_plan(
-                    source_model, source_eligible, source_proposed,
-                    source_proposed_eligible, changed_steps + [step], [])
-            except ValueError as error:
-                rejected_steps.append(str(error))
-                continue
-            accepted = (step, proposed_model, proposed_eligible, composed,
-                        source_composed)
-            break
+            merged_model, merged_eligible = _merge_final_collinear(
+                raw_proposed_model, set(raw_proposed_eligible))
+            states = [(merged_model, merged_eligible)]
+            merged_signature = _model_geometry_signature(merged_model)
+            current_signature = _model_geometry_signature(current_model)
+            if (merged_signature != current_signature and
+                    merged_signature !=
+                    _model_geometry_signature(raw_proposed_model)):
+                # Collinear compaction is an optimization, not an obligation.
+                # A merged segment can expose a clearance violation across a
+                # pre-existing breakpoint. Retain the already validated raw
+                # rewrite instead of losing a formerly safe gloss. When the
+                # merge reproduces current copper exactly, however, the raw
+                # state changes segmentation only and would create a cycle.
+                states.append((raw_proposed_model, raw_proposed_eligible))
+            for proposed_model, proposed_eligible in states:
+                proposed_model = _canonicalize_model_segments(proposed_model)
+                if (_model_geometry_signature(proposed_model) ==
+                        _model_geometry_signature(current_model)):
+                    rejected_steps.append(
+                        "Candidate changes identities but not copper geometry")
+                    continue
+                try:
+                    composed = _compose_refined_plan(
+                        model, original_eligible, proposed_model,
+                        proposed_eligible, changed_steps + [step], [])
+                    source_proposed, source_proposed_eligible = \
+                        _restore_unchanged_subdivisions(
+                            proposed_model, proposed_eligible, input_expansions)
+                    source_composed = _compose_refined_plan(
+                        source_model, source_eligible, source_proposed,
+                        source_proposed_eligible, changed_steps + [step], [])
+                except ValueError as error:
+                    rejected_steps.append(str(error))
+                    continue
+                accepted = (step, proposed_model, proposed_eligible, composed,
+                            source_composed)
+                break
+            if accepted is not None:
+                break
         if accepted is None:
             final_search = GlossResult()
             final_search.warnings.append(
@@ -1774,8 +2095,7 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
                 "changed", step)
             pass_observer(state)
             previous_mm = state["copper_mm"]
-    else:  # pragma: no cover - the bounded loop always breaks or raises.
-        raise ValueError("Gloss convergence ended unexpectedly")
+        pass_index += 1
 
     if not changed_steps:
         final_search.convergence_passes = 0

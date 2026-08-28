@@ -116,8 +116,6 @@ def show_session_settings(parent=None):
         try:
             update_session_config(
                 minimum_saved_length_mm=minimum.GetValue(),
-                interactive_max_passes=(
-                    policy.convergence.interactive_max_passes),
                 interactive_group_max_passes=(
                     policy.convergence.interactive_group_max_passes),
                 interactive_total_time_budget_seconds=total_budget.GetValue(),

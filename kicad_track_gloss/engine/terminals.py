@@ -14,9 +14,11 @@ def vertex(x, y):
     return round(x, 6), round(y, 6)
 
 
-def find_track_terminal_targets(model, eligible_segment_keys, tolerance=1e-5,
+def find_track_terminal_targets(model, eligible_segment_keys, tolerance=None,
                                 planner_context=None):
     """Find eligible vertices electrically terminating on immutable tracks."""
+    tolerance = (model.coordinate_quantum_mm
+                 if tolerance is None else tolerance)
     eligible = {str(key) for key in eligible_segment_keys}
     immutable = [segment for segment in model.segments
                  if segment_key(segment) not in eligible]
@@ -45,7 +47,7 @@ def find_track_terminal_targets(model, eligible_segment_keys, tolerance=1e-5,
             for terminal, found in targets.items()}
 
 
-def find_track_terminal_vertices(model, eligible_segment_keys, tolerance=1e-5):
+def find_track_terminal_vertices(model, eligible_segment_keys, tolerance=None):
     return set(find_track_terminal_targets(
         model, eligible_segment_keys, tolerance))
 
@@ -62,12 +64,15 @@ def find_pad_terminal_targets(model, eligible_segment_keys,
                       (segment.end_x, segment.end_y)):
             terminal = (segment.net_id, segment.layer, vertex(*point))
             regions = (planner_context.pads.query(line_bbox(
-                point, point, planner_context.max_pad_radius + 1e-6))
+                point, point, planner_context.max_pad_radius +
+                model.coordinate_quantum_mm))
                 if planner_context is not None else model.pad_regions)
             for region in regions:
                 if (region.net_id == segment.net_id and
                         (not region.layers or segment.layer in region.layers) and
-                        pad_contains(region, point, tolerance=1e-6)):
+                        pad_contains(
+                            region, point,
+                            tolerance=model.coordinate_quantum_mm)):
                     targets[terminal].append(region)
     return {terminal: tuple(regions) for terminal, regions in targets.items()}
 

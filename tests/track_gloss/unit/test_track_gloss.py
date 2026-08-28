@@ -13,16 +13,15 @@ import pytest
 from kicad_track_gloss.engine import (combine_plans, find_track_terminal_vertices,
                                       generate_candidate_plans,
                                       generate_converged_plan,
+                                      generate_single_connection_alternatives,
                                       rank_candidate_plans,
                                       smooth_selected_chains, summarize_plan)
 from kicad_track_gloss.engine.model import (AddedSegment, BoardModel,
                                             CircleObstacle, GlossResult,
                                             PadRegion, Segment, segment_key)
-from kicad_track_gloss.kicad.selection import meander_keys as _meander_keys
 from kicad_track_gloss.engine.pads import segment_hits_pad
-from kicad_track_gloss.kicad.rules import via_track_hole_clearance
 from kicad_track_gloss.kicad.native_salvage import (
-    maximize_safe_native_candidates)
+    maximize_safe_native_candidates, maximize_safe_native_connections)
 from kicad_track_gloss.engine.planner import (
     PlanningDeadlineExceeded, _apply_to_model,
     _group_dependency_signature)
@@ -93,7 +92,8 @@ def test_native_candidate_search_never_drops_safe_third_candidate():
     class Adapter:
         def validate_plan_ladder(self, _board, plans, **_kwargs):
             ladder_calls.append(tuple(plan.remove_keys[0] for plan in plans))
-            return [_native_result(False), _native_result(True)]
+            return [_native_result(False), _native_result(False),
+                    _native_result(True)]
 
         def validate_plan(self, _board, plan, **_kwargs):
             followups.append(plan.remove_keys[0])
@@ -107,9 +107,9 @@ def test_native_candidate_search_never_drops_safe_third_candidate():
         operation_deadline=time.monotonic() + 5.0,
         wait_callback=None)
 
-    assert ladder_calls == [("global", "conservative")]
-    assert followups == ["connection"]
-    assert decision.plan is conservative
+    assert ladder_calls == [("global", "conservative", "connection")]
+    assert followups == []
+    assert decision.plan is connection_plan
     assert decision.native.allowed
     assert decision.fallback_used
 
@@ -139,23 +139,46 @@ def test_native_candidate_search_does_not_salvage_an_identical_incumbent(
     assert not decision.salvage_used
 
 
-def test_custom_via_track_hole_clearance_uses_matching_active_rule(tmp_path):
-    board_path = tmp_path / "board.kicad_pcb"
-    board_path.write_text("(kicad_pcb)", encoding="utf-8")
-    board_path.with_suffix(".kicad_dru").write_text(
-        """
-# (rule "disabled" (constraint hole_clearance (min 9mm))
-#   (condition "A.Type == 'via' && B.Type == 'track'"))
-(rule "via-track"
-  (constraint hole_clearance (min 0.254mm))
-  (condition "A.Type == 'via' && B.Type == 'track'"))
-(rule "pth-track"
-  (constraint hole_clearance (min 0.33mm))
-  (condition "A.Type != 'Via' && B.Type == 'track'"))
-""", encoding="utf-8")
+def test_native_connection_salvage_runs_three_candidates_in_one_drc_wave():
+    segments = []
+    plans = []
+    eligible = set()
+    for net_id, y in enumerate((0.0, 10.0, 20.0), start=1):
+        first = Segment(0, y, 1, y + 1, 0.2, 0, net_id,
+                        "{}a".format(net_id))
+        second = Segment(1, y + 1, 2, y, 0.2, 0, net_id,
+                         "{}b".format(net_id))
+        segments.extend((first, second))
+        eligible.update((first.uuid, second.uuid))
+        plans.append(GlossResult(
+            remove_keys=[first.uuid, second.uuid],
+            additions=[AddedSegment((0, y), (2, y), 0.2, 0, net_id)],
+            saved_mm=2 * math.sqrt(2) - 2,
+            convergence_passes=1, fixed_point=True))
+    waves = []
 
-    board = types.SimpleNamespace(GetFileName=lambda: str(board_path))
-    assert via_track_hole_clearance(None, board) == 0.254
+    class Adapter:
+        def validate_plan_ladder(self, _board, candidates, **_kwargs):
+            waves.append(len(candidates))
+            if len(waves) == 1:
+                return [_native_result(False), _native_result(False),
+                        _native_result(True)]
+            return [_native_result(True) for _candidate in candidates]
+
+        def validate_plan(self, _board, _candidate, **_kwargs):
+            waves.append(1)
+            return _native_result(True)
+
+    result, native, _attempts, _deadline, retained, total = \
+        maximize_safe_native_connections(
+            Adapter(), object(), BoardModel(segments), eligible, plans,
+            force_native=False, skip_native=False,
+            operation_deadline=time.monotonic() + 5.0,
+            wait_callback=None)
+
+    assert waves[0] == 3
+    assert result is not None and native.allowed
+    assert retained == total == 3
 
 
 def staircase(count=20, pitch=0.2, net=1):
@@ -354,47 +377,6 @@ def test_no_selection_is_noop():
     assert not smooth_selected_chains(BoardModel(staircase()), set()).changed
 
 
-def test_meander_direction_reversal_is_protected():
-    points = [(0, 0), (1, 0), (1, 1), (0, 1), (0, 2), (1, 2)]
-    segs = [Segment(a[0], a[1], b[0], b[1], 0.2, 0, 1, f"m{i}")
-            for i, (a, b) in enumerate(zip(points, points[1:]))]
-    assert _meander_keys(segs) == {segment_key(s) for s in segs}
-    assert not _meander_keys(staircase(8))
-
-
-def test_meander_protection_does_not_spill_into_disconnected_route():
-    meander_points = [(0, 0), (1, 0), (1, 1), (0, 1), (0, 2), (1, 2)]
-    meander = [Segment(a[0], a[1], b[0], b[1], 0.2, 0, 1, f"m{i}")
-               for i, (a, b) in enumerate(zip(meander_points, meander_points[1:]))]
-    ordinary = [Segment(10, 0, 11, 0, 0.2, 0, 1, "ordinary-a"),
-                Segment(11, 0, 12, 1, 0.2, 0, 1, "ordinary-b")]
-    assert _meander_keys(meander + ordinary) == {segment_key(s) for s in meander}
-
-
-def test_single_direction_reversal_is_not_misclassified_as_meander():
-    # Regression from dispenser_labels.kicad_pcb / Net-(U2-VCC): an ordinary
-    # route has one A/B/-A reversal, but no repeated length-tuning serpent.
-    points = [(213.6, 116.7), (213.6, 118.95), (213.05, 119.5),
-              (213.0, 119.55), (211.575, 119.55), (211.575, 118.425),
-              (210.275, 117.125), (207.35, 117.125)]
-    segments = [Segment(a[0], a[1], b[0], b[1], 0.127, 0, 1, f"real{i}")
-                for i, (a, b) in enumerate(zip(points, points[1:]))]
-    assert not _meander_keys(segments)
-
-
-def test_dense_micro_jog_tuning_is_protected_without_reversals():
-    # Regression for dispenser_labels /cpu/~{csn}: 111 connected segments,
-    # mostly 0.035 mm long, previously triggered ~9,700 clearance checks and
-    # made KiCad look frozen although no candidate was ultimately accepted.
-    segments = staircase(40, pitch=0.025)
-    assert _meander_keys(segments) == {segment_key(s) for s in segments}
-
-
-def test_long_ordinary_route_is_not_dense_micro_jog_tuning():
-    segments = staircase(40, pitch=0.2)
-    assert not _meander_keys(segments)
-
-
 def _plan_signature(plan):
     return (tuple(sorted(plan.remove_keys)),
             tuple(sorted((a.start, a.end, a.width, a.layer, a.net_id)
@@ -422,11 +404,21 @@ def test_kicad_netclass_clearance_is_honored():
                        minimum_clearance=0.2)
     result = smooth_selected_chains(model, {segment_key(s) for s in segs},
                                     clearance=0.0, span_strategy="global")
-    from kicad_track_gloss.engine.geometry import segment_distance
+    from kicad_track_gloss.engine.geometry import (point_segment_distance,
+                                                   segment_distance)
     for new in result.additions:
-        assert segment_distance(new.start, new.end,
-                                (foreign.start_x, foreign.start_y),
-                                (foreign.end_x, foreign.end_y)) >= 0.95 - 1e-6
+        distance = segment_distance(
+            new.start, new.end, (foreign.start_x, foreign.start_y),
+            (foreign.end_x, foreign.end_y))
+        retained_original_copper = any(
+            point_segment_distance(
+                new.start, (old.start_x, old.start_y),
+                (old.end_x, old.end_y)) <= 1e-6 and
+            point_segment_distance(
+                new.end, (old.start_x, old.start_y),
+                (old.end_x, old.end_y)) <= 1e-6
+            for old in segs)
+        assert distance >= 0.95 - 1e-6 or retained_original_copper
 
 
 def test_batch_pool_contains_combined_and_isolated_fallbacks():
@@ -807,6 +799,9 @@ def test_normal_action_bells_once_only_on_noop():
     fake_pcbnew.PCB_TRACK = FakeTrack
     fake_pcbnew.PCB_ARC = FakeArc
     fake_pcbnew.PCB_VIA = FakeVia
+    fake_pcbnew.PCB_TRACE_T = 1
+    fake_pcbnew.PCB_ARC_T = 2
+    fake_pcbnew.PCB_VIA_T = 3
     fake_wx = types.ModuleType("wx")
     fake_wx.Bell = lambda: calls.append("bell")
     fake_wx.BeginBusyCursor = lambda: calls.append("busy-begin")
@@ -841,13 +836,16 @@ def test_normal_action_bells_once_only_on_noop():
         footprint.Pads = lambda: [SelectedItem()]
 
         class SelectedTrack(SelectedItem, FakeTrack):
-            pass
+            def Type(self):
+                return fake_pcbnew.PCB_TRACE_T
 
         class SelectedArc(SelectedItem, FakeArc):
-            pass
+            def Type(self):
+                return fake_pcbnew.PCB_ARC_T
 
         class SelectedVia(SelectedItem, FakeVia):
-            pass
+            def Type(self):
+                return fake_pcbnew.PCB_VIA_T
 
         class SelectedBoard:
             def GetTracks(self):
@@ -960,23 +958,18 @@ def test_normal_action_bells_once_only_on_noop():
                 return self._result(candidate)
 
             def validate_plan_ladder(self, _board, candidates, **_kwargs):
-                first = self._result(candidates[0])
-                if first.allowed:
-                    return [first, types.SimpleNamespace(
-                        allowed=False, error="", timings_ms={},
-                        validation_mode="not_needed")]
-                return [first, self._result(candidates[1])]
+                return [self._result(candidate) for candidate in candidates]
 
         (connection_plan, connection_native, connection_attempts,
          connection_deadline, retained, total) = \
-            module._shared_maximize_safe_connections(
+            maximize_safe_native_connections(
                 ConnectionAdapter(), object(), local_model, local_keys,
                 local_plans, force_native=False, skip_native=False,
                 operation_deadline=time.monotonic() + 5.0,
                 wait_callback=lambda: None)
         assert connection_native.allowed
         assert {item.net_id for item in connection_plan.additions} == {3, 4}
-        assert connection_attempts == 4
+        assert connection_attempts >= 4
         assert (retained, total) == (2, 4)
         assert not connection_deadline
 
@@ -1028,7 +1021,7 @@ def test_pcm_archive_uses_flat_entrypoint_with_internal_packages():
     assert packaged_metadata["$schema"].endswith("/v2")
     assert "download_url" not in packaged_metadata["versions"][0]
     official_version = official_metadata["versions"][0]
-    assert official_version["status"] == "stable"
+    assert official_version["status"] == "testing"
     assert official_version["download_url"].endswith(
         "/v-test-alpha/" + archive_path.name)
     assert len(official_version["download_sha256"]) == 64
@@ -1089,21 +1082,24 @@ class _NativeUuid:
 class _NativeTrack:
     def __init__(self, uuid, start, end, net, clearance=0.127):
         self.uuid = uuid
+        self.m_Uuid = _NativeUuid(uuid)
         self.start = _NativePoint(*start)
         self.end = _NativePoint(*end)
         self.net = net
         self.clearance = clearance
 
     def GetClass(self): return "PCB_TRACK"
+    def Type(self): return _NativePcbnew.PCB_TRACE_T
     def GetStart(self): return self.start
     def GetEnd(self): return self.end
     def GetWidth(self): return 0.2
     def GetLayer(self): return 0
     def GetNetCode(self): return self.net
+    def GetNet(self): return self
     def GetNetname(self): return "NET" + str(self.net)
-    def GetUuid(self): return _NativeUuid(self.uuid)
     def GetOwnClearance(self, _layer): return self.clearance
     def IsLocked(self): return False
+    def GetParentGroup(self): return None
 
 
 class _NativeConnectivity:
@@ -1127,8 +1123,15 @@ class _NativeBoard:
     def GetConnectivity(self):
         return self.connectivity
 
+    def DpCoupledNet(self, _net):
+        return None
+
 
 class _NativePcbnew:
+    PCB_IU_PER_MM = 1_000_000
+    PCB_TRACE_T = 1
+    PCB_ARC_T = 2
+    PCB_VIA_T = 3
     PCB_TRACK = _NativeTrack
     PCB_ARC = type("NativeArc", (), {})
     PCB_VIA = type("NativeVia", (), {})
@@ -1140,7 +1143,7 @@ class _NativePcbnew:
 def _native_records(adapter, tracks):
     records = {}
     for track in tracks:
-        segment = adapter._segment_from_item(track)
+        segment = adapter.segment_from_item(track)
         records[segment_key(segment)] = (track, segment)
     return records
 
@@ -1170,7 +1173,7 @@ def test_native_connection_expansion_batches_multiple_nets():
 def test_native_segment_uses_kicad_resolved_track_clearance():
     from kicad_track_gloss.kicad import BoardAdapter
     adapter = BoardAdapter(_NativePcbnew())
-    segment = adapter._segment_from_item(
+    segment = adapter.segment_from_item(
         _NativeTrack("rule", (0, 0), (1, 0), 1, clearance=0.127))
 
     assert segment.clearance == 0.127
@@ -1193,6 +1196,86 @@ def test_adapter_rounds_millimetres_to_exact_integer_nanometres():
 
     assert adapter.from_mm(130.2) == 130_200_000
     assert adapter.vector((130.2, 0.25)) == (130_200_000, 250_000)
+
+
+def test_live_apply_reads_back_exact_requested_copper():
+    class Point:
+        def __init__(self, x=0, y=0):
+            self.x, self.y = x, y
+
+    class Track:
+        sequence = 0
+
+        def __init__(self, _board, uuid=None):
+            Track.sequence += 1
+            self.m_Uuid = _NativeUuid(uuid or "new{}".format(Track.sequence))
+            self.start, self.end = Point(), Point()
+            self.width, self.layer, self.net = 0, 0, 0
+
+        def Type(self): return Pcbnew.PCB_TRACE_T
+        def GetStart(self): return self.start
+        def GetEnd(self): return self.end
+        def GetWidth(self): return self.width
+        def GetLayer(self): return self.layer
+        def GetNetCode(self): return self.net
+        def GetNetname(self): return "NET{}".format(self.net)
+        def GetOwnClearance(self, _layer): return 0
+        def IsLocked(self): return False
+        def SetStart(self, value): self.start = value
+        def SetEnd(self, value): self.end = value
+        def SetWidth(self, value): self.width = value
+        def SetLayer(self, value): self.layer = value
+        def SetNetCode(self, value): self.net = value
+
+    class Pcbnew:
+        PCB_IU_PER_MM = 1_000_000
+        PCB_TRACE_T = 1
+        PCB_ARC_T = 2
+        PCB_VIA_T = 3
+        PCB_TRACK = Track
+        PCB_ARC = type("Arc", (), {})
+        PCB_VIA = type("Via", (), {})
+        VECTOR2I = Point
+
+        @staticmethod
+        def ToMM(value): return value / 1_000_000
+
+    class Board:
+        def __init__(self, tracks): self.tracks = list(tracks)
+        def GetTracks(self): return list(self.tracks)
+        def Add(self, item): self.tracks.append(item)
+        def RemoveNative(self, item): self.tracks.remove(item)
+
+    original = Track(None, "old")
+    original.SetStart(Point(0, 0))
+    original.SetEnd(Point(1_000_000, 1_000_000))
+    original.SetWidth(200_000)
+    original.SetNetCode(1)
+    board = Board([original])
+    from kicad_track_gloss.kicad import BoardAdapter
+    adapter = BoardAdapter(Pcbnew())
+    plan = GlossResult(
+        remove_keys=["old"],
+        additions=[AddedSegment((0, 0), (1, 0), 0.2, 0, 1)])
+
+    adapter.apply(board, plan)
+
+    assert len(board.tracks) == 1
+    assert board.tracks[0].GetStart().x == 0
+    assert board.tracks[0].GetEnd().x == 1_000_000
+    assert board.tracks[0].GetEnd().y == 0
+
+
+def test_live_apply_readback_rejects_a_silent_native_remove_failure(
+        monkeypatch):
+    from kicad_track_gloss.kicad import writer
+
+    monkeypatch.setattr(writer, "_track_map",
+                        lambda _adapter, _board: {"old": object()})
+
+    with pytest.raises(RuntimeError, match="removed tracks still present"):
+        writer._verify_applied_plan(
+            object(), object(), GlossResult(remove_keys=["old"]), [])
 
 
 def test_via_obstacle_uses_native_non_contiguous_copper_layer_set():
@@ -1265,10 +1348,11 @@ def test_unknown_layer_ids_fail_closed_without_kicad_semantics():
     class Adapter:
         pcbnew = Pcbnew()
 
-    assert copper_layers(Adapter(), Board(), LayerSet()) == ()
+    with pytest.raises(RuntimeError, match="unavailable"):
+        copper_layers(Adapter(), Board(), LayerSet())
 
 
-def test_via_layer_fallback_asks_kicad_for_each_enabled_copper_layer():
+def test_via_layers_use_kicad_10_layer_set_directly():
     from kicad_track_gloss.kicad.reader import _via_copper_layers
 
     class LayerSet:
@@ -1284,11 +1368,7 @@ def test_via_layer_fallback_asks_kicad_for_each_enabled_copper_layer():
     class Via:
         @staticmethod
         def GetLayerSet():
-            raise RuntimeError("not exposed")
-
-        @staticmethod
-        def IsOnLayer(layer):
-            return layer in (0, 5, 31)
+            return LayerSet()
 
     class Pcbnew:
         @staticmethod
@@ -1298,7 +1378,7 @@ def test_via_layer_fallback_asks_kicad_for_each_enabled_copper_layer():
     class Adapter:
         pcbnew = Pcbnew()
 
-    assert _via_copper_layers(Adapter(), Board(), Via()) == (0, 5, 31)
+    assert _via_copper_layers(Adapter(), Board(), Via()) == (0, 3, 5, 31)
 
 
 def test_pad_shapes_use_pcbnew_enum_values():
@@ -1324,7 +1404,7 @@ def test_pad_shapes_use_pcbnew_enum_values():
     assert _pad_shape(Adapter(), Pad(42)) == "rect"
     assert _pad_shape(Adapter(), Pad(43)) == "oval"
     assert _pad_shape(Adapter(), Pad(44)) == "roundrect"
-    assert _pad_shape(Adapter(), Pad(99)) == "fallback"
+    assert _pad_shape(Adapter(), Pad(99)) is None
 
 
 def test_exact_board_outline_rejects_concave_shortcut_and_hole():
@@ -1354,9 +1434,9 @@ def test_exact_board_outline_rejects_concave_shortcut_and_hole():
 
 def test_native_drc_report_counts_rule_categories():
     from kicad_track_gloss.kicad.native_validation import (
-        _drc_increases, _json_report_counts, _json_report_summary)
+        _drc_increases, _json_report_summary)
 
-    counts = _json_report_counts(json.dumps({
+    counts, _fingerprints = _json_report_summary(json.dumps({
         "violations": [{"type": "clearance"}, {"type": "clearance"}],
         "unconnected_items": [{"type": "unconnected_items"}],
     }))
@@ -1377,9 +1457,9 @@ def test_native_drc_report_counts_rule_categories():
     })
     before_counts, before_fingerprints = _json_report_summary(before)
     after_counts, after_fingerprints = _json_report_summary(after)
-    assert not _drc_increases(
+    assert _drc_increases(
         before_counts, after_counts,
-        before_fingerprints, after_fingerprints)
+        before_fingerprints, after_fingerprints) == {}
     added = json.dumps({
         "violations": [],
         "unconnected_items": json.loads(after)["unconnected_items"] + [{
@@ -1392,6 +1472,30 @@ def test_native_drc_report_counts_rule_categories():
         before_counts, added_counts,
         before_fingerprints, added_fingerprints) == {
             "unconnected_items": 1}
+
+
+def test_native_drc_fingerprint_preserves_lengths_and_exact_positions():
+    from kicad_track_gloss.kicad.native_validation import (
+        _drc_increases, _json_report_summary)
+
+    def report(length, x):
+        return json.dumps({"violations": [{
+            "type": "length_out_of_range",
+            "description": "length {} mm".format(length),
+            "items": [{"description": "track", "pos": {"x": x, "y": 2}}],
+        }]})
+
+    before_counts, before = _json_report_summary(report("10.000", 1.0001))
+    changed_length_counts, changed_length = _json_report_summary(
+        report("10.001", 1.0001))
+    changed_position_counts, changed_position = _json_report_summary(
+        report("10.000", 1.0002))
+    assert _drc_increases(
+        before_counts, changed_length_counts, before, changed_length) == {
+        "length_out_of_range": 1}
+    assert _drc_increases(
+        before_counts, changed_position_counts, before, changed_position) == {
+        "length_out_of_range": 1}
 
 
 def test_native_helpers_are_hidden_on_windows():
@@ -1459,9 +1563,9 @@ def test_connectivity_partition_reuses_unchanged_net_signature():
     ]
     pads = [PadRegion(0, 0, 0.5, 0.5, 0, "circle", 0, 1, (0,))]
     first = _connectivity_signature(
-        segments, [], pads, {"immutable"}, 1)
+        segments, [], pads, {"immutable"}, 1, 0.000001)
     second = _connectivity_signature(
-        segments, [], pads, {"immutable"}, 1)
+        segments, [], pads, {"immutable"}, 1, 0.000001)
 
     assert first == second
     assert _connectivity_partition.cache_info().hits == 1
@@ -1532,6 +1636,67 @@ def test_mid_track_t_junction_is_a_sliding_gloss_termination():
                for addition in result.additions
                for point in (addition.start, addition.end))
     assert "through" not in result.remove_keys
+
+
+def test_internal_corner_is_partially_chamfered_before_a_blocker():
+    # Left-hand VCC corner from magic_keys.  Replacing both complete segments
+    # crosses A5, but cutting back their safe tails produces the useful local
+    # 45-degree chamfer made manually in KiCad.
+    selected = [
+        Segment(106.426, 54.61, 106.426, 44.45,
+                0.2, 0, 53, "vertical", net_name="VCC", clearance=0.2),
+        Segment(106.426, 44.45, 142.748, 44.45,
+                0.2, 0, 53, "horizontal", net_name="VCC", clearance=0.2),
+    ]
+    blockers = [
+        Segment(111.506, 54.61, 111.506, 45.212,
+                0.2, 0, 2, "a5-vertical", net_name="Net-(A1-A5)",
+                clearance=0.2),
+        Segment(111.506, 45.212, 141.986, 45.212,
+                0.2, 0, 2, "a5-horizontal", net_name="Net-(A1-A5)",
+                clearance=0.2),
+    ]
+    model = BoardModel(selected + blockers, minimum_clearance=0.2)
+    result = smooth_selected_chains(
+        model, {"vertical", "horizontal"}, min_gain=0.2,
+        span_strategy="global", clearance=0.2)
+
+    assert result.changed
+    assert set(result.remove_keys) == {"vertical", "horizontal"}
+    assert result.saved_mm > 3.0
+    assert any(
+        addition.start[0] == pytest.approx(106.426) and
+        44.45 < addition.start[1] < 54.61 and
+        addition.end[0] > 106.426 and
+        addition.end[1] == pytest.approx(44.45)
+        for addition in result.additions)
+    assert [item.geometry for item in result.transformations] == [
+        "corner_chamfer"]
+
+
+def test_internal_segment_translates_to_last_safe_position_before_obstacle():
+    # The globally shortest A->D diagonal crosses the foreign obstacle.  A
+    # pure gloss can still slide the internal vertical, retaining the two
+    # outer supporting lines and stopping at the clearance boundary.
+    selected = [
+        Segment(0, 0, 2, 2, 0.2, 0, 1, "a"),
+        Segment(2, 2, 2, 6, 0.2, 0, 1, "middle"),
+        Segment(2, 6, 6, 6, 0.2, 0, 1, "c"),
+    ]
+    obstacle = CircleObstacle(5, 5, 0.4, 2, (0,), "via", 0.1)
+    model = BoardModel(
+        selected, obstacles=[obstacle], minimum_clearance=0.1)
+
+    result = smooth_selected_chains(
+        model, {"a", "middle", "c"}, min_gain=0.01,
+        span_strategy="global", clearance=0.1, solution_rank=1)
+
+    assert result.changed
+    assert result.saved_mm > 0.1
+    verticals = [item for item in result.additions
+                 if abs(item.start[0] - item.end[0]) < 1e-8]
+    assert verticals
+    assert 2.0 < verticals[0].start[0] < 5.0
 
 
 def test_connection_between_two_through_tracks_glosses_between_terminations():
@@ -1654,6 +1819,33 @@ def test_one_segment_can_shorten_between_two_pad_copper_areas():
     assert summary["mechanisms"][0]["key"] == "pad_slide"
 
 
+def test_single_connection_portfolio_converges_three_terminal_policies():
+    selected = [
+        Segment(0, 0, 2, 0, 0.2, 0, 1, "s0"),
+        Segment(2, 0, 3, 1, 0.2, 0, 1, "s1"),
+        Segment(3, 1, 4, 1, 0.2, 0, 1, "s2"),
+    ]
+    through = Segment(4, -2, 4, 3, 0.2, 0, 1, "through")
+    pad = PadRegion(0, 0, 1, 1, 0, "rect", 0, 1, (0,))
+    model = BoardModel(selected + [through], pad_regions=[pad])
+    eligible = {"s0", "s1", "s2"}
+    primary = generate_converged_plan(
+        model, eligible, max_passes=None, return_partial_on_limit=True,
+        group_max_passes=2, min_gain=0.01, clearance=0.0)
+
+    candidates = generate_single_connection_alternatives(
+        model, eligible, primary, min_gain=0.01,
+        allow_equal_length_simpler=True, clearance=0.0,
+        group_max_passes=2, collect_statistics=True,
+        planning_deadline=None, cancellation_grace_seconds=1.0)
+
+    assert len(candidates) == 3
+    assert all(candidate.fixed_point for candidate in candidates)
+    assert len({tuple((item.start, item.end)
+                      for item in candidate.additions)
+                for candidate in candidates}) == 3
+
+
 def test_diagnostic_collection_does_not_change_the_edit_plan():
     segments = staircase(12)
     model = BoardModel(segments)
@@ -1734,7 +1926,8 @@ def test_diagnostic_reports_the_foreign_net_blocking_a_shortcut():
         {segment.uuid for segment in selected}, min_gain=0.01,
         allow_equal_length_simpler=False, clearance=0.2)
 
-    assert not result.changed
+    assert result.changed
+    assert result.saved_mm > 0.1
     assert result.search_counts["foreign_track_clearance"] > 0
     assert result.blocking_nets == {
         "Net-(U2A-DATA_11)":

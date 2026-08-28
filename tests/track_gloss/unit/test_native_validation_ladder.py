@@ -25,10 +25,10 @@ def _plan(label):
         additions=[AddedSegment((0.0, 0.0), (1.0, 0.0), 0.2, 0, 1)])
 
 
-def test_native_ladder_rejects_more_than_two_candidates():
-    with pytest.raises(ValueError, match="one or two"):
+def test_native_ladder_rejects_more_than_three_candidates():
+    with pytest.raises(ValueError, match="one, two, or three"):
         native_validation.validate_native_plan_ladder(
-            None, None, [_plan("a"), _plan("b"), _plan("c")],
+            None, None, [_plan("a"), _plan("b"), _plan("c"), _plan("d")],
             skip_native=True)
 
 
@@ -58,15 +58,12 @@ def test_native_ladder_validates_both_candidates_in_one_parallel_wave(
         if name.startswith("candidate-"):
             candidate_barrier.wait(timeout=1.0)
         counts = Counter(clearance=1) if name == "candidate-0" else Counter()
-        return counts, Counter()
+        fingerprints = (Counter({("clearance", ("candidate", 0)): 1})
+                        if name == "candidate-0" else Counter())
+        return counts, fingerprints
 
     monkeypatch.setattr(native_validation, "_apply_plan_process", apply_plan)
     monkeypatch.setattr(native_validation, "_run_drc", run_drc)
-    monkeypatch.setattr(
-        native_validation, "_drc_increases",
-        lambda _before, after, _before_fp, _after_fp:
-        ({"clearance": 1} if after.get("clearance") else {}))
-
     waits = []
     results = native_validation.validate_native_plan_ladder(
         _FakeAdapter(), object(), [_plan("primary"), _plan("fallback")],

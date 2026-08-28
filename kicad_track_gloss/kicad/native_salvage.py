@@ -61,6 +61,13 @@ def maximize_safe_native_candidates(
 
     primary = ranked[0]
     initial = [primary]
+    # Validate the three complementary levels in one native wave: global
+    # optimum, whole-board conservative plan, and best independent connection.
+    # KiCad's baseline DRC is shared, so this preserves both the historical
+    # conservative success and a useful local result without another serial
+    # baseline run.
+    local_anchor = next((plan for plan in rank_candidate_plans(connection_plans)
+                         if plan_identity(plan) != plan_identity(primary)), None)
     conservative_identity = (
         plan_identity(conservative_plan)
         if conservative_plan is not None and conservative_plan.changed else
@@ -68,8 +75,19 @@ def maximize_safe_native_candidates(
     if (conservative_identity is not None and
             conservative_identity != plan_identity(primary)):
         initial.append(conservative_plan)
-    elif len(ranked) > 1:
-        initial.append(ranked[1])
+    if (local_anchor is not None and
+            all(plan_identity(local_anchor) != plan_identity(plan)
+                for plan in initial)):
+        initial.append(local_anchor)
+    # Fill every available native process with a distinct geometry.  This is
+    # essential for one-connection glosses, which have no independent local
+    # connection to use as ``local_anchor``.
+    for alternate in ranked[1:]:
+        if len(initial) >= 3:
+            break
+        if all(plan_identity(alternate) != plan_identity(plan)
+               for plan in initial):
+            initial.append(alternate)
     initial_identities = {plan_identity(plan) for plan in initial}
 
     remaining = (None if operation_deadline is None else
@@ -112,37 +130,6 @@ def maximize_safe_native_candidates(
             plan_identity(decision.plan) != plan_identity(primary))
         return decision
 
-    # Only candidates capable of improving the incumbent need another native
-    # validation.  This is normally the connection composition that ranked
-    # between the aggressive and conservative plans.
-    if decision.plan is not None:
-        for candidate in ranked:
-            if plan_identity(candidate) in initial_identities:
-                continue
-            if not _is_better_plan(candidate, decision.plan):
-                continue
-            if (operation_deadline is not None and
-                    time.monotonic() >= operation_deadline):
-                break
-            remaining = (None if operation_deadline is None else
-                         max(0.0, operation_deadline - time.monotonic()))
-            stage_started = time.monotonic()
-            native = adapter.validate_plan(
-                board, candidate, force_native=force_native,
-                skip_native=skip_native, timeout_seconds=remaining,
-                wait_callback=wait_callback)
-            decision.followup_validation_ms += (
-                time.monotonic() - stage_started) * 1000.0
-            decision.followup_validations += 1
-            last_native = native
-            if native.allowed and _is_better_plan(candidate, decision.plan):
-                decision.plan = candidate
-                decision.native = native
-            if native.error or native.validation_mode == "native_timeout":
-                if decision.native is None:
-                    decision.native = native
-                break
-
     # A rejected full local composition is only an upper bound.  Its safe
     # subsets may still beat the incumbent, so use the remaining budget while
     # retaining the approved plan as a floor.
@@ -175,6 +162,37 @@ def maximize_safe_native_candidates(
             decision.salvage_used = True
             decision.connections_retained = retained
             decision.connections_planned = total
+
+    # Broad composed alternatives come last: local salvage is anytime and can
+    # grow a proven incumbent, whereas one rejected monolithic follow-up can
+    # otherwise consume the whole remaining budget without adding any work.
+    if decision.plan is not None:
+        for candidate in ranked:
+            if plan_identity(candidate) in initial_identities:
+                continue
+            if not _is_better_plan(candidate, decision.plan):
+                continue
+            if (operation_deadline is not None and
+                    time.monotonic() >= operation_deadline):
+                break
+            remaining = (None if operation_deadline is None else
+                         max(0.0, operation_deadline - time.monotonic()))
+            stage_started = time.monotonic()
+            native = adapter.validate_plan(
+                board, candidate, force_native=force_native,
+                skip_native=skip_native, timeout_seconds=remaining,
+                wait_callback=wait_callback)
+            decision.followup_validation_ms += (
+                time.monotonic() - stage_started) * 1000.0
+            decision.followup_validations += 1
+            last_native = native
+            if native.allowed and _is_better_plan(candidate, decision.plan):
+                decision.plan = candidate
+                decision.native = native
+            if native.error or native.validation_mode == "native_timeout":
+                if decision.native is None:
+                    decision.native = native
+                break
 
     if decision.native is None:
         decision.native = last_native
@@ -225,15 +243,19 @@ def maximize_safe_native_connections(
                 chunks = [tuple(pending[:midpoint])]
                 if midpoint < len(pending):
                     chunks.append(tuple(pending[midpoint:]))
-            chunk = chunks.pop(0)
-            incremental = compose(accepted + list(chunk))
-            if (incremental is not None and
-                    all(plan_identity(incremental) != plan_identity(item)
-                        for item in candidates)):
-                candidates.append(incremental)
-                meanings.append(("chunk", chunk))
+            # The native ladder supports three candidate DRC processes in one
+            # wave. Probe both halves beside the full batch so a bad first
+            # half cannot hide a safe second half behind another serial DRC.
+            while chunks and len(candidates) < 3:
+                chunk = chunks.pop(0)
+                incremental = compose(accepted + list(chunk))
+                if (incremental is not None and
+                        all(plan_identity(incremental) != plan_identity(item)
+                            for item in candidates)):
+                    candidates.append(incremental)
+                    meanings.append(("chunk", chunk))
         else:
-            for plan in pending[:2]:
+            for plan in pending[:3]:
                 candidate = compose([plan])
                 if candidate is not None:
                     candidates.append(candidate)
@@ -246,7 +268,7 @@ def maximize_safe_native_connections(
         if remaining is not None and remaining <= 0.0:
             deadline_reached = True
             break
-        if len(candidates) == 2:
+        if len(candidates) > 1:
             native_results = adapter.validate_plan_ladder(
                 board, candidates, force_native=force_native,
                 skip_native=skip_native, timeout_seconds=remaining,

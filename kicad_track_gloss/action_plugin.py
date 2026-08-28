@@ -15,14 +15,14 @@ from .configuration import get_session_config
 from .engine import (find_pad_terminal_targets, find_track_terminal_vertices,
                      compose_compatible_connection_plans,
                      generate_connection_candidates, generate_converged_plan,
+                     generate_single_connection_alternatives,
                      plan_net_ids, rank_candidate_plans,
                      summarize_plan)
-from .engine.model import segment_key
+from .engine.model import GlossResult, segment_key
 from .kicad import BoardAdapter
 from .kicad.diagnostics import append_plan_statistics, append_search_statistics
 from .kicad.native_salvage import (
-    maximize_safe_native_candidates as _maximize_safe_native_candidates,
-    maximize_safe_native_connections as _shared_maximize_safe_connections)
+    maximize_safe_native_candidates as _maximize_safe_native_candidates)
 from .kicad.report_dialog import (show_diagnostic_report as _show_diagnostic_report,
                                   show_report as _show_report,
                                   warning_bell as _warning_bell)
@@ -39,9 +39,6 @@ LOG = logging.getLogger("KiCadTrackGloss")
 # Native KiCad DRC validation is intentionally retained as a safety gate and
 # can dominate response time even for a single selected connection.
 ALLOW_EQUAL_LENGTH_SIMPLIFICATION = True
-# Interactive work must remain responsive. Independent net/layer groups are
-# converged inside parallel workers; these passes are only global reconciliation
-# rounds. A safe partial result is applied if this guard is reached.
 BUSY_CURSOR_DELAY_SECONDS = 3.0
 BUSY_CURSOR_POLL_SECONDS = 0.05
 
@@ -112,10 +109,7 @@ def _run_api_neutral(function, wait_callback):
 def _selection_counts(board):
     counts = {"segments": 0, "arcs": 0, "vias": 0, "other": 0}
     for item in board.GetTracks():
-        try:
-            if not item.IsSelected():
-                continue
-        except Exception:
+        if not item.IsSelected():
             continue
         if is_straight_track(pcbnew, item):
             counts["segments"] += 1
@@ -126,27 +120,14 @@ def _selection_counts(board):
         else:
             counts["other"] += 1
 
-    other_collections = []
-    for alternatives in (("GetFootprints",), ("GetDrawings",),
-                         ("Zones", "GetZones")):
-        for accessor in alternatives:
-            try:
-                other_collections.append(getattr(board, accessor)())
-                break
-            except Exception:
-                continue
-    try:
-        other_collections.extend(footprint.Pads()
-                                 for footprint in board.GetFootprints())
-    except Exception:
-        pass
+    other_collections = [
+        board.GetFootprints(), board.GetDrawings(), board.Zones()]
+    other_collections.extend(
+        footprint.Pads() for footprint in board.GetFootprints())
     for values in other_collections:
         for item in values:
-            try:
-                if item.IsSelected():
-                    counts["other"] += 1
-            except Exception:
-                continue
+            if item.IsSelected():
+                counts["other"] += 1
     return counts
 
 
@@ -233,11 +214,10 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         report.append(
             "Optimization coordinates: exact copper geometry; active KiCad grid not used.")
         report.append(
-            "Session policy: minimum saving {:.6f} mm; interactive passes {} "
-            "(group {}); single-track KiCad DRC {}; time budget {:.1f} s "
+            "Session policy: minimum saving {:.6f} mm; convergence to fixed "
+            "point (group passes {}); single-track KiCad DRC {}; time budget {:.1f} s "
             "(planning {:.1f} s).".format(
                 config.gloss.minimum_saved_length_mm,
-                config.convergence.interactive_max_passes,
                 config.convergence.interactive_group_max_passes,
                 "enabled" if config.safety.kicad_drc_for_single_track
                 else "disabled",
@@ -272,8 +252,8 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             len(net_names), ", ".join(net_names) if net_names else "none"))
         report.append("Automatic connection expansion: {} seed(s) + {} segment(s).".format(
             snapshot.selection_seed_count, snapshot.auto_expanded_count))
-        report.append("Protected tuned segments: " +
-                      str(snapshot.tuned_protected_count))
+        report.append("Native-protected segments: " +
+                      str(snapshot.native_protected_count))
         for warning in snapshot.warnings:
             report.append("Protection: " + warning)
         stage_started = time.monotonic()
@@ -304,48 +284,28 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             stage_started +
             config.timing.interactive_planning_time_budget_seconds)
         conservative_ladder = []
-        best = _run_api_neutral(
-            lambda: generate_converged_plan(
-                snapshot.model, snapshot.eligible_keys,
-                max_passes=config.convergence.interactive_max_passes,
-                return_partial_on_limit=True,
-                group_max_passes=(
-                    config.convergence.interactive_group_max_passes),
-                min_gain=config.gloss.minimum_saved_length_mm,
-                allow_equal_length_simpler=(
-                    ALLOW_EQUAL_LENGTH_SIMPLIFICATION),
-                clearance=snapshot.minimum_clearance,
-                collect_statistics=diagnostic,
-                parallel=True,
-                deadline=planning_deadline,
-                conservative_ladder=conservative_ladder,
-                cancellation_grace_seconds=(
-                    config.timing.interactive_cancellation_grace_seconds)),
-            wait_callback)
-        timings["planning"] = (
-            time.monotonic() - stage_started) * 1000.0
-        global_plan = best
         connection_plans = []
         connection_plan = None
-        connection_planning_deadline = False
+        connection_planning_limit_reached = False
+        connection_planning_deadline = planning_deadline
         if (len(snapshot.connection_scopes) > 1 and
-                time.monotonic() < planning_deadline):
+                time.monotonic() < connection_planning_deadline):
             stage_started = time.monotonic()
             try:
                 (connection_plans, connection_rejections,
-                 connection_planning_deadline) = _run_api_neutral(
+                 connection_planning_limit_reached) = _run_api_neutral(
                     lambda: generate_connection_candidates(
                         snapshot.model, snapshot.eligible_keys,
-                        snapshot.connection_scopes, global_plan,
+                        snapshot.connection_scopes, GlossResult(),
                         min_gain=config.gloss.minimum_saved_length_mm,
                         allow_equal_length_simpler=(
                             ALLOW_EQUAL_LENGTH_SIMPLIFICATION),
                         clearance=snapshot.minimum_clearance,
-                        max_passes=config.convergence.interactive_max_passes,
+                        max_passes=None,
                         group_max_passes=(
                             config.convergence.interactive_group_max_passes),
                         collect_statistics=diagnostic,
-                        planning_deadline=planning_deadline,
+                        planning_deadline=connection_planning_deadline,
                         cancellation_grace_seconds=(
                             config.timing.interactive_cancellation_grace_seconds)),
                     wait_callback)
@@ -368,12 +328,61 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                     "Connection-local planning rejected {} candidate(s) "
                     "internally.".format(len(connection_rejections)))
 
+        global_plan = GlossResult()
+        if time.monotonic() < planning_deadline:
+            stage_started = time.monotonic()
+            global_plan = _run_api_neutral(
+                lambda: generate_converged_plan(
+                    snapshot.model, snapshot.eligible_keys,
+                    max_passes=None,
+                    return_partial_on_limit=True,
+                    group_max_passes=(
+                        config.convergence.interactive_group_max_passes),
+                    min_gain=config.gloss.minimum_saved_length_mm,
+                    allow_equal_length_simpler=(
+                        ALLOW_EQUAL_LENGTH_SIMPLIFICATION),
+                    clearance=snapshot.minimum_clearance,
+                    collect_statistics=diagnostic,
+                    parallel=True,
+                    deadline=planning_deadline,
+                    conservative_ladder=conservative_ladder,
+                    cancellation_grace_seconds=(
+                        config.timing.interactive_cancellation_grace_seconds)),
+                wait_callback)
+            timings["planning"] = (
+                time.monotonic() - stage_started) * 1000.0
+
         planning_candidates = [global_plan]
         if connection_plan is not None and connection_plan.changed:
             planning_candidates.append(connection_plan)
         if conservative_ladder and conservative_ladder[0].changed:
             planning_candidates.append(conservative_ladder[0])
+        if (len(snapshot.connection_scopes) == 1 and global_plan.changed and
+                time.monotonic() < planning_deadline):
+            stage_started = time.monotonic()
+            local_candidates = _run_api_neutral(
+                lambda: generate_single_connection_alternatives(
+                    snapshot.model, snapshot.eligible_keys, global_plan,
+                    min_gain=config.gloss.minimum_saved_length_mm,
+                    allow_equal_length_simpler=(
+                        ALLOW_EQUAL_LENGTH_SIMPLIFICATION),
+                    clearance=snapshot.minimum_clearance,
+                    group_max_passes=(
+                        config.convergence.interactive_group_max_passes),
+                    collect_statistics=diagnostic,
+                    planning_deadline=planning_deadline,
+                    cancellation_grace_seconds=(
+                        config.timing.interactive_cancellation_grace_seconds),
+                    maximum_candidates=3),
+                wait_callback)
+            planning_candidates.extend(local_candidates)
+            timings["single_connection_portfolio"] = (
+                time.monotonic() - stage_started) * 1000.0
         planning_candidates = list(rank_candidate_plans(planning_candidates))
+        if diagnostic and len(snapshot.connection_scopes) == 1:
+            report.append(
+                "Single-connection converged candidates: {}.".format(
+                    len(planning_candidates)))
         best = planning_candidates[0]
         aggressive_plan = best
         report.append("Convergence passes: " + str(best.convergence_passes))
@@ -433,7 +442,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         partial_subset_used = decision.salvage_used
         partial_subset_attempts = decision.salvage_attempts
         partial_subset_deadline = (
-            decision.salvage_deadline or connection_planning_deadline)
+            decision.salvage_deadline or connection_planning_limit_reached)
         partial_connections_retained = decision.connections_retained
         partial_connections_total = decision.connections_planned
         primary_native = decision.primary_native or native
@@ -444,6 +453,13 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                 timings["native_primary_" + key] = value
         for key, value in native.timings_ms.items():
             timings["native_" + key] = value
+        if ("unconnected_items" in native.increases or
+                native.before.get("unconnected_items", 0) or
+                native.after.get("unconnected_items", 0)):
+            report.append(
+                "Native unconnected items: {} -> {}.".format(
+                    native.before.get("unconnected_items", 0),
+                    native.after.get("unconnected_items", 0)))
         if not native.allowed:
             if native.validation_mode == "native_timeout":
                 report.append("Native KiCad DRC gate: interactive time budget reached.")
@@ -506,10 +522,10 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         stage_started = time.monotonic()
         adapter.apply(board, best, rollback_on_error=True)
         timings["apply"] = (time.monotonic() - stage_started) * 1000.0
-        try:
-            board.SetModified()
-        except Exception:
-            pass
+        if diagnostic:
+            report.append(
+                "Post-apply copper readback: requested plan matched.")
+        board.SetModified()
         pcbnew.Refresh()
         timings["total"] = (
             time.monotonic() - operation_started) * 1000.0

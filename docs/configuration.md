@@ -9,7 +9,6 @@ in-memory session override and never writes the file.
 | JSON path | Default | Unit/range | Scope | Effect |
 |---|---:|---|---|---|
 | `gloss.minimum_saved_length_mm` | `0.2` | mm, non-negative | Plugin and CLI | Rejects a length-only change below this saving. Angle normalization and permitted equal-length simplification retain their own explicit rules. The CLI can override it with `--minimum-saved-length-mm`. |
-| `convergence.interactive_max_passes` | `4` | integer >= 1 | Plugin, internal | Maximum global reconciliation passes for an interactive run. |
 | `convergence.interactive_group_max_passes` | `2` | integer >= 1 | Plugin, internal | Maximum local passes per independent group. |
 | `convergence.cli_max_passes` | `16` | integer >= 1 | CLI | Default changed-pass convergence guard; overridden by `--max-passes`. |
 | `timing.interactive_total_time_budget_seconds` | `20.0` | seconds > 0 | Plugin, session-editable | Bounds the complete interactive operation, including native validation. Long operations display only KiCad's non-modal busy cursor after three cumulative seconds. |
@@ -33,9 +32,11 @@ during interactive work:
 4. planning time budget;
 5. cancellation grace.
 
-Pass limits remain internal because they are implementation guards, not routing
-styles. There is no conservative/aggressive mode and no grid preference. The
-optimizer always uses exact copper coordinates and the same objective.
+The plugin's global search converges to a fixed point or stops at its planning
+deadline; it has no pass-count quality limit. The local group-pass limit is an
+internal scheduling guard, not a routing style. There is no conservative/aggressive
+mode and no grid preference. The optimizer always uses exact copper coordinates
+and the same objective.
 
 ## CLI overrides
 

@@ -73,10 +73,17 @@ is enabled.
 
 ## Candidate ladder and connection-local recovery
 
-If native DRC rejects the most refined plan and sufficient time remains, the
-shared workflow may try a distinct conservative one-pass candidate. That plan
-must pass its own complete native validation. A rejected fallback leaves the
-live board unchanged.
+For one selected connection, the planner builds up to three distinct,
+fixed-point glosses: every terminal movable, track intersections retained, and
+pad contacts retained (with fixed electrical terminals used when needed for a
+third distinct result).  They share one parallel native-DRC wave.  This keeps
+a rejected aggressive terminal relocation from hiding a safe segment
+translation.  Every candidate passes the complete internal gate first.
+
+KiCad recreates the identity and reported position of an unconnected item when
+the touched tracks are rebuilt.  This category is therefore compared by its
+before/after count; stable geometric violation categories retain exact JSON
+comparison.  Diagnostics print both unconnected counts whenever relevant.
 
 For a selection spanning several local connections, the engine also rebuilds
 each connection through the same convergence path used when one segment is

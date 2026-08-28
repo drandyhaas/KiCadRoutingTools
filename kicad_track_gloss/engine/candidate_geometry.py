@@ -16,9 +16,6 @@ from .model import segment_key
 from .pads import segment_hits_pad
 
 
-PAD_CLEARANCE_TOLERANCE_MM = 0.000001
-
-
 def effective_clearance(model, segment):
     if segment.clearance >= 0.0:
         return max(model.minimum_clearance, segment.clearance)
@@ -135,11 +132,13 @@ def _interval_is_covered(required, covers):
 
 
 def _clearance_violation_is_preexisting(a, b, moving, foreign, required,
-                                         immutable_cover_keys, context):
+                                         immutable_cover_keys, context,
+                                         coordinate_quantum_mm):
     """Whether all newly conflicting copper is inside immutable same-net copper."""
     violation = _capsule_interval(
         a, b, (foreign.start_x, foreign.start_y),
-        (foreign.end_x, foreign.end_y), required - 1e-6)
+        (foreign.end_x, foreign.end_y),
+        required - coordinate_quantum_mm)
     covers = []
     for existing in context.nearby_segments(a, b, 0.0, moving.width):
         if segment_key(existing) not in immutable_cover_keys:
@@ -167,7 +166,7 @@ def path_blocker(model, path, moving, replaced_keys, clearance, context=None,
     def unchanged_copper(a, b):
         """Whether the candidate only retains part of removed copper."""
         return any(
-            moving.width <= segment.width + 1e-6 and
+            moving.width <= segment.width + model.coordinate_quantum_mm and
             point_segment_distance(a, (segment.start_x, segment.start_y),
                                    (segment.end_x, segment.end_y)) <= 1e-6 and
             point_segment_distance(b, (segment.start_x, segment.start_y),
@@ -200,7 +199,8 @@ def path_blocker(model, path, moving, replaced_keys, clearance, context=None,
                                 (other.end_x, other.end_y)) < required - 1e-6:
                 if _clearance_violation_is_preexisting(
                         a, b, moving, other, required,
-                        immutable_cover_keys, context):
+                        immutable_cover_keys, context,
+                        model.coordinate_quantum_mm):
                     continue
                 return "foreign_track_clearance", other.net_id
         for obstacle in context.nearby_obstacles(
@@ -222,7 +222,7 @@ def path_blocker(model, path, moving, replaced_keys, clearance, context=None,
                 continue
             pad_clearance = max(moving_clearance, pad.clearance)
             margin = max(0.0, pad_clearance + moving.width / 2.0 -
-                         PAD_CLEARANCE_TOLERANCE_MM)
+                         model.coordinate_quantum_mm)
             enclosing_radius = (pad.width * pad.width +
                                 pad.height * pad.height) ** 0.5 / 2.0
             if point_segment_distance((pad.x, pad.y), a, b) >= \

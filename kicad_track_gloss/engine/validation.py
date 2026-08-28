@@ -75,7 +75,7 @@ def validate_result(model, eligible_keys, result: GlossResult,
 # covering normal whole-board rounds.
 @lru_cache(maxsize=1024)
 def _connectivity_partition(segments, obstacles, pad_regions,
-                            immutable_keys, net_id):
+                            immutable_keys, net_id, tolerance):
     """Return stable connected terminal groups for one net.
 
     Arguments are immutable tuples/frozensets so the unchanged-board side of
@@ -119,7 +119,7 @@ def _connectivity_partition(segments, obstacles, pad_regions,
         [math.hypot(item.width, item.height) / 2.0 for item in pads] + [0.0])
     for i, a in enumerate(segs):
         aa, ab = (a.start_x, a.start_y), (a.end_x, a.end_y)
-        margin = (a.width + max_width) / 2.0 + 1e-5
+        margin = (a.width + max_width) / 2.0 + tolerance
         for b in spatial.query(line_bbox(aa, ab, margin)):
             j = segment_positions[id(b)]
             if j <= i:
@@ -127,21 +127,23 @@ def _connectivity_partition(segments, obstacles, pad_regions,
             if a.layer != b.layer:
                 continue
             if segment_distance(aa, ab, (b.start_x, b.start_y),
-                                (b.end_x, b.end_y)) <= (a.width + b.width) / 2.0 + 1e-5:
+                                (b.end_x, b.end_y)) <= \
+                    (a.width + b.width) / 2.0 + tolerance:
                 union(i, j)
-        obstacle_margin = max_obstacle_radius + a.width / 2.0 + 1e-5
+        obstacle_margin = max_obstacle_radius + a.width / 2.0 + tolerance
         for obstacle in obstacle_spatial.query(
                 line_bbox(aa, ab, obstacle_margin)):
             if obstacle.layers and a.layer not in obstacle.layers:
                 continue
             if point_segment_distance((obstacle.x, obstacle.y), aa, ab) <= \
-                    obstacle.radius + a.width / 2.0 + 1e-5:
+                    obstacle.radius + a.width / 2.0 + tolerance:
                 union(i, len(segs) + obstacle_positions[id(obstacle)])
-        pad_margin = max_pad_radius + a.width / 2.0 + 1e-6
+        pad_margin = max_pad_radius + a.width / 2.0 + tolerance
         for pad in pad_spatial.query(line_bbox(aa, ab, pad_margin)):
             if pad.layers and a.layer not in pad.layers:
                 continue
-            if segment_hits_pad(pad, aa, ab, margin=a.width / 2.0 + 1e-6):
+            if segment_hits_pad(
+                    pad, aa, ab, margin=a.width / 2.0 + tolerance):
                 union(i, len(segs) + len(obs) + pad_positions[id(pad)])
 
     labels = []
@@ -160,14 +162,8 @@ def _connectivity_partition(segments, obstacles, pad_regions,
 
 
 def _connectivity_signature(segments, obstacles, pad_regions,
-                            immutable_keys, net_id):
-    """Return a cached signature keyed only by the affected net.
-
-    Older callers supplied the entire board, which made both hashing and the
-    cache key proportional to board size even for a one-net candidate.  Keep
-    that public compatibility while normalizing to the relevant net before
-    entering the cached implementation.
-    """
+                            immutable_keys, net_id, tolerance):
+    """Return a cached signature keyed only by the affected net."""
     net_segments = tuple(segment for segment in segments
                          if segment.net_id == net_id)
     net_obstacles = tuple(obstacle for obstacle in obstacles
@@ -176,7 +172,8 @@ def _connectivity_signature(segments, obstacles, pad_regions,
     net_keys = {segment_key(segment) for segment in net_segments}
     return _connectivity_partition(
         net_segments, net_obstacles, net_pads,
-        frozenset(key for key in immutable_keys if key in net_keys), net_id)
+        frozenset(key for key in immutable_keys if key in net_keys), net_id,
+        tolerance)
 
 
 def _validate_connectivity(model, eligible_keys, result):
@@ -221,9 +218,11 @@ def _validate_connectivity(model, eligible_keys, result):
         pads = pads_by_net[net_id]
         immutable = immutable_by_net[net_id]
         before_groups = _connectivity_signature(
-            before, obstacles, pads, immutable, net_id)
+            before, obstacles, pads, immutable, net_id,
+            model.coordinate_quantum_mm)
         after_groups = _connectivity_signature(
-            after, obstacles, pads, immutable, net_id)
+            after, obstacles, pads, immutable, net_id,
+            model.coordinate_quantum_mm)
         after_by_label = {
             label: group for group in after_groups for label in group
         }

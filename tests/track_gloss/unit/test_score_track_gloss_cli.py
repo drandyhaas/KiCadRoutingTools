@@ -93,12 +93,22 @@ def test_scope_resolves_exact_nets_and_segments():
         "a": (None, Segment(0, 0, 1, 0, 0.2, 0, 1, "a", net_name="VCC")),
         "b": (None, Segment(0, 1, 1, 1, 0.2, 0, 2, "b", net_name="GND")),
     }
-    not_diff = lambda _name: False
-    assert CLI.seed_keys_for_scopes(records, ["net:VCC"], not_diff) == {"a"}
+    assert CLI.seed_keys_for_scopes(records, ["net:VCC"], set()) == {"a"}
     assert CLI.seed_keys_for_scopes(
-        records, ["segment:b"], not_diff) == {"b"}
+        records, ["segment:b"], set()) == {"b"}
     with pytest.raises(ValueError):
-        CLI.seed_keys_for_scopes(records, ["net:vcc"], not_diff)
+        CLI.seed_keys_for_scopes(records, ["net:vcc"], set())
+
+
+def test_scope_respects_only_native_protection_keys():
+    records = {
+        "manual": (None, Segment(
+            0, 0, 1, 0, 0.2, 0, 1, "manual", net_name="USB_P")),
+        "native": (None, Segment(
+            0, 1, 1, 1, 0.2, 0, 2, "native", net_name="ordinary")),
+    }
+    assert CLI.seed_keys_for_scopes(
+        records, ["ALL"], {"native": "generated"}) == {"manual"}
 
 
 def test_cli_exposes_convergence_pass_limit_and_trace():

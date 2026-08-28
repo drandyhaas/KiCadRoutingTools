@@ -83,10 +83,10 @@ Run real-board integration with KiCad's Python:
 D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py
 ```
 
-Costly order permutations and full connection sweeps are opt-in:
+The full connection sweep is opt-in:
 
 ```powershell
-D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --all-orders --full-sweep
+D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --full-sweep
 ```
 
 Build the Plugin and Content Manager archive:

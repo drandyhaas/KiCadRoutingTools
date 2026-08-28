@@ -27,9 +27,7 @@ from kicad_track_gloss.engine import (  # noqa: E402
 from kicad_track_gloss.configuration import CONFIG  # noqa: E402
 from kicad_track_gloss.engine.model import segment_key  # noqa: E402
 from kicad_track_gloss.kicad import BoardAdapter  # noqa: E402
-from kicad_track_gloss.kicad.selection import (  # noqa: E402
-    is_probable_diff_pair as _is_probable_diff_pair,
-)
+from kicad_track_gloss.kicad.authority import protected_track_keys  # noqa: E402
 from kicad_track_gloss.kicad.types import is_straight_track  # noqa: E402
 from kicad_track_gloss.version import __version__  # noqa: E402
 
@@ -51,7 +49,7 @@ def main():
     for item in board.GetTracks():
         if not is_straight_track(pcbnew, item):
             continue
-        segment = adapter._segment_from_item(item)
+        segment = adapter.segment_from_item(item)
         records[segment_key(segment)] = (item, segment)
     if args.sweep:
         sweep(board, adapter, snapshot, records, args.board, args.apply_in_memory,
@@ -62,7 +60,7 @@ def main():
         raise SystemExit("Track UUID not found: " + str(missing or args.uuid))
 
     warnings = []
-    eligible, expanded, meanders = adapter.expand_eligible_keys(
+    eligible, expanded, protected = adapter.expand_eligible_keys(
         board, records, set(args.uuid), warnings)
     targets = find_track_terminal_targets(snapshot.model, eligible)
     pad_targets = find_pad_terminal_targets(snapshot.model, eligible)
@@ -79,7 +77,7 @@ def main():
         segment = records[key][1]
         print("  ", key, (segment.start_x, segment.start_y), "->",
               (segment.end_x, segment.end_y))
-    print("meander-protected:", len(meanders), sorted(meanders))
+    print("native-protected:", len(protected), sorted(protected))
     print("eligible:", len(eligible), sorted(eligible))
     print("warnings:", warnings)
     print("sliding terminals:", len(targets))
@@ -111,20 +109,19 @@ def main():
 def sweep(board, adapter, snapshot, records, board_path, verify_apply, max_scopes):
     scopes = {}
     assigned = {}
-    protected = 0
+    native_protected = protected_track_keys(adapter, board, records)
     for seed_key, (_item, seed) in sorted(records.items()):
-        if seed.locked or _is_probable_diff_pair(seed.net_name):
-            protected += 1
+        if seed_key in native_protected:
             continue
         if seed_key in assigned:
             continue
         warnings = []
-        eligible, _expanded, meanders = adapter.expand_eligible_keys(
+        eligible, _expanded, protected = adapter.expand_eligible_keys(
             board, records, {seed_key}, warnings)
         eligible = frozenset(eligible)
         signature = tuple(sorted(eligible))
         if signature and signature not in scopes:
-            scopes[signature] = (seed_key, seed.net_name, warnings, len(meanders))
+            scopes[signature] = (seed_key, seed.net_name, warnings, len(protected))
             for member in eligible:
                 assigned[member] = signature
 
@@ -183,7 +180,7 @@ def sweep(board, adapter, snapshot, records, board_path, verify_apply, max_scope
     changed = sorted((row for row in rows if row["changed"]),
                      key=lambda row: (-row["saved"], row["seed"]))
     print("SWEEP", board_path)
-    print("straight tracks:", len(records), "protected seeds:", protected)
+    print("straight tracks:", len(records), "protected seeds:", len(native_protected))
     print("unique eligible connections:", len(rows))
     print("changed:", len(changed), "no-op:", len(rows) - len(changed) - len(errors))
     print("generation errors:", len(errors), "apply errors:", len(apply_errors))

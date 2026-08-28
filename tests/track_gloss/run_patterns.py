@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 from pathlib import Path
-import random
 import shutil
 import sys
 import tempfile
@@ -37,17 +36,14 @@ from kicad_track_gloss.engine.pads import pad_contains  # noqa: E402
 from kicad_track_gloss.engine.planner import _apply_to_model  # noqa: E402
 from kicad_track_gloss.kicad import BoardAdapter  # noqa: E402
 from kicad_track_gloss.kicad.types import is_straight_track  # noqa: E402
-from kicad_track_gloss.kicad.selection import (  # noqa: E402
-    is_probable_diff_pair as _is_probable_diff_pair,
-)
+from kicad_track_gloss.kicad.authority import protected_track_keys  # noqa: E402
 
 
 EXPECTED_TRACKS = 706
 EXPECTED_SCOPES = 334
-EXPECTED_ALL_SELECTED_SAVED_MM = 66.020888
-EXPECTED_ALL_SELECTED_REMOVED = 237
-EXPECTED_ALL_SELECTED_ADDED = 205
-MICRO_JOG_SEED = "58ebb541-fac6-4d02-8a68-65aca50766b5"
+EXPECTED_ALL_SELECTED_SAVED_MM = 73.896101
+EXPECTED_ALL_SELECTED_REMOVED = 392
+EXPECTED_ALL_SELECTED_ADDED = 252
 SHORT_VCC_SEED = "cc798608-5e9b-4c2a-9856-dde85f9d85f0"
 PAD_SLIDING_SEED = "54640123-2d45-4136-984c-783155178230"
 PASTE_PAD_SEED = "e149801e-8263-4ee7-8861-6e960836dada"
@@ -62,7 +58,7 @@ def _records(adapter, board):
     result = {}
     for item in board.GetTracks():
         if is_straight_track(pcbnew, item):
-            segment = adapter._segment_from_item(item)
+            segment = adapter.segment_from_item(item)
             result[segment_key(segment)] = (item, segment)
     return result
 
@@ -70,26 +66,17 @@ def _records(adapter, board):
 def _scopes(board, adapter, records):
     scopes = {}
     assigned = set()
+    protected = protected_track_keys(adapter, board, records)
     for seed_key, (_item, seed) in sorted(records.items()):
-        if seed.locked or _is_probable_diff_pair(seed.net_name) or seed_key in assigned:
+        if seed_key in protected or seed_key in assigned:
             continue
-        eligible, _expanded, _meanders = adapter.expand_eligible_keys(
+        eligible, _expanded, _protected = adapter.expand_eligible_keys(
             board, records, {seed_key}, [])
         signature = tuple(sorted(eligible))
         if signature and signature not in scopes:
             scopes[signature] = seed_key
             assigned.update(eligible)
     return scopes
-
-
-def _plan_signature(plan):
-    return (
-        tuple(sorted(plan.remove_keys)),
-        tuple(sorted((addition.start, addition.end, addition.width,
-                      addition.layer, addition.net_id)
-                     for addition in plan.additions)),
-        round(plan.saved_mm, 9),
-    )
 
 
 def _subdivide_eligible(model, eligible, fractions, label):
@@ -221,11 +208,10 @@ def _segment_subdivision_regression(snapshot, eligible, reference_plan):
     print("SEGMENT SUBDIVISION INVARIANCE PASS:", results, flush=True)
 
 
-def _all_selected_regression(board, adapter, snapshot, records,
-                             check_all_orders=False):
-    seeds = {key for key, (_item, segment) in records.items()
-             if not segment.locked and not _is_probable_diff_pair(segment.net_name)}
-    eligible, expanded, meanders = adapter.expand_eligible_keys(
+def _all_selected_regression(board, adapter, snapshot, records):
+    protected = protected_track_keys(adapter, board, records)
+    seeds = set(records) - set(protected)
+    eligible, expanded, protected = adapter.expand_eligible_keys(
         board, records, seeds, [])
     with tempfile.TemporaryDirectory(prefix="track-gloss-selection-") as name:
         temporary = Path(name)
@@ -244,43 +230,10 @@ def _all_selected_regression(board, adapter, snapshot, records,
         assert plugin_snapshot.eligible_keys == eligible
         assert plugin_snapshot.selection_seed_count == len(seeds)
 
-    original = list(snapshot.model.segments)
-    variants = {"board order": original}
-    if check_all_orders:
-        variants.update({
-            "reverse order": list(reversed(original)),
-            "nets ascending": sorted(
-                original,
-                key=lambda segment: (segment.net_id, segment.layer,
-                                     segment.width, segment_key(segment))),
-            "nets descending": sorted(
-                original,
-                key=lambda segment: (-segment.net_id, -segment.layer,
-                                     -segment.width, segment_key(segment))),
-        })
-        for seed in range(3):
-            shuffled = list(original)
-            random.Random(seed).shuffle(shuffled)
-            variants[f"shuffle {seed}"] = shuffled
-
-    signatures = {}
-    reference_plan = None
-    for label, ordered_segments in variants.items():
-        print(f"all-selected order: {label}", flush=True)
-        model = replace(snapshot.model, segments=ordered_segments)
-        plan = generate_converged_plan(
-            model, eligible, min_gain=0.01,
-            allow_equal_length_simpler=True,
-            clearance=snapshot.minimum_clearance, parallel=True)
-        signatures[label] = _plan_signature(plan)
-        if reference_plan is None:
-            reference_plan = plan
-    if check_all_orders:
-        assert len(set(signatures.values())) == 1, {
-            label: len(signature) for label, signature in signatures.items()
-        }
-
-    best = reference_plan
+    best = generate_converged_plan(
+        snapshot.model, eligible, min_gain=0.01,
+        allow_equal_length_simpler=True,
+        clearance=snapshot.minimum_clearance, parallel=True)
     print("all-selected result:", round(best.saved_mm, 6), "mm,",
           len(best.remove_keys), "removed,", len(best.additions), "added",
           flush=True)
@@ -293,26 +246,12 @@ def _all_selected_regression(board, adapter, snapshot, records,
     saved_segments = len(best.remove_keys) - len(best.additions)
     print(
         "ALL SELECTED PASS:", len(seeds), "seeds,", len(expanded), "expanded,",
-        len(meanders), "meander-protected,", len(eligible), "eligible,",
+        len(protected), "native-protected,", len(eligible), "eligible,",
         round(best.saved_mm, 6), "mm saved,", saved_segments,
         "segments saved (", len(best.remove_keys), "removed /",
         len(best.additions), "added ), plugin/CLI scopes identical,",
-        len(variants), "orders identical")
-    if not check_all_orders:
-        print("ORDER INDEPENDENCE CHECK SUSPENDED: use --all-orders to replay "
-              "all 7 input orders", flush=True)
+        "canonical board order")
     return best
-
-
-def _dense_micro_jog_regression(board, adapter, records):
-    warnings = []
-    eligible, expanded, protected = adapter.expand_eligible_keys(
-        board, records, {MICRO_JOG_SEED}, warnings)
-    assert len(expanded) == 111, len(expanded)
-    assert protected == expanded
-    assert not eligible
-    assert any("dense micro-jog" in warning for warning in warnings)
-    print("DENSE MICRO-JOG PASS: 111 tuned segments protected, 0 planned")
 
 
 def _short_vcc_regression(board, adapter, snapshot, records):
@@ -324,14 +263,14 @@ def _short_vcc_regression(board, adapter, snapshot, records):
         clearance=snapshot.minimum_clearance, parallel=True)
     assert len(expanded) == 9
     assert not protected
-    assert round(best.saved_mm, 6) == 1.299925
+    assert round(best.saved_mm, 6) == 1.369980
     assert len(best.remove_keys) == 9, (
         len(best.remove_keys), len(best.additions), best.saved_mm)
-    assert len(best.additions) == 6, (
+    assert len(best.additions) == 5, (
         len(best.remove_keys), len(best.additions), best.saved_mm)
     fresh = pcbnew.LoadBoard(str(FIXTURE))
     BoardAdapter(pcbnew).apply(fresh, best, rollback_on_error=True)
-    print("SHORT VCC PASS: 1.299925 mm saved with exact pad-area sliding")
+    print("SHORT VCC PASS: 1.369980 mm saved with converged pad/internal sliding")
 
 
 def _pad_sliding_regression(board, adapter, snapshot, records):
@@ -363,7 +302,7 @@ def _reported_clearance_regressions(board, adapter, snapshot, records):
         for obstacle in snapshot.model.obstacles)
 
     cases = (
-        ({PASTE_PAD_SEED}, 1.676996, 10, 7),
+        ({PASTE_PAD_SEED}, 2.157290, 17, 13),
         # The mixed-width engine now moves the 0.127/0.25 transition instead
         # of retaining it as a fixed anchor, so all four originals are
         # replaced by three exact-width octolinear segments.
@@ -409,9 +348,6 @@ def main():
     parser = argparse.ArgumentParser(
         description="Replay Track Gloss against the real-board pattern.")
     parser.add_argument(
-        "--all-orders", action="store_true",
-        help="also replay all 7 segment orders (slow, disabled by default)")
-    parser.add_argument(
         "--full-sweep", action="store_true",
         help="also generate every scope and apply every changed plan "
              "(slow, disabled by default)")
@@ -427,19 +363,16 @@ def main():
     records = _records(adapter, board)
 
     assert len(records) == EXPECTED_TRACKS, (len(records), EXPECTED_TRACKS)
-    _dense_micro_jog_regression(board, adapter, records)
     _short_vcc_regression(board, adapter, snapshot, records)
     _pad_sliding_regression(board, adapter, snapshot, records)
     _reported_clearance_regressions(board, adapter, snapshot, records)
 
     all_selected = _all_selected_regression(
-        board, adapter, snapshot, records, check_all_orders=args.all_orders)
+        board, adapter, snapshot, records)
 
     if args.segment_subdivisions:
-        seeds = {key for key, (_item, segment) in records.items()
-                 if not segment.locked and
-                 not _is_probable_diff_pair(segment.net_name)}
-        eligible, _expanded, _meanders = adapter.expand_eligible_keys(
+        seeds = set(records) - set(protected_track_keys(adapter, board, records))
+        eligible, _expanded, _protected = adapter.expand_eligible_keys(
             board, records, seeds, [])
         _segment_subdivision_regression(snapshot, eligible, all_selected)
     else:

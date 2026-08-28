@@ -13,20 +13,11 @@ from .writer import add_track, apply_plan
 
 
 def _uuid(item):
-    try:
-        return item.m_Uuid.AsString()
-    except Exception:
-        try:
-            return item.GetUuid().AsString()
-        except Exception:
-            return ""
+    return str(item.m_Uuid.AsString())
 
 
 def _net_name(item):
-    try:
-        return str(item.GetNetname() or "")
-    except Exception:
-        return ""
+    return str(item.GetNetname() or "")
 
 
 class BoardAdapter:
@@ -36,16 +27,10 @@ class BoardAdapter:
         self.pcbnew = pcbnew_module
 
     def _iu_per_mm(self):
-        try:
-            return float(self.pcbnew.PCB_IU_PER_MM)
-        except (AttributeError, TypeError, ValueError):
-            return float(self.pcbnew.FromMM(1.0))
+        return float(self.pcbnew.PCB_IU_PER_MM)
 
     def to_mm(self, value):
-        try:
-            return float(self.pcbnew.ToMM(value))
-        except Exception:
-            return float(value) / self._iu_per_mm()
+        return float(self.pcbnew.ToMM(value))
 
     def point_mm(self, point):
         return self.to_mm(point.x), self.to_mm(point.y)
@@ -64,18 +49,12 @@ class BoardAdapter:
 
     def segment_from_item(self, item):
         start, end = self.point_mm(item.GetStart()), self.point_mm(item.GetEnd())
-        try:
-            clearance = self.to_mm(item.GetOwnClearance(item.GetLayer()))
-        except Exception:
-            clearance = -1.0
+        clearance = self.to_mm(item.GetOwnClearance(item.GetLayer()))
         return Segment(start[0], start[1], end[0], end[1],
                        self.to_mm(item.GetWidth()), int(item.GetLayer()),
                        int(item.GetNetCode()), _uuid(item), bool(item.IsLocked()),
                        is_arc(self.pcbnew, item), _net_name(item),
                        clearance)
-
-    # Compatibility alias kept for existing diagnostic/test callers.
-    _segment_from_item = segment_from_item
 
     def _expand_seed_keys(self, board, straight_by_key, seed_keys, warnings):
         return expand_seed_keys(

@@ -19,6 +19,7 @@ GEOMETRY_LABELS = {
     "equal_length_merge": "Equal-length segment merge",
     "dogleg_removal": "Dogleg removal",
     "staircase_shortcut": "Staircase shortcut",
+    "corner_chamfer": "Local corner chamfer",
     "corner_relocation": "Corner or endpoint relocation",
     "segment_simplification": "Segment-count simplification",
     "octolinear_shortcut": "Octolinear shortcut",
@@ -36,13 +37,13 @@ SEARCH_LABELS = {
 }
 
 
-def classify_transformation(segments, path, mechanism, equal_tolerance=0.001,
+def classify_transformation(segments, path, mechanism, equal_tolerance=0.000001,
                             after_segments=None):
     before_mm = sum(length((segment.start_x, segment.start_y),
                            (segment.end_x, segment.end_y))
                     for segment in segments)
     path_edges = [(a, b) for a, b in zip(path, path[1:])
-                  if length(a, b) > 1e-6]
+                  if length(a, b) > equal_tolerance]
     after_mm = sum(length(a, b) for a, b in path_edges)
     before_count = len(segments)
     after_count = len(path_edges) if after_segments is None else after_segments
@@ -53,6 +54,8 @@ def classify_transformation(segments, path, mechanism, equal_tolerance=0.001,
         geometry = "dogleg_removal"
     elif before_count >= 3 and after_count < before_count:
         geometry = "staircase_shortcut"
+    elif before_count == 2 and after_count == 3 and gain > equal_tolerance:
+        geometry = "corner_chamfer"
     elif before_count == after_count:
         geometry = "corner_relocation"
     elif after_count < before_count:

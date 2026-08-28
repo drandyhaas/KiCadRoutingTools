@@ -49,6 +49,7 @@ def _encode_model(model):
         "board_bounds": model.board_bounds,
         "board_outline": (asdict(model.board_outline)
                           if model.board_outline is not None else None),
+        "coordinate_quantum_mm": model.coordinate_quantum_mm,
     }
 
 
@@ -86,7 +87,8 @@ def _decode_model(data):
         copper_edge_clearance=data["copper_edge_clearance"],
         board_bounds=data["board_bounds"],
         pad_regions=pads,
-        board_outline=outline)
+        board_outline=outline,
+        coordinate_quantum_mm=data["coordinate_quantum_mm"])
 
 
 def _stop_processes(processes, grace_seconds=2.0):

@@ -75,14 +75,16 @@ class BoardModel:
     segments: List[Segment]
     obstacles: List[CircleObstacle] = field(default_factory=list)
     keepouts: List[PolygonKeepout] = field(default_factory=list)
-    # Netclass fallback used by API-neutral callers and older KiCad APIs.
-    # Live KiCad snapshots normally carry the rule-engine result per Segment.
+    # Netclass baseline used by API-neutral callers. Live KiCad 10 snapshots
+    # carry the resolved rule-engine result on every Segment as well.
     net_clearances: Dict[int, float] = field(default_factory=dict)
     minimum_clearance: float = 0.0
     copper_edge_clearance: float = 0.0
     board_bounds: object = None
     pad_regions: List[PadRegion] = field(default_factory=list)
     board_outline: object = None
+    # Smallest coordinate step exposed by the active KiCad board runtime.
+    coordinate_quantum_mm: float = 0.000001
 
 
 @dataclass(frozen=True)

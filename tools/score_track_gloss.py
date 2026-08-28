@@ -215,7 +215,7 @@ def resolve_scopes(values=None, scope_file=None):
     return normalized
 
 
-def seed_keys_for_scopes(records, scopes, is_probable_diff_pair):
+def seed_keys_for_scopes(records, scopes, protected_keys):
     """Resolve scope strings to the same admissible seeds as the plugin."""
     matched = set()
     if scopes == ["ALL"]:
@@ -234,13 +234,10 @@ def seed_keys_for_scopes(records, scopes, is_probable_diff_pair):
                 if not net_keys:
                     raise ValueError("scope net was not found: " + target)
                 matched.update(net_keys)
-    seeds = {
-        key for key in matched
-        if (not records[key][1].locked and
-            not is_probable_diff_pair(records[key][1].net_name))}
+    seeds = set(matched) - set(protected_keys)
     if not seeds:
         raise ValueError(
-            "scope contains no admissible unlocked non-differential track")
+            "scope contains no track outside KiCad native protection")
     return seeds
 
 
@@ -291,13 +288,13 @@ def _bootstrap_engine():
     from kicad_track_gloss.engine.geometry import length
     from kicad_track_gloss.engine.model import segment_key
     from kicad_track_gloss.kicad import BoardAdapter
-    from kicad_track_gloss.kicad.selection import is_probable_diff_pair
+    from kicad_track_gloss.kicad.authority import protected_track_keys
     from kicad_track_gloss.kicad.types import is_straight_track
     from kicad_track_gloss.version import __version__
 
     return (pcbnew, BoardAdapter, generate_converged_plan,
             length, segment_key,
-            is_probable_diff_pair, is_straight_track, __version__, CONFIG)
+            protected_track_keys, is_straight_track, __version__, CONFIG)
 
 
 def _save_output(pcbnew, board, input_path, output_path, force=False):
@@ -322,11 +319,12 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
              force=False, max_passes=None, scopes=None, pass_observer=None,
              time_budget_seconds=None, minimum_saved_length_mm=None):
     (pcbnew, BoardAdapter, generate_converged_plan, length, segment_key,
-     is_probable_diff_pair, is_straight_track,
+     protected_track_keys, is_straight_track,
      version, config) = _bootstrap_engine()
     from kicad_track_gloss.engine import (
         compose_compatible_connection_plans, generate_connection_candidates,
         rank_candidate_plans)
+    from kicad_track_gloss.engine.model import GlossResult
     from kicad_track_gloss.kicad.native_salvage import (
         maximize_safe_native_candidates)
     if max_passes is None:
@@ -375,50 +373,56 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             segment = adapter.segment_from_item(item)
             records[segment_key(segment)] = (item, segment)
         scopes = resolve_scopes(scopes)
-        seeds = seed_keys_for_scopes(
-            records, scopes, is_probable_diff_pair)
-        eligible, expanded, meanders, connection_scopes = \
+        protected = protected_track_keys(pcbnew, board, records)
+        seeds = seed_keys_for_scopes(records, scopes, protected)
+        eligible, expanded, protected_expanded, connection_scopes = \
             adapter.expand_eligible_scopes(
             board, records, seeds, [])
         timings_ms["scope"] = (time.monotonic() - stage_started) * 1000.0
         if not eligible:
             raise ValueError("scope contains no eligible track after protection")
         conservative_ladder = []
-        stage_started = time.monotonic()
-        best = generate_converged_plan(
-            initial.model, eligible, max_passes=max_passes,
-            min_gain=minimum_saved_length_mm,
-            allow_equal_length_simpler=True,
-            clearance=initial.minimum_clearance, parallel=parallel,
-            pass_observer=pass_observer, deadline=planning_deadline,
-            conservative_ladder=conservative_ladder,
-            cancellation_grace_seconds=(
-                config.timing.interactive_cancellation_grace_seconds))
-        timings_ms["planning_primary"] = (
-            time.monotonic() - stage_started) * 1000.0
-        global_plan = best
         connection_plans = []
         connection_plan = None
+        # The first half of a bounded run produces both the broad plan and
+        # independently validatable connections.  The second half belongs to
+        # native DRC and anytime salvage, which can always return its incumbent.
+        connection_planning_deadline = planning_deadline
         if (len(connection_scopes) > 1 and
-                (planning_deadline is None or
-                 time.monotonic() < planning_deadline)):
+                (connection_planning_deadline is None or
+                 time.monotonic() < connection_planning_deadline)):
             stage_started = time.monotonic()
             (connection_plans, _connection_rejections,
              _connection_deadline) = generate_connection_candidates(
-                initial.model, eligible, connection_scopes, global_plan,
+                initial.model, eligible, connection_scopes, GlossResult(),
                 min_gain=minimum_saved_length_mm,
                 allow_equal_length_simpler=True,
                 clearance=initial.minimum_clearance,
                 max_passes=max_passes,
                 group_max_passes=max_passes,
                 collect_statistics=False,
-                planning_deadline=planning_deadline,
+                planning_deadline=connection_planning_deadline,
                 cancellation_grace_seconds=(
                     config.timing.interactive_cancellation_grace_seconds))
             (connection_plan, _compatible_plans,
              _composition_rejections) = compose_compatible_connection_plans(
                 initial.model, eligible, connection_plans)
             timings_ms["planning_connections"] = (
+                time.monotonic() - stage_started) * 1000.0
+        global_plan = GlossResult()
+        if (planning_deadline is None or
+                time.monotonic() < planning_deadline):
+            stage_started = time.monotonic()
+            global_plan = generate_converged_plan(
+                initial.model, eligible, max_passes=max_passes,
+                min_gain=minimum_saved_length_mm,
+                allow_equal_length_simpler=True,
+                clearance=initial.minimum_clearance, parallel=parallel,
+                pass_observer=pass_observer, deadline=planning_deadline,
+                conservative_ladder=conservative_ladder,
+                cancellation_grace_seconds=(
+                    config.timing.interactive_cancellation_grace_seconds))
+            timings_ms["planning_primary"] = (
                 time.monotonic() - stage_started) * 1000.0
         planning_candidates = [global_plan]
         if connection_plan is not None and connection_plan.changed:
@@ -511,7 +515,7 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             "selected_seeds": len(seeds),
             "expanded_tracks": len(expanded),
             "eligible_tracks": len(eligible),
-            "protected_tuned_tracks": len(meanders),
+            "native_protected_tracks": len(protected_expanded),
             "convergence_passes": best.convergence_passes,
             "max_passes": max_passes,
             "time_budget_seconds": time_budget_seconds,
