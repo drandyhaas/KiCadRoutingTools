@@ -33,10 +33,10 @@ re-derivable from this tree; the rebuild moved the partners, halved U1's
 courtyard and added the keep-out's `allow` list.) `arm_M_seed_independence` is
 what stops it recurring.
 
-Mutation battery: `tests/mutate_698.py` -- **38 rows: 36 killed, 2 survived
-(both recorded with their reason), 0 broken, 0 disagreeing with expectation.**
+Mutation battery: `tests/mutate_698.py` -- **41 rows: 38 killed, 3 survived
+(all recorded with their reason), 0 broken, 0 disagreeing with expectation.**
 
-What it caught in THIS file, over two rounds, which is why it exists:
+What it caught in THIS file, over three rounds, which is why it exists:
 
 | mutation | why it survived |
 |---|---|
@@ -46,9 +46,13 @@ What it caught in THIS file, over two rounds, which is why it exists:
 | `the-KEPT-note-credits-the-probe-for-every-held-revert` | **round 2** -- the arm-S check written for that very finding put U1 outside the keep-out at BOTH poses, so `undoes_intent` was False and the mutated line was unreachable. |
 | `the-probe-goes-back-to-the-named-scope-only` | **round 2** -- that check asserted on a probe the TEST built, which says nothing about the one `reseat_scope` builds. It now spies the real call site. |
 
-The round-2 pair is the lesson worth keeping: those two checks were written to
-pin findings from a code review, and they were themselves vacuous. A fix is not
-verified by the reviewer that motivated it.
+| `the-min_gain-branch-guards-on-truthiness` | **round 3** -- a REGRESSION the round-2 fix introduced. `elif gated and min_gain` let `--reseat-min-gain 1e-12` accept a gain of exactly zero: a stricter flag, a looser gate. SF-3 tested only 0.0, 0.5, 0.5001 and 1000.0, none of which can see it. `SF-3b` now pins monotonicity. |
+| `the-empty-basis-reports-a-fabricated-min_gain` | **round 3** -- fixed in round 2 and checked nowhere, so the row could only have been BROKEN or vacuous. |
+
+The round-2 and round-3 findings are the lesson worth keeping: those checks
+were written to pin findings from a review, and were themselves vacuous or
+wrong. A fix is not verified by the reviewer that motivated it -- three rounds
+running, the pass over the fixes found something the pass before it had missed.
 
 And one the battery caught in ITSELF: the row
 `the-zone-spec-forgets-the-anchor-branch` originally mutated `not any(` to
