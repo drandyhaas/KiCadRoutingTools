@@ -120,6 +120,42 @@ def lis_keep(ranks):
     return keep
 
 
+def lis_keep_weighted(ranks, weight):
+    """A maximum-length increasing subsequence, choosing among the
+    equally-long ones the one of greatest total weight.
+
+    The LIS is NOT unique, and which one is picked decides which nets
+    become DIVERS (the complement). That matters: a diver is delivered
+    on the opposite layer, so it pairs for free with a dive escape
+    (their vias merge) and costs an extra via with a surface escape.
+    Weighting the nets whose escape starts on the tooth layer -- the
+    ones that WANT to be keepers -- picks the LIS that aligns the two,
+    at no cost in length.
+
+    Length dominates: the weight bonus is scaled below 1 so it can only
+    break ties between equally long subsequences.
+    """
+    n = len(ranks)
+    if n == 0:
+        return set()
+    W = [1.0 + 0.5 * float(weight[i]) for i in range(n)]
+    best = [(1, W[i]) for i in range(n)]
+    prev = [-1] * n
+    for i in range(n):
+        for j in range(i):
+            if ranks[j] < ranks[i]:
+                cand = (best[j][0] + 1, best[j][1] + W[i])
+                if cand > best[i]:
+                    best[i] = cand
+                    prev[i] = j
+    i = max(range(n), key=lambda k: best[k])
+    keep = set()
+    while i >= 0:
+        keep.add(i)
+        i = prev[i]
+    return keep
+
+
 def rdp(pts, eps=0.02):
     """Ramer-Douglas-Peucker polyline simplification."""
     if len(pts) < 3:

@@ -65,9 +65,6 @@ for nm in names:
 grid0 = em.grid_of(pcb.footprints[ends[names[0]][2]])
 paths = db.taut_paths(names, ends, lambda nm: obs(byname[nm][0], 'F.Cu'))
 buses = db.cluster(names, paths)
-choice, unplaced = sm.select(menu, launch, keep_out=grid0.bbox,
-                             buses=buses)
-
 # the tooth layer is what the corridor STARTS the net on
 tooth_layer = {}
 for nm in names:
@@ -78,6 +75,10 @@ for nm in names:
          and (abs(s.start_x - tp[0]) + abs(s.start_y - tp[1]) < 0.005
               or abs(s.end_x - tp[0]) + abs(s.end_y - tp[1]) < 0.005)),
         'F.Cu')
+
+choice, unplaced = sm.select(menu, launch, keep_out=grid0.bbox,
+                             buses=buses, tooth_layer=tooth_layer,
+                             log=(print if '-v' in sys.argv else None))
 
 print(f'K={K}: {len(names)} nets, {len(buses)} buses\n')
 tot_mismatch = tot_extra = 0
@@ -92,18 +93,13 @@ for bus in sorted(buses, key=len, reverse=True):
                                      li[n]))
     tr = {n: i for i, n in enumerate(tgt)}
     ranks = [tr[n] for n in lo]
-    keep = te.lis_keep(ranks)
-    divers = {lo[i] for i in range(len(lo)) if i not in keep}
-    # the corridor delivers a keeper on its tooth layer and a diver on
-    # the other one (that is what diving means)
-    mism = []
-    for n in bus:
-        delivered = tooth_layer[n]
-        if n in divers:
-            delivered = 'B.Cu' if delivered == 'F.Cu' else 'F.Cu'
-        if delivered != choice[n].layer:
-            mism.append(n)
-    floor = 2 * (len(bus) - len(keep))
+    # ask the SELECTOR which layer it hands each net over on, rather
+    # than recomputing it here: this probe used its own unweighted LIS
+    # and so reported a diver set the selector was not using
+    dl = sm.delivered_layers(choice, buses, launch, tooth_layer)
+    divers = {n for n in bus if dl[n] != tooth_layer[n]}
+    mism = [n for n in bus if dl[n] != choice[n].layer]
+    floor = 2 * (len(bus) - len(te.lis_keep(ranks)))
     tot_mismatch += len(mism)
     tot_extra += len(mism)
     print(f'bus[{len(bus):2d}] exits {side:5s}: '

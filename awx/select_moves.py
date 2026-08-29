@@ -196,6 +196,79 @@ def bus_sides(menu: Dict[str, List[Move]],
     return out
 
 
+def _other(layer: str, layers=('F.Cu', 'B.Cu')) -> str:
+    return layers[1] if layer == layers[0] else layers[0]
+
+
+def delivered_layers(choice: Dict[str, Move], buses, launch,
+                     tooth_layer: Dict[str, str]) -> Dict[str, str]:
+    """The layer the corridor hands each net over on: its tooth layer
+    if the permutation makes it a keeper, the other one if it must
+    dive."""
+    import topo_emit as _te
+    out: Dict[str, str] = {}
+    for bus in buses:
+        if not all(n in choice for n in bus):
+            continue
+        side = choice[bus[0]].direction
+        axis = 1 if side in ('left', 'right') else 0
+        lo = sorted(bus, key=lambda n: launch[n][1])
+        li = {n: i for i, n in enumerate(lo)}
+        tgt = sorted(bus, key=lambda n: (round(choice[n].exit_pt[axis], 3),
+                                         li[n]))
+        tr = {n: i for i, n in enumerate(tgt)}
+        # among the equally-long LISs, take the one that makes the nets
+        # whose escape starts on their TOOTH layer the keepers -- they
+        # are the ones that pair for free with staying put
+        w = [1.0 if choice[n].layer == tooth_layer.get(n, 'F.Cu') else 0.0
+             for n in lo]
+        keep = _te.lis_keep_weighted([tr[n] for n in lo], w)
+        for i, n in enumerate(lo):
+            L = tooth_layer.get(n, 'F.Cu')
+            out[n] = L if i in keep else _other(L)
+    return out
+
+
+def true_vias(choice: Dict[str, Move], buses, launch,
+              tooth_layer: Dict[str, str]) -> int:
+    """The vias a route ACTUALLY needs, per net:
+
+        1 if the corridor makes it dive at the tooth
+      + 1 if the layer it is handed over on is not the one its escape
+          starts on
+      + the escape's own vias
+
+    which gives 0 for a keeper taking a surface escape and 2 for
+    everything else -- an aligned diver's dive and its escape's surface
+    via being the SAME two, not four. Counting escape vias and the
+    corridor floor as independent totals double-counts exactly that
+    merge, and would score an aligned plan as though nothing had been
+    saved."""
+    dl = delivered_layers(choice, buses, launch, tooth_layer)
+    n_v = 0
+    for n, m in choice.items():
+        if n not in dl:
+            continue
+        n_v += 1 if dl[n] != tooth_layer.get(n, 'F.Cu') else 0
+        n_v += 1 if dl[n] != m.layer else 0
+        n_v += m.vias
+    return n_v
+
+
+def score(choice: Dict[str, Move], buses, launch,
+          tooth_layer: Dict[str, str]) -> Tuple[int, int, int]:
+    """(true vias, corridor via floor, layer mismatches). The first is
+    what a round is judged on; the others are reported to show where it
+    came from."""
+    tv = true_vias(choice, buses, launch, tooth_layer)
+    fl = sum(_floor(b, choice, launch) for b in buses
+             if len(b) >= 2 and all(n in choice for n in b))
+    dl = delivered_layers(choice, buses, launch, tooth_layer)
+    mm = sum(1 for n, m in choice.items()
+             if dl.get(n) and dl[n] != m.layer)
+    return tv, fl, mm
+
+
 def _floor(bus: Sequence[str], sel: Dict[str, Move],
            launch: Dict[str, Pt]) -> int:
     """2*(K - LIS) of the launch->exit permutation: the corridor's via
@@ -212,7 +285,8 @@ def _floor(bus: Sequence[str], sel: Dict[str, Move],
 
 def refine_lis(choice: Dict[str, Move], buses, menu, launch,
                free: Callable[[Move, Dict[str, Move], str], bool],
-               rounds: int = 6, log=None) -> Dict[str, Move]:
+               rounds: int = 6, prefer_layer=None,
+               log=None) -> Dict[str, Move]:
     """Choose exit coordinates to MAXIMISE the corridor's LIS, exactly.
 
     The corridor's via floor is 2*(K - LIS) of the launch->exit
@@ -237,7 +311,20 @@ def refine_lis(choice: Dict[str, Move], buses, menu, launch,
         opts = {}
         for n in lo:
             seen, keep = {}, []
-            for m in sorted(menu[n], key=lambda m: (m.vias, _length(m))):
+            # Collapse each exit coordinate to ONE representative -- but
+            # rank a move that starts on the layer the corridor will
+            # deliver FIRST. Ranking purely by via count kept the 0-via
+            # surface move at every coordinate and threw the dive escape
+            # away, which silently undid the layer alignment: SA7 had a
+            # matching dogbone at cost 27.5 against its 29.0 surface,
+            # and never got to keep it.
+            pl = (prefer_layer or {}).get(n)
+
+            def _rank(m, _pl=pl):
+                return (0 if _pl and m.layer == _pl else 1,
+                        m.vias, _length(m))
+
+            for m in sorted(menu[n], key=_rank):
                 if m.direction != side:
                     continue
                 c = round(m.exit_pt[axis], 3)
@@ -302,6 +389,9 @@ def select(menu: Dict[str, List[Move]],
            keep_out=None,
            buses: Optional[Sequence[Sequence[str]]] = None,
            side_weight: float = 6.0,
+           tooth_layer: Optional[Dict[str, str]] = None,
+           mismatch_weight: float = 4.0,
+           align_rounds: int = 4,
            log=None) -> Tuple[Dict[str, Move], List[str]]:
     """Pick one move per net. `launch[n]` is where the net enters the
     corridor, used to price how far the corridor must carry it to reach
@@ -328,11 +418,18 @@ def select(menu: Dict[str, List[Move]],
     # before it is committed there; deviating from it means crossing
     # your own bundle, which nothing else in this cost sees
     side = bus_sides(menu, launch, buses, cost, log=log) if buses else {}
+    # filled by the alignment loop below; empty on the first pass, so
+    # the penalty is inert until there is a diver set to align with
+    want_layer: Dict[str, str] = {}
 
     def total(n: str, m: Move) -> float:
         c = cost(n, m)
         if side.get(n) and m.direction != side[n]:
             c += side_weight
+        # prefer an escape that starts on the layer the corridor will
+        # actually hand this net over on; a mismatch costs a via
+        if want_layer.get(n) and m.layer != want_layer[n]:
+            c += mismatch_weight
         return c
 
     taken_lane: Dict[Tuple, List[Tuple[float, float]]] = {}
@@ -393,6 +490,57 @@ def select(menu: Dict[str, List[Move]],
 
     if buses:
         refine_lis(choice, buses, menu, launch, _free, log=log)
+
+    # --- fixed point: exits decide the divers, divers decide the
+    # preferred escape layer, which decides the exits
+    if buses and tooth_layer:
+        best = dict(choice)
+        best_s = score(best, buses, launch, tooth_layer)
+        if log:
+            log(f'  align round 0: vias {best_s[0]}, floor {best_s[1]}, '
+                f'mismatch {best_s[2]}')
+        for r in range(align_rounds):
+            want_layer.clear()
+            want_layer.update(delivered_layers(choice, buses, launch,
+                                               tooth_layer))
+            taken_lane.clear()
+            taken_site.clear()
+            trial: Dict[str, Move] = {}
+            for n in order:
+                pick = None
+                for m in sorted(cand[n], key=lambda m: total(n, m)):
+                    if not lane_free(m):
+                        continue
+                    sk = _site_key(m)
+                    if sk is not None and sk in taken_site:
+                        continue
+                    pick = m
+                    break
+                if pick is None:
+                    continue
+                trial[n] = pick
+                _k, _a, _b = _lane_span(pick)
+                taken_lane.setdefault(_k, []).append((_a, _b))
+                sk = _site_key(pick)
+                if sk is not None:
+                    taken_site.add(sk)
+            if len(trial) < len(choice):
+                break                      # lost a net: reject the round
+            refine_lis(trial, buses, menu, launch, _free,
+                       prefer_layer=want_layer)
+            s = score(trial, buses, launch, tooth_layer)
+            if log:
+                log(f'  align round {r + 1}: vias {s[0]}, floor {s[1]}, '
+                    f'mismatch {s[2]}')
+            if s[0] < best_s[0]:        # judge on the true via count
+                best, best_s = dict(trial), s
+            if trial == choice:
+                break
+            choice = trial
+        choice = best
+        if log:
+            log(f'  aligned: vias {best_s[0]}, floor {best_s[1]}, '
+                f'mismatch {best_s[2]}')
     return choice, unplaced
 
 
