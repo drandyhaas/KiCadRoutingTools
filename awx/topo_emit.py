@@ -254,6 +254,8 @@ def main():
     ap.add_argument('--dump-segs', default='')
     ap.add_argument('--no-smooth', action='store_true',
                     help='skip the repo #536 octolinear smoothing pass')
+    ap.add_argument('--moves', default='',
+                    help='homotopy entry moves, e.g. SDQ0=S,SDQ11=N')
     ap.add_argument('--no-octi', action='store_true',
                     help='emit the raw arbitrary-angle braid geometry')
     a = ap.parse_args()
@@ -299,9 +301,19 @@ def main():
                     return False
         return True
 
+    moves = {}
+    for tok in a.moves.split(','):
+        if '=' in tok:
+            k, v = tok.split('=')
+            moves[k.strip()] = v.strip().upper()
+    comps_pads = [p for c in comps for p in pcb.footprints[c].pads]
+    rows_all = sorted({round(p.global_y, 3) for p in comps_pads})
+
     ball_order = sorted(names, key=lambda nm: (ends[nm][1][1],
                                                ends[nm][1][0]))
     for nm in ball_order:
+        if nm in moves:
+            continue
         bx, by = ends[nm][1][0], ends[nm][1][1]
         cands = []
         if bx <= fx0 + 0.01:
@@ -318,8 +330,33 @@ def main():
                 placed_f.extend(s for s in segs if s[0] != s[1])
                 break
 
+    # flank entries (#622 take-3 task 2): trunk lane just outside the W
+    # block (clears the corridor cap band), vertical drop at the splice
+    # column to the outer N/S run along the field edge, then the
+    # vertical inter-column street west of the ball, half-pitch jog.
+    f_ys = [e[1] for e in entry.values() if e[0] == 'F']
+    for flank in ('N', 'S'):
+        movers = sorted((nm for nm, f in moves.items() if f == flank),
+                        key=lambda nm: ends[nm][1][0])
+        for i, nm in enumerate(movers):
+            bx, by = ends[nm][1][0], ends[nm][1][1]
+            sx = bx - half
+            if flank == 'N':
+                run_y = rows_all[0] - 0.4 - i * 0.3
+                ly = (min(f_ys) if f_ys else rows_all[0]) - 0.35 - i * 0.3
+                dx_ = x1   # single-file drop; multi-S staggering TBD
+            else:
+                run_y = rows_all[-1] + 0.4 + i * 0.3
+                ly = (max(f_ys) if f_ys else rows_all[-1]) + 0.35 + i * 0.3
+                dx_ = x1   # single-file drop; multi-S staggering TBD
+            entry[nm] = (flank, (sx, run_y, ly, dx_))
+            placed_f.append(((dx_, ly), (dx_, run_y)))
+            placed_f.append(((dx_, run_y), (sx, run_y)))
+            placed_f.append(((sx, run_y), (sx, by)))
+            placed_f.append(((sx, by), (bx, by)))
+
     for nm in ball_order:
-        if nm in entry:
+        if nm in entry or nm in moves:
             continue
         bx, by = ends[nm][1][0], ends[nm][1][1]
         sx = bx - half
@@ -339,7 +376,10 @@ def main():
 
     # lane ys: F nets pin their entry; B nets slot strictly between the
     # neighbouring F entries, ordered by site y
-    f_sorted = sorted((e[1], nm) for nm, e in entry.items() if e[0] == 'F')
+    f_sorted = sorted([(e[1], nm) for nm, e in entry.items()
+                       if e[0] == 'F']
+                      + [(e[1][2], nm) for nm, e in entry.items()
+                         if e[0] in ('N', 'S')])
     b_nets = sorted(((e[1][1], nm) for nm, e in entry.items()
                      if e[0] == 'B'))
     lane_y = {nm: ey for ey, nm in f_sorted}
@@ -472,6 +512,10 @@ def main():
         if mode == 'F':
             sy = v
             path = trunk + [(x1, sy), (bx, sy), (bx, by)]
+        elif mode in ('N', 'S'):
+            sx, ry, ly, dx_ = v
+            path = trunk + [(dx_, ly), (dx_, ry), (sx, ry),
+                            (sx, by), (bx, by)]
         else:
             sx, sy = v
             path = trunk + [(x1, lane_y[nm]), (sx, sy)]
