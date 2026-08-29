@@ -72,6 +72,20 @@ Expect `recovery` to get no better and `collateral_pad_rms` to grow: this puts
 parts where the netlist wants them, not where they were. That is the intended
 trade.
 
+**On a `[GATE REFUSED]`, read `accept_basis`, not the gate tuple (#698).** A
+named scope and the bare auto scope are judged by different rules, and the
+summary says which: `policy` is `auto:oob-strict` or
+`explicit:one-term-strict`, `fired` is the basis that carried the pass, and
+`terms` lists *every* basis with its before/after — so a refusal tells you what
+would have to change. The auto rule is unchanged (the off-board amount must
+strictly improve). A named scope is accepted when the off-outline count did not
+grow, no hard gate term got worse, no declared claim got worse, and one
+scope-relevant basis strictly improved; `hpwl` is the one term it is licensed to
+pay, because a seat made for a declared reason is hpwl-worse by construction.
+`--reseat-min-gain MM` raises the bar on the wirelength basis only (the count
+bases threshold at one whole defect); the default 0 already rejects a shuffle,
+which measures as *exactly* zero rather than as a small win.
+
 #### When a part will not seat, read the verdict before reaching for a hammer
 
 Every part the rung leaves unseated carries a **`no_pose_verdict`** in the

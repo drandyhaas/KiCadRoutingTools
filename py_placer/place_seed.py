@@ -140,6 +140,21 @@ Examples:
                         "pose being discarded). Composes with --repair and "
                         "runs BEFORE it. Judge it on witnesses_after, not on "
                         "how far anything moved")
+    p.add_argument("--reseat-min-gain", type=float, default=0.0, metavar="MM",
+                   help="With --reseat REF (an EXPLICIT scope): the smallest "
+                        "wirelength win, in mm, that counts as a re-seat. 0 "
+                        "(the default) means any strict win. It gates the "
+                        "MILLIMETRE basis only -- the scope's own HPWL, which "
+                        "is where a sideways shuffle can score. The "
+                        "intent-violation, blocking-pair and stack bases are "
+                        "COUNTS, whose smallest meaningful gain is one whole "
+                        "defect: one number compared against both currencies "
+                        "would be asserting an exchange rate between half a "
+                        "millimetre of wire and half a keep-out violation. "
+                        "Inert on the AUTO scope (bare --reseat), whose rule "
+                        "is unchanged. JSON_SUMMARY accept_basis reports every "
+                        "basis, whether this applied to it, and by how much "
+                        "each one missed")
     p.add_argument("--dry-run", action="store_true",
                    help="With --repair/--reseat: print the move list and "
                         "grades, write nothing")
@@ -161,6 +176,17 @@ Examples:
                 "everything)")
     if args.dry_run and not (args.repair or args.reseat is not None):
         p.error("--dry-run only applies to --repair / --reseat")
+    if args.reseat_min_gain and args.reseat is None:
+        p.error("--reseat-min-gain only applies to --reseat")
+    if args.reseat_min_gain < 0:
+        p.error("--reseat-min-gain is a magnitude in mm; negative is not a "
+                "looser threshold, it is a typo")
+    if args.reseat_min_gain and args.reseat == []:
+        # An inert knob says so, rather than reading as a threshold that
+        # happened to find nothing wrong (cli_gates' own disclosure rule).
+        print("--reseat-min-gain is inert on the AUTO scope: that rule is "
+              "'the off-board amount strictly improved', which this does not "
+              "gate", file=sys.stderr)
 
     try:
         from redo_record import record_invocation
@@ -241,7 +267,8 @@ Examples:
                 grid_step=args.grid_step, seed=args.seed,
                 # The same flag, not a second one: it was parsed and
                 # silently ignored on this path (#699).
-                evict_depth=args.evict_depth)
+                evict_depth=args.evict_depth,
+                min_gain=args.reseat_min_gain)
             for note in reseat['notes']:
                 print(f"  NOTE: {note}")
             # Over the SCOPE only: the line prints it as "{n} re-seated
@@ -267,6 +294,21 @@ Examples:
                   f"{len(reseat['witnesses_after'])}"
                   + ('' if reseat['accepted'] else '  [GATE REFUSED]'))
             print(f"  gate {reseat['gate_before']} -> {reseat['gate_after']}")
+            # #698: WHICH scope-relevant term carried the pass, or -- on a
+            # refusal -- what every basis measured. A verdict with no basis is
+            # how this pass came to refuse on a term the operator never asked
+            # about for a whole release.
+            _ab = reseat.get('accept_basis') or {}
+            if _ab.get('fired'):
+                _t = next((t for t in _ab.get('terms') or []
+                           if t['term'] == _ab['fired']), {})
+                print(f"  accepted on {_ab['fired']}: "
+                      f"{_t.get('before')} -> {_t.get('after')} "
+                      f"({_t.get('units')}); {_ab.get('policy')}")
+            elif _ab.get('policy') == 'explicit:one-term-strict':
+                print("  no basis fired: " + ", ".join(
+                    f"{t['term']} {t['before']}->{t['after']}"
+                    for t in (_ab.get('terms') or [])))
             summary.update({
                 'reseat': True,
                 'scope': reseat['scope'],
@@ -292,6 +334,11 @@ Examples:
                 'gate_before': reseat['gate_before'],
                 'gate_after': reseat['gate_after'],
                 'accepted': reseat['accepted'],
+                # #698: the whole basis record, not just the winner -- a basis
+                # that measured nothing and a basis that measured no change
+                # must not look alike to a reader of the summary either.
+                'accept_basis': reseat.get('accept_basis'),
+                'reseat_min_gain': args.reseat_min_gain,
                 'reseat_max_move_mm': round(_rmax, 3),
             })
             _advance(reseat['moves'], 'reseat')

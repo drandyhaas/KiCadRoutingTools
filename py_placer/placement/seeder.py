@@ -3233,7 +3233,15 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
     pruned = _recon.prune_assignment(state, old, notes,
                                      edge_bands=gate_bands,
                                      exempt=set(evicted),
-                                     evidenced=set(scope))
+                                     evidenced=set(scope),
+                                     # #698: the sweep's tuple has no intent
+                                     # term, so a seat that cleared a declared
+                                     # keep-out reads as a pure hpwl loss and
+                                     # is reverted before the gate below ever
+                                     # runs. `None` on the auto scope, where
+                                     # the pass's win IS in the tuple.
+                                     intent_probe=(probe.terms if probe
+                                                   is not None else None))
     after = _recon.measure(state, gate_bands)
     witnesses_after = _recon.damage_witnesses(state)
     _oob = _recon.GATE_TERMS.index('oob')

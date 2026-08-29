@@ -557,7 +557,11 @@ Examples:
         return rep
 
     def _reseat_report(rep, preview=False):
-        d = {'scope': rep['scope'], 'scope_source': rep['scope_source'],
+        # #698: the same vocabulary as `place_seed`'s summary. This rung's
+        # scope is always `auto:damage_witnesses`, so the basis is `oob` or
+        # None -- but the two CLIs must not describe one pass differently.
+        d = {'accept_basis': rep.get('accept_basis'),
+             'scope': rep['scope'], 'scope_source': rep['scope_source'],
              'reseated': rep['reseated'], 'unseated': rep['unseated'],
              'refused': rep['refused'], 'pruned': rep['pruned'],
              'edge_bands_dropped': rep['edge_bands_dropped'],

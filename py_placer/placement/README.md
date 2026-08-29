@@ -263,6 +263,51 @@ a new stack would sit below it unread. At depth 0 — the default, and what
 `place_reconstruct`'s reseat rung uses — nothing outside the scope is touched
 and the counts are 0.
 
+**An EXPLICIT scope is accepted on a different rule from the auto one (#698),
+and the difference is structural rather than a preference.** On
+`auto:damage_witnesses` the pass's win *is* `oob`, at index 3 of the gate tuple
+— **above** `hpwl` — so the lexicographic compare already sees it, `prune`
+cannot revert a genuine homecoming, and `after[oob] < before[oob]` is a complete
+rule. On an explicit scope the win is a declared claim or the scope's own
+wirelength, which the tuple cannot see **at all**; `after[oob] < before[oob]` is
+then unsatisfiable for any part that is on the board, so an explicitly named
+part could never be re-seated whatever the search found. So:
+
+- **Safety is TERM-WISE, not lexicographic.** Every gate term must not worsen
+  except `hpwl`, the one licensed term — a seat made for a declared reason is
+  hpwl-worse *by construction*, for the same reason `exempt` gives above.
+  Measured on #698's fixture: escaping the declared keep-out costs +11.372 mm of
+  hpwl on 20 of 20 seeds, so a lexicographic `after <= before` refuses exactly
+  the case the change exists for. `oob` stays hard but is no longer required to
+  *improve*, and that one asymmetry is the whole bug.
+- **A separate trigger.** At least one basis in `RESEAT_BASES` must strictly
+  improve: the six hard gate terms, the scope's own HPWL, and the count of
+  breached declared claims. All are reported in `accept_basis` whether they
+  fired or not — a basis that measured nothing and a basis that measured no
+  change must not look alike.
+- **The intent VECTOR is the guard; the intent COUNT is only the trigger.** A
+  bare count carries the trap `quench._IntentTerm` names — a part hopping from
+  keep-out A into keep-out B reads `1 -> 1`, which a monotone rule admits — so
+  `IntentProbe.licence` separately refuses any term that *rose*, termwise and
+  never summed.
+- **`prune_assignment` had to be taught the same thing**, because it reverts
+  *first*. Its tuple has no intent term either, so a seat that cleared a
+  keep-out reads as a pure hpwl loss and was undone before the gate ran. It now
+  takes an `intent_probe` and refuses a revert that would re-break a
+  declaration — a conjunct rather than an `exempt` entry, so the sweep still
+  catches every mis-move it caught before and stays monotone, now on
+  `(tuple, intent vector)` jointly. Kept moves are named in a `prune: KEPT …`
+  note.
+- **`--reseat-min-gain` (mm) gates the HPWL basis only.** Count bases threshold
+  at one whole defect; one number compared against both currencies would assert
+  an exchange rate between half a millimetre of wire and half a keep-out
+  violation. The default is **0.0**, and that is measured rather than assumed:
+  over 16 explicit re-seats on four corpus boards the gains are bimodal with no
+  middle — 10 are *exactly* 0.000 (the search re-seats the part where it already
+  was) and the 6 real relocations run 1.004 to 19.875 mm. A shuffle does not
+  produce a small positive gain here, so a non-zero floor would buy nothing and
+  could reject a genuine small win.
+
 Requires an Edge.Cuts outline (exit 3 without one — the outline is spec-owned
 and will not be invented) and refuses a board that already looks placed
 (use `place_portfolio.py` to explore around an existing placement, or
