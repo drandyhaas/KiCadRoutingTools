@@ -733,6 +733,22 @@ python3 -X utf8 py_placer/place_optimize.py board.kicad_pcb placed.kicad_pcb \
     --lock 'J*' 'H*' 'U1' --max-displacement 2
 ```
 
+**And pass the INTENT to every placement invocation, for the same reason.**
+Since #702 `--intent` is not a grading flag: its declared zones, keep-outs and
+exclusive zones are HARD per-move gates inside the quench, and its `must_lock`
+globs and edge claims are locked. A step you forget to pass it to is a step
+that optimises against no constraint at all — which is exactly the defect #702
+fixed, one level up. `place_optimize`, `place_route_loop`, `place_seed` and
+`place_portfolio` all take it:
+
+```bash
+python3 -X utf8 py_placer/place_optimize.py board.kicad_pcb placed.kicad_pcb     --intent wk/intent.json --lock 'J*' 'H*' 'U1' --max-displacement 2
+```
+
+It is MONOTONE — it prevents a part being walked out of its zone, it does not
+walk one back in. A part that is already out stays out; re-seating it is
+`place_seed --repair`'s job, not the gate's.
+
 `(locked yes)` stamped in the board file (a seeder's `must_lock` output)
 satisfies this for every place_* tool — the file lock is honored everywhere
 `--lock` is. When you rely on it instead of `--lock`, say so once in the

@@ -246,7 +246,11 @@ class TestOneSpelling(unittest.TestCase):
                 except OSError:
                     continue
                 if 'nd_map' in txt and 'tests' not in p:
-                    hits.append(os.path.relpath(p, REPO))
+                    # POSIX separators: `relpath` returns the HOST's, so on
+                    # Windows this compared 'py_router\fix_...' against the
+                    # forward-slash literal below and failed for a reason that
+                    # has nothing to do with where the clamp body lives.
+                    hits.append(os.path.relpath(p, REPO).replace(os.sep, '/'))
         self.assertEqual(
             hits, ['py_router/fix_kicad_drc_settings.py'],
             f'the non-Default clamp body should live in one file, found {hits}')

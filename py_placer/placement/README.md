@@ -36,6 +36,7 @@ Key options:
 | `--ignore-nets` | – | Net patterns excluded from airwire scoring (plane-routed power nets) |
 | `--lock` | – | Reference patterns to pin in place (connectors, mounting-critical parts) |
 | `--halo-coef` | 0.25 | Extra whitespace per √(pin count); keep modest (~0.15) on dense boards |
+| `--intent` | – | Floorplan intent JSON. Its declared zones, keep-outs and exclusive zones become HARD per-move gates; its `must_lock` globs and `edge_connectors` edge claims are locked. MONOTONE: it prevents a part being walked out of a zone, it does not walk one back in. Omitted, the run is bit-identical to one built before the flag existed (#702) |
 | `--no-rotate` / `--no-swap` | off | Disable rotation / swap moves. `--no-rotate` freezes every part's angle: nudges keep the current rotation, and same-footprint swaps are restricted to pairs that already share one, since a swap exchanges full poses and a mixed-angle pair would rotate both parts |
 
 ## place_route_loop.py — router-in-the-loop repair

@@ -39,6 +39,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+#: A scoped probe that reaches most of the board is a whole-board route wearing
+#: a scope's name. Refused rather than reported, for the reason this file
+#: refuses an empty scope: a number nobody can attribute is not evidence.
+MAX_SCOPE_FRACTION = 0.5
+
+
+class ScopeTooWide(RuntimeError):
+    pass
+
+
 def causal_nets(board, intent_path=None, extra=None):
     """The nets the change claims to help, as glob-free exact names.
 
@@ -66,6 +76,61 @@ def causal_nets(board, intent_path=None, extra=None):
         for nid, n in pcb.nets.items():
             if nid > 0 and n.name and matches_net_filter(n.name, pats):
                 names.add(n.name)
+
+    # #702: the nets of the parts a DECLARED CLAIM binds -- zoned-block members
+    # and keep-out-bound refs. Without this source a zone or keep-out term
+    # yields no causal nets at all and the probe exits 2, so the one tier that
+    # actually ROUTES could not be pointed at #702 without a human typing a net
+    # list -- and a gate that needs a human to type its own scope is a gate
+    # nobody runs.
+    #
+    # This is NOT the circularity this file forbids. The rule at the top is
+    # "never scope by which parts MOVED", because a term that moves nothing
+    # would then score a perfect null. This scopes by what the intent DECLARES,
+    # off the OFF board, identical on both arms -- structurally the same as the
+    # corridor source above.
+    from placement.legality import (footprint_side, sides_occupied,
+                                    footprint_has_through_pads)
+    bound = set()
+    blocks, _ = floorplan.resolve_blocks(intent, pcb, ('kicad', 'sheet'))
+    for z in intent.blocks:
+        if z.rect is not None:
+            bound.update(blocks.get(z.name, ()))
+    for ref, fp in pcb.footprints.items():
+        sides = sides_occupied(footprint_side(fp),
+                               footprint_has_through_pads(fp))
+        if floorplan.keepouts_for_ref(intent.keepouts, ref, sides):
+            bound.add(ref)
+    # A high-fanout net (GND on ulx3s touches 96 parts) would drag most of the
+    # board in and turn a SCOPED probe into a whole-board route, so cut at the
+    # same fanout the health signals cut at.
+    from placement.routability import DISPLACEMENT_MAX_FANOUT
+    owners = {}
+    for ref, fp in pcb.footprints.items():
+        for pad in fp.pads:
+            if pad.net_id > 0 and pad.net_name:
+                owners.setdefault(pad.net_name, set()).add(ref)
+    declared = set()
+    for ref in bound:
+        fp = pcb.footprints.get(ref)
+        for pad in (fp.pads if fp else ()):
+            if (pad.net_id > 0 and pad.net_name
+                    and len(owners.get(pad.net_name, ())) <= DISPLACEMENT_MAX_FANOUT):
+                declared.add(pad.net_name)
+    if declared:
+        print(f"  causal: {len(declared)} net(s) from {len(bound)} part(s) "
+              f"bound by a declared zone or keep-out")
+    names |= declared
+
+    # A probe that routes most of the board is not a scoped probe, and
+    # reporting that as evidence would be worse than reporting nothing.
+    live = {n.name for i, n in pcb.nets.items() if i > 0 and n.name}
+    if live and len(names) > MAX_SCOPE_FRACTION * len(live):
+        raise ScopeTooWide(
+            f"{len(names)} of {len(live)} board nets "
+            f"({len(names) / len(live):.0%}) exceeds the "
+            f"{MAX_SCOPE_FRACTION:.0%} cap: this is a whole-board route, not "
+            f"a scoped probe. Narrow the intent or pass --extra-nets.")
     return sorted(names)
 
 
@@ -114,7 +179,11 @@ def main(argv=None):
 
     import shlex
     route_args = shlex.split(args.route_args) if args.route_args else []
-    nets = causal_nets(args.off, args.intent, args.extra_nets)
+    try:
+        nets = causal_nets(args.off, args.intent, args.extra_nets)
+    except ScopeTooWide as exc:
+        print(f"scope too wide: {exc}", file=sys.stderr)
+        return 2
     if not nets:
         print("no causal nets: nothing this change claims to help is "
               "identifiable. Declare health.bus_corridors, or pass "

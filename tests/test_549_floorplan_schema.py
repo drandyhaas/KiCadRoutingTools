@@ -454,10 +454,11 @@ def test_an_entry_carries_its_own_context_slot():
 def test_severity_keys_are_checked_against_the_rule_names():
     """#710: `severity` validated its VALUES and never its keys.
 
-    The vocabulary is 12 names, not the 9 in `RULES`: three findings are
+    The vocabulary is 13 names, not the 9 in `RULES`: four findings are
     raised outside the rules loop (`validate_intent` raises two,
-    `resolve_blocks` one) and an intent has always been allowed to set their
-    severity. Validating against `RULES` alone would refuse
+    `resolve_blocks` one, and `resolve_intent_gate` raises
+    `intent_zone_in_keepout` since #702) and an intent has always been allowed
+    to set their severity. Validating against `RULES` alone would refuse
     `{"block_unresolved": "warn"}`, which is legal today -- so the test
     asserts every name in the real vocabulary still loads, not just that a
     typo is refused.
@@ -474,7 +475,8 @@ def test_severity_keys_are_checked_against_the_rule_names():
     # shrinks, and passes. (It did.)
     expected = {n for n, _ in RULES} | {'intent_zone_outside_envelope',
                                         'intent_zone_overlap',
-                                        'block_unresolved'}
+                                        'block_unresolved',
+                                        'intent_zone_in_keepout'}
     assert _SEVERITY_KEYS == expected, sorted(_SEVERITY_KEYS ^ expected)
     for name in sorted(expected):
         i = intent_from_dict(_base(severity={name: WARN}))

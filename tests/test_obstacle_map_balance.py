@@ -51,7 +51,16 @@ TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 #: presented as a timeout and was dismissed as slowness. Measured in #691: it
 #: passes ALONE in 681 s with all 18 checks green, so this is a budget for the
 #: contended case, not cover for a hung test.
-RUN_ALL_TIMEOUT = 1200
+#:
+#: Raised to 2400 s because 1200 was still not a contended-case budget on a
+#: slower box. Measured here: ALONE 994 s, all checks green -- 1.46x the #691
+#: figure -- while the same test TIMED OUT inside a full `run_all.py` (which
+#: runs 4 at a time) on that same machine. A budget with 1.2x headroom over
+#: the solo time is not a budget for contention, and the failure mode it
+#: produces is the one this comment already warns about: a real result
+#: presented as slowness. The subprocess timeout below is raised to match, or
+#: the inner kill would just move the same problem one level down.
+RUN_ALL_TIMEOUT = 2400
 
 ROOT_DIR = os.path.dirname(TESTS_DIR)
 KF = os.path.join(ROOT_DIR, "kicad_files")
@@ -94,8 +103,11 @@ def run_cmd(args, audit=True, ledger=False, tap_verify=False,
         # test environment-dependent. Pin the field off for that stage; the
         # audit under churn is what this test exists to exercise.
         env["KICAD_PLANE_FRAGILITY_COST"] = "0"
+    # Kept equal to RUN_ALL_TIMEOUT above: an inner kill lower than the outer
+    # budget just relocates the same "a real result presented as slowness"
+    # failure one level down, where it reads as a router hang instead.
     p = subprocess.run([sys.executable, "-X", "utf8"] + args, cwd=ROOT_DIR,
-                       env=env, capture_output=True, text=True, timeout=1200)
+                       env=env, capture_output=True, text=True, timeout=2400)
     return p.returncode, p.stdout + p.stderr
 
 

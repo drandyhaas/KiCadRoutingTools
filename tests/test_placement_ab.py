@@ -60,13 +60,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOARDS = os.path.join(ROOT, 'kicad_files')
 
-# Six full quenches (3 rows x off/on) on three large boards. Measured 233-340 s
-# of row time across four runs on one box; declared with headroom so a slower
-# box reports FAIL, not TIME.
-RUN_ALL_TIMEOUT = 1200
+# Fourteen full quenches (7 rows x off/on) over four distinct boards. 233-340 s
+# of row time for the first three rows; the #702 rows add roughly as much
+# again. Declared with headroom so a slower box reports FAIL, not TIME.
+RUN_ALL_TIMEOUT = 1800
 
 DEFAULT_BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 'placement_ab_baseline.json')
+
+# The sources `resolve_blocks` derives from when the grade resolves an emitted
+# intent's blocks. `emit_intent` stamps EVERY block with a `group` key, so a
+# grade given no sources resolves every one of them to nothing -- see `_run`.
+# `('kicad', 'sheet')` is what `groups.parse_sources('auto')` returns, and it is
+# what `check_floorplan.py`, `place_seed.py` and `place_portfolio.py` all
+# default to; spelled out rather than imported so the fixture cannot drift with
+# a change to `auto`'s membership.
+GROUP_SOURCES = ('kicad', 'sheet')
 
 # The keys compared against the committed baseline.
 #
@@ -76,7 +85,8 @@ DEFAULT_BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # "0.0 -> 806.84" is not a regression, it is a comparison that was never made,
 # and recording it as evidence would pin a fiction.
 BASELINE_INT_KEYS = ('crossings', 'health_bus_foreign_crossings',
-                     'intent_errors')
+                     'intent_errors', 'intent_errors_enforced',
+                     'intent_errors_other')
 BASELINE_FLOAT_KEYS = ('hpwl', 'health_block_displacement_max_mm')
 BASELINE_DICT_KEYS = ('intent_errors_by_rule',)
 
@@ -94,6 +104,11 @@ BASELINE_DICT_KEYS = ('intent_errors_by_rule',)
 # term with no effect at all marks `neutral`, which fails the rule outright.)
 MIN_TRIAL_BOARDS = 3
 
+
+#: Sentinel a row puts in `quench_on` to mean "the gate resolved from THIS
+#: row's intent". Not the intent itself: the table is read by `--list` and by
+#: the baseline comparator, and an Intent object in it would print as a repr.
+ROW_INTENT = '<resolved from this row>'
 
 # --- the table ------------------------------------------------------------
 #
@@ -190,6 +205,108 @@ ROWS = [
                 'row currently disagrees is how a one-in-three result becomes '
                 'folklore. Numbers: tests/placement_ab_baseline.json.'),
     },
+
+    # --- #702: the declared-intent gate ------------------------------------
+    #
+    # These landed ON TRIAL (no `expect`) so `gate()`'s >=3-DISTINCT-BOARDS
+    # rule would actually run rather than be skipped the way a pinned row skips
+    # it. IT RAN AND IT REFUSED: 1 of 4 boards improved, 3 regressed, against a
+    # rule of "improve on >= N-1, regress on none".
+    #
+    # They ship PINNED anyway, and the distinction matters. That rule is for an
+    # OBJECTIVE TERM, which has to earn its place against the terms already
+    # there. This is a hard CONSTRAINT: it does not compete with crossings and
+    # hpwl, it overrules them. Every regress mark below is on a GUARD, never on
+    # the signal. So the rows are pinned as PRICE change-detectors -- what the
+    # constraint costs, recorded so a later change to that cost is visible --
+    # and not as a claim that the term improves the objective. The marks come
+    # from the run that measured them, never from this comment.
+    #
+    # ON THE CIRCULARITY, STATED RATHER THAN HIDDEN. #701 deliberately made the
+    # grader and the enforcer ONE implementation, so for these three rules the
+    # file's usual independence premise does not hold. It is still not a
+    # tautology, and the reason is measurable: the gate is MONOTONE and never
+    # repairs, so it can LOSE to an unconstrained quench that happened to
+    # improve the same count. The `zone_exclusive` row is exactly that case.
+    # What makes these rows worth running is the GUARDS -- a constraint that
+    # buys containment by wrecking crossings or hpwl is a bad trade, and that
+    # is what `crossings`, `hpwl` and `intent_errors_other` are here to catch.
+    {
+        'name': 'intent-ulx3s',
+        'board': 'ulx3s.kicad_pcb',
+        'corridors': [],
+        'ignore_nets': ['GND', '+3V3', '+5V'],
+        'quench_on': {'intent_gate': ROW_INTENT},
+        'signal': 'intent_errors_enforced',
+        'guard': ('crossings', 'hpwl', 'intent_errors_other'),
+        'expect': 'regress',
+        'why': ('MECHANISM: the seed grades clean and the quench manufactures '
+                'every zone_containment error, so the gate has something real '
+                'to prevent -- and it prevents all of them. The mark is '
+                'REGRESS on the GUARDS, not on the signal: a hard constraint '
+                'removes poses from the search, so the objective it is '
+                'overruling gets worse. That is the trade being bought, and '
+                'pinning it here is what makes the PRICE a change detector '
+                'rather than a footnote. ulx3s emits 4 disjoint zones, one '
+                'B-side, so the side path is exercised too.'),
+    },
+    {
+        'name': 'intent-orangecrab',
+        'board': 'orangecrab_ext_pll.kicad_pcb',
+        'corridors': [],
+        'ignore_nets': ['GND', '+3V3', '+5V'],
+        'quench_on': {'intent_gate': ROW_INTENT},
+        'signal': 'intent_errors_enforced',
+        'guard': ('crossings', 'hpwl', 'intent_errors_other'),
+        'expect': 'improve',
+        'why': ('MECHANISM: same as intent-ulx3s but thinner, and a SECOND '
+                'board -- which is what the >=3-board rule is about. Here the '
+                'constraint costs nothing: both guards improve as well, so a '
+                'gated search is not inherently worse, it depends on whether '
+                'the poses it removes were load-bearing.'),
+    },
+    {
+        'name': 'intent-rp2350',
+        'board': 'rp2350_fpga_eensy_prePlane.kicad_pcb',
+        'corridors': [],
+        'quench_base': {'max_displacement': 10.0},
+        'quench_on': {'intent_gate': ROW_INTENT},
+        'signal': 'intent_errors_enforced',
+        'guard': ('crossings', 'hpwl', 'intent_errors_other'),
+        'expect': 'regress',
+        'why': ('MECHANISM: the CHEAP row (61 parts), and the corpus-scale '
+                'test of the monotone FREEZE. This board SEEDS with a '
+                'containment error, and the ON arm holds that count instead '
+                'of driving it to zero -- which is the whole contract: the '
+                'gate prevents a walk-out, it does not repair one. A run that '
+                'showed this signal reaching 0 would mean the gate had '
+                'started repairing and the contract had changed. It also '
+                'carries the known CONTAINER footprint, so the gate is '
+                'exercised beside that exemption.'),
+    },
+    {
+        'name': 'intent-exclusive-coldfire',
+        'board': 'kit-dev-coldfire-xilinx_5213.kicad_pcb',
+        'corridors': [],
+        'ignore_nets': ['GND', 'VCC*', '+3.3V', '+5V'],
+        'zone_flags': {'exclusive': True},
+        'quench_on': {'intent_gate': ROW_INTENT},
+        'signal': 'intent_errors_enforced',
+        'guard': ('crossings', 'hpwl', 'intent_errors_other'),
+        'expect': 'regress',
+        'why': ('MECHANISM: the row that DISAGREES, and the only corpus-scale '
+                'zone_exclusive coverage. Its signal is NEUTRAL because BOTH '
+                'arms improve by the same amount -- the seed grades 7 and '
+                'gated and ungated both reach 5. The monotone rule admits '
+                'improving moves, so the gate does not stop the optimizer '
+                'clearing exclusive zones on its own here; it neither helps '
+                'nor hinders, and the mark is decided entirely by the '
+                'crossings guard. That is the honest shape of a constraint '
+                'that costs something and buys nothing HERE, and the row is '
+                'kept for exactly that: a term that helps on one board of '
+                'four is not a term, and deleting the dissenting row is how '
+                'that becomes folklore.'),
+    },
 ]
 
 QUENCH_BASE = dict(
@@ -199,26 +316,58 @@ QUENCH_BASE = dict(
     edge_weight=2.0, max_passes=4, verbose=False)
 
 
-def _intent_for(board_path, corridors, workdir):
+def _intent_for(board_path, corridors, workdir, zone_flags=None):
     """An intent for `board_path` with `corridors` declared.
 
     Emitted from the board itself rather than hand-written, so the blocks the
     health signals need are the ones that board actually has, and the row only
     has to state the bus.
+
+    `zone_flags` is applied BY RULE to every block that has a zone, never to a
+    hand-picked list: a row that named its own members would be fitted to the
+    arrangement it is measuring.
+
+    Keep-outs are deliberately NOT injectable here. `emit_intent` writes
+    `keepouts: []` by design (a keep-out is a mechanical fact and cannot be
+    read off a board), so any corpus keep-out is an invention -- and one that
+    BITES is one placed where the OFF arm happens to walk a part, i.e. fitted
+    to the OFF arm and invalidated the next time it moves. The keep-out half
+    is measured in tests/test_702_quench_intent_gate.py on hand-written boards
+    where the answer is a theorem.
     """
     from kicad_parser import parse_kicad_pcb
     from placement import floorplan
     path = os.path.join(workdir, 'intent.json')
     doc = floorplan.emit_intent(parse_kicad_pcb(board_path), board_path)
-    doc['health'] = dict(doc.get('health') or {})
-    doc['health']['bus_corridors'] = corridors
+    if corridors:
+        # Guarded: an unconditional assignment plants an empty `bus_corridors`
+        # on a row that declares none, which makes
+        # `health_bus_foreign_crossings` a measurement of nothing rather than
+        # an absent key.
+        doc['health'] = dict(doc.get('health') or {})
+        doc['health']['bus_corridors'] = corridors
+    if zone_flags:
+        for b in doc['blocks']:
+            if b.get('zone'):
+                b.update(zone_flags)
     with open(path, 'w') as fh:
         json.dump(doc, fh, indent=2)
     return floorplan.load_intent(path)
 
 
-def _run(board_path, out_path, intent, quench_kw):
-    """One quench + write + independent grade. Returns the measured row."""
+def _run(board_path, out_path, intent, quench_kw, group_sources=GROUP_SOURCES):
+    """One quench + write + independent grade. Returns the measured row.
+
+    `group_sources` is NOT optional in spirit, only in signature. Every block
+    `_intent_for` emits carries a `group` key (floorplan.emit_intent), and
+    `resolve_blocks` only derives groups when it is given sources -- so a grade
+    at the `()` default resolves EVERY block to nothing and reports it as
+    `block_unresolved`. Measured before this was passed (#702): ulx3s 10
+    errors, orangecrab 6, coldfire 2, all of them `block_unresolved`, all of
+    them ZERO at ('kicad', 'sheet'). That is the instrument misreading its own
+    fixture, not a finding about the board, and it made `intent_errors` a
+    column that could not see the rule this file exists to measure.
+    """
     from kicad_parser import parse_kicad_pcb
     from placement.quench import quench
     from placement.writer import write_placed_output
@@ -239,7 +388,8 @@ def _run(board_path, out_path, intent, quench_kw):
     # here come from the final poses, not from the frozen model the optimizer
     # minimised against.
     graded = parse_kicad_pcb(out_path)
-    result = floorplan.grade(intent, graded, out_path, with_health=True)
+    result = floorplan.grade(intent, graded, out_path, with_health=True,
+                             group_sources=group_sources)
     summary = floorplan.summary(result)
     after = metrics.get('after') or {}
     # ERRORS only, by rule. `summary()['violations_by_rule']` counts warnings
@@ -248,6 +398,17 @@ def _run(board_path, out_path, intent, quench_kw):
     by_rule = {}
     for v in result.errors:
         by_rule[v.rule] = by_rule.get(v.rule, 0) + 1
+    # #702: split the error count by whether the quench gate can ENFORCE the
+    # rule. Raw `intent_errors` mixes the rules a term can move with the ones
+    # it cannot, so a row signalling on the total is diluted by whatever else
+    # the emitted intent happens to find. The enforced set is imported from
+    # the engine, never re-typed here: a rule the engine starts enforcing
+    # enters this signal automatically, and one removed to flatter a row trips
+    # `test_702_quench_intent_gate.py`'s arm M rather than passing quietly.
+    from placement.quench import INTENT_ENFORCED_RULES
+    enforced = sum(n for r, n in by_rule.items()
+                   if r in INTENT_ENFORCED_RULES)
+    gate = metrics.get('intent_gate')
     return {
         'seconds': round(time.time() - t0, 1),
         'crossings': after.get('crossings'),
@@ -269,6 +430,11 @@ def _run(board_path, out_path, intent, quench_kw):
             summary.get('health_block_displacement_max_mm'),
         'intent_errors': summary.get('errors'),
         'intent_errors_by_rule': by_rule,
+        'intent_errors_enforced': enforced,
+        'intent_errors_other': (summary.get('errors') or 0) - enforced,
+        # 0 when a gate was built and refused nothing; None when NO gate was
+        # built at all. The distinction is the point -- see quench.py.
+        'intent_gate_rejected': None if gate is None else gate['rejected'],
     }
 
 
@@ -319,12 +485,22 @@ def run_row(row, workdir):
         return 'skip', [], None, None
     d = os.path.join(workdir, row['name'])
     os.makedirs(d, exist_ok=True)
-    intent = _intent_for(board, row['corridors'], d)
+    intent = _intent_for(board, row['corridors'], d, row.get('zone_flags'))
 
     kw_off = dict(QUENCH_BASE)
+    kw_off.update(row.get('quench_base') or {})
     kw_off['ignore_nets'] = list(row.get('ignore_nets') or ())
     kw_on = dict(kw_off)
     kw_on.update(row['quench_on'])
+    # #702: the row declares the intent it wants gated with a sentinel, so the
+    # table stays plain data and `_intent_for` stays the only place an intent
+    # is built. The OFF arm must NOT get one, or "off" would mean "resolved
+    # and then ignored" rather than "the engine that shipped".
+    if kw_on.get('intent_gate') is ROW_INTENT:
+        from kicad_parser import parse_kicad_pcb
+        from placement import floorplan
+        kw_on['intent_gate'], _probs = floorplan.resolve_intent_gate(
+            intent, parse_kicad_pcb(board), GROUP_SOURCES)
     # The ON run needs the corridors the flag prices; the OFF run must NOT get
     # them, or "off" would mean "built and multiplied by zero" rather than
     # "the objective that shipped".
@@ -630,10 +806,12 @@ def _self_test():
     # --- the comparator ---
     base = {'r': {'board': 'b.kicad_pcb', 'mark': 'regress',
                   'off': {'crossings': 100, 'hpwl': 10.0,
-                          'intent_errors': 5,
+                          'intent_errors': 5, 'intent_errors_enforced': 5,
+                          'intent_errors_other': 0,
                           'intent_errors_by_rule': {'zone_containment': 5}},
                   'on': {'crossings': 90, 'hpwl': 9.0,
-                         'intent_errors': 7,
+                         'intent_errors': 7, 'intent_errors_enforced': 7,
+                         'intent_errors_other': 0,
                          'intent_errors_by_rule': {'zone_containment': 7}}}}
     same = json.loads(json.dumps(base))
     assert compare_baseline(same, base) == [], compare_baseline(same, base)
@@ -697,12 +875,16 @@ def _self_test():
             'health_bus_foreign_crossings': 62,
             'health_block_displacement_max_mm': 17.95,
             'intent_errors': 14,
+            'intent_errors_enforced': 4, 'intent_errors_other': 10,
+            'intent_gate_rejected': None,
             'intent_errors_by_rule': {'block_unresolved': 10,
                                       'zone_containment': 4}}
     von = {'crossings': 90, 'hpwl': 9.0, 'corridor_cut': 800.0, 'seconds': 1,
            'health_bus_foreign_crossings': 55,
            'health_block_displacement_max_mm': 18.09,
            'intent_errors': 17,
+           'intent_errors_enforced': 7, 'intent_errors_other': 10,
+           'intent_gate_rejected': None,
            'intent_errors_by_rule': {'block_unresolved': 10,
                                      'zone_containment': 7}}
 

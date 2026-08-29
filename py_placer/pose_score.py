@@ -60,7 +60,7 @@ def make_state(pcb_data, board_path: str, *, clearance: float = 0.25,
                halo_weight: float = 2.0, edge_halo: float = 2.0,
                edge_weight: float = 2.0,
                ignore_net_ids=None, net_weights=None, move_refs=None,
-               extra_locked_refs=None, keepouts=None):
+               extra_locked_refs=None, keepouts=None, intent_zones=None):
     """A QuenchState used purely as an oracle -- built, queried, thrown away.
 
     Defaults mirror the placement guidance rather than quench's own library
@@ -81,7 +81,14 @@ def make_state(pcb_data, board_path: str, *, clearance: float = 0.25,
         # rather than read here, because this factory has no intent -- every
         # caller that has one hands it over, and a caller that has none gets
         # the inert default.
-        keepouts=keepouts)
+        keepouts=keepouts,
+        # #702: declared zones, same passthrough. Note the ASYMMETRY, which is
+        # deliberate -- `place_seed`'s post-polish re-seat passes `keepouts`
+        # and must NOT pass this. The re-seat's whole job is to move a part
+        # that is ALREADY violating back where it belongs, and the zone gate is
+        # monotone against the pose the part is in, so handing it over would
+        # make the repair refuse its own target and quietly stop repairing.
+        intent_zones=intent_zones)
 
 
 def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,

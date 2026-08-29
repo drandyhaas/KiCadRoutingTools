@@ -39,6 +39,7 @@ from __future__ import annotations
 import glob
 import ntpath
 import os
+import posixpath
 import platform
 import re
 import sys
@@ -276,13 +277,20 @@ def darwin_bundle_patterns(home: str) -> List[str]:
     assume. Shared with describe_search, so the diagnostic cannot claim to
     have searched somewhere this does not.
     """
+    # posixpath, not os.path: every function here takes an explicit `system`
+    # so a caller can reason about a platform other than the host, and macOS
+    # paths are POSIX by construction. `os.path.join` on a Windows host emits
+    # backslashes into them, which is how a cross-platform caller -- or this
+    # module's own test suite -- gets `/Applications/KiCad\KiCad.app`. The
+    # Windows branch of `kicad_python_candidates` already uses `ntpath.join`
+    # for exactly this reason; these two were simply missed.
     return [
         '/Applications/KiCad/KiCad.app',
-        os.path.join(home, 'Applications', 'KiCad', 'KiCad.app'),
+        posixpath.join(home, 'Applications', 'KiCad', 'KiCad.app'),
         '/Applications/KiCad/KiCad*.app',
         '/Applications/KiCad*.app',
-        os.path.join(home, 'Applications', 'KiCad', 'KiCad*.app'),
-        os.path.join(home, 'Applications', 'KiCad*.app'),
+        posixpath.join(home, 'Applications', 'KiCad', 'KiCad*.app'),
+        posixpath.join(home, 'Applications', 'KiCad*.app'),
     ]
 
 
@@ -291,8 +299,8 @@ def linux_prefixes(home: str) -> List[str]:
     describe_search for the same reason as darwin_bundle_patterns."""
     return ['/usr', '/usr/local', '/opt/kicad',
             '/var/lib/flatpak/app/org.kicad.KiCad/current/active/files',
-            os.path.join(home, '.local', 'share', 'flatpak', 'app',
-                         'org.kicad.KiCad', 'current', 'active', 'files'),
+            posixpath.join(home, '.local', 'share', 'flatpak', 'app',
+                           'org.kicad.KiCad', 'current', 'active', 'files'),
             '/snap/kicad/current/usr']
 
 
@@ -386,19 +394,19 @@ def kicad_python_candidates(system: Optional[str] = None,
         if system == 'Windows':
             cands.append(ntpath.join(root, 'bin', 'python.exe'))
         elif system == 'Darwin':
-            fw = os.path.join(root, 'Contents', 'Frameworks',
-                              'Python.framework', 'Versions')
-            cands.append(os.path.join(fw, 'Current', 'bin', 'python3'))
+            fw = posixpath.join(root, 'Contents', 'Frameworks',
+                                'Python.framework', 'Versions')
+            cands.append(posixpath.join(fw, 'Current', 'bin', 'python3'))
             # Versioned frameworks, newest first, for a bundle whose
             # `Current` symlink is missing or broken.
             globber = kw.get('globber', glob.glob)
             cands.extend(sorted(
-                (os.path.join(v, 'bin', 'python3')
-                 for v in globber(os.path.join(fw, '3.*'))),
+                (posixpath.join(v, 'bin', 'python3')
+                 for v in globber(posixpath.join(fw, '3.*'))),
                 key=lambda p: version_key(p), reverse=True))
         else:
             for name in ('python3', 'python'):
-                cands.append(os.path.join(root, 'bin', name))
+                cands.append(posixpath.join(root, 'bin', name))
     cands.append('/usr/bin/python3')   # distro KiCad ships pcbnew here
     seen, out = set(), []
     for c in cands:

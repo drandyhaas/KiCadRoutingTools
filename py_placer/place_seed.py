@@ -31,6 +31,7 @@ import sys
 
 def main():
     import routing_defaults as defaults
+    from placement.cli_gates import add_intent_arg
 
     p = argparse.ArgumentParser(
         description="Intent-driven initial placement for an unplaced board.",
@@ -41,9 +42,9 @@ Examples:
 """)
     p.add_argument("input_file", help="Input KiCad PCB (unplaced parts + outline)")
     p.add_argument("output_file", help="Output board with the seeded placement")
-    p.add_argument("--intent", required=True, metavar="JSON",
-                   help="Floorplan intent: the constraint source AND the "
-                        "acceptance gate for the emitted seed")
+    add_intent_arg(p, required=True, extra=(
+        "Here it is also the CONSTRUCTION source for the seed and the "
+        "acceptance gate the emitted seed is graded against."))
     p.add_argument("--seed", type=int, default=0,
                    help="Packing-order/jitter seed; same seed reproduces byte "
                         "for byte (default: 0)")
@@ -463,9 +464,16 @@ Examples:
         # polished by the objective the later steps rank with. Locks ride in
         # from the file (must_lock was just stamped); edge connectors are
         # locked per-call so the polish cannot walk them off their band.
-        # edge_claims(), not edge_connectors: a connector_affinity entry
-        # makes no seat claim and must not be locked out of the polish.
-        edge_refs = [c['ref'] for c in intent.edge_claims()]
+        # #702: edge_claims(), must_lock and the declared zones all now
+        # ride in through `intent_gate`, resolved by the ONE function
+        # every quenching CLI uses. The edge_claims()-not-edge_connectors
+        # filter that used to live here moved with it -- see
+        # `floorplan.resolve_intent_gate`, which is the point: a filter
+        # that must be remembered at each call site is one that will be
+        # forgotten at the next.
+        from placement.cli_gates import resolve_intent_gate_for_cli
+        _gate, _ = resolve_intent_gate_for_cli(
+            intent, pcb_seeded, sources, args.intent)
         placements = quench(
             pcb_seeded, pcb_file=args.output_file,
             max_displacement=args.max_displacement,
@@ -474,7 +482,7 @@ Examples:
             crossing_penalty=30.0, length_weight=0.3, halo_base=0.5,
             halo_coef=0.15, halo_weight=2.0, edge_halo=2.0, edge_weight=2.0,
             ignore_nets=args.ignore_nets,
-            lock_refs=edge_refs or None, metrics_out=ratsnest,
+            metrics_out=ratsnest, intent_gate=_gate,
             corridor_weight=args.corridor_weight,
             corridor_specs=list((intent.health or {}).get('bus_corridors')
                                 or ()) or None)
