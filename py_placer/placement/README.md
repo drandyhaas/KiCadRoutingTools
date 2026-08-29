@@ -276,10 +276,11 @@ part could never be re-seated whatever the search found. So:
 - **Safety is TERM-WISE, not lexicographic.** Every gate term must not worsen
   except `hpwl`, the one licensed term — a seat made for a declared reason is
   hpwl-worse *by construction*, for the same reason `exempt` gives above.
-  Measured on #698's fixture: escaping the declared keep-out costs +11.372 mm of
-  hpwl on 20 of 20 seeds, so a lexicographic `after <= before` refuses exactly
-  the case the change exists for. `oob` stays hard but is no longer required to
-  *improve*, and that one asymmetry is the whole bug.
+  Measured on #698's fixture, swept over 20 seeds: escaping the declared
+  keep-out costs hpwl on **20 of 20** — 6.82 to 12.39 mm, a different value per
+  seed, since the seat search is seeded — so a lexicographic `after <= before`
+  refuses exactly the case the change exists for. `oob` stays hard but is no
+  longer required to *improve*, and that one asymmetry is the whole bug.
 - **A separate trigger.** At least one basis in `RESEAT_BASES` must strictly
   improve: the six hard gate terms, the scope's own HPWL, and the count of
   breached declared claims. All are reported in `accept_basis` whether they
@@ -298,15 +299,26 @@ part could never be re-seated whatever the search found. So:
   catches every mis-move it caught before and stays monotone, now on
   `(tuple, intent vector)` jointly. Kept moves are named in a `prune: KEPT …`
   note.
-- **`--reseat-min-gain` (mm) gates the HPWL basis only.** Count bases threshold
-  at one whole defect; one number compared against both currencies would assert
-  an exchange rate between half a millimetre of wire and half a keep-out
-  violation. The default is **0.0**, and that is measured rather than assumed:
-  over 16 explicit re-seats on four corpus boards the gains are bimodal with no
-  middle — 10 are *exactly* 0.000 (the search re-seats the part where it already
-  was) and the 6 real relocations run 1.004 to 19.875 mm. A shuffle does not
-  produce a small positive gain here, so a non-zero floor would buy nothing and
-  could reject a genuine small win.
+- **`--reseat-min-gain` (mm) gates the `scope_hpwl` basis only.** Count bases
+  threshold at one whole defect; one number compared against both currencies
+  would assert an exchange rate between half a millimetre of wire and half a
+  keep-out violation. The other continuous bases are floored at
+  `MEASURE_QUANTUM` instead, because `reconstruct.measure` rounds them to 4
+  decimals and a "gain" at or below that is rounding — measured before that
+  floor existed, an `overlap` gain of 1e-4 mm² fired and bought a 50 mm hpwl
+  blow-up.
+
+  The default is **0.0**, from `tests/measure_698_min_gain.py` (16 explicit
+  re-seats on four corpus boards, parts chosen by pad count so the sample cannot
+  be fitted to the conclusion). **Read that script's `pre_prune` column before
+  quoting it**: the gains look bimodal — 10 exactly 0.000, and 6 running 1.004
+  to 19.875 mm — but 9 of the 10 zeros are seats `prune_assignment` REVERTED
+  (the search relocated by tens of millimetres to an hpwl-worse pose, so `after`
+  is the restored input pose), and only one is a genuine no-op. The bimodality
+  is therefore partly structural: anything surviving prune has improved hpwl by
+  construction. What the sample does support is narrower and still sufficient —
+  among the re-seats that reach the gate, the smallest gain is ~1 mm, so a
+  non-zero default would buy nothing here while risking a genuine small win.
 
 Requires an Edge.Cuts outline (exit 3 without one — the outline is spec-owned
 and will not be invented) and refuses a board that already looks placed

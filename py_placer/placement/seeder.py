@@ -2672,10 +2672,19 @@ RESEAT_BASIS_UNITS = {'locked_contacts': 'count', 'pad_pairs': 'count',
 #: it is not also a basis: a seat made for a declared reason is hpwl-worse BY
 #: CONSTRUCTION, because hpwl is the netlist proxy the declaration overrules.
 #: `placement/README.md` says it in the same words for the evicted-part
-#: exemption -- "an edge-class seat is hpwl-worse BY DESIGN". Measured on #698's
-#: own fixture: escaping keep-out `hot` costs +0.812 mm of hpwl, so any rule
-#: that forbids hpwl rising refuses exactly the case this exists for.
+#: exemption -- "an edge-class seat is hpwl-worse BY DESIGN". Measured on
+#: `tests/test_698_reseat_acceptance.py`'s keep-out fixture, swept over 20
+#: seeds: escaping keep-out `hot` costs hpwl on 20 of 20 (6.82 to 12.39 mm --
+#: a different value per seed, since the seat search is seeded), so any rule
+#: that forbids hpwl rising refuses exactly the case this exists for. `arm_B`
+#: computes that counterfactual rather than asserting it.
 RESEAT_LICENSED_TERM = 'hpwl'
+
+#: The smallest change `reconstruct.measure` can express. It rounds every
+#: continuous term to 4 decimals, so a "gain" at or below this is rounding, not
+#: a measurement -- and the continuous legality bases are not gated by
+#: `--reseat-min-gain`, so nothing else would stop noise from carrying a pass.
+MEASURE_QUANTUM = 1e-4
 
 
 def reseat_safety_ok(before: Sequence[float],
@@ -2708,12 +2717,21 @@ def reseat_safety_ok(before: Sequence[float],
 
 
 def scope_hpwl(state, refs) -> float:
-    """HPWL over the nets a scope ref has a pad on (mm).
+    """HPWL over the NETS a scope ref has a pad on (mm).
 
-    Scope-restricted rather than the tuple's board-wide `hpwl`, for one
-    measured reason: at `--evict-depth >= 1` the pass also moves parts OUTSIDE
-    its scope, so a board-wide delta can be carried by an evicted part while
-    the ref the operator named got worse. The pass is judged on its scope.
+    Narrower than the tuple's board-wide `hpwl`, which is the point: a net that
+    touches no scope ref cannot move in this pass, so including it only adds a
+    constant that hides the signal.
+
+    It is NOT "the scope's own contribution", and the difference matters at
+    `--evict-depth >= 1`. The sum runs over every pad on those nets, so an
+    evicted neighbour sharing a net with the scope can supply part or all of
+    the gain while the ref the operator named got worse. Measured on the
+    `plain_board` fixture with scope `{U1}`, moving only CON2: `scope_hpwl`
+    62.0 -> 8.0. What stops that being a licence is elsewhere -- the intent
+    probe covers the whole board (see `reseat_scope`), and
+    `eviction_licence_ok` refuses any eviction that raised stacks or overlap --
+    not this function, which is only a wirelength number over a net set.
     """
     nets = set()
     for r in refs:
@@ -2736,6 +2754,36 @@ def reseat_bases(gate: Sequence[float], intent_count: int,
     out['intent'] = intent_count
     out['scope_hpwl'] = hpwl_scope
     return out
+
+
+def basis_skeleton(scope_source: str, *, policy: str,
+                   witnesses_before=(), witnesses_after=(),
+                   hpwl_before: float = 0.0, hpwl_after: float = 0.0,
+                   min_gain: float = 0.0) -> Dict:
+    """The `accept_basis` key set, in ONE place.
+
+    Every return path of `reseat_scope` -- the seated one, the early-out, and
+    both policies -- carries the same keys because they all come from here. The
+    early-out used to hand back 6 of the 15 under a comment promising parity,
+    which `reseat_refusal_note` then KeyError'd on: exactly the schema split
+    that early-out's own census keys exist to prevent, one field down.
+    """
+    return {
+        'scope_source': scope_source,
+        'policy': policy,
+        'witness_ok': True,
+        'witnesses_before': len(witnesses_before),
+        'witnesses_after': len(witnesses_after),
+        'hpwl_before': hpwl_before, 'hpwl_after': hpwl_after,
+        'hpwl_delta': round(hpwl_after - hpwl_before, 3),
+        'min_gain': float(min_gain), 'min_gain_units': 'mm',
+        'min_gain_applies_to': 'scope_hpwl',
+        'fired': None, 'terms': [],
+        # Measured-and-clean must not look like never-measured: a path that
+        # does not run these leaves them None rather than reporting a clean
+        # pass over nothing.
+        'safety': None, 'intent_licence': None,
+    }
 
 
 def reseat_accept(before: Sequence[float], after: Sequence[float], *,
@@ -2769,20 +2817,11 @@ def reseat_accept(before: Sequence[float], after: Sequence[float], *,
     _hp = _recon.GATE_TERMS.index(RESEAT_LICENSED_TERM)
     witness_ok = len(witnesses_after) <= len(witnesses_before)
 
-    basis: Dict = {
-        'scope_source': scope_source,
-        'witness_ok': witness_ok,
-        'witnesses_before': len(witnesses_before),
-        'witnesses_after': len(witnesses_after),
-        'hpwl_before': before[_hp], 'hpwl_after': after[_hp],
-        'hpwl_delta': round(after[_hp] - before[_hp], 3),
-        'min_gain': float(min_gain), 'min_gain_units': 'mm',
-        'min_gain_applies_to': 'scope_hpwl',
-        'fired': None, 'terms': [],
-        # Measured-and-clean must not look like never-measured: the auto path
-        # leaves these None rather than reporting an empty pass.
-        'safety': None, 'intent_licence': None,
-    }
+    basis = basis_skeleton(
+        scope_source, policy='', witnesses_before=witnesses_before,
+        witnesses_after=witnesses_after, hpwl_before=before[_hp],
+        hpwl_after=after[_hp], min_gain=min_gain)
+    basis['witness_ok'] = witness_ok
 
     if scope_source != 'explicit':
         basis['policy'] = 'auto:oob-strict'
@@ -2817,10 +2856,24 @@ def reseat_accept(before: Sequence[float], after: Sequence[float], *,
         gated = (name == 'scope_hpwl')
         if units == 'count':
             ok = gain >= 1
-        elif gated:
-            ok = gain > max(abs(float(min_gain)), 1e-9)
+        elif gated and min_gain:
+            # `>=`, not `>`. The flag's help calls it "the smallest win that
+            # COUNTS as a re-seat", and `scope_hpwl` is quantised to 3dp, so
+            # exact equality with a round threshold is the common case rather
+            # than a corner: `--reseat-min-gain 0.5` refusing a gain of 0.5
+            # would be the flag not doing what it says.
+            ok = gain >= float(min_gain) - 1e-9
         else:
-            ok = gain > 1e-9
+            # `MEASURE_QUANTUM`, not an epsilon. `reconstruct.measure` rounds
+            # every continuous term to 4dp, so a gain at or below that is not
+            # a measurement -- and these bases are ungated by `min_gain`, so
+            # nothing else stops noise from carrying a pass. Measured before
+            # this floor existed: `overlap 0.5000 -> 0.4999` (1e-4) fired and
+            # bought an hpwl blow-up of 50mm, which the licence permits
+            # because hpwl is licensed. Run 4 demoted `overlap` below `hpwl`
+            # in GATE_TERMS because 0.73mm2 of kiss had vetoed a 44mm
+            # homecoming; 0.0001mm2 should certainly not buy one.
+            ok = gain > MEASURE_QUANTUM
         first = ok and fired is None
         if first:
             fired = name
@@ -2850,6 +2903,16 @@ def reseat_refusal_note(n_scope: int, basis: Dict) -> str:
     reason sends the reader to fix the wrong thing.
     """
     head = f"REVERTED: re-seating {n_scope} part(s) was refused"
+    # FIRST, on BOTH policies. `reseat_scope` sets this flag on either scope,
+    # and the auto branch below returns -- so an evicted auto pass used to
+    # print "the off-board amount strictly improves (9.65 -> 0.0) and the
+    # witness count does not grow (2 -> 0)" as its REASON for refusing, with
+    # both conjuncts visibly satisfied in the sentence stating them. That is
+    # the defect this function exists to prevent, one branch over.
+    if basis.get('eviction_licence') is False:
+        return (f"{head}: the eviction licence -- moving parts outside the "
+                f"scope raised the stack count or the overlap area. See the "
+                f"note above for the figures.")
     if basis.get('policy') == 'auto:oob-strict':
         t = (basis.get('terms') or [{}])[0]
         return (f"{head}: on the AUTO scope the rule is that the off-board "
@@ -2860,8 +2923,6 @@ def reseat_refusal_note(n_scope: int, basis: Dict) -> str:
                 f"required: the gate tuple is lexicographic, so a large oob "
                 f"win would hide a new stack or an hpwl blow-up below it, and "
                 f"a sideways move that changes neither is not a re-seat.")
-    if basis.get('eviction_licence') is False:
-        return (f"{head}: the eviction licence. See the note above.")
     if not basis.get('witness_ok', True):
         return (f"{head}: the off-outline part count GREW "
                 f"({basis.get('witnesses_before')} -> "
@@ -2968,18 +3029,34 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
          `evidenced=scope` (a part coming back onto the board is gate-neutral
          on several terms by construction, exactly like the mounting-hole
          homecoming that rule was written for).
-      3. A pass-specific conjunct the tuple cannot express: `oob` must STRICTLY
-         improve AND the witness count must not rise. The tuple's lexicographic
-         comparison stops at the first differing term, and a re-seat moves
-         `oob` (index 3) hugely in its own favour -- which would HIDE a new
-         stack, an hpwl blow-up or piled-on overlap below it. This conjunct is
-         what stops the pass 'succeeding' by moving a part sideways.
+      3. A pass-specific conjunct the tuple cannot express, and it depends on
+         `scope_source` (#698). See `reseat_accept`, which is the rule; in
+         outline:
+
+         * **AUTO scope** -- unchanged: `oob` must STRICTLY improve AND the
+           witness count must not rise. The tuple's lexicographic comparison
+           stops at the first differing term, and this pass moves `oob`
+           (index 3) hugely in its own favour, which would HIDE a new stack,
+           an hpwl blow-up or piled-on overlap below it.
+         * **EXPLICIT scope** -- the same rule is unsatisfiable here, because a
+           part that is legal and ON the board cannot move `oob` at all, so an
+           explicitly named ref could never be re-seated whatever the search
+           found. Instead: the witness count must not rise, no HARD gate term
+           may worsen (`hpwl` is the one licensed term -- a seat made for a
+           declared reason is hpwl-worse by construction), no declared claim
+           may worsen termwise, and at least one basis in `RESEAT_BASES` must
+           strictly improve. What stops a sideways move 'succeeding' is that
+           `oob` is no longer the only thing measured, not that it is required.
 
     Returns `{'moves', 'reseated', 'refused', 'unseated', 'evicted', 'scope',
     'scope_source', 'notes', 'gate_before', 'gate_after', 'accepted',
-    'witnesses_before', 'witnesses_after', 'edge_bands_dropped', 'pruned'}`.
+    'accept_basis', 'witnesses_before', 'witnesses_after',
+    'edge_bands_dropped', 'pruned'}`.
     `reseated` stays the SCOPE parts that moved; an evicted part is not a
-    re-seat and is counted separately.
+    re-seat and is counted separately. `accept_basis` is the whole verdict --
+    which basis carried the pass, what the safety half saw, and every basis
+    that did not fire -- and it is present on EVERY return path, including the
+    empty-scope early-out.
 
     NOT `placement/reseat.py`, which is a different mechanism for a different
     problem (Hungarian re-assignment of a proximity-tethered decap cluster onto
@@ -3051,6 +3128,7 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
 
     def _empty(reason: str) -> Dict:
         notes.append(reason)
+        _empty_gate = _recon.measure(state, edge_bands or {})
         return {'moves': [], 'reseated': [], 'refused': sorted(refused),
                 'intent_used': intent,
                 'unseated': [], 'scope': [], 'scope_source': scope_source,
@@ -3063,16 +3141,20 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
                 'no_pose_blockers': {}, 'no_pose_verdict': {},
                 'no_pose_census': {}, 'evicted': [],
                 'evictions': 0, 'evictions_reverted': 0,
-                'gate_before': list(_recon.measure(state, edge_bands or {})),
-                'gate_after': list(_recon.measure(state, edge_bands or {})),
+                'gate_before': list(_empty_gate),
+                'gate_after': list(_empty_gate),
                 # #698: the SAME keys as the seated path, for the reason the
                 # census keys above are here -- a consumer that reads
                 # `accept_basis` on one path and KeyErrors on the other is the
-                # schema split this early-out already shipped once.
-                'accept_basis': {'scope_source': scope_source,
-                                 'policy': 'empty', 'fired': None,
-                                 'terms': [], 'safety': None,
-                                 'intent_licence': None},
+                # schema split this early-out already shipped once. Built from
+                # the shared skeleton so the promise is structural, not a
+                # literal someone has to keep in step.
+                'accept_basis': basis_skeleton(
+                    scope_source, policy='empty',
+                    witnesses_before=witnesses_before,
+                    witnesses_after=witnesses_before,
+                    hpwl_before=_empty_gate[_recon.GATE_TERMS.index('hpwl')],
+                    hpwl_after=_empty_gate[_recon.GATE_TERMS.index('hpwl')]),
                 'accepted': True, 'pruned': [],
                 'witnesses_before': sorted(witnesses_before),
                 'witnesses_after': sorted(witnesses_before),
@@ -3164,7 +3246,16 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
             # Reported, never dropped: a block that resolves to nothing gates
             # nobody and looks identical to a gate that is working.
             notes.append(f"intent gate: [{_v.rule}] {_v.message}")
-        probe = _q.IntentProbe(state, zones=_bundle['zones'], refs=scope)
+        # The WHOLE BOARD, not `refs=scope`. The scope is not the set of parts
+        # this pass can move: at `--evict-depth >= 1` it trades out neighbours
+        # nobody named, and those refs are not known until `seed_from_intent`
+        # has run -- after the "before" snapshot has to be taken. Scoped to the
+        # named refs, the licence could not see an evicted stranger pushed INTO
+        # a keep-out: the scope ref's own escape fires the `intent` basis, no
+        # gate term moves, and the pass is accepted having created the
+        # violation it was run to remove. Only claim-bound refs get terms, so
+        # on a board that declares nothing this is still empty.
+        probe = _q.IntentProbe(state, zones=_bundle['zones'])
 
     # ---- seat ---------------------------------------------------------------
     before = _recon.measure(state, gate_bands)

@@ -18,10 +18,20 @@ optimizer, which makes the control circular. Here the answer is a theorem.
 **The KEEPOUT fixture's hpwl cost is a theorem, and that was measured the hard
 way.** Every net is a 2-pad net between U1 and a partner; both partners sit
 strictly INSIDE the keep-out rect, so any pose that clears the rect is strictly
-farther from both. The first version of this fixture put the partners outside,
-where their bounding box CONTAINED most escape poses -- hpwl was flat and prune
-reverted on only 9 of 20 seeds, so `pruned == ['U1']` would have been a
-seed-0 accident asserted as a property. `arm_M_seed_independence` pins it.
+farther from both. Swept over 20 seeds on the fixture as it stands: hpwl is
+worse on **20 of 20** (6.82 to 12.39 mm -- a different value per seed, since
+the seat search is seeded; 11.372 at seed 0), prune reverts on 20 of 20 without
+the probe, and the pass is accepted on 20 of 20 with it.
+
+The first version of this fixture put the partners at (3,3) and (17,9), OUTSIDE
+the rect, where their bounding box contained most escape poses. HPWL was flat at
+39.2 and prune reverted on **9 of 20** seeds -- so on the other 11 the seat
+survived prune and only the acceptance gate refused it, and `pruned == ['U1']`
+would have been a seed-0 accident asserted as a property. (That measurement was
+taken at the time and the fixture has since been replaced, so it is not
+re-derivable from this tree; the rebuild moved the partners, halved U1's
+courtyard and added the keep-out's `allow` list.) `arm_M_seed_independence` is
+what stops it recurring.
 
 Mutation battery: `tests/mutate_698.py` -- **32 rows: 30 killed, 2 survived
 (both recorded with their reason), 0 broken, 0 disagreeing with expectation.**
@@ -513,11 +523,34 @@ def arm_H_seat_gate_stays_disarmed(wd):
 
     # A source guard, because the tempting "simplification" is to hand
     # `intent_zones=` to make_state and re-open the bug pose_score describes.
+    #
+    # Asserted on the SHAPE, not on the absence of a token. The first version
+    # was `'intent_zones=' not in src` over the whole file, which is both too
+    # broad (a comment mentioning the token fails it) and too weak (`**kw`, an
+    # alias, or `intent_zones =` with spaces passes it). Walk the AST and look
+    # at what `pose_score.make_state` is actually CALLED with.
+    import ast
     src = open(os.path.join(REPO, 'py_placer', 'placement', 'seeder.py'),
                encoding='utf-8').read()
-    check("seeder.py never passes intent_zones= to a state factory",
-          'intent_zones=' not in src,
-          "0 occurrences -- see pose_score.make_state's own comment")
+    calls, offenders, starstar = 0, [], 0
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (isinstance(fn, ast.Attribute) and fn.attr == 'make_state'):
+            continue
+        calls += 1
+        for kw in node.keywords:
+            if kw.arg is None:
+                starstar += 1           # **kw could smuggle it in
+            elif kw.arg == 'intent_zones':
+                offenders.append(node.lineno)
+    check("seeder.py calls pose_score.make_state at all", calls > 0,
+          f"{calls} call site(s) found by AST")
+    check("and no call passes intent_zones=", not offenders,
+          f"offending lines: {offenders or 'none'}")
+    check("and none of them splats **kwargs, which could smuggle it in",
+          starstar == 0, f"{starstar} **kwargs splat(s)")
     qsrc = open(os.path.join(REPO, 'py_placer', 'placement', 'quench.py'),
                 encoding='utf-8').read()
     cls = qsrc[qsrc.index('class IntentProbe'):qsrc.index('def rect_gap')
@@ -887,6 +920,96 @@ def arm_R_prune_still_reverts_a_claim_bound_part(wd):
           abs(st.parts['U1'].x - home[0]) < 1e-9, f"x={st.parts['U1'].x}")
 
 
+def arm_S_review_findings(wd):
+    """Every defect the pre-push review found, pinned so it cannot come back.
+
+    All five were in code this change added, and none was reachable from the
+    behavioural arms above -- which is the argument for the review, not against
+    the arms.
+    """
+    print("--- S: the pre-push review's findings, pinned")
+    idx = reconstruct.GATE_TERMS.index
+    base = [0, 0, 0.0, 0.0, 0, 10.0, 0.0]
+    bb = {n: 0.0 for n in seeder.RESEAT_BASES}
+
+    # SF-1: an evicted AUTO pass used to print both conjuncts as SATISFIED in
+    # the sentence giving them as the reason for refusing.
+    _ok, ab = seeder.reseat_accept(
+        [0, 0, 0.0, 9.65, 0, 10.0, 0.0], [0, 0, 0.0, 0.0, 0, 10.0, 0.0],
+        scope_source='auto:damage_witnesses',
+        witnesses_before=['A', 'B'], witnesses_after=[])
+    ab['eviction_licence'] = False
+    note = seeder.reseat_refusal_note(1, ab)
+    check("SF-1: an evicted auto refusal blames the eviction licence",
+          'eviction licence' in note and 'strictly improves' not in note,
+          note[:100])
+
+    # SF-2: `_empty`'s basis must carry the seated path's key set, or
+    # `reseat_refusal_note` KeyErrors on it.
+    b = keepout_board(wd, 's')
+    _p, it = keepout_intent(wd, 's')
+    seated = reseat(b, it, ['U1'])
+    empty = reseat(b, it, ['NOSUCHREF*'])
+    missing = sorted(set(seated['accept_basis']) - set(empty['accept_basis']))
+    check("SF-2: the early-out's accept_basis has the same keys", not missing,
+          f"missing={missing or 'none'} ({len(empty['accept_basis'])} keys)")
+    try:
+        seeder.reseat_refusal_note(0, empty['accept_basis'])
+        note_ok = True
+    except KeyError as e:                                    # noqa: BLE001
+        note_ok = f"KeyError {e}"
+    check("SF-2: and the refusal note renders against it", note_ok is True,
+          str(note_ok))
+
+    # SF-3: a gain of EXACTLY --reseat-min-gain must count; the help calls it
+    # "the smallest win that counts".
+    ba = dict(bb, scope_hpwl=-0.5)          # gain of exactly 0.5
+    for mg, want in ((0.5, True), (0.5001, False)):
+        ok, _ = seeder.reseat_accept(
+            base, list(base), scope_source='explicit',
+            witnesses_before=[], witnesses_after=[],
+            bases_before=bb, bases_after=ba, min_gain=mg)
+        check(f"SF-3: gain 0.5 against --reseat-min-gain {mg} -> "
+              f"{'accept' if want else 'refuse'}", ok is want, f"accepted={ok}")
+
+    # N-1: a continuous legality basis must not fire on rounding noise.
+    for delta, want in ((1e-4, False), (2e-3, True)):
+        ok, _ = seeder.reseat_accept(
+            base, list(base), scope_source='explicit',
+            witnesses_before=[], witnesses_after=[],
+            bases_before=dict(bb, overlap=0.5),
+            bases_after=dict(bb, overlap=0.5 - delta))
+        check(f"N-1: an overlap gain of {delta:g} mm2 -> "
+              f"{'accept' if want else 'refuse'}", ok is want,
+              f"accepted={ok} (MEASURE_QUANTUM={seeder.MEASURE_QUANTUM})")
+
+    # SF-4: the KEPT note must not credit the probe for a revert the TUPLE
+    # refused on its own.
+    pcb = parse_kicad_pcb(b)
+    bundle, _pr = floorplan.resolve_intent_gate(it, pcb, ())
+    import pose_score
+    st = pose_score.make_state(pcb, b, clearance=0.2,
+                               board_edge_clearance=0.5, grid_step=0.1,
+                               keepouts=it.keepouts)
+    probe = q.IntentProbe(st, zones=bundle['zones'])
+    # `old` = a pose FARTHER from U1's partners than where it stands, so the
+    # tuple does not want the revert; U1 is clear of the keep-out either way.
+    st.apply_move('U1', 13.5, 6.0, 0.0)
+    notes = []
+    pruned = reconstruct.prune_assignment(
+        st, {'U1': (18.0, 11.0, 0.0)}, notes, edge_bands={},
+        intent_probe=probe.terms)
+    check("SF-4: the tuple declines the revert", pruned == [], f"{pruned}")
+    check("SF-4: and no note credits the intent probe for it",
+          not any('KEPT' in n for n in notes), f"notes={notes}")
+
+    # SF-6a: the probe covers the whole board, not just the named scope, so an
+    # EVICTED stranger cannot be pushed into a keep-out unseen.
+    check("SF-6a: the probe binds every claim-bound ref, not only the scope",
+          set(probe.spec) >= {'U1'} and probe.refs == tuple(sorted(st.parts)),
+          f"probe.refs={probe.refs}")
+
+
 def main():
     with tempfile.TemporaryDirectory() as wd:
         arm_A_keepout_accepted(wd)
@@ -907,6 +1030,7 @@ def main():
         arm_P_end_to_end_cli(wd)
         arm_Q_the_conjuncts_compose(wd)
         arm_R_prune_still_reverts_a_claim_bound_part(wd)
+        arm_S_review_findings(wd)
     print(f"\n{passed}/{passed + failed} checks passed")
     return 1 if failed else 0
 

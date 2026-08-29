@@ -1039,15 +1039,21 @@ def prune_assignment(state, old: Dict[str, Tuple[float, float, float]],
         state.apply_move(ref, x, y, rot)
         after = measure(state, edge_bands)
         after_intent = intent_probe(ref) if intent_probe is not None else ()
-        # 1e-9: the same tolerance `seeder.eviction_licence_ok` uses. One pass
-        # must not carry two.
-        undoes_intent = any(a > b + 1e-9
+        # `legality.EPS`, the same tolerance `quench.IntentProbe.licence` uses
+        # for the same question -- "did a declared term RISE". One pass must
+        # not answer it two ways.
+        undoes_intent = any(a > b + legality.EPS
                             for a, b in zip(after_intent, base_intent))
-        if not undoes_intent and (after < base
-                                  or (after == base and ref not in evidenced)):
+        wanted = (after < base or (after == base and ref not in evidenced))
+        if not undoes_intent and wanted:
             pruned.append(ref)
         else:
-            if undoes_intent:
+            # `and wanted`: without it this credits the probe for every revert
+            # the TUPLE refused on its own, so a part the sweep was never going
+            # to touch is reported as "a declared claim justifies it". A note
+            # that overstates what the new conjunct did is how the conjunct
+            # comes to look load-bearing when it is inert.
+            if undoes_intent and wanted:
                 held.append(ref)
             state.apply_move(ref, *cur)
     if notes is not None and pruned:

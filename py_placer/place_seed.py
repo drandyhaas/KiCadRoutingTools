@@ -306,7 +306,14 @@ Examples:
                       f"{_t.get('before')} -> {_t.get('after')} "
                       f"({_t.get('units')}); {_ab.get('policy')}")
             elif _ab.get('policy') == 'explicit:one-term-strict':
-                print("  no basis fired: " + ", ".join(
+                # "would have fired", never "no basis fired": on a safety or
+                # licence refusal the top-level `fired` is None by design while
+                # a term still carries `first`, and printing "no basis fired"
+                # then contradicts the record right beside it.
+                _first = next((t['term'] for t in (_ab.get('terms') or [])
+                               if t.get('first')), None)
+                print(("  refused despite " + _first + " improving: "
+                       if _first else "  no basis improved: ") + ", ".join(
                     f"{t['term']} {t['before']}->{t['after']}"
                     for t in (_ab.get('terms') or [])))
             summary.update({

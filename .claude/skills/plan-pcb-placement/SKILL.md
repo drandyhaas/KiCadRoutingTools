@@ -83,8 +83,11 @@ grow, no hard gate term got worse, no declared claim got worse, and one
 scope-relevant basis strictly improved; `hpwl` is the one term it is licensed to
 pay, because a seat made for a declared reason is hpwl-worse by construction.
 `--reseat-min-gain MM` raises the bar on the wirelength basis only (the count
-bases threshold at one whole defect); the default 0 already rejects a shuffle,
-which measures as *exactly* zero rather than as a small win.
+bases threshold at one whole defect). The default is 0: measured over 16
+explicit re-seats on four corpus boards, every gain that reached the gate was
+≥1 mm, so a floor would buy nothing there — see `tests/measure_698_min_gain.py`,
+and read its `pre_prune` column rather than the headline, because most of the
+zero rows are seats the prune sweep reverted rather than shuffles.
 
 #### When a part will not seat, read the verdict before reaching for a hammer
 

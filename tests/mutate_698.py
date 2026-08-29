@@ -265,6 +265,53 @@ ROWS = [
      "        items = self.net_refs.items()\n",
      (T698,), 'KILLED'),
 
+    # ---- the pre-push review's findings ------------------------------------
+    ('the-auto-branch-outranks-the-eviction-licence', 's',
+     "    if basis.get('eviction_licence') is False:\n"
+     "        return (f\"{head}: the eviction licence -- moving parts outside "
+     "the \"\n"
+     "                f\"scope raised the stack count or the overlap area. See "
+     "the \"\n"
+     "                f\"note above for the figures.\")\n",
+     "",
+     (T698,), 'KILLED'),
+
+    ('the-empty-basis-goes-back-to-a-literal', 's',
+     "                'accept_basis': basis_skeleton(\n"
+     "                    scope_source, policy='empty',\n"
+     "                    witnesses_before=witnesses_before,\n"
+     "                    witnesses_after=witnesses_before,\n"
+     "                    hpwl_before=_empty_gate[_recon.GATE_TERMS.index("
+     "'hpwl')],\n"
+     "                    hpwl_after=_empty_gate[_recon.GATE_TERMS.index("
+     "'hpwl')]),\n",
+     "                'accept_basis': {'scope_source': scope_source,\n"
+     "                                 'policy': 'empty', 'fired': None,\n"
+     "                                 'terms': [], 'safety': None,\n"
+     "                                 'intent_licence': None},\n",
+     (T698,), 'KILLED'),
+
+    ('min_gain-refuses-a-gain-of-exactly-min_gain', 's',
+     "            ok = gain >= float(min_gain) - 1e-9\n",
+     "            ok = gain > float(min_gain)\n",
+     (T698,), 'KILLED'),
+
+    ('a-continuous-basis-fires-on-rounding-noise', 's',
+     "            ok = gain > MEASURE_QUANTUM\n",
+     "            ok = gain > 1e-9\n",
+     (T698,), 'KILLED'),
+
+    ('the-KEPT-note-credits-the-probe-for-every-held-revert', 'r',
+     "            if undoes_intent and wanted:\n",
+     "            if undoes_intent:\n",
+     (T698,), 'KILLED'),
+
+    ('the-probe-goes-back-to-the-named-scope-only', 's',
+     "        probe = _q.IntentProbe(state, zones=_bundle['zones'])\n",
+     "        probe = _q.IntentProbe(state, zones=_bundle['zones'], "
+     "refs=scope)\n",
+     (T698,), 'KILLED'),
+
     # ---- reporting ---------------------------------------------------------
     ('accept_basis-never-names-the-winner', 's',
      "    basis['fired'] = fired if accepted else None\n",
