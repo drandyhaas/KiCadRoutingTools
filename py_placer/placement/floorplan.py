@@ -983,6 +983,37 @@ def zone_fits_courtyard(zone_rect, part_rect, tol: float) -> bool:
            (h <= zw + 1e-9 and w <= zh + 1e-9)
 
 
+def zone_escape(zone_rect, part_rect, anchor: bool) -> Tuple[float, str]:
+    """How far `part_rect` is outside `zone_rect`, in mm, and on which side.
+    Exactly 0.0 when contained.
+
+    THE zone measurement, shared by `rule_zone_containment` and the quench's
+    intent gate (#702), for the reason `keepout_hit`'s docstring gives about
+    the keep-out one: a pose the optimizer accepts that the grade then flags is
+    an exit 4 on a board this tool placed itself, and two implementations of
+    "outside its zone" is how that happens.
+
+    `anchor` selects the spec-COORDINATE branch -- grade the courtyard CENTRE,
+    because a zone smaller than the courtyard cannot contain it at any
+    rotation. The CALLER passes the decision `zone_fits_courtyard` makes,
+    because it is pose-INVARIANT (it reads only w/h, and tests both orders) and
+    a per-pose gate must resolve it once per part rather than once per
+    candidate pose.
+
+    Note what this is NOT: `seeder.zone_gate`'s anchor branch tests the
+    footprint ORIGIN (x, y), not the courtyard centre. The two differ by
+    (b[0]+b[2])/2, and `_feasible_centre_box` records how much that is -- 17 of
+    65 parts on splitflap_driver and 6 of 89 on tigard have an offset centre,
+    up to 10.15mm on tigard J3. A gate built on the seeder's predicate would
+    admit, by up to 10mm, poses this rule flags.
+    """
+    if anchor:
+        cx = (part_rect[0] + part_rect[2]) / 2.0
+        cy = (part_rect[1] + part_rect[3]) / 2.0
+        return _rect_escape(zone_rect, (cx, cy, cx, cy))
+    return _rect_escape(zone_rect, part_rect)
+
+
 def rule_zone_containment(ctx) -> Iterator[Violation]:
     for z in ctx.intent.blocks:
         if z.rect is None:
@@ -994,9 +1025,7 @@ def rule_zone_containment(ctx) -> Iterator[Violation]:
                 continue
             if not zone_fits_courtyard(z.rect, part.rect, tol):
                 # Spec-coordinate zone: grade the part's CENTER against it.
-                cx = (part.rect[0] + part.rect[2]) / 2.0
-                cy = (part.rect[1] + part.rect[3]) / 2.0
-                out, axis = _rect_escape(z.rect, (cx, cy, cx, cy))
+                out, axis = zone_escape(z.rect, part.rect, True)
                 if out > tol:
                     yield Violation(
                         rule='zone_containment',
@@ -1011,7 +1040,7 @@ def rule_zone_containment(ctx) -> Iterator[Violation]:
                                   'anchor_graded': True},
                         expected={'zone': list(z.rect), 'tolerance_mm': tol})
                 continue
-            out, axis = _rect_escape(z.rect, part.rect)
+            out, axis = zone_escape(z.rect, part.rect, False)
             if out > tol:
                 yield Violation(
                     rule='zone_containment',
