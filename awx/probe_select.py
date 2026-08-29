@@ -63,8 +63,14 @@ for nm in names:
     menu[nm] = em.enumerate_moves(pad, grid, LAYERS, clear, vclear)
     launch[nm] = ends[nm][0]
 
+grid0 = em.grid_of(pcb.footprints[ends[names[0]][2]])
+import detect_buses as _db
+_paths = _db.taut_paths(names, ends,
+                        lambda nm: obs_for(byname[nm][0], 'F.Cu'))
+groups = _db.cluster(names, _paths)
 choice, unplaced = sm.select(menu, launch,
-                             only_dirs={'left'} if west_only else None)
+                             only_dirs={'left'} if west_only else None,
+                             keep_out=grid0.bbox, buses=groups)
 print(f'K={K}{"  (west-only)" if west_only else ""}: '
       + sm.summarise(choice))
 if unplaced:

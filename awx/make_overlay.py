@@ -80,7 +80,9 @@ for nm in names:
             obs(_n, L).point_violation(p, pad=(te.VIA_SIZE - te.TRACK) / 2)
             or [0])[0])
     launch[nm] = ends[nm][0]
-choice, unplaced = sm.select(menu, launch)
+grid0 = em.grid_of(pcb.footprints[ends[names[0]][2]])
+choice, unplaced = sm.select(menu, launch, keep_out=grid0.bbox,
+                             buses=groups)
 print('  ' + sm.summarise(choice))
 
 lines = []
