@@ -277,6 +277,8 @@ def main():
                     help='skip the repo #536 octolinear smoothing pass')
     ap.add_argument('--moves', default='',
                     help='homotopy entry moves, e.g. SDQ0=S,SDQ11=N')
+    ap.add_argument('--no-vip', action='store_true',
+                    help='disable via-in-pad berths (task 4)')
     ap.add_argument('--no-octi', action='store_true',
                     help='emit the raw arbitrary-angle braid geometry')
     a = ap.parse_args()
@@ -408,6 +410,7 @@ def main():
 
     obsB = {}
     placed_b = []           # B approaches: horizontal runs at site y
+    vip_nets = []           # via-in-pad berths (IPC-4761 fab note)
 
     def b_ok(nm, sx, sy):
         """Dogbone site + its westward B approach (a street-line run
@@ -435,22 +438,31 @@ def main():
         if nm in entry or nm in moves:
             continue
         bx, by = ends[nm][1][0], ends[nm][1][1]
-        sx = bx - half
-        chosen = None
-        for sy in (by - half, by + half):
-            ok = all(ts.seg_pt_dist(p, q, (sx, sy)) > via_seg_min
-                     for (p, q) in placed_f)
-            ok = ok and all(math.hypot(sx - v[0], sy - v[1]) >
-                            VIA_SIZE + CLEAR for v in placed_vias)
-            if ok and f_ok(nm, [((sx, sy), (bx, by))]) and \
-                    b_ok(nm, sx, sy):
-                chosen = sy
-                break
-        assert chosen is not None, f'no street and no dogbone for {nm}'
-        entry[nm] = ('B', (sx, chosen))
-        placed_f.append(((sx, chosen), (bx, by)))
-        placed_vias.append((sx, chosen))
-        placed_b.append(((x1, chosen), (sx, chosen)))
+        site = None
+        if not a.no_vip:
+            # via-in-pad berth (task 4): the surface via IS the ball --
+            # no F stub, no diagonal cell consumed (IPC-4761 Type VII)
+            ok = all(math.hypot(bx - v[0], by - v[1]) >
+                     VIA_SIZE + CLEAR for v in placed_vias)
+            if ok and b_ok(nm, bx, by):
+                site = (bx, by)
+                vip_nets.append(nm)
+        if site is None:
+            sx = bx - half
+            for sy in (by - half, by + half):
+                ok = all(ts.seg_pt_dist(p, q, (sx, sy)) > via_seg_min
+                         for (p, q) in placed_f)
+                ok = ok and all(math.hypot(sx - v[0], sy - v[1]) >
+                                VIA_SIZE + CLEAR for v in placed_vias)
+                if ok and f_ok(nm, [((sx, sy), (bx, by))]) and \
+                        b_ok(nm, sx, sy):
+                    site = (sx, sy)
+                    placed_f.append(((sx, sy), (bx, by)))
+                    break
+        assert site is not None, f'no street/dogbone/VIP for {nm}'
+        entry[nm] = ('B', site)
+        placed_vias.append(site)
+        placed_b.append(((x1, site[1]), site))
 
     # lane ys: F nets pin their entry; B nets slot strictly between the
     # neighbouring F entries, ordered by site y
@@ -630,13 +642,20 @@ def main():
             wb = min(wb_hi, max(x0 + (sk + 1.6) * W,
                                 x0 + (sk + 1.5) * W + 0.45))
             if fe is None and wb < x0 + (sk + 1.5) * W + 0.28:
-                # no trunk room after the last own swap: surface on the
-                # street run instead (via next to the field = cheap kind)
-                wb = min(x1 + 0.31, ends[d][1][0] - 0.35)
+                # no trunk room after the last own swap: via-in-pad tail
+                # (B all the way to the ball; safe: fe is None means no
+                # foreign crossing needs this diver on F east of here),
+                # else surface on the street run
+                if not a.no_vip:
+                    wb = None
+                    vip_nets.append(d)
+                else:
+                    wb = min(x1 + 0.31, ends[d][1][0] - 0.35)
         else:
             wa = x0 + (n + 0.75) * W
             if invol.get(d):
                 wa = max(wa, x0 + (max(invol[d]) + 1.5) * W + 0.10)
+            wa_lo_map[d] = wa            # west-slide floor (swapless)
             wb = x1 - 0.15
         if entry[d][0] == 'B':
             if d in first:
@@ -776,7 +795,7 @@ def main():
                 x_ -= 0.06
         placed_wv.append((x_, y_at(d, x_)))
         wa = x_
-        if wb is not None:
+        if wb is not None and (len(win) > 2 or win[1] is not None):
             sk = last.get(d)
             wb_min = x0 + (sk + 1.5) * W + 0.15 if sk is not None else wa
             x_ = max(wb, wb_min)
@@ -843,8 +862,11 @@ def main():
                 on_b = wa < mx < wb
             segs.append((p, q, 'B.Cu' if on_b else 'F.Cu'))
         if mode == 'B':
-            vias.append((v[0], v[1]))           # surface at dogbone site
-            segs.append(((v[0], v[1]), (bx, by), 'F.Cu'))  # stub to ball
+            vias.append((v[0], v[1]))    # surface via (dogbone or VIP)
+            if (v[0], v[1]) != (bx, by):
+                segs.append(((v[0], v[1]), (bx, by), 'F.Cu'))
+        elif nm in vip_nets:
+            vias.append((bx, by))        # via-in-pad tail surface
         out_segs[nm] = segs
         out_vias[nm] = vias
 
@@ -1099,6 +1121,10 @@ def main():
               f'{sum(pre_len.values()):.2f} -> '
               f'{sum(post_len.values()):.2f} mm')
         smoothed = True
+
+    if vip_nets:
+        print(f'VIA-IN-PAD berths (IPC-4761 Type VII filled+capped '
+              f'required): {sorted(set(vip_nets))}')
 
     # write board
     txt = open(a.board, encoding='utf-8').read()
