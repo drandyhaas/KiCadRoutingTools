@@ -28,6 +28,15 @@ for _sib in ('py_placer', 'py_tools'):
     if os.path.isdir(_d) and _d not in sys.path:
         sys.path.append(_d)
 
+# #795: KiCad's hand-written __iter__ for GetTracks()/GetDrawings() calls the
+# py2 `SwigPyIterator.next()`, dropped by current SWIG -- restore the alias at
+# the GUI entry, before _get_selected_net_names() or the dialog walk a board.
+try:
+    from swig_compat import patch_swig_iterators as _patch_swig_iterators
+    _patch_swig_iterators()
+except ImportError:
+    pass         # kicad_parser makes the same call, and it is what parses here
+
 
 def _get_selected_net_names(board):
     """Return the set of net names that the user has selected in the PCB editor.

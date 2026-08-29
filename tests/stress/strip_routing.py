@@ -13,6 +13,12 @@ import os
 STRESS = Path(os.environ.get("STRESS_DIR", str(Path.home() / "Documents/kicad_stress_test")))
 import pcbnew
 
+# #795: KiCad's own __iter__ for GetTracks()/GetDrawings() calls the py2
+# `SwigPyIterator.next()`, which a current SWIG no longer supplies.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'py_router'))
+from swig_compat import patch_swig_iterators  # noqa: E402
+patch_swig_iterators()
+
 
 def rdp(points, eps):
     """Iterative Ramer-Douglas-Peucker polyline simplification."""

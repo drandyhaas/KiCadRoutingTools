@@ -40,6 +40,12 @@ import tempfile
 from typing import Dict, List, Optional, Tuple
 
 import kicad_locate
+from swig_compat import patch_swig_iterators as _patch_swig_iterators
+
+# #795: repin_netcodes_from_file() walks board.GetTracks() in the pcbnew
+# subprocess, which imports THIS module -- so the alias must be restored here
+# too, not only via kicad_parser.
+_patch_swig_iterators()
 
 EXACT_FILL_TIMEOUT = 300
 

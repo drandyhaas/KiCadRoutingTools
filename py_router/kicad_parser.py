@@ -8,9 +8,15 @@ import re
 import math
 import json
 import routing_defaults as defaults  # fab-floor outline width for 0-stroke copper polys (#337/M2)
+from swig_compat import patch_swig_iterators as _patch_swig_iterators
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
+
+# #795: KiCad's own `__iter__` for GetTracks()/GetDrawings() calls the py2
+# `SwigPyIterator.next()`, which a current SWIG no longer supplies. Restore the
+# alias before anything here walks a live board. No-op off a KiCad python.
+_patch_swig_iterators()
 
 
 # Position rounding precision for coordinate COMPARISONS (dedup keys, position
