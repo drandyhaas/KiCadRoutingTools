@@ -74,6 +74,32 @@ def _seg_hits_box(a: Pt, b: Pt, box) -> bool:
     return t0 < t1
 
 
+def around_box_path(a: Pt, b: Pt, box, pad: float = 0.3):
+    """The polyline `around_box` measures: the straight line when it
+    misses the box, otherwise the shorter way round its padded corners.
+    Returned so the corridor leg can be DRAWN, not just priced."""
+    x0, y0, x1, y1 = box
+    bx = (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
+    if not _seg_hits_box(a, b, bx):
+        return [a, b]
+    x0, y0, x1, y1 = bx
+    corners = ((x0, y0), (x1, y0), (x0, y1), (x1, y1))
+    best, path = float('inf'), [a, b]
+    for c1 in corners:
+        for c2 in corners:
+            if _seg_hits_box(a, c1, bx) or _seg_hits_box(c2, b, bx):
+                continue
+            if c1 != c2 and _seg_hits_box(c1, c2, bx):
+                continue
+            d = (math.hypot(c1[0] - a[0], c1[1] - a[1])
+                 + math.hypot(c2[0] - c1[0], c2[1] - c1[1])
+                 + math.hypot(b[0] - c2[0], b[1] - c2[1]))
+            if d < best:
+                best = d
+                path = [a, c1, c2, b] if c1 != c2 else [a, c1, b]
+    return path
+
+
 def around_box(a: Pt, b: Pt, box, pad: float = 0.3) -> float:
     """Distance from a to b that does not cross `box`. The straight
     line when it misses; otherwise the shorter of the two ways round,
