@@ -104,12 +104,14 @@ class Obstacles:
                 out.extend(self._grid.get((key[0] + dx_, key[1] + dy_), ()))
         return out
 
-    def point_violation(self, p):
+    def point_violation(self, p, pad=0.0):
         """Deepest violated obstacle at point p -> (depth, push_dir) or
-        None."""
+        None. `pad` inflates every obstacle radius (e.g. for a via body
+        wider than the track the margins were built for)."""
         worst = None
         for i in self.near_discs(p):
             x, y, r, _n = self.discs[i]
+            r += pad
             d = math.hypot(p[0] - x, p[1] - y)
             if d < r:
                 depth = r - d
@@ -120,6 +122,7 @@ class Obstacles:
                         dirv = ((p[0] - x) / d, (p[1] - y) / d)
                     worst = (depth, dirv)
         for (a, b, r, _n) in self.caps:
+            r += pad
             d = seg_pt_dist(a, b, p)
             if d < r:
                 depth = r - d
