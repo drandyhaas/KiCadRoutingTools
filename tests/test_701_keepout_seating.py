@@ -545,6 +545,37 @@ def arm_polish_repair(wd):
         check("H-a: place_seed exits 0 after repairing itself",
               r.returncode == 0, f"rc={r.returncode}")
 
+    # ---- H-c: the same fault on a part with NO ZONE ---------------------
+    # A keep-out violation does not imply a zone, and most parts on most
+    # boards have none. The repair loop originally required one, which would
+    # have made the keep-out half inert exactly there while reading as
+    # implemented -- so this arm declares a block with members and no `zone`.
+    ipath_c = os.path.join(wd, 'Hc-fp.json')
+    out_c = os.path.join(wd, 'Hc-out.kicad_pcb')
+    bpath_c = os.path.join(wd, 'Hc-in.kicad_pcb')
+    one_part_board(bpath_c)
+    with open(ipath_c, 'w', encoding='utf-8') as f:
+        json.dump({"schema": 1, "kind": "floorplan-intent", "units": "mm",
+                   "envelope": {"rect": [0.0, 0.0, SIZE[0], SIZE[1]],
+                                "tolerance_mm": 0.5},
+                   "blocks": [{"name": "b", "refs": ["U1"]}],
+                   "keepouts": [dict(k) for k in ko]}, f)
+    rc_ = subprocess.run(
+        [sys.executable, '-X', 'utf8',
+         os.path.join('py_placer', 'place_seed.py'), bpath_c, out_c,
+         '--intent', ipath_c, '--clearance', '0.2',
+         '--board-edge-clearance', '0.5', '--force'],
+        capture_output=True, text=True, encoding='utf-8', errors='replace',
+        cwd=REPO, timeout=900, env=env)
+    fired = 'polish walked' in rc_.stdout
+    check("H-c: the repair fires for a part with NO declared zone -- a "
+          "keep-out violation does not imply a zone", fired,
+          "the repair skipped it; the zone-less branch is inert")
+    if fired:
+        ovc = overlap(out_c, 'U1', KO)
+        check("H-c: and U1 is out of the keep-out on the WRITTEN board",
+              ovc == 0.0, f"overlap {ovc}mm2, pose {poses(out_c)['U1']}")
+
     # ---- H-b: the ordinary run ------------------------------------------
     r2, s2, out2 = run(wd, one_part_board, wide_zone_intent(keepouts=ko),
                        tag='Hb', polish=True)
