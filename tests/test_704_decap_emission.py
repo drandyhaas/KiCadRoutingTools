@@ -351,7 +351,14 @@ def test_the_census_is_deterministic():
             timeout=600, env=dict(os.environ, PYTHONHASHSEED=seed))
         outs.append(r.stdout.strip().splitlines()[-1])
     assert outs[0] == outs[1], (outs[0][:200], outs[1][:200])
-    print(f"  PASS: {name}'s census is identical across PYTHONHASHSEED")
+    # Stable is not the same as SORTED, and only the first is what two runs of
+    # identical code can show. Reversing the order is deterministic too, so it
+    # survives the comparison above -- pin the property the code claims.
+    for nm in _present(EMITTING + tuple(WITHHELD)):
+        refs = _emit(nm)[0]['context']['decap_census']['beyond_radius_refs']
+        assert refs == sorted(refs), (nm, refs)
+    print(f"  PASS: {name}'s census is identical across PYTHONHASHSEED, and "
+          f"beyond_radius_refs is sorted on every board")
 
 
 # --------------------------------------------------------------------------
