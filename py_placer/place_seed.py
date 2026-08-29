@@ -509,7 +509,12 @@ Examples:
                 st = pose_score.make_state(
                     pcb_cur, args.output_file, clearance=args.clearance,
                     board_edge_clearance=args.board_edge_clearance,
-                    grid_step=args.grid_step)
+                    grid_step=args.grid_step,
+                    # #701: the ONLY seat-predicate call site outside
+                    # seeder.py. Without this the re-seat below would be free
+                    # to put the part back into a declared keep-out while
+                    # fixing its zone.
+                    keepouts=intent.keepouts)
                 blocks2, _p = floorplan.resolve_blocks(intent, pcb_cur,
                                                        sources)
                 zone_of = {}

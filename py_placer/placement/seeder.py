@@ -83,11 +83,31 @@ def pose_ok(state, ref: str, x: float, y: float, rot: float,
     pose is off the board, its #456 branch accepts poses that move strictly
     TOWARD the board while still outside it. Placement from scratch has no
     incumbent worth improving on, so full containment is demanded explicitly.
+
+    The third conjunct is the intent's declared KEEP-OUTS (#701). Before it,
+    `rule_keepout` graded a region the seat search walked parts into, forever:
+    a declared keep-out was enforced by nothing at all. It sits BEFORE
+    `candidate_valid` for the same reason `count_legal_poses` puts the zone
+    gate first -- a handful of float compares against a usually-empty tuple,
+    where `candidate_valid` ends in the neighbour loop.
     """
     part = state.parts[ref]
-    r = part.rect(x, y, rot)
+    r, tht = part.rects(x, y, rot)
     if state.edge_gate.rect_outside_amount(r) > 1e-9:
         return False
+    # BOTH rects, because `rule_keepout` grades both: a through-hole part's
+    # leads pass through a keep-out even when its body sits on the far side,
+    # so a courtyard-only seat would be accepted here and flagged there --
+    # exit 4 on a board this function placed correctly.
+    if state.keepouts_for:
+        # Lazy, inside the guard, matching this file's idiom for `floorplan`
+        # (see `zone_gate` below) -- so a board declaring no keep-out pays
+        # nothing at all, not even a sys.modules lookup, on a predicate this
+        # hot.
+        from placement.floorplan import keepout_hit
+        for k in state.keepouts_for.get(ref, ()):
+            if keepout_hit(k, (r, tht)):
+                return False
     return state.candidate_valid(ref, x, y, rot, exclude=exclude)
 
 
@@ -1180,7 +1200,11 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
 
     state = pose_score.make_state(
         pcb_data, pcb_file, clearance=clearance,
-        board_edge_clearance=board_edge_clearance, grid_step=grid_step)
+        board_edge_clearance=board_edge_clearance, grid_step=grid_step,
+        # #701: the declared keep-outs reach the SEAT PREDICATE here, and
+        # every `_try_place` / `count_legal_poses` / `_evict_trade` site in
+        # this module inherits them through `pose_ok`.
+        keepouts=intent.keepouts if intent else ())
     bounds = state.board
     refs_all = sorted(pcb_data.footprints)
     notes: List[str] = []
@@ -1931,7 +1955,11 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     state = pose_score.make_state(
         pcb_data, pcb_file, clearance=clearance,
         board_edge_clearance=board_edge_clearance, grid_step=grid_step,
-        extra_locked_refs=_extra_locked or None)
+        extra_locked_refs=_extra_locked or None,
+        # #701: the declared keep-outs reach the SEAT PREDICATE (see
+        # `seed_from_intent`). `intent` is optional on this path, so the
+        # inert default is what a caller without one gets.
+        keepouts=intent.keepouts if intent else ())
     refs_all = sorted(pcb_data.footprints)
     notes: List[str] = []
     must_lock = {r for pat in intent.must_lock
@@ -2554,7 +2582,11 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
     state = pose_score.make_state(
         pcb_data, pcb_file, clearance=clearance,
         board_edge_clearance=board_edge_clearance, grid_step=grid_step,
-        extra_locked_refs=_extra_locked or None)
+        extra_locked_refs=_extra_locked or None,
+        # #701: the declared keep-outs reach the SEAT PREDICATE (see
+        # `seed_from_intent`). `intent` is optional on this path, so the
+        # inert default is what a caller without one gets.
+        keepouts=intent.keepouts if intent else ())
     refs_all = sorted(pcb_data.footprints)
     notes: List[str] = []
     must_lock = {r for pat in intent.must_lock

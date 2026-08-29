@@ -416,7 +416,15 @@ class QuenchState:
                  # built and the objective is bit-identical.
                  corridor_weight: float = 0.0,
                  corridor_specs: Optional[Sequence[Dict]] = None,
-                 corridor_max_fanout: int = 20):
+                 corridor_max_fanout: int = 20,
+                 # --- #701 intent keep-outs. Appended for the same
+                 # positional-binding reason as the #548 block above, and
+                 # empty by default so every state in the tree that does not
+                 # ask for them -- INCLUDING the one `floorplan.grade` builds,
+                 # which must keep measuring independently of the seat gate --
+                 # is bit-identical. Consumed by `seeder.pose_ok` and
+                 # `seeder.edge_seat_ok`; the quench objective never reads it.
+                 keepouts: Optional[Sequence[Dict]] = None):
         bounds = pcb_data.board_info.board_bounds
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
@@ -482,6 +490,25 @@ class QuenchState:
             self.parts[ref].nets = [n for n in self.parts[ref].nets
                                     if n not in ignore]
         warn_missing_courtyards(no_courtyard, 'quench')
+
+        # #701 intent keep-outs, resolved ONCE per state rather than once per
+        # candidate pose. Neither an `allow` fnmatch against a reference nor
+        # the set of faces a part occupies changes when the part moves, so the
+        # only pose-dependent work left for the seat predicate is the geometry
+        # itself. `_try_place` evaluates thousands of poses per part, so this
+        # is the difference between a conjunct and a regression.
+        #
+        # `keepouts_for` is EMPTY on every board that declares no keep-out --
+        # which is every board in the corpus today -- and `pose_ok` guards on
+        # that emptiness, so the whole channel is inert unless asked for.
+        self.keepouts = tuple(keepouts or ())
+        self.keepouts_for: Dict[str, Tuple[Dict, ...]] = {}
+        if self.keepouts:
+            from . import floorplan as _fp
+            for _ref, _p in self.parts.items():
+                _binding = _fp.keepouts_for_ref(self.keepouts, _ref, _p.sides)
+                if _binding:
+                    self.keepouts_for[_ref] = _binding
 
         # Run-6 CONTAINER exemption: a courtyard covering most of the board
         # is a FRAME (a module-outline footprint hosting the whole design),
