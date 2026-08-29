@@ -168,13 +168,31 @@ def certify(menu: Dict[str, List[Move]], bus: Sequence[str],
 def bus_sides(menu: Dict[str, List[Move]],
               launch: Dict[str, Pt],
               buses: Sequence[Sequence[str]],
-              cost_fn, log=None) -> Dict[str, str]:
-    """One exit side per bus: the cheapest side that PASSES the
-    capacity certificate. Certifying first means a side that cannot
-    hold the bundle is never offered, instead of being discovered one
-    unplaceable net at a time inside greedy assignment."""
+              cost_fn, geo: Optional['Corridor'] = None,
+              cross_weight: float = 6.0, log=None) -> Dict[str, str]:
+    """One exit side per bus: the cheapest side that PASSES the capacity
+    certificate AND does not cut through the corridors already placed.
+
+    Certifying first means a side that cannot hold the bundle is never
+    offered, instead of being discovered one unplaceable net at a time
+    inside greedy assignment.
+
+    The crossing term is the whole point of doing this in order rather
+    than per bus. Corridors are as expensive to each other as their
+    members are among themselves -- measured at K21, 30 crossings
+    BETWEEN corridors against 34 within them -- and a per-bus choice
+    cannot see that, because the cost of a side depends on what is
+    already there. A 2-net bus sent `up` around the array cost 30
+    crossings against two bundles it had no business touching, and
+    scored as the cheapest side available.
+
+    Buses are placed largest first, so the big bundles lay down the
+    reference and the small ones fit around them, rather than a two-net
+    bus dictating terms to an eleven-net one.
+    """
     out: Dict[str, str] = {}
-    for bus in buses:
+    placed: List[List[Pt]] = []
+    for bus in sorted(buses, key=len, reverse=True):
         scored = []
         for d in ('left', 'right', 'up', 'down'):
             ok, why = certify(menu, bus, d)
@@ -182,17 +200,33 @@ def bus_sides(menu: Dict[str, List[Move]],
                 if log:
                     log(f'  bus[{len(bus)}] {d}: REFUSED -- {why}')
                 continue
-            s = sum(min(cost_fn(n, m) for m in menu[n]
-                        if m.direction == d) for n in bus)
-            scored.append((s, d, why))
+            pick, s = {}, 0.0
+            for n in bus:
+                m = min((m for m in menu[n] if m.direction == d),
+                        key=lambda m: cost_fn(n, m))
+                pick[n] = m
+                s += cost_fn(n, m)
+            xs = 0
+            if geo is not None and placed:
+                for n in bus:
+                    leg = geo.leg(n, pick[n])
+                    xs += sum(1 for other in placed
+                              if geo.paths_cross(leg, other))
+            scored.append((s + cross_weight * xs, d, why, xs, pick))
         if not scored:
             continue
-        scored.sort()
-        s, best, why = scored[0]
+        scored.sort(key=lambda r: r[0])
+        s, best, why, xs, pick = scored[0]
         if log:
-            log(f'  bus[{len(bus)}] -> {best} ({why}, cost {s:.0f})')
+            alt = ', '.join(f'{d}:{c:.0f}(+{x} cross)'
+                            for c, d, _w, x, _p in scored[1:])
+            log(f'  bus[{len(bus)}] -> {best} ({why}, cost {s:.0f}, '
+                f'{xs} crossings into placed corridors)'
+                + (f'   over {alt}' if alt else ''))
         for n in bus:
             out[n] = best
+        if geo is not None:
+            placed.extend(geo.leg(n, pick[n]) for n in bus)
     return out
 
 
@@ -246,12 +280,19 @@ class Corridor:
         self.box = box
         self.pad = pad
         self.launch = launch
+        self._legs: Dict[Tuple, List[Pt]] = {}
+        self._x: Dict[Tuple, bool] = {}
 
     def leg(self, n: str, m) -> List[Pt]:
         """The polyline the corridor must draw for this net: launch to
         the escape's exit, around the array rather than through it."""
         pt = m if isinstance(m, tuple) else m.exit_pt
-        return around_box_path(self.launch[n], pt, self.box, self.pad)
+        key = (n, round(pt[0], 4), round(pt[1], 4))
+        hit = self._legs.get(key)
+        if hit is None:
+            hit = around_box_path(self.launch[n], pt, self.box, self.pad)
+            self._legs[key] = hit
+        return hit
 
     def axis(self, grp: Sequence[str], sel: Dict[str, Move]) -> Pt:
         """Unit vector ACROSS the bundle -- perpendicular to where it is
@@ -275,11 +316,21 @@ class Corridor:
         t = t or self.axis(grp, sel)
         return sorted(grp, key=lambda n: self.launch_key(n, t))
 
-    def crosses(self, a: str, b: str, sel: Dict[str, Move]) -> bool:
-        pa, pb = self.leg(a, sel[a]), self.leg(b, sel[b])
+    @staticmethod
+    def paths_cross(pa: Sequence[Pt], pb: Sequence[Pt]) -> bool:
         return any(_proper_cross(p, q, r, s)
                    for p, q in zip(pa, pa[1:])
                    for r, s in zip(pb, pb[1:]))
+
+    def crosses(self, a: str, b: str, sel: Dict[str, Move]) -> bool:
+        ea, eb = sel[a].exit_pt, sel[b].exit_pt
+        key = (a, round(ea[0], 4), round(ea[1], 4),
+               b, round(eb[0], 4), round(eb[1], 4))
+        hit = self._x.get(key)
+        if hit is None:
+            hit = self.paths_cross(self.leg(a, sel[a]), self.leg(b, sel[b]))
+            self._x[key] = hit
+        return hit
 
     def keep(self, grp: Sequence[str], sel: Dict[str, Move],
              weight: Optional[Dict[str, float]] = None) -> List[str]:
@@ -392,6 +443,21 @@ def score(choice: Dict[str, Move], groups, geo: 'Corridor',
     mm = sum(1 for n, m in choice.items()
              if dl.get(n) and dl[n] != m.layer)
     return tv, fl, mm
+
+
+def plan_floor(sel: Dict[str, Move], geo: 'Corridor') -> int:
+    """The via floor for the WHOLE plan, corridor boundaries ignored.
+
+    A per-corridor floor prices only the crossings inside a corridor,
+    which makes any change that pushes crossings across a corridor
+    boundary look free. It is not: the board is one surface, and the
+    corridor split is our decomposition for search, not an accounting
+    boundary. Measured at K32, moving from no crossing pricing to
+    cross_weight 6 cut total crossings 241 -> 112 while the per-corridor
+    via count ROSE 37 -> 45, purely because the crossings it removed
+    were the ones nobody was charging for."""
+    nets = list(sel)
+    return 2 * (len(nets) - len(geo.keep(nets, sel)))
 
 
 def _floor(bus: Sequence[str], sel: Dict[str, Move],
@@ -524,6 +590,12 @@ def select(menu: Dict[str, List[Move]],
            side_weight: float = 6.0,
            tooth_layer: Optional[Dict[str, str]] = None,
            mismatch_weight: float = 4.0,
+           # 6.0 measured over the whole coherent ladder: it is the
+           # only value tried that improves the WHOLE-PLAN floor at
+           # every checkpoint (K11 12->10, K21 18->16, K32 46->38,
+           # K47 70->62, K51 72->64). 12.0 is better at K32 and a
+           # wash at K11; 24.0 regresses at K51.
+           cross_weight: float = 6.0,
            align_rounds: int = 4,
            log=None) -> Tuple[Dict[str, Move], List[str]]:
     """Pick one move per net. `launch[n]` is where the net enters the
@@ -551,10 +623,20 @@ def select(menu: Dict[str, List[Move]],
     # a bus enters the destination on ONE side, certified for capacity
     # before it is committed there; deviating from it means crossing
     # your own bundle, which nothing else in this cost sees
-    side = bus_sides(menu, launch, buses, cost, log=log) if buses else {}
+    side = (bus_sides(menu, launch, buses, cost, geo=geo,
+                      cross_weight=cross_weight, log=log)
+            if buses else {})
     # filled by the alignment loop below; empty on the first pass, so
     # the penalty is inert until there is a diver set to align with
     want_layer: Dict[str, str] = {}
+
+    # legs of the nets chosen so far, so a candidate can be charged for
+    # the corridors it would cut through. Pricing this only at the BUS
+    # level is not enough: bus_sides stopped sending anyone `up`, and
+    # three nets then deviated there one at a time inside the greedy
+    # pass -- each deviation cheap on its own, 38 inter-corridor
+    # crossings between them.
+    placed_legs: List[List[Pt]] = []
 
     def total(n: str, m: Move) -> float:
         c = cost(n, m)
@@ -564,6 +646,10 @@ def select(menu: Dict[str, List[Move]],
         # actually hand this net over on; a mismatch costs a via
         if want_layer.get(n) and m.layer != want_layer[n]:
             c += mismatch_weight
+        if geo is not None and placed_legs and cross_weight:
+            leg = geo.leg(n, m)
+            c += cross_weight * sum(1 for o in placed_legs
+                                    if geo.paths_cross(leg, o))
         return c
 
     taken_lane: Dict[Tuple, List[Tuple[float, float]]] = {}
@@ -598,6 +684,8 @@ def select(menu: Dict[str, List[Move]],
             log(f'  {n}: leaves its bus side {side[n]} for '
                 f'{best.direction} (no room on the bus side)')
         choice[n] = best
+        if geo is not None:
+            placed_legs.append(geo.leg(n, best))
         _k, _a, _b = _lane_span(best)
         taken_lane.setdefault(_k, []).append((_a, _b))
         sk = _site_key(best)
@@ -645,6 +733,7 @@ def select(menu: Dict[str, List[Move]],
                                                geo, tooth_layer))
             taken_lane.clear()
             taken_site.clear()
+            placed_legs.clear()
             trial: Dict[str, Move] = {}
             for n in order:
                 pick = None
@@ -659,6 +748,8 @@ def select(menu: Dict[str, List[Move]],
                 if pick is None:
                     continue
                 trial[n] = pick
+                if geo is not None:
+                    placed_legs.append(geo.leg(n, pick))
                 _k, _a, _b = _lane_span(pick)
                 taken_lane.setdefault(_k, []).append((_a, _b))
                 sk = _site_key(pick)
