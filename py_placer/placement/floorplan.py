@@ -683,6 +683,74 @@ def _circle_hits_rect(cx, cy, radius, rect) -> bool:
 
 
 # --------------------------------------------------------------------------
+# keep-outs: ONE resolver and ONE hit test, shared by the grader (rule_keepout,
+# below) and the seat predicate (seeder.pose_ok / seeder.edge_seat_ok).
+#
+# They live here, together, because the alternative measured badly elsewhere in
+# this module: docs/floorplan-intent.md says of the rules that "every one of
+# them measures with the geometry the OPTIMIZER ITSELF gates on", and until
+# #701 the keepout row was the one place that was false -- the optimizer gated
+# on nothing at all. A seat the search accepts that the grade then flags is an
+# exit 4 on a board the seeder produced correctly, so the two must not be two
+# implementations.
+# --------------------------------------------------------------------------
+
+def keepouts_for_ref(keepouts, ref: str, sides) -> Tuple[Dict, ...]:
+    """The keep-out entries that BIND `ref`: not exempted by `allow`, and
+    sharing at least one face with it.
+
+    Pose-INVARIANT by construction -- an fnmatch against a reference and the
+    set of faces a part occupies are both unchanged by moving it -- which is
+    what lets a seat search resolve this ONCE per part instead of once per
+    candidate pose. `_try_place` evaluates thousands of poses per part.
+
+    Both filters live here rather than at each caller, for the reason
+    `Intent.edge_claims` gives about its own split: a filter that must be
+    remembered is a filter that will be forgotten at the next call site. If
+    the seat honoured an `allow` glob the grade ignored, a mounting-hole
+    keep-out would strand its own mounting hole.
+    """
+    out = []
+    for k in keepouts:
+        if any(fnmatch.fnmatch(ref, pat) for pat in (k.get('allow') or ())):
+            continue
+        if not (set(sides) & set(k.get('sides') or ('F', 'B'))):
+            continue
+        out.append(k)
+    return tuple(out)
+
+
+def keepout_hit(entry, rects) -> float:
+    """How far into keep-out `entry` any of `rects` reaches; 0.0 when clear.
+
+    THE hit test. The `legality.EPS` thresholding is INSIDE this function, not
+    at the callers: two `> EPS` comparisons at two call sites are two chances
+    to drift, and a pose the seeder accepts at the boundary that the grade
+    then flags is exactly the round trip this exists to keep closed.
+
+    `rects` may contain None -- `quench._Part.rects()` returns
+    `(courtyard, None)` for a part with no drilled pads -- so both callers can
+    pass their own natural shape without a branch.
+
+    A rect entry returns the overlap AREA in mm2. A circle entry returns 1.0:
+    a MARKER, not a measurement. Nothing in this tree computes circle/rect
+    intersection area, and returning a fabricated one would be a figure a
+    reader could quote.
+    """
+    hit = 0.0
+    for r in rects:
+        if r is None:
+            continue
+        if entry.get('rect') is not None:
+            hit = max(hit, legality.rect_overlap_area(r, entry['rect']))
+        else:
+            cx, cy, radius = entry['circle']
+            if _circle_hits_rect(cx, cy, radius, r):
+                hit = max(hit, 1.0)
+    return hit if hit > legality.EPS else 0.0
+
+
+# --------------------------------------------------------------------------
 # the board's own outline, checked before anything is graded against it
 # --------------------------------------------------------------------------
 
@@ -999,26 +1067,17 @@ def rule_keepout(ctx) -> Iterator[Violation]:
     for k in ctx.intent.keepouts:
         name = k['name']
         allow = k.get('allow') or ()
-        sides = set(k.get('sides') or ('F', 'B'))
         for ref, part in sorted(ctx.parts.items()):
-            if any(fnmatch.fnmatch(ref, pat) for pat in allow):
+            # `allow` and the side filter, from the SHARED resolver: the grader
+            # and the seat predicate must agree on WHICH keep-outs bind a ref,
+            # not merely on the geometry once they do. A through-hole part
+            # occupies BOTH faces -- its leads pass through the keep-out even
+            # when its body sits on the other side -- which is why `sides` is
+            # `part.sides` and the hit test below is given both rects.
+            if not keepouts_for_ref((k,), ref, part.sides):
                 continue
-            # A through-hole part occupies BOTH faces: its leads pass through
-            # the keep-out even when its body sits on the other side.
-            if not (set(part.sides) & sides):
-                continue
-            rects = [part.rect]
-            if part.tht_rect is not None:
-                rects.append(part.tht_rect)
-            hit = 0.0
-            for r in rects:
-                if k.get('rect') is not None:
-                    hit = max(hit, legality.rect_overlap_area(r, k['rect']))
-                else:
-                    cx, cy, radius = k['circle']
-                    if _circle_hits_rect(cx, cy, radius, r):
-                        hit = max(hit, 1.0)
-            if hit > legality.EPS:
+            hit = keepout_hit(k, (part.rect, part.tht_rect))
+            if hit:
                 shape = (_fmt_rect(k['rect']) if k.get('rect') is not None
                          else f"circle {k['circle']}")
                 yield Violation(
