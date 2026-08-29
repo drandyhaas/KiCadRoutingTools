@@ -284,19 +284,18 @@ ROWS = [
      "",
      (T698,), 'KILLED'),
 
-    ('the-empty-basis-goes-back-to-a-literal', 's',
-     "                'accept_basis': basis_skeleton(\n"
-     "                    scope_source, policy='empty',\n"
-     "                    witnesses_before=witnesses_before,\n"
-     "                    witnesses_after=witnesses_before,\n"
-     "                    hpwl_before=_empty_gate[_recon.GATE_TERMS.index("
-     "'hpwl')],\n"
-     "                    hpwl_after=_empty_gate[_recon.GATE_TERMS.index("
-     "'hpwl')]),\n",
-     "                'accept_basis': {'scope_source': scope_source,\n"
-     "                                 'policy': 'empty', 'fired': None,\n"
-     "                                 'terms': [], 'safety': None,\n"
-     "                                 'intent_licence': None},\n",
+    # Anchored on ONE line each, deliberately: the multi-line anchors these
+    # replace went stale twice in one session as the call grew arguments, and a
+    # BROKEN row is indistinguishable from a catastrophic test failure until
+    # you read it.
+    ('the-empty-basis-reports-a-fabricated-min_gain', 's',
+     "                    min_gain=min_gain),\n",
+     "                    min_gain=0.0),\n",
+     (T698,), 'KILLED'),
+
+    ('the-skeleton-drops-the-eviction_licence-key', 's',
+     "        'eviction_licence': None,\n",
+     "",
      (T698,), 'KILLED'),
 
     ('min_gain-refuses-a-gain-of-exactly-min_gain', 's',
@@ -338,15 +337,8 @@ ROWS = [
      (T698,), 'KILLED'),
 
     ('the-early-out-drops-accept_basis', 's',
-     "                'accept_basis': basis_skeleton(\n"
-     "                    scope_source, policy='empty',\n"
-     "                    witnesses_before=witnesses_before,\n"
-     "                    witnesses_after=witnesses_before,\n"
-     "                    hpwl_before=_empty_gate[_recon.GATE_TERMS.index"
-     "('hpwl')],\n"
-     "                    hpwl_after=_empty_gate[_recon.GATE_TERMS.index"
-     "('hpwl')]),\n",
-     "",
+     "                'accept_basis': basis_skeleton(\n",
+     "                'accept_basis_MISSING': basis_skeleton(\n",
      (T698,), 'KILLED'),
 
     ('the-auto-path-reports-a-safety-half-it-never-measured', 's',

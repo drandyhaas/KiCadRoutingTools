@@ -978,6 +978,17 @@ def arm_S_review_findings(wd):
         note_ok = f"KeyError {e}"
     check("SF-2: and the refusal note renders against it", note_ok is True,
           str(note_ok))
+    # The keys must also carry the CALLER's values, not fabricated ones: a
+    # reported threshold that was never in force is the same defect as a
+    # reported census that never ran, one field over.
+    empty_mg = reseat(b, it, ['NOSUCHREF*'], min_gain=0.75)
+    check("SF-2: the early-out reports the min_gain it was given",
+          empty_mg['accept_basis'].get('min_gain') == 0.75,
+          f"min_gain={empty_mg['accept_basis'].get('min_gain')}")
+    check("SF-2: and the skeleton carries eviction_licence on both paths",
+          ('eviction_licence' in seated['accept_basis']
+           and 'eviction_licence' in empty['accept_basis']),
+          "present on both")
 
     # SF-3: a gain of EXACTLY --reseat-min-gain must count; the help calls it
     # "the smallest win that counts".
