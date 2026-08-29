@@ -254,6 +254,38 @@ def test_a_zero_tether_board_does_not_emit_a_vacuous_zero():
     print(f"  PASS: sonde_u (0 tethers) withholds -- {why[:60]}...")
 
 
+#: The board that isolates the CENSORING guard. Every tracked board in
+#: `WITHHELD` is caught by an earlier guard -- sonde_u has no tethers at all
+#: and interf_u_unrouted has one -- so deleting the censoring rule outright
+#: changed no verdict anywhere and the mutation SURVIVED the first version of
+#: this file: a guard with a measured rationale, a named constant and a
+#: documented table, asserted by nothing. `tigard_placed` clears both earlier
+#: guards with 15 tethers and is withheld by censoring alone.
+_CENSORED = os.path.join(REPO, 'tests', 'fixtures', 'run23',
+                         'tigard_placed.kicad_pcb')
+
+
+def test_the_censoring_guard_is_the_ONLY_thing_withholding_on_a_mid_repair_board():
+    if not os.path.exists(_CENSORED):
+        print(f"  SKIP: {_CENSORED} not present")
+        return
+    doc = fp.emit_intent(parse_kicad_pcb(_CENSORED), _CENSORED,
+                         derive_decaps=True)
+    c = doc['context']['decap_census']
+    # It must CLEAR the two earlier guards, or this arm is testing one of
+    # those instead and the censoring rule is still unasserted.
+    assert c['tethers'] >= fp.DECAP_MIN_SAMPLE, c['tethers']
+    total = c['tethers'] + c['beyond_radius']
+    frac = c['beyond_radius'] / total
+    assert frac > fp.DECAP_MAX_CENSORED, (frac, c)
+    assert 'max_distance_mm' not in doc['decaps'], doc['decaps']
+    why = doc['context']['budget_withheld']['decaps.max_distance_mm']
+    assert 'search radius' in why and 'bless' in why, why
+    print(f"  PASS: tigard_placed has {c['tethers']} tethers (clears "
+          f"MIN_SAMPLE) and censors {frac:.2f} > {fp.DECAP_MAX_CENSORED}, so "
+          f"the censoring guard alone withholds it")
+
+
 def test_the_censoring_guard_separates_healthy_from_degenerate():
     """The withholding rule is a threshold on a measured quantity, so the
     measurement is asserted rather than the threshold restated: every emitting
@@ -511,6 +543,7 @@ TESTS = [
     test_no_search_radius_is_written_into_decaps,
     test_a_board_that_cannot_support_a_limit_withholds_and_says_why,
     test_a_zero_tether_board_does_not_emit_a_vacuous_zero,
+    test_the_censoring_guard_is_the_ONLY_thing_withholding_on_a_mid_repair_board,
     test_the_censoring_guard_separates_healthy_from_degenerate,
     test_the_census_discloses_what_the_limit_cannot_see,
     test_the_census_is_deterministic,
