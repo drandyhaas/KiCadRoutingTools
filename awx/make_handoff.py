@@ -71,8 +71,6 @@ grid0 = em.grid_of(pcb.footprints[ends[names[0]][2]])
 print('taut pre-routes...')
 paths = db.taut_paths(names, ends, lambda nm: obs(byname[nm][0], 'F.Cu'))
 buses = db.cluster(names, paths)
-choice, _un = sm.select(menu, launch, keep_out=grid0.bbox, buses=buses)
-
 tooth_layer = {}
 for nm in names:
     nid = byname[nm][0]
@@ -82,24 +80,10 @@ for nm in names:
          and (abs(s.start_x - tp[0]) + abs(s.start_y - tp[1]) < 0.005
               or abs(s.end_x - tp[0]) + abs(s.end_y - tp[1]) < 0.005)),
         'F.Cu')
+choice, _un = sm.select(menu, launch, keep_out=grid0.bbox, buses=buses,
+                        tooth_layer=tooth_layer)
 # which nets the corridor would make divers, per bus
-delivered = {}
-for bus in buses:
-    if not all(n in choice for n in bus):
-        continue
-    side = choice[bus[0]].direction
-    axis = 1 if side in ('left', 'right') else 0
-    lo = sorted(bus, key=lambda n: launch[n][1])
-    li = {n: i for i, n in enumerate(lo)}
-    tgt = sorted(bus, key=lambda n: (round(choice[n].exit_pt[axis], 3),
-                                     li[n]))
-    tr = {n: i for i, n in enumerate(tgt)}
-    keep = te.lis_keep([tr[n] for n in lo])
-    for i, n in enumerate(lo):
-        L = tooth_layer[n]
-        if i not in keep:
-            L = 'B.Cu' if L == 'F.Cu' else 'F.Cu'
-        delivered[n] = L
+delivered = sm.delivered_layers(choice, buses, launch, tooth_layer)
 
 lines = []
 

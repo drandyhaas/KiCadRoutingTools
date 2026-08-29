@@ -81,8 +81,17 @@ for nm in names:
             or [0])[0])
     launch[nm] = ends[nm][0]
 grid0 = em.grid_of(pcb.footprints[ends[names[0]][2]])
+tooth_layer = {}
+for nm in names:
+    _nid = byname[nm][0]
+    _tp = ends[nm][0]
+    tooth_layer[nm] = next(
+        (s.layer for s in pcb.segments if s.net_id == _nid
+         and (abs(s.start_x - _tp[0]) + abs(s.start_y - _tp[1]) < 0.005
+              or abs(s.end_x - _tp[0]) + abs(s.end_y - _tp[1]) < 0.005)),
+        'F.Cu')
 choice, unplaced = sm.select(menu, launch, keep_out=grid0.bbox,
-                             buses=groups)
+                             buses=groups, tooth_layer=tooth_layer)
 print('  ' + sm.summarise(choice))
 
 lines = []
