@@ -35,6 +35,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 import topo_strings as ts  # noqa: E402
+import flow_frame as ff  # noqa: E402
 
 TRACK = 0.127
 CLEAR = 0.105            # 0.1 spec + 5um so hugs don't sit exactly at 0.1
@@ -292,6 +293,26 @@ def main():
 
     pcb = parse_kicad_pcb(a.board)
     byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
+    # FLOW FRAME: everything below assumes the source is due west of the
+    # destination. Rotate the board so that it is, then map the emitted
+    # copper back at write time. Snapped to 90 degrees, so the frame is
+    # a relabelling of the axes: octilinear stays octilinear and the
+    # destination's rows stay rows.
+    _probe = endpoints(pcb, [n.strip() for n in a.nets.split(',')
+                             if n.strip()], byname)
+    _theta = ff.flow_angle([_probe[n][0] for n in _probe],
+                           [_probe[n][1] for n in _probe])
+    if os.environ.get('KICAD_FLOW_FRAME') == '0':
+        _theta = 0.0      # negative control: prove the frame is needed
+    _cx = sum(_probe[n][1][0] for n in _probe) / max(len(_probe), 1)
+    _cy = sum(_probe[n][1][1] for n in _probe) / max(len(_probe), 1)
+    pcb, back_xy = ff.rotate_pcb(pcb, _theta, _cx, _cy)
+    if _theta:
+        print(f'flow frame: source is not due west -- rotating the '
+              f'problem by {_theta:.0f} deg about '
+              f'({_cx:.2f},{_cy:.2f})')
+        byname = {n.name.split('/')[-1]: (i, n)
+                  for i, n in pcb.nets.items()}
     kids = {byname[nm][0] for nm in names}
     ends = endpoints(pcb, names, byname)
 
@@ -1285,39 +1306,47 @@ def main():
         for nm in names:
             nid, _ = byname[nm]
             for s in final_segs[nm]:
+                (ax, ay), (bx_, by_) = back_xy(s.start_x, s.start_y), \
+                    back_xy(s.end_x, s.end_y)
                 add.append(
-                    f'  (segment (start {s.start_x:.4f} {s.start_y:.4f}) '
-                    f'(end {s.end_x:.4f} {s.end_y:.4f}) '
+                    f'  (segment (start {ax:.4f} {ay:.4f}) '
+                    f'(end {bx_:.4f} {by_:.4f}) '
                     f'(width {s.width}) '
                     f'(layer "{s.layer}") (net {nid}))\n')
             for (vx, vy) in out_vias[nm]:
+                vx, vy = back_xy(vx, vy)
                 add.append(
                     f'  (via (at {vx:.4f} {vy:.4f}) (size {VIA_SIZE}) '
                     f'(drill {VIA_DRILL}) (layers "F.Cu" "B.Cu") '
                     f'(net {nid}))\n')
             for s in final_segs[nm]:
+                (ax, ay), (bx_, by_) = back_xy(s.start_x, s.start_y), \
+                    back_xy(s.end_x, s.end_y)
                 add.append(
-                    f'  (gr_line (start {s.start_x:.4f} {s.start_y:.4f}) '
-                    f'(end {s.end_x:.4f} {s.end_y:.4f}) '
+                    f'  (gr_line (start {ax:.4f} {ay:.4f}) '
+                    f'(end {bx_:.4f} {by_:.4f}) '
                     f'(stroke (width 0.05) (type solid)) '
                     f'(layer "Eco2.User"))\n')
     else:
         for nm in names:
             nid, _ = byname[nm]
             for (p, q, layer) in out_segs[nm]:
+                (ax, ay), (bx_, by_) = back_xy(*p), back_xy(*q)
                 add.append(
-                    f'  (segment (start {p[0]:.4f} {p[1]:.4f}) '
-                    f'(end {q[0]:.4f} {q[1]:.4f}) (width {TRACK}) '
+                    f'  (segment (start {ax:.4f} {ay:.4f}) '
+                    f'(end {bx_:.4f} {by_:.4f}) (width {TRACK}) '
                     f'(layer "{layer}") (net {nid}))\n')
             for (vx, vy) in out_vias[nm]:
+                vx, vy = back_xy(vx, vy)
                 add.append(
                     f'  (via (at {vx:.4f} {vy:.4f}) (size {VIA_SIZE}) '
                     f'(drill {VIA_DRILL}) (layers "F.Cu" "B.Cu") '
                     f'(net {nid}))\n')
             for (p, q, _l) in out_segs[nm]:
+                (ax, ay), (bx_, by_) = back_xy(*p), back_xy(*q)
                 add.append(
-                    f'  (gr_line (start {p[0]:.4f} {p[1]:.4f}) '
-                    f'(end {q[0]:.4f} {q[1]:.4f}) '
+                    f'  (gr_line (start {ax:.4f} {ay:.4f}) '
+                    f'(end {bx_:.4f} {by_:.4f}) '
                     f'(stroke (width 0.05) (type solid)) '
                     f'(layer "Eco2.User"))\n')
     k = txt.rstrip().rfind(')')
