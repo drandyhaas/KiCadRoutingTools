@@ -1064,20 +1064,21 @@ def rule_zone_exclusive(ctx) -> Iterator[Violation]:
 
 
 def rule_keepout(ctx) -> Iterator[Violation]:
-    for k in ctx.intent.keepouts:
-        name = k['name']
-        allow = k.get('allow') or ()
-        for ref, part in sorted(ctx.parts.items()):
-            # `allow` and the side filter, from the SHARED resolver: the grader
-            # and the seat predicate must agree on WHICH keep-outs bind a ref,
-            # not merely on the geometry once they do. A through-hole part
-            # occupies BOTH faces -- its leads pass through the keep-out even
-            # when its body sits on the other side -- which is why `sides` is
-            # `part.sides` and the hit test below is given both rects.
-            if not keepouts_for_ref((k,), ref, part.sides):
-                continue
-            hit = keepout_hit(k, (part.rect, part.tht_rect))
-            if hit:
+    # PART-outer, so `keepouts_for_ref` is called once per part over the whole
+    # list -- which is the resolution its own docstring describes, and the
+    # same shape `QuenchState` uses to build `keepouts_for`. Keep-out-outer
+    # with a 1-tuple worked, but rebuilt two sets per (keep-out, part) pair.
+    # Violation order is not affected: `grade` sorts on `Violation.sort_key`.
+    for ref, part in sorted(ctx.parts.items()):
+        # `allow` and the side filter, from the SHARED resolver: the grader
+        # and the seat predicate must agree on WHICH keep-outs bind a ref, not
+        # merely on the geometry once they do. A through-hole part occupies
+        # BOTH faces -- its leads pass through the keep-out even when its body
+        # sits on the other side -- which is why `sides` is `part.sides` and
+        # the hit test is given both rects.
+        for k in keepouts_for_ref(ctx.intent.keepouts, ref, part.sides):
+            if keepout_hit(k, (part.rect, part.tht_rect)):
+                name = k['name']
                 shape = (_fmt_rect(k['rect']) if k.get('rect') is not None
                          else f"circle {k['circle']}")
                 yield Violation(
@@ -1086,7 +1087,7 @@ def rule_keepout(ctx) -> Iterator[Violation]:
                              f"{name!r} {shape}"),
                     measured={'keepout': name, 'side': part.side,
                               'sides_occupied': sorted(part.sides)},
-                    expected={'allow': list(allow)})
+                    expected={'allow': list(k.get('allow') or ())})
 
 
 def rule_edge_connector(ctx) -> Iterator[Violation]:

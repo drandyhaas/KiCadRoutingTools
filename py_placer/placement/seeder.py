@@ -418,7 +418,8 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
                       cap: int = CENSUS_CAP,
                       max_disp: Optional[float] = None,
                       rotations: Optional[Sequence[float]] = None,
-                      constraint=None, tol: float = 0.5) -> int:
+                      constraint=None, tol: float = 0.5,
+                      without_keepouts: Sequence[str] = ()) -> int:
     """How many legal poses `ref` has near (tx, ty), counting at most `cap`.
 
     This is issue #629's measurement. Three consecutive sweeps in run 19
@@ -443,6 +444,14 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
     excludes, and the disc alone leaves it counting poses that are outside
     the zone the seat had to satisfy. `radius`/`step` are ignored when a
     constraint is given -- the zone supersedes them.
+
+    `without_keepouts` names declared keep-outs to LIFT for the sweep (#701).
+    A keep-out is measured the way a blocker is measured -- count the poses
+    with it out of the way -- so that "this keep-out is what refuses the
+    part" is a NUMBER from the same predicate the seat search uses, not a
+    static "does the zone intersect a keep-out" test computed some other way.
+    A verdict derived from a different question is the reported-field trap
+    one level up.
     """
     from pose_score import _offsets
     part = state.parts[ref]
@@ -455,21 +464,38 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
         _step, offsets, _reach = zone_census_offsets(
             part, constraint, tol, tx, ty,
             getattr(state, 'grid_step', 0.1), max_disp)
-    n = 0
-    for dx, dy in offsets:
-        if max_disp is not None and math.hypot(dx, dy) > max_disp + 1e-9:
-            continue
-        x, y = round(tx + dx, 3), round(ty + dy, 3)
-        for rot in rots:
-            # Zone first: it is four float compares, where `pose_ok` ends in
-            # `candidate_valid`. Measured 19x faster on a small zone.
-            if not in_zone(x, y, rot):
+    # Lift the named keep-outs for the duration of the sweep, the same way
+    # `_try_place` swaps `state.clearance` and `_evict_trade` swaps a pose:
+    # a try/finally around the state, so the count comes from `pose_ok`
+    # itself rather than from a second, keep-out-blind predicate.
+    lift = set(without_keepouts or ())
+    saved = None
+    if lift and state.keepouts_for.get(ref):
+        saved = state.keepouts_for[ref]
+        kept = tuple(k for k in saved if k['name'] not in lift)
+        if kept:
+            state.keepouts_for[ref] = kept
+        else:
+            del state.keepouts_for[ref]
+    try:
+        n = 0
+        for dx, dy in offsets:
+            if max_disp is not None and math.hypot(dx, dy) > max_disp + 1e-9:
                 continue
-            if pose_ok(state, ref, x, y, rot, exclude):
-                n += 1
-                if n >= cap:
-                    return n
-    return n
+            x, y = round(tx + dx, 3), round(ty + dy, 3)
+            for rot in rots:
+                # Zone first: it is four float compares, where `pose_ok` ends
+                # in `candidate_valid`. Measured 19x faster on a small zone.
+                if not in_zone(x, y, rot):
+                    continue
+                if pose_ok(state, ref, x, y, rot, exclude):
+                    n += 1
+                    if n >= cap:
+                        return n
+        return n
+    finally:
+        if saved is not None:
+            state.keepouts_for[ref] = saved
 
 
 #: The verdicts a part with no legal pose can be given (#699). Two of them
@@ -487,6 +513,11 @@ NO_POSE_VERDICTS = (
     'no_pair_lift_frees',       # ... and no PAIR of them frees one either
     'blocker_available',        # a lift WOULD free a pose; the depth said no
     'trade_reverted',           # a trade was tried and put back
+    # #701. Before it, a part a declared KEEP-OUT refuses reported
+    # `no_movable_neighbour`, whose prose says "the outline, the zone or its
+    # own size refuses it, not a neighbour" -- false, and the reader's next
+    # move is different: move the keep-out, or add the part to its `allow`.
+    'keepout_blocks',
 )
 
 
@@ -501,12 +532,24 @@ def _empty_census() -> Dict:
     """
     return {'boxed': 0, 'movable': 0, 'censused': 0, 'frozen': {},
             'truncated': 0, 'baseline': 0, 'pairs_total': 0,
-            'pairs_censused': 0, 'pairs_truncated': 0, 'best_pair': None}
+            'pairs_censused': 0, 'pairs_truncated': 0, 'best_pair': None,
+            # #701: {keep-out name: poses freed by lifting it}. Present and
+            # empty on every part, per this function's whole rationale --
+            # a consumer must never need a defaulting `.get` to tell "no
+            # keep-out is in the way" from "keep-outs were not considered".
+            'keepouts_freeing': {}}
 
 
 def _verdict_for(cands: Sequence[str], census: Dict) -> str:
     """The verdict for a part still unseated after the census."""
-    if not cands:
+    if census.get('keepouts_freeing'):
+        # #701, and FIRST: a declared keep-out that frees poses when lifted
+        # is the answer, whatever the neighbours look like. It outranks
+        # `no_movable_neighbour`, whose prose would actively mislead here,
+        # and it sits below `blocker_available` for free -- this function is
+        # only reached when no trade was chosen.
+        v = 'keepout_blocks'
+    elif not cands:
         v = ('immovable_given_frozen' if census.get('frozen')
              else 'no_movable_neighbour')
     else:
@@ -541,6 +584,13 @@ def _no_pose_note(ref: str, verdict: str, census: Dict,
     if frozen and verdict in ('no_single_lift_frees', 'no_pair_lift_frees'):
         tail += ("; also in the way, and not this rung's to move: "
                  + ', '.join(f"{r} ({why})" for r, why in sorted(frozen.items())))
+    if verdict == 'keepout_blocks':
+        who = ', '.join(f"{n!r} (frees {c})" for n, c
+                        in sorted((census.get('keepouts_freeing') or {}).items()))
+        return (f"{ref}: no legal pose, and the DECLARED KEEP-OUT(S) {who} "
+                f"are what refuse it -- not a neighbour, and not this rung's "
+                f"to lift. Move the keep-out, or add {ref} to its `allow` "
+                f"list if it is the part that owns it")
     if verdict == 'no_movable_neighbour':
         return (f"{ref}: no legal pose, and NOTHING seated is near enough to "
                 f"be in the way -- the outline, the zone or its own size "
@@ -1707,6 +1757,20 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # and this one reaches `place_seed`'s JSON_SUMMARY.
             zkw = dict(constraint=constraint, tol=tol)
             baseline = count_legal_poses(state, ref, tx, ty, base_excl, **zkw)
+            # #701: which DECLARED KEEP-OUT is refusing this part, measured
+            # the way a blocker is -- count the poses with it lifted. Only
+            # when the part has no pose at all (nothing to explain otherwise)
+            # and only over the keep-outs that BIND it, so a board declaring
+            # none pays nothing and each extra census is already capped by
+            # CENSUS_CAP.
+            keepouts_freeing: Dict[str, int] = {}
+            if not baseline:
+                for _k in state.keepouts_for.get(ref, ()):
+                    _n = count_legal_poses(state, ref, tx, ty, base_excl,
+                                           without_keepouts=(_k['name'],),
+                                           **zkw)
+                    if _n > baseline:
+                        keepouts_freeing[_k['name']] = _n
             cinfo: Dict = {}
             cands = _evict_candidates(state, ref, tx, ty, placed, immovable,
                                       constraint=constraint, tol=tol,
@@ -1723,7 +1787,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                            'censused': cinfo.get('censused', len(cands)),
                            'frozen': cinfo.get('frozen') or {},
                            'truncated': cinfo.get('truncated', 0),
-                           'baseline': baseline})
+                           'baseline': baseline,
+                           'keepouts_freeing': keepouts_freeing})
             no_pose_census[ref] = census
             useful = sorted((n, b) for b, n in freed.items() if n > baseline)
             if not evict_depth:
