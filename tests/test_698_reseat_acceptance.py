@@ -33,21 +33,27 @@ re-derivable from this tree; the rebuild moved the partners, halved U1's
 courtyard and added the keep-out's `allow` list.) `arm_M_seed_independence` is
 what stops it recurring.
 
-Mutation battery: `tests/mutate_698.py` -- **32 rows: 30 killed, 2 survived
+Mutation battery: `tests/mutate_698.py` -- **38 rows: 36 killed, 2 survived
 (both recorded with their reason), 0 broken, 0 disagreeing with expectation.**
 
-What it caught in THIS file, which is why it exists:
+What it caught in THIS file, over two rounds, which is why it exists:
 
-| mutation | why it survived the first time |
+| mutation | why it survived |
 |---|---|
 | `drop-the-safety-half` | a legal seat search never worsens a hard term, so no behavioural arm could reach the conjunct. `arm_Q` drives `reseat_accept` directly. |
 | `prune-refuses-every-revert` | no fixture had prune legitimately reverting a claim-bound part, so "the probe is a conjunct, not an exemption" was untested. `arm_R`. |
 | `hpwl-ignores-its-net-subset` | every net on the plain fixture touched the scope ref, so `scope_hpwl` and the board-wide `hpwl` were the same number. R8/R9 fixed that. |
+| `the-KEPT-note-credits-the-probe-for-every-held-revert` | **round 2** -- the arm-S check written for that very finding put U1 outside the keep-out at BOTH poses, so `undoes_intent` was False and the mutated line was unreachable. |
+| `the-probe-goes-back-to-the-named-scope-only` | **round 2** -- that check asserted on a probe the TEST built, which says nothing about the one `reseat_scope` builds. It now spies the real call site. |
 
-And one it caught in ITSELF: the row `the-zone-spec-forgets-the-anchor-branch`
-originally mutated `not any(` to `False or not any(`, which is the same
-expression -- a row that could not fail, recorded as an expected survivor. It
-read as a finding and was a tautology.
+The round-2 pair is the lesson worth keeping: those two checks were written to
+pin findings from a code review, and they were themselves vacuous. A fix is not
+verified by the reviewer that motivated it.
+
+And one the battery caught in ITSELF: the row
+`the-zone-spec-forgets-the-anchor-branch` originally mutated `not any(` to
+`False or not any(`, which is the same expression -- a row that could not fail,
+recorded as an expected survivor. It read as a finding and was a tautology.
 """
 import json
 import os
