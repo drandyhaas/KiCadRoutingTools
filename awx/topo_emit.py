@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 import topo_strings as ts  # noqa: E402
 import flow_frame as ff  # noqa: E402
+import escape_moves as em  # noqa: E402
 
 TRACK = 0.127
 CLEAR = 0.105            # 0.1 spec + 5um so hugs don't sit exactly at 0.1
@@ -377,6 +378,45 @@ def main():
 
     ball_order = sorted(names, key=lambda nm: (ends[nm][1][1],
                                                ends[nm][1][0]))
+
+    # ---- the escape-move MENU for every berth pad (audit item 1).
+    # The array's pitch and extent are measured from the footprint here,
+    # not taken from --pitch.
+    _dest_fp = {}
+    for nm in names:
+        _dest_fp.setdefault(ends[nm][2], pcb.footprints[ends[nm][2]])
+    _grids = {ref: em.grid_of(fp) for ref, fp in _dest_fp.items()}
+    _obs_cache = {}
+
+    def _obs(nid, layer):
+        if (nid, layer) not in _obs_cache:
+            _obs_cache[(nid, layer)] = build_obstacles(pcb, nid, kids,
+                                                       layer)
+        return _obs_cache[(nid, layer)]
+
+    LAYERS = ('F.Cu', 'B.Cu')
+    menu = {}
+    for nm in names:
+        nid_m = byname[nm][0]
+        ref = ends[nm][2]
+        bxm, bym = ends[nm][1]
+        pad_m = min(pcb.footprints[ref].pads,
+                    key=lambda p: (p.global_x - bxm) ** 2
+                    + (p.global_y - bym) ** 2)
+
+        def _clear(pp, qq, lay, _n=nid_m):
+            return _obs(_n, lay).seg_clear(pp, qq)
+
+        def _vclear(pp, lay, _n=nid_m):
+            vv = _obs(_n, lay).point_violation(
+                pp, pad=(VIA_SIZE - TRACK) / 2)
+            return not (vv and vv[0] > 0)
+
+        menu[nm] = em.enumerate_moves(pad_m, _grids[ref], LAYERS,
+                                      _clear, _vclear)
+    print('escape menu: ' + ' '.join(
+        f'{nm}:{len(menu[nm])}' for nm in ball_order))
+
     for nm in ball_order:
         if nm in moves:
             continue
