@@ -231,10 +231,11 @@ def octify_segs(segs, eps=0.05, fine=None):
     return out
 
 
-def strip_net_segments(txt, net_ids):
-    """Remove every (segment ...) block whose (net N) is in net_ids,
-    paren-balanced (handles both KiCad multi-line and our one-line
-    forms)."""
+def strip_net_segments(txt, net_ids, net_names=()):
+    """Remove every (segment ...) block whose net ref matches, in
+    EITHER dialect: numeric (net N) or quoted name (net "/path/NAME")
+    (#749 lore: boards carry both). Paren-balanced (KiCad multi-line
+    and our one-line forms)."""
     out = []
     i = 0
     while True:
@@ -252,8 +253,11 @@ def strip_net_segments(txt, net_ids):
                 if depth == 0:
                     break
             k += 1
-        m = re.search(r'\(net (\d+)\)', txt[j:k + 1])
-        if m and int(m.group(1)) in net_ids:
+        block = txt[j:k + 1]
+        m = re.search(r'\(net (\d+)\)', block)
+        m2 = re.search(r'\(net "([^"]+)"\)', block)
+        if (m and int(m.group(1)) in net_ids) or \
+                (m2 and m2.group(1) in net_names):
             out.append(txt[i:j].rstrip(' \t'))
             e = k + 1
             if e < len(txt) and txt[e] == '\n':
@@ -279,6 +283,8 @@ def main():
                     help='homotopy entry moves, e.g. SDQ0=S,SDQ11=N')
     ap.add_argument('--no-vip', action='store_true',
                     help='disable via-in-pad berths (task 4)')
+    ap.add_argument('--plan-out', default='',
+                    help='export per-net layer/entry plan JSON (task 5)')
     ap.add_argument('--no-octi', action='store_true',
                     help='emit the raw arbitrary-angle braid geometry')
     a = ap.parse_args()
@@ -514,6 +520,32 @@ def main():
     downs = sorted((d for d in divers if trank[d] >= lidx[d]),
                    key=lambda nm: -trank[nm])
     dirs = {d: (-1 if trank[d] < lidx[d] else 1) for d in divers}
+    # task 5: a diver whose fanout stub already sits on B.Cu is BORN
+    # diving -- no dive via. It must do all its diver-diver crossings
+    # as the MOVER (it can never be F while passed), so B-birth divers
+    # go to the FRONT of priority; mutually-inverted B-birth pairs are
+    # illegal (the plan/refanout must not create them).
+    wtooth_layer = {}
+    for nm in names:
+        nid2 = byname[nm][0]
+        tp = ends[nm][0]
+        wtooth_layer[nm] = next(
+            (s.layer for s in pcb.segments if s.net_id == nid2
+             and (abs(s.start_x - tp[0]) + abs(s.start_y - tp[1]) < 0.005
+                  or abs(s.end_x - tp[0]) + abs(s.end_y - tp[1])
+                  < 0.005)), 'F.Cu')
+    birth_b = {d for d in divers if wtooth_layer[d] == 'B.Cu'}
+    for da in birth_b:
+        for db in birth_b:
+            if da < db:
+                assert not inverted(da, db), \
+                    f'mutually inverted B-birth divers {da}/{db}'
+    if birth_b:
+        print(f'B-birth divers (no dive via): {sorted(birth_b)}')
+        ups = [d for d in birth_b if d in ups] + \
+            [d for d in ups if d not in birth_b]
+        downs = [d for d in birth_b if d in downs] + \
+            [d for d in downs if d not in birth_b]
     priority = ups + downs
 
     # serial pass (the proven west-asc / east-desc remove-insert form)
@@ -625,8 +657,40 @@ def main():
     # F there, so the window is clamped away from those stages.
     window = {}
     wa_lo_map = {}
+    # B-birth divers: window opens at the tooth (their stub IS the B
+    # copper); assert nobody passes them west of their own swaps
+    
     wb_hi_map = {}
     for d in divers:
+        if d in birth_b:
+            s1 = first.get(d)
+            if s1 is not None:
+                fw_chk = [s for s in invol[d] if s < s1]
+                assert not fw_chk, f'B-birth {d} passed before its band'
+            wa = ends[d][0][0] - 0.05
+            sk = last.get(d)
+            fe = min((s for s in invol[d] if sk is None or s > sk),
+                     default=None)
+            wb_hi = x0 + (fe + 0.5) * W - 0.30 if fe is not None \
+                else x1 - 0.15
+            if sk is not None:
+                wb = min(wb_hi, max(x0 + (sk + 1.6) * W,
+                                    x0 + (sk + 1.5) * W + 0.45))
+                if fe is None and wb < x0 + (sk + 1.5) * W + 0.28:
+                    if not a.no_vip:
+                        wb = None
+                        vip_nets.append(d)
+                    else:
+                        wb = min(x1 + 0.31, ends[d][1][0] - 0.35)
+            else:
+                wb = None if not a.no_vip else x1 - 0.15
+                if wb is None:
+                    vip_nets.append(d)
+            if entry[d][0] == 'B':
+                window[d] = (wa, None)
+            else:
+                window[d] = (wa, wb)
+            continue
         if d in first:
             s1, sk = first[d], last[d]
             fw = max((s for s in invol[d] if s < s1), default=None)
@@ -677,6 +741,13 @@ def main():
     assert all(b > a for a, b in zip(py, py[1:])), ('lane ys not strictly '
                                                     'increasing', py)
     Ly = sorted(ends[nm][0][1] for nm in names)
+    # enforce a minimum launch-slot pitch: refanned B teeth can land
+    # arbitrarily close to existing teeth; the tooth legs jog the
+    # difference (the slot grid must never degenerate)
+    _ly2 = []
+    for _v in Ly:
+        _ly2.append(_v if not _ly2 else max(_v, _ly2[-1] + 0.28))
+    Ly = _ly2
 
     def slot(t, i):
         return (1 - t) * Ly[i] + t * py[i]
@@ -760,6 +831,11 @@ def main():
 
     obs_cache = {}
     for d in sorted(window, key=lambda d: window[d][0]):
+        if d in birth_b:
+            wa, wb = window[d][0], window[d][1]
+            print(f'{d}: window ({wa:.2f}, '
+                  f'{wb if wb is None else round(wb, 2)}) [B-birth]')
+            continue
         win = window[d]
         wa, wb = win[0], win[1]
         x_ad = win[2] if len(win) == 3 else None
@@ -1125,12 +1201,44 @@ def main():
     if vip_nets:
         print(f'VIA-IN-PAD berths (IPC-4761 Type VII filled+capped '
               f'required): {sorted(set(vip_nets))}')
+    if a.plan_out:
+        import json as _json
+        plan = {}
+        for nm in names:
+            if nm in river2:
+                plan[nm] = {'river': 'south'}
+                continue
+            plan[nm] = {
+                'river': 'west',
+                'home': 'B' if nm in divers else 'F',
+                'tooth_layer': wtooth_layer.get(nm, 'F.Cu'),
+                'diver': nm in divers,
+                'birth_b': nm in birth_b,
+                'vip': nm in vip_nets,
+                'entry': entry.get(nm, ('?',))[0],
+            }
+        # fanout wishlist: divers whose stubs are still F and who are
+        # not mutually inverted with an existing B-birth diver
+        wish = []
+        for d in sorted(divers, key=lambda n: trank.get(n, 99)):
+            if wtooth_layer.get(d) != 'F.Cu':
+                continue
+            if all(not inverted(d, e) for e in
+                   list(birth_b) + wish if e != d):
+                wish.append(d)
+        for d in wish:
+            plan[d]['fanout_wish'] = 'B'
+        with open(a.plan_out, 'w') as f:
+            _json.dump(plan, f, indent=1)
+        print(f'plan exported: {a.plan_out} '
+              f'(fanout B wishlist: {wish})')
 
     # write board
     txt = open(a.board, encoding='utf-8').read()
     add = []
     if smoothed:
-        txt = strip_net_segments(txt, kids)
+        kid_names = {pcb.nets[i].name for i in kids if i in pcb.nets}
+        txt = strip_net_segments(txt, kids, kid_names)
         for nm in names:
             nid, _ = byname[nm]
             for s in final_segs[nm]:
