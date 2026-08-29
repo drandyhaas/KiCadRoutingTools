@@ -276,18 +276,27 @@ class Corridor:
     on one exit point.
     """
 
-    def __init__(self, box, launch: Dict[str, Pt], pad: float = 0.3):
+    def __init__(self, box, launch: Dict[str, Pt], pad: float = 0.3,
+                 cache: Optional[Dict[str, Dict]] = None):
         self.box = box
         self.pad = pad
         self.launch = launch
-        self._legs: Dict[Tuple, List[Pt]] = {}
-        self._x: Dict[Tuple, bool] = {}
+        # the caches key on the LAUNCH point as well as the exit, so a
+        # caller that rebuilds the frame with one net moved -- which is
+        # every step of a source-side search -- keeps the other nets'
+        # work instead of paying O(N^2) crossings again per candidate
+        if cache is None:
+            cache = {}
+        self._legs = cache.setdefault('legs', {})
+        self._x = cache.setdefault('x', {})
 
     def leg(self, n: str, m) -> List[Pt]:
         """The polyline the corridor must draw for this net: launch to
         the escape's exit, around the array rather than through it."""
         pt = m if isinstance(m, tuple) else m.exit_pt
-        key = (n, round(pt[0], 4), round(pt[1], 4))
+        lp = self.launch[n]
+        key = (n, round(lp[0], 4), round(lp[1], 4),
+               round(pt[0], 4), round(pt[1], 4), self.pad)
         hit = self._legs.get(key)
         if hit is None:
             hit = around_box_path(self.launch[n], pt, self.box, self.pad)
@@ -324,8 +333,11 @@ class Corridor:
 
     def crosses(self, a: str, b: str, sel: Dict[str, Move]) -> bool:
         ea, eb = sel[a].exit_pt, sel[b].exit_pt
-        key = (a, round(ea[0], 4), round(ea[1], 4),
-               b, round(eb[0], 4), round(eb[1], 4))
+        la, lb = self.launch[a], self.launch[b]
+        key = (a, round(la[0], 4), round(la[1], 4),
+               round(ea[0], 4), round(ea[1], 4),
+               b, round(lb[0], 4), round(lb[1], 4),
+               round(eb[0], 4), round(eb[1], 4), self.pad)
         hit = self._x.get(key)
         if hit is None:
             hit = self.paths_cross(self.leg(a, sel[a]), self.leg(b, sel[b]))
@@ -443,6 +455,23 @@ def score(choice: Dict[str, Move], groups, geo: 'Corridor',
     mm = sum(1 for n, m in choice.items()
              if dl.get(n) and dl[n] != m.layer)
     return tv, fl, mm
+
+
+def lanes_free(m: Move, sel: Dict[str, Move], me: str) -> bool:
+    """Is this move's channel and via site free, ignoring the net's own
+    current claim? The same check select() applies inside its greedy
+    pass, exposed so a later refinement cannot quietly propose a move
+    that two nets would have to share."""
+    key, a, b = _lane_span(m)
+    for other, om in sel.items():
+        if other == me:
+            continue
+        ok, oa, ob = _lane_span(om)
+        if ok == key and a < ob and oa < b:
+            return False
+        if m.site is not None and _site_key(om) == _site_key(m):
+            return False
+    return True
 
 
 def plan_floor(sel: Dict[str, Move], geo: 'Corridor') -> int:
