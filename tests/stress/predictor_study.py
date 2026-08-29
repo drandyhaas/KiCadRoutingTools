@@ -84,7 +84,6 @@ import argparse
 import concurrent.futures
 import glob
 import hashlib
-import io
 import json
 import os
 import subprocess
@@ -812,21 +811,26 @@ def load_rows(path):
     `JSONDecodeError: Extra data: line 2 column 1` -- a tool refusing the file
     it had just written. Found when the committed rows file was withdrawn and
     the JSONL became the only path anyone would use.
+
+    A ONE-row JSONL is the trap here: it parses as a lone JSON object, so a
+    `.get('rows') or []` reads it as a document with no rows and returns
+    NOTHING -- and the caller then blames the file ("carries no study rows")
+    and exits 0. Same defect as the crash, only silent. Only a document has
+    the `rows` key, so anything else that parses as an object is one row.
     """
     with open(path, encoding='utf-8') as f:
         text = f.read()
-    stripped = text.lstrip()
-    if stripped.startswith('{') and '\n{' not in stripped.rstrip():
-        return json.load(io.StringIO(text)).get('rows') or []
     try:
         d = json.loads(text)
     except ValueError:
-        pass
+        pass            # not one JSON value -- JSONL below
     else:
-        if isinstance(d, dict):
-            return d.get('rows') or []
         if isinstance(d, list):
             return d
+        if isinstance(d, dict):
+            if 'rows' in d:
+                return d.get('rows') or []
+            return [d] if d else []
     rows = []
     for n, line in enumerate(text.splitlines(), 1):
         line = line.strip()
