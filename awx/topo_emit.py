@@ -691,6 +691,7 @@ def main():
             else:
                 window[d] = (wa, wb)
             continue
+        fe = None
         if d in first:
             s1, sk = first[d], last[d]
             fw = max((s for s in invol[d] if s < s1), default=None)
@@ -722,10 +723,18 @@ def main():
             wa_lo_map[d] = wa            # west-slide floor (swapless)
             wb = x1 - 0.15
         if entry[d][0] == 'B':
-            if d in first:
+            if d in first and fe is not None:
                 # trunk-crossing B-entry: normal trunk window for its
                 # own swaps, then a second dive near the splice for the
-                # B approach to the dogbone site (4 vias total)
+                # B approach to the dogbone site (4 vias total).
+                # ONLY when a foreign crossing east of this diver's own
+                # band actually needs it on F (fe is not None). With
+                # fe None it may simply STAY on B from its dive through
+                # to the dogbone -- the same reasoning the no-trunk-room
+                # branch above already states -- which is 2 vias, not 4.
+                # Measured at K11: SDQ0 surfaced at 131.21, ran 1.6mm on
+                # F and re-dived at 132.84 for nothing; dropping that
+                # excursion takes the rung from 16 vias to the human's 14.
                 x_ad = max(wb + 0.35, x1 - 0.45)
                 if invol.get(d):
                     x_ad = max(x_ad,
@@ -1239,6 +1248,40 @@ def main():
     if smoothed:
         kid_names = {pcb.nets[i].name for i in kids if i in pcb.nets}
         txt = strip_net_segments(txt, kids, kid_names)
+        # The octify / #536 smoothing passes leave a few DEGENERATE
+        # segments -- measured at K11 and K21: three of 0.4 um and one
+        # of 2 um. They are far below any manufacturing resolution, and
+        # a 0.4 um segment between two 127 um tracks is an overlap, not
+        # a link -- but they are junk in the output, they inflate the
+        # segment count, and a structural audit reads the pair of them
+        # meeting at one point as a BRANCH in an otherwise clean chain.
+        # Drop anything under 1 um; the neighbours already overlap.
+        # ...and a few DUPLICATES: the same 2 um segment emitted twice,
+        # which reads as a degree-4 vertex -- a BRANCH -- in a chain that
+        # is actually clean. Dedup is strictly safe (dropping a copy
+        # cannot disconnect anything); the length drop is not, so it
+        # stays at 1 um where the neighbours already overlap.
+        n_deg = n_dup = 0
+        for nm in names:
+            keep = []
+            seen = set()
+            for s in final_segs[nm]:
+                if math.hypot(s.end_x - s.start_x,
+                              s.end_y - s.start_y) < 0.001:
+                    n_deg += 1
+                    continue
+                k = (round(s.start_x, 4), round(s.start_y, 4),
+                     round(s.end_x, 4), round(s.end_y, 4), s.layer)
+                kr = (k[2], k[3], k[0], k[1], k[4])
+                if k in seen or kr in seen:
+                    n_dup += 1
+                    continue
+                seen.add(k)
+                keep.append(s)
+            final_segs[nm] = keep
+        if n_deg or n_dup:
+            print(f'dropped {n_deg} degenerate (< 1 um) and {n_dup} '
+                  f'duplicate segment(s)')
         for nm in names:
             nid, _ = byname[nm]
             for s in final_segs[nm]:
