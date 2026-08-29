@@ -146,11 +146,28 @@ class Obstacles:
         return worst
 
     def seg_clear(self, a, b):
-        # sampled + exact-vs-discs check for segment ab
-        for (x, y, r, _n) in self.discs:
+        # disc candidates from the grid, sampled along the segment
+        # (sample step 0.9 < cell 1.0, so with the 3x3 neighbourhood
+        # every cell the segment touches is covered); caps via a bbox
+        # prefilter. Exact checks on the candidates only.
+        L = math.hypot(b[0] - a[0], b[1] - a[1])
+        nsteps = max(1, int(L / 0.9))
+        cand = set()
+        for k in range(nsteps + 1):
+            t = k / nsteps
+            cand.update(self.near_discs((a[0] + t * (b[0] - a[0]),
+                                         a[1] + t * (b[1] - a[1]))))
+        for i in cand:
+            x, y, r, _n = self.discs[i]
             if seg_pt_dist(a, b, (x, y)) < r:
                 return False
+        xlo, xhi = min(a[0], b[0]), max(a[0], b[0])
+        ylo, yhi = min(a[1], b[1]), max(a[1], b[1])
         for (c, e, r, _n) in self.caps:
+            if min(c[0], e[0]) - r > xhi or max(c[0], e[0]) + r < xlo \
+                    or min(c[1], e[1]) - r > yhi \
+                    or max(c[1], e[1]) + r < ylo:
+                continue
             if seg_seg_dist(a, b, c, e) < r:
                 return False
         return True
