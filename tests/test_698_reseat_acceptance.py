@@ -984,30 +984,69 @@ def arm_S_review_findings(wd):
               f"accepted={ok} (MEASURE_QUANTUM={seeder.MEASURE_QUANTUM})")
 
     # SF-4: the KEPT note must not credit the probe for a revert the TUPLE
-    # refused on its own.
-    pcb = parse_kicad_pcb(b)
-    bundle, _pr = floorplan.resolve_intent_gate(it, pcb, ())
+    # refused on its own. The case needs `undoes_intent` TRUE (the old pose is
+    # INSIDE the keep-out, so restoring it re-breaks the claim) while the tuple
+    # declines anyway -- here because a blocker sits on the old pose, so the
+    # revert would create courtyard overlap. Both halves matter: with only the
+    # first, the tuple wants the revert and the mutation is unreachable, which
+    # is how the first version of this check passed while testing nothing.
+    b4 = board(os.path.join(wd, 's4.kicad_pcb'),
+               [_part('U1', 14.0, 2.0, 0.5, 0.5, npads=4, nets=(1, 2, 3, 4)),
+                _part('R1', 9.0, 5.0, 0.4, 0.3, npads=2, nets=(1, 2)),
+                _part('C1', 11.0, 7.0, 0.4, 0.3, npads=2, nets=(3, 4)),
+                _part('BLK', 10.0, 6.0, 1.2, 1.2, npads=2, nets=(7, 8))],
+               size=KO_SIZE)
+    _p4, it4 = keepout_intent(wd, 's4')
+    pcb4 = parse_kicad_pcb(b4)
+    bundle4, _pr4 = floorplan.resolve_intent_gate(it4, pcb4, ())
     import pose_score
-    st = pose_score.make_state(pcb, b, clearance=0.2,
-                               board_edge_clearance=0.5, grid_step=0.1,
-                               keepouts=it.keepouts)
-    probe = q.IntentProbe(st, zones=bundle['zones'])
-    # `old` = a pose FARTHER from U1's partners than where it stands, so the
-    # tuple does not want the revert; U1 is clear of the keep-out either way.
-    st.apply_move('U1', 13.5, 6.0, 0.0)
-    notes = []
-    pruned = reconstruct.prune_assignment(
-        st, {'U1': (18.0, 11.0, 0.0)}, notes, edge_bands={},
-        intent_probe=probe.terms)
-    check("SF-4: the tuple declines the revert", pruned == [], f"{pruned}")
-    check("SF-4: and no note credits the intent probe for it",
-          not any('KEPT' in n for n in notes), f"notes={notes}")
+    st4 = pose_score.make_state(pcb4, b4, clearance=0.2,
+                                board_edge_clearance=0.5, grid_step=0.1,
+                                keepouts=it4.keepouts)
+    probe4 = q.IntentProbe(st4, zones=bundle4['zones'])
+    old4 = (10.0, 6.0, 0.0)                 # inside `hot`, and on top of BLK
+    check("SF-4 control: the CURRENT pose breaches nothing",
+          probe4.terms('U1') == (0.0,), f"terms={probe4.terms('U1')}")
+    st4.apply_move('U1', *old4)
+    breached = probe4.terms('U1')
+    st4.apply_move('U1', 14.0, 2.0, 0.0)
+    check("SF-4 control: the OLD pose breaches the keep-out",
+          breached and breached[0] > 0, f"terms={breached}")
+    notes4 = []
+    pruned4 = reconstruct.prune_assignment(
+        st4, {'U1': old4}, notes4, edge_bands={}, intent_probe=probe4.terms)
+    check("SF-4: the tuple declines the revert on its own", pruned4 == [],
+          f"pruned={pruned4}")
+    check("SF-4: and no KEPT note credits the intent probe for it",
+          not any('KEPT' in n for n in notes4), f"notes={notes4}")
 
-    # SF-6a: the probe covers the whole board, not just the named scope, so an
-    # EVICTED stranger cannot be pushed into a keep-out unseen.
-    check("SF-6a: the probe binds every claim-bound ref, not only the scope",
-          set(probe.spec) >= {'U1'} and probe.refs == tuple(sorted(st.parts)),
-          f"probe.refs={probe.refs}")
+    # SF-6a: the probe `reseat_scope` ACTUALLY BUILDS must cover the whole
+    # board, so an evicted stranger cannot be pushed into a keep-out unseen.
+    # Asserted at the real call site -- a probe this test constructs proves
+    # nothing about the one the engine constructs.
+    seen6 = {}
+    real6 = q.IntentProbe.__init__
+
+    def spy6(self, state, zones=(), refs=None):
+        real6(self, state, zones=zones, refs=refs)
+        seen6['refs_arg'] = refs
+        seen6['covered'] = set(self.refs)
+        seen6['parts'] = set(state.parts)
+
+    q.IntentProbe.__init__ = spy6
+    try:
+        reseat(b, it, ['U1'])
+    finally:
+        q.IntentProbe.__init__ = real6
+    check("SF-6a: reseat_scope builds the probe over the WHOLE board",
+          seen6.get('refs_arg') is None
+          and seen6.get('covered') == seen6.get('parts'),
+          f"refs={seen6.get('refs_arg')}, "
+          f"{len(seen6.get('covered') or ())} of "
+          f"{len(seen6.get('parts') or ())} parts covered")
+    check("SF-6a: and that is strictly more than the named scope",
+          len(seen6.get('covered') or ()) > 1,
+          f"scope was ['U1'], probe covers {sorted(seen6.get('covered') or ())}")
 
 
 def main():

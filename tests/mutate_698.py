@@ -161,7 +161,7 @@ ROWS = [
 
     # ---- min_gain ----------------------------------------------------------
     ('min_gain-is-ignored', 's',
-     "            ok = gain > max(abs(float(min_gain)), 1e-9)\n",
+     "            ok = gain >= float(min_gain) - 1e-9\n",
      "            ok = gain > 1e-9\n",
      (T698,), 'KILLED'),
 
@@ -195,13 +195,13 @@ ROWS = [
 
     # ---- the prune probe ---------------------------------------------------
     ('prune-ignores-the-probe', 'r',
-     "        undoes_intent = any(a > b + 1e-9\n"
+     "        undoes_intent = any(a > b + legality.EPS\n"
      "                            for a, b in zip(after_intent, base_intent))\n",
      "        undoes_intent = False\n",
      (T698,), 'KILLED'),
 
     ('prune-refuses-every-revert', 'r',
-     "        undoes_intent = any(a > b + 1e-9\n"
+     "        undoes_intent = any(a > b + legality.EPS\n"
      "                            for a, b in zip(after_intent, base_intent))\n",
      "        undoes_intent = bool(after_intent)\n",
      (T698, T630), 'KILLED'),
@@ -319,10 +319,14 @@ ROWS = [
      (T698,), 'KILLED'),
 
     ('the-early-out-drops-accept_basis', 's',
-     "                'accept_basis': {'scope_source': scope_source,\n"
-     "                                 'policy': 'empty', 'fired': None,\n"
-     "                                 'terms': [], 'safety': None,\n"
-     "                                 'intent_licence': None},\n",
+     "                'accept_basis': basis_skeleton(\n"
+     "                    scope_source, policy='empty',\n"
+     "                    witnesses_before=witnesses_before,\n"
+     "                    witnesses_after=witnesses_before,\n"
+     "                    hpwl_before=_empty_gate[_recon.GATE_TERMS.index"
+     "('hpwl')],\n"
+     "                    hpwl_after=_empty_gate[_recon.GATE_TERMS.index"
+     "('hpwl')]),\n",
      "",
      (T698,), 'KILLED'),
 
