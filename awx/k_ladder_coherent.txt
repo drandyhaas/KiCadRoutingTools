@@ -1,0 +1,17 @@
+# Coherent K-ladder for fb_t2q_base (#622): whole rivers only, ordered
+# tightest data lanes first, singletons last. Derived from the champion
+# K=51 run's river decomposition (zj2_k51_ctl_fixed.log physical orders).
+# A prefix K never splits a river except mid-river at the K boundary --
+# use the checkpoints. Old prefix ladder (SHORT51 order) mixed singletons
+# into small K (K=4 carried SA12, excluded by detection).
+#
+# Checkpoints: K=4 (river R4 whole) | 11 (+R3) | 15 (+R5) | 19 (+R6)
+#   | 21 (+R7) | 32 (+R1) | 47 (+R2) | 51 (+singletons)
+SDQ15 SDQ14 SDQ13 SDQ11
+SDQ0 SDQM0 SDQ12 SDQ8 SDQ10 SDQ9 SDQM1
+SRAS SCAS SA7 SA9
+SODT0 SODT1 SA13 SWE
+SCKE1 SCKE0
+SA8 SA6 SA4 SA1 SDQ7 SBA1 SA0 SA12 SA15 SDQ2 SA11
+SRST SBA0 SA5 SBA2 SVREF SA2 SCS0 SCS1 SA3 SDQ6 SDQ3 SDQ4 SDQ5 SA10 SDQ1
+SA14 SZQ DU1_ZQ DU1_ZQ1
