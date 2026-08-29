@@ -68,6 +68,15 @@ RUN_ALL_TIMEOUT = 1200
 DEFAULT_BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 'placement_ab_baseline.json')
 
+# The sources `resolve_blocks` derives from when the grade resolves an emitted
+# intent's blocks. `emit_intent` stamps EVERY block with a `group` key, so a
+# grade given no sources resolves every one of them to nothing -- see `_run`.
+# `('kicad', 'sheet')` is what `groups.parse_sources('auto')` returns, and it is
+# what `check_floorplan.py`, `place_seed.py` and `place_portfolio.py` all
+# default to; spelled out rather than imported so the fixture cannot drift with
+# a change to `auto`'s membership.
+GROUP_SOURCES = ('kicad', 'sheet')
+
 # The keys compared against the committed baseline.
 #
 # `seconds` is wall-clock and is never compared. `corridor_cut` is never
@@ -217,8 +226,19 @@ def _intent_for(board_path, corridors, workdir):
     return floorplan.load_intent(path)
 
 
-def _run(board_path, out_path, intent, quench_kw):
-    """One quench + write + independent grade. Returns the measured row."""
+def _run(board_path, out_path, intent, quench_kw, group_sources=GROUP_SOURCES):
+    """One quench + write + independent grade. Returns the measured row.
+
+    `group_sources` is NOT optional in spirit, only in signature. Every block
+    `_intent_for` emits carries a `group` key (floorplan.emit_intent), and
+    `resolve_blocks` only derives groups when it is given sources -- so a grade
+    at the `()` default resolves EVERY block to nothing and reports it as
+    `block_unresolved`. Measured before this was passed (#702): ulx3s 10
+    errors, orangecrab 6, coldfire 2, all of them `block_unresolved`, all of
+    them ZERO at ('kicad', 'sheet'). That is the instrument misreading its own
+    fixture, not a finding about the board, and it made `intent_errors` a
+    column that could not see the rule this file exists to measure.
+    """
     from kicad_parser import parse_kicad_pcb
     from placement.quench import quench
     from placement.writer import write_placed_output
@@ -239,7 +259,8 @@ def _run(board_path, out_path, intent, quench_kw):
     # here come from the final poses, not from the frozen model the optimizer
     # minimised against.
     graded = parse_kicad_pcb(out_path)
-    result = floorplan.grade(intent, graded, out_path, with_health=True)
+    result = floorplan.grade(intent, graded, out_path, with_health=True,
+                             group_sources=group_sources)
     summary = floorplan.summary(result)
     after = metrics.get('after') or {}
     # ERRORS only, by rule. `summary()['violations_by_rule']` counts warnings

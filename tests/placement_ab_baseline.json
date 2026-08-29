@@ -7,20 +7,16 @@
    "health_block_displacement_max_mm": 55.3346,
    "health_bus_foreign_crossings": 147,
    "hpwl": 7434.4,
-   "intent_errors": 2,
-   "intent_errors_by_rule": {
-    "block_unresolved": 2
-   }
+   "intent_errors": 0,
+   "intent_errors_by_rule": {}
   },
   "on": {
    "crossings": 1370,
    "health_block_displacement_max_mm": 54.6257,
    "health_bus_foreign_crossings": 143,
    "hpwl": 7241.97,
-   "intent_errors": 2,
-   "intent_errors_by_rule": {
-    "block_unresolved": 2
-   }
+   "intent_errors": 0,
+   "intent_errors_by_rule": {}
   }
  },
  "corridor-orangecrab": {
@@ -31,9 +27,8 @@
    "health_block_displacement_max_mm": 18.5356,
    "health_bus_foreign_crossings": 32,
    "hpwl": 2117.85,
-   "intent_errors": 7,
+   "intent_errors": 1,
    "intent_errors_by_rule": {
-    "block_unresolved": 6,
     "zone_containment": 1
    }
   },
@@ -42,9 +37,8 @@
    "health_block_displacement_max_mm": 18.8075,
    "health_bus_foreign_crossings": 31,
    "hpwl": 2113.67,
-   "intent_errors": 7,
+   "intent_errors": 1,
    "intent_errors_by_rule": {
-    "block_unresolved": 6,
     "zone_containment": 1
    }
   }
@@ -57,9 +51,8 @@
    "health_block_displacement_max_mm": 17.9512,
    "health_bus_foreign_crossings": 62,
    "hpwl": 7437.99,
-   "intent_errors": 14,
+   "intent_errors": 4,
    "intent_errors_by_rule": {
-    "block_unresolved": 10,
     "zone_containment": 4
    }
   },
@@ -68,9 +61,8 @@
    "health_block_displacement_max_mm": 18.0904,
    "health_bus_foreign_crossings": 55,
    "hpwl": 7416.23,
-   "intent_errors": 17,
+   "intent_errors": 7,
    "intent_errors_by_rule": {
-    "block_unresolved": 10,
     "zone_containment": 7
    }
   }
