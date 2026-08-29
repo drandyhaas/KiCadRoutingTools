@@ -83,11 +83,31 @@ def pose_ok(state, ref: str, x: float, y: float, rot: float,
     pose is off the board, its #456 branch accepts poses that move strictly
     TOWARD the board while still outside it. Placement from scratch has no
     incumbent worth improving on, so full containment is demanded explicitly.
+
+    The third conjunct is the intent's declared KEEP-OUTS (#701). Before it,
+    `rule_keepout` graded a region the seat search walked parts into, forever:
+    a declared keep-out was enforced by nothing at all. It sits BEFORE
+    `candidate_valid` for the same reason `count_legal_poses` puts the zone
+    gate first -- a handful of float compares against a usually-empty tuple,
+    where `candidate_valid` ends in the neighbour loop.
     """
     part = state.parts[ref]
-    r = part.rect(x, y, rot)
+    r, tht = part.rects(x, y, rot)
     if state.edge_gate.rect_outside_amount(r) > 1e-9:
         return False
+    # BOTH rects, because `rule_keepout` grades both: a through-hole part's
+    # leads pass through a keep-out even when its body sits on the far side,
+    # so a courtyard-only seat would be accepted here and flagged there --
+    # exit 4 on a board this function placed correctly.
+    if state.keepouts_for:
+        # Lazy, inside the guard, matching this file's idiom for `floorplan`
+        # (see `zone_gate` below) -- so a board declaring no keep-out pays
+        # nothing at all, not even a sys.modules lookup, on a predicate this
+        # hot.
+        from placement.floorplan import keepout_hit
+        for k in state.keepouts_for.get(ref, ()):
+            if keepout_hit(k, (r, tht)):
+                return False
     return state.candidate_valid(ref, x, y, rot, exclude=exclude)
 
 
@@ -398,7 +418,8 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
                       cap: int = CENSUS_CAP,
                       max_disp: Optional[float] = None,
                       rotations: Optional[Sequence[float]] = None,
-                      constraint=None, tol: float = 0.5) -> int:
+                      constraint=None, tol: float = 0.5,
+                      without_keepouts: Sequence[str] = ()) -> int:
     """How many legal poses `ref` has near (tx, ty), counting at most `cap`.
 
     This is issue #629's measurement. Three consecutive sweeps in run 19
@@ -423,6 +444,14 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
     excludes, and the disc alone leaves it counting poses that are outside
     the zone the seat had to satisfy. `radius`/`step` are ignored when a
     constraint is given -- the zone supersedes them.
+
+    `without_keepouts` names declared keep-outs to LIFT for the sweep (#701).
+    A keep-out is measured the way a blocker is measured -- count the poses
+    with it out of the way -- so that "this keep-out is what refuses the
+    part" is a NUMBER from the same predicate the seat search uses, not a
+    static "does the zone intersect a keep-out" test computed some other way.
+    A verdict derived from a different question is the reported-field trap
+    one level up.
     """
     from pose_score import _offsets
     part = state.parts[ref]
@@ -435,21 +464,38 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
         _step, offsets, _reach = zone_census_offsets(
             part, constraint, tol, tx, ty,
             getattr(state, 'grid_step', 0.1), max_disp)
-    n = 0
-    for dx, dy in offsets:
-        if max_disp is not None and math.hypot(dx, dy) > max_disp + 1e-9:
-            continue
-        x, y = round(tx + dx, 3), round(ty + dy, 3)
-        for rot in rots:
-            # Zone first: it is four float compares, where `pose_ok` ends in
-            # `candidate_valid`. Measured 19x faster on a small zone.
-            if not in_zone(x, y, rot):
+    # Lift the named keep-outs for the duration of the sweep, the same way
+    # `_try_place` swaps `state.clearance` and `_evict_trade` swaps a pose:
+    # a try/finally around the state, so the count comes from `pose_ok`
+    # itself rather than from a second, keep-out-blind predicate.
+    lift = set(without_keepouts or ())
+    saved = None
+    if lift and state.keepouts_for.get(ref):
+        saved = state.keepouts_for[ref]
+        kept = tuple(k for k in saved if k['name'] not in lift)
+        if kept:
+            state.keepouts_for[ref] = kept
+        else:
+            del state.keepouts_for[ref]
+    try:
+        n = 0
+        for dx, dy in offsets:
+            if max_disp is not None and math.hypot(dx, dy) > max_disp + 1e-9:
                 continue
-            if pose_ok(state, ref, x, y, rot, exclude):
-                n += 1
-                if n >= cap:
-                    return n
-    return n
+            x, y = round(tx + dx, 3), round(ty + dy, 3)
+            for rot in rots:
+                # Zone first: it is four float compares, where `pose_ok` ends
+                # in `candidate_valid`. Measured 19x faster on a small zone.
+                if not in_zone(x, y, rot):
+                    continue
+                if pose_ok(state, ref, x, y, rot, exclude):
+                    n += 1
+                    if n >= cap:
+                        return n
+        return n
+    finally:
+        if saved is not None:
+            state.keepouts_for[ref] = saved
 
 
 #: The verdicts a part with no legal pose can be given (#699). Two of them
@@ -467,6 +513,11 @@ NO_POSE_VERDICTS = (
     'no_pair_lift_frees',       # ... and no PAIR of them frees one either
     'blocker_available',        # a lift WOULD free a pose; the depth said no
     'trade_reverted',           # a trade was tried and put back
+    # #701. Before it, a part a declared KEEP-OUT refuses reported
+    # `no_movable_neighbour`, whose prose says "the outline, the zone or its
+    # own size refuses it, not a neighbour" -- false, and the reader's next
+    # move is different: move the keep-out, or add the part to its `allow`.
+    'keepout_blocks',
 )
 
 
@@ -481,12 +532,28 @@ def _empty_census() -> Dict:
     """
     return {'boxed': 0, 'movable': 0, 'censused': 0, 'frozen': {},
             'truncated': 0, 'baseline': 0, 'pairs_total': 0,
-            'pairs_censused': 0, 'pairs_truncated': 0, 'best_pair': None}
+            'pairs_censused': 0, 'pairs_truncated': 0, 'best_pair': None,
+            # #701: poses freed by lifting EVERY bound keep-out at once, for
+            # a part no single one explains. 0 means the keep-outs are not
+            # jointly what refuses it.
+            'keepouts_joint': 0,
+            # #701: {keep-out name: poses freed by lifting it}. Present and
+            # empty on every part, per this function's whole rationale --
+            # a consumer must never need a defaulting `.get` to tell "no
+            # keep-out is in the way" from "keep-outs were not considered".
+            'keepouts_freeing': {}}
 
 
 def _verdict_for(cands: Sequence[str], census: Dict) -> str:
     """The verdict for a part still unseated after the census."""
-    if not cands:
+    if census.get('keepouts_freeing') or census.get('keepouts_joint'):
+        # #701, and FIRST: a declared keep-out that frees poses when lifted
+        # is the answer, whatever the neighbours look like. It outranks
+        # `no_movable_neighbour`, whose prose would actively mislead here,
+        # and it sits below `blocker_available` for free -- this function is
+        # only reached when no trade was chosen.
+        v = 'keepout_blocks'
+    elif not cands:
         v = ('immovable_given_frozen' if census.get('frozen')
              else 'no_movable_neighbour')
     else:
@@ -521,6 +588,24 @@ def _no_pose_note(ref: str, verdict: str, census: Dict,
     if frozen and verdict in ('no_single_lift_frees', 'no_pair_lift_frees'):
         tail += ("; also in the way, and not this rung's to move: "
                  + ', '.join(f"{r} ({why})" for r, why in sorted(frozen.items())))
+    if verdict == 'keepout_blocks':
+        freeing = census.get('keepouts_freeing') or {}
+        if freeing:
+            who = ', '.join(f"{n!r} (frees {c})"
+                            for n, c in sorted(freeing.items()))
+            what = (f"the DECLARED KEEP-OUT(S) {who} are what refuse it -- "
+                    f"not a neighbour")
+        else:
+            # The JOINT case: no single keep-out frees a pose, all of them
+            # together do. Naming one here would be false of every individual
+            # one, which is why the sentence does not.
+            what = (f"the declared keep-outs are JOINTLY what refuse it -- "
+                    f"no single one frees a pose, lifting all of them frees "
+                    f"{census.get('keepouts_joint', 0)}, and no neighbour is "
+                    f"involved")
+        return (f"{ref}: no legal pose, and {what}, and not this rung's to "
+                f"lift. Move a keep-out, or add {ref} to an `allow` list if "
+                f"it is the part that owns one")
     if verdict == 'no_movable_neighbour':
         return (f"{ref}: no legal pose, and NOTHING seated is near enough to "
                 f"be in the way -- the outline, the zone or its own size "
@@ -952,7 +1037,8 @@ def _edge_correct(state, ref: str, edge: str, x: float, y: float,
 
 
 def edge_seat_ok(state, part, x: float, y: float, edge: str,
-                 lo: float, hi: float) -> bool:
+                 lo: float, hi: float,
+                 reasons: Optional[List[str]] = None) -> bool:
     """Is this edge pose a seat, or is the part off the board?
 
     An edge seat is the one seat in the system that cannot use `pose_ok` --
@@ -979,11 +1065,30 @@ def edge_seat_ok(state, part, x: float, y: float, edge: str,
 
     An edge connector's BODY overhangs by design; its PADS do not. That
     asymmetry is what makes this checkable at all.
+
+    A THIRD conjunct, since #701: a declared KEEP-OUT. An edge connector's
+    body may leave the outline; it may not enter a region the intent
+    reserved, and neither of the other two conjuncts can see that -- a
+    mounting-hole keep-out on the north edge leaves the band satisfied and
+    every pad on the board. This is the only place it can go: `pose_ok`
+    demands full containment and an edge seat overhangs by design, so this
+    predicate deliberately bypasses it, and BOTH edge paths come through
+    here -- `_seat_edge`'s `on_board`, and stage 1 of `seed_from_intent`,
+    which runs no legality gate at all by design. `reasons`, when given,
+    collects WHY, so a refusal can name the keep-out instead of sending the
+    reader to look at an outline that is not the problem.
     """
-    r = part.rect(x, y, part.rot)
+    r, tht = part.rects(x, y, part.rot)
     amt = state.edge_gate.rect_outside_amount(r)
     if not ((lo - 0.02) <= amt <= (hi + 0.02)):
         return False
+    if state.keepouts_for:
+        from placement.floorplan import keepout_hit
+        for k in state.keepouts_for.get(part.ref, ()):
+            if keepout_hit(k, (r, tht)):
+                if reasons is not None:
+                    reasons.append(f"keep-out {k['name']!r}")
+                return False
     gate = state.edge_gate
     for px, py, _sz in part.pad_globals(x, y, part.rot):
         # A zero-size rect at the pad centre: "is this point on the board",
@@ -1079,8 +1184,16 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
                 return False
         return True
 
+    # #701: WHY the band refused, when it was a declared keep-out rather than
+    # the outline. "no conflict-free seat found on the declared north edge"
+    # sends the reader to look at the outline and the neighbours, neither of
+    # which is the problem, and the next move is different: move the keep-out
+    # or add an `allow`.
+    refused: List[str] = []
+
     def on_board(px, py):
-        return edge_seat_ok(state, part, px, py, edge, lo, hi_eff)
+        return edge_seat_ok(state, part, px, py, edge, lo, hi_eff,
+                            reasons=refused)
 
     for df in (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
                0.2, -0.2, 0.3, -0.3, 0.4, -0.4):
@@ -1092,6 +1205,12 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
         if conflict_free(x, y):
             state.apply_move(ref, round(x, 3), round(y, 3), part.rot)
             return True
+    if refused:
+        # Sorted+deduped: the ladder tries up to 13 fractions and would
+        # otherwise name the same keep-out 13 times.
+        notes.append(f"{ref}: every position on the declared {edge} edge band "
+                     f"is refused by " + ', '.join(sorted(set(refused)))
+                     + " -- move the keep-out, or add this ref to its `allow`")
     return False
 
 
@@ -1180,7 +1299,11 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
 
     state = pose_score.make_state(
         pcb_data, pcb_file, clearance=clearance,
-        board_edge_clearance=board_edge_clearance, grid_step=grid_step)
+        board_edge_clearance=board_edge_clearance, grid_step=grid_step,
+        # #701: the declared keep-outs reach the SEAT PREDICATE here, and
+        # every `_try_place` / `count_legal_poses` / `_evict_trade` site in
+        # this module inherits them through `pose_ok`.
+        keepouts=intent.keepouts if intent else ())
     bounds = state.board
     refs_all = sorted(pcb_data.footprints)
     notes: List[str] = []
@@ -1273,6 +1396,31 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                              f"edge, so stage 1 leaves it to the later stages")
                 continue
             frac = min(f_hi, max(f_lo, frac))
+            # #701: SLIDE along the edge when a declared keep-out refuses the
+            # even-distribution position, using the same ladder `_seat_edge`
+            # already uses. Without it, one keep-out over the middle of an
+            # edge sent the connector to the ordinary stages, which park it in
+            # the board INTERIOR -- measured: J1 written at (11.22, 6.589) on
+            # a board whose south edge is y=14, trading a `keepout` grade
+            # error for an `edge_connector` one, while 26 clear south-edge
+            # seats existed. The ladder is skipped entirely when nothing is
+            # declared, so a board with no keep-out is unchanged.
+            _slide = ((0.0,) if not state.keepouts_for.get(ref) else
+                      (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
+                       0.2, -0.2, 0.3, -0.3, 0.4, -0.4))
+            _base_frac = frac
+            _why: List[str] = []
+            for _df in _slide:
+                frac = min(f_hi, max(f_lo, _base_frac + _df))
+                _x, _y = _edge_pose(part, bounds, edge, frac, overhang)
+                _x, _y, _conv = _edge_correct(state, ref, edge, _x, _y,
+                                              overhang)
+                _why = []
+                if _conv and edge_seat_ok(state, part, _x, _y, edge, lo,
+                                          float(hi) if hi is not None
+                                          else max(2.0 * overhang, lo + 1.0),
+                                          reasons=_why):
+                    break
             x, y = _edge_pose(part, bounds, edge, frac, overhang)
             x, y, converged = _edge_correct(state, ref, edge, x, y, overhang)
             if not converged:
@@ -1292,10 +1440,17 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # all by design, so nothing downstream catches it.
             hi_eff = float(hi) if hi is not None else max(2.0 * overhang,
                                                           lo + 1.0)
-            if not edge_seat_ok(state, part, x, y, edge, lo, hi_eff):
-                notes.append(f"edge connector {ref}: the {edge} band would "
-                             f"put it off the board, so stage 1 left it for "
-                             f"the later stages")
+            _why: List[str] = []
+            if not edge_seat_ok(state, part, x, y, edge, lo, hi_eff,
+                                reasons=_why):
+                # #701: a keep-out refusal has a DIFFERENT next move from an
+                # off-board one -- move the keep-out, not the band -- so it is
+                # named rather than folded into "would put it off the board".
+                notes.append(f"edge connector {ref}: "
+                             + (f"the {edge} band is refused by "
+                                + ', '.join(sorted(set(_why))) if _why else
+                                f"the {edge} band would put it off the board")
+                             + ", so stage 1 left it for the later stages")
                 continue
             state.apply_move(ref, round(x, 3), round(y, 3), part.rot)
             placed.add(ref)
@@ -1642,6 +1797,37 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # and this one reaches `place_seed`'s JSON_SUMMARY.
             zkw = dict(constraint=constraint, tol=tol)
             baseline = count_legal_poses(state, ref, tx, ty, base_excl, **zkw)
+            # #701: which DECLARED KEEP-OUT is refusing this part, measured
+            # the way a blocker is -- count the poses with it lifted. Only
+            # when the part has no pose at all (nothing to explain otherwise)
+            # and only over the keep-outs that BIND it, so a board declaring
+            # none pays nothing and each extra census is already capped by
+            # CENSUS_CAP.
+            keepouts_freeing: Dict[str, int] = {}
+            keepouts_joint = 0
+            if not baseline:
+                _bound = state.keepouts_for.get(ref, ())
+                for _k in _bound:
+                    _n = count_legal_poses(state, ref, tx, ty, base_excl,
+                                           without_keepouts=(_k['name'],),
+                                           **zkw)
+                    if _n > baseline:
+                        keepouts_freeing[_k['name']] = _n
+                # JOINTLY blocked: two keep-outs that overlap over the part's
+                # feasible region each free nothing ALONE, so the per-keep-out
+                # sweep above reports {} and the verdict would fall back to
+                # `no_movable_neighbour` -- whose prose ("nothing seated is
+                # near enough to be in the way -- the outline, the zone or its
+                # own size refuses it") is exactly the misleading answer this
+                # whole disclosure exists to replace. Measured on a nested
+                # enclosure+boss pair. One extra census, only for a part no
+                # single lift explained, mirroring the blocker side's own
+                # single-then-pair escalation.
+                if not keepouts_freeing and len(_bound) > 1:
+                    keepouts_joint = count_legal_poses(
+                        state, ref, tx, ty, base_excl,
+                        without_keepouts=tuple(k['name'] for k in _bound),
+                        **zkw)
             cinfo: Dict = {}
             cands = _evict_candidates(state, ref, tx, ty, placed, immovable,
                                       constraint=constraint, tol=tol,
@@ -1658,7 +1844,9 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                            'censused': cinfo.get('censused', len(cands)),
                            'frozen': cinfo.get('frozen') or {},
                            'truncated': cinfo.get('truncated', 0),
-                           'baseline': baseline})
+                           'baseline': baseline,
+                           'keepouts_freeing': keepouts_freeing,
+                           'keepouts_joint': keepouts_joint})
             no_pose_census[ref] = census
             useful = sorted((n, b) for b, n in freed.items() if n > baseline)
             if not evict_depth:
@@ -1931,7 +2119,11 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     state = pose_score.make_state(
         pcb_data, pcb_file, clearance=clearance,
         board_edge_clearance=board_edge_clearance, grid_step=grid_step,
-        extra_locked_refs=_extra_locked or None)
+        extra_locked_refs=_extra_locked or None,
+        # #701: the declared keep-outs reach the SEAT PREDICATE (see
+        # `seed_from_intent`). `intent` is optional on this path, so the
+        # inert default is what a caller without one gets.
+        keepouts=intent.keepouts if intent else ())
     refs_all = sorted(pcb_data.footprints)
     notes: List[str] = []
     must_lock = {r for pat in intent.must_lock
@@ -2554,7 +2746,11 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
     state = pose_score.make_state(
         pcb_data, pcb_file, clearance=clearance,
         board_edge_clearance=board_edge_clearance, grid_step=grid_step,
-        extra_locked_refs=_extra_locked or None)
+        extra_locked_refs=_extra_locked or None,
+        # #701: the declared keep-outs reach the SEAT PREDICATE (see
+        # `seed_from_intent`). `intent` is optional on this path, so the
+        # inert default is what a caller without one gets.
+        keepouts=intent.keepouts if intent else ())
     refs_all = sorted(pcb_data.footprints)
     notes: List[str] = []
     must_lock = {r for pat in intent.must_lock

@@ -500,16 +500,28 @@ Examples:
         # space too (measured: 0.784mm2 of new overlap) -- so the part is
         # RE-SEATED: the seeder's own search, targeted at its seeded pose,
         # constrained to its zone, against the post-polish board.
+        # #701: and it has no keep-out term either, so the same nudge can walk
+        # a part into a declared keep-out -- on a board this tool's own seeder
+        # placed correctly, which then exits 4 against its own intent. Same
+        # repair, same reason, one more rule name.
         if not args.no_polish:
+            _repairable = ('zone_containment', 'keepout')
             broke = sorted({v.ref for v in graded.errors
-                            if v.rule == 'zone_containment' and v.ref})
+                            if v.rule in _repairable and v.ref})
+            _rules = sorted({v.rule for v in graded.errors
+                             if v.rule in _repairable and v.ref})
             if broke:
                 import pose_score
                 pcb_cur = parse_kicad_pcb(args.output_file)
                 st = pose_score.make_state(
                     pcb_cur, args.output_file, clearance=args.clearance,
                     board_edge_clearance=args.board_edge_clearance,
-                    grid_step=args.grid_step)
+                    grid_step=args.grid_step,
+                    # #701: the ONLY seat-predicate call site outside
+                    # seeder.py. Without this the re-seat below would be free
+                    # to put the part back into a declared keep-out while
+                    # fixing its zone.
+                    keepouts=intent.keepouts)
                 blocks2, _p = floorplan.resolve_blocks(intent, pcb_cur,
                                                        sources)
                 zone_of = {}
@@ -523,20 +535,25 @@ Examples:
                 for ref in broke:
                     z = zone_of.get(ref)
                     sp = seeded_pose.get(ref)
-                    if z is None or sp is None or ref not in st.parts:
+                    # #701: a keep-out violation does NOT imply a zone. The
+                    # zone-only version required one and skipped a zone-less
+                    # part entirely, which would have left the keep-out half
+                    # of this repair silently inert on most boards.
+                    if sp is None or ref not in st.parts:
                         continue
                     clr = seeder._try_place(
                         st, ref, sp['new_x'], sp['new_y'], set(),
-                        constraint=z.rect, tol=intent.zone_tolerance(z))
+                        constraint=z.rect if z is not None else None,
+                        tol=intent.zone_tolerance(z) if z is not None else 0.5)
                     if clr is not None:
                         p2 = st.parts[ref]
                         fixes.append({'reference': ref, 'new_x': p2.x,
                                       'new_y': p2.y, 'new_rotation': p2.rot})
                 if fixes:
                     print(f"  polish walked "
-                          f"{', '.join(f['reference'] for f in fixes)} out "
-                          f"of a declared zone; re-seated in-zone against "
-                          f"the polished board")
+                          f"{', '.join(f['reference'] for f in fixes)} out of "
+                          f"a declared {' / '.join(_rules)}; re-seated "
+                          f"against the polished board")
                     tmp = args.output_file + '.reseat'
                     write_placed_output(args.output_file, tmp, fixes)
                     os.replace(tmp, args.output_file)

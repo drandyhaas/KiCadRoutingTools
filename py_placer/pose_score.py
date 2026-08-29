@@ -60,7 +60,7 @@ def make_state(pcb_data, board_path: str, *, clearance: float = 0.25,
                halo_weight: float = 2.0, edge_halo: float = 2.0,
                edge_weight: float = 2.0,
                ignore_net_ids=None, net_weights=None, move_refs=None,
-               extra_locked_refs=None):
+               extra_locked_refs=None, keepouts=None):
     """A QuenchState used purely as an oracle -- built, queried, thrown away.
 
     Defaults mirror the placement guidance rather than quench's own library
@@ -76,7 +76,12 @@ def make_state(pcb_data, board_path: str, *, clearance: float = 0.25,
         edge_weight=edge_weight, grid_step=grid_step,
         length_weight=length_weight, ignore_net_ids=ignore_net_ids,
         net_weights=net_weights, move_refs=move_refs,
-        extra_locked_refs=extra_locked_refs)
+        extra_locked_refs=extra_locked_refs,
+        # #701: the intent's keep-outs, for the SEAT predicate. Passed through
+        # rather than read here, because this factory has no intent -- every
+        # caller that has one hands it over, and a caller that has none gets
+        # the inert default.
+        keepouts=keepouts)
 
 
 def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,

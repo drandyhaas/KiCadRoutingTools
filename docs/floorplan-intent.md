@@ -20,8 +20,9 @@ python3 py_tools/check_floorplan.py board.kicad_pcb --intent floorplan.json --js
 
 The intent is also a GENERATOR input, not only a grader's: `place_seed.py`
 turns a declared intent into an initial placement for an unplaced board
-(zones, edge bands, locks and decap rules become placement constraints, and
-the emitted seed is graded against the same intent it was built from), and
+(zones, edge bands, keep-outs, locks and decap rules become placement
+constraints, and the emitted seed is graded against the same intent it was
+built from), and
 `place_portfolio.py` uses the intent as the hard gate plus the `health`
 signals when ranking K perturbed placement candidates. See
 `placement/README.md` for both.
@@ -221,7 +222,7 @@ for it, and the reason is printed:
 | `zone_containment` | a member's courtyard leaves its block's zone | `GradedPart.rect` |
 | `zone_side` | a member is on the other face | `legality.footprint_side` |
 | `zone_exclusive` | a non-member intrudes on a reserved zone | `rect_overlap_area` |
-| `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect |
+| `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect. **Enforced, not only graded, since [#701](https://github.com/drandyhaas/KiCadRoutingTools/issues/701)** — the seat search refuses such a pose through the same `keepout_hit` this rule calls |
 | `edge_connector` | overhang outside `[min,max]`, or the wrong edge; a `connector_affinity` entry seated more than 3 mm from every edge fires at **warn** whatever the configured severity | `BoardOutlineGate.rect_outside_amount`, `edge_clearance` |
 | `decap_distance` | a decoupling cap is too far from its own IC | `groups.decap_tethers` |
 | `must_lock` | a declared-critical part is not locked in the file | `parser.extract_locked_refs` |
@@ -446,10 +447,118 @@ design.
 
 A withheld key is **abstained at grade time, not passed**. `check_floorplan
 --intent` reads `context.budget_withheld`, reports every withheld key that the
-intent does not also declare under `N legality budget key(s) NOT DERIVABLE --
+intent does not also declare under `N declared value(s) NOT DERIVABLE --
 not graded, not passed`, and carries them as `budget_abstained` in `--json` and
 as `budget_abstained` / `budget_abstained_keys` in `JSON_SUMMARY`. When the
 whole budget is empty the `legality` rule does not run at all, and its skip
 reason names the withholding rather than saying only "the intent declares no
 legality_budget". Declaring the key by hand overrides the note: a declared
 budget is graded.
+
+The withholding channel is **not legality-only**. `_WITHHELD_RULE` maps each
+withholdable key to the rule it disarms and to the test for "declared by hand
+anyway", so a withheld `decaps.max_distance_mm` reaches `decap_distance`'s skip
+reason exactly as `overlap_area` reaches `legality`'s. A key that is in
+`budget_withheld` but in no such mapping still abstains — reported as not
+derivable, blamed on no rule — rather than being dropped, so a typo'd
+withholding note is visible instead of silent.
+
+## `--declare-decaps`: a decap limit read off the board (#704)
+
+`emit_intent` wrote `decaps: {}` as a constant, so `rule_decap_distance` could
+never fire on an auto-emitted intent. With `--declare-decaps` it derives
+`max_distance_mm` from the board's own tethers.
+
+**The statistic is `ceil(max)`, and the argument is a fixed point, not a
+statistic.** An emitted intent is a baseline to tighten: emit, grade clean,
+re-emit, get the same limit. Only the max has that property. The median is
+refuted by measurement — `glasgow_revC`'s tether median is **0.0000**, because
+58 of its 87 caps sit inside their IC's bounding box and clamp to zero, so a
+median limit flags 29 caps on a healthy human-routed board at the first
+emission. A high percentile has no fixed point at all: it flags ~5% by
+construction, forever, and every violation is then manufactured by the emitter
+rather than found on the board.
+
+`_ceil4`, not `round`, and derived from the **unrounded** max: `round(v, 4)`
+can land below the measured value, so the document would fail against the very
+board it was written from. That bites on 3 of the 9 tracked boards
+(splitflap_driver 3.4617228369700497 → 3.4617, ulx3s 4.714904558949195 →
+4.7149, glasgow_revC 4.786912496589008 → 4.7869). `context.decap_census`
+therefore carries `max_mm` unrounded and `max_mm_display` for the reader.
+
+### When it is withheld, and why the issue's own guard could not be used
+
+The obvious guard — withhold when the emitting board already violates the
+number — is **unreachable**: `ceil(max(observed))` is ≥ every observed value by
+construction, so it would be a branch that never executes, which is worse than
+absent because it reads like a guard.
+
+The reachable analogue is **censoring**. `groups.decap_tethers` drops any cap
+further than `DECAP_RADIUS_MM` (5 mm) from a chip carrying its rail, so the
+observed distribution is censored and a limit read off the survivors can bless
+a board whose caps have left decoupling range. Measured over the tracked
+boards:
+
+| board | tethers ≤5 mm | beyond | censored | max (≤5 mm) | worst beyond |
+|---|---|---|---|---|---|
+| tigard | 25 | 1 | 0.04 | 3.0650 | 6.17 |
+| glasgow_revC | 87 | 5 | 0.05 | 4.7869 | 10.34 |
+| splitflap_driver | 11 | 1 | 0.08 | 3.4617 | **19.30** |
+| watchy | 24 | 2 | 0.08 | 3.7525 | 11.16 |
+| ulx3s | 53 | 7 | 0.12 | 4.7149 | 12.24 |
+| kit-dev-coldfire | 41 | 12 | 0.23 | 4.8990 | — |
+| interf_u_unrouted | 1 | 4 | **0.80** | 4.5800 | 19.82 |
+| sonde_u | **0** | 5 | **1.00** | — | 15.58 |
+
+Healthy 0.04–0.23, degenerate 0.80–1.00. So the limit is withheld when there
+are **no** tethers, **fewer than `DECAP_MIN_SAMPLE` (3)** — a max over one
+sample is a coordinate, not a limit — or **more than `DECAP_MAX_CENSORED`
+(0.25)** of the rail-sharing caps lie beyond the radius.
+
+A rejected alternative, recorded so it is not re-proposed: withhold when
+`max > K × p75` (the max is a tail outlier over its own body). Built and
+measured, and it does **not** separate — healthy splitflap_driver scores 2.46
+and mid-repair `tigard_placed` 2.22.
+
+### What the census discloses that the rule cannot see
+
+`context.decap_census` is written on **every** emission, with or without the
+flag, so a reader of the document can tell "no cap is far from its IC" from
+"nobody measured". It carries the metric, the search radius, the tether and IC
+counts, the max and median, and — the point of it — `beyond_radius`,
+`beyond_radius_refs` and `worst_beyond_mm`.
+
+That last group is a **known, unfixed hole**, disclosed rather than closed: the
+emitter and the rule both call `decap_tethers` at the same 5 mm truncation, so
+`splitflap_driver` emits a limit of 3.4618 while a rail-sharing cap sits
+**19.30 mm** from its IC, invisible to both. `rules_run` goes up; that cap is
+still ungraded.
+
+### Declaring this key CHANGES PLACEMENT
+
+It is not a grading-only knob, which is why it is opt-in, default off, and on
+its own flag rather than folded into `--declare-classes`. `place_seed` reads
+`decaps.max_distance_mm` and, when it is set, pulls every two-net-bearing-pad
+`C*` out of radial zone packing into its per-supply-pin stage. Measured:
+
+| board | seeder scope | graded tethers | in scope, never graded |
+|---|---|---|---|
+| ulx3s | 70 | 53 | 17 |
+| glasgow_revC | 92 | 87 | 5 |
+| watchy | 28 | 24 | 4 |
+| splitflap_driver | 12 | 11 | 1 |
+
+The two populations differ because the two "is this a decap" predicates
+differ — the grouper tests *exactly two distinct net ids*, the seeder *exactly
+two net-bearing pads* — and the metrics differ too. `context.decap_census`
+carries `seeder_scope` and `seeder_scope_ungraded`, and `--emit-intent` prints
+the same warning. Reconciling the predicates is a separate change.
+
+### `keepouts` stays empty, and says so
+
+A keep-out is a mechanical fact — an enclosure rib, a standoff, a battery, a
+display window, an antenna clearance — and none of those can be read off a
+board, so the emitter keeps writing `[]`. What it should not do is leave the
+reader unable to tell *"none declared"* from *"not considered"*, so
+`context.keepouts_note` states which one it is. At grade time the same
+distinction is already carried by `rules_skipped` and by `--require-rules`.

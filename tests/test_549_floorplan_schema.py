@@ -113,8 +113,13 @@ RULE_LITERAL = "rule=[" + chr(39) + chr(34) + "](" + chr(92) + "w+)[" \
 #: that GROWING a key set is as loud as shrinking one. Both directions are
 #: defects: a shrunk set refuses a key real intent files carry, and a grown one
 #: re-admits a key nothing reads -- which is #710 itself. The emitter-driven
-#: detector in test_549_floorplan_grade.py cannot see either, because
-#: `emit_intent` never writes a `health`, `decaps` or `keepouts` object at all.
+#: detector in test_549_floorplan_grade.py cannot see either: it only harvests
+#: `edge_connectors[]` / `blocks[]` entries, and of the remaining objects
+#: `emit_intent` writes only `decaps` (a bare `max_distance_mm`, under
+#: --declare-decaps since #704) and never a `health` or `keepouts` one.
+#: #704's provenance deliberately went to `context`, which has NO key set --
+#: growing `_DECAP_KEYS` would make an older build REFUSE the whole file,
+#: since `_reject_unknown` raises.
 KEY_SETS = {
     '_TOP_LEVEL_KEYS': {
         'schema', 'kind', 'board', 'units', 'min_reader', 'envelope',
@@ -148,8 +153,8 @@ def test_the_key_sets_are_exactly_what_is_documented():
     Shrinking a set is the regression this whole change risks -- it refuses a
     key that real intent files carry. Growing one silently re-admits a key
     nothing reads, which is #710 over again. Neither is visible to the
-    emitter-driven detector in the grade test, which only sees keys
-    `emit_intent` writes.
+    emitter-driven detector in the grade test, which only sees the
+    `edge_connectors[]` / `blocks[]` entry keys `emit_intent` writes.
     """
     for name, expected in sorted(KEY_SETS.items()):
         actual = set(getattr(fp, name))
@@ -170,8 +175,10 @@ def test_an_intent_using_every_known_key_loads():
 
     Pinning the sets catches a set that changed; this catches a set that was
     right while the code around it refused the key anyway -- and it is the
-    only test that exercises `health`, `decaps` and `keepouts` keys through
-    the loader at all, since `emit_intent` never writes those objects.
+    only test that exercises the `health` and `keepouts` keys through the
+    loader at all, since `emit_intent` never writes those objects. `decaps`
+    it does write since #704, but only `max_distance_mm`, so `exempt` and
+    `search_radius_mm` are still covered here alone.
     """
     raw = {
         'schema': SCHEMA_VERSION, 'kind': KIND, 'units': 'mm',
