@@ -157,11 +157,17 @@ def plain_board(wd, tag='pl'):
     """A legal, on-board, MISPLACED part with NO declared claim at all -- the
     pure form of the defect. Nothing but the scope's own wirelength can carry
     it, so this arm proves the fix is not intent-dependent."""
+    # R8/R9 carry net 8, which CON2 has no pad on. They are what makes
+    # `scope_hpwl` differ from the board-wide `hpwl` -- without a net OUTSIDE
+    # the scope the two numbers are equal and `state.hpwl(nets)` could ignore
+    # its subset undetected (a mutation that survived until they were added).
     return board(os.path.join(wd, f'{tag}.kicad_pcb'),
                  [_part('CON2', 15.0, 7.0, 8.9, 1.3, npads=7, thru=True,
                         nets=(1, 2, 3, 4, 5, 6, 7)),
                   _part('U1', 4.0, 3.0, 1.5, 1.5, npads=4, nets=(1, 2, 3, 4)),
-                  _part('U2', 6.0, 11.0, 1.5, 1.5, npads=3, nets=(5, 6, 7))],
+                  _part('U2', 6.0, 11.0, 1.5, 1.5, npads=3, nets=(5, 6, 7)),
+                  _part('R8', 27.0, 2.0, 0.4, 0.3, npads=2, nets=(8, 8)),
+                  _part('R9', 29.0, 12.5, 0.4, 0.3, npads=2, nets=(8, 8))],
                  size=PL_SIZE)
 
 
@@ -355,6 +361,23 @@ def arm_E_plain_board_hpwl_basis(wd):
           basis_term(ab, 'oob').get('before')
           == basis_term(ab, 'oob').get('after') == 0.0,
           f"oob={basis_term(ab, 'oob')}")
+
+    # `scope_hpwl` must be the SCOPE's nets, not the board's. Net 8 (R8<->R9)
+    # touches no scope ref, so the two numbers must differ -- without this the
+    # subset argument to `state.hpwl` could be ignored undetected.
+    import pose_score
+    pcb = parse_kicad_pcb(b)
+    st = pose_score.make_state(pcb, b, clearance=0.2,
+                               board_edge_clearance=0.5, grid_step=0.1)
+    board_wide = round(st.hpwl(), 3)
+    scoped = seeder.scope_hpwl(st, {'CON2'})
+    check("scope_hpwl is strictly less than the board-wide hpwl",
+          scoped < board_wide - 1e-9,
+          f"scope {scoped} vs board {board_wide} -- net 8 is outside the scope")
+    check("and the basis reports the SCOPED number",
+          abs(basis_term(ab, 'scope_hpwl').get('before', 0) - scoped) < 1e-6,
+          f"basis before={basis_term(ab, 'scope_hpwl').get('before')} "
+          f"scope_hpwl={scoped}")
 
 
 def arm_F_min_gain(wd):
@@ -731,6 +754,125 @@ def arm_P_end_to_end_cli(wd):
           "exit 2")
 
 
+def arm_Q_the_conjuncts_compose(wd):
+    """`reseat_accept` is pure policy, so each conjunct is testable directly --
+    which is the only way to reach the ones a legal seat search cannot produce.
+
+    Every row here exists because a mutation survived without it: deleting
+    `safe`, deleting `not risen` and deleting `witness_ok` from the conjunct
+    all passed the behavioural arms, since a legal seat never worsens a hard
+    term and the fixtures' claims never rise.
+    """
+    print("--- Q: each conjunct refuses on its own")
+    idx = reconstruct.GATE_TERMS.index
+    before = [0, 0, 0.0, 0.0, 0, 10.0, 0.0]
+    after = list(before)
+    bb = {n: 0.0 for n in seeder.RESEAT_BASES}
+    bb['intent'] = 1
+    ba = dict(bb, intent=0)                 # one whole defect cleared
+
+    def acc(**kw):
+        kw.setdefault('scope_source', 'explicit')
+        kw.setdefault('witnesses_before', ['A'])
+        kw.setdefault('witnesses_after', ['A'])
+        kw.setdefault('bases_before', bb)
+        kw.setdefault('bases_after', ba)
+        return seeder.reseat_accept(kw.pop('before', before),
+                                    kw.pop('after', after), **kw)
+
+    ok, basis = acc()
+    check("control: safe, no risen claim, one basis fired -> ACCEPTED",
+          ok is True and basis['fired'] == 'intent',
+          f"accepted={ok} fired={basis['fired']}")
+
+    worse = list(after)
+    worse[idx('stacks')] = before[idx('stacks')] + 1
+    ok2, b2 = acc(after=worse)
+    check("a worsened HARD term refuses a pass whose basis fired",
+          ok2 is False and b2['safety']['worsened'] == ['stacks'],
+          f"accepted={ok2} worsened={b2['safety']['worsened']}")
+    check("and the refusal note names the term, not the off-board amount",
+          'stacks' in seeder.reseat_refusal_note(1, b2)
+          and 'off-board amount' not in seeder.reseat_refusal_note(1, b2),
+          seeder.reseat_refusal_note(1, b2)[:110])
+
+    lic = list(after)
+    lic[idx('hpwl')] = before[idx('hpwl')] + 5.0
+    ok3, _b3 = acc(after=lic)
+    check("the LICENSED term worsening does not refuse it", ok3 is True,
+          f"accepted={ok3} with hpwl +5.0")
+
+    ok4, b4 = acc(intent_risen=[('U1', 'keepout', 'hot', 0.0, 5.0)])
+    check("a RISEN declared claim refuses it even though the count improved",
+          ok4 is False and b4['intent_licence']['ok'] is False,
+          f"accepted={ok4} risen={b4['intent_licence']['risen']}")
+    check("and that refusal names the claim",
+          "'hot'" in seeder.reseat_refusal_note(1, b4),
+          seeder.reseat_refusal_note(1, b4)[:110])
+
+    ok5, b5 = acc(witnesses_after=['A', 'B'])
+    check("a GROWN off-outline count refuses it",
+          ok5 is False and b5['witness_ok'] is False,
+          f"accepted={ok5} witness_ok={b5['witness_ok']}")
+    check("and that refusal names the count",
+          'GREW' in seeder.reseat_refusal_note(1, b5),
+          seeder.reseat_refusal_note(1, b5)[:110])
+
+    ok6, b6 = acc(bases_after=dict(bb))     # nothing improved
+    check("no basis firing refuses it", ok6 is False and b6['fired'] is None,
+          f"accepted={ok6} fired={b6['fired']}")
+
+    # The auto branch, on the same numbers, must be the OLD rule.
+    ok7, b7 = acc(scope_source='auto:damage_witnesses')
+    check("the auto branch ignores every basis and reads oob only",
+          ok7 is False and b7['policy'] == 'auto:oob-strict',
+          f"accepted={ok7} policy={b7['policy']} (oob did not move)")
+    moved = list(after)
+    moved[idx('oob')] = before[idx('oob')] - 1.0
+    ok8, _b8 = acc(after=moved, scope_source='auto:damage_witnesses')
+    check("and accepts on a strict oob improvement alone", ok8 is True,
+          "oob 0.0 -> -1.0")
+
+
+def arm_R_prune_still_reverts_a_claim_bound_part(wd):
+    """The probe is a CONJUNCT, not an exemption: a part bound by a claim is
+    still pruned when the revert does not re-break anything.
+
+    Without this, `undoes_intent = bool(after_intent)` -- refuse EVERY revert
+    of any claim-bound part -- passes the whole suite, and the sweep silently
+    stops doing its job for exactly the parts this change touches.
+    """
+    print("--- R: a claim-bound part is still prunable")
+    b = keepout_board(wd, 'r')
+    _p, it = keepout_intent(wd, 'r')
+    pcb = parse_kicad_pcb(b)
+    bundle, _pr = floorplan.resolve_intent_gate(it, pcb, ())
+    import pose_score
+    st = pose_score.make_state(pcb, b, clearance=0.2,
+                               board_edge_clearance=0.5, grid_step=0.1,
+                               keepouts=it.keepouts)
+    probe = q.IntentProbe(st, zones=bundle['zones'], refs={'U1'})
+
+    # Both poses are OUTSIDE the keep-out, so the claim vector is 0 either way
+    # -- the revert cannot re-break anything -- but the `old` pose is nearer
+    # U1's net partners, so the tuple wants it back.
+    home = (13.5, 6.0, 0.0)
+    away = (18.0, 11.0, 0.0)
+    st.apply_move('U1', *home)
+    check("control: the 'home' pose breaches nothing", probe.terms('U1') == (0.0,),
+          f"terms={probe.terms('U1')}")
+    st.apply_move('U1', *away)
+    check("control: the 'away' pose breaches nothing either",
+          probe.terms('U1') == (0.0,), f"terms={probe.terms('U1')}")
+
+    pruned = reconstruct.prune_assignment(
+        st, {'U1': home}, None, edge_bands={}, intent_probe=probe.terms)
+    check("prune reverts it, probe or no probe", pruned == ['U1'],
+          f"pruned={pruned}")
+    check("and the revert actually landed",
+          abs(st.parts['U1'].x - home[0]) < 1e-9, f"x={st.parts['U1'].x}")
+
+
 def main():
     with tempfile.TemporaryDirectory() as wd:
         arm_A_keepout_accepted(wd)
@@ -749,6 +891,8 @@ def main():
         arm_N_enforced_rules_covered(wd)
         arm_O_zone_containment_basis(wd)
         arm_P_end_to_end_cli(wd)
+        arm_Q_the_conjuncts_compose(wd)
+        arm_R_prune_still_reverts_a_claim_bound_part(wd)
     print(f"\n{passed}/{passed + failed} checks passed")
     return 1 if failed else 0
 
