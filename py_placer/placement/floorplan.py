@@ -905,11 +905,28 @@ def resolve_blocks(intent: Intent, pcb_data, group_sources: Sequence[str] = ()
     return out, problems
 
 
-def zone_covered_by_keepout(zone, keepouts) -> Optional[str]:
-    """The name of a rect keep-out that swallows `zone` whole, or None (#702).
+def _swallows(entry, rect) -> bool:
+    """Does this keep-out cover `rect` entirely?
+
+    Rect: containment. Circle: all four corners inside, which is exactly the
+    condition for a convex disc to contain a rectangle -- four `hypot` calls,
+    not the fabricated area `keepout_hit` declines to invent.
+    """
+    r = entry.get('rect')
+    if r is not None:
+        return (r[0] <= rect[0] and r[1] <= rect[1]
+                and r[2] >= rect[2] and r[3] >= rect[3])
+    cx, cy, rad = entry['circle']
+    return all(math.hypot(px - cx, py - cy) <= rad
+               for px in (rect[0], rect[2]) for py in (rect[1], rect[3]))
+
+
+def zone_covered_by_keepout(zone, keepouts, member_sides=None) -> Optional[str]:
+    """The name of a keep-out that swallows `zone` whole for a member that it
+    actually BINDS, or None (#702).
 
     An intent whose keep-out covers the region its zone demands is a
-    CONTRADICTION, and `validate_intent` cannot currently see it: it checks
+    CONTRADICTION, and `validate_intent` cannot see it: it checks
     zone-inside-envelope and zone-vs-zone overlap, and nothing compares a zone
     against a keep-out.
 
@@ -918,24 +935,34 @@ def zone_covered_by_keepout(zone, keepouts) -> Optional[str]:
     the rule is termwise-monotone, so `keepout` falls only by leaving the
     keep-out, leaving raises `zone_containment`, and no candidate can lower
     both. The part is frozen for the run, where the pre-#702 quench would have
-    walked it out. So the contradiction has to be refused where it is authored
-    rather than discovered as an immobile part.
+    walked it out.
 
-    Only RECT keep-outs, and only total containment. A circle is reported by
-    `keepout_hit` as a fabricated marker with no area (see its docstring), so
-    "does this circle swallow that rectangle" is not a question this module can
-    answer without inventing geometry -- and a partial overlap is a legitimate
-    intent (a zone with a corner bitten out still has room).
+    `member_sides` is `{ref: sides}` for the block's resolved members, and it
+    is what makes this test the same question the GRADE asks. Without it the
+    check reads raw `intent.keepouts` and ignores both filters
+    `keepouts_for_ref` exists to centralize -- so a `sides: ["B"]` keep-out
+    over an F-side block, or the mounting-hole `allow: ["MH1"]` pattern over
+    MH1's own zone, would each be reported as a contradiction at ERROR while
+    the grade raises no `keepout` finding at all. Measured: both did.
+
+    Only TOTAL coverage. A partial overlap is a legitimate intent -- a zone
+    with a corner bitten out still has room -- and deciding whether what is
+    left can actually hold the part is a different (harder) question than this
+    one.
     """
     if zone.rect is None:
         return None
     for k in keepouts:
-        r = k.get('rect')
-        if r is None:
+        if not _swallows(k, zone.rect):
             continue
-        if (r[0] <= zone.rect[0] and r[1] <= zone.rect[1]
-                and r[2] >= zone.rect[2] and r[3] >= zone.rect[3]):
+        if member_sides is None:
             return str(k.get('name') or '<unnamed>')
+        # Binding is per member, through the SAME resolver the seat predicate
+        # and the grade use, so `allow` globs and `sides` are honoured here
+        # exactly as they are there.
+        for ref, sides in member_sides.items():
+            if keepouts_for_ref((k,), ref, sides):
+                return str(k.get('name') or '<unnamed>')
     return None
 
 
@@ -977,8 +1004,15 @@ def resolve_intent_gate(intent: Intent, pcb_data,
          'exclusive': bool(z.exclusive)}
         for z in intent.blocks if z.rect is not None)
 
+    member_sides = {}
+    for ref in sorted(pcb_data.footprints):
+        fp = pcb_data.footprints[ref]
+        member_sides[ref] = legality.sides_occupied(
+            legality.footprint_side(fp), legality.footprint_has_through_pads(fp))
     for z in intent.blocks:
-        hit = zone_covered_by_keepout(z, intent.keepouts)
+        mine = {r: member_sides[r] for r in blocks.get(z.name, ())
+                if r in member_sides}
+        hit = zone_covered_by_keepout(z, intent.keepouts, mine)
         if hit is not None:
             problems.append(Violation(
                 rule='intent_zone_in_keepout', block=z.name,

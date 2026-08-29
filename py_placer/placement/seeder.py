@@ -472,6 +472,10 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
     saved = None
     if lift and state.keepouts_for.get(ref):
         saved = state.keepouts_for[ref]
+        # The gate derives its keep-out terms from `keepouts_for` per
+        # call, so the lift below is honoured -- but the INCUMBENT
+        # vector is cached, and under a lift it has the wrong arity.
+        state._inc_intent.clear()
         kept = tuple(k for k in saved if k['name'] not in lift)
         if kept:
             state.keepouts_for[ref] = kept
@@ -496,6 +500,7 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
     finally:
         if saved is not None:
             state.keepouts_for[ref] = saved
+            state._inc_intent.clear()
 
 
 #: The verdicts a part with no legal pose can be given (#699). Two of them

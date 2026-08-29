@@ -424,9 +424,15 @@ def test_the_grader_builds_a_state_that_carries_no_keepouts():
         QuenchState.__init__ = real
 
     assert built, "grade built no QuenchState"
-    leaked = [(i, len(s.keepouts_for), len(s.keepouts))
+    # #702 added a SECOND channel into the same gate (`intent_zones` ->
+    # `_intent_spec` -> `_intent_active`), and a guard that named only the
+    # #701 one would pass a grader that inherited the new half. Assert every
+    # field the gate reads, not the field that existed when this was written.
+    leaked = [(i, len(s.keepouts_for), len(s.keepouts),
+               len(s.intent_zones), len(s._intent_spec), s._intent_active)
               for i, s in enumerate(built)
-              if s.keepouts_for or s.keepouts]
+              if s.keepouts_for or s.keepouts or s.intent_zones
+              or s._intent_spec or s._intent_active]
     assert not leaked, (
         f"grade's own state(s) carry the SEAT gate: {leaked}. The grader "
         f"would then be grading the seat predicate against itself")

@@ -18,14 +18,36 @@ python3 py_tools/check_floorplan.py board.kicad_pcb --intent floorplan.json
 python3 py_tools/check_floorplan.py board.kicad_pcb --intent floorplan.json --json findings.json
 ```
 
-The intent is also a GENERATOR input, not only a grader's: `place_seed.py`
-turns a declared intent into an initial placement for an unplaced board
-(zones, edge bands, keep-outs, locks and decap rules become placement
-constraints, and the emitted seed is graded against the same intent it was
-built from), and
-`place_portfolio.py` uses the intent as the hard gate plus the `health`
-signals when ranking K perturbed placement candidates. See
-`placement/README.md` for both.
+The intent is also a GENERATOR input, not only a grader's, and it now has
+**three** distinct jobs:
+
+1. **A construction source.** `place_seed.py` turns a declared intent into an
+   initial placement for an unplaced board — zones, edge bands, keep-outs,
+   locks and decap rules become placement constraints, and the emitted seed is
+   graded against the same intent it was built from.
+2. **A hard per-move gate inside the optimizer (#702).** Every CLI that
+   quenches — `place_optimize.py`, `place_route_loop.py`, `place_seed.py`'s
+   polish and `place_portfolio.py`'s per-candidate quench — takes `--intent`
+   and refuses any move that breaks a declared zone, keep-out or exclusive
+   zone. Before this, the intent reached `place_seed` and stopped, so the two
+   tools that run the most quench iterations in a real chain could walk a part
+   straight out of a zone the file declared. Measured on ulx3s: the seed grades
+   clean, an ungated quench manufactures 4 `zone_containment` errors, a gated
+   one manufactures none.
+3. **A rank gate and a health source.** `place_portfolio.py` ranks K perturbed
+   candidates only if they grade error-free, using the `health` signals in the
+   rank key.
+
+See `placement/README.md` for all of them.
+
+**The gate is MONOTONE: it prevents a walk-out, it does not repair one.** A
+part that arrives already outside its zone may improve or hold, never worsen —
+so on a board whose seed already violates, the correct outcome is *the seed's
+count, held*, not zero.
+
+> **Careful with a self-emitted intent.** `--emit-intent` run on the board you
+> are repairing records that board's damage as the requirement. Before #702
+> that only mis-graded; now it also **steers the optimizer toward the damage**.
 
 ## The board outline is not editable by this toolchain
 
@@ -119,7 +141,7 @@ source, suspect, suspect_reason
 | `legality_budget` | `overlap_area`, `oob_count`, `oob_amount` (`oob_area` refused — see below) |
 | `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids` |
 | `health.bus_corridors[]` | `name`, `nets`, `width_mm` |
-| `severity` | any of the 12 rule names below |
+| `severity` | any of the 13 rule names below |
 | `overlap_waivers[]` | `pair`, `reason`, `context` |
 | `must_lock` | a list of reference globs (no nested keys) |
 
@@ -220,10 +242,10 @@ for it, and the reason is printed:
 | rule | fires when | measured with |
 |---|---|---|
 | `envelope` | the declared envelope is not the board's outline | `board_bounds` |
-| `zone_containment` | a member's courtyard leaves its block's zone | `GradedPart.rect` |
+| `zone_containment` | a member's courtyard leaves its block's zone | `GradedPart.rect`. **Enforced, not only graded, since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702)** — the quench refuses such a MOVE, through the same `zone_escape` this rule calls |
 | `zone_side` | a member is on the other face | `legality.footprint_side` |
-| `zone_exclusive` | a non-member intrudes on a reserved zone | `rect_overlap_area` |
-| `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect. **Enforced, not only graded, since [#701](https://github.com/drandyhaas/KiCadRoutingTools/issues/701)** — the seat search refuses such a pose through the same `keepout_hit` this rule calls |
+| `zone_exclusive` | a non-member intrudes on a reserved zone | `rect_overlap_area`. **Enforced since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702)**, same way |
+| `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect. **Enforced, not only graded, since [#701](https://github.com/drandyhaas/KiCadRoutingTools/issues/701)** — the seat search refuses such a pose through the same `keepout_hit` this rule calls — and since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702) the quench refuses such a MOVE through it too |
 | `edge_connector` | overhang outside `[min,max]`, or the wrong edge; a `connector_affinity` entry seated more than 3 mm from every edge fires at **warn** whatever the configured severity | `BoardOutlineGate.rect_outside_amount`, `edge_clearance` |
 | `decap_distance` | a decoupling cap is too far from its own IC | `groups.decap_tethers` |
 | `must_lock` | a declared-critical part is not locked in the file | `parser.extract_locked_refs` |
@@ -236,6 +258,30 @@ A grader with its own idea of what "legal" means grades the reimplementation
 rather than the board — so where re-deriving was plausible, a test asserts the
 two agree exactly (all 34 of ulx3s's cap distances identical to the grouper's,
 all five legality numbers identical to the quench's).
+
+### Which rules the SEARCH can see
+
+A constraint the search cannot see can only ever produce a failing grade. This
+is the whole table, and the "no" column is the part worth reading — each of
+them is a decision, not an omission.
+
+| rule | graded | seat search (#701) | quench gate (#702) | if not, why not |
+|---|---|---|---|---|
+| `zone_containment` | yes | via `zone_gate` | **yes** | — |
+| `zone_exclusive` | yes | no | **yes** | the seeder has no verdict string for this refusal yet |
+| `keepout` | yes | **yes** | **yes** | — |
+| `must_lock` | yes | — | **by freezing** | it is a claim about the FILE; no pose satisfies or violates it |
+| `edge_connector` | yes | anchor tier | **by freezing** | two of its three sub-claims are bounds on being *off* the board, so a per-pose term would fight the containment gate rather than complement it |
+| `zone_side` | yes | — | no | **vacuous, not conservative**: the quench never flips a side, so the term is invariant under every move it can make. Reported once at load instead |
+| `envelope` | yes | — | no | a claim about the intent FILE against the board, not about any pose |
+| `decap_distance` | yes | scope stage | no | graded in a currency the optimizer does not carry — pad centroid to an IC's pad bbox inflated 0.5 mm, not courtyard to courtyard. A gate in the wrong currency can *admit what the grade flags*, which is worse than no gate. And the cap→IC tether is re-elected from live poses, so a per-move form would have the `corridor_weight` non-stationarity problem too |
+| `legality` | yes | — | no | a whole-board aggregate against a BUDGET, so a per-pose form is non-local: whether A's move is admissible would depend on B's violation |
+
+Enforcing is not free, and the price is recorded rather than described:
+`tests/test_placement_ab.py` carries four `intent-*` rows and
+`tests/placement_ab_baseline.json` the numbers. A hard constraint removes poses
+from the search, so `crossings` and `hpwl` can get worse — on ulx3s they do,
+and that row is pinned `regress` with the containment errors going 4 → 0.
 
 ### A through-hole part is in a keep-out from either side
 

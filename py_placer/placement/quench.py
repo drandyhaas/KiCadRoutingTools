@@ -602,13 +602,10 @@ class QuenchState:
                         _terms.append(_IntentTerm(
                             'zone_exclusive', _z['name'], tuple(_z['rect']),
                             legality.EPS, False, None))
-                for _k in self.keepouts_for.get(_ref, ()):
-                    _terms.append(_IntentTerm(
-                        'keepout', str(_k.get('name') or '<unnamed>'),
-                        None, 0.0, False, _k))
                 if _terms:
                     self._intent_spec[_ref] = tuple(_terms)
-            self._intent_active = bool(self._intent_spec)
+            self._intent_active = bool(self._intent_spec
+                                       or self.keepouts_for)
         # ref -> the incumbent pose's term vector. Cleared beside
         # `_inc_violation` on every move, for the same reason. Never computed
         # on a compliant board: `intent_ok` returns on its absolute branch.
@@ -1181,15 +1178,41 @@ class QuenchState:
                     return board, overlap
         return board, overlap
 
+    def intent_spec_for(self, ref) -> Tuple[_IntentTerm, ...]:
+        """The claims binding `ref` right now: frozen zone terms, plus keep-out
+        terms derived LIVE from `keepouts_for`.
+
+        The keep-out slice is deliberately not frozen. `seeder.count_legal_poses`
+        answers "how many seats would lifting keep-out X free" by temporarily
+        removing X from `state.keepouts_for[ref]` and recounting -- and a frozen
+        copy defeats that lift silently, because `pose_ok` reaches this gate
+        through `candidate_valid`. Measured when it WAS frozen: the #701 census
+        went `lifted=64` to `lifted=0`, and a stranded part's verdict degraded
+        from `keepout_blocks` to `no_movable_neighbour`, whose prose --
+        "NOTHING seated is near enough to be in the way" -- is verbatim the
+        misleading answer that disclosure exists to replace.
+
+        Still pose-INVARIANT and still resolved once: `keepouts_for` is the
+        cached resolution, and this only reads it.
+        """
+        zones = self._intent_spec.get(ref, ())
+        kos = self.keepouts_for.get(ref, ())
+        if not kos:
+            return zones
+        return zones + tuple(
+            _IntentTerm('keepout', str(k.get('name') or '<unnamed>'),
+                        None, 0.0, False, k)
+            for k in kos)
+
     def intent_terms(self, ref, rects) -> Tuple[float, ...]:
         """This pose measured against every declared claim binding `ref`, in
-        the fixed order `_intent_spec[ref]` froze.
+        the fixed order `intent_spec_for` returns.
 
         A VECTOR, never a scalar -- see `_IntentTerm`.
         """
         from . import floorplan as _fp   # lazy: see seeder.pose_ok's reason
         out = []
-        for t in self._intent_spec[ref]:
+        for t in self.intent_spec_for(ref):
             if t.rule == 'keepout':
                 # BOTH rects, because `rule_keepout` grades both: a THT part's
                 # leads pierce a keep-out from the far side.
@@ -1212,7 +1235,7 @@ class QuenchState:
         seats a part whose current pose is fully inside a keep-out and asserts
         REFUSAL, which the monotone rule below would admit.
         """
-        spec = self._intent_spec.get(ref)
+        spec = self.intent_spec_for(ref)
         if not spec:
             return True
         return all(v <= t.threshold
@@ -1277,8 +1300,28 @@ class QuenchState:
         bug: `keepout_hit` reports a circle as a fabricated 1.0 marker, so
         `<` would freeze a part already inside a circle unless it could clear
         the whole circle in a single nudge.
+
+        THE TRADE THIS MAKES, STATED. Because the conjunct sits ABOVE the #456
+        off-board escape branch and returns rather than setting a flag, a part
+        that is OFF THE OUTLINE and whose only reachable homeward poses lie in
+        a declared keep-out stays off the outline. Measured on a fixture: the
+        ungated run brings it 1.50mm inside the usable inset, the gated run
+        leaves it 2.50mm outside. That trades a `keepout` finding for an
+        off-board part, and CLAUDE.md ranks a part whose pad copper lies
+        outside the outline as the TOP-priority placement defect, because it
+        converts one-for-one into unrouted and broken nets.
+
+        It is nonetheless the right ordering, for one reason: the alternative
+        is a gate that can be defeated by first walking a part off the board.
+        A declared keep-out that stops applying under some other violation is
+        not a hard constraint. The honest handling is disclosure, not a
+        loophole -- `intent_blockers` names the claim that stranded the part,
+        and an intent whose keep-outs leave a part no way home is a
+        contradiction its author has to see. `zone_covered_by_keepout` catches
+        the total-coverage case at load time; the partial case is not caught
+        yet, and is filed rather than silently accepted.
         """
-        spec = self._intent_spec.get(ref)
+        spec = self.intent_spec_for(ref)
         if not spec:
             return True
         if rects is None:
@@ -1293,7 +1336,7 @@ class QuenchState:
         """[(rule, name, measured, incumbent)] for the terms `intent_ok`
         refuses at this pose. DIAGNOSTIC only, and the reason the refusal can
         be reported by NAME rather than as a silent missing pose."""
-        spec = self._intent_spec.get(ref)
+        spec = self.intent_spec_for(ref)
         if not spec:
             return []
         if rects is None:
@@ -1306,11 +1349,34 @@ class QuenchState:
 
     def _note_intent_refusal(self, ref, site, rects=None,
                              x=None, y=None, rot=None) -> None:
-        """Tally a refusal for `metrics_out['intent_gate']`."""
+        """Tally ONE refusal against `site`, and the rules behind it.
+
+        `by_site` counts REFUSALS and `by_rule` counts BLOCKING TERMS, so the
+        two do not sum to each other in either direction: one refused pose can
+        break two claims at once, and a pose refused for a reason this call was
+        not given a ref for contributes to `by_site` alone. Stated here because
+        a reader will otherwise assume `by_rule` partitions `rejected`.
+        """
         self.intent_rejected_by_site[site] = (
             self.intent_rejected_by_site.get(site, 0) + 1)
         for rule, _name, _c, _u in self.intent_blockers(ref, x, y, rot, rects):
             self.intent_rejected[rule] = self.intent_rejected.get(rule, 0) + 1
+
+    def _note_swap_refusal(self, ra, rb) -> None:
+        """Attribute a refused swap to whichever HALF of it was refused.
+
+        Asking only about `ra` loses the case where the partner's claims are
+        what refused: `by_site` showed the swap and `by_rule` stayed empty,
+        which reads as a refusal with no reason. Both halves are checked
+        because either can be the one that failed, and both can.
+        """
+        pa, pb = self.parts[ra], self.parts[rb]
+        self.intent_rejected_by_site['swap'] = (
+            self.intent_rejected_by_site.get('swap', 0) + 1)
+        for who, (x, y, rot) in ((ra, (pb.x, pb.y, pb.rot)),
+                                 (rb, (pa.x, pa.y, pa.rot))):
+            for rule, _n, _c, _u in self.intent_blockers(who, x, y, rot):
+                self.intent_rejected[rule] = self.intent_rejected.get(rule, 0) + 1
 
     def candidate_valid(self, ref, x, y, rot, exclude: Optional[Set[str]] = None):
         """True when the pose is legal, or -- when the part sits OFF THE BOARD --
@@ -2572,8 +2638,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         # with nothing to gain".
                         if (state._intent_active
                                 and not state.swap_intent_ok(ra, rb)):
-                            state._note_intent_refusal(
-                                ra, 'swap', None, pb.x, pb.y, pb.rot)
+                            state._note_swap_refusal(ra, rb)
                             swaps_skipped_intent += 1
                             continue
                         cur = eval_pair(pa.x, pa.y, pa.rot, pb.x, pb.y, pb.rot)
@@ -2631,7 +2696,13 @@ def quench(pcb_data: PCBData, pcb_file: str,
         # a gate was built, and `rejected: 0` is a real answer -- without this
         # key, "the gate refused nothing" and "the gate was never wired" are
         # the same observation, which is how a constraint ships inert.
-        if state._intent_active:
+        # Gated on "a gate was HANDED IN", not on `_intent_active`. An intent
+        # whose zone refs resolve to nothing on this board, or whose only
+        # keep-out allows every ref, builds an empty spec -- and reporting no
+        # key for that puts back exactly the ambiguity this key removes: "the
+        # gate refused nothing" and "there was no gate" become the same
+        # observation again, in the one case where the difference matters most.
+        if intent_gate is not None:
             metrics_out['intent_gate'] = {
                 'rejected': sum(state.intent_rejected_by_site.values()),
                 'by_rule': dict(sorted(state.intent_rejected.items())),
