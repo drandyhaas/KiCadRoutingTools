@@ -972,7 +972,8 @@ def _edge_correct(state, ref: str, edge: str, x: float, y: float,
 
 
 def edge_seat_ok(state, part, x: float, y: float, edge: str,
-                 lo: float, hi: float) -> bool:
+                 lo: float, hi: float,
+                 reasons: Optional[List[str]] = None) -> bool:
     """Is this edge pose a seat, or is the part off the board?
 
     An edge seat is the one seat in the system that cannot use `pose_ok` --
@@ -999,11 +1000,30 @@ def edge_seat_ok(state, part, x: float, y: float, edge: str,
 
     An edge connector's BODY overhangs by design; its PADS do not. That
     asymmetry is what makes this checkable at all.
+
+    A THIRD conjunct, since #701: a declared KEEP-OUT. An edge connector's
+    body may leave the outline; it may not enter a region the intent
+    reserved, and neither of the other two conjuncts can see that -- a
+    mounting-hole keep-out on the north edge leaves the band satisfied and
+    every pad on the board. This is the only place it can go: `pose_ok`
+    demands full containment and an edge seat overhangs by design, so this
+    predicate deliberately bypasses it, and BOTH edge paths come through
+    here -- `_seat_edge`'s `on_board`, and stage 1 of `seed_from_intent`,
+    which runs no legality gate at all by design. `reasons`, when given,
+    collects WHY, so a refusal can name the keep-out instead of sending the
+    reader to look at an outline that is not the problem.
     """
-    r = part.rect(x, y, part.rot)
+    r, tht = part.rects(x, y, part.rot)
     amt = state.edge_gate.rect_outside_amount(r)
     if not ((lo - 0.02) <= amt <= (hi + 0.02)):
         return False
+    if state.keepouts_for:
+        from placement.floorplan import keepout_hit
+        for k in state.keepouts_for.get(part.ref, ()):
+            if keepout_hit(k, (r, tht)):
+                if reasons is not None:
+                    reasons.append(f"keep-out {k['name']!r}")
+                return False
     gate = state.edge_gate
     for px, py, _sz in part.pad_globals(x, y, part.rot):
         # A zero-size rect at the pad centre: "is this point on the board",
@@ -1099,8 +1119,16 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
                 return False
         return True
 
+    # #701: WHY the band refused, when it was a declared keep-out rather than
+    # the outline. "no conflict-free seat found on the declared north edge"
+    # sends the reader to look at the outline and the neighbours, neither of
+    # which is the problem, and the next move is different: move the keep-out
+    # or add an `allow`.
+    refused: List[str] = []
+
     def on_board(px, py):
-        return edge_seat_ok(state, part, px, py, edge, lo, hi_eff)
+        return edge_seat_ok(state, part, px, py, edge, lo, hi_eff,
+                            reasons=refused)
 
     for df in (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
                0.2, -0.2, 0.3, -0.3, 0.4, -0.4):
@@ -1112,6 +1140,12 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
         if conflict_free(x, y):
             state.apply_move(ref, round(x, 3), round(y, 3), part.rot)
             return True
+    if refused:
+        # Sorted+deduped: the ladder tries up to 13 fractions and would
+        # otherwise name the same keep-out 13 times.
+        notes.append(f"{ref}: every position on the declared {edge} edge band "
+                     f"is refused by " + ', '.join(sorted(set(refused)))
+                     + " -- move the keep-out, or add this ref to its `allow`")
     return False
 
 
@@ -1316,10 +1350,17 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # all by design, so nothing downstream catches it.
             hi_eff = float(hi) if hi is not None else max(2.0 * overhang,
                                                           lo + 1.0)
-            if not edge_seat_ok(state, part, x, y, edge, lo, hi_eff):
-                notes.append(f"edge connector {ref}: the {edge} band would "
-                             f"put it off the board, so stage 1 left it for "
-                             f"the later stages")
+            _why: List[str] = []
+            if not edge_seat_ok(state, part, x, y, edge, lo, hi_eff,
+                                reasons=_why):
+                # #701: a keep-out refusal has a DIFFERENT next move from an
+                # off-board one -- move the keep-out, not the band -- so it is
+                # named rather than folded into "would put it off the board".
+                notes.append(f"edge connector {ref}: "
+                             + (f"the {edge} band is refused by "
+                                + ', '.join(sorted(set(_why))) if _why else
+                                f"the {edge} band would put it off the board")
+                             + ", so stage 1 left it for the later stages")
                 continue
             state.apply_move(ref, round(x, 3), round(y, 3), part.rot)
             placed.add(ref)
