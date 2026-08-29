@@ -471,7 +471,21 @@ class TestPlaceSeedLocksOnlyClaims(unittest.TestCase):
                 pass
 
             def _spy(*a, **kw):
+                # BOTH channels. #702 moved the edge claims out of the
+                # `lock_refs=` kwarg and into the resolved intent bundle, which
+                # `quench()` unions into the same frozen set -- the refs are
+                # unchanged, the parameter carrying them is not.
+                #
+                # Reading only `lock_refs` does not FAIL loudly when that
+                # happens: `kw.get` stores None, so `assertIn('lock_refs',
+                # seen)` still passes and `got & weak == set()` passes
+                # VACUOUSLY on an empty set. The connector_affinity guard --
+                # the entire reason this test exists -- would go on reporting
+                # green while asserting nothing. Hence the union, and hence
+                # the assertion below that it is non-empty.
                 seen['lock_refs'] = kw.get('lock_refs')
+                seen['intent_lock_refs'] = (
+                    (kw.get('intent_gate') or {}).get('lock_refs'))
                 raise _Stop()
 
             real, quench_mod.quench = quench_mod.quench, _spy
@@ -488,7 +502,14 @@ class TestPlaceSeedLocksOnlyClaims(unittest.TestCase):
                 sys.argv = argv
 
         self.assertIn('lock_refs', seen, 'the polish quench was never reached')
-        got = set(seen['lock_refs'] or ())
+        got = set(seen['lock_refs'] or ()) | set(seen['intent_lock_refs'] or ())
+        # Non-empty FIRST. The two assertions below are both satisfied by an
+        # empty set, so without this the guard passes when the polish stops
+        # being told about the edge claims at all -- which is exactly how a
+        # channel move would slip through unnoticed.
+        self.assertTrue(got, 'the polish was handed NO locked refs by either '
+                             'channel: the connector_affinity guard below '
+                             'would pass vacuously')
         self.assertEqual(got & weak, set(),
                          f'connector_affinity refs locked in the polish: '
                          f'{sorted(got & weak)}')

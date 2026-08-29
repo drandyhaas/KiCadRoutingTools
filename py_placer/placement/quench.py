@@ -1187,7 +1187,8 @@ class QuenchState:
         removing X from `state.keepouts_for[ref]` and recounting -- and a frozen
         copy defeats that lift silently, because `pose_ok` reaches this gate
         through `candidate_valid`. Measured when it WAS frozen: the #701 census
-        went `lifted=64` to `lifted=0`, and a stranded part's verdict degraded
+        went `lifted=49` to `lifted=0` on arm Q's fixture, and a stranded
+        part's verdict degraded
         from `keepout_blocks` to `no_movable_neighbour`, whose prose --
         "NOTHING seated is near enough to be in the way" -- is verbatim the
         misleading answer that disclosure exists to replace.
@@ -2707,10 +2708,22 @@ def quench(pcb_data: PCBData, pcb_file: str,
                 'rejected': sum(state.intent_rejected_by_site.values()),
                 'by_rule': dict(sorted(state.intent_rejected.items())),
                 'by_site': dict(sorted(state.intent_rejected_by_site.items())),
-                'refs_bound': len(state._intent_spec),
+                # Both derived through `intent_spec_for`, NOT off
+                # `_intent_spec`. That dict holds the ZONE terms only -- the
+                # keep-out slice is derived live from `keepouts_for` so the
+                # #701 census lift keeps working -- so reading it directly
+                # made a keep-out-ONLY intent (the shape #701 exists for)
+                # report `refs_bound: 0, rules_enforced: []` while refusing
+                # hundreds of poses. `place_optimize` then printed the
+                # self-contradictory line "enforced  over 0 bound part(s);
+                # refused 360 candidate pose(s)", and shipped the same
+                # nonsense in JSON_SUMMARY.
+                'refs_bound': len(set(state._intent_spec)
+                                  | set(state.keepouts_for)),
                 'rules_enforced': sorted(
-                    {t.rule for terms in state._intent_spec.values()
-                     for t in terms}),
+                    {t.rule for ref in (set(state._intent_spec)
+                                        | set(state.keepouts_for))
+                     for t in state.intent_spec_for(ref)}),
             }
 
     return [{'reference': ref,

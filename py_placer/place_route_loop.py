@@ -487,6 +487,17 @@ def main():
     if not args.suggest_locks and not args.output_file:
         parser.error("output_file is required (except with --suggest-locks)")
 
+    # #702: the intent is loaded BEFORE record_invocation, for the reason
+    # place_optimize gives -- an exit 2 on an unreadable intent touches no
+    # file, and a manifest carrying a command that produced nothing leaves the
+    # next step's input made by nothing. It needs only `args`, so it is safe
+    # this early; the board-dependent RESOLVE stays down beside the
+    # board-state gates.
+    from placement.cli_gates import load_intent_or_exit
+    _intent, _rc = load_intent_or_exit(args)
+    if _rc:
+        return _rc
+
     if not args.suggest_locks:
         try:
             from redo_record import record_invocation
@@ -551,13 +562,7 @@ def main():
     # the grader re-derives them from the final poses"). A gate that re-elects
     # its own identity mid-run is not monotone.
     intent_gate = None
-    if args.intent:
-        from placement import floorplan
-        try:
-            _intent = floorplan.load_intent(args.intent)
-        except (OSError, ValueError) as exc:
-            print(f"cannot load intent {args.intent}: {exc}", file=sys.stderr)
-            return 2
+    if _intent is not None:
         from placement.cli_gates import resolve_intent_gate_for_cli
         intent_gate, _ = resolve_intent_gate_for_cli(
             _intent, _pcb0, group_sources, args.intent)

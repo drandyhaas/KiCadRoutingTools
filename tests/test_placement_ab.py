@@ -60,7 +60,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOARDS = os.path.join(ROOT, 'kicad_files')
 
-# Fourteen full quenches (7 rows x off/on) on five boards. Measured 233-340 s
+# Fourteen full quenches (7 rows x off/on) over four distinct boards. 233-340 s
 # of row time for the first three rows; the #702 rows add roughly as much
 # again. Declared with headroom so a slower box reports FAIL, not TIME.
 RUN_ALL_TIMEOUT = 1800
@@ -208,10 +208,19 @@ ROWS = [
 
     # --- #702: the declared-intent gate ------------------------------------
     #
-    # ON TRIAL on purpose: no `expect`, so `gate()`'s >=3-DISTINCT-BOARDS rule
-    # actually runs on this term instead of being skipped the way a pinned row
-    # skips it. The marks get pinned from the run that measures them, in the
-    # same commit, never from this comment.
+    # These landed ON TRIAL (no `expect`) so `gate()`'s >=3-DISTINCT-BOARDS
+    # rule would actually run rather than be skipped the way a pinned row skips
+    # it. IT RAN AND IT REFUSED: 1 of 4 boards improved, 3 regressed, against a
+    # rule of "improve on >= N-1, regress on none".
+    #
+    # They ship PINNED anyway, and the distinction matters. That rule is for an
+    # OBJECTIVE TERM, which has to earn its place against the terms already
+    # there. This is a hard CONSTRAINT: it does not compete with crossings and
+    # hpwl, it overrules them. Every regress mark below is on a GUARD, never on
+    # the signal. So the rows are pinned as PRICE change-detectors -- what the
+    # constraint costs, recorded so a later change to that cost is visible --
+    # and not as a claim that the term improves the objective. The marks come
+    # from the run that measured them, never from this comment.
     #
     # ON THE CIRCULARITY, STATED RATHER THAN HIDDEN. #701 deliberately made the
     # grader and the enforcer ONE implementation, so for these three rules the
@@ -286,9 +295,12 @@ ROWS = [
         'guard': ('crossings', 'hpwl', 'intent_errors_other'),
         'expect': 'regress',
         'why': ('MECHANISM: the row that DISAGREES, and the only corpus-scale '
-                'zone_exclusive coverage. Its signal is NEUTRAL -- the gate '
-                'holds the seed count and the unconstrained arm reaches the '
-                'same number -- so the mark is decided entirely by the '
+                'zone_exclusive coverage. Its signal is NEUTRAL because BOTH '
+                'arms improve by the same amount -- the seed grades 7 and '
+                'gated and ungated both reach 5. The monotone rule admits '
+                'improving moves, so the gate does not stop the optimizer '
+                'clearing exclusive zones on its own here; it neither helps '
+                'nor hinders, and the mark is decided entirely by the '
                 'crossings guard. That is the honest shape of a constraint '
                 'that costs something and buys nothing HERE, and the row is '
                 'kept for exactly that: a term that helps on one board of '

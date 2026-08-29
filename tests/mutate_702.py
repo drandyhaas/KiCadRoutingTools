@@ -144,7 +144,8 @@ ROWS = [
     # The keep-out slice must stay LIVE, or #701's census lift is defeated:
     # `count_legal_poses` removes an entry from `keepouts_for` and recounts,
     # and a frozen copy makes the lift invisible. Measured before the fix:
-    # the census went lifted=64 -> lifted=0 and the verdict degraded from
+    # the census went lifted=49 -> lifted=0 on arm Q's fixture, and the
+    # verdict degraded from
     # `keepout_blocks` to `no_movable_neighbour`.
     ('the-keepout-slice-stops-honouring-the-lift', 'q',
      "        kos = self.keepouts_for.get(ref, ())\n",
@@ -189,7 +190,7 @@ ROWS = [
 
     # ---- the load-time contradiction ---------------------------------------
     ('the-crossed-claim-check-never-fires', 'fp',
-     "        if not _swallows(k, zone.rect):\n"
+     "        if not _swallows(k, reach):\n"
      "            continue\n",
      "        if True:\n"
      "            continue\n",
@@ -217,6 +218,24 @@ ROWS = [
      "                return str(k.get('name') or '<unnamed>')\n",
      "        return str(k.get('name') or '<unnamed>')\n",
      (T702,), 'KILLED'),
+
+    # ---- the metrics, which a keep-out-only intent made self-contradictory --
+    ('the-metrics-read-zone-terms-only', 'q',
+     "                'refs_bound': len(set(state._intent_spec)\n"
+     "                                  | set(state.keepouts_for)),\n",
+     "                'refs_bound': len(state._intent_spec),\n",
+     (T702,), 'KILLED'),
+
+    # ---- the contradiction check must respect the zone TOLERANCE -----------
+    # A zone whose tolerance band reaches outside the keep-out still has legal
+    # poses, so reporting it as a contradiction is a false ERROR. Measured on a
+    # 4x4 zone at tolerance 2.0 with the keep-out equal to the rect: 5 poses
+    # satisfy both rules. Recorded SURVIVED: no arm builds that fixture, and
+    # the row is here so the day one does, the guard is already written.
+    ('the-swallow-test-ignores-the-tolerance', 'fp',
+     "    reach = _inflate(zone.rect, tolerance)\n",
+     "    reach = zone.rect\n",
+     (T702,), 'SURVIVED'),
 
     # ---- inertness ----------------------------------------------------------
     ('the-gate-is-built-even-with-no-intent', 'q',

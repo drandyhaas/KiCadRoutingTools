@@ -21,7 +21,7 @@ mutations in `tests/mutate_702.py` are killed only by a `by_site` assertion.
 MEASURED MUTATION TABLE, from `python3 tests/mutate_702.py`. The edits are in
 that file; these are the verdicts, recorded FROM THE RUN and not predicted:
 
-    20 rows: 18 killed, 2 survived, 0 broken, 0 disagreeing with expectation
+    22 rows: 19 killed, 3 survived, 0 broken, 0 disagreeing with expectation
 
     the two survivors, recorded rather than deleted:
       the-gate-is-built-even-with-no-intent      building an empty spec on a
@@ -36,6 +36,11 @@ that file; these are the verdicts, recorded FROM THE RUN and not predicted:
                                                 already a no-op on an empty
                                                 spec. Kept as a detector for
                                                 the day the guard means more.
+      the-swallow-test-ignores-the-tolerance    no arm builds a zone whose
+                                                tolerance band reaches outside
+                                                its keep-out; the row is here
+                                                so the guard exists the day one
+                                                does.
 
 Three rows exist because a mutation caught THIS FILE, not the engine:
 `the-incumbent-is-read-at-the-SEED-pose` survived until arm C was written at
@@ -669,7 +674,11 @@ def arm_Q_census_lift(wd):
     from `keepout_blocks` to `no_movable_neighbour`, whose prose is verbatim
     the misleading answer that whole disclosure exists to replace.
 
-    Measured while the slice was frozen: lifted went 64 -> 0.
+    Measured on THIS fixture while the slice was frozen: lifted 49 -> 0.
+    (An earlier draft of this docstring said 64. That number came from a
+    verifier's terminal and was republished here without re-deriving it --
+    and 64 is exactly `seeder.CENSUS_CAP`, i.e. a SATURATED count rather
+    than a count of freed seats. The arm prints its own numbers now.)
     """
     print("--- Q: the #701 census lift still reaches through the gate")
     from placement import seeder
@@ -750,6 +759,60 @@ def arm_L_inertness(wd):
     check("a no-intent quench never calls the gate", ok, why)
     check("and reports no intent_gate metrics", 'intent_gate' not in m,
           "the key is absent, not zero -- 'no gate' != 'refused nothing'")
+
+
+def arm_R_metrics_see_keepouts(wd):
+    """`refs_bound` and `rules_enforced` must see the KEEP-OUT slice.
+
+    Both were derived from `_intent_spec`, which holds zone terms only -- the
+    keep-out slice is live so #701's census lift works -- so a keep-out-ONLY
+    intent, the exact shape #701 exists for, reported `refs_bound: 0,
+    rules_enforced: []` while refusing hundreds of poses. `place_optimize`
+    then printed the self-contradictory "enforced  over 0 bound part(s);
+    refused N candidate pose(s)" and shipped it in JSON_SUMMARY.
+    """
+    print("--- R: the metrics see keep-outs, not just zones")
+    b = board(os.path.join(wd, 'r.kicad_pcb'), [
+        _part('U1', 10.0, 12.0, 1.5, 1.5),
+        _part('U2', 30.0, 12.0, 1.5, 1.5),
+    ])
+    it = load(intent_doc(keepouts=[{"name": "mid",
+                                    "rect": [14.0, 6.0, 26.0, 18.0]}]), wd, 'r')
+    pcb = parse_kicad_pcb(b)
+    g, _ = floorplan.resolve_intent_gate(it, pcb, ())
+    check("fixture: the intent declares a keep-out and NO zone",
+          not g['zones'] and len(g['keepouts']) == 1,
+          f"{len(g['zones'])} zone(s), {len(g['keepouts'])} keep-out(s)")
+    m = {}
+    quench(pcb, pcb_file=b, max_displacement=14.0, step=1.0, grid_step=0.1,
+           clearance=0.25, board_edge_clearance=0.55, crossing_penalty=10.0,
+           length_weight=1.0, halo_base=0.5, halo_coef=0.25, halo_weight=2.0,
+           edge_halo=2.0, edge_weight=2.0, metrics_out=m, intent_gate=g,
+           max_passes=2)
+    ig = m.get('intent_gate') or {}
+    check("refs_bound counts the keep-out-bound parts",
+          ig.get('refs_bound', 0) > 0, f"refs_bound={ig.get('refs_bound')}")
+    check("rules_enforced names 'keepout'",
+          'keepout' in (ig.get('rules_enforced') or []),
+          f"rules_enforced={ig.get('rules_enforced')}")
+    check("and a refusal is attributed to it",
+          ig.get('rejected', 0) > 0 and 'keepout' in (ig.get('by_rule') or {}),
+          f"rejected={ig.get('rejected')} by_rule={ig.get('by_rule')}")
+
+    # A gate that BINDS NOTHING must still report, or "refused nothing" and
+    # "never wired" collapse together again -- in the case that matters most.
+    it2 = load(intent_doc(keepouts=[{"name": "x", "rect": [1.0, 1.0, 2.0, 2.0],
+                                     "allow": ["*"]}]), wd, 'r2')
+    g2, _ = floorplan.resolve_intent_gate(it2, pcb, ())
+    m2 = {}
+    quench(parse_kicad_pcb(b), pcb_file=b, max_displacement=3.0, step=1.0,
+           grid_step=0.1, clearance=0.25, board_edge_clearance=0.55,
+           crossing_penalty=10.0, length_weight=1.0, halo_base=0.5,
+           halo_coef=0.25, halo_weight=2.0, edge_halo=2.0, edge_weight=2.0,
+           metrics_out=m2, intent_gate=g2, max_passes=2)
+    check("a gate that binds NOTHING still reports its key",
+          'intent_gate' in m2 and m2['intent_gate']['rejected'] == 0,
+          f"rejected={m2.get('intent_gate', {}).get('rejected')}")
 
 
 def arm_M_enforced_tuple(wd):
@@ -883,6 +946,7 @@ def main():
         arm_H_group_path(wd)
         arm_I_unfreeze_branch(wd)
         arm_Q_census_lift(wd)
+        arm_R_metrics_see_keepouts(wd)
         arm_L_inertness(wd)
         arm_M_enforced_tuple(wd)
         arm_N_gate_vs_grade(wd)

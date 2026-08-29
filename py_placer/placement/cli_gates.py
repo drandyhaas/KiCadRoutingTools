@@ -44,6 +44,34 @@ def add_intent_arg(parser, *, required: bool = False, extra: str = "") -> None:
              + ((" " + extra) if extra else ""))
 
 
+def load_intent_or_exit(args):
+    """(intent, exit_code). `exit_code` is 2 when the intent is unreadable.
+
+    Shared because the two things it gets right are the two things a per-CLI
+    copy got wrong:
+
+    * it is called BEFORE `record_invocation`, so an exit 2 never records a
+      manifest command that touched no file (place_route_loop recorded one);
+    * `--suggest-locks` warns and continues rather than erroring, and warns on
+      BOTH CLIs -- place_optimize printed the note and place_route_loop
+      returned before reaching it, which is a small instance of exactly the
+      drift this module exists to prevent.
+    """
+    import sys
+    from placement import floorplan
+    if not getattr(args, 'intent', None):
+        return None, 0
+    if getattr(args, 'suggest_locks', False):
+        print("--intent is ignored with --suggest-locks: no quench runs, and "
+              "the lock advisor does not read an intent", file=sys.stderr)
+        return None, 0
+    try:
+        return floorplan.load_intent(args.intent), 0
+    except (OSError, ValueError) as exc:
+        print(f"cannot load intent {args.intent}: {exc}", file=sys.stderr)
+        return None, 2
+
+
 def resolve_intent_gate_for_cli(intent, pcb_data, sources, path):
     """(bundle, problems) plus the one report every quenching CLI must print.
 

@@ -921,7 +921,12 @@ def _swallows(entry, rect) -> bool:
                for px in (rect[0], rect[2]) for py in (rect[1], rect[3]))
 
 
-def zone_covered_by_keepout(zone, keepouts, member_sides=None) -> Optional[str]:
+def _inflate(rect, by: float):
+    return (rect[0] - by, rect[1] - by, rect[2] + by, rect[3] + by)
+
+
+def zone_covered_by_keepout(zone, keepouts, member_sides=None,
+                            tolerance: float = 0.0) -> Optional[str]:
     """The name of a keep-out that swallows `zone` whole for a member that it
     actually BINDS, or None (#702).
 
@@ -934,8 +939,15 @@ def zone_covered_by_keepout(zone, keepouts, member_sides=None) -> Optional[str]:
     findings and the optimizer moved it anyway. Under the #702 gate it is not:
     the rule is termwise-monotone, so `keepout` falls only by leaving the
     keep-out, leaving raises `zone_containment`, and no candidate can lower
-    both. The part is frozen for the run, where the pre-#702 quench would have
-    walked it out.
+    both. The part is CONFINED TO ITS ZONE for the run, where the pre-#702
+    quench would have walked it out.
+
+    Confined, not frozen -- the distinction was measured, and the message says
+    the weaker true thing rather than the stronger false one. Every pose inside
+    a fully-swallowed zone yields an identical term vector (the intrusion is
+    the constant full-courtyard area, the escape is 0), so the monotone rule
+    admits all of them: 6 of 8 probed alternative poses were accepted. What the
+    member can never do is get OUT.
 
     `member_sides` is `{ref: sides}` for the block's resolved members, and it
     is what makes this test the same question the GRADE asks. Without it the
@@ -952,8 +964,15 @@ def zone_covered_by_keepout(zone, keepouts, member_sides=None) -> Optional[str]:
     """
     if zone.rect is None:
         return None
+    # The zone a member must satisfy is its rect PLUS its tolerance -- that is
+    # what `rule_zone_containment` grades against -- so a keep-out that covers
+    # the bare rect but not the tolerance band leaves real poses. Measured on a
+    # 4x4 zone at tolerance 2.0 with the keep-out equal to the rect: 5 probed
+    # poses satisfy both rules, and without this the intent was refused at
+    # ERROR anyway.
+    reach = _inflate(zone.rect, tolerance)
     for k in keepouts:
-        if not _swallows(k, zone.rect):
+        if not _swallows(k, reach):
             continue
         if member_sides is None:
             return str(k.get('name') or '<unnamed>')
@@ -1012,7 +1031,8 @@ def resolve_intent_gate(intent: Intent, pcb_data,
     for z in intent.blocks:
         mine = {r: member_sides[r] for r in blocks.get(z.name, ())
                 if r in member_sides}
-        hit = zone_covered_by_keepout(z, intent.keepouts, mine)
+        hit = zone_covered_by_keepout(z, intent.keepouts, mine,
+                                      intent.zone_tolerance(z))
         if hit is not None:
             problems.append(Violation(
                 rule='intent_zone_in_keepout', block=z.name,
@@ -1020,8 +1040,10 @@ def resolve_intent_gate(intent: Intent, pcb_data,
                 message=(f"block {z.name!r} declares a zone that keep-out "
                          f"{hit!r} covers entirely: its members are required "
                          f"to be somewhere they are forbidden to be. No pose "
-                         f"satisfies both, and the optimizer's intent gate is "
-                         f"monotone, so such a member cannot move at all"),
+                         f"satisfies both, so such a member can never LEAVE "
+                         f"its zone under the optimizer's monotone intent "
+                         f"gate, and cannot clear the keep-out without "
+                         f"leaving it"),
                 measured={'zone': list(z.rect), 'keepout': hit},
                 expected={'overlap': 'partial or none'}))
 

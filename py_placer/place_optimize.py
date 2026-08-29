@@ -153,20 +153,13 @@ Examples:
     # an unreadable one touches no file -- and a manifest that carries a
     # command which produced nothing leaves the next step's input made by
     # nothing, which is exactly why the recorder is conditional below.
-    intent = None
-    if args.intent and args.suggest_locks:
-        # Not parser.error: a caller that always passes --intent must not have
-        # to special-case the report mode, which writes no board and never
-        # quenches.
-        print("--intent is ignored with --suggest-locks: no quench runs, and "
-              "the lock advisor does not read an intent", file=sys.stderr)
-    elif args.intent:
-        from placement import floorplan
-        try:
-            intent = floorplan.load_intent(args.intent)
-        except (OSError, ValueError) as exc:
-            print(f"cannot load intent {args.intent}: {exc}", file=sys.stderr)
-            return 2
+    # Not parser.error on the --suggest-locks combination: a caller that always
+    # passes --intent must not have to special-case the report mode, which
+    # writes no board and never quenches.
+    from placement.cli_gates import load_intent_or_exit
+    intent, _rc = load_intent_or_exit(args)
+    if _rc:
+        return _rc
 
     # Recorded AFTER parsing and only for a real run: this tool MUTATES the
     # board, so a stress manifest that omits it leaves the next step's input
