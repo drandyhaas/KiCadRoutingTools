@@ -392,6 +392,16 @@ def generate_underpad_escape(footprint: Footprint,
                              # dog-bone/off-pad sites only; balls with no legal
                              # off-pad site fail honestly.
                              no_via_in_pad: bool = False,
+                             # Per-pad escape direction from a caller's plan,
+                             # keyed (round(x,3), round(y,3)). The dog-bone
+                             # site is normally chosen toward the ball's
+                             # NEAREST BOUNDARY, which is a per-ball guess made
+                             # without seeing the corridor the net has to join;
+                             # a hint replaces that guess for the balls it
+                             # names. None/{} leaves every site exactly where
+                             # it is today.
+                             escape_dir_hints: Optional[Dict[
+                                 Tuple[float, float], str]] = None,
                              # progress_callback(current, total, label); the
                              # per-ball A* is where a large array's minutes go,
                              # so each escape loop reports its count through
@@ -1075,12 +1085,35 @@ def generate_underpad_escape(footprint: Footprint,
     def heur(ix, iy):
         return max(0, min(ix - bx0, bx1 - ix, iy - by0, by1 - iy))
 
+    # Distance to ONE named side, for a search that has been told which
+    # way the ball must leave. `heur` measures the nearest boundary,
+    # which is the right guide for a ball considered alone -- and the
+    # wrong one for a ball joining a bundle that leaves on a particular
+    # side, since the search then races to the near edge and the plan is
+    # lost with no error anywhere.
+    _SIDE_H = {
+        'left': lambda ix, iy: max(0, ix - bx0),
+        'right': lambda ix, iy: max(0, bx1 - ix),
+        'up': lambda ix, iy: max(0, iy - by0),
+        'down': lambda ix, iy: max(0, by1 - iy),
+    }
+
+    def _left_on(side, cx, cy):
+        """Did the path leave the array on `side`?"""
+        if side == 'left':
+            return cx < bx0
+        if side == 'right':
+            return cx > bx1
+        if side == 'up':
+            return cy < by0
+        return cy > by1
+
     def depth(p):
         return min(p.global_x - grid.min_x, grid.max_x - p.global_x,
                    p.global_y - grid.min_y, grid.max_y - p.global_y)
 
     def astar(sx, sy, home, route_layers, allow_via, via_ok=None, net_id=0,
-              carve=None, start_layer=None, cost_out=None):
+              carve=None, start_layer=None, cost_out=None, side=None):
         """Route from the pad to any boundary cell.
 
         `route_layers` = the set of layer indices the track may run on. The pad
@@ -1104,9 +1137,13 @@ def generate_underpad_escape(footprint: Footprint,
                     return False
             return True
 
+        # `side` restricts which boundary counts as an exit, and steers
+        # the heuristic at it. None = leave on whichever edge is nearest,
+        # which is what every caller without a plan does.
+        _h = _SIDE_H.get(side, heur) if side else heur
         start = (sx, sy, top_idx if start_layer is None else start_layer)
         g = {start: 0.0}
-        pq = [(heur(sx, sy), start)]
+        pq = [(_h(sx, sy), start)]
         came = {}
         # #561 hot-loop: byte-equivalent mechanical speedup -- localize the
         # per-iteration lookups and index the occupancy bytearrays directly
@@ -1127,7 +1164,8 @@ def generate_underpad_escape(footprint: Footprint,
         while pq:
             _, cur = _heappop(pq)
             cx, cy, L = cur
-            if not (bx0 <= cx <= bx1 and by0 <= cy <= by1):
+            if not (bx0 <= cx <= bx1 and by0 <= cy <= by1) \
+                    and (side is None or _left_on(side, cx, cy)):
                 if cost_out is not None:
                     # outside the window the tie-break heuristic is 0, so the
                     # popped priority IS the path's g-cost (#563 layer compare)
@@ -1144,6 +1182,22 @@ def generate_underpad_escape(footprint: Footprint,
                 for dx, dy in _steps:
                     nx, ny = cx + dx, cy + dy
                     if not (0 <= nx < _onx and 0 <= ny < _ony):
+                        continue
+                    # Outside the array bbox nothing blocks (see the test
+                    # below: it is guarded on being INSIDE). That is safe for
+                    # an unrestricted search, which stops the moment it leaves
+                    # -- but a side-restricted one does not stop on the wrong
+                    # edge, so without this it escapes into the unchecked
+                    # margin and walks around the outside of the array to the
+                    # side it was told to use, through everyone else's exit
+                    # stubs. Measured: 42 segment-segment CONTACTS, one net
+                    # running 6.3 mm along x=133.50 past the west edge across
+                    # every other net's exit. So a side-restricted search may
+                    # only leave the bbox by crossing the edge it was asked
+                    # for -- which is the goal, and terminates it.
+                    if side is not None \
+                            and not (bx0 <= nx <= bx1 and by0 <= ny <= by1) \
+                            and not _left_on(side, nx, ny):
                         continue
                     if (bx0 <= nx <= bx1 and by0 <= ny <= by1) \
                             and _gL[nx * _ony + ny] \
@@ -1174,7 +1228,17 @@ def generate_underpad_escape(footprint: Footprint,
                     if ng < _g_get(nxt, 1e18):
                         g[nxt] = ng
                         came[nxt] = cur
-                        _heappush(pq, (ng + max(0, min(nx - bx0, bx1 - nx, ny - by0, by1 - ny)), nxt))
+                        # The inlined heuristic is the #561 hot-loop copy of
+                        # `heur`. With a side named it has to follow that side
+                        # instead -- min-over-all-edges is still admissible, so
+                        # the search would stay CORRECT, but it would race at
+                        # the nearest edge and expand far more to reach the one
+                        # asked for. The no-side branch is untouched, so a run
+                        # without hints expands exactly as before.
+                        _heappush(pq, (ng + (_h(nx, ny) if side else
+                                             max(0, min(nx - bx0, bx1 - nx,
+                                                        ny - by0, by1 - ny))),
+                                       nxt))
             # The single via, only in the ball's own pad. A through via spans
             # all layers, so the site must also clear immovable foreign copper
             # on layers the run-blocking test never looks at (via_ok, #253/
@@ -1212,7 +1276,7 @@ def generate_underpad_escape(footprint: Footprint,
                     if ng < g.get(nxt, 1e18):
                         g[nxt] = ng
                         came[nxt] = cur
-                        heapq.heappush(pq, (ng + heur(cx, cy), nxt))
+                        heapq.heappush(pq, (ng + _h(cx, cy), nxt))
         return None
 
     # Layer policy: near-edge balls escape on the BGA's own layer (no via),
@@ -1244,6 +1308,10 @@ def generate_underpad_escape(footprint: Footprint,
     tracks: List[Dict] = []
     vias_to_add: List[Dict] = []
     failed: List[str] = []
+    # Balls whose planned side had no route, so they escaped some other
+    # way. Reported rather than swallowed: a plan silently half-applied
+    # is worse than one that says which half did not fit.
+    _hint_missed: List[str] = []
     nvia = 0
     n_fcu = 0
 
@@ -1740,8 +1808,25 @@ def generate_underpad_escape(footprint: Footprint,
             sx, sy = occ.cell(p.global_x, p.global_y)
             home = home_of(p)
             carve = _carve_foreign([(p.global_x, p.global_y)], home, {p.net_id})
-            path = astar(sx, sy, home, {top_idx}, allow_via=False,
-                         net_id=p.net_id, carve=carve)
+            # This is the phase that escapes the SHALLOW balls on the top
+            # layer with no via, and on a shallow array it is where most of
+            # the balls go -- so a plan that reaches only the dog-bone and
+            # inner-ball phases reaches almost nothing. (Measured: hints wired
+            # into those two alone left the bench's 21 balls bit-identical,
+            # 10/21 obeyed either way, because every one of them escaped
+            # here.) Side first, unrestricted retry after, so a hint can never
+            # cost a ball its escape.
+            _side = (escape_dir_hints or {}).get(
+                (round(p.global_x, 3), round(p.global_y, 3)))
+            path = None
+            if _side:
+                path = astar(sx, sy, home, {top_idx}, allow_via=False,
+                             net_id=p.net_id, carve=carve, side=_side)
+                if path is None:
+                    _hint_missed.append(p.net_name)
+            if path is None:
+                path = astar(sx, sy, home, {top_idx}, allow_via=False,
+                             net_id=p.net_id, carve=carve)
             if path is not None:
                 commit(p, path, carve)
                 n_fcu += 1
@@ -1812,6 +1897,21 @@ def generate_underpad_escape(footprint: Footprint,
         ex = 1.0 if d_e <= d_w else -1.0
         ey = 1.0 if d_s <= d_n else -1.0
         primary_x = min(d_e, d_w) <= min(d_s, d_n)
+        # A caller's plan overrides "toward the nearest boundary". The
+        # nearest boundary is the right guess for a ball considered
+        # alone and the wrong one for a ball that has to join a bundle
+        # leaving on a particular side -- which is the whole reason the
+        # plan exists. Only the escape SIDE is taken from the hint; the
+        # ring-parity stagger and the candidate ordering are untouched.
+        _h = (escape_dir_hints or {}).get((round(gx, 3), round(gy, 3)))
+        if _h == 'left':
+            ex, primary_x = -1.0, True
+        elif _h == 'right':
+            ex, primary_x = 1.0, True
+        elif _h == 'up':
+            ey, primary_x = -1.0, False
+        elif _h == 'down':
+            ey, primary_x = 1.0, False
         alt = 1.0 if int(round(depth(p) / max(pitch, 1e-9))) % 2 == 0 else -1.0
         if primary_x:
             cands = [(ex * hx, alt * ey * hy), (ex * hx, -alt * ey * hy),
@@ -2095,8 +2195,26 @@ def generate_underpad_escape(footprint: Footprint,
                 _m[key] = ok
             return ok
 
-        path = astar(sx, sy, home, inner_layers, allow_via=True,
-                     via_ok=_via_ok, net_id=p.net_id, carve=carve)
+        # A plan's side is tried FIRST and is never allowed to cost a
+        # ball: if no route leaves on it, the same searches run again
+        # unrestricted. So hints can only change WHICH way a ball
+        # escapes, never WHETHER it does.
+        _side = (escape_dir_hints or {}).get(
+            (round(p.global_x, 3), round(p.global_y, 3)))
+        path = None
+        if _side:
+            path = astar(sx, sy, home, inner_layers, allow_via=True,
+                         via_ok=_via_ok, net_id=p.net_id, carve=carve,
+                         side=_side)
+            if path is None and nl > 1:
+                path = astar(sx, sy, home, set(range(nl)), allow_via=True,
+                             via_ok=_via_ok, net_id=p.net_id, carve=carve,
+                             side=_side)
+            if path is None:
+                _hint_missed.append(p.net_name)
+        if path is None:
+            path = astar(sx, sy, home, inner_layers, allow_via=True,
+                         via_ok=_via_ok, net_id=p.net_id, carve=carve)
         if path is None and nl > 1:
             path = astar(sx, sy, home, set(range(nl)), allow_via=True,
                          via_ok=_via_ok, net_id=p.net_id, carve=carve)
@@ -2419,4 +2537,10 @@ def generate_underpad_escape(footprint: Footprint,
     from fab_notes import print_via_in_pad_note
     print_via_in_pad_note(vias_to_add, pcb_data.pads_by_net,
                           context="BGA under-pad escape")
+    if _hint_missed and verbose:
+        print(f"  Under-pad: {len(_hint_missed)} ball(s) had no route out "
+              f"the side the caller asked for and escaped elsewhere "
+              f"[{', '.join(sorted(_hint_missed)[:6])}"
+              + (f", +{len(_hint_missed) - 6} more" if len(_hint_missed) > 6
+                 else "") + "]")
     return tracks, vias_to_add, failed

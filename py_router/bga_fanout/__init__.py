@@ -2399,6 +2399,19 @@ def _generate_bga_fanout_core(footprint: Footprint,
                         escape_method: str = 'auto',
                         grid_step: float = 0.0,
                         layer_costs: Optional[List[float]] = None,
+                        # Caller-supplied escape direction per pad, keyed
+                        # (round(x,3), round(y,3)) like preferred_escape_dirs'
+                        # own return. This is how a PLAN reaches the fanout:
+                        # preferred_escape_dirs guesses "toward the net's
+                        # nearest off-footprint pad", which is a per-net guess
+                        # made without seeing the other nets, and a topological
+                        # plan knows better. An explicit hint outranks that
+                        # guess; the env knob still governs whether the guess
+                        # runs at all, and it then fills only the pads the
+                        # caller left unnamed. None/{} is exactly today's
+                        # behaviour.
+                        escape_dir_hints: Optional[Dict[Tuple[float, float],
+                                                        str]] = None,
                         _pad_filter: Optional[Set[Tuple[float, float]]] = None,
                         _ignore_prefanned: bool = False,
                         _single_pass: bool = False,
@@ -2528,6 +2541,35 @@ def _generate_bga_fanout_core(footprint: Footprint,
         print(f"  {footprint.reference} placed at {footprint.rotation:.1f}° - routing "
               f"in the footprint frame and mapping back (issue #137)")
         rp, back = to_axis_aligned_frame(pcb_data, footprint.reference)
+        # The hints are keyed by BOARD-frame pad position and name a
+        # board-frame direction, so both have to come along into the
+        # rotated frame or they would be applied to the wrong pads
+        # pointing the wrong way -- silently, since a direction string
+        # is always valid. Pads are matched by pad_number (the one thing
+        # the rotation does not change) and the direction is rotated and
+        # snapped back to an axis, which is exact for the escape grid
+        # because that grid IS axis-aligned in this frame.
+        _hints = escape_dir_hints
+        if _hints:
+            import math as _m
+            _rot = {p.pad_number: p for p in rp.footprints[
+                footprint.reference].pads}
+            _vec = {'right': (1.0, 0.0), 'left': (-1.0, 0.0),
+                    'down': (0.0, 1.0), 'up': (0.0, -1.0)}
+            _th = _m.radians(-footprint.rotation)
+            _c, _s = _m.cos(_th), _m.sin(_th)
+            _moved = {}
+            for p in footprint.pads:
+                d = _hints.get((round(p.global_x, 3), round(p.global_y, 3)))
+                q = _rot.get(p.pad_number)
+                if d is None or q is None or d not in _vec:
+                    continue
+                vx, vy = _vec[d]
+                rx, ry = vx * _c - vy * _s, vx * _s + vy * _c
+                nd = min(_vec, key=lambda k: (_vec[k][0] - rx) ** 2
+                         + (_vec[k][1] - ry) ** 2)
+                _moved[(round(q.global_x, 3), round(q.global_y, 3))] = nd
+            _hints = _moved
         tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
             rp.footprints[footprint.reference], rp,
             net_filter=net_filter, diff_pair_patterns=diff_pair_patterns, layers=layers,
@@ -2537,6 +2579,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             via_size=via_size, via_drill=via_drill, check_for_previous=check_for_previous,
             no_inner_top_layer=no_inner_top_layer, escape_method=escape_method,
             grid_step=grid_step, layer_costs=layer_costs,
+            escape_dir_hints=_hints,
             same_net_pad_clearance=same_net_pad_clearance,
             cancel_check=cancel_check,
             progress_callback=progress_callback)
@@ -2634,7 +2677,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 rebalance_escape=rebalance_escape, via_size=via_size,
                 via_drill=via_drill, no_inner_top_layer=no_inner_top_layer,
                 escape_method=escape_method, grid_step=grid_step,
-                layer_costs=layer_costs,
+                layer_costs=layer_costs, escape_dir_hints=escape_dir_hints,
                 same_net_pad_clearance=same_net_pad_clearance,
                 cancel_check=cancel_check,
                 progress_callback=progress_callback)
@@ -3011,6 +3054,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             dogbone=(escape_method == 'dogbone'),
             no_via_in_pad=(same_net_pad_clearance is not None
                            and same_net_pad_clearance > 0),  # #581
+            escape_dir_hints=escape_dir_hints,
             # Rides _up_kw so the shrink rescue's re-run reports too.
             progress_callback=progress_callback,
             cancel_check=cancel_check,
@@ -3278,13 +3322,19 @@ def _generate_bga_fanout_core(footprint: Footprint,
         # each pad's escape direction biases toward its net's nearest
         # off-footprint pad; the smart layer assignment then spreads the
         # extra same-direction competition across layers.
-        _toward_targets = {}
+        # An explicit plan outranks the guess: the caller's hints go in
+        # first and the heuristic only fills pads it did not name.
+        _toward_targets = dict(escape_dir_hints or {})
+        _n_planned = len(_toward_targets)
         if env_knobs.FANOUT_TOWARD_TARGETS:
             from bga_fanout.escape import preferred_escape_dirs
-            _toward_targets = preferred_escape_dirs(pcb_data, footprint)
-            if _toward_targets:
-                print(f"  Target-side escape preference active for "
-                      f"{len(_toward_targets)} pad(s)")
+            for _k, _v in preferred_escape_dirs(pcb_data, footprint).items():
+                _toward_targets.setdefault(_k, _v)
+        if _toward_targets:
+            print(f"  Escape direction preference active for "
+                  f"{len(_toward_targets)} pad(s)"
+                  + (f" ({_n_planned} from the caller's plan)"
+                     if _n_planned else ""))
 
         for pad in footprint.pads:
             if not pad.net_name or pad.net_id == 0:
@@ -3649,7 +3699,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 via_size=via_size, via_drill=via_drill,
                 check_for_previous=check_for_previous,
                 no_inner_top_layer=no_inner_top_layer, escape_method=method,
-                grid_step=grid_step, _pad_filter=_pad_filter,
+                grid_step=grid_step, escape_dir_hints=escape_dir_hints,
+                _pad_filter=_pad_filter,
                 _ignore_prefanned=_ignore_prefanned, _single_pass=_single_pass,
                 same_net_pad_clearance=same_net_pad_clearance,
                 progress_callback=progress_callback,
@@ -3957,6 +4008,12 @@ def generate_bga_fanout(footprint: Footprint,
                         layer_costs: Optional[List[float]] = None,
                         plane_drop: str = 'auto',
                         plane_net_layers: Optional[Dict[str, List[str]]] = None,
+                        # Per-pad escape direction from a caller's PLAN; see
+                        # _generate_bga_fanout_core. Outranks the
+                        # KICAD_FANOUT_TOWARD_TARGETS heuristic, which then
+                        # fills only the pads left unnamed. None = unchanged.
+                        escape_dir_hints: Optional[Dict[Tuple[float, float],
+                                                        str]] = None,
                         _pad_filter: Optional[Set[Tuple[float, float]]] = None,
                         _ignore_prefanned: bool = False,
                         _single_pass: bool = False,
@@ -4059,6 +4116,7 @@ def generate_bga_fanout(footprint: Footprint,
         check_for_previous=check_for_previous,
         no_inner_top_layer=no_inner_top_layer, escape_method=escape_method,
         grid_step=grid_step, layer_costs=layer_costs, cancel_check=_cc,
+        escape_dir_hints=escape_dir_hints,
         progress_callback=progress_callback,
         _pad_filter=_pad_filter, _ignore_prefanned=_ignore_prefanned,
         _single_pass=_single_pass,

@@ -35,8 +35,17 @@ import detect_buses as db  # noqa: E402
 import plan_ends as pe  # noqa: E402
 
 out_path = sys.argv[1]
-K = sys.argv[2] if len(sys.argv) > 2 else '21'
+rest = [a for a in sys.argv[2:] if not a.startswith('-')]
+K = rest[0] if rest else '21'
 base = os.path.join(HERE, 'fb_t2q_base.kicad_pcb')
+# --on BOARD draws the overlay onto ANOTHER board -- normally the one the
+# braid was emitted to -- while still PLANNING from the bare bench. That
+# is the comparison worth looking at: the braid copper that exists next
+# to the corridor the plan says it should have drawn. Planning from the
+# emitted board instead would plan around the braid's own copper and
+# answer a different question.
+on_path = next((a.split('=', 1)[1] for a in sys.argv
+                if a.startswith('--on=')), None)
 names = subprocess.run([sys.executable,
                         os.path.join(HERE, 'coherent_nets.py'), K],
                        capture_output=True, text=True).stdout.strip()
@@ -175,10 +184,13 @@ for nm in names:
         box(m.exit_pt, 0.30, 'Cmts.User')
         n_layer += 1
 
-txt = open(base, encoding='utf-8').read()
+host = on_path or base
+txt = open(host, encoding='utf-8').read()
 k = txt.rstrip().rfind(')')
 open(out_path, 'w').write(txt[:k] + ''.join(lines) + txt[k:])
-pro = os.path.splitext(base)[0] + '.kicad_pro'
+pro = os.path.splitext(host)[0] + '.kicad_pro'
+if not os.path.exists(pro):
+    pro = os.path.splitext(base)[0] + '.kicad_pro'
 if os.path.exists(pro):
     import shutil
     shutil.copy(pro, os.path.splitext(out_path)[0] + '.kicad_pro')
