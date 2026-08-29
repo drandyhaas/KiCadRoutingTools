@@ -84,10 +84,16 @@ def endpoints(pcb, names, byname):
         for s in segs:
             cnt[(round(s.start_x, 3), round(s.start_y, 3))] += 1
             cnt[(round(s.end_x, 3), round(s.end_y, 3))] += 1
-        padpts = {(round(p.global_x, 3), round(p.global_y, 3))
-                  for p in net.pads}
-        free = [pt for pt, c in cnt.items() if c == 1 and pt not in padpts]
-        assert len(free) == 1, (nm, free)
+        anchors = [(p.global_x, p.global_y) for p in net.pads] + \
+            [(v.x, v.y) for v in pcb.vias if v.net_id == nid]
+        free = [pt for pt, c in cnt.items() if c == 1 and
+                all(math.hypot(pt[0] - ax, pt[1] - ay) > 0.02
+                    for (ax, ay) in anchors)]
+        assert free, (nm, 'no free stub end')
+        if len(free) > 1:
+            # soft joints / branches: the escape's exit is the end
+            # farthest from every pad
+            free.sort(key=lambda pt: -min(ts.d2(pt, a) for a in anchors))
         src = free[0]
         tgt = max(net.pads, key=lambda p: ts.d2((p.global_x, p.global_y),
                                                 src))
@@ -282,6 +288,22 @@ def main():
     ends = endpoints(pcb, names, byname)
 
     comps = {ends[nm][2] for nm in names}
+    comps_pads0 = [p for c in comps for p in pcb.footprints[c].pads]
+    rows0 = sorted({round(p.global_y, 3) for p in comps_pads0})
+    # SOUTH RIVER split (take-3 task 3, K15+): nets whose fanout stubs
+    # exit U1's south flank (teeth below the field) form a second river
+    # routed by a dedicated builder; the west braid never sees them
+    all_names = list(names)
+    moves0 = {}
+    for tok in a.moves.split(','):
+        if '=' in tok:
+            k, v = tok.split('=')
+            moves0[k.strip()] = v.strip().upper()
+    river2 = [nm for nm in names
+              if ends[nm][0][1] > rows0[-1] + 0.8 and nm not in moves0]
+    if river2:
+        names = [nm for nm in names if nm not in river2]
+        print(f'south river ({len(river2)}): {river2}')
     fx0 = min(p.global_x for c in comps for p in pcb.footprints[c].pads)
     x1 = fx0 - a.pitch * 0.8
     x0 = max(ends[nm][0][0] for nm in names) + 0.3
@@ -350,20 +372,34 @@ def main():
     # column to the outer N/S run along the field edge, then the
     # vertical inter-column street west of the ball, half-pitch jog.
     f_ys = [e[1] for e in entry.values() if e[0] == 'F']
+    flank_prev_run = {'N': rows_all[0] - 0.25, 'S': rows_all[-1] + 0.25}
     for flank in ('N', 'S'):
         movers = sorted((nm for nm, f in moves.items() if f == flank),
                         key=lambda nm: ends[nm][1][0])
         for i, nm in enumerate(movers):
             bx, by = ends[nm][1][0], ends[nm][1][1]
-            sx = bx - half
+            sgn = -1 if flank == 'N' else 1
+            # street: nearest side whose descent+jog is static-clear
+            sx = None
+            for sx_ in (bx - half, bx + half):
+                edge = rows_all[0] - 0.3 if flank == 'N'                     else rows_all[-1] + 0.3
+                if f_ok(nm, [((sx_, edge), (sx_, by)),
+                             ((sx_, by), (bx, by))]):
+                    sx = sx_
+                    break
+            assert sx is not None, f'no clear {flank} street for {nm}'
+            # run y: step OUTWARD until the run is static-clear (C9/C7
+            # class obstacles guard the field's N approach)
+            run_y = flank_prev_run[flank] + sgn * 0.30
+            while not f_ok(nm, [((x1 - 0.4, run_y), (sx, run_y))]):
+                run_y += sgn * 0.15
+                assert abs(run_y - rows_all[0]) < 8, 'no clear flank run'
+            flank_prev_run[flank] = run_y
             if flank == 'N':
-                run_y = rows_all[0] - 0.4 - i * 0.3
                 ly = (min(f_ys) if f_ys else rows_all[0]) - 0.35 - i * 0.3
-                dx_ = x1   # single-file drop; multi-S staggering TBD
             else:
-                run_y = rows_all[-1] + 0.4 + i * 0.3
                 ly = (max(f_ys) if f_ys else rows_all[-1]) + 0.35 + i * 0.3
-                dx_ = x1   # single-file drop; multi-S staggering TBD
+            dx_ = x1 - 0.35 * i        # staggered drop columns
             entry[nm] = (flank, (sx, run_y, ly, dx_))
             placed_f.append(((dx_, ly), (dx_, run_y)))
             placed_f.append(((dx_, run_y), (sx, run_y)))
@@ -768,8 +804,8 @@ def main():
             path = trunk + [(x1, sy), (bx, sy), (bx, by)]
         elif mode in ('N', 'S'):
             sx, ry, ly, dx_ = v
-            path = trunk + [(dx_, ly), (dx_, ry), (sx, ry),
-                            (sx, by), (bx, by)]
+            path = [p_ for p_ in trunk if p_[0] < dx_ - 0.05] + \
+                [(dx_, ly), (dx_, ry), (sx, ry), (sx, by), (bx, by)]
         else:
             sx, sy = v
             ly_ = lane_y[nm]
@@ -905,6 +941,95 @@ def main():
     # x-windows around a violation get a tighter deviation tube (the
     # octified path converges to the raw geometry there, which verified
     # clean); the rest of the drawing keeps the pretty 0.05 tube
+    # SOUTH RIVER builder: nested B.Cu runs below the teeth line
+    # (deepest run = first turn, so descents nest and never cross),
+    # one via at each turn, then an F.Cu street climb through the
+    # field -- legally crossing the other B runs -- and a half-pitch
+    # jog onto the ball. Zero same-layer crossings, one via per net.
+    if river2:
+        # tooth layer + descent x (F-toothed nets jog east before their
+        # tooth via when a B-tooth descent sits within 0.28)
+        tooth_layer = {}
+        for nm in river2:
+            nid2 = byname[nm][0]
+            tp = ends[nm][0]
+            tooth_layer[nm] = next(
+                (s.layer for s in pcb.segments if s.net_id == nid2
+                 and (abs(s.start_x - tp[0]) + abs(s.start_y - tp[1])
+                      < 0.005 or
+                      abs(s.end_x - tp[0]) + abs(s.end_y - tp[1])
+                      < 0.005)), 'B.Cu')
+        desc_x = {}
+        for nm in sorted(river2, key=lambda n: (tooth_layer[n] != 'B.Cu',
+                                                ends[n][0][0])):
+            dx0 = ends[nm][0][0]
+            while any(abs(dx0 - v) < 0.28 for v in desc_x.values()):
+                dx0 += 0.30
+            desc_x[nm] = dx0
+        r2 = sorted(river2, key=lambda nm: desc_x[nm])
+        base = max(ends[nm][0][1] for nm in r2) + 0.80
+        # order-free street assignment (climbs are on F.Cu, so any turn
+        # permutation is legal; only spacing matters). Contested columns
+        # overflow to FAR streets (+-1.2/+-2.0) with a row-street run
+        # leg on the ball row's south or north side.
+        turns = {}
+        street_runs = []       # (y, xlo, xhi) of assigned run legs
+
+        def run_free(y_, a_, b_):
+            lo, hi = min(a_, b_) - 0.25, max(a_, b_) + 0.25
+            return all(abs(y_ - ry) > 0.25 or hi < rl or lo > rh
+                       for (ry, rl, rh) in street_runs)
+
+        for nm in sorted(r2, key=lambda n: ends[n][1][0]):
+            bx, by = ends[nm][1][0], ends[nm][1][1]
+            cands = [(bx - half, None), (bx + half, None)]
+            for off in (1.5 * a.pitch, 2.5 * a.pitch):
+                for side in (by + half, by - half):
+                    cands.append((bx - off, side))
+                    cands.append((bx + off, side))
+            for tx_, ry_ in cands:
+                if any(abs(tx_ - v[0]) < 0.45 for v in turns.values()):
+                    continue
+                if ry_ is not None and not run_free(ry_, tx_, bx):
+                    continue
+                turns[nm] = (tx_, ry_)
+                if ry_ is not None:
+                    street_runs.append((ry_, min(tx_, bx), max(tx_, bx)))
+                break
+            assert nm in turns, f'no south street for {nm}'
+        for i, nm in enumerate(r2):
+            run_y = base + (len(r2) - 1 - i) * 0.3
+            tooth2 = ends[nm][0]
+            bx, by = ends[nm][1][0], ends[nm][1][1]
+            tx_, ry_ = turns[nm]
+            dx0 = desc_x[nm]
+            segs2 = []
+            vias2 = []
+            if tooth_layer[nm] == 'B.Cu':
+                start = tooth2
+            else:
+                # F tooth: short F jog to the descent x, tooth via to B
+                vp = (dx0, tooth2[1] + 0.30)
+                fj = octi45(tooth2, vp)
+                segs2 += [(p_, q_, 'F.Cu')
+                          for p_, q_ in zip(fj, fj[1:]) if p_ != q_]
+                vias2.append(vp)
+                start = vp
+            pts_b = [start, (dx0, run_y - 0.15), (dx0 + 0.15, run_y),
+                     (tx_, run_y)]
+            if ry_ is None:
+                pts_f = [(tx_, run_y), (tx_, by), (bx, by)]
+            else:
+                pts_f = [(tx_, run_y), (tx_, ry_), (bx, ry_), (bx, by)]
+            vias2.append((tx_, run_y))
+            segs2 += [(p_, q_, 'B.Cu')
+                      for p_, q_ in zip(pts_b, pts_b[1:]) if p_ != q_]
+            segs2 += [(p_, q_, 'F.Cu')
+                      for p_, q_ in zip(pts_f, pts_f[1:]) if p_ != q_]
+            out_segs[nm] = segs2
+            out_vias[nm] = vias2
+        names = all_names
+
     if not a.no_octi:
         raw_segs = {nm: list(out_segs[nm]) for nm in names}
         windows = {nm: [] for nm in names}
