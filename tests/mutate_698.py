@@ -165,6 +165,14 @@ ROWS = [
      "            ok = gain > 1e-9\n",
      (T698,), 'KILLED'),
 
+    # The regression the FIX WAVE introduced and the re-verification caught: a
+    # bare truthiness guard sends a sub-quantum threshold down the `>=` branch,
+    # so a stricter flag produces a LOOSER gate.
+    ('the-min_gain-branch-guards-on-truthiness', 's',
+     "        elif gated and float(min_gain) > MEASURE_QUANTUM:\n",
+     "        elif gated and min_gain:\n",
+     (T698,), 'KILLED'),
+
     ('min_gain-gates-the-count-bases-too', 's',
      "        if units == 'count':\n"
      "            ok = gain >= 1\n",
@@ -300,6 +308,17 @@ ROWS = [
      "            ok = gain > MEASURE_QUANTUM\n",
      "            ok = gain > 1e-9\n",
      (T698,), 'KILLED'),
+
+    # EXPECTED SURVIVOR, recorded rather than deleted. `keepout_hit` already
+    # thresholds at `legality.EPS` internally and `grid_step` is 0.1mm, so no
+    # realizable term rises into the gap between 1e-9 and 1e-6 -- the change is
+    # about ONE PASS not answering "did a declared term rise" two ways, not
+    # about a decision that moves. Kept as a change detector, and recorded so
+    # that "no arm covers it" is a stated fact rather than a discovery.
+    ('prune-uses-a-different-epsilon-from-the-licence', 'r',
+     "        undoes_intent = any(a > b + legality.EPS\n",
+     "        undoes_intent = any(a > b + 1e-9\n",
+     (T698,), 'SURVIVED'),
 
     ('the-KEPT-note-credits-the-probe-for-every-held-revert', 'r',
      "            if undoes_intent and wanted:\n",

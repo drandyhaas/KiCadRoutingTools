@@ -2680,10 +2680,11 @@ RESEAT_BASIS_UNITS = {'locked_contacts': 'count', 'pad_pairs': 'count',
 #: computes that counterfactual rather than asserting it.
 RESEAT_LICENSED_TERM = 'hpwl'
 
-#: The smallest change `reconstruct.measure` can express. It rounds every
-#: continuous term to 4 decimals, so a "gain" at or below this is rounding, not
-#: a measurement -- and the continuous legality bases are not gated by
-#: `--reseat-min-gain`, so nothing else would stop noise from carrying a pass.
+#: The last digit `reconstruct.measure` keeps for the continuous LEGALITY terms
+#: -- `hole`, `oob` and `overlap` are rounded to 4 decimals (`hpwl` to 3). A
+#: gain must EXCEED this to count: a change in the last representable digit of
+#: a 4dp aggregate is not evidence of anything, and these bases are otherwise
+#: ungated, so nothing else would stop rounding from carrying a pass.
 MEASURE_QUANTUM = 1e-4
 
 
@@ -2764,13 +2765,20 @@ def basis_skeleton(scope_source: str, *, policy: str,
 
     Every return path of `reseat_scope` -- the seated one, the early-out, and
     both policies -- carries the same keys because they all come from here. The
-    early-out used to hand back 6 of the 15 under a comment promising parity,
-    which `reseat_refusal_note` then KeyError'd on: exactly the schema split
-    that early-out's own census keys exist to prevent, one field down.
+    early-out used to hand back 6 of the 15 under a comment promising parity:
+    exactly the schema split that early-out's own census keys exist to prevent,
+    one field down. (It did NOT crash anything -- `reseat_refusal_note` reads
+    every field with `.get`, and no engine path passes an empty-scope basis to
+    it. The defect is the broken promise, which a consumer outside this repo is
+    entitled to rely on, not a live traceback.)
     """
     return {
         'scope_source': scope_source,
         'policy': policy,
+        # Present on EVERY path, so the seated path cannot carry a key the
+        # early-out lacks. `reseat_scope` overwrites it with False when the
+        # licence refuses; None means the question never arose.
+        'eviction_licence': None,
         'witness_ok': True,
         'witnesses_before': len(witnesses_before),
         'witnesses_after': len(witnesses_after),
@@ -2856,23 +2864,35 @@ def reseat_accept(before: Sequence[float], after: Sequence[float], *,
         gated = (name == 'scope_hpwl')
         if units == 'count':
             ok = gain >= 1
-        elif gated and min_gain:
+        elif gated and float(min_gain) > MEASURE_QUANTUM:
             # `>=`, not `>`. The flag's help calls it "the smallest win that
             # COUNTS as a re-seat", and `scope_hpwl` is quantised to 3dp, so
             # exact equality with a round threshold is the common case rather
             # than a corner: `--reseat-min-gain 0.5` refusing a gain of 0.5
             # would be the flag not doing what it says.
+            #
+            # The guard is `> MEASURE_QUANTUM`, not a bare truthiness test, and
+            # that is the whole reason this branch is written out. A threshold
+            # BELOW the quantum must not reach it: with `elif gated and
+            # min_gain` a `--reseat-min-gain 1e-12` sent a gain of EXACTLY ZERO
+            # down this path and accepted it -- a looser gate from a stricter
+            # flag, admitting the very sideways shuffle the basis exists to
+            # refuse, and reachable (10 of the 16 corpus rows in
+            # `tests/measure_698_min_gain.py` have a gain of exactly 0.000). A
+            # negative `min_gain` did the same through the kwarg, which the CLI
+            # validator cannot see. Falling through to the floor below makes
+            # the rule MONOTONE in `min_gain`: a bigger threshold is never
+            # looser, and no threshold is ever looser than no threshold.
             ok = gain >= float(min_gain) - 1e-9
         else:
-            # `MEASURE_QUANTUM`, not an epsilon. `reconstruct.measure` rounds
-            # every continuous term to 4dp, so a gain at or below that is not
-            # a measurement -- and these bases are ungated by `min_gain`, so
-            # nothing else stops noise from carrying a pass. Measured before
-            # this floor existed: `overlap 0.5000 -> 0.4999` (1e-4) fired and
-            # bought an hpwl blow-up of 50mm, which the licence permits
-            # because hpwl is licensed. Run 4 demoted `overlap` below `hpwl`
-            # in GATE_TERMS because 0.73mm2 of kiss had vetoed a 44mm
-            # homecoming; 0.0001mm2 should certainly not buy one.
+            # `MEASURE_QUANTUM`, not an epsilon. These bases are ungated by
+            # `min_gain`, so without a floor the old `gain > 1e-9` fired on a
+            # change in the LAST DIGIT `measure` keeps -- an `overlap` gain of
+            # 1e-4 mm2 was enough to accept a pass, and since `hpwl` is the
+            # licensed term such a pass may be arbitrarily worse on wirelength.
+            # Run 4 demoted `overlap` below `hpwl` in GATE_TERMS because
+            # 0.73mm2 of kiss had vetoed a 44mm homecoming; 0.0001mm2 must not
+            # buy one in the other direction.
             ok = gain > MEASURE_QUANTUM
         first = ok and fired is None
         if first:
@@ -3144,17 +3164,19 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
                 'gate_before': list(_empty_gate),
                 'gate_after': list(_empty_gate),
                 # #698: the SAME keys as the seated path, for the reason the
-                # census keys above are here -- a consumer that reads
-                # `accept_basis` on one path and KeyErrors on the other is the
-                # schema split this early-out already shipped once. Built from
-                # the shared skeleton so the promise is structural, not a
-                # literal someone has to keep in step.
+                # census keys above are here -- one function must not return
+                # two schemas. Built from the shared skeleton so the promise is
+                # structural, not a literal someone has to keep in step.
+                # `min_gain` is the caller's, not a fabricated 0.0: reporting a
+                # threshold that was never the one in force is the same defect
+                # as reporting a census that never ran.
                 'accept_basis': basis_skeleton(
                     scope_source, policy='empty',
                     witnesses_before=witnesses_before,
                     witnesses_after=witnesses_before,
                     hpwl_before=_empty_gate[_recon.GATE_TERMS.index('hpwl')],
-                    hpwl_after=_empty_gate[_recon.GATE_TERMS.index('hpwl')]),
+                    hpwl_after=_empty_gate[_recon.GATE_TERMS.index('hpwl')],
+                    min_gain=min_gain),
                 'accepted': True, 'pruned': [],
                 'witnesses_before': sorted(witnesses_before),
                 'witnesses_after': sorted(witnesses_before),

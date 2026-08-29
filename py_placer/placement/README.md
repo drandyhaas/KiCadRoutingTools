@@ -302,11 +302,14 @@ part could never be re-seated whatever the search found. So:
 - **`--reseat-min-gain` (mm) gates the `scope_hpwl` basis only.** Count bases
   threshold at one whole defect; one number compared against both currencies
   would assert an exchange rate between half a millimetre of wire and half a
-  keep-out violation. The other continuous bases are floored at
-  `MEASURE_QUANTUM` instead, because `reconstruct.measure` rounds them to 4
-  decimals and a "gain" at or below that is rounding — measured before that
-  floor existed, an `overlap` gain of 1e-4 mm² fired and bought a 50 mm hpwl
-  blow-up.
+  keep-out violation. Every continuous basis is *also* floored at
+  `MEASURE_QUANTUM`, the last digit `reconstruct.measure` keeps for the 4-dp
+  legality terms: without it the old `gain > 1e-9` let an `overlap` improvement
+  of 1e-4 mm² — a change in the last representable digit — accept a pass, and
+  since `hpwl` is the licensed term such a pass may be arbitrarily worse on
+  wirelength. The floor is also what makes the rule **monotone in
+  `--reseat-min-gain`**: a threshold below the quantum falls through to it, so
+  a stricter flag can never produce a looser gate.
 
   The default is **0.0**, from `tests/measure_698_min_gain.py` (16 explicit
   re-seats on four corpus boards, parts chosen by pad count so the sample cannot
@@ -317,8 +320,8 @@ part could never be re-seated whatever the search found. So:
   is the restored input pose), and only one is a genuine no-op. The bimodality
   is therefore partly structural: anything surviving prune has improved hpwl by
   construction. What the sample does support is narrower and still sufficient —
-  among the re-seats that reach the gate, the smallest gain is ~1 mm, so a
-  non-zero default would buy nothing here while risking a genuine small win.
+  every re-seat whose gain was **non-zero** gained at least ~1 mm, so a non-zero
+  default would buy nothing here while risking a genuine small win.
 
 Requires an Edge.Cuts outline (exit 3 without one — the outline is spec-owned
 and will not be invented) and refuses a board that already looks placed

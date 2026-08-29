@@ -693,14 +693,26 @@ def arm_M_seed_independence(wd):
     print("--- M: the fixture is seed-independent")
     b = keepout_board(wd, 'm')
     _p, it = keepout_intent(wd, 'm')
-    acc = 0
-    bases = set()
-    for s in range(8):
+    hp = _idx('hpwl')
+    n = 20                      # the number the module docstring quotes
+    acc, worse, bases, deltas = 0, 0, set(), []
+    for s in range(n):
         rep = reseat(b, it, ['U1'], seed=s)
         acc += bool(rep['accepted'])
         bases.add((rep['accept_basis'] or {}).get('fired'))
-    check("accepted on every seed", acc == 8, f"{acc}/8 seeds accepted")
+        d = rep['gate_after'][hp] - rep['gate_before'][hp]
+        deltas.append(round(d, 3))
+        worse += d > 1e-9
+    check(f"accepted on every one of {n} seeds", acc == n,
+          f"{acc}/{n} seeds accepted")
     check("and always on the same basis", bases == {'intent'}, str(bases))
+    # The hpwl claim in the module docstring, re-derived rather than quoted.
+    # It is a RANGE, not a constant: the seat search is seeded, so every seed
+    # escapes to a different pose. An earlier version of this file recorded one
+    # seed's value as if it held for all 20.
+    check(f"the escape costs hpwl on every one of {n} seeds", worse == n,
+          f"{worse}/{n} worse; range {min(deltas)} to {max(deltas)} mm, "
+          f"{len(set(deltas))} distinct values")
 
 
 def arm_N_enforced_rules_covered(wd):
@@ -969,14 +981,37 @@ def arm_S_review_findings(wd):
 
     # SF-3: a gain of EXACTLY --reseat-min-gain must count; the help calls it
     # "the smallest win that counts".
-    ba = dict(bb, scope_hpwl=-0.5)          # gain of exactly 0.5
-    for mg, want in ((0.5, True), (0.5001, False)):
-        ok, _ = seeder.reseat_accept(
+    def _hp(gain, mg):
+        ok, _b = seeder.reseat_accept(
             base, list(base), scope_source='explicit',
             witnesses_before=[], witnesses_after=[],
-            bases_before=bb, bases_after=ba, min_gain=mg)
+            bases_before=bb, bases_after=dict(bb, scope_hpwl=-gain),
+            min_gain=mg)
+        return ok
+
+    for mg, want in ((0.5, True), (0.5001, False)):
         check(f"SF-3: gain 0.5 against --reseat-min-gain {mg} -> "
-              f"{'accept' if want else 'refuse'}", ok is want, f"accepted={ok}")
+              f"{'accept' if want else 'refuse'}", _hp(0.5, mg) is want,
+              f"accepted={_hp(0.5, mg)}")
+
+    # SF-3b: MONOTONE in min_gain. The first fix lost this: `elif gated and
+    # min_gain` sent a sub-quantum threshold down the `>=` branch, so
+    # `--reseat-min-gain 1e-12` accepted a gain of EXACTLY ZERO -- a looser
+    # gate from a stricter flag, admitting the sideways shuffle the basis
+    # exists to refuse. A negative one did the same through the kwarg, which
+    # the CLI validator cannot see.
+    check("SF-3b: a sub-quantum threshold does not accept a ZERO gain",
+          _hp(0.0, 1e-12) is False, f"accepted={_hp(0.0, 1e-12)}")
+    check("SF-3b: nor does it accept a sub-quantum gain",
+          _hp(6e-5, 5e-5) is False, f"accepted={_hp(6e-5, 5e-5)}")
+    check("SF-3b: a NEGATIVE threshold does not accept a WORSENING basis",
+          _hp(-3.0, -5.0) is False, f"accepted={_hp(-3.0, -5.0)}")
+    check("SF-3b: and raising the threshold never loosens the gate",
+          all(not (_hp(g, hi) and not _hp(g, lo))
+              for g in (0.0, 6e-5, 0.5, 2.0)
+              for lo, hi in ((0.0, 1e-12), (1e-12, 5e-5), (5e-5, 0.5),
+                             (0.5, 2.0))),
+          "monotone over 4 gains x 4 threshold pairs")
 
     # N-1: a continuous legality basis must not fire on rounding noise.
     for delta, want in ((1e-4, False), (2e-3, True)):
@@ -1053,6 +1088,65 @@ def arm_S_review_findings(wd):
     check("SF-6a: and that is strictly more than the named scope",
           len(seen6.get('covered') or ()) > 1,
           f"scope was ['U1'], probe covers {sorted(seen6.get('covered') or ())}")
+
+    # SF-6b: the BEHAVIOUR, not just the constructor argument. Nothing else in
+    # the tree passes `evict_depth` together with a keep-out, so without this
+    # the whole-board probe is pinned only by how it is built. A stub eviction
+    # drops a stranger INTO `hot` while the scope ref escapes it: with the
+    # whole-board probe the licence refuses; scoped to the named refs it is
+    # accepted, and the `intent` basis even reads 1 -> 0 while the board is
+    # still in violation.
+    b6 = board(os.path.join(wd, 's6.kicad_pcb'),
+               [_part('U1', 10.0, 6.0, 0.5, 0.5, npads=4, nets=(1, 2, 3, 4)),
+                _part('R1', 9.0, 5.0, 0.4, 0.3, npads=2, nets=(1, 2)),
+                _part('C1', 11.0, 7.0, 0.4, 0.3, npads=2, nets=(3, 4)),
+                _part('S', 3.0, 3.0, 0.5, 0.5, npads=2, nets=(7, 8))],
+               size=KO_SIZE)
+    _p6, it6 = keepout_intent(wd, 's6')
+    real_seed = seeder.seed_from_intent
+
+    def stub_seed(pcb2, path2, intent2, rng, **kw):
+        """Seat U1 clear of `hot` and 'evict' S straight into it."""
+        return {'placements': [
+                    {'reference': 'U1', 'new_x': 15.0, 'new_y': 10.0,
+                     'new_rotation': 0.0},
+                    {'reference': 'S', 'new_x': 10.0, 'new_y': 6.0,
+                     'new_rotation': 0.0}],
+                'unseated': [], 'notes': [],
+                'evictions': [{'accepted': True, 'blockers': ['S']}],
+                'no_pose_blockers': {}, 'no_pose_verdict': {},
+                'no_pose_census': {}}
+
+    seeder.seed_from_intent = stub_seed
+    try:
+        wide = reseat(b6, it6, ['U1'], evict_depth=1)
+        real_probe_init = q.IntentProbe.__init__
+
+        def narrow_init(self, state, zones=(), refs=None):
+            real_probe_init(self, state, zones=zones, refs={'U1'})
+
+        q.IntentProbe.__init__ = narrow_init
+        try:
+            narrow = reseat(b6, it6, ['U1'], evict_depth=1)
+        finally:
+            q.IntentProbe.__init__ = real_probe_init
+    finally:
+        seeder.seed_from_intent = real_seed
+
+    risen = ((wide['accept_basis'].get('intent_licence') or {}).get('risen')
+             or [])
+    check("SF-6b: the whole-board probe REFUSES an evicted stranger pushed "
+          "into a keep-out", wide['accepted'] is False,
+          f"accepted={wide['accepted']}")
+    check("SF-6b: and names the stranger and the claim",
+          any(r[0] == 'S' and r[1] == 'keepout' for r in risen),
+          f"risen={risen}")
+    check("SF-6b: control -- scoped to the named refs it is ACCEPTED",
+          narrow['accepted'] is True, f"accepted={narrow['accepted']}")
+    check("SF-6b: and the scoped basis even reads intent 1 -> 0 on a board "
+          "still in violation",
+          basis_term(narrow['accept_basis'], 'intent').get('after') == 0,
+          f"intent={basis_term(narrow['accept_basis'], 'intent')}")
 
 
 def main():
