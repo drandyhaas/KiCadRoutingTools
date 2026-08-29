@@ -802,8 +802,46 @@ def compare_row(row, want):
 
 
 def load_rows(path):
-    d = json.load(open(path, encoding='utf-8'))
-    return d.get('rows') or []
+    """Rows from EITHER a `{rows: [...]}` document or the run's own JSONL.
+
+    The study writes `<out>/rows.jsonl`, one row per line, and both the usage
+    text above and `docs/placement-predictors.md` tell the reader to feed that
+    file straight back in with `--from-rows`. This function only read the
+    document form, so following the documented command crashed with
+    `JSONDecodeError: Extra data: line 2 column 1` -- a tool refusing the file
+    it had just written. Found when the committed rows file was withdrawn and
+    the JSONL became the only path anyone would use.
+
+    A ONE-row JSONL is the trap here: it parses as a lone JSON object, so a
+    `.get('rows') or []` reads it as a document with no rows and returns
+    NOTHING -- and the caller then blames the file ("carries no study rows")
+    and exits 0. Same defect as the crash, only silent. Only a document has
+    the `rows` key, so anything else that parses as an object is one row.
+    """
+    with open(path, encoding='utf-8') as f:
+        text = f.read()
+    try:
+        d = json.loads(text)
+    except ValueError:
+        pass            # not one JSON value -- JSONL below
+    else:
+        if isinstance(d, list):
+            return d
+        if isinstance(d, dict):
+            if 'rows' in d:
+                return d.get('rows') or []
+            return [d] if d else []
+    rows = []
+    for n, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except ValueError as e:
+            raise SystemExit(f'{path}:{n} is neither a rows document nor a '
+                             f'JSONL row: {e}')
+    return rows
 
 
 def read_jsonl(path):
