@@ -905,6 +905,102 @@ def resolve_blocks(intent: Intent, pcb_data, group_sources: Sequence[str] = ()
     return out, problems
 
 
+def zone_covered_by_keepout(zone, keepouts) -> Optional[str]:
+    """The name of a rect keep-out that swallows `zone` whole, or None (#702).
+
+    An intent whose keep-out covers the region its zone demands is a
+    CONTRADICTION, and `validate_intent` cannot currently see it: it checks
+    zone-inside-envelope and zone-vs-zone overlap, and nothing compares a zone
+    against a keep-out.
+
+    That was harmless while the intent was only graded -- the part took two
+    findings and the optimizer moved it anyway. Under the #702 gate it is not:
+    the rule is termwise-monotone, so `keepout` falls only by leaving the
+    keep-out, leaving raises `zone_containment`, and no candidate can lower
+    both. The part is frozen for the run, where the pre-#702 quench would have
+    walked it out. So the contradiction has to be refused where it is authored
+    rather than discovered as an immobile part.
+
+    Only RECT keep-outs, and only total containment. A circle is reported by
+    `keepout_hit` as a fabricated marker with no area (see its docstring), so
+    "does this circle swallow that rectangle" is not a question this module can
+    answer without inventing geometry -- and a partial overlap is a legitimate
+    intent (a zone with a corner bitten out still has room).
+    """
+    if zone.rect is None:
+        return None
+    for k in keepouts:
+        r = k.get('rect')
+        if r is None:
+            continue
+        if (r[0] <= zone.rect[0] and r[1] <= zone.rect[1]
+                and r[2] >= zone.rect[2] and r[3] >= zone.rect[3]):
+            return str(k.get('name') or '<unnamed>')
+    return None
+
+
+def resolve_intent_gate(intent: Intent, pcb_data,
+                        group_sources: Sequence[str] = ()
+                        ) -> Tuple[Dict[str, object], List[Violation]]:
+    """The pose-INVARIANT join a per-move gate needs, plus the problems (#702).
+
+    `resolve_blocks` returns refs and NO geometry, so every consumer has had to
+    join `block name -> Zone.rect` itself; `place_seed.py` was the first copy
+    and four more quench call sites were about to add theirs. One resolver
+    instead, for the reason `Intent.edge_claims` gives about its own split: a
+    filter that must be remembered is a filter that will be forgotten at the
+    next call site.
+
+    Returns PLAIN DATA -- dicts and tuples, no `Intent`, no `Zone`. The quench
+    must not have to import this schema to run, and `grade` builds a
+    QuenchState of its own that must keep measuring INDEPENDENTLY of whatever
+    the optimizer was gated on (tests/test_701_keepout_predicate.py:395).
+
+    `lock_refs` carries the two rules that are enforced by FREEZING rather than
+    by a pose term, because neither is a property of a pose:
+
+      * `must_lock` is a claim about the FILE. No pose satisfies or violates
+        it. Freezing does not launder the grade -- the file is still unstamped,
+        so `rule_must_lock` still fires and still tells the author to stamp it.
+      * `edge_claims()`, NOT `edge_connectors`: a `connector_affinity` entry
+        makes no seat claim and must not be locked out of the search. That
+        split is measured in `Intent.edge_claims`' own docstring (6 extra refs
+        on tigard_placed).
+    """
+    blocks, problems = resolve_blocks(intent, pcb_data, group_sources)
+    zones = tuple(
+        {'name': z.name,
+         'rect': tuple(z.rect),
+         'tolerance_mm': intent.zone_tolerance(z),
+         'refs': tuple(blocks.get(z.name, ())),
+         'side': z.side,
+         'exclusive': bool(z.exclusive)}
+        for z in intent.blocks if z.rect is not None)
+
+    for z in intent.blocks:
+        hit = zone_covered_by_keepout(z, intent.keepouts)
+        if hit is not None:
+            problems.append(Violation(
+                rule='intent_zone_in_keepout', block=z.name,
+                severity=intent.severity_of('intent_zone_in_keepout'),
+                message=(f"block {z.name!r} declares a zone that keep-out "
+                         f"{hit!r} covers entirely: its members are required "
+                         f"to be somewhere they are forbidden to be. No pose "
+                         f"satisfies both, and the optimizer's intent gate is "
+                         f"monotone, so such a member cannot move at all"),
+                measured={'zone': list(z.rect), 'keepout': hit},
+                expected={'overlap': 'partial or none'}))
+
+    lock: set = set()
+    for pat in intent.must_lock:
+        lock.update(fnmatch.filter(sorted(pcb_data.footprints), pat))
+    lock.update(str(c['ref']) for c in intent.edge_claims()
+                if c.get('ref') in pcb_data.footprints)
+    return ({'zones': zones,
+             'keepouts': tuple(intent.keepouts),
+             'lock_refs': tuple(sorted(lock))}, problems)
+
+
 # --------------------------------------------------------------------------
 # rules
 # --------------------------------------------------------------------------
@@ -1301,11 +1397,13 @@ RULES = (
 
 #: Rules whose violations are raised OUTSIDE the `RULES` loop, and so have no
 #: rule function to be enumerated from: the two self-contradiction findings in
-#: `validate_intent` and the unresolved-block finding in `resolve_blocks`.
+#: `validate_intent`, the unresolved-block finding in `resolve_blocks`, and the
+#: zone-inside-a-keep-out contradiction `resolve_intent_gate` raises (#702).
 #: Kept as a named set rather than folded into `_SEVERITY_KEYS` by hand, so the
 #: next reader can see which names are the exception and why.
 _NON_RULE_SEVERITIES = frozenset({
-    'intent_zone_outside_envelope', 'intent_zone_overlap', 'block_unresolved'})
+    'intent_zone_outside_envelope', 'intent_zone_overlap', 'block_unresolved',
+    'intent_zone_in_keepout'})
 
 #: Every rule name an intent may set a severity for. Derived from `RULES`, so a
 #: new rule is settable the moment it is registered -- a hand-listed set would

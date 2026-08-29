@@ -125,9 +125,10 @@ source, suspect, suspect_reason
 
 `severity` keys are checked too. The settable names are the nine rules —
 `envelope`, `zone_containment`, `zone_side`, `zone_exclusive`, `keepout`,
-`edge_connector`, `decap_distance`, `must_lock`, `legality` — plus the three
+`edge_connector`, `decap_distance`, `must_lock`, `legality` — plus the four
 findings raised outside the rule loop: `intent_zone_outside_envelope`,
-`intent_zone_overlap`, `block_unresolved`. `{"decap_distanc": "warn"}` is a
+`intent_zone_overlap`, `block_unresolved`, `intent_zone_in_keepout`.
+`{"decap_distanc": "warn"}` is a
 demotion that never happens, so it is refused rather than accepted.
 
 ### `context` is the slot for everything that is not a claim

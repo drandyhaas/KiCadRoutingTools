@@ -99,15 +99,15 @@ def pose_ok(state, ref: str, x: float, y: float, rot: float,
     # leads pass through a keep-out even when its body sits on the far side,
     # so a courtyard-only seat would be accepted here and flagged there --
     # exit 4 on a board this function placed correctly.
-    if state.keepouts_for:
-        # Lazy, inside the guard, matching this file's idiom for `floorplan`
-        # (see `zone_gate` below) -- so a board declaring no keep-out pays
-        # nothing at all, not even a sys.modules lookup, on a predicate this
-        # hot.
-        from placement.floorplan import keepout_hit
-        for k in state.keepouts_for.get(ref, ()):
-            if keepout_hit(k, (r, tht)):
-                return False
+    # ABSOLUTE, via the state's shared loop. `edge_seat_ok` below had a second
+    # copy of this and #702 gave `candidate_valid` a third -- with a MONOTONE
+    # policy, which this predicate must not inherit: seeding from scratch has
+    # no incumbent worth improving on, and `test_701_keepout_predicate.py`
+    # seats a part whose current pose is fully inside a keep-out and asserts
+    # refusal, which "no worse than where you already are" would admit. One
+    # loop, two policies, both named.
+    if not state.keepout_clear(ref, (r, tht)):
+        return False
     return state.candidate_valid(ref, x, y, rot, exclude=exclude)
 
 
@@ -1082,13 +1082,11 @@ def edge_seat_ok(state, part, x: float, y: float, edge: str,
     amt = state.edge_gate.rect_outside_amount(r)
     if not ((lo - 0.02) <= amt <= (hi + 0.02)):
         return False
-    if state.keepouts_for:
-        from placement.floorplan import keepout_hit
-        for k in state.keepouts_for.get(part.ref, ()):
-            if keepout_hit(k, (r, tht)):
-                if reasons is not None:
-                    reasons.append(f"keep-out {k['name']!r}")
-                return False
+    _blockers = state.keepout_blockers(part.ref, (r, tht))
+    if _blockers:
+        if reasons is not None:
+            reasons.extend(f"keep-out {n!r}" for n in _blockers)
+        return False
     gate = state.edge_gate
     for px, py, _sz in part.pad_globals(x, y, part.rot):
         # A zero-size rect at the pad centre: "is this point on the board",
