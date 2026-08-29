@@ -329,8 +329,15 @@ def main():
         if '=' in tok:
             k, v = tok.split('=')
             moves0[k.strip()] = v.strip().upper()
-    river2 = [nm for nm in names
-              if ends[nm][0][1] > rows0[-1] + 0.8 and nm not in moves0]
+    # The split into a separate hand-written flow is audit item 1. The
+    # braid's lane morph does not inherently need a tooth inside the
+    # destination's y-span -- it maps ANY launch order onto ANY entry
+    # order -- so KICAD_NO_RIVER=1 routes these nets as ordinary
+    # corridor nets and measures whether the separate builder is
+    # earning its 87 lines.
+    river2 = [] if os.environ.get('KICAD_NO_RIVER') else [
+        nm for nm in names
+        if ends[nm][0][1] > rows0[-1] + 0.8 and nm not in moves0]
     if river2:
         names = [nm for nm in names if nm not in river2]
         print(f'south river ({len(river2)}): {river2}')

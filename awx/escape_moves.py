@@ -150,19 +150,23 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                 out.append(Move(net, 'via_in_pad', d, L, e, 1,
                                 [((px, py), e, L)], site=(px, py)))
 
-    # --- dogbone: 45 stub into a diagonal inter-ball cell, via, leave
-    for d in DIRS:
-        for (sx, sy) in DIAGS[d]:
-            site = (px + sx * hx, py + sy * hy)
-            if via_clear and not all(via_clear(site, lay) for lay in layers):
-                continue
-            if not clear((px, py), site, home):
-                continue
+    # --- dogbone: 45 stub into a diagonal inter-ball cell, via, leave.
+    # The SITE and the exit DIRECTION are independent: a via in the
+    # east diagonal can still be met by a run heading west, which is
+    # exactly what the old code's westward B approach did. Tying the
+    # site to the direction hid half the options.
+    for (sx, sy) in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
+        site = (px + sx * hx, py + sy * hy)
+        if via_clear and not all(via_clear(site, lay) for lay in layers):
+            continue
+        if not clear((px, py), site, home):
+            continue
+        for d in DIRS:
+            e = edge(d)
+            # the run leaves from the SITE, so its exit tracks the
+            # site's own row/column, not the pad's
+            e = (e[0], site[1]) if DIRS[d][0] else (site[0], e[1])
             for L in others:
-                e = edge(d)
-                # the run leaves from the SITE, so its exit tracks the
-                # site's own row/column, not the pad's
-                e = (e[0], site[1]) if DIRS[d][0] else (site[0], e[1])
                 if clear(site, e, L):
                     out.append(Move(net, 'dogbone', d, L, e, 1,
                                     [((px, py), site, home),

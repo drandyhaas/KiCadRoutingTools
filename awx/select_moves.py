@@ -27,12 +27,24 @@ from escape_moves import Move
 Pt = Tuple[float, float]
 
 
-def _lane_key(m: Move) -> Tuple:
-    """The shared resource this move consumes: a row gap (for a
-    left/right escape) or a column gap (up/down), on its own layer."""
+def _lane_span(m: Move) -> Tuple[Tuple, float, float]:
+    """The channel this move occupies and the interval it takes along
+    it: a row gap (left/right escape) or a column gap (up/down), on its
+    own layer, from where the escape enters the gap to where it leaves
+    the array."""
+    src = m.site if m.site is not None else m.legs[0][0]
     if m.direction in ('left', 'right'):
-        return ('row', round(m.exit_pt[1], 3), m.layer, m.direction)
-    return ('col', round(m.exit_pt[0], 3), m.layer, m.direction)
+        key = ('row', round(m.exit_pt[1], 3), m.layer)
+        a, b = src[0], m.exit_pt[0]
+    else:
+        key = ('col', round(m.exit_pt[0], 3), m.layer)
+        a, b = src[1], m.exit_pt[1]
+    return key, min(a, b), max(a, b)
+
+
+def _length(m: Move) -> float:
+    return sum(math.hypot(q[0] - p[0], q[1] - p[1])
+               for (p, q, _L) in m.legs)
 
 
 def _site_key(m: Move) -> Optional[Tuple]:
@@ -45,6 +57,7 @@ def select(menu: Dict[str, List[Move]],
            launch: Dict[str, Pt],
            only_dirs: Optional[Iterable[str]] = None,
            via_weight: float = 3.0,
+           channel_weight: float = 2.0,
            log=None) -> Tuple[Dict[str, Move], List[str]]:
     """Pick one move per net. `launch[n]` is where the net enters the
     corridor, used to price how far the corridor must carry it to reach
@@ -58,10 +71,19 @@ def select(menu: Dict[str, List[Move]],
     def cost(n: str, m: Move) -> float:
         lx, ly = launch[n]
         reach = math.hypot(m.exit_pt[0] - lx, m.exit_pt[1] - ly)
-        return via_weight * m.vias + reach
+        # the move's own run occupies a channel INSIDE the array, which
+        # is scarcer than corridor length -- weight it above `reach`
+        return via_weight * m.vias + channel_weight * _length(m) + reach
 
-    taken_lane = {}
+    taken_lane: Dict[Tuple, List[Tuple[float, float]]] = {}
     taken_site = set()
+
+    def lane_free(m: Move) -> bool:
+        key, a, b = _lane_span(m)
+        for (u, v) in taken_lane.get(key, ()):
+            if a < v and u < b:            # intervals overlap
+                return False
+        return True
     choice: Dict[str, Move] = {}
     unplaced: List[str] = []
     # most constrained first: a net with few options must choose before
@@ -70,9 +92,8 @@ def select(menu: Dict[str, List[Move]],
     for n in order:
         best = None
         for m in sorted(cand[n], key=lambda m: cost(n, m)):
-            lk = _lane_key(m)
             sk = _site_key(m)
-            if lk in taken_lane:
+            if not lane_free(m):
                 continue
             if sk is not None and sk in taken_site:
                 continue
@@ -82,7 +103,8 @@ def select(menu: Dict[str, List[Move]],
             unplaced.append(n)
             continue
         choice[n] = best
-        taken_lane[_lane_key(best)] = n
+        _k, _a, _b = _lane_span(best)
+        taken_lane.setdefault(_k, []).append((_a, _b))
         sk = _site_key(best)
         if sk is not None:
             taken_site.add(sk)
