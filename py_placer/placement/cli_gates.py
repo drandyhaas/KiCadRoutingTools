@@ -1,11 +1,92 @@
-"""Argparse flags shared by `place_optimize.py` and `place_route_loop.py` (#431).
+"""Argparse flags shared by the placement CLIs (#431, widened by #702).
 
-Defined once so the two CLIs cannot drift: a lock advisor that reports on one
+Defined once so the CLIs cannot drift: a lock advisor that reports on one
 tool but not the other, or an `--allow-unplaced` that spells itself differently,
 is exactly the kind of divergence CLAUDE.md's CLI/GUI section warns about --
 here between two CLIs rather than between a CLI and the GUI.
+
+`add_intent_arg` raises the stakes a level, which is why it lives here rather
+than four times over: since #702 the same resolved intent becomes the same hard
+gate inside the same engine for `place_optimize`, `place_route_loop`,
+`place_seed` and `place_portfolio`. Four spellings of that flag, or four
+descriptions of what it buys, is how one of them ends up gating on something
+the others do not -- and that divergence IS #702, which was `grep -ci intent`
+returning 36 on place_seed.py and 0 on the two CLIs that run the most quench
+iterations in a real chain.
 """
 from __future__ import annotations
+
+
+def add_intent_arg(parser, *, required: bool = False, extra: str = "") -> None:
+    """`--intent`: the floorplan intent, for every CLI that quenches (#702).
+
+    `required` because `place_seed` cannot run without one -- there the intent
+    is the INPUT the placement is derived from, not a constraint on a placement
+    that already exists. `extra` appends a per-tool clause, for a real
+    difference in what the flag buys rather than a wording preference: the
+    portfolio's intent is ALSO its hard rank gate and the source of its health
+    signals.
+    """
+    parser.add_argument(
+        "--intent", metavar="JSON", required=required, default=None,
+        help="Floorplan intent JSON (`check_floorplan.py --emit-intent` writes "
+             "a starter). Its declared zones, keep-outs and exclusive zones "
+             "become HARD per-move gates inside the quench, and its must_lock "
+             "globs and edge_connectors edge claims are locked, so a declared "
+             "constraint no longer decays under optimization (#702). "
+             "MONOTONE, not repairing: a part that arrives already violating "
+             "may improve or hold, never worsen -- this prevents a walk-out, "
+             "it does not undo one. WARNING: an intent that --emit-intent "
+             "wrote FROM the board you are repairing records that board's "
+             "damage as the requirement, and now STEERS the search toward it "
+             "rather than merely mis-grading it. Omitted (the default), the "
+             "run is bit-identical to one built before this flag existed"
+             + ((" " + extra) if extra else ""))
+
+
+def resolve_intent_gate_for_cli(intent, pcb_data, sources, path):
+    """(bundle, problems) plus the one report every quenching CLI must print.
+
+    Shared so the four CLIs cannot describe the same gate differently. Two
+    things it does that a hand-rolled copy at each site kept getting wrong:
+
+    * **Resolves at `sources or auto`.** `place_optimize` and
+      `place_route_loop` default `--group-by none`, while `place_seed`,
+      `place_portfolio` and `check_floorplan` default `auto`. Resolving at a
+      bare `()` makes every `group:`-shaped block resolve to NOTHING on exactly
+      the two tools that run the most quench iterations -- and silently, since
+      neither runs a grader. That is #702 one level down. Deriving groups is
+      read-only (`check_floorplan.py` says so in its own `--group-by` help), so
+      it is safe to derive here even when the caller asked not to MOVE blocks;
+      `sources` still governs the write side, which stays off.
+    * **Prints `resolve_blocks`' problems instead of dropping them.**
+      `block_unresolved` is ERROR severity by design, and the argument is
+      stronger for a gate than for a grade: a block that resolves to nothing
+      gates nobody, and looks identical to a gate that is working.
+    """
+    import sys
+    from placement.groups import parse_sources
+    from placement import floorplan
+    resolve_sources = tuple(sources) or parse_sources('auto')
+    bundle, problems = floorplan.resolve_intent_gate(
+        intent, pcb_data, resolve_sources)
+    for v in problems:
+        print(f"  INTENT ERROR [{v.rule}] {v.message}", file=sys.stderr)
+    zoned = [z for z in bundle['zones'] if z['refs']]
+    bound = len({r for z in zoned for r in z['refs']})
+    if not (zoned or bundle['keepouts'] or bundle['lock_refs']):
+        # place_portfolio's --corridor-weight warning, same shape: an
+        # intent-derived knob with nothing to bite on says so, rather than
+        # reading as enforcement that happened to find nothing wrong.
+        print(f"--intent {path} declares nothing this quench can gate on "
+              f"(no block with a resolved zone rect, no keep-out, no "
+              f"must_lock, no edge claim): the gate is inert", file=sys.stderr)
+    else:
+        print(f"intent: {len(zoned)} zoned block(s) over {bound} part(s), "
+              f"{len(bundle['keepouts'])} keep-out(s), "
+              f"{len(bundle['lock_refs'])} locked ref(s); blocks resolved from "
+              f"{','.join(resolve_sources) or 'refs only'}")
+    return bundle, problems
 
 
 def add_board_state_args(parser) -> None:

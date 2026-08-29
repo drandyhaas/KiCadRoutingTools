@@ -41,7 +41,7 @@ from kicad_parser import parse_kicad_pcb
 import routing_defaults as defaults
 from placement.portfolio import copy_siblings
 from placement.groups import GroupError, derive_groups, describe, parse_sources
-from placement.cli_gates import (add_board_state_args,
+from placement.cli_gates import (add_board_state_args, add_intent_arg,
                                  add_lock_advisor_args, add_tidiness_args)
 from placement.quench import quench
 from placement.writer import write_placed_output
@@ -471,6 +471,7 @@ def main():
                         help="frames per placement glide in --movie; 0 = no "
                              "glide, cut straight to the new placement")
     add_board_state_args(parser)
+    add_intent_arg(parser)
     add_lock_advisor_args(parser)
     add_tidiness_args(parser)
 
@@ -529,10 +530,37 @@ def main():
     # so refusing here saves minutes-to-hours of A* that would fail everything
     # and then quench a pile.
     from placement.placement_state import gate_or_exit
-    gate_or_exit(parse_kicad_pcb(args.input_file), args.input_file,
+    _pcb0 = parse_kicad_pcb(args.input_file)
+    gate_or_exit(_pcb0, args.input_file,
                  'place_route_loop.py',
                  allow_unplaced=args.allow_unplaced,
                  allow_routed=args.allow_routed)
+
+    # #702: resolved ONCE, here, and FROZEN for the whole run.
+    #
+    # Here, because a malformed intent has the same cost profile as the
+    # board-state gates just above -- round 0 routes the whole board, and
+    # refusing after that has already run wastes exactly what those gates
+    # exist to save.
+    #
+    # Frozen, because block membership is a function of refs, globs and
+    # derived groups, not of poses, so no round can legitimately change it --
+    # and re-deriving under the optimizer's own moves is precisely the
+    # non-stationarity that made `corridor_weight` NOT ADOPTED (quench.py:
+    # "the optimizer minimises against corridors frozen at construction while
+    # the grader re-derives them from the final poses"). A gate that re-elects
+    # its own identity mid-run is not monotone.
+    intent_gate = None
+    if args.intent:
+        from placement import floorplan
+        try:
+            _intent = floorplan.load_intent(args.intent)
+        except (OSError, ValueError) as exc:
+            print(f"cannot load intent {args.intent}: {exc}", file=sys.stderr)
+            return 2
+        from placement.cli_gates import resolve_intent_gate_for_cli
+        intent_gate, _ = resolve_intent_gate_for_cli(
+            _intent, _pcb0, group_sources, args.intent)
 
     work = args.work_dir or os.path.dirname(os.path.abspath(args.output_file))
     os.makedirs(work, exist_ok=True)
@@ -649,11 +677,20 @@ def main():
             metrics_out=ratsnest,
             groups=blocks,
             verbose=args.verbose,
+            intent_gate=intent_gate,
         )
 
         if not placements:
+            # #702: name the declared gate when it is what refused, or
+            # widening the radius reads as "try harder" while every
+            # extra pose it offers is one the gate also refuses.
+            _ref = (ratsnest.get("intent_gate") or {}).get("rejected", 0)
             print(f"  Quench found no improving moves - widening the nudge cap"
-                  f" (swap cap stays {swap_cap:.1f}mm).")
+                  f" (swap cap stays {swap_cap:.1f}mm)."
+                  + (f" NOTE: the declared-intent gate refused {_ref} pose(s)"
+                     f" this round; a wider radius offers more poses it also"
+                     f" refuses. Relax the zone tolerance or drop --intent if"
+                     f" the loop stalls here." if _ref else ""))
             max_disp *= 1.5
             continue
 

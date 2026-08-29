@@ -46,7 +46,8 @@ def _parse_strategies(text):
 
 def build_parser():
     import routing_defaults as defaults
-    from placement.cli_gates import add_board_state_args, add_tidiness_args
+    from placement.cli_gates import (add_board_state_args, add_intent_arg,
+                                     add_tidiness_args)
 
     p = argparse.ArgumentParser(
         description="Placement portfolio: K diverse candidates from one seed.",
@@ -112,9 +113,10 @@ Examples:
                         "tests/placement_ab_baseline.json. Read the cut as a "
                         "DIAGNOSTIC instead: 'check_floorplan --intent "
                         "--health' reports cut_mm and cover per corridor")
-    p.add_argument("--intent", default=None, metavar="JSON",
-                   help="Floorplan intent: hard gate (error-free grade "
-                        "required) plus the health signals in the rank key")
+    add_intent_arg(p, extra=(
+        "Here it is ALSO the post-hoc hard rank gate (a candidate is "
+        "ranked only if it grades error-free) and the source of the "
+        "health signals in the rank key."))
     p.add_argument("--group-by", default="auto",
                    help="Block sources for swap moves and intent grading "
                         "(comma list of kicad/sheet/netprefix/decap; 'auto' = "
@@ -203,7 +205,7 @@ Examples:
     return p
 
 
-def _quench_kw(args, intent=None):
+def _quench_kw(args, intent=None, intent_gate=None):
     corridor_specs = None
     if args.corridor_weight > 0.0 and intent is not None:
         # The SAME `health.bus_corridors` the grader reads, so the optimizer
@@ -226,7 +228,8 @@ def _quench_kw(args, intent=None):
         lock_refs=args.lock, align_weight=args.align_weight,
         align_radius=args.align_radius, align_span=args.align_span,
         orient_weight=args.orient_weight,
-        corridor_weight=args.corridor_weight, corridor_specs=corridor_specs)
+        corridor_weight=args.corridor_weight,
+        corridor_specs=corridor_specs, intent_gate=intent_gate)
 
 
 def _replay_argv(args, index):
@@ -385,11 +388,22 @@ def main():
             return 2
 
     # Swap blocks: the intent's declared blocks when given (zones are the
-    # designer's grouping), else the structural sources. Never handed to the
-    # quench itself -- candidate 0 must equal a default place_optimize run.
+    # designer's grouping), else the structural sources. Still never handed
+    # to the quench as `groups=` -- the rigid-body phase stays off, which is
+    # what keeps candidate 0 a DEFAULT place_optimize run.
+    #
+    # #702 changes what 'the same knobs' means, not that clause: the
+    # declared intent now also reaches the quench as `intent_gate`, so
+    # candidate 0 equals a place_optimize run with the same knobs INCLUDING
+    # --intent. With no --intent both sides pass None and the anchor is
+    # unchanged, which is what tests/test_portfolio.py asserts.
+    intent_gate = None
     if intent is not None:
+        from placement.cli_gates import resolve_intent_gate_for_cli
+        intent_gate, _problems = resolve_intent_gate_for_cli(
+            intent, pcb, sources, args.intent)
         from placement import floorplan
-        swap_blocks, _problems = floorplan.resolve_blocks(intent, pcb, sources)
+        swap_blocks, _ = floorplan.resolve_blocks(intent, pcb, sources)
     else:
         swap_blocks = derive_groups(pcb, sources) if sources else {}
 
@@ -398,7 +412,7 @@ def main():
         n_candidates=args.candidates, strategies=args.strategy,
         radius=args.radius, lock_globs=args.lock,
         ignore_nets=args.ignore_nets, swap_blocks=swap_blocks,
-        quench_kw=_quench_kw(args, intent), only=args.only)
+        quench_kw=_quench_kw(args, intent, intent_gate), only=args.only)
     baseline = result['baseline']
     cands = result['candidates']
     free = result['free']
