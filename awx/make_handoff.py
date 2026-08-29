@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""Render the HANDOFF: U1 tooth -> corridor -> berth escape -> ball, and
-mark where that handoff does not work.
+"""Render the whole plan: U1 escape -> corridor -> berth escape -> ball.
 
-The intent overlay shows the taut homotopy and the chosen escapes, but
-not the join between them -- which is where the plan currently fails.
-This draws the join and its failures:
+  Eco1  white   the CORRIDOR LEG the braid must draw, source exit to
+                berth exit, routed AROUND the destination array.
+  Eco2  yellow  the ESCAPES at both ends, plus a small box at each exit
+                point. A DIAMOND at the source end marks a tooth this
+                plan MOVED from where the fanout put it.
+  Cmts  orange  what the plan still has to pay for. A cross on every
+                net outside the crossing-free set -- those are the nets
+                that must dive and come back, 2 vias each, and they are
+                the whole via floor. A box where the corridor hands a
+                net over on the opposite layer from the one its berth
+                escape starts on.
 
-  Eco1  white   the CORRIDOR LEG the braid must draw: tooth to the
-                escape's exit point, routed around the destination
-                array (the corridor cannot cross it).
-  Eco2  yellow  the ESCAPE itself: exit point back to the ball, plus a
-                marker at the exit.
-  Cmts  orange  the FAILURES. A large cross at an exit the braid has no
-                mechanism to reach (any side but the corridor's), and a
-                small box at an exit where the corridor arrives on the
-                opposite layer from the one the escape starts on, which
-                costs a via nothing has counted.
+There is deliberately no "the corridor is on the left" here any more.
+That was a fact about one board, and it was still in this file marking
+every exit on the other three sides as a failure -- while the selector
+had long since been choosing all four.
 
 usage: make_handoff.py OUT.kicad_pcb [K]
 """
-import math
 import os
 import subprocess
 import sys
@@ -32,6 +32,7 @@ import topo_emit as te  # noqa: E402
 import escape_moves as em  # noqa: E402
 import select_moves as sm  # noqa: E402
 import detect_buses as db  # noqa: E402
+import plan_ends as pe  # noqa: E402
 
 out_path = sys.argv[1]
 K = sys.argv[2] if len(sys.argv) > 2 else '21'
@@ -54,38 +55,73 @@ def obs(nid, layer):
 
 
 LAYERS = ('F.Cu', 'B.Cu')
-menu, launch = {}, {}
+dmenu, launch, src_pad = {}, {}, {}
 for nm in names:
-    nid = byname[nm][0]
+    nid, net = byname[nm]
     fp = pcb.footprints[ends[nm][2]]
     bx, by = ends[nm][1]
     pad = min(fp.pads, key=lambda p: (p.global_x - bx) ** 2
               + (p.global_y - by) ** 2)
-    menu[nm] = em.enumerate_moves(
+    dmenu[nm] = em.enumerate_moves(
         pad, em.grid_of(fp), LAYERS,
         lambda p, q, L, _n=nid: obs(_n, L).seg_clear(p, q),
         lambda p, L, _n=nid: not (obs(_n, L).point_violation(
             p, pad=(te.VIA_SIZE - te.TRACK) / 2) or [0])[0])
     launch[nm] = ends[nm][0]
-grid0 = em.grid_of(pcb.footprints[ends[names[0]][2]])
+    others = [p for p in net.pads if p.component_ref != ends[nm][2]]
+    src_pad[nm] = others[0] if others else None
+
+dgrid = em.grid_of(pcb.footprints[ends[names[0]][2]])
+refs = {}
+for nm in names:
+    if src_pad[nm] is not None:
+        refs[src_pad[nm].component_ref] = refs.get(
+            src_pad[nm].component_ref, 0) + 1
+sref = max(refs, key=refs.get)
+sgrid = em.grid_of(pcb.footprints[sref])
+smenu = {}
+for nm in names:
+    p = src_pad[nm]
+    if p is None or p.component_ref != sref:
+        continue
+    nid = byname[nm][0]
+    smenu[nm] = em.enumerate_moves(
+        p, sgrid, LAYERS,
+        lambda a, b, L, _n=nid: obs(_n, L).seg_clear(a, b),
+        lambda a, L, _n=nid: not (obs(_n, L).point_violation(
+            a, pad=(te.VIA_SIZE - te.TRACK) / 2) or [0])[0])
+
 print('taut pre-routes...')
 paths = db.taut_paths(names, ends, lambda nm: obs(byname[nm][0], 'F.Cu'))
 buses = db.cluster(names, paths)
-tooth_layer = {}
+tooth0 = {}
 for nm in names:
     nid = byname[nm][0]
     tp = ends[nm][0]
-    tooth_layer[nm] = next(
+    tooth0[nm] = next(
         (s.layer for s in pcb.segments if s.net_id == nid
          and (abs(s.start_x - tp[0]) + abs(s.start_y - tp[1]) < 0.005
               or abs(s.end_x - tp[0]) + abs(s.end_y - tp[1]) < 0.005)),
         'F.Cu')
-geo = sm.Corridor(grid0.bbox, launch)
-choice, _un = sm.select(menu, launch, keep_out=grid0.bbox, buses=buses,
-                        tooth_layer=tooth_layer)
-# which nets the corridor would make divers, per bus
-delivered = sm.delivered_layers(choice, sm.corridors(choice), geo,
-                                tooth_layer)
+
+print('planning both ends...')
+schoice, choice, lp, report = pe.plan_ends(
+    smenu, dmenu, launch, sgrid.bbox, dgrid.bbox, buses=buses,
+    tooth_layer0=tooth0)
+for line in report:
+    print(line)
+geo = sm.Corridor(dgrid.bbox, lp)
+corr = sm.corridors(choice)
+tooth = dict(tooth0)
+for n, m in schoice.items():
+    tooth[n] = m.layer
+delivered = sm.delivered_layers(choice, corr, geo, tooth)
+# the crossing-free set over the WHOLE plan, not the union of the
+# per-corridor ones. Taking the union ignores every crossing between
+# corridors, so it marks fewer nets than must actually dive and the
+# picture disagrees with the floor the plan reports (30 drawn against
+# 48 planned at K51).
+kept = set(geo.keep(list(choice), choice))
 
 lines = []
 
@@ -108,22 +144,34 @@ def box(c, r, layer):
         gr(a, b, layer)
 
 
-CORRIDOR_SIDE = 'left'
-n_place = n_layer = 0
+def diamond(c, r, layer):
+    p = [(c[0] - r, c[1]), (c[0], c[1] - r),
+         (c[0] + r, c[1]), (c[0], c[1] + r)]
+    for a, b in zip(p, p[1:] + p[:1]):
+        gr(a, b, layer)
+
+
+n_dive = n_layer = n_moved = 0
 for nm in names:
     m = choice.get(nm)
     if m is None:
         continue
-    leg = sm.around_box_path(launch[nm], m.exit_pt, grid0.bbox)
-    for a, b in zip(leg, leg[1:]):
+    for a, b in zip(geo.leg(nm, m), geo.leg(nm, m)[1:]):
         gr(a, b, 'Eco1.User')
     for (a, b, _L) in m.legs:
         gr(a, b, 'Eco2.User')
     box(m.exit_pt, 0.16, 'Eco2.User')
-    if m.direction != CORRIDOR_SIDE:
+    sm_ = schoice.get(nm)
+    if sm_ is not None:
+        for (a, b, _L) in sm_.legs:
+            gr(a, b, 'Eco2.User')
+        if lp.get(nm) != launch.get(nm):
+            diamond(sm_.exit_pt, 0.22, 'Eco2.User')
+            n_moved += 1
+    if nm not in kept:
         cross(m.exit_pt, 0.42, 'Cmts.User')
-        n_place += 1
-    elif delivered.get(nm) and delivered[nm] != m.layer:
+        n_dive += 1
+    if delivered.get(nm) and delivered[nm] != m.layer:
         box(m.exit_pt, 0.30, 'Cmts.User')
         n_layer += 1
 
@@ -135,5 +183,6 @@ if os.path.exists(pro):
     import shutil
     shutil.copy(pro, os.path.splitext(out_path)[0] + '.kicad_pro')
 print(f'wrote {out_path}: {len(lines)} lines; '
-      f'{n_place} exits the corridor cannot reach (orange X), '
-      f'{n_layer} layer mismatches (orange box)')
+      f'floor {2 * n_dive} ({n_dive} nets must dive, orange X), '
+      f'{n_layer} layer mismatches (orange box), '
+      f'{n_moved} teeth moved (yellow diamond)')
