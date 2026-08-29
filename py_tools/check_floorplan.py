@@ -79,6 +79,23 @@ def build_parser():
                         'the proximity rule, which is the detection working. '
                         'Default off to preserve the observation-only round '
                         'trip')
+    p.add_argument('--declare-decaps', action='store_true',
+                   help='with --emit-intent: ALSO derive decaps.'
+                        'max_distance_mm from the board\'s own measured '
+                        'tethers (#704), so rule_decap_distance can fire on '
+                        'an auto intent at all. The limit is ceil(max) over '
+                        'placement.groups.decap_tethers, so it grades CLEAN '
+                        'by construction, and it is WITHHELD into '
+                        'context.budget_withheld when the number would be '
+                        'dishonest: no tethers, fewer than 3, or more than '
+                        'a quarter of the rail-sharing caps already beyond '
+                        'the search radius. SEPARATE from --declare-classes '
+                        'on purpose -- this key is not a part CLASS, and '
+                        'declaring it CHANGES PLACEMENT: place_seed reads it '
+                        'and moves every 2-pin C* out of zone packing into '
+                        'its per-supply-pin stage (ulx3s: 70 caps, of which '
+                        '53 are graded). The tether census is written to '
+                        'context.decap_census either way')
     p.add_argument('--json', metavar='PATH',
                    help='write the full findings (every measurement) as JSON')
     p.add_argument('--group-by', default='auto', metavar='SOURCES',
@@ -143,7 +160,8 @@ def main(argv=None):
     if args.emit_intent:
         try:
             doc = emit_intent(pcb, args.board, group_sources=sources or (),
-                              declare_classes=args.declare_classes)
+                              declare_classes=args.declare_classes,
+                              derive_decaps=args.declare_decaps)
         except UntrustworthyOutline as exc:
             print(f"ERROR: {args.board}: {exc}", file=sys.stderr)
             return UNPLACED_EXIT
@@ -158,6 +176,26 @@ def main(argv=None):
                   f"{len(doc['must_lock'])} locked part(s)")
             print(f"  envelope {doc['envelope']['rect']} -- read from the "
                   f"board. The outline is not editable by this toolchain")
+            # #704: the decap number and what it COSTS, next to each other.
+            cen = (doc.get('context') or {}).get('decap_census') or {}
+            lim = (doc.get('decaps') or {}).get('max_distance_mm')
+            held = ((doc.get('context') or {}).get('budget_withheld')
+                    or {}).get('decaps.max_distance_mm')
+            if lim is not None:
+                print(f"  decaps: max_distance_mm {lim} from "
+                      f"{cen.get('tethers')} tether(s) -- NOTE: place_seed "
+                      f"READS this key and will seat {cen.get('seeder_scope')}"
+                      f" cap(s) per supply pin instead of zone-packing them, "
+                      f"{cen.get('seeder_scope_ungraded')} of which this rule "
+                      f"never grades")
+            elif held:
+                print(f"  decaps: max_distance_mm WITHHELD -- {held}")
+            if cen.get('beyond_radius'):
+                print(f"  decap census: {cen['beyond_radius']} rail-sharing "
+                      f"cap(s) lie beyond the {cen['search_radius_mm']}mm "
+                      f"search radius (worst {cen['worst_beyond_mm']}mm) and "
+                      f"are invisible to the rule -- see "
+                      f"context.decap_census")
         return 0
 
     try:
