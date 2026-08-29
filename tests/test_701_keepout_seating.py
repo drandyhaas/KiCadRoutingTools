@@ -43,6 +43,12 @@ passed = failed = 0
 
 
 def check(name, ok, detail=""):
+    """Prints `detail` on OK and FAIL alike, as test_630_seeder_eviction does.
+
+    Which means every `detail` here must read as a MEASUREMENT, not as a
+    failure explanation: a detail phrased "the repair never fired" next to an
+    `OK` is a log that actively misleads its reader.
+    """
     global passed, failed
     passed += bool(ok)
     failed += not ok
@@ -302,7 +308,7 @@ def arm_stranded_and_its_control(wd):
     check("C: and the stdout NOTE names it too -- the JSON verdict and the "
           "prose come from one function, so they cannot drift",
           bool(named),
-          named[0].strip() if named else "no line names U1 and 'hot'")
+          named[0].strip() if named else "lines naming U1+hot: 0")
 
     # ---- the control: the same impossible-looking zone, no keep-out ------
     r2, s2, out2 = run(wd, one_part_board,
@@ -315,6 +321,43 @@ def arm_stranded_and_its_control(wd):
         ov = overlap(out2, 'U1', KO)
         check("C-control: and it sits in the rect", ov > 0.0,
               f"overlap {ov}mm2")
+
+
+def arm_jointly_blocked(wd):
+    """Two keep-outs that OVERLAP over the part's feasible region each free
+    NOTHING when lifted alone, so the per-keep-out census reports `{}` and --
+    before this arm existed -- the verdict fell back to
+    `no_movable_neighbour`, whose prose blames the outline, the zone or the
+    part's own size. That is exactly the misleading answer the whole
+    disclosure exists to replace, reappearing in the two-keep-out case.
+
+    The fixture is a nested enclosure + boss, which is what a real mechanical
+    intent looks like: a board-wide envelope plus a local obstruction."""
+    ko = [{"name": "enclosure", "rect": list(WHOLE_BOARD), "sides": ["F"]},
+          {"name": "boss", "rect": [5.0, 2.0, 15.0, 10.0], "sides": ["F"]}]
+    tight = (7.5, 3.5, 12.5, 8.5)
+    r, s, out = run(wd, one_part_board,
+                    wide_zone_intent(keepouts=ko, zone=tight), tag='J')
+    check("J: U1 is unseated", s and s.get('unseated_refs') == ['U1'],
+          f"unseated_refs={s and s.get('unseated_refs')}")
+    if not s:
+        return
+    v = (s.get('no_pose_verdict') or {}).get('U1')
+    check("J: the verdict is still keepout_blocks when NO SINGLE keep-out "
+          "frees a pose", v == 'keepout_blocks', f"verdict={v!r}")
+    cen = (s.get('no_pose_census') or {}).get('U1') or {}
+    check("J: keepouts_freeing is empty -- that is the whole point, and it "
+          "is why a per-keep-out sweep alone is not enough",
+          cen.get('keepouts_freeing') == {},
+          f"keepouts_freeing={cen.get('keepouts_freeing')!r}")
+    check("J: and keepouts_joint is the count that carries the verdict",
+          (cen.get('keepouts_joint') or 0) > 0,
+          f"keepouts_joint={cen.get('keepouts_joint')!r}")
+    named = [ln for ln in r.stdout.splitlines()
+             if 'U1' in ln and 'JOINTLY' in ln]
+    check("J: the NOTE says JOINTLY rather than naming one keep-out falsely",
+          bool(named),
+          named[0].strip() if named else "lines saying JOINTLY: 0")
 
 
 # --------------------------------------------------------------------------
@@ -463,14 +506,19 @@ def arm_edge_connector(wd):
           "turns red", ov1 == 0.0,
           f"overlap {ov1}mm2, pose {poses(out1)['J1']}")
     check("G: and the grade agrees", not graded_keepout_errors(out1, it(True)))
-    # The band was given up, which is the honest outcome -- but it must be
-    # DISCLOSED, and disclosed with the keep-out's name. A silent fallback to
-    # the ordinary stages is how a connector quietly stops reaching its edge.
-    named = [ln for ln in r1.stdout.splitlines()
-             if 'J1' in ln and 'shell' in ln]
-    check("G: the refusal is disclosed and NAMES the keep-out, not the "
-          "outline", bool(named),
-          named[0].strip() if named else "no line names both J1 and 'shell'")
+    # ... AND it keeps its declared edge. Stage 1 originally tried a single
+    # along-edge position, so the keep-out sent J1 to the ordinary stages,
+    # which parked it at (11.22, 6.589) -- the board INTERIOR on a board whose
+    # south edge is y=14 -- trading a `keepout` grade error for an
+    # `edge_connector` one while 26 clear south-edge seats existed. The slide
+    # is what makes this assertion pass, and it is the assertion that fails if
+    # the slide is removed.
+    gy = poses(out1)['J1'][1]
+    check("G: and J1 KEEPS its declared south edge rather than being parked "
+          "inland", gy > size[1] - 3.0,
+          f"y={gy} on a {size[1]}mm-tall board (south edge y={size[1]})")
+    check("G: the run has no grade error at all", r1.returncode == 0,
+          f"rc={r1.returncode}")
 
 
 # --------------------------------------------------------------------------
@@ -535,10 +583,11 @@ def arm_polish_repair(wd):
     injected = 'polish walked' in r.stdout
     check("H-a: the injected polish really did break the board, so this arm "
           "is not vacuous", injected,
-          "the repair never fired -- the injection did not take effect")
+          f"repair line present: {injected}")
     if injected:
         check("H-a: the repair names `keepout` as what it repaired",
-              'keepout' in r.stdout, "repair line does not mention keepout")
+              'keepout' in r.stdout,
+              f"names keepout: {'keepout' in r.stdout}")
         ov = overlap(out_a, 'U1', KO)
         check("H-a: and U1 is back out of the keep-out on the WRITTEN board",
               ov == 0.0, f"overlap {ov}mm2, pose {poses(out_a)['U1']}")
@@ -570,7 +619,7 @@ def arm_polish_repair(wd):
     fired = 'polish walked' in rc_.stdout
     check("H-c: the repair fires for a part with NO declared zone -- a "
           "keep-out violation does not imply a zone", fired,
-          "the repair skipped it; the zone-less branch is inert")
+          f"repair line present: {fired}")
     if fired:
         ovc = overlap(out_c, 'U1', KO)
         check("H-c: and U1 is out of the keep-out on the WRITTEN board",
@@ -593,6 +642,7 @@ def main():
     with tempfile.TemporaryDirectory() as wd:
         for fn in (arm_displaced_and_its_control,
                    arm_stranded_and_its_control,
+                   arm_jointly_blocked,
                    arm_allow_owner_exemption,
                    arm_through_hole_from_the_other_side,
                    arm_edge_connector,

@@ -218,12 +218,16 @@ in the JSON_SUMMARY and as a NOTE:
 
 `no_pose_census[ref]` carries the counts those verdicts came from — `boxed`,
 `movable`, `censused`, `frozen`, `truncated`, `baseline`, `pairs_total`,
-`pairs_censused`, `pairs_truncated`, `best_pair`, `keepouts_freeing` — so a
-capped sweep can never
+`pairs_censused`, `pairs_truncated`, `best_pair`, `keepouts_freeing`,
+`keepouts_joint` — so a capped sweep can never
 read as a complete one. `keepouts_freeing` is `{keep-out name: poses freed by
 lifting it}`, filled only for a part with no pose at all and only over the
 keep-outs that bind it; it is the count `keepout_blocks` is derived from, so
 the verdict cannot drift from a differently-computed claim.
+`keepouts_joint` is the poses freed by lifting **every** bound keep-out at
+once, and it exists because two that overlap over the part's feasible region
+each free *nothing alone* — so `keepouts_freeing` is `{}` and, without this,
+the verdict would fall back to `no_movable_neighbour` and blame the outline.
 `movable` and `censused` are deliberately separate:
 the first is how many neighbours *could* have been censused, the second how
 many were, and quoting the first as the second is the inversion the whole

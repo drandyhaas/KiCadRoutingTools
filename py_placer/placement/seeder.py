@@ -533,6 +533,10 @@ def _empty_census() -> Dict:
     return {'boxed': 0, 'movable': 0, 'censused': 0, 'frozen': {},
             'truncated': 0, 'baseline': 0, 'pairs_total': 0,
             'pairs_censused': 0, 'pairs_truncated': 0, 'best_pair': None,
+            # #701: poses freed by lifting EVERY bound keep-out at once, for
+            # a part no single one explains. 0 means the keep-outs are not
+            # jointly what refuses it.
+            'keepouts_joint': 0,
             # #701: {keep-out name: poses freed by lifting it}. Present and
             # empty on every part, per this function's whole rationale --
             # a consumer must never need a defaulting `.get` to tell "no
@@ -542,7 +546,7 @@ def _empty_census() -> Dict:
 
 def _verdict_for(cands: Sequence[str], census: Dict) -> str:
     """The verdict for a part still unseated after the census."""
-    if census.get('keepouts_freeing'):
+    if census.get('keepouts_freeing') or census.get('keepouts_joint'):
         # #701, and FIRST: a declared keep-out that frees poses when lifted
         # is the answer, whatever the neighbours look like. It outranks
         # `no_movable_neighbour`, whose prose would actively mislead here,
@@ -585,12 +589,23 @@ def _no_pose_note(ref: str, verdict: str, census: Dict,
         tail += ("; also in the way, and not this rung's to move: "
                  + ', '.join(f"{r} ({why})" for r, why in sorted(frozen.items())))
     if verdict == 'keepout_blocks':
-        who = ', '.join(f"{n!r} (frees {c})" for n, c
-                        in sorted((census.get('keepouts_freeing') or {}).items()))
-        return (f"{ref}: no legal pose, and the DECLARED KEEP-OUT(S) {who} "
-                f"are what refuse it -- not a neighbour, and not this rung's "
-                f"to lift. Move the keep-out, or add {ref} to its `allow` "
-                f"list if it is the part that owns it")
+        freeing = census.get('keepouts_freeing') or {}
+        if freeing:
+            who = ', '.join(f"{n!r} (frees {c})"
+                            for n, c in sorted(freeing.items()))
+            what = (f"the DECLARED KEEP-OUT(S) {who} are what refuse it -- "
+                    f"not a neighbour")
+        else:
+            # The JOINT case: no single keep-out frees a pose, all of them
+            # together do. Naming one here would be false of every individual
+            # one, which is why the sentence does not.
+            what = (f"the declared keep-outs are JOINTLY what refuse it -- "
+                    f"no single one frees a pose, lifting all of them frees "
+                    f"{census.get('keepouts_joint', 0)}, and no neighbour is "
+                    f"involved")
+        return (f"{ref}: no legal pose, and {what}, and not this rung's to "
+                f"lift. Move a keep-out, or add {ref} to an `allow` list if "
+                f"it is the part that owns one")
     if verdict == 'no_movable_neighbour':
         return (f"{ref}: no legal pose, and NOTHING seated is near enough to "
                 f"be in the way -- the outline, the zone or its own size "
@@ -1381,6 +1396,31 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                              f"edge, so stage 1 leaves it to the later stages")
                 continue
             frac = min(f_hi, max(f_lo, frac))
+            # #701: SLIDE along the edge when a declared keep-out refuses the
+            # even-distribution position, using the same ladder `_seat_edge`
+            # already uses. Without it, one keep-out over the middle of an
+            # edge sent the connector to the ordinary stages, which park it in
+            # the board INTERIOR -- measured: J1 written at (11.22, 6.589) on
+            # a board whose south edge is y=14, trading a `keepout` grade
+            # error for an `edge_connector` one, while 26 clear south-edge
+            # seats existed. The ladder is skipped entirely when nothing is
+            # declared, so a board with no keep-out is unchanged.
+            _slide = ((0.0,) if not state.keepouts_for.get(ref) else
+                      (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
+                       0.2, -0.2, 0.3, -0.3, 0.4, -0.4))
+            _base_frac = frac
+            _why: List[str] = []
+            for _df in _slide:
+                frac = min(f_hi, max(f_lo, _base_frac + _df))
+                _x, _y = _edge_pose(part, bounds, edge, frac, overhang)
+                _x, _y, _conv = _edge_correct(state, ref, edge, _x, _y,
+                                              overhang)
+                _why = []
+                if _conv and edge_seat_ok(state, part, _x, _y, edge, lo,
+                                          float(hi) if hi is not None
+                                          else max(2.0 * overhang, lo + 1.0),
+                                          reasons=_why):
+                    break
             x, y = _edge_pose(part, bounds, edge, frac, overhang)
             x, y, converged = _edge_correct(state, ref, edge, x, y, overhang)
             if not converged:
@@ -1764,13 +1804,30 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # none pays nothing and each extra census is already capped by
             # CENSUS_CAP.
             keepouts_freeing: Dict[str, int] = {}
+            keepouts_joint = 0
             if not baseline:
-                for _k in state.keepouts_for.get(ref, ()):
+                _bound = state.keepouts_for.get(ref, ())
+                for _k in _bound:
                     _n = count_legal_poses(state, ref, tx, ty, base_excl,
                                            without_keepouts=(_k['name'],),
                                            **zkw)
                     if _n > baseline:
                         keepouts_freeing[_k['name']] = _n
+                # JOINTLY blocked: two keep-outs that overlap over the part's
+                # feasible region each free nothing ALONE, so the per-keep-out
+                # sweep above reports {} and the verdict would fall back to
+                # `no_movable_neighbour` -- whose prose ("nothing seated is
+                # near enough to be in the way -- the outline, the zone or its
+                # own size refuses it") is exactly the misleading answer this
+                # whole disclosure exists to replace. Measured on a nested
+                # enclosure+boss pair. One extra census, only for a part no
+                # single lift explained, mirroring the blocker side's own
+                # single-then-pair escalation.
+                if not keepouts_freeing and len(_bound) > 1:
+                    keepouts_joint = count_legal_poses(
+                        state, ref, tx, ty, base_excl,
+                        without_keepouts=tuple(k['name'] for k in _bound),
+                        **zkw)
             cinfo: Dict = {}
             cands = _evict_candidates(state, ref, tx, ty, placed, immovable,
                                       constraint=constraint, tol=tol,
@@ -1788,7 +1845,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                            'frozen': cinfo.get('frozen') or {},
                            'truncated': cinfo.get('truncated', 0),
                            'baseline': baseline,
-                           'keepouts_freeing': keepouts_freeing})
+                           'keepouts_freeing': keepouts_freeing,
+                           'keepouts_joint': keepouts_joint})
             no_pose_census[ref] = census
             useful = sorted((n, b) for b, n in freed.items() if n > baseline)
             if not evict_depth:

@@ -441,21 +441,34 @@ def test_the_grader_builds_a_state_that_carries_no_keepouts():
 # 5. the vocabulary is documented -- a static change detector
 # --------------------------------------------------------------------------
 
-def test_every_no_pose_verdict_has_a_README_row():
-    """The README table is the only place a reader learns this vocabulary,
-    and nothing guarded it before. A verdict shipped without its row is a
-    string consumers switch on and humans cannot look up."""
-    readme = io.open(os.path.join(REPO, 'py_placer', 'placement', 'README.md'),
-                     encoding='utf-8').read()
-    missing = [v for v in seeder.NO_POSE_VERDICTS
-               if f"`{v}`" not in readme]
-    assert not missing, f"verdict(s) with no README row: {missing}"
-    # And the census keys, for the same reason.
+#: Every reader-facing table of the verdict vocabulary. BOTH of them: the
+#: skill's table was written independently and had fallen a verdict behind
+#: while the README was current, because only the README was guarded.
+_VERDICT_DOCS = (
+    os.path.join(REPO, 'py_placer', 'placement', 'README.md'),
+    os.path.join(REPO, '.claude', 'skills', 'plan-pcb-placement', 'SKILL.md'),
+)
+
+
+def test_every_no_pose_verdict_has_a_row_in_EVERY_table():
+    """These tables are the only place a reader learns this vocabulary. A
+    verdict shipped without its row is a string consumers switch on and
+    humans cannot look up."""
+    for doc in _VERDICT_DOCS:
+        rel = os.path.relpath(doc, REPO).replace('\\', '/')
+        assert os.path.exists(doc), rel
+        text = io.open(doc, encoding='utf-8').read()
+        missing = [v for v in seeder.NO_POSE_VERDICTS if f"`{v}`" not in text]
+        assert not missing, f"{rel}: verdict(s) with no row: {missing}"
+    # The census keys, for the same reason -- README only, since the skill
+    # table documents verdicts rather than the census.
     keys = sorted(seeder._empty_census())
+    readme = io.open(_VERDICT_DOCS[0], encoding='utf-8').read()
     missing_k = [k for k in keys if f"`{k}`" not in readme]
     assert not missing_k, f"census key(s) with no README mention: {missing_k}"
-    print(f"  PASS: {len(seeder.NO_POSE_VERDICTS)} verdict(s) and "
-          f"{len(keys)} census key(s) all documented")
+    print(f"  PASS: {len(seeder.NO_POSE_VERDICTS)} verdict(s) documented in "
+          f"{len(_VERDICT_DOCS)} table(s); {len(keys)} census key(s) in the "
+          f"README")
 
 
 # --------------------------------------------------------------------------
@@ -479,33 +492,61 @@ def test_every_seat_predicate_caller_outside_the_seeder_attaches_keepouts():
     function to build its state with `keepouts=`."""
     offenders = []
     checked = []
-    for root, _dirs, files in os.walk(os.path.join(REPO, 'py_placer')):
-        for fn in files:
-            if not fn.endswith('.py'):
-                continue
-            path = os.path.join(root, fn)
-            if os.path.basename(path) == 'seeder.py':
-                continue          # the definitions live here
-            tree = ast.parse(io.open(path, encoding='utf-8').read())
-            for node in ast.walk(tree):
-                if not isinstance(node, (ast.FunctionDef,
-                                         ast.AsyncFunctionDef)):
+    #: EVERY python tree that could import the seeder, not just py_placer.
+    #: A module under py_tools/ that builds its own state and calls
+    #: `seeder._try_place` enforces nothing, and a scan rooted at py_placer
+    #: cannot see it.
+    roots = [os.path.join(REPO, d) for d in
+             ('py_placer', 'py_router', 'py_tools')]
+    for root0 in roots:
+        for root, _dirs, files in os.walk(root0):
+            for fn in files:
+                if not fn.endswith('.py'):
                     continue
-                body = ast.dump(node)
-                if not any(f"attr='{f}'" in body or f"id='{f}'" in body
-                           for f in _SEAT_FUNCS):
-                    continue
-                rel = os.path.relpath(path, REPO).replace('\\', '/')
-                checked.append(f"{rel}:{node.lineno} {node.name}")
-                if "keepouts" not in body:
-                    offenders.append(f"{rel}:{node.lineno} {node.name}")
+                path = os.path.join(root, fn)
+                if os.path.basename(path) == 'seeder.py':
+                    continue      # the definitions live here
+                tree = ast.parse(io.open(path, encoding='utf-8').read())
+                for node in ast.walk(tree):
+                    if not isinstance(node, (ast.FunctionDef,
+                                             ast.AsyncFunctionDef)):
+                        continue
+                    if not any(f"attr='{f}'" in ast.dump(node)
+                               or f"id='{f}'" in ast.dump(node)
+                               for f in _SEAT_FUNCS):
+                        continue
+                    rel = os.path.relpath(path, REPO).replace('\\', '/')
+                    checked.append(f"{rel}:{node.lineno} {node.name}")
+                    # The VALUE, not the spelling. `keepouts=None` contains
+                    # the string "keepouts" and satisfies a substring check
+                    # while disabling enforcement completely -- measured, a
+                    # four-character edit that survived both batteries. A
+                    # keyword whose value is a literal None/()/[] is the same
+                    # defect written three ways.
+                    ok = False
+                    for call in ast.walk(node):
+                        if not isinstance(call, ast.Call):
+                            continue
+                        for kw in call.keywords:
+                            if kw.arg != 'keepouts':
+                                continue
+                            v = kw.value
+                            if isinstance(v, ast.Constant) and v.value is None:
+                                continue
+                            if isinstance(v, (ast.Tuple, ast.List)) \
+                                    and not v.elts:
+                                continue
+                            ok = True
+                    if not ok:
+                        offenders.append(f"{rel}:{node.lineno} {node.name}")
     assert checked, ("the scan found NO seat-predicate caller outside "
                      "seeder.py -- the gate is vacuous, fix the scan")
     assert not offenders, (
-        "seat-predicate caller(s) whose state carries no keep-outs, so the "
-        f"rule is unenforced there: {offenders}")
+        "seat-predicate caller(s) whose state carries no keep-outs (absent, "
+        f"or a literal None/empty), so the rule is unenforced there: "
+        f"{offenders}")
     print(f"  PASS: {len(checked)} external seat-predicate caller(s), all "
-          f"attaching keep-outs -- {', '.join(checked)}")
+          f"attaching a NON-EMPTY keepouts value -- {', '.join(checked)}")
 
 
 TESTS = [
@@ -517,7 +558,7 @@ TESTS = [
     test_the_resolver_boundaries,
     test_the_seat_predicate_sees_the_through_hole_rect_not_just_the_body,
     test_the_grader_builds_a_state_that_carries_no_keepouts,
-    test_every_no_pose_verdict_has_a_README_row,
+    test_every_no_pose_verdict_has_a_row_in_EVERY_table,
     test_every_seat_predicate_caller_outside_the_seeder_attaches_keepouts,
 ]
 
