@@ -1747,11 +1747,34 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     def _exempt_ok(gx, gy):
         return bounds is None or (bounds[0] <= gx <= bounds[2] and bounds[1] <= gy <= bounds[3])
     allow_radius = 10
+    # The exemption block is a rectangle and `bounds` is a rectangle, so CLIP the
+    # ranges once per terminal instead of testing every cell. Same cells in the
+    # same order -- the predicate was a pure bounds test, so intersecting the
+    # ranges admits exactly the set it admitted -- but it removes one Python call
+    # per cell. Measured on rp2350: 510,339,830 _exempt_ok calls, 48.6 s, against
+    # 723 s for the whole route; the 21x21 block per terminal is what makes it
+    # the largest per-cell cost left after the underpad work (#786).
     for gx, gy, _ in sources_grid + targets_grid:
-        for dx in range(-allow_radius, allow_radius + 1):
-            for dy in range(-allow_radius, allow_radius + 1):
-                if _exempt_ok(gx + dx, gy + dy):
-                    obstacles.add_allowed_cell(gx + dx, gy + dy)
+        if bounds is None:
+            lo_x, hi_x = gx - allow_radius, gx + allow_radius
+            lo_y, hi_y = gy - allow_radius, gy + allow_radius
+        else:
+            lo_x = gx - allow_radius
+            if lo_x < bounds[0]:
+                lo_x = bounds[0]
+            hi_x = gx + allow_radius
+            if hi_x > bounds[2]:
+                hi_x = bounds[2]
+            lo_y = gy - allow_radius
+            if lo_y < bounds[1]:
+                lo_y = bounds[1]
+            hi_y = gy + allow_radius
+            if hi_y > bounds[3]:
+                hi_y = bounds[3]
+        add_allowed = obstacles.add_allowed_cell
+        for ax in range(lo_x, hi_x + 1):
+            for ay in range(lo_y, hi_y + 1):
+                add_allowed(ax, ay)
 
     # Mark exact source/target cells so routing can start/end there even if blocked by
     # adjacent track expansion (but NOT blocked by BGA zones - use allowed_cells for that)

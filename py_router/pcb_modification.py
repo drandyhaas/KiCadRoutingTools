@@ -1846,7 +1846,8 @@ def _via_support_layers(v, segs, pads, zones, copper_layers):
     return sup & span
 
 
-def trim_net_stub_debris(pcb_data: PCBData, net_id: int, result, config):
+def trim_net_stub_debris(pcb_data: PCBData, net_id: int, result, config,
+                         swap_vias=None, vias_only=False):
     """In-loop stub-debris trim: the moment a net's route COMMITS, prune
     the branches of its own pre-existing stub tree the route left unused
     -- and any via those branches leave DANGLING (same-net copper on <=1
@@ -1873,6 +1874,41 @@ def trim_net_stub_debris(pcb_data: PCBData, net_id: int, result, config):
     whose reference snapshot freezes later (at cleanup); in
     --keep-input-copper runs (config._keep_input_copper) input copper is
     read-only. Returns (segments_removed, vias_removed).
+
+    `vias_only` runs the DANGLING-VIA pass WITHOUT the stub prune. It is NOT
+    USED, and the reason is worth keeping: it was written to let MULTIPOINT nets
+    trim their dangling vias, on the argument that the exemption protects stubs
+    (Phase-3 landing sites) and a via is not one. THAT ARGUMENT IS WRONG and the
+    corpus said so -- on glasgow_revC, one pass from an identical input went from
+    2 open nets to 5, and the log shows one net losing 8 vias at once. On a
+    multipoint net the via IS where a later Phase-3 tap lands, and
+    `_via_support_layers(...) <= 1` measures support BEFORE those taps arrive --
+    so a via that is legitimately half-connected at trim time reads as dangling.
+    The exemption is load-bearing exactly as the original author wrote it.
+
+    The DRC symptom that motivated this is real and still open (see below); it
+    needs a remedy that runs AFTER Phase 3, not an in-loop trim.
+
+    Measured on glasgow_revC: a multipoint net kept a via carrying copper on
+    B.Cu only, 50 um from its own functional via, against a 250 um hole-to-hole
+    rule -- a real DRC violation. The board-wide sweep does not catch it either:
+    sweep_dead_ends never calls _via_support_layers and never removes input
+    vias, which is the whole reason this in-loop pass exists.
+
+    `swap_vias` is the run's stub-layer-swap via list (`state.all_swap_vias`),
+    and it MUST be passed or this pass ships DRC violations. The output writer
+    emits vias from TWO sources -- each result's `new_vias`, and that list --
+    and a swap via also lives in `pcb_data.vias`. Dropping it from `pcb_data`
+    alone frees its cells in the obstacle map while the writer still emits it
+    from `all_swap_vias`: a later net routes through the vacated space and the
+    via reappears beside the new track. Measured on tinytapeout_qfn: 10 of 34
+    swap vias were freed here and every one was still written (a "ghost" -- in
+    the file, absent from the board model), producing 12 Via<->Seg clearance
+    violations on a board that graded clean before this pass existed. The
+    `vias_to_remove` writer channel cannot help: it strips vias from the
+    verbatim copy of the INPUT file, so it never reaches copper this run
+    appended. The list is filtered IN PLACE because the writer holds the same
+    list object.
     """
     pads = pcb_data.pads_by_net.get(net_id, [])
     if not pads:
@@ -1901,16 +1937,20 @@ def trim_net_stub_debris(pcb_data: PCBData, net_id: int, result, config):
               if getattr(s, 'graphic', False) or getattr(s, 'locked', False)
               or (_keep_input and id(s) not in _new_seg_ids)]
     prunable = [s for s in net_segs if id(s) not in {id(a) for a in anchor}]
-    kept, removed = _safe_prune_net(net_id, prunable, net_vias, pads, zones,
-                                    anchor_segments=anchor or None,
-                                    zone_credit_validator=_zcv,
-                                    fill_anchor_validator=_zfa,
-                                    aggressive=True, tol=_tol,
-                                    pcb_data=pcb_data)
-    kept, removed = _restore_soft_joint_bridges(list(kept) + anchor, removed,
-                                                net_vias, pads)
-    removed = [s for s in removed if not getattr(s, 'graphic', False)
-               and not getattr(s, 'locked', False)]
+    if vias_only:
+        # Multipoint: keep every stub (Phase-3 landing sites); vias below only.
+        kept, removed = list(net_segs), []
+    else:
+        kept, removed = _safe_prune_net(net_id, prunable, net_vias, pads, zones,
+                                        anchor_segments=anchor or None,
+                                        zone_credit_validator=_zcv,
+                                        fill_anchor_validator=_zfa,
+                                        aggressive=True, tol=_tol,
+                                        pcb_data=pcb_data)
+        kept, removed = _restore_soft_joint_bridges(list(kept) + anchor, removed,
+                                                    net_vias, pads)
+        removed = [s for s in removed if not getattr(s, 'graphic', False)
+                   and not getattr(s, 'locked', False)]
     kept_all = [s for s in net_segs
                 if id(s) not in {id(x) for x in removed}]
 
@@ -1955,6 +1995,10 @@ def trim_net_stub_debris(pcb_data: PCBData, net_id: int, result, config):
         vias = result.get('new_vias')
         if vias:
             result['new_vias'] = [v for v in vias if id(v) not in rm_via_ids]
+        # The writer's OTHER via source (see `swap_vias` in the docstring).
+        # In place: the writer holds this same list object.
+        if swap_vias:
+            swap_vias[:] = [v for v in swap_vias if id(v) not in rm_via_ids]
     return len(rm_seg_ids), len(rm_via_ids)
 
 

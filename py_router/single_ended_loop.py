@@ -753,8 +753,9 @@ def route_single_ended_nets(
             # Phase-3 landing sites.
             if env_knobs.STUB_DEBRIS_TRIM and not result.get('is_multipoint'):
                 from pcb_modification import trim_net_stub_debris
-                _td_s, _td_v = trim_net_stub_debris(pcb_data, net_id, result,
-                                                    config)
+                _td_s, _td_v = trim_net_stub_debris(
+                    pcb_data, net_id, result, config,
+                    swap_vias=getattr(state, 'all_swap_vias', None))
                 if _td_s or _td_v:
                     print(f"    stub-debris trim: {_td_s} unused stub "
                           f"segment(s), {_td_v} dangling via(s) freed")
@@ -1228,7 +1229,9 @@ def route_single_ended_nets(
                                     and not retry_result.get('is_multipoint')):
                                 from pcb_modification import trim_net_stub_debris
                                 _td_s, _td_v = trim_net_stub_debris(
-                                    pcb_data, net_id, retry_result, config)
+                                    pcb_data, net_id, retry_result, config,
+                                    swap_vias=getattr(state, 'all_swap_vias',
+                                                      None))
                                 if _td_s or _td_v:
                                     print(f"    stub-debris trim: {_td_s} unused "
                                           f"stub segment(s), {_td_v} dangling "
