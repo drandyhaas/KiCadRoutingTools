@@ -23,7 +23,21 @@ where their bounding box CONTAINED most escape poses -- hpwl was flat and prune
 reverted on only 9 of 20 seeds, so `pruned == ['U1']` would have been a
 seed-0 accident asserted as a property. `arm_M_seed_independence` pins it.
 
-Mutation battery: `tests/mutate_698.py`.
+Mutation battery: `tests/mutate_698.py` -- **32 rows: 30 killed, 2 survived
+(both recorded with their reason), 0 broken, 0 disagreeing with expectation.**
+
+What it caught in THIS file, which is why it exists:
+
+| mutation | why it survived the first time |
+|---|---|
+| `drop-the-safety-half` | a legal seat search never worsens a hard term, so no behavioural arm could reach the conjunct. `arm_Q` drives `reseat_accept` directly. |
+| `prune-refuses-every-revert` | no fixture had prune legitimately reverting a claim-bound part, so "the probe is a conjunct, not an exemption" was untested. `arm_R`. |
+| `hpwl-ignores-its-net-subset` | every net on the plain fixture touched the scope ref, so `scope_hpwl` and the board-wide `hpwl` were the same number. R8/R9 fixed that. |
+
+And one it caught in ITSELF: the row `the-zone-spec-forgets-the-anchor-branch`
+originally mutated `not any(` to `False or not any(`, which is the same
+expression -- a row that could not fail, recorded as an expected survivor. It
+read as a finding and was a tautology.
 """
 import json
 import os
