@@ -76,34 +76,35 @@ for nm in names:
               or abs(s.end_x - tp[0]) + abs(s.end_y - tp[1]) < 0.005)),
         'F.Cu')
 
+geo = sm.Corridor(grid0.bbox, launch)
 choice, unplaced = sm.select(menu, launch, keep_out=grid0.bbox,
                              buses=buses, tooth_layer=tooth_layer,
                              log=(print if '-v' in sys.argv else None))
 
-print(f'K={K}: {len(names)} nets, {len(buses)} buses\n')
+# The reported unit is the CORRIDOR -- every net leaving on one side --
+# not the taut-path cluster. Clusters that pick the same side share one
+# channel and one permutation, so a per-cluster floor cannot see the
+# crossings between them.
+corr = sm.corridors(choice)
+print(f'K={K}: {len(names)} nets, {len(buses)} taut-path buses -> '
+      f'{len(corr)} corridors\n')
 tot_mismatch = tot_extra = 0
-for bus in sorted(buses, key=len, reverse=True):
+# ask the SELECTOR which layer it hands each net over on, rather than
+# recomputing it here: this probe used its own unweighted LIS and so
+# reported a diver set the selector was not using
+dl = sm.delivered_layers(choice, corr, geo, tooth_layer)
+for bus in sorted(corr, key=len, reverse=True):
     if not all(n in choice for n in bus):
         continue
     side = choice[bus[0]].direction
-    axis = 1 if side in ('left', 'right') else 0
-    lo = sorted(bus, key=lambda n: launch[n][1])
-    li = {n: i for i, n in enumerate(lo)}
-    tgt = sorted(bus, key=lambda n: (round(choice[n].exit_pt[axis], 3),
-                                     li[n]))
-    tr = {n: i for i, n in enumerate(tgt)}
-    ranks = [tr[n] for n in lo]
-    # ask the SELECTOR which layer it hands each net over on, rather
-    # than recomputing it here: this probe used its own unweighted LIS
-    # and so reported a diver set the selector was not using
-    dl = sm.delivered_layers(choice, buses, launch, tooth_layer)
     divers = {n for n in bus if dl[n] != tooth_layer[n]}
     mism = [n for n in bus if dl[n] != choice[n].layer]
-    floor = 2 * (len(bus) - len(te.lis_keep(ranks)))
+    floor = sm._floor(bus, choice, geo) if len(bus) >= 2 else 0
     tot_mismatch += len(mism)
     tot_extra += len(mism)
-    print(f'bus[{len(bus):2d}] exits {side:5s}: '
-          f'{len(divers)} divers, corridor via floor {floor}')
+    nb = len({tuple(b) for b in buses if set(b) & set(bus)})
+    print(f'corridor[{len(bus):2d}] exits {side:5s}: '
+          f'{len(divers)} divers, via floor {floor}, from {nb} bus(es)')
     print(f'    layer handoff: {len(bus) - len(mism)}/{len(bus)} arrive '
           f'on the layer their escape starts on'
           + (f'; MISMATCH on {",".join(sorted(mism)[:6])}' if mism else ''))

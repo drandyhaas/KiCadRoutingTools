@@ -80,10 +80,12 @@ for nm in names:
          and (abs(s.start_x - tp[0]) + abs(s.start_y - tp[1]) < 0.005
               or abs(s.end_x - tp[0]) + abs(s.end_y - tp[1]) < 0.005)),
         'F.Cu')
+geo = sm.Corridor(grid0.bbox, launch)
 choice, _un = sm.select(menu, launch, keep_out=grid0.bbox, buses=buses,
                         tooth_layer=tooth_layer)
 # which nets the corridor would make divers, per bus
-delivered = sm.delivered_layers(choice, buses, launch, tooth_layer)
+delivered = sm.delivered_layers(choice, sm.corridors(choice), geo,
+                                tooth_layer)
 
 lines = []
 

@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Why does a mismatched net not switch to an escape on the layer the
-corridor delivers it on? Prints its tooth layer, the layer it is handed
-over on, and every candidate on its bus side with the cost the selector
-would give it."""
-import math
+"""Why does the `down` corridor's geometry not behave like the model?
+
+The model says a corridor is a bundle wrapping one corner, so its via
+floor is 2*(K - LIS) of the launch->exit permutation. On the synthetic
+board that is exact. On this bench the `down` group reaches only 3
+crossings where the model predicts 22, so one of the model's premises
+does not hold. Print the premises: where each launch is relative to the
+array, which corner its leg wraps, and whether it wraps at all.
+
+usage: probe_down_geom.py [K] [side]
+"""
 import os
 import subprocess
 import sys
@@ -18,7 +24,7 @@ import select_moves as sm  # noqa: E402
 import detect_buses as db  # noqa: E402
 
 K = sys.argv[1] if len(sys.argv) > 1 else '21'
-WHO = sys.argv[2] if len(sys.argv) > 2 else None
+SIDE = sys.argv[2] if len(sys.argv) > 2 else 'down'
 names = subprocess.run([sys.executable,
                         os.path.join(HERE, 'coherent_nets.py'), K],
                        capture_output=True, text=True).stdout.strip()
@@ -65,27 +71,27 @@ for nm in names:
 geo = sm.Corridor(grid0.bbox, launch)
 choice, _ = sm.select(menu, launch, keep_out=grid0.bbox, buses=buses,
                       tooth_layer=tooth_layer)
-dl = sm.delivered_layers(choice, sm.corridors(choice), geo, tooth_layer)
-bad = [n for n in names if n in choice and dl.get(n)
-       and dl[n] != choice[n].layer]
-print(f'tooth layers on the mismatched nets: '
-      + ', '.join(f'{n}:{tooth_layer[n][0]}' for n in bad))
-targets = [WHO] if WHO else bad[:2]
-for nm in targets:
-    m = choice[nm]
-    side = m.direction
-    lx, ly = launch[nm]
-    print(f'\n{nm}: tooth {tooth_layer[nm]}, corridor delivers '
-          f'{dl[nm]}, escape starts {m.layer}  -> MISMATCH')
-    print(f'  chosen: {m}')
-    print(f'  candidates on side {side}:')
-    for c in sorted(menu[nm], key=lambda c: c.vias):
-        if c.direction != side:
-            continue
-        el = sum(math.hypot(q[0] - p[0], q[1] - p[1])
-                 for (p, q, _L) in c.legs)
-        reach = sm.around_box((lx, ly), c.exit_pt, grid0.bbox)
-        base = 3.0 * c.vias + 2.0 * el + reach
-        pen = 0.0 if c.layer == dl[nm] else 4.0
-        print(f'    {str(c):58s} cost {base:6.1f} + pen {pen:.0f} '
-              f'= {base + pen:6.1f}')
+
+x0, y0, x1, y1 = grid0.bbox
+print(f'array bbox (pad centres) x {x0:.2f}..{x1:.2f}   '
+      f'y {y0:.2f}..{y1:.2f}   pitch {grid0.pitch_x:.3f} x '
+      f'{grid0.pitch_y:.3f}')
+lx = [launch[n][0] for n in names]
+ly = [launch[n][1] for n in names]
+print(f'launches            x {min(lx):.2f}..{max(lx):.2f}   '
+      f'y {min(ly):.2f}..{max(ly):.2f}\n')
+
+HALF = min(grid0.pitch_x, grid0.pitch_y) / 2.0
+grp = [n for n in names if choice[n].direction == SIDE]
+print(f'{SIDE} corridor, {len(grp)} nets, in launch order:')
+print(f'{"net":10s} {"launch":>16s} {"exit":>16s}  rel  wrap')
+for n in sorted(grp, key=lambda n: launch[n][1]):
+    lp, ep = launch[n], choice[n].exit_pt
+    p = sm.around_box_path(lp, ep, grid0.bbox, pad=0.35 * HALF)
+    if len(p) == 2:
+        wrap = 'STRAIGHT (never touches the array)'
+    else:
+        wrap = ' -> '.join(f'({c[0]:.1f},{c[1]:.1f})' for c in p[1:-1])
+    rel = ('N' if lp[1] < y0 else 'S' if lp[1] > y1 else '=')
+    print(f'{n:10s} ({lp[0]:7.2f},{lp[1]:7.2f}) '
+          f'({ep[0]:7.2f},{ep[1]:7.2f})   {rel}   {wrap}')

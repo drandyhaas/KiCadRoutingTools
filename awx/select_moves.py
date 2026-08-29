@@ -200,36 +200,161 @@ def _other(layer: str, layers=('F.Cu', 'B.Cu')) -> str:
     return layers[1] if layer == layers[0] else layers[0]
 
 
-def delivered_layers(choice: Dict[str, Move], buses, launch,
+def _proper_cross(p1: Pt, p2: Pt, p3: Pt, p4: Pt) -> bool:
+    """Do segments p1p2 and p3p4 properly intersect? Shared endpoints
+    and collinear touching do not count."""
+    def d(a, b, c):
+        return ((b[0] - a[0]) * (c[1] - a[1])
+                - (b[1] - a[1]) * (c[0] - a[0]))
+    d1, d2 = d(p3, p4, p1), d(p3, p4, p2)
+    d3, d4 = d(p1, p2, p3), d(p1, p2, p4)
+    return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
+
+
+class Corridor:
+    """How a corridor is ordered, and which of its nets can stay put.
+
+    The via floor is 2*(K - a), where `a` is the largest set of legs
+    that pairwise do not cross: everyone else has to dive and come back.
+    Reading that off a 1-D permutation is only valid when a coordinate
+    exists that really does order the crossings, and the obvious
+    candidates were each measured wrong on this bench:
+
+      launch y / exit axis  assumes the launches are a VERTICAL comb.
+                            The `down` corridor launches from a
+                            horizontal comb south-west of the array,
+                            every member within 0.3 mm of one y, so
+                            ordering by y is a coin flip -- it called
+                            9 of 28 pairs crossing where 3 do.
+      angle about the array assumes the bundle WRAPS the array. That
+                            corridor approaches the bottom edge head-on
+                            from the south and wraps nothing: 6 pairs
+                            predicted, 5 of them wrong.
+
+    So the projection is used only to PROPOSE an order -- the transverse
+    axis of the bundle's own mean travel, which needs no comb
+    orientation and no side cases, and which measured best of the five
+    tried (2 wrong of 28 on `down`, 0 of 55 on `left`, 0 of 1 on `up`).
+    The proposal is then CHECKED against the drawn legs and any pair
+    that really crosses is dropped. So the kept set is always genuinely
+    non-crossing, and the floor it gives is never optimistic -- which is
+    the failure that mattered, a floor of 0 reported for four nets piled
+    on one exit point.
+    """
+
+    def __init__(self, box, launch: Dict[str, Pt], pad: float = 0.3):
+        self.box = box
+        self.pad = pad
+        self.launch = launch
+
+    def leg(self, n: str, m) -> List[Pt]:
+        """The polyline the corridor must draw for this net: launch to
+        the escape's exit, around the array rather than through it."""
+        pt = m if isinstance(m, tuple) else m.exit_pt
+        return around_box_path(self.launch[n], pt, self.box, self.pad)
+
+    def axis(self, grp: Sequence[str], sel: Dict[str, Move]) -> Pt:
+        """Unit vector ACROSS the bundle -- perpendicular to where it is
+        on average going."""
+        dx = dy = 0.0
+        for n in grp:
+            dx += sel[n].exit_pt[0] - self.launch[n][0]
+            dy += sel[n].exit_pt[1] - self.launch[n][1]
+        h = math.hypot(dx, dy) or 1.0
+        return (-dy / h, dx / h)
+
+    def launch_key(self, n: str, t: Pt) -> float:
+        return self.launch[n][0] * t[0] + self.launch[n][1] * t[1]
+
+    def exit_key(self, n: str, m, t: Pt) -> float:
+        pt = m if isinstance(m, tuple) else m.exit_pt
+        return pt[0] * t[0] + pt[1] * t[1]
+
+    def order(self, grp: Sequence[str], sel: Dict[str, Move],
+              t: Optional[Pt] = None) -> List[str]:
+        t = t or self.axis(grp, sel)
+        return sorted(grp, key=lambda n: self.launch_key(n, t))
+
+    def crosses(self, a: str, b: str, sel: Dict[str, Move]) -> bool:
+        pa, pb = self.leg(a, sel[a]), self.leg(b, sel[b])
+        return any(_proper_cross(p, q, r, s)
+                   for p, q in zip(pa, pa[1:])
+                   for r, s in zip(pb, pb[1:]))
+
+    def keep(self, grp: Sequence[str], sel: Dict[str, Move],
+             weight: Optional[Dict[str, float]] = None) -> List[str]:
+        """The nets that can travel the corridor without diving: the
+        proposal from the transverse order, pruned until no two of them
+        actually cross."""
+        import topo_emit as _te
+        if len(grp) < 2:
+            return list(grp)
+        t = self.axis(grp, sel)
+        lo = self.order(grp, sel, t)
+        li = {n: i for i, n in enumerate(lo)}
+        tgt = sorted(grp, key=lambda n: (round(self.exit_key(n, sel[n], t),
+                                               6), li[n]))
+        tr = {n: i for i, n in enumerate(tgt)}
+        ranks = [tr[n] for n in lo]
+        if weight:
+            idx = _te.lis_keep_weighted(ranks, [weight.get(n, 0.0)
+                                                for n in lo])
+        else:
+            idx = _te.lis_keep(ranks)
+        kept = [lo[i] for i in sorted(idx)]
+        # prune: drop the worst offender until the set really is
+        # crossing-free. The projection is a proposal, not a proof.
+        while True:
+            bad: Dict[str, int] = {}
+            for i, a in enumerate(kept):
+                for b in kept[i + 1:]:
+                    if self.crosses(a, b, sel):
+                        bad[a] = bad.get(a, 0) + 1
+                        bad[b] = bad.get(b, 0) + 1
+            if not bad:
+                return kept
+            worst = max(bad, key=lambda n: (bad[n], -(weight or {}).get(n, 0)))
+            kept = [n for n in kept if n != worst]
+
+
+def corridors(choice: Dict[str, Move]) -> List[List[str]]:
+    """The unit a corridor actually routes: EVERY net leaving on one
+    side, not one taut-path cluster.
+
+    Clusters answer "which nets are going the same way", which is the
+    right question for CHOOSING a side. But two clusters that pick the
+    same side share one channel and one permutation, so their mutual
+    crossings are real and a per-cluster floor cannot see them. Measured
+    at K21: three clusters (5/4/2 nets) all left, 23 crossings between
+    them, and the summed per-cluster floor understated the truth by 8."""
+    g: Dict[str, List[str]] = {}
+    for n, m in choice.items():
+        g.setdefault(m.direction, []).append(n)
+    return [v for _k, v in sorted(g.items())]
+
+
+def delivered_layers(choice: Dict[str, Move], groups, geo: 'Corridor',
                      tooth_layer: Dict[str, str]) -> Dict[str, str]:
     """The layer the corridor hands each net over on: its tooth layer
     if the permutation makes it a keeper, the other one if it must
     dive."""
-    import topo_emit as _te
     out: Dict[str, str] = {}
-    for bus in buses:
+    for bus in groups:
         if not all(n in choice for n in bus):
             continue
-        side = choice[bus[0]].direction
-        axis = 1 if side in ('left', 'right') else 0
-        lo = sorted(bus, key=lambda n: launch[n][1])
-        li = {n: i for i, n in enumerate(lo)}
-        tgt = sorted(bus, key=lambda n: (round(choice[n].exit_pt[axis], 3),
-                                         li[n]))
-        tr = {n: i for i, n in enumerate(tgt)}
-        # among the equally-long LISs, take the one that makes the nets
-        # whose escape starts on their TOOTH layer the keepers -- they
+        # among the equally-good keep sets, take the one that holds on
+        # to the nets whose escape starts on their TOOTH layer -- those
         # are the ones that pair for free with staying put
-        w = [1.0 if choice[n].layer == tooth_layer.get(n, 'F.Cu') else 0.0
-             for n in lo]
-        keep = _te.lis_keep_weighted([tr[n] for n in lo], w)
-        for i, n in enumerate(lo):
+        w = {n: (1.0 if choice[n].layer == tooth_layer.get(n, 'F.Cu')
+                 else 0.0) for n in bus}
+        kept = set(geo.keep(bus, choice, w))
+        for n in bus:
             L = tooth_layer.get(n, 'F.Cu')
-            out[n] = L if i in keep else _other(L)
+            out[n] = L if n in kept else _other(L)
     return out
 
 
-def true_vias(choice: Dict[str, Move], buses, launch,
+def true_vias(choice: Dict[str, Move], groups, geo: 'Corridor',
               tooth_layer: Dict[str, str]) -> int:
     """The vias a route ACTUALLY needs, per net:
 
@@ -244,7 +369,7 @@ def true_vias(choice: Dict[str, Move], buses, launch,
     corridor floor as independent totals double-counts exactly that
     merge, and would score an aligned plan as though nothing had been
     saved."""
-    dl = delivered_layers(choice, buses, launch, tooth_layer)
+    dl = delivered_layers(choice, groups, geo, tooth_layer)
     n_v = 0
     for n, m in choice.items():
         if n not in dl:
@@ -255,35 +380,29 @@ def true_vias(choice: Dict[str, Move], buses, launch,
     return n_v
 
 
-def score(choice: Dict[str, Move], buses, launch,
+def score(choice: Dict[str, Move], groups, geo: 'Corridor',
           tooth_layer: Dict[str, str]) -> Tuple[int, int, int]:
     """(true vias, corridor via floor, layer mismatches). The first is
     what a round is judged on; the others are reported to show where it
     came from."""
-    tv = true_vias(choice, buses, launch, tooth_layer)
-    fl = sum(_floor(b, choice, launch) for b in buses
+    tv = true_vias(choice, groups, geo, tooth_layer)
+    fl = sum(_floor(b, choice, geo) for b in groups
              if len(b) >= 2 and all(n in choice for n in b))
-    dl = delivered_layers(choice, buses, launch, tooth_layer)
+    dl = delivered_layers(choice, groups, geo, tooth_layer)
     mm = sum(1 for n, m in choice.items()
              if dl.get(n) and dl[n] != m.layer)
     return tv, fl, mm
 
 
 def _floor(bus: Sequence[str], sel: Dict[str, Move],
-           launch: Dict[str, Pt]) -> int:
-    """2*(K - LIS) of the launch->exit permutation: the corridor's via
-    floor for this bus."""
-    import topo_emit as _te
-    lo = sorted(bus, key=lambda n: launch[n][1])
-    axis = 1 if sel[bus[0]].direction in ('left', 'right') else 0
-    li = {n: i for i, n in enumerate(lo)}
-    tgt = sorted(bus, key=lambda n: (round(sel[n].exit_pt[axis], 3), li[n]))
-    tr = {n: i for i, n in enumerate(tgt)}
-    ranks = [tr[n] for n in lo]
-    return 2 * (len(bus) - len(_te.lis_keep(ranks)))
+           geo: 'Corridor') -> int:
+    """The corridor's via floor: 2 vias for every net that cannot stay
+    on the layer it arrives on, i.e. everything outside the largest
+    crossing-free set."""
+    return 2 * (len(bus) - len(geo.keep(bus, sel)))
 
 
-def refine_lis(choice: Dict[str, Move], buses, menu, launch,
+def refine_lis(choice: Dict[str, Move], groups, menu, geo: 'Corridor',
                free: Callable[[Move, Dict[str, Move], str], bool],
                rounds: int = 6, prefer_layer=None,
                log=None) -> Dict[str, Move]:
@@ -298,24 +417,34 @@ def refine_lis(choice: Dict[str, Move], buses, menu, launch,
     first and stalls: reaching the best assignment needs several nets
     to move together, so it sat at the floor it started from.
 
-    Nets that are not on the chain keep the cheapest exit whose channel
-    is still free; ties are fine, since two nets on one exit line but
-    different layers do not cross.
+    The chain runs over SLOTS -- (exit line, layer) -- and must increase
+    STRICTLY through them, which is what makes the answer physical. With
+    a merely non-decreasing chain over exit coordinates the DP has a
+    trivial optimum: put every net on ONE exit line, where all the ties
+    count as ordered, and report LIS = K and a floor of 0. It did
+    exactly that, and nothing downstream objected, because the chain
+    nets were also applied WITHOUT the channel check the other nets go
+    through. Measured at K21: four nets of the `down` corridor assigned
+    to the single point (140.73, 68.16), and a floor of 0 that no route
+    could ever realise. Strict slot order caps a line at one net per
+    layer, and the chain is now applied through `free` like everything
+    else, so an unrealisable chain loses its members instead of being
+    reported as an achievement.
     """
-    for bus in buses:
+    for bus in groups:
         if len(bus) < 3 or any(n not in choice for n in bus):
             continue
         side = choice[bus[0]].direction
-        axis = 1 if side in ('left', 'right') else 0
-        lo = sorted(bus, key=lambda n: launch[n][1])
+        t = geo.axis(bus, choice)
+        lo = geo.order(bus, choice, t)
         opts = {}
         for n in lo:
             seen, keep = {}, []
-            # Collapse each exit coordinate to ONE representative -- but
-            # rank a move that starts on the layer the corridor will
-            # deliver FIRST. Ranking purely by via count kept the 0-via
-            # surface move at every coordinate and threw the dive escape
-            # away, which silently undid the layer alignment: SA7 had a
+            # Collapse each SLOT to one representative -- but rank a
+            # move that starts on the layer the corridor will deliver
+            # FIRST. Ranking purely by via count kept the 0-via surface
+            # move at every coordinate and threw the dive escape away,
+            # which silently undid the layer alignment: SA7 had a
             # matching dogbone at cost 27.5 against its 29.0 surface,
             # and never got to keep it.
             pl = (prefer_layer or {}).get(n)
@@ -327,52 +456,56 @@ def refine_lis(choice: Dict[str, Move], buses, menu, launch,
             for m in sorted(menu[n], key=_rank):
                 if m.direction != side:
                     continue
-                c = round(m.exit_pt[axis], 3)
-                if c not in seen:
-                    seen[c] = m
-                    keep.append((c, m))
+                s = (round(geo.exit_key(n, m, t), 6), m.layer)
+                if s not in seen:
+                    seen[s] = m
+                    keep.append((s, m))
             opts[n] = sorted(keep)
         if not all(opts[n] for n in lo):
             continue
-        # dp over nets in launch order: (chain length, coordinate)
-        NEG = (-1, None, None)
-        best_end = {}          # coord -> (len, net index, move)
+        # dp over nets in launch order: longest STRICTLY increasing
+        # chain of slots
+        best_end = {}          # slot -> (len, net index, move)
         back = {}
         for i, n in enumerate(lo):
             cur = {}
-            for c, m in opts[n]:
-                bl, bi, bc = 0, None, None
-                for c2, (l2, i2, _m2) in best_end.items():
-                    if c2 <= c + 1e-9 and l2 > bl:
-                        bl, bi, bc = l2, i2, c2
-                cur[c] = (bl + 1, i, m)
-                back[(i, c)] = (bi, bc)
-            for c, v in cur.items():
-                if c not in best_end or v[0] > best_end[c][0]:
-                    best_end[c] = v
+            for s, m in opts[n]:
+                bl, bi, bs = 0, None, None
+                for s2, (l2, i2, _m2) in best_end.items():
+                    if s2 < s and l2 > bl:
+                        bl, bi, bs = l2, i2, s2
+                cur[s] = (bl + 1, i, m)
+                back[(i, s)] = (bi, bs)
+            for s, v in cur.items():
+                if s not in best_end or v[0] > best_end[s][0]:
+                    best_end[s] = v
         if not best_end:
             continue
-        endc = max(best_end, key=lambda c: best_end[c][0])
+        ends = max(best_end, key=lambda s: best_end[s][0])
         chain = {}
-        i, c = best_end[endc][1], endc
+        i, s = best_end[ends][1], ends
         while i is not None:
-            chain[lo[i]] = dict(opts[lo[i]])[c]
-            i, c = back[(i, c)]
-        # apply: chain nets take their chain move, the rest keep the
-        # cheapest still-free option
-        trial = dict(choice)
+            chain[lo[i]] = dict(opts[lo[i]])[s]
+            i, s = back[(i, s)]
+        # apply: chain first, then the rest -- but every net through the
+        # SAME channel check, chain members included
+        trial = {n: m for n, m in choice.items() if n not in bus}
         for n in lo:
-            if n in chain:
+            if n in chain and free(chain[n], trial, n):
                 trial[n] = chain[n]
         for n in lo:
-            if n in chain:
+            if n in trial:
                 continue
-            for c, m in opts[n]:
+            for s, m in opts[n]:
                 if free(m, trial, n):
                     trial[n] = m
                     break
-        before = _floor(bus, choice, launch)
-        after = _floor(bus, trial, launch)
+            else:
+                trial[n] = choice[n]        # nothing free: keep what it had
+        if len(trial) != len(choice):
+            continue
+        before = _floor(bus, choice, geo)
+        after = _floor(bus, trial, geo)
         if after < before:
             for n in bus:
                 choice[n] = trial[n]
@@ -401,6 +534,7 @@ def select(menu: Dict[str, List[Move]],
     for n, ms in menu.items():
         ms = [m for m in ms if dirs is None or m.direction in dirs]
         cand[n] = ms
+    geo = Corridor(keep_out, launch) if keep_out else None
 
     def cost(n: str, m: Move) -> float:
         lx, ly = launch[n]
@@ -488,21 +622,27 @@ def select(menu: Dict[str, List[Move]],
                 return False
         return True
 
-    if buses:
-        refine_lis(choice, buses, menu, launch, _free, log=log)
+    # From here on the grouping is the CORRIDOR -- every net leaving on
+    # one side -- not the taut-path cluster. The cluster chose the side
+    # (above); the permutation, the via floor and the diver set all
+    # belong to whatever ends up sharing that one channel, and are
+    # recomputed from `choice` because the greedy pass is allowed to
+    # send a net off its bus side when the side is full.
+    if buses and geo:
+        refine_lis(choice, corridors(choice), menu, geo, _free, log=log)
 
     # --- fixed point: exits decide the divers, divers decide the
     # preferred escape layer, which decides the exits
-    if buses and tooth_layer:
+    if buses and tooth_layer and geo:
         best = dict(choice)
-        best_s = score(best, buses, launch, tooth_layer)
+        best_s = score(best, corridors(best), geo, tooth_layer)
         if log:
             log(f'  align round 0: vias {best_s[0]}, floor {best_s[1]}, '
                 f'mismatch {best_s[2]}')
         for r in range(align_rounds):
             want_layer.clear()
-            want_layer.update(delivered_layers(choice, buses, launch,
-                                               tooth_layer))
+            want_layer.update(delivered_layers(choice, corridors(choice),
+                                               geo, tooth_layer))
             taken_lane.clear()
             taken_site.clear()
             trial: Dict[str, Move] = {}
@@ -526,9 +666,9 @@ def select(menu: Dict[str, List[Move]],
                     taken_site.add(sk)
             if len(trial) < len(choice):
                 break                      # lost a net: reject the round
-            refine_lis(trial, buses, menu, launch, _free,
+            refine_lis(trial, corridors(trial), menu, geo, _free,
                        prefer_layer=want_layer)
-            s = score(trial, buses, launch, tooth_layer)
+            s = score(trial, corridors(trial), geo, tooth_layer)
             if log:
                 log(f'  align round {r + 1}: vias {s[0]}, floor {s[1]}, '
                     f'mismatch {s[2]}')

@@ -90,6 +90,7 @@ for nm in names:
          and (abs(s.start_x - _tp[0]) + abs(s.start_y - _tp[1]) < 0.005
               or abs(s.end_x - _tp[0]) + abs(s.end_y - _tp[1]) < 0.005)),
         'F.Cu')
+geo = sm.Corridor(grid0.bbox, launch)
 choice, unplaced = sm.select(menu, launch, keep_out=grid0.bbox,
                              buses=groups, tooth_layer=tooth_layer)
 print('  ' + sm.summarise(choice))
