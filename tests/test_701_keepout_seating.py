@@ -477,24 +477,85 @@ def arm_edge_connector(wd):
 # H -- the polish quench has no keep-out term; the self-check repairs it
 # --------------------------------------------------------------------------
 
-def arm_polish_repair(wd):
-    """`place_seed` runs a polish quench after seeding, and the quench has no
-    keep-out concept at all. Without a repair the polish can walk a part back
-    into a keep-out and `place_seed` then fails its own grade, exit 4, on a
-    board its own seeder produced correctly.
+#: Fault injection for arm H-a. The quench on these tiny fixtures happens to
+#: leave the part alone, so a plain end-to-end run never reaches the repair
+#: and would pass with the repair deleted -- a test that passes in both
+#: directions. This sitecustomize forces the polish to return the one move
+#: that puts U1 back in the keep-out, which is precisely what a real quench
+#: with no keep-out term is free to do.
+_INJECT = '''
+import placement.quench as _q
+_real = _q.quench
 
-    Run arm A's fixture WITH the polish enabled and require a clean grade."""
+
+def _walk_it_in(*a, **kw):
+    _real(*a, **kw)
+    return [{'reference': 'U1', 'new_x': 10.0, 'new_y': 6.0,
+             'new_rotation': 0.0}]
+
+
+_q.quench = _walk_it_in
+'''
+
+
+def arm_polish_repair(wd):
+    """`place_seed` runs a polish quench after seeding, and the quench has NO
+    keep-out term -- `grep keepout py_placer/placement/quench.py` finds
+    nothing relevant. So the polish is free to walk a part back into a
+    declared keep-out, and `place_seed` then exits 4 against its own intent on
+    a board its own seeder placed correctly.
+
+    H-a injects exactly that fault and requires the repair to undo it. H-b is
+    the ordinary end-to-end run."""
     ko = [{"name": "hot", "rect": list(KO), "sides": ["F"]}]
-    r, s, out = run(wd, one_part_board, wide_zone_intent(keepouts=ko),
-                    tag='H', polish=True)
-    check("H: place_seed exits 0 with the polish enabled",
-          r.returncode == 0, f"rc={r.returncode}")
-    check("H: no keepout error in its own self-check",
-          s and s.get('grade_errors') == 0,
-          f"grade_errors={s and s.get('grade_errors')}")
-    ov = overlap(out, 'U1', KO)
-    check("H: the polished board is still clear of the keep-out", ov == 0.0,
-          f"overlap {ov}mm2")
+
+    # ---- H-a: the polish IS forced to break it -------------------------
+    inj = os.path.join(wd, 'inj')
+    os.makedirs(inj, exist_ok=True)
+    with open(os.path.join(inj, 'sitecustomize.py'), 'w',
+              encoding='utf-8') as f:
+        f.write(_INJECT)
+    bpath = os.path.join(wd, 'Ha-in.kicad_pcb')
+    ipath = os.path.join(wd, 'Ha-fp.json')
+    out_a = os.path.join(wd, 'Ha-out.kicad_pcb')
+    one_part_board(bpath)
+    with open(ipath, 'w', encoding='utf-8') as f:
+        json.dump(wide_zone_intent(keepouts=ko), f)
+    env = dict(os.environ, PYTHONHASHSEED='0', PYTHONIOENCODING='utf-8',
+               PYTHONPATH=inj + os.pathsep
+               + os.pathsep.join(os.path.join(REPO, d) for d in
+                                 ('py_placer', 'py_router', 'py_tools')))
+    r = subprocess.run(
+        [sys.executable, '-X', 'utf8',
+         os.path.join('py_placer', 'place_seed.py'), bpath, out_a,
+         '--intent', ipath, '--clearance', '0.2',
+         '--board-edge-clearance', '0.5', '--force'],
+        capture_output=True, text=True, encoding='utf-8', errors='replace',
+        cwd=REPO, timeout=900, env=env)
+    injected = 'polish walked' in r.stdout
+    check("H-a: the injected polish really did break the board, so this arm "
+          "is not vacuous", injected,
+          "the repair never fired -- the injection did not take effect")
+    if injected:
+        check("H-a: the repair names `keepout` as what it repaired",
+              'keepout' in r.stdout, "repair line does not mention keepout")
+        ov = overlap(out_a, 'U1', KO)
+        check("H-a: and U1 is back out of the keep-out on the WRITTEN board",
+              ov == 0.0, f"overlap {ov}mm2, pose {poses(out_a)['U1']}")
+        check("H-a: place_seed exits 0 after repairing itself",
+              r.returncode == 0, f"rc={r.returncode}")
+
+    # ---- H-b: the ordinary run ------------------------------------------
+    r2, s2, out2 = run(wd, one_part_board, wide_zone_intent(keepouts=ko),
+                       tag='Hb', polish=True)
+    check("H-b: place_seed exits 0 with the polish enabled",
+          r2.returncode == 0, f"rc={r2.returncode}")
+    check("H-b: no grade error in its own self-check",
+          s2 and s2.get('grade_errors') == 0,
+          f"grade_errors={s2 and s2.get('grade_errors')}")
+    ov2 = overlap(out2, 'U1', KO)
+    check("H-b: the polished board is clear of the keep-out", ov2 == 0.0,
+          f"overlap {ov2}mm2")
 
 
 def main():
