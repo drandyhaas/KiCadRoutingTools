@@ -55,3 +55,39 @@ def compute_footprint_bbox_local(footprint: Footprint) -> Tuple[float, float, fl
 def snap_to_grid(value: float, grid_step: float) -> float:
     """Snap a value to the nearest grid point."""
     return round(value / grid_step) * grid_step
+
+
+def refs_in_rect(pcb_data, rect, *, by='pad') -> list:
+    """Every reference whose geometry lies in `rect`, HALF-OPEN on the far edge.
+
+    THE one implementation, because two of them is a real defect rather than a
+    tidiness point: `check_pockets` prints a rectangle and
+    `place_seed --reseat-region` lifts the parts in it, and if the two resolve
+    the same rectangle differently the census names parts the mover does not
+    touch. Half-open (`x0 <= x < x1`) so a part on a shared boundary belongs to
+    exactly one window of a tiling.
+
+    by='pad'    -- any pad centre inside the rect. What the census has always
+                   used, and the right question for "which parts cage this
+                   window", since a large part reaches into a window its origin
+                   is nowhere near.
+    by='origin' -- the footprint origin only. This is `perturb._region_unit`'s
+                   own membership rule, so it is what names the block that
+                   `--block region:qN` would move.
+    """
+    x0, y0, x1, y1 = rect
+    out = set()
+    if by == 'origin':
+        for ref, fp in pcb_data.footprints.items():
+            if ref and x0 <= fp.x < x1 and y0 <= fp.y < y1:
+                out.add(ref)
+        return sorted(out)
+    if by != 'pad':
+        raise ValueError("refs_in_rect: by must be 'pad' or 'origin'")
+    for fp in pcb_data.footprints.values():
+        for pad in fp.pads:
+            if (x0 <= pad.global_x < x1 and y0 <= pad.global_y < y1
+                    and pad.component_ref):
+                out.add(pad.component_ref)
+                break
+    return sorted(out)
