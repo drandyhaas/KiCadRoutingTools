@@ -167,6 +167,11 @@ re-emit if in doubt.
    both correlate POSITIVELY with **distance-to-truth**. That is the measured
    dependent variable; neither has been correlated with routed `blocking`
    (`docs/placement-predictors.md`).
+   WHICH pad-pad channel: the pad-INTERSECTION count, which is
+   `check_assembly`'s `blocking` and the routing loop's L2 refusal. The
+   clearance-GRAZE count (`pad_conflicts`) is reported and not gated -- #788
+   measured it as redundant with that refusal, not as unimportant, and the
+   reason is written beside the gate in `loop_driver.py`.
 5. Every proposal is decided by a MEASUREMENT on the board in front of you, not
    by what a pattern suggests. If no instrument confirms it, do not apply it.
 6. Placement invalidates every downstream routed board. Never run it mid-chain.
