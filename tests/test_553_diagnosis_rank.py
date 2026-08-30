@@ -449,6 +449,119 @@ def t_format_text_names_the_skipped_signals():
           'the table states there is no combined score')
 
 
+def t_top_k_bounds_each_signals_pool():
+    """`--diagnosis-top-k` is what bounds the move set once --max-target-pins
+    stops applying to block members, so "it is only a report size" does not
+    excuse leaving it untested. The MAIN fixture cannot see it -- 4 candidates
+    over 3 signals union to everything at k=3 -- so this builds one that can."""
+    state, pcb = _state()
+    legality = {'pairs': [('A1', 'C1', 'pad_clearance'),
+                          ('A1', 'C2', 'pad_clearance'),
+                          ('A1', 'B1', 'pad_clearance'),
+                          ('A2', 'C1', 'body_overlap'),
+                          ('C1', 'C2', 'body_overlap'),
+                          ('C2', 'B1', 'courtyard_blocking')],
+                'clearance': 0.15, 'notes': []}
+    got = {}
+    for k in (1, 2, 3):
+        d = D.diagnose(state, pcb, {}, blocker_report=None, legality=legality,
+                       max_fanout=4, top_k=k)
+        got[k] = list(d.selected_keys)
+    check(len(got[1]) == 1,
+          f'top_k=1 offers exactly one candidate per signal ({got[1]})')
+    check(len(got[1]) < len(got[2]) < len(got[3]),
+          f'and the pool grows with k ({got})')
+    check(got[3][:1] == got[1],
+          'the head is the same candidate at every k -- k widens, it does not '
+          'reorder')
+
+
+def t_the_clearance_comes_from_the_board_and_says_where_from():
+    """The only MEASURED signal is graded at this number, and on most tracked
+    boards it is a constant, not the board's own. Undisclosed, that turns
+    "graded at the board's own clearance" into a false claim."""
+    have, want = D.resolve_clearance(None, 0.19)
+    check((have, want) == (0.19, 'caller'), 'an explicit value is honoured')
+    check(D.resolve_clearance(None, 0.0) == (0.0, 'caller'),
+          'including an explicit ZERO -- it grades nothing, which is what was '
+          'asked for, rather than being silently replaced')
+    val, src = D.resolve_clearance(None, None)
+    check(src == 'default' and val > 0,
+          f'with no board it falls back to routing_defaults, and SAYS so ({src})')
+    board = os.path.join(ROOT, 'kicad_files', 'esp_prog.kicad_pcb')
+    if os.path.isfile(board):
+        val, src = D.resolve_clearance(board, None)
+        check(src in ('netclass', 'default'),
+              f'a real board resolves to one of the two named sources ({src})')
+        rep = D.legality_defects(_parse(board), pcb_file=board)
+        check(rep.get('clearance_source') == src,
+              'and legality_defects reports the SAME source it graded at')
+        if src == 'default':
+            check(any('NOT from the board' in n for n in rep['notes']),
+                  'a board with no netclass is disclosed as graded at a '
+                  'constant, because the pair count moves with that number')
+
+
+def _parse(path):
+    from kicad_parser import parse_kicad_pcb
+    return parse_kicad_pcb(path)
+
+
+def t_a_callers_own_limits_refuse_by_their_own_name():
+    """top_k=0 and budget=0 select nothing, and that is the CALLER's doing --
+    reporting it as "no signal ranked anything above zero" blames the board for
+    the caller's argument, and both were measured saying exactly that."""
+    for kw in ({'top_k': 0}, {'top_k': -1}, {'budget': 0}, {'budget': -1}):
+        d = _run(**kw)
+        check(d.selected == [], f'{kw} selects nothing')
+        check(d.refusal and 'admits no candidate' in d.refusal,
+              f'{kw} is refused by name ({d.refusal!r})')
+        check(d.fallback_reason() == d.refusal,
+              f'{kw}: the fallback reason IS the refusal, not a signal excuse')
+        check(d.signals_defined, f'{kw}: the signals were defined all along')
+        check(d.overshoot == 0,
+              f'{kw}: nothing was selected, so nothing overshot '
+              f'({d.overshoot})')
+
+
+def t_a_blocker_net_the_board_does_not_have_is_its_own_reason():
+    """route.py and the plane repair rename nets between chain steps, so a
+    blocker name the parsed board no longer carries is real input. Filing it
+    under the high-fanout rail cut reports a reason that is simply false."""
+    d = _run(blocker_report=[{'net': '/X', 'blocked_by': [
+        {'net': '/GONE', 'blocked_count': 77}]}])
+    notes = ' '.join(d.disclosures)
+    check('does not carry' in notes,
+          f'the unknown net is reported as unknown ({notes})')
+    check('/GONE' in notes, 'and named')
+    check('77 cell(s) on ignored or high-fanout' not in notes,
+          'and NOT charged to the rail cut, which would be a false reason')
+
+
+def t_a_block_named_like_a_part_does_not_delete_the_part():
+    """A public function takes any dict. Overwriting a block with a same-named
+    loose part removed its members from the universe while still crediting
+    their evidence to the survivor -- moving the selection could then not
+    address the evidence that selected it."""
+    state, pcb = _state()
+    d = D.diagnose(state, pcb, {'C1': ['A1', 'A2']}, blocker_report=REPORT,
+                   legality=LEGALITY, max_fanout=4)
+    keys = {c.key: c.members for c in d.candidates}
+    check(keys.get('C1') == ('A1', 'A2') or 'A1' in d.selected + [
+        m for ms in keys.values() for m in ms],
+        f'the block survives rather than being replaced by the part ({keys})')
+    check(any('collision' in n for n in d.disclosures),
+          f'and the collision is disclosed ({d.disclosures})')
+
+
+def t_the_report_renders_even_when_it_is_empty():
+    check('SKIPPED' in D.format_text(D.Diagnosis(
+        skipped={s: 'nothing' for s in D.SIGNAL_ORDER})),
+        'an all-skipped report renders')
+    check(isinstance(D.format_text(D.Diagnosis()), str),
+          'and so does a wholly empty one, rather than raising IndexError')
+
+
 def t_the_ranking_path_does_no_io():
     import inspect
     src = inspect.getsource(D.diagnose)
@@ -480,6 +593,12 @@ TESTS = [
     t_input_order_cannot_change_the_ranking,
     t_the_no_efficacy_claim_travels_with_the_result,
     t_format_text_names_the_skipped_signals,
+    t_top_k_bounds_each_signals_pool,
+    t_the_clearance_comes_from_the_board_and_says_where_from,
+    t_a_callers_own_limits_refuse_by_their_own_name,
+    t_a_blocker_net_the_board_does_not_have_is_its_own_reason,
+    t_a_block_named_like_a_part_does_not_delete_the_part,
+    t_the_report_renders_even_when_it_is_empty,
     t_the_ranking_path_does_no_io,
 ]
 

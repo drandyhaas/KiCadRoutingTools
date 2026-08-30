@@ -192,6 +192,45 @@ ROWS = [
      "    'diagnosis selects the movers that matter. '\n",
      (T553,), 'KILLED'),
 
+    # ---- the surfaces an adversarial review found UNTESTED ------------------
+    # A review mutated each of these against a copy and the grader stayed
+    # green, so each got a test and then a row. `resolve_clearance` is the one
+    # that mattered: the only MEASURED signal is graded at its output, and on
+    # every board #703 measured it resolves to a constant.
+    ('clearance-always-the-constant', 'd',
+     "    if clearance is not None:\n"
+     "        return float(clearance), 'caller'\n",
+     "    if True:\n"
+     "        return 0.25, 'default'\n",
+     (T553,), 'KILLED'),
+
+    ('clearance-source-not-disclosed', 'd',
+     "    if clr_source == 'default':\n", "    if False:\n",
+     (T553,), 'KILLED'),
+
+    # `--diagnosis-top-k` is what bounds the move set once --max-target-pins
+    # stops applying to block members. It had no test at all.
+    ('top-k-slice-removed', 'd',
+     "             {sig: [k for k, _ in ranked[sig][:top_k]] for sig in ranked})\n",
+     "             {sig: [k for k, _ in ranked[sig][:]] for sig in ranked})\n",
+     (T553,), 'KILLED'),
+
+    # A blocker net the board does not carry, reported as a power rail.
+    ('unknown-net-charged-to-the-rail', 'd',
+     "                if nid is None:\n",
+     "                if nid is None and False:\n",
+     (T553,), 'KILLED'),
+
+    # The caller's own limits reported as the board's fault.
+    ('refusal-borrows-a-signal-excuse', 'd',
+     "        if self.refusal:\n            return self.refusal\n", '',
+     (T553,), 'KILLED'),
+
+    # A block silently deleted by a same-named part.
+    ('collision-overwrites-the-block', 'd',
+     "        if ref in members:\n", "        if False:\n",
+     (T553,), 'KILLED'),
+
     # ---- INERT PROBES, which must change nothing ---------------------------
     # A battery with no expected survivors cannot distinguish "my tests are
     # thorough" from "my tests fail on any edit at all".

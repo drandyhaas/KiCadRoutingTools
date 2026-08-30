@@ -24,8 +24,10 @@ WHAT BACKS EACH SIGNAL, which is not the same for the three
     observed fact. There is nothing to correlate.
 
 `legality_pairs`  THE ONLY MEASURED ONE. `docs/placement-predictors.md` ranked
-    pre-route predictors against routed `blocking` over 120 placements on 6
-    boards, and the legality counts are what passed: pad and body pairs at
+    pre-route predictors against routed `blocking` over 6 boards -- 120
+    placements planned, 119 of which produced a routed result, and every N in
+    that document is over the rows that produced a defined rho rather than over
+    the planned count. The legality counts are what passed: pad and body pairs at
     rho = +0.785 on 6 of 6 boards, courtyard blocking at rho = +0.684 on 6 of 6,
     where `crossings` and `hpwl` failed.
     **The extrapolation is disclosed and is the weakest link here:** #703
@@ -108,8 +110,17 @@ RANK_DECIMALS = 4
 #: arrangement metric.
 TOP_K = 3
 
-#: Fixed, declared, and never chosen per run: it breaks the intra-sweep tie
-#: only. Changing it changes which signal is asked first in each sweep.
+#: Fixed and declared, never chosen per run.
+#:
+#: HOW MUCH IT DECIDES, stated exactly, because the comfortable version of this
+#: sentence is false. UNBUDGETED, permuting it changes only the ORDER of
+#: `selected_keys`; the selected part SET is invariant. UNDER A BUDGET it can
+#: change the set outright -- measured on the unit fixture, `budget=1` selects
+#: `sheet:mag` (parts A1, A2) under the declared order and `C1` under an order
+#: led by `legality_pairs`: disjoint. And `place_route_loop` budgets EVERY
+#: round, so on a board where the pin budget bites, the head signal wins the
+#: last slot. That is the price of refusing to combine the signals into one
+#: score, and it is disclosed rather than hidden behind "it only breaks ties".
 SIGNAL_ORDER = ('block_displacement', 'blocker_cells', 'legality_pairs')
 
 SIGNAL_UNITS = {'block_displacement': 'mm',
@@ -151,6 +162,7 @@ class BlockerEvidence:
     def to_dict(self) -> Dict[str, object]:
         return {'nets': len(self.cells),
                 'total_cells': self.total_cells,
+                'unique_cells': sum(self.unique.values()),
                 'countless': list(self.countless),
                 'truncated_nets': self.truncated_nets,
                 'cells_dropped': self.cells_dropped,
@@ -207,30 +219,40 @@ def blocker_evidence(report: Optional[Sequence[Dict]]) -> BlockerEvidence:
 # --------------------------------------------------------------------------
 
 def resolve_clearance(pcb_file: Optional[str] = None,
-                      clearance: Optional[float] = None) -> float:
-    """The board's OWN Default-netclass clearance, never a guessed round number.
+                      clearance: Optional[float] = None) -> Tuple[float, str]:
+    """`(mm, source)` -- the board's own Default-netclass clearance if it has one.
 
-    Same resolution `lock_advisor.advise_locks` uses for its pad-conflict
-    demotion: the board's Default class, else `routing_defaults.CLEARANCE`.
-    Grading at a value the board does not use manufactures phantom pairs on one
-    side and misses real ones on the other.
+    Returns the SOURCE as well as the number, and every caller must carry it,
+    because the honest version of "never a guessed round number" is narrower
+    than it sounds: MOST tracked boards have no sibling `.kicad_pro` at all --
+    including all six that `docs/placement-predictors.md` measured on -- so the
+    value is `routing_defaults.CLEARANCE`, a constant, on exactly the boards the
+    only measured signal was measured on. It is load-bearing (glasgow_revC
+    grades 23 defect pairs at 0.15 mm and 29 at 0.30), so a consumer that
+    cannot see where it came from cannot judge the ranking it produced.
+
+    Sources: `netclass` (the board said so), `default` (nothing did), or
+    `caller`. `lock_advisor.advise_locks` resolves the same chain for its
+    pad-conflict demotion; the one deliberate difference is that an EXPLICIT
+    0.0 is honoured here rather than silently replaced -- a caller asking to
+    grade at zero gets zero, and finds nothing, which is at least the thing
+    they asked for.
     """
-    if clearance:
-        return float(clearance)
-    val = None
+    if clearance is not None:
+        return float(clearance), 'caller'
     if pcb_file:
         try:
             from list_nets import board_default_netclass_clearance
             val = board_default_netclass_clearance(pcb_file)
+            if val:
+                return float(val), 'netclass'
         except Exception:
-            val = None
-    if not val:
-        try:
-            from routing_defaults import CLEARANCE as _DEF
-            val = _DEF
-        except Exception:
-            val = 0.25
-    return float(val)
+            pass
+    try:
+        from routing_defaults import CLEARANCE as _DEF
+        return float(_DEF), 'default'
+    except Exception:
+        return 0.25, 'default'
 
 
 def legality_defects(pcb_data, clearance: Optional[float] = None,
@@ -244,15 +266,23 @@ def legality_defects(pcb_data, clearance: Optional[float] = None,
       body_overlap         `grade_body_overlap(...)['blocking_pairs']`
       courtyard_blocking   ...`['courtyard_blocking_pairs']`
 
-    A grader that RAISES is recorded in `notes` and contributes no pairs. A
-    grader that returns an error string (the courtyard census) has that string
-    propagated verbatim: "blocking: none" on a census that did not run is the
-    silence this repo keeps filing bugs about.
+    A grader that RAISES is recorded in `notes` and contributes no pairs, and
+    so is a grader that could not JUDGE part of the board: `fab_unjudged_refs`
+    (no .Fab outline to compare) and `courtyard_synthetic_refs` (a courtyard
+    invented from the pad box) are parts whose absence from the pair list means
+    "not looked at", not "clean". Reporting "no findings" for a census that
+    could not run on half the board is the silence this repo keeps filing bugs
+    about.
     """
     from placement import legality as _leg
-    clr = resolve_clearance(pcb_file, clearance)
+    clr, clr_source = resolve_clearance(pcb_file, clearance)
     pairs: List[Tuple[str, str, str]] = []
     notes: List[str] = []
+    if clr_source == 'default':
+        notes.append(
+            f'graded at {clr} mm from routing_defaults, NOT from the board: '
+            f'it declares no Default netclass clearance (no sibling '
+            f'.kicad_pro). The pair count moves with this number')
 
     try:
         rep = _leg.grade_pad_legality(pcb_data, clr, worst_n=0,
@@ -270,9 +300,23 @@ def legality_defects(pcb_data, clearance: Optional[float] = None,
             pairs.append((p.a, p.b, 'body_overlap'))
         for p in (bo.get('courtyard_blocking_pairs') or ()):
             pairs.append((p.a, p.b, 'courtyard_blocking'))
-        err = bo.get('courtyard_census_error')
-        if err:
-            notes.append(f'courtyard census: {err}')
+        # What the census could NOT judge. These are the real "did not run"
+        # channels `grade_body_overlap` exposes -- it has no error key, and a
+        # branch reading one would be dead code pretending to be a guarantee.
+        unjudged = list(bo.get('fab_unjudged_refs') or ())
+        if unjudged:
+            notes.append(
+                f'{len(unjudged)} part(s) had no .Fab outline to judge and are '
+                f'absent from the pair list because they were NOT LOOKED AT, '
+                f'not because they are clean: '
+                f'{", ".join(sorted(unjudged)[:6])}'
+                + ('...' if len(unjudged) > 6 else ''))
+        synthetic = list(bo.get('courtyard_synthetic_refs') or ())
+        if synthetic:
+            notes.append(
+                f'{len(synthetic)} part(s) have a SYNTHETIC courtyard (the pad '
+                f'box, carrying no courtyard margin), so their blocking pairs '
+                f'are excluded from the census by legality.py')
     except Exception as e:                            # noqa: BLE001
         notes.append(f'body_overlap grader failed: {type(e).__name__}: {e}')
 
@@ -286,7 +330,8 @@ def legality_defects(pcb_data, clearance: Optional[float] = None,
         seen.add(key)
         out.append(key)
     out.sort()
-    return {'pairs': out, 'clearance': clr, 'notes': notes}
+    return {'pairs': out, 'clearance': clr, 'clearance_source': clr_source,
+            'notes': notes}
 
 
 def ignore_net_ids(pcb_data, patterns: Optional[Sequence[str]]) -> set:
@@ -374,6 +419,9 @@ class Diagnosis:
     budget: Optional[int] = None
     overshoot: int = 0
     top_k: int = TOP_K
+    #: Set when the CALLER's own limits admitted nothing, which is a different
+    #: fact from "no signal could be defined" and must not borrow its words.
+    refusal: str = ''
     efficacy: str = NO_EFFICACY_CLAIM
 
     @property
@@ -388,20 +436,16 @@ class Diagnosis:
     def fallback_reason(self) -> str:
         if self.signals_defined and self.selected:
             return ''
+        if self.refusal:
+            return self.refusal
         if not self.signals_defined:
             return ('no signal could be defined: '
                     + '; '.join(f'{s}: {self.skipped[s]}' for s in SIGNAL_ORDER
                                 if s in self.skipped))
+        if self.candidates:
+            return ('every defined signal ranked candidates, but none reached '
+                    'the selection')
         return 'every defined signal ranked nothing above zero'
-
-    def tally(self) -> Dict[str, object]:
-        return {'signals': self.signals_defined,
-                'candidates': len(self.candidates),
-                'selected_keys': len(self.selected_keys),
-                'selected_parts': len(self.selected),
-                'budget': self.budget,
-                'overshoot': self.overshoot,
-                'degenerate': self.degenerate}
 
     def to_dict(self) -> Dict[str, object]:
         return {'schema': self.schema,
@@ -415,6 +459,7 @@ class Diagnosis:
                 'budget': self.budget,
                 'overshoot': self.overshoot,
                 'top_k': self.top_k,
+                'refusal': self.refusal,
                 'efficacy': self.efficacy,
                 'fallback_reason': self.fallback_reason()}
 
@@ -469,6 +514,19 @@ def diagnose(state, pcb_data, blocks: Optional[Dict[str, Sequence[str]]] = None,
         kinds[name] = 'block'
     for ref in sorted(parts):
         if ref in block_of:
+            continue
+        if ref in members:
+            # A block NAMED like a part. `derive_groups` cannot produce one
+            # (its keys are all `kicad:`/`sheet:`/`net:`/`decap:`-prefixed), but
+            # this is a public function and a caller may pass any dict. Silently
+            # overwriting the block would delete its members from the universe
+            # while `owner()` still credited their evidence to the surviving
+            # single-part candidate -- so moving the selection could not address
+            # the evidence that selected it.
+            d.disclosures.append(
+                f'candidate name collision: a block and a part are both named '
+                f'{ref!r}; the BLOCK is kept and the loose part is not a '
+                f'candidate of its own')
             continue
         members[ref] = (ref,)
         kinds[ref] = 'part'
@@ -531,9 +589,19 @@ def diagnose(state, pcb_data, blocks: Optional[Dict[str, Sequence[str]]] = None,
             name_to_id = {n.name: nid for nid, n in (pcb_data.nets or {}).items()}
             unassigned = 0
             skipped_power = 0
+            unknown_cells = 0
+            unknown_nets = []
             for net, cells in sorted(ev.cells.items()):
                 nid = name_to_id.get(net)
-                if nid is None or nid in ignored:
+                if nid is None:
+                    # NOT a rail, and not ignored: a name this board does not
+                    # carry. Real input -- route.py and the plane repair rename
+                    # nets between chain steps -- and filing it under the rail
+                    # cut would report a reason that is simply false.
+                    unknown_cells += cells
+                    unknown_nets.append(net)
+                    continue
+                if nid in ignored:
                     skipped_power += cells
                     continue
                 tally: Dict[str, int] = {}
@@ -559,6 +627,14 @@ def diagnose(state, pcb_data, blocks: Optional[Dict[str, Sequence[str]]] = None,
                     f'blocker_cells: {skipped_power} cell(s) on ignored or '
                     f'high-fanout nets were dropped -- a rail that reaches '
                     f'everywhere ranks nothing')
+            if unknown_cells:
+                d.disclosures.append(
+                    f'blocker_cells: {unknown_cells} cell(s) name '
+                    f'{len(unknown_nets)} net(s) this board does not carry '
+                    f'({", ".join(sorted(unknown_nets)[:4])}'
+                    f'{"..." if len(unknown_nets) > 4 else ""}) -- the router '
+                    f'and the board disagree about the net list, which a '
+                    f'rename between chain steps will do')
             if unassigned:
                 d.disclosures.append(
                     f'blocker_cells: {unassigned} cell(s) belong to nets no '
@@ -628,18 +704,27 @@ def diagnose(state, pcb_data, blocks: Optional[Dict[str, Sequence[str]]] = None,
                 detail=details[sig].get(key, {})))
 
     # ---- round-robin union of the per-signal top-k
-    pools = {sig: [k for k, _ in ranked[sig][:max(0, top_k)]] for sig in ranked}
+    # A caller can ask for nothing. Say so by name rather than letting the
+    # empty selection be reported as "no signal ranked anything above zero",
+    # which is a different fact and was measured false in exactly these cases.
+    if top_k is not None and top_k < 1:
+        d.refusal = f'top_k={top_k} admits no candidate from any signal'
+    elif budget is not None and budget < 1:
+        d.refusal = f'budget={budget} part(s) admits no candidate'
+
+    pools = ({} if d.refusal else
+             {sig: [k for k, _ in ranked[sig][:top_k]] for sig in ranked})
     chosen: List[str] = []
     chosen_set: set = set()
     selected_by: Dict[str, List[str]] = {}
-    n_parts = 0
+    picked: set = set()          # deduplicated PARTS, which is what a budget caps
     exhausted = False
     while not exhausted and any(pools.get(s) for s in SIGNAL_ORDER):
         for sig in SIGNAL_ORDER:
             pool = pools.get(sig)
             if not pool:
                 continue
-            if budget is not None and n_parts >= budget:
+            if budget is not None and len(picked) >= budget:
                 exhausted = True
                 break
             key = pool.pop(0)
@@ -650,10 +735,13 @@ def diagnose(state, pcb_data, blocks: Optional[Dict[str, Sequence[str]]] = None,
                 continue
             chosen.append(key)
             chosen_set.add(key)
-            n_parts += len(members[key])
+            # Deduplicated, not summed: two blocks may name the same ref (this
+            # function takes any dict), and counting a shared member twice
+            # reports an overshoot that did not happen.
+            picked.update(members[key])
 
-    if budget is not None and n_parts > budget:
-        d.overshoot = n_parts - budget
+    if budget is not None and chosen and len(picked) > budget:
+        d.overshoot = len(picked) - budget
         d.disclosures.append(
             f'budget {budget} part(s) overshot by {d.overshoot}: a block is '
             f'added whole, never half-moved')
@@ -687,6 +775,8 @@ def format_text(d: Diagnosis, limit: int = 3) -> str:
     out = [f'  target-select: diagnosis  (selected {len(d.selected)} part(s) '
            f'in {len(d.selected_keys)} candidate(s)'
            + (f'; budget {d.budget}' if d.budget is not None else '') + ')']
+    if d.refusal:
+        out.append(f'    REFUSED  {d.refusal}')
     if d.evidence is not None:
         out.append(f'    blocker evidence: {d.evidence.total_cells} reported '
                    f'cell(s) over {len(d.evidence.cells)} net(s)')
@@ -699,6 +789,9 @@ def format_text(d: Diagnosis, limit: int = 3) -> str:
             out.append(f'    {sig:<20} SKIPPED  {d.skipped[sig]}')
             continue
         rowset = sorted(by_sig.get(sig, ()), key=lambda kv: (-kv[1], kv[0]))
+        if not rowset:
+            out.append(f'    {sig:<20} defined, but nothing reached the report')
+            continue
         head = '  '.join(f'{k}({v:.4g})' for k, v in rowset[:limit])
         out.append(f'    {sig:<20} {len(rowset):>3} ranked  '
                    f'{rowset[0][1]:.4g} .. {rowset[-1][1]:.4g}  {head}')

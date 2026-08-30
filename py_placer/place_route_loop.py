@@ -46,7 +46,8 @@ from placement.cli_gates import (add_board_state_args, add_intent_arg,
 from placement.quench import quench
 from placement.writer import write_placed_output
 from placement.diagnosis import (TOP_K as DIAGNOSIS_TOP_K,
-                                 format_text as diagnosis_format)
+                                 format_text as diagnosis_format,
+                                 to_json as diagnosis_to_json)
 
 # The loop shells out to the route.py sitting NEXT TO THIS FILE. A bare
 # relative 'route.py' only resolved when the caller's cwd happened to be the
@@ -988,8 +989,8 @@ def main():
                             targets=targets, groups=blocks,
                             moved=moves_from_placements(pcb_data, placements),
                             metrics=metrics,
-                            diagnosis=(diag.to_dict() if diag is not None
-                                       else None))
+                            diagnosis=(diagnosis_to_json(diag)
+                                       if diag is not None else None))
         if _accepted:
             print(f"  ACCEPTED (was failures={best['failures']},"
                   f" iterations={best['iterations']:,})")
