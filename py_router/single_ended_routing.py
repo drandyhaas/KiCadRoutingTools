@@ -321,6 +321,14 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     return min(float(np.min(d)), best_custom)
 
 
+_SEGARR_STALE = [0]
+if os.environ.get('KICAD_SEGARR_STATS') == '1':
+    import atexit as _atexit_sa
+    _atexit_sa.register(lambda: print(
+        f"[SEGARR] cache HITS whose signature matched but copper DIFFERED "
+        f"(stale arrays served to the #339 refit): {_SEGARR_STALE[0]}"))
+
+
 def _foreign_seg_arrays(pcb_data, layer):
     """Cached per-layer numpy arrays (net_id, x1, y1, x2, y2, half_width) for every
     routed SEGMENT on `layer`, plus every VIA folded in as a degenerate (zero-length)
@@ -336,6 +344,18 @@ def _foreign_seg_arrays(pcb_data, layer):
            (tail.start_x, tail.start_y, tail.end_x, tail.net_id) if tail is not None else None,
            (vtail.x, vtail.y, vtail.net_id) if vtail is not None else None)
     cache = getattr(pcb_data, '_foreign_seg_arr_cache', None)
+    # #803 instrumentation (KICAD_SEGARR_STATS=1): the signature is count+TAIL
+    # (#339). Detect the case it CANNOT see -- signature identical but the
+    # actual copper different -- by carrying a content fingerprint alongside.
+    # The fingerprint never decides the hit; it only counts how often a hit
+    # WOULD have served stale arrays. This guard feeds _unblock_via_refit, so a
+    # stale hit here means a via approved against copper that has moved.
+    if os.environ.get('KICAD_SEGARR_STATS') == '1':
+        _fp = (len(segs), sum(map(id, segs)))
+        if cache is not None and cache[0] == sig:
+            if getattr(pcb_data, '_foreign_seg_arr_fp', None) != _fp:
+                _SEGARR_STALE[0] += 1
+        pcb_data._foreign_seg_arr_fp = _fp
     if cache is None or cache[0] != sig:
         cache = (sig, {})
         pcb_data._foreign_seg_arr_cache = cache
@@ -595,9 +615,27 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
         pair = (round(f['via_diameter'], 3), round(f['via_drill'], 3))
         if pair[0] < rec[0] - 1e-9 and pair not in cands:
             cands.append(pair)
+    _dbg = os.environ.get('KICAD_REFIT_DEBUG')
+    _dbgpt = None
+    if _dbg:
+        for _p in _dbg.split(';'):
+            try:
+                _px, _py = (float(t) for t in _p.split(','))
+            except ValueError:
+                continue
+            if abs(x - _px) <= 0.05 and abs(y - _py) <= 0.05:
+                _dbgpt = (_px, _py)
+                break
     for vs, dr in cands:
         need = vs / 2.0 + clearance - eps
         ok = True
+        if _dbgpt:
+            print(f"[REFIT] net {net_id} at ({x:.3f},{y:.3f}) trying "
+                  f"{vs}/{dr}: need={need:.4f} (clearance={clearance} eps={eps})")
+            for _l in layers:
+                _d = _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y, _l)
+                print(f"        {_l}: foreign-seg dist={_d:.4f}"
+                      + ("  << FAILS" if _d < need else ""))
         for layer in layers:
             if _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y, layer) < need:
                 ok = False
@@ -609,7 +647,11 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
         if ok and _seg_foreign_via_dist(pcb_data, net_id, x, y, x, y, layers[0] if layers else 'F.Cu') < need:
             ok = False
         if ok:
+            if _dbgpt:
+                print(f"[REFIT] net {net_id} at ({x:.3f},{y:.3f}) APPROVED {vs}/{dr}")
             return (vs, dr)
+    if _dbgpt:
+        print(f"[REFIT] net {net_id} at ({x:.3f},{y:.3f}) rejected every size")
     return None
 
 
@@ -2779,6 +2821,46 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
             used_stub_segs.extend(stub_segs)
             if stub_segs:
                 n_offpad += 1
+    # #803: COMMIT the kept unblock copper to pcb_data now.
+    #
+    # _register_unblock_via is purely permissive (free-via + a source/target
+    # override on every layer + an 11x11 allowed block) and the via was not in
+    # pcb_data, because a multipoint tap result is deferred. Until that result
+    # commits the barrel therefore blocks NOBODY. Measured on glasgow_revC at
+    # the moment a phase-3 ripped net re-routes:
+    #     in_pcb_data=0  via_blocked=True  cells=T,F,F,F   (only the PAD blocks)
+    #     in_pcb_data=1  via_blocked=True  cells=T,T,T,T   (committed)
+    # so a foreign track routes straight through it on an inner/back layer --
+    # /RD over /~{ALERT}'s 0.30/0.15 via, 0.100mm centre-to-axis against 0.250mm
+    # to touch, four contact violations.
+    #
+    # Commit rather than STAMP. A raw add_vias_list_as_obstacles stamp is not
+    # net-aware: the obstacle map cannot tell the via's owner from a stranger,
+    # so the stamp blocks the net that placed it (its own later MST edges), and
+    # it double-counts when the caller's commit recomputes the net's cache --
+    # measured, +10588 blocked_cells unaccounted and a broken net. #309's
+    # in-progress rings say the same thing in their docstring: the rings are
+    # per-route scaffolding because "the committed route's vias get their real
+    # keep-outs from the net's recomputed obstacle cache". The cache IS the
+    # net-aware channel -- prepare_obstacles_inplace lifts the owner's own
+    # copper and leaves it for everyone else -- so put the via where the cache
+    # will find it.
+    #
+    # Safe against double-add: add_route_to_pcb_data dedupes by id() (#195), so
+    # the caller's later commit skips objects already present.
+    if used and not getattr(config, 'plan_probe', False):
+        # plan_probe: probes route on a throwaway map and must emit no copper
+        # (the same rule the _unblock_via_sizes registry above obeys -- a leak
+        # there measurably changed routing, oc null-control 37 vs 33).
+        _have_v = {id(v) for v in pcb_data.vias}
+        for _v in used:
+            if id(_v) not in _have_v:
+                pcb_data.vias.append(_v)
+        _have_s = {id(sg) for sg in pcb_data.segments}
+        for _sg in used_stub_segs:
+            if id(_sg) not in _have_s:
+                pcb_data.segments.append(_sg)
+        pcb_data._copper_epoch = getattr(pcb_data, '_copper_epoch', 0) + 1
     if used:
         _off = (f" ({n_offpad} off-pad escape stub(s), #535)" if n_offpad else "")
         print(f"{print_prefix}{GREEN}Via-in-pad unblock: dropped {len(used)} fab-floor "
