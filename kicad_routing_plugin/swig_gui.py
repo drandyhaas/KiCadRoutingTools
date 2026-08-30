@@ -1053,6 +1053,7 @@ class RoutingDialog(wx.Dialog):
     def _on_check_stackup(self, event):
         """Run recommend-stackup headless and show the report (issue #40)."""
         from .ai_gui import run_skill_dialog, board_path_for_analysis
+        from .ai_backend import ANALYSIS_CONSTRAINT
 
         board = board_path_for_analysis(self.board_filename)
         if board is None:
@@ -1060,7 +1061,7 @@ class RoutingDialog(wx.Dialog):
         value = run_skill_dialog(
             self, "AI: check stackup",
             "recommend-stackup", os.path.abspath(board),
-            "analysis only, do not modify any files. After the report, end "
+            ANALYSIS_CONSTRAINT + " After the report, end "
             "your reply with exactly one line of the form RESULT=<copper "
             "layer count you recommend> (a bare integer), e.g. RESULT=4",
             intro=f"Running recommend-stackup on {os.path.basename(board)} ...\n"
@@ -1378,6 +1379,7 @@ class RoutingDialog(wx.Dialog):
         """Run analyze-power-nets headless and fill the Power Nets and
         Power Widths fields from its recommendation (issue #34)."""
         from .ai_gui import run_skill_dialog, board_path_for_analysis
+        from .ai_backend import ANALYSIS_CONSTRAINT
 
         board = board_path_for_analysis(self.board_filename)
         if board is None:
@@ -1385,7 +1387,7 @@ class RoutingDialog(wx.Dialog):
         value = run_skill_dialog(
             self, "AI: analyze power nets",
             "analyze-power-nets", os.path.abspath(board),
-            "analysis only, do not modify any files. After the report, end "
+            ANALYSIS_CONSTRAINT + " After the report, end "
             "your reply with exactly one line of the form "
             "RESULT=--power-nets <space-separated glob patterns> "
             "--power-nets-widths <space-separated widths in mm>, "

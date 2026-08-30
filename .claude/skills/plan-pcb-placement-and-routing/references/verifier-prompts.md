@@ -184,11 +184,21 @@ Two failure modes to refuse by name:
 is geometrically unsatisfiable does not get more iterations — it gets a
 measurement and a written finding about the requirement.
 
-**When the `Agent` tool is unavailable** — the GUI headless path allows only
-`Read,Glob,Grep,Bash,WebSearch` — run the same lenses yourself, in the same
-order, on the same inputs, tag each `mode=inline`, and **say in the report that
-verification was single-agent**. A run must never look like a fan-out happened
-when it did not.
+**When the subagent-dispatch tool is unavailable**, run the same lenses
+yourself, in the same order, on the same inputs, tag each `mode=inline`, and
+**say in the report that verification was single-agent**. A run must never look
+like a fan-out happened when it did not.
+
+Do not decide that from a remembered allowlist. This clause used to assert that
+the GUI headless path "allows only `Read,Glob,Grep,Bash,WebSearch`", which was
+already false for the Placement tab (write-capable since #633) and is false for
+the analysis path too since #552 — a restated literal that went stale exactly
+the way `opencode.json`'s did. The allowlists live in
+`kicad_routing_plugin/ai_backend.py` (`CLAUDE_ALLOWED_TOOLS`) and
+`kicad_routing_plugin/placement_run.py` (`PLACEMENT_ALLOWED_TOOLS`); both name
+the dispatch tool under **both** spellings, because Claude Code renamed it from
+`Task` to `Agent` and a permission rule matches the canonical name only. Try
+the dispatch, and fall back to inline only if it actually fails.
 
 
 ## Pre-registration rule: arm falsifiers in BOTH directions (run-4 B12)
@@ -234,8 +244,9 @@ Rules of engagement, mirrored from 9.4b:
 - A FAIL is remediated (fix the entry, re-read the artifact, or re-run
   the step) and re-verified before the loop continues — it is never
   re-worded into a caveat.
-- When the `Agent` tool is unavailable, run the same checks yourself,
-  tag `mode=inline`, and say so in the report — same as the lens rule.
+- When the subagent-dispatch tool is unavailable, run the same checks
+  yourself, tag `mode=inline`, and say so in the report — same as the
+  lens rule, including its "try it, don't assume" clause.
 
 ## Check 5 addendum (run-6): assembly-clean at placement boundaries
 
