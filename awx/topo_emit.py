@@ -77,7 +77,54 @@ def build_obstacles(pcb, nid, kids, layer):
     return obs
 
 
-def endpoints(pcb, names, byname):
+def _owner(pt, segs, pads, pcb):
+    """The component whose pad the net's copper connects `pt` to.
+
+    Segment endpoints are graph nodes (vias join layers at one point,
+    so a 2-D node graph is enough); a pad is reached when a node lies
+    within its copper. Falls back to nearest-pad only when the walk
+    reaches no pad at all (an isolated fragment)."""
+    def key(x, y):
+        return (round(x, 3), round(y, 3))
+    adj = {}
+    for s in segs:
+        a, b = key(s.start_x, s.start_y), key(s.end_x, s.end_y)
+        adj.setdefault(a, set()).add(b)
+        adj.setdefault(b, set()).add(a)
+    start = key(*pt)
+    seen = {start}
+    stack = [start]
+    while stack:
+        u = stack.pop()
+        for v in adj.get(u, ()):
+            if v not in seen:
+                seen.add(v)
+                stack.append(v)
+    for p in pads:
+        rx, ry = p.size_x / 2 + 0.02, p.size_y / 2 + 0.02
+        for (x, y) in seen:
+            if abs(x - p.global_x) <= rx and abs(y - p.global_y) <= ry:
+                return p.component_ref
+    p = min(pads, key=lambda q: ts.d2((q.global_x, q.global_y), pt))
+    return p.component_ref
+
+
+def endpoints(pcb, names, byname, dest_ref=None):
+    """Where each net's braid must start and finish.
+
+    Default (dest_ref None): the source stub's free end, to the BALL --
+    the bench shape, where only the source is fanned out and the braid
+    has to enter the destination's ball field itself.
+
+    With dest_ref: the destination is fanned out too, so each net has a
+    free end at BOTH ends and the braid's job is only the corridor
+    between them. This is not a refinement of the default, it is the
+    opposite of what it would do -- asked for a board fanned out at both
+    ends, the default picks the DESTINATION stub end as `src` and a
+    SOURCE pad as `tgt` (measured: 10 of 11 nets at K11), so the braid
+    would run backwards, into the source's own 21x21 field. Silently:
+    both are legal points and nothing downstream can tell.
+    """
     ends = {}
     for nm in names:
         nid, net = byname[nm]
@@ -86,12 +133,42 @@ def endpoints(pcb, names, byname):
         for s in segs:
             cnt[(round(s.start_x, 3), round(s.start_y, 3))] += 1
             cnt[(round(s.end_x, 3), round(s.end_y, 3))] += 1
-        anchors = [(p.global_x, p.global_y) for p in net.pads] + \
-            [(v.x, v.y) for v in pcb.vias if v.net_id == nid]
+        # an endpoint inside a via barrel or a pad's copper is joined,
+        # not free: the fanout starts a stub 25 um off the via centre
+        # (K21: SRAS's via-in-pad at (140.329, 66.161), stub from
+        # (140.329, 66.136)), and a 0.02 point tolerance read that as
+        # a free end -- the braid then aimed at the ball, not the stub
+        anchors = [(p.global_x, p.global_y, max(p.size_x, p.size_y) / 2)
+                   for p in net.pads] + \
+            [(v.x, v.y, v.size / 2) for v in pcb.vias if v.net_id == nid]
         free = [pt for pt, c in cnt.items() if c == 1 and
-                all(math.hypot(pt[0] - ax, pt[1] - ay) > 0.02
-                    for (ax, ay) in anchors)]
+                all(math.hypot(pt[0] - ax, pt[1] - ay) > max(0.02, ar)
+                    for (ax, ay, ar) in anchors)]
         assert free, (nm, 'no free stub end')
+        if dest_ref is not None:
+            # Which component does this free end BELONG to? Not the
+            # nearest pad: a stub the fanout dragged across the whole
+            # destination field (K15 chain: SA7, 11.6 mm from its
+            # east-column ball to the west exit line) ends nearer the
+            # SOURCE's pad than its own, so nearest-pad called it a
+            # source tooth, x0 landed east of x1 and the trunk was
+            # drawn in a corridor of width -0.5 mm. Walk the net's own
+            # copper from the free end to the pad it reaches instead.
+            def _at(pt):
+                return _owner(pt, segs, net.pads, pcb)
+            at_dest = [pt for pt in free if _at(pt) == dest_ref]
+            at_src = [pt for pt in free if _at(pt) != dest_ref]
+            if at_dest and at_src:
+                # farthest-apart pair, so a net with several stubs at one
+                # end still spans the whole corridor
+                src = max(at_src, key=lambda p: max(ts.d2(p, q)
+                                                    for q in at_dest))
+                tgt = max(at_dest, key=lambda q: ts.d2(src, q))
+                ends[nm] = (src, tgt, dest_ref)
+                continue
+            # only one end fanned out: fall through to the ball, which
+            # is the honest answer rather than inventing a stub
+            free = at_src or free
         if len(free) > 1:
             # soft joints / branches: the escape's exit is the end
             # farthest from every pad
@@ -219,6 +296,86 @@ def octi45(p, q):
     return [p, mid, q]
 
 
+def astar_f(ok, start, goal, bound, h=0.1, x_lo=None, x_hi=None,
+            y_hi=None, bound_hi=None):
+    """Octilinear grid A* on one layer from `start` to `goal`.
+
+    Eight moves of `h`, a small turn penalty, every step validated by
+    `ok(p, q)` (static copper + copper already placed by the caller),
+    and a floor `bound(x)` the path may not rise above (y smaller
+    than it): the trunk's lanes live there. The grid is anchored on
+    the goal so the last waypoint is exact; the first segment jumps
+    from the exact start onto the grid. Returns waypoints with
+    collinear runs merged, or None.
+
+    This is the "A* only for the connection" piece: the trunk decides
+    the order and the layers, the A* only threads one tail through
+    whatever clutter sits between the trunk's end and a stub end
+    (K15: C5 exactly where a straight descent to the south port must
+    pass -- both its pads, at 45 and at the morph's slope alike).
+    """
+    import heapq
+    gx, gy = goal
+
+    def node(p):
+        return (round((p[0] - gx) / h), round((p[1] - gy) / h))
+
+    def pt(n):
+        return (gx + n[0] * h, gy + n[1] * h)
+
+    s0 = node(start)
+    if not ok(start, pt(s0)):
+        return None
+    x_lo = start[0] - 0.3 if x_lo is None else x_lo
+    x_hi = goal[0] + 0.6 if x_hi is None else x_hi
+    y_hi = goal[1] + 3.0 if y_hi is None else y_hi
+    DIRS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1),
+            (1, -1)]
+    R2 = math.sqrt(2)
+
+    def hcost(n):
+        dx, dy = abs(n[0]), abs(n[1])
+        return h * (max(dx, dy) + (R2 - 1) * min(dx, dy))
+
+    best = {(s0, None): 0.0}
+    came = {}
+    heap = [(hcost(s0), 0.0, s0, None)]
+    goal_state = None
+    while heap:
+        f, g, n, d = heapq.heappop(heap)
+        if best.get((n, d), 1e9) < g - 1e-12:
+            continue
+        if n == (0, 0):
+            goal_state = (n, d)
+            break
+        p = pt(n)
+        for k, (dx, dy) in enumerate(DIRS):
+            m = (n[0] + dx, n[1] + dy)
+            q = pt(m)
+            if not (x_lo <= q[0] <= x_hi) or q[1] > y_hi or \
+                    q[1] < bound(q[0]):
+                continue
+            if bound_hi is not None and q[1] > bound_hi(q[0]):
+                continue
+            if not ok(p, q):
+                continue
+            g2 = g + h * (R2 if dx and dy else 1.0) + \
+                (0.0 if d is None or d == k else 0.06)
+            if g2 < best.get((m, k), 1e9):
+                best[(m, k)] = g2
+                came[(m, k)] = (n, d)
+                heapq.heappush(heap, (g2 + hcost(m), g2, m, k))
+    if goal_state is None:
+        return None
+    path = []
+    st = goal_state
+    while st is not None:
+        path.append(pt(st[0]))
+        st = came.get(st)
+    path.reverse()
+    return merge_collinear([start] + path)
+
+
 def merge_collinear(pts):
     out = [pts[0]]
     for p in pts[1:]:
@@ -313,6 +470,13 @@ def main():
                     'fb_t2q_base.kicad_pcb'))
     ap.add_argument('--nets', default='SDQ15,SDQ14,SDQ13,SDQ11')
     ap.add_argument('--out', default=os.path.join(HERE, 'topo_k4_emit'))
+    # The destination is already fanned out (a fanout step ran first),
+    # so the braid delivers to its STUB ENDS and the field-entry
+    # machinery is not its problem. Omitted = the bench shape, ball
+    # targets, exactly as before.
+    ap.add_argument('--dest-stubs', metavar='REF', default=None,
+                    help='destination component whose stub ends are '
+                         'the braid targets')
     ap.add_argument('--pitch', type=float, default=0.8)
     ap.add_argument('--dump-segs', default='')
     ap.add_argument('--no-smooth', action='store_true',
@@ -335,8 +499,14 @@ def main():
     # copper back at write time. Snapped to 90 degrees, so the frame is
     # a relabelling of the axes: octilinear stays octilinear and the
     # destination's rows stay rows.
+    # dest_ref matters HERE too, not only at the real call below: on a
+    # board fanned out at both ends the default picks the destination
+    # stub as the source, so the probe concluded the source was EAST and
+    # rotated the whole problem 180 degrees -- correctly, for the
+    # endpoints it was given, and uselessly for the ones actually routed.
     _probe = endpoints(pcb, [n.strip() for n in a.nets.split(',')
-                             if n.strip()], byname)
+                             if n.strip()], byname,
+                       dest_ref=a.dest_stubs)
     _theta = ff.flow_angle([_probe[n][0] for n in _probe],
                            [_probe[n][1] for n in _probe])
     if os.environ.get('KICAD_FLOW_FRAME') == '0':
@@ -351,7 +521,7 @@ def main():
         byname = {n.name.split('/')[-1]: (i, n)
                   for i, n in pcb.nets.items()}
     kids = {byname[nm][0] for nm in names}
-    ends = endpoints(pcb, names, byname)
+    ends = endpoints(pcb, names, byname, dest_ref=a.dest_stubs)
 
     comps = {ends[nm][2] for nm in names}
     comps_pads0 = [p for c in comps for p in pcb.footprints[c].pads]
@@ -379,6 +549,14 @@ def main():
         print(f'south river ({len(river2)}): {river2}')
     fx0 = min(p.global_x for c in comps for p in pcb.footprints[c].pads)
     x1 = fx0 - a.pitch * 0.8
+    if a.dest_stubs:
+        # the splice line must sit WEST of every stub end the braid is
+        # delivering to; the field-derived x1 is only right when the
+        # stub ends are east of it
+        # ...and 0.6 mm west of them, so the tails have room for a 45
+        # degree jog: the lanes leave the splice at a pitch a surface
+        # via fits between (0.38), the stub ends are packed at 0.25.
+        x1 = min(x1, min(ends[nm][1][0] for nm in names) - 0.6)
     x0 = max(ends[nm][0][0] for nm in names) + 0.3
 
     launch = sorted(names, key=lambda nm: ends[nm][0][1])
@@ -439,7 +617,7 @@ def main():
 
     LAYERS = ('F.Cu', 'B.Cu')
     menu = {}
-    for nm in names:
+    for nm in ([] if a.dest_stubs else names):
         nid_m = byname[nm][0]
         ref = ends[nm][2]
         bxm, bym = ends[nm][1]
@@ -457,10 +635,14 @@ def main():
 
         menu[nm] = em.enumerate_moves(pad_m, _grids[ref], LAYERS,
                                       _clear, _vclear)
-    print('escape menu: ' + ' '.join(
-        f'{nm}:{len(menu[nm])}' for nm in ball_order))
+    if menu:
+        print('escape menu: ' + ' '.join(
+            f'{nm}:{len(menu[nm])}' for nm in ball_order))
 
-    for nm in ball_order:
+    # In --dest-stubs mode the entry is decided in one line below;
+    # these loops exist to get INTO a ball field that is already
+    # escaped, and the B loop asserts when it cannot.
+    for nm in ([] if a.dest_stubs else ball_order):
         if nm in moves:
             continue
         bx, by = ends[nm][1][0], ends[nm][1][1]
@@ -544,7 +726,7 @@ def main():
                 return False
         return True
 
-    for nm in ball_order:
+    for nm in ([] if a.dest_stubs else ball_order):
         if nm in entry or nm in moves:
             continue
         bx, by = ends[nm][1][0], ends[nm][1][1]
@@ -574,12 +756,73 @@ def main():
         placed_vias.append(site)
         placed_b.append(((x1, site[1]), site))
 
+    port_placed = {}      # nm -> the straight port segs placed for it
+    if a.dest_stubs:
+        # The destination is already fanned out, so there is no field to
+        # enter: a net whose stub exits the WEST face is an F entry on
+        # the stub end's own y, and the 'F' path below (trunk ->
+        # (x1, sy) -> (bx, sy) -> (bx, by)) collapses to the direct run
+        # when sy == by. This is the whole point of chaining a fanout in
+        # front of the braid -- the machinery above is what fails at
+        # K32 and beyond, and here it is simply not needed.
+        entry.clear()
+        fy1 = rows0[-1]
+        south = sorted((nm for nm in names if ends[nm][1][1] > fy1 + 0.2),
+                       key=lambda nm: ends[nm][1][0])
+        for nm in names:
+            if nm not in south:
+                entry[nm] = ('F', ends[nm][1][1])
+        if south:
+            # SOUTH PORT: a west-toothed net whose stub the plan sent out
+            # the SOUTH face (K15: SDQ0, which was the deepest diver of
+            # the west-only plan and is monotone this way). It rides the
+            # trunk's bottom lanes, runs east under the field on a port
+            # line below the plane-drop vias, and turns up into its own
+            # stub. Nearest stub takes the uppermost lane, so no run
+            # crosses an earlier net's turn-up. The port line steps
+            # south until every run and turn is clear of static copper.
+            y_s = fy1 + 0.55
+            while True:
+                trial = []
+                for i, nm in enumerate(south):
+                    bx_, by_ = ends[nm][1]
+                    # 0.35 pitch: the octify tube deviates each lane by
+                    # up to 0.05, and 0.27 measured 0.22 between two
+                    # port lanes at K21 (0.227 is the floor)
+                    ly_ = y_s + i * 0.35
+                    segs_ = [((x1, ly_), (bx_, ly_)), ((bx_, ly_), (bx_, by_))]
+                    if not f_ok(nm, segs_):
+                        break
+                    trial.append((nm, ly_, segs_))
+                if len(trial) == len(south):
+                    break
+                y_s += 0.15
+                assert y_s < fy1 + 6, 'no clear south port line'
+            for nm, ly_, segs_ in trial:
+                entry[nm] = ('P', (ly_, ends[nm][1][0]))
+                placed_f.extend(segs_)
+                port_placed[nm] = list(segs_)
+            print(f'south port ({len(south)}) at y={y_s:.2f}: '
+                  + ', '.join(f'{nm}@{ends[nm][1][0]:.2f}' for nm in south))
+        _ys = sorted((e[1] if e[0] == 'F' else e[1][0], nm)
+                     for nm, e in entry.items())
+        _tight = [(b, aa) for (ya, aa), (yb, b) in zip(_ys, _ys[1:])
+                  if abs(yb - ya) < 0.25]
+        if _tight:
+            # Not fatal, but not silent either: two stub ends this close
+            # share a lane and the trunk cannot separate them.
+            print(f'WARNING: {len(_tight)} stub-end pair(s) within '
+                  f'0.25mm in y -- they share a lane: '
+                  + ', '.join(f'{x}/{y}' for x, y in _tight[:6]))
+
     # lane ys: F nets pin their entry; B nets slot strictly between the
     # neighbouring F entries, ordered by site y
     f_sorted = sorted([(e[1], nm) for nm, e in entry.items()
                        if e[0] == 'F']
                       + [(e[1][2], nm) for nm, e in entry.items()
-                         if e[0] in ('N', 'S')])
+                         if e[0] in ('N', 'S')]
+                      + [(e[1][0], nm) for nm, e in entry.items()
+                         if e[0] == 'P'])
     b_nets = sorted(((e[1][1], nm) for nm, e in entry.items()
                      if e[0] == 'B'))
     lane_y = {nm: ey for ey, nm in f_sorted}
@@ -672,66 +915,94 @@ def main():
     # flying past an earlier inverted diver p it waits for p's pass if
     # p will do the passing, else for p to FINISH (window closed) --
     # so every diver-diver crossing has exactly one side on B.
-    done_moves = {d: set() for d in priority}
-    passed = set()
-    last_passed_round = {}
-    seq = list(launch)
-    cols = []            # cols[c] = [(mover, partner), ...]
-    guard = 0
+    def schedule(gap):
+        """The gated wave schedule. `gap` = spacer columns a diver
+        waits after being passed before its own first swap, so its
+        dive via has room between the passer's lane and its own first
+        crossing."""
+        done_moves = {d: set() for d in priority}
+        passed = set()
+        last_passed_round = {}
+        seq = list(launch)
+        cols = []            # cols[c] = [(mover, partner), ...]
+        guard = 0
 
-    def finished(p):
-        return len(done_moves[p]) == len(mover_set[p])
+        def finished(p):
+            return len(done_moves[p]) == len(mover_set[p])
 
-    while seq != target:
-        used = set()
-        col = []
-        delay_stall = False
-        for d in priority:
-            if d in used or finished(d):
-                continue
-            gated = False
-            for p in priority[:priority.index(d)]:
-                if not inverted(p, d):
+        while seq != target:
+            used = set()
+            col = []
+            delay_stall = False
+            for d in priority:
+                if d in used or finished(d):
                     continue
-                if d in mover_set[p]:
-                    if (p, d) not in passed:
+                gated = False
+                for p in priority[:priority.index(d)]:
+                    if not inverted(p, d):
+                        continue
+                    if d in mover_set[p]:
+                        if (p, d) not in passed:
+                            gated = True
+                            break
+                    elif not finished(p):
                         gated = True
                         break
-                elif not finished(p):
-                    gated = True
-                    break
-            if gated:
+                if gated:
+                    continue
+                # clear column(s) after being passed, so the dive via
+                # has room west of this diver's own first crossing
+                if not done_moves[d] and d in last_passed_round and \
+                        len(cols) <= last_passed_round[d] + gap:
+                    delay_stall = True
+                    continue
+                i = seq.index(d)
+                j = i + dirs[d]
+                if not (0 <= j < len(seq)):
+                    continue
+                p = seq[j]
+                if p in used or p not in mover_set[d] or \
+                        p in done_moves[d]:
+                    continue                          # stalled this round
+                seq[i], seq[j] = seq[j], seq[i]
+                col.append((d, p))
+                used.add(d)
+                used.add(p)
+                done_moves[d].add(p)
+                if p in dirs:
+                    passed.add((d, p))
+                    last_passed_round[p] = len(cols)
+            if not col and delay_stall:
+                cols.append([])          # spacer column -- the delay's point
+                guard += 1
                 continue
-            # one clear column after being passed, so the dive via has
-            # 1.5W of room west of this diver's own first crossing
-            if not done_moves[d] and d in last_passed_round and \
-                    len(cols) <= last_passed_round[d] + 1:
-                delay_stall = True
-                continue
-            i = seq.index(d)
-            j = i + dirs[d]
-            if not (0 <= j < len(seq)):
-                continue
-            p = seq[j]
-            if p in used or p not in mover_set[d] or \
-                    p in done_moves[d]:
-                continue                          # stalled this round
-            seq[i], seq[j] = seq[j], seq[i]
-            col.append((d, p))
-            used.add(d)
-            used.add(p)
-            done_moves[d].add(p)
-            if p in dirs:
-                passed.add((d, p))
-                last_passed_round[p] = len(cols)
-        if not col and delay_stall:
-            cols.append([])          # spacer column -- the delay's point
+            assert col, ('wave schedule deadlocked', seq, target)
+            cols.append(col)
             guard += 1
-            continue
-        assert col, ('wave schedule deadlocked', seq, target)
-        cols.append(col)
-        guard += 1
-        assert guard < 20 * len(names) + 20, 'wave schedule runaway'
+            assert guard < 20 * len(names) + 20, 'wave schedule runaway'
+        return cols
+
+    # The bench's rule was ONE spacer column: 1.5W of room, which at
+    # its W (~0.5) is a via's worth. In dest-stubs mode the corridor is
+    # shorter (tail room + surfacing reserve) and W drops to ~0.37, so
+    # the passed diver's dive via -- 0.36 clear of the passer's lane
+    # kink, 0.45 west of its own first crossing -- needs (gap+0.5)W >=
+    # 0.81. Iterate: more spacers shrink W, which may need more spacers.
+    # Measured at K21: SDQ13 had a 0.12 mm window at gap 1 and the last
+    # resort branch put its dive via west of the pass (B on B, 343 DRC).
+    gap = 1
+    reserve = 0.5 if a.dest_stubs else 0.0
+    for _ in range(4):
+        cols = schedule(gap)
+        if not a.dest_stubs:
+            break
+        W_est = (x1 - x0 - reserve) / (len(cols) + 1)
+        need = max(1, math.ceil(0.81 / W_est - 0.5))
+        if need <= gap:
+            break
+        gap = need
+    if gap > 1:
+        print(f'pass-to-swap gap {gap} columns (W ~{W_est:.3f})')
     swaps = [sw for col in cols for sw in col]
     seen_pairs = set()
     for (d, e) in swaps:
@@ -742,7 +1013,12 @@ def main():
     n = len(cols)
     print(f'{len(swaps)} swaps in {n} columns: {cols}')
 
-    W = (x1 - x0) / (n + 1)
+    # dest-stubs: RESERVE trunk after the last swap column. A diver
+    # that swaps in the last column needs ~0.45 mm of trunk past it to
+    # surface, and the exit line has no room for a via at all (stubs
+    # at 0.25 pitch): the bench's via-in-pad fallback put SDQM1's
+    # surface via ON its stub end, 0.25 from SDQ14's.
+    W = (x1 - x0 - reserve) / (n + 1)
     if W < 0.24:
         print(f'WARNING: column pitch {W:.3f} < 0.24mm -- expect raw '
               f'clearance violations')
@@ -815,7 +1091,14 @@ def main():
                 # (B all the way to the ball; safe: fe is None means no
                 # foreign crossing needs this diver on F east of here),
                 # else surface on the street run
-                if not a.no_vip:
+                if a.dest_stubs:
+                    # there is no pad to put a via in -- the target is a
+                    # stub end with a neighbour 0.25 away. The reserve
+                    # above is meant to make this unreachable.
+                    print(f'WARNING: {d}: no trunk room to surface after '
+                          f'its last swap (column {sk}) -- via forced '
+                          f'onto the tail')
+                if not a.no_vip and not a.dest_stubs:
                     wb = None
                     vip_nets.append(d)
                 else:
@@ -853,6 +1136,33 @@ def main():
     py = [lane_y[nm] for nm in target]
     assert all(b > a for a, b in zip(py, py[1:])), ('lane ys not strictly '
                                                     'increasing', py)
+    if a.dest_stubs:
+        # minimum lane pitch at the splice: the fanout packs stub ends
+        # at 0.25 (track + clearance), a surface via next to a lane
+        # needs 0.2885 and via_clear asks 0.36. Relax the tight pairs
+        # apart symmetrically (port lanes pinned -- they are >1 mm from
+        # anything) and let the 0.6 mm tail jog the difference.
+        MINP = 0.38
+        pinned = {i for i, nm in enumerate(target) if entry[nm][0] == 'P'}
+        for _ in range(40):
+            moved = False
+            for i in range(len(py) - 1):
+                gap = py[i + 1] - py[i]
+                if gap < MINP - 1e-9:
+                    push = (MINP - gap) / 2
+                    if i not in pinned:
+                        py[i] -= push if i + 1 not in pinned else 2 * push
+                    if i + 1 not in pinned:
+                        py[i + 1] += push if i not in pinned else 2 * push
+                    moved = True
+            if not moved:
+                break
+        jog = max(abs(py[trank[nm]] - lane_y[nm]) for nm in names)
+        if jog > 1e-6:
+            print(f'lane pitch floor {MINP}: max tail jog {jog:.3f} mm')
+        assert jog < 0.55, ('tail jog exceeds the 0.6 mm tail', jog)
+        for nm in names:
+            lane_y[nm] = py[trank[nm]]
     Ly = sorted(ends[nm][0][1] for nm in names)
     # enforce a minimum launch-slot pitch: refanned B teeth can land
     # arbitrarily close to existing teeth; the tooth legs jog the
@@ -869,7 +1179,7 @@ def main():
         # launch legs stay FLAT for the first column (dive-via room at
         # exact teeth spacing; a flat leg is octilinear and never
         # deviates), then the lane morph begins
-        xms = x0 + (x1 - x0) / (n + 1)
+        xms = x0 + W
         return max(0.0, (xm - xms) / (x1 - xms))
 
     orders = [list(launch)]
@@ -880,15 +1190,23 @@ def main():
             o[i], o[j] = o[j], o[i]
         orders.append(o)
 
-    def y_at(nm, x):
-        """The net's exact drawn trunk y at x (piecewise-linear through
-        the column midpoints; tooth west of the first, entry lane east
-        of the last)."""
+    port_path = {}        # nm -> exact drawn pts, replaces the morph
+
+    def _pts_of(nm):
+        if nm in port_path:
+            return port_path[nm]
         pts = [ends[nm][0]]
         for s in range(n + 1):
             xm = x0 + (s + 0.5) * W
             pts.append((xm, slot(morph_t(xm), orders[s].index(nm))))
         pts.append((x1, py[trank[nm]]))
+        return pts
+
+    def y_at(nm, x):
+        """The net's exact drawn trunk y at x (piecewise-linear through
+        the column midpoints; tooth west of the first, entry lane east
+        of the last)."""
+        pts = _pts_of(nm)
         if x <= pts[0][0]:
             return pts[0][1]
         for a_, b_ in zip(pts, pts[1:]):
@@ -896,6 +1214,60 @@ def main():
                 tt = (x - a_[0]) / max(b_[0] - a_[0], 1e-9)
                 return a_[1] + tt * (b_[1] - a_[1])
         return pts[-1][1]
+
+    # SOUTH PORT approaches (dest-stubs): a port net leaves the trunk
+    # right after the flat launch column and is threaded to its stub
+    # end by A*, kept 0.3 below every other lane. Done BEFORE the via
+    # placement below, which prices every other net's ACTUAL lane.
+    def _lane_y(om, x):
+        """y_at, but None east of a port path's end -- that net's copper
+        stops at its stub; a bound that kept reading its last y there
+        made the port BELOW it unreachable (K21: SDQ0 under SDQM0)."""
+        if om in port_path and x > port_path[om][-1][0] + 0.05:
+            return None
+        return y_at(om, x)
+
+    for nm in target:
+        if entry[nm][0] != 'P':
+            continue
+        # leave the trunk after the last swap column that involves this
+        # net (K21: SDQM0 is passed by two divers first), at the
+        # column midpoint so the trunk's own pts lead exactly there
+        smax = max(invol.get(nm, [-1]))
+        xs_ = x0 + W if smax < 0 else x0 + (smax + 1.5) * W
+        ys_ = y_at(nm, xs_)
+        bx_, by_ = ends[nm][1]
+        above = [om for om in names if trank[om] < trank[nm]]
+        below = [om for om in names if trank[om] > trank[nm]]
+
+        # band: below every lane that ends above it, above every lane
+        # that ends below it (final order -- valid east of xs_)
+        def _bound(x, _ab=above):
+            ys = [v for v in (_lane_y(om, x) for om in _ab)
+                  if v is not None]
+            return max(ys) + 0.26 if ys else -1e9
+
+        def _hi(x, _be=below):
+            ys = [v for v in (_lane_y(om, x) for om in _be)
+                  if v is not None]
+            return min(ys) - 0.26 if ys else 1e9
+
+        # the straight port run placed at entry time was this net's own
+        # copper; the A* replaces it (and must not be blocked by it)
+        for s_ in port_placed.get(nm, ()):
+            placed_f.remove(s_)
+        pts_ = astar_f(lambda p_, q_, _n=nm: f_ok(_n, [(p_, q_)]),
+                       (xs_, ys_), (bx_, by_), _bound, x_lo=xs_ - 0.01,
+                       bound_hi=_hi)
+        if pts_ is None:
+            print(f'WARNING: {nm}: no clear port approach -- linear morph')
+            placed_f.extend(port_placed.get(nm, ()))
+            continue
+        port_path[nm] = [p_ for p_ in _pts_of(nm) if p_[0] < xs_ - 1e-6] \
+            + pts_
+        placed_f.extend(zip(pts_, pts_[1:]))
+        print(f'{nm}: port approach {len(pts_)} pts from '
+              f'({xs_:.2f},{ys_:.2f}) to ({bx_:.2f},{by_:.2f})')
 
     # geometry-aware via placement: slide each window edge east until
     # the via clears static copper (both layers, via-pad inflated),
@@ -906,17 +1278,15 @@ def main():
 
     def trunk_pts(nm):
         if nm not in _trunk_cache:
-            pts = [ends[nm][0]]
-            for s in range(n + 1):
-                xm = x0 + (s + 0.5) * W
-                pts.append((xm, slot(morph_t(xm), orders[s].index(nm))))
-            pts.append((x1, py[trank[nm]]))
-            _trunk_cache[nm] = pts
+            _trunk_cache[nm] = _pts_of(nm)
         return _trunk_cache[nm]
+
+    _via_dbg = os.environ.get('VIA_DEBUG', '')
 
     def via_clear(d, x, force_margin=None):
         vy = y_at(d, x)
         nid = byname[d][0]
+        dbg = (d == _via_dbg)
         for layer in ('F.Cu', 'B.Cu'):
             o = obs_cache.get((nid, layer))
             if o is None:
@@ -924,10 +1294,16 @@ def main():
                 obs_cache[(nid, layer)] = o
             vv = o.point_violation((x, vy), pad=vpad2)
             if vv and vv[0] > 0:
+                if dbg:
+                    print(f'  via_dbg {d} x={x:.2f} y={vy:.2f}: static '
+                          f'{layer} {sorted(o.hugs([(x, vy)], slack=vpad2))}')
                 return False
-        if any(math.hypot(x - px, vy - pyy) < VIA_SIZE + 0.12
-               for (px, pyy) in placed_wv):
-            return False
+        for (px, pyy) in placed_wv:
+            if math.hypot(x - px, vy - pyy) < VIA_SIZE + 0.12:
+                if dbg:
+                    print(f'  via_dbg {d} x={x:.2f} y={vy:.2f}: via at '
+                          f'({px:.2f},{pyy:.2f})')
+                return False
         # tighter margin on the FLAT launch legs (no octify deviation)
         margin = force_margin or (0.31 if x < x0 + W else 0.36)
         for om in names:
@@ -938,7 +1314,11 @@ def main():
                 if max(a_[0], b_[0]) < x - 1.0 or \
                         min(a_[0], b_[0]) > x + 1.0:
                     continue
-                if ts.seg_pt_dist(a_, b_, (x, vy)) < margin:
+                dd = ts.seg_pt_dist(a_, b_, (x, vy))
+                if dd < margin:
+                    if dbg:
+                        print(f'  via_dbg {d} x={x:.2f} y={vy:.2f}: lane '
+                              f'{om} d={dd:.3f} < {margin}')
                     return False
         return True
 
@@ -975,13 +1355,21 @@ def main():
                 x_ += 0.08
         if not via_clear(d, x_, force_margin=0.30):
             # last resort: the FLAT launch leg at the true clearance
-            # floor (0.2885 + 0.5um) -- flat legs never octify-deviate
-            x_ = min(wa_max, x0 + W - 0.05)
+            # floor (0.2885 + 0.5um) -- flat legs never octify-deviate.
+            # NEVER west of the foreign-pass clamp: a diver that is
+            # passed must be on F there, and putting its dive via on
+            # the launch leg anyway is a B-on-B crossing (K21 SDQ13).
             wa_min = max(ends[d][0][0] + 0.05,
                          wa_lo_map.get(d, x0 - 0.05))
-            while not via_clear(d, x_, force_margin=0.289) and \
-                    x_ > wa_min:
-                x_ -= 0.06
+            if wa_min <= x0 + W - 0.05:
+                x_ = min(wa_max, x0 + W - 0.05)
+                while not via_clear(d, x_, force_margin=0.289) and \
+                        x_ > wa_min:
+                    x_ -= 0.06
+            else:
+                print(f'WARNING: {d}: no legal dive-via spot in '
+                      f'[{wa_min:.2f}, {wa_max:.2f}] -- keeping '
+                      f'{x_:.2f} at reduced margin')
         placed_wv.append((x_, y_at(d, x_)))
         wa = x_
         if wb is not None and (len(win) > 2 or win[1] is not None):
@@ -1007,9 +1395,22 @@ def main():
             xm = x0 + (s + 0.5) * W
             trunk.append((xm, slot(morph_t(xm), orders[s].index(nm))))
         bx, by = ends[nm][1][0], ends[nm][1][1]
-        if mode == 'F':
+        if mode == 'F' and a.dest_stubs:
+            # trunk lane (pitch-floored) to the splice, 45 degree jog
+            # onto the stub end
+            ly_ = py[trank[nm]]
+            jog_ = abs(ly_ - by)
+            path = trunk + [(x1, ly_)] + \
+                ([(bx - jog_, ly_)] if jog_ > 1e-6 else []) + [(bx, by)]
+        elif mode == 'F':
             sy = v
             path = trunk + [(x1, sy), (bx, sy), (bx, by)]
+        elif mode == 'P':
+            ly_, _bx = v
+            if nm in port_path:
+                path = list(port_path[nm])
+            else:
+                path = trunk + [(x1, ly_), (bx, ly_), (bx, by)]
         elif mode in ('N', 'S'):
             sx, ry, ly, dx_ = v
             path = [p_ for p_ in trunk if p_[0] < dx_ - 0.05] + \
@@ -1170,15 +1571,57 @@ def main():
                       < 0.005 or
                       abs(s.end_x - tp[0]) + abs(s.end_y - tp[1])
                       < 0.005)), 'B.Cu')
+        base = max(ends[nm][0][1] for nm in river2) + 0.80
+        _deep = base + (len(river2) - 1) * 0.3
+
+        def _desc_ok(nm, dx0):
+            """dest-stubs: an F tooth's jog, tooth via and B descent
+            must clear static copper. K21: SCKE1's tooth sits on the
+            west launch line below the field, and the formula via at
+            (tooth x, tooth y + 0.3) landed ON SA6's B tooth."""
+            if not a.dest_stubs or tooth_layer[nm] != 'F.Cu':
+                return True
+            nid_ = byname[nm][0]
+            if nm not in obsF:
+                obsF[nm] = build_obstacles(pcb, nid_, kids, 'F.Cu')
+            if nm not in obsB:
+                obsB[nm] = build_obstacles(pcb, nid_, kids, 'B.Cu')
+            tp = ends[nm][0]
+            vp = (dx0, tp[1] + 0.30)
+            fj = octi45(tp, vp)
+            if not all(obsF[nm].seg_clear(p_, q_)
+                       for p_, q_ in zip(fj, fj[1:]) if p_ != q_):
+                return False
+            for o in (obsF[nm], obsB[nm]):
+                vv = o.point_violation(vp, pad=(VIA_SIZE - TRACK) / 2)
+                if vv and vv[0] > 0:
+                    return False
+            return obsB[nm].seg_clear(vp, (dx0, _deep))
+
         desc_x = {}
         for nm in sorted(river2, key=lambda n: (tooth_layer[n] != 'B.Cu',
                                                 ends[n][0][0])):
             dx0 = ends[nm][0][0]
-            while any(abs(dx0 - v) < 0.28 for v in desc_x.values()):
+            while any(abs(dx0 - v) < 0.28 for v in desc_x.values()) or \
+                    not _desc_ok(nm, dx0):
                 dx0 += 0.30
+                assert dx0 < ends[nm][0][0] + 3.0, f'no descent for {nm}'
             desc_x[nm] = dx0
         r2 = sorted(river2, key=lambda nm: desc_x[nm])
-        base = max(ends[nm][0][1] for nm in r2) + 0.80
+        # dest-stubs: a stub end the fanout left on B.Cu (via-in-pad
+        # escape) is joined from the F climb through a second via 0.3
+        # below it -- the end itself may share x-y with a neighbour's
+        # F stub end (K21: SRAS under SCKE1 in one street)
+        stub_layer = {}
+        for nm in r2:
+            nid2 = byname[nm][0]
+            tp = ends[nm][1]
+            stub_layer[nm] = next(
+                (s.layer for s in pcb.segments if s.net_id == nid2
+                 and (abs(s.start_x - tp[0]) + abs(s.start_y - tp[1])
+                      < 0.005 or
+                      abs(s.end_x - tp[0]) + abs(s.end_y - tp[1])
+                      < 0.005)), 'F.Cu') if a.dest_stubs else 'F.Cu'
         # order-free street assignment (climbs are on F.Cu, so any turn
         # permutation is legal; only spacing matters). Contested columns
         # overflow to FAR streets (+-1.2/+-2.0) with a row-street run
@@ -1191,18 +1634,45 @@ def main():
             return all(abs(y_ - ry) > 0.25 or hi < rl or lo > rh
                        for (ry, rl, rh) in street_runs)
 
+        deep = base + (len(r2) - 1) * 0.3
         for nm in sorted(r2, key=lambda n: ends[n][1][0]):
             bx, by = ends[nm][1][0], ends[nm][1][1]
             cands = [(bx - half, None), (bx + half, None)]
+            if a.dest_stubs:
+                # the target is a stub end already OUTSIDE the field
+                # (south face): climb straight up its own column
+                cands.insert(0, (bx, None))
             for off in (1.5 * a.pitch, 2.5 * a.pitch):
                 for side in (by + half, by - half):
                     cands.append((bx - off, side))
                     cands.append((bx + off, side))
+            # turn-via x spacing: 0.45 on the bench (balls a pitch
+            # apart, so it never binds); with stub ends the fanout
+            # packs south exits at 0.38-0.42, and the turn vias sit on
+            # DIFFERENT run ys (0.3 apart), so 0.30 in x is already
+            # 0.42 centre-to-centre (via-via needs 0.35) and 0.30 to
+            # the neighbour's climb (via-track needs 0.2885).
+            tsp = 0.30 if a.dest_stubs else 0.45
             for tx_, ry_ in cands:
-                if any(abs(tx_ - v[0]) < 0.45 for v in turns.values()):
+                if any(abs(tx_ - v[0]) < tsp for v in turns.values()):
                     continue
                 if ry_ is not None and not run_free(ry_, tx_, bx):
                     continue
+                if a.dest_stubs:
+                    # the climb must clear static copper and the west
+                    # braid's south-port runs (bench path unchanged: it
+                    # never checked, and its K4..K19 rungs are pinned)
+                    if ry_ is None:
+                        climb = [((tx_, deep), (tx_, by))]
+                    else:
+                        climb = [((tx_, deep), (tx_, ry_)),
+                                 ((tx_, ry_), (bx, ry_)), ((bx, ry_), (bx, by))]
+                    if nm not in obsF:
+                        obsF[nm] = build_obstacles(pcb, byname[nm][0],
+                                                   kids, 'F.Cu')
+                    if not f_ok(nm, climb):
+                        continue
+                    placed_f.extend(climb)
                 turns[nm] = (tx_, ry_)
                 if ry_ is not None:
                     street_runs.append((ry_, min(tx_, bx), max(tx_, bx)))
@@ -1228,7 +1698,13 @@ def main():
                 start = vp
             pts_b = [start, (dx0, run_y - 0.15), (dx0 + 0.15, run_y),
                      (tx_, run_y)]
-            if ry_ is None:
+            tail_b = []
+            if stub_layer[nm] == 'B.Cu' and ry_ is None and tx_ == bx:
+                vp2 = (bx, by + 0.30)
+                pts_f = [(tx_, run_y), vp2]
+                vias2.append(vp2)
+                tail_b = [(vp2, (bx, by))]
+            elif ry_ is None:
                 pts_f = [(tx_, run_y), (tx_, by), (bx, by)]
             else:
                 pts_f = [(tx_, run_y), (tx_, ry_), (bx, ry_), (bx, by)]
@@ -1237,6 +1713,7 @@ def main():
                       for p_, q_ in zip(pts_b, pts_b[1:]) if p_ != q_]
             segs2 += [(p_, q_, 'F.Cu')
                       for p_, q_ in zip(pts_f, pts_f[1:]) if p_ != q_]
+            segs2 += [(p_, q_, 'B.Cu') for p_, q_ in tail_b]
             out_segs[nm] = segs2
             out_vias[nm] = vias2
         names = all_names

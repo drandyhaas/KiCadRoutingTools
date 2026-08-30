@@ -402,6 +402,20 @@ def generate_underpad_escape(footprint: Footprint,
                              # it is today.
                              escape_dir_hints: Optional[Dict[
                                  Tuple[float, float], str]] = None,
+                             # Per-pad exit LINE, in mm along the exit
+                             # edge (y for a left/right escape, x for
+                             # up/down). A side alone does not pin the
+                             # permutation -- which row gap a ball takes
+                             # is what fixes its place in the
+                             # launch->exit order, and the order IS the
+                             # via floor. Measured on the bench: hints
+                             # carrying only the side left 14 of 15
+                             # stubs off the line the plan chose and
+                             # raised the inversion count from 38 to 53,
+                             # handing the next stage a permutation
+                             # nobody had chosen.
+                             escape_line_hints: Optional[Dict[
+                                 Tuple[float, float], float]] = None,
                              # progress_callback(current, total, label); the
                              # per-ball A* is where a large array's minutes go,
                              # so each escape loop reports its count through
@@ -1098,6 +1112,26 @@ def generate_underpad_escape(footprint: Footprint,
         'down': lambda ix, iy: max(0, by1 - iy),
     }
 
+    def _line_of(p, side):
+        """(cell coordinate, tolerance in cells) for this pad's exit line
+        hint, or None. Half a pitch of slack: the plan names a row GAP,
+        and landing anywhere in that gap preserves the order, while
+        demanding an exact cell would just fail the search."""
+        if not escape_line_hints or not side:
+            return None
+        v = escape_line_hints.get((round(p.global_x, 3),
+                                   round(p.global_y, 3)))
+        if v is None:
+            return None
+        ix, iy = occ.cell(v, v)
+        pitch = grid.pitch_y if side in ('left', 'right') else grid.pitch_x
+        # 0.3 of a pitch, not 0.5: at half a pitch the neighbouring
+        # PAD ROW is exactly on the tolerance edge and gets accepted,
+        # which is what let 13 of 15 stubs land off the plan's gap
+        # while the search reported success.
+        tol = max(1.0, (pitch * 0.3) / occ.res)
+        return ((iy if side in ('left', 'right') else ix), tol)
+
     def _left_on(side, cx, cy):
         """Did the path leave the array on `side`?"""
         if side == 'left':
@@ -1113,7 +1147,8 @@ def generate_underpad_escape(footprint: Footprint,
                    p.global_y - grid.min_y, grid.max_y - p.global_y)
 
     def astar(sx, sy, home, route_layers, allow_via, via_ok=None, net_id=0,
-              carve=None, start_layer=None, cost_out=None, side=None):
+              carve=None, start_layer=None, cost_out=None, side=None,
+              line=None):
         """Route from the pad to any boundary cell.
 
         `route_layers` = the set of layer indices the track may run on. The pad
@@ -1141,6 +1176,17 @@ def generate_underpad_escape(footprint: Footprint,
         # the heuristic at it. None = leave on whichever edge is nearest,
         # which is what every caller without a plan does.
         _h = _SIDE_H.get(side, heur) if side else heur
+        # `line` pins WHERE along that side, in cells. The exit
+        # coordinate is y for a left/right escape and x for up/down.
+        _lax = 1 if side in ('left', 'right') else 0
+        if side and line is not None:
+            _lc, _ltol = line
+
+            def _h(ix, iy, _b=_SIDE_H[side], _c=_lc):
+                # still admissible: the true remaining cost is at least
+                # the distance to the edge AND at least the distance
+                # along it, so the max of the two underestimates.
+                return max(_b(ix, iy), abs((iy if _lax else ix) - _c))
         start = (sx, sy, top_idx if start_layer is None else start_layer)
         g = {start: 0.0}
         pq = [(_h(sx, sy), start)]
@@ -1165,7 +1211,9 @@ def generate_underpad_escape(footprint: Footprint,
             _, cur = _heappop(pq)
             cx, cy, L = cur
             if not (bx0 <= cx <= bx1 and by0 <= cy <= by1) \
-                    and (side is None or _left_on(side, cx, cy)):
+                    and (side is None or _left_on(side, cx, cy)) \
+                    and (line is None or side is None
+                         or abs((cy if _lax else cx) - line[0]) <= line[1]):
                 if cost_out is not None:
                     # outside the window the tie-break heuristic is 0, so the
                     # popped priority IS the path's g-cost (#563 layer compare)
@@ -1312,6 +1360,7 @@ def generate_underpad_escape(footprint: Footprint,
     # way. Reported rather than swallowed: a plan silently half-applied
     # is worse than one that says which half did not fit.
     _hint_missed: List[str] = []
+    _line_missed: List[str] = []
     nvia = 0
     n_fcu = 0
 
@@ -1819,7 +1868,14 @@ def generate_underpad_escape(footprint: Footprint,
             _side = (escape_dir_hints or {}).get(
                 (round(p.global_x, 3), round(p.global_y, 3)))
             path = None
-            if _side:
+            _line = _line_of(p, _side)
+            if _side and _line:
+                path = astar(sx, sy, home, {top_idx}, allow_via=False,
+                             net_id=p.net_id, carve=carve, side=_side,
+                             line=_line)
+                if path is None:
+                    _line_missed.append(p.net_name)
+            if path is None and _side:
                 path = astar(sx, sy, home, {top_idx}, allow_via=False,
                              net_id=p.net_id, carve=carve, side=_side)
                 if path is None:
@@ -2202,7 +2258,18 @@ def generate_underpad_escape(footprint: Footprint,
         _side = (escape_dir_hints or {}).get(
             (round(p.global_x, 3), round(p.global_y, 3)))
         path = None
-        if _side:
+        _line = _line_of(p, _side)
+        if _side and _line:
+            path = astar(sx, sy, home, inner_layers, allow_via=True,
+                         via_ok=_via_ok, net_id=p.net_id, carve=carve,
+                         side=_side, line=_line)
+            if path is None and nl > 1:
+                path = astar(sx, sy, home, set(range(nl)), allow_via=True,
+                             via_ok=_via_ok, net_id=p.net_id, carve=carve,
+                             side=_side, line=_line)
+            if path is None:
+                _line_missed.append(p.net_name)
+        if _side and path is None:
             path = astar(sx, sy, home, inner_layers, allow_via=True,
                          via_ok=_via_ok, net_id=p.net_id, carve=carve,
                          side=_side)
@@ -2537,6 +2604,12 @@ def generate_underpad_escape(footprint: Footprint,
     from fab_notes import print_via_in_pad_note
     print_via_in_pad_note(vias_to_add, pcb_data.pads_by_net,
                           context="BGA under-pad escape")
+    if _line_missed and verbose:
+        print(f"  Under-pad: {len(_line_missed)} ball(s) could not reach "
+              f"the exit LINE asked for and took another gap on the same "
+              f"side [{', '.join(sorted(_line_missed)[:6])}"
+              + (f", +{len(_line_missed) - 6} more"
+                 if len(_line_missed) > 6 else "") + "]")
     if _hint_missed and verbose:
         print(f"  Under-pad: {len(_hint_missed)} ball(s) had no route out "
               f"the side the caller asked for and escaped elsewhere "

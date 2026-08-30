@@ -2412,6 +2412,11 @@ def _generate_bga_fanout_core(footprint: Footprint,
                         # behaviour.
                         escape_dir_hints: Optional[Dict[Tuple[float, float],
                                                         str]] = None,
+                        # Per-pad exit LINE in mm along that side. A side
+                        # alone does not pin the permutation; the row gap
+                        # does, and the permutation is the via floor.
+                        escape_line_hints: Optional[Dict[
+                            Tuple[float, float], float]] = None,
                         _pad_filter: Optional[Set[Tuple[float, float]]] = None,
                         _ignore_prefanned: bool = False,
                         _single_pass: bool = False,
@@ -2580,6 +2585,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             no_inner_top_layer=no_inner_top_layer, escape_method=escape_method,
             grid_step=grid_step, layer_costs=layer_costs,
             escape_dir_hints=_hints,
+            escape_line_hints=escape_line_hints,
             same_net_pad_clearance=same_net_pad_clearance,
             cancel_check=cancel_check,
             progress_callback=progress_callback)
@@ -2678,6 +2684,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 via_drill=via_drill, no_inner_top_layer=no_inner_top_layer,
                 escape_method=escape_method, grid_step=grid_step,
                 layer_costs=layer_costs, escape_dir_hints=escape_dir_hints,
+                escape_line_hints=escape_line_hints,
                 same_net_pad_clearance=same_net_pad_clearance,
                 cancel_check=cancel_check,
                 progress_callback=progress_callback)
@@ -3055,6 +3062,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             no_via_in_pad=(same_net_pad_clearance is not None
                            and same_net_pad_clearance > 0),  # #581
             escape_dir_hints=escape_dir_hints,
+            escape_line_hints=escape_line_hints,
             # Rides _up_kw so the shrink rescue's re-run reports too.
             progress_callback=progress_callback,
             cancel_check=cancel_check,
@@ -3700,6 +3708,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 check_for_previous=check_for_previous,
                 no_inner_top_layer=no_inner_top_layer, escape_method=method,
                 grid_step=grid_step, escape_dir_hints=escape_dir_hints,
+                escape_line_hints=escape_line_hints,
                 _pad_filter=_pad_filter,
                 _ignore_prefanned=_ignore_prefanned, _single_pass=_single_pass,
                 same_net_pad_clearance=same_net_pad_clearance,
@@ -4014,6 +4023,11 @@ def generate_bga_fanout(footprint: Footprint,
                         # fills only the pads left unnamed. None = unchanged.
                         escape_dir_hints: Optional[Dict[Tuple[float, float],
                                                         str]] = None,
+                        # Per-pad exit LINE in mm along that side. A side
+                        # alone does not pin the permutation; the row gap
+                        # does, and the permutation is the via floor.
+                        escape_line_hints: Optional[Dict[
+                            Tuple[float, float], float]] = None,
                         _pad_filter: Optional[Set[Tuple[float, float]]] = None,
                         _ignore_prefanned: bool = False,
                         _single_pass: bool = False,
@@ -4117,6 +4131,7 @@ def generate_bga_fanout(footprint: Footprint,
         no_inner_top_layer=no_inner_top_layer, escape_method=escape_method,
         grid_step=grid_step, layer_costs=layer_costs, cancel_check=_cc,
         escape_dir_hints=escape_dir_hints,
+        escape_line_hints=escape_line_hints,
         progress_callback=progress_callback,
         _pad_filter=_pad_filter, _ignore_prefanned=_ignore_prefanned,
         _single_pass=_single_pass,

@@ -43,6 +43,23 @@ NO_HINTS = '--no-hints' in sys.argv
 BOTH = '--both-ends' in sys.argv
 METHOD = next((a.split('=', 1)[1] for a in sys.argv
                if a.startswith('--escape-method=')), 'auto')
+# Restrict the plan to one exit side. The braid delivers from the WEST
+# splice line and has no mechanism to reach any other face, so a chain
+# that means to hand off to it has to plan within that limit; without
+# this the plan spreads over all four sides and most nets have no
+# corridor at all. Not a fact about this board -- a fact about what the
+# braid can currently do.
+ONLY = next((set(a.split('=', 1)[1].split(',')) for a in sys.argv
+             if a.startswith('--dirs=')), None)
+# The plane-drop pass collides with the decoupling caps under the array
+# on this bench -- 4 pad-via violations present with hints, without
+# hints, and with no braid at all. It is a defect of that pass, not of
+# anything here, so it gets a switch: with it off, what the DRC count
+# reports is the escapes and the braid alone.
+NO_DROP = '--no-plane-drop' in sys.argv
+# Negative control for the exit-line hint specifically: directions
+# still applied, gaps left to the fanout.
+NO_LINES = '--no-lines' in sys.argv
 base = os.path.join(HERE, 'fb_t2q_base.kicad_pcb')
 
 names = subprocess.run([sys.executable,
@@ -115,16 +132,30 @@ for nm in names:
         'F.Cu')
 
 print('planning...')
+if ONLY:
+    dmenu = {n: [m for m in ms if m.direction in ONLY]
+             for n, ms in dmenu.items()}
+    _empty = [n for n, ms in dmenu.items() if not ms]
+    if _empty:
+        print(f'  {len(_empty)} net(s) have NO move on {",".join(ONLY)}: '
+              + ','.join(_empty[:8]))
 schoice, choice, lp, report = pe.plan_ends(
     smenu, dmenu, launch, sgrid.bbox, dgrid.bbox, buses=buses,
     tooth_layer0=tooth0)
 for line in report:
     print(line)
 
-hints = {}
+hints, lines = {}, {}
 for nm, m in choice.items():
     p = dst_pad[nm]
-    hints[(round(p.global_x, 3), round(p.global_y, 3))] = m.direction
+    k = (round(p.global_x, 3), round(p.global_y, 3))
+    hints[k] = m.direction
+    # the exit LINE: which row gap (left/right) or column gap (up/down)
+    # the plan put this net in. The side alone leaves the fanout free to
+    # pick the gap, and the gap is what the launch->exit permutation --
+    # and so the via floor -- is actually made of.
+    lines[k] = m.exit_pt[1] if m.direction in ('left', 'right') \
+        else m.exit_pt[0]
 print(f'\nplan: {len(hints)} berth escape directions '
       + ', '.join(f'{d}:{sum(1 for v in hints.values() if v == d)}'
                   for d in sorted(set(hints.values()))))
@@ -141,7 +172,9 @@ tracks, vias_add, vias_rm, failed = generate_bga_fanout(
     via_size=0.45, via_drill=0.25,
     exit_margin=0.5,
     escape_method=METHOD,
+    plane_drop=('off' if NO_DROP else 'auto'),
     escape_dir_hints=(None if NO_HINTS else hints),
+    escape_line_hints=(None if (NO_HINTS or NO_LINES) else lines),
 )
 
 net_names = {nid: n.name for nid, n in pcb.nets.items()}
