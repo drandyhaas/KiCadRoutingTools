@@ -120,7 +120,8 @@ def accept_score(cmd: str, placed: str, routed: str, json_file: str):
 
 
 def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str,
-              json_file: str = None, extra_targets=None):
+              json_file: str = None, extra_targets=None, *,
+              keep_blocker_cells: bool = False):
     """Run route.py and return its metrics dict.
 
     `json_file` asks route.py to also write its MERGED summary there
@@ -171,17 +172,43 @@ def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str,
             f"whole-board result.\nsee {log_file}\n"
             + _log_tail(log))
 
-    return metrics_from_summary(summary, log, extra_targets)
+    return metrics_from_summary(summary, log, extra_targets,
+                                keep_blocker_cells=keep_blocker_cells)
 
 
 def metrics_from_summary(summary: dict, log: str = '',
-                         extra_targets=None) -> dict:
+                         extra_targets=None, *,
+                         keep_blocker_cells: bool = False) -> dict:
     """Round metrics from an already-merged JSON_SUMMARY.
 
     Split out of run_route (#431) so a renderer can caption a recorded round
     from its `loop_roundN_route.log` using THIS arithmetic rather than a second
     implementation that drifts. Pure: no subprocess, no file IO. `log` is only
     the pre-#409 blocker fallback.
+
+    `keep_blocker_cells` (#553) adds two keys and changes nothing else. The
+    seven-key form is what `write_round_sidecar` serialises verbatim into
+    `loop_round{N}.json` (:272), so an unconditional key would change the
+    sidecar bytes of every run that does not want it. Off by default; the loop
+    passes it only in `--target-select diagnosis`.
+
+      blocker_report            the raw `summary['blockers']` list, or None on
+                                the pre-#409 regex path. None and [] are
+                                DIFFERENT: [] means "structured emitter, nothing
+                                left to attribute" (see below), None means "no
+                                structured evidence exists at all". A consumer
+                                that conflates them imputes evidence.
+      blockers_without_counts   attributions naming a net with no cell counts:
+                                every entry of route.py's `stage='preexisting'`
+                                variant (route.py:3756-3760 emits {'net': n,
+                                'preexisting': True} and nothing else), plus
+                                every name on the regex path. Counted, never
+                                imputed a count of 1.
+
+    Why carry it rather than re-read `work/loop_round{N}_route.json`: run_route
+    only adds `--json-out` when the operator did not put their own in
+    `--route-args` (:139-140), so on a legal invocation that file is never
+    written. The merged summary is in hand here.
     """
     failed_nets = list(summary.get('failed_single', []))
     # Nets the CALLER named as the thing to work on, whether or not the router
@@ -226,7 +253,7 @@ def metrics_from_summary(summary: dict, log: str = '',
     else:
         blockers = set(re.findall(r'^\s+\d+\.\s+(\S+?):\s+\d+\s+\(', log, re.M))
 
-    return {
+    out = {
         'failures': failures,
         'failed_nets': failed_nets,
         'blockers': sorted(blockers),
@@ -238,6 +265,19 @@ def metrics_from_summary(summary: dict, log: str = '',
         'pad_pairs_connected': summary.get('pad_pairs_connected', 0),
         'pad_pairs_total': summary.get('pad_pairs_total', 0),
     }
+    if keep_blocker_cells:
+        # The cell counts the seven-key form discards above. No coordinates
+        # exist anywhere in this JSON (blocking_analysis.blocking_info_to_dict
+        # serialises counts only), and none is invented here.
+        if jb is None:
+            out['blocker_report'] = None
+            out['blockers_without_counts'] = len(blockers)
+        else:
+            out['blocker_report'] = jb
+            out['blockers_without_counts'] = sum(
+                1 for e in jb for b in e.get('blocked_by', [])
+                if 'blocked_count' not in b)
+    return out
 
 
 def write_round_sidecar(work: str, rnd: int, *, board: str, routed: str,
