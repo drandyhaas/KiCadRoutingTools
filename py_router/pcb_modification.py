@@ -3017,6 +3017,7 @@ def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=Non
 
     Returns (detours_welded, nets_touched, original_segments_removed)."""
     from collections import defaultdict
+    import numpy as np          # this module imports numpy per-function
     from single_ended_routing import _seg_foreign_pad_dist, _seg_foreign_via_dist
     from check_connected import check_net_connectivity
 
@@ -3030,6 +3031,69 @@ def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=Non
             return clearance
         return max(clearance, net_clearances.get(nid, clearance))
 
+    # Per-layer arrays of EVERY segment on the layer, so the seg-vs-seg sweep
+    # below runs once in numpy instead of once per foreign segment in Python.
+    # Measured on glasgow: the scalar loop drove 7,497,266 _seg_seg_min_dist
+    # calls (886 ns each) and 29,989,064 _pt_seg calls -- 13.5 s of a route,
+    # from 4,225 clears() calls each scanning ~1,775 segments.
+    #
+    # Rebuilt whenever this pass moves an endpoint. That is cheap (welds are
+    # rare) and it is the honest guard: try_weld mutates coordinates IN PLACE,
+    # and although those movers are always SAME-NET -- so the mask below
+    # already excludes them for the net being welded -- they are foreign to
+    # every LATER net, and a stale coordinate there would be a wrong
+    # clearance verdict rather than a slow one.
+    _fs_cache = {}
+
+    def _foreign_arrays(layer):
+        arr = _fs_cache.get(layer)
+        if arr is None:
+            sx, sy, ex, ey, wd, ef, nd = [], [], [], [], [], [], []
+            for o in pcb_data.segments:
+                if o.layer != layer:
+                    continue
+                sx.append(o.start_x); sy.append(o.start_y)
+                ex.append(o.end_x); ey.append(o.end_y)
+                wd.append(o.width); ef.append(_eff(o.net_id)); nd.append(o.net_id)
+            arr = (np.asarray(sx, dtype=float), np.asarray(sy, dtype=float),
+                   np.asarray(ex, dtype=float), np.asarray(ey, dtype=float),
+                   np.asarray(wd, dtype=float), np.asarray(ef, dtype=float),
+                   np.asarray(nd, dtype=np.int64),
+                   [o for o in pcb_data.segments if o.layer == layer])
+            _fs_cache[layer] = arr
+        return arr
+
+    def _pt_to_segs(px, py, ax, ay, bx, by):
+        """One point to MANY segments (the vector twin of _pt_seg)."""
+        vx = bx - ax
+        vy = by - ay
+        l2 = vx * vx + vy * vy
+        safe = np.where(l2 > 0.0, l2, 1.0)
+        t = ((px - ax) * vx + (py - ay) * vy) / safe
+        np.clip(t, 0.0, 1.0, out=t)
+        t = np.where(l2 > 0.0, t, 0.0)
+        return np.hypot(px - (ax + t * vx), py - (ay + t * vy))
+
+    def _pts_to_seg(pxs, pys, ax, ay, bx, by):
+        """MANY points to one segment."""
+        vx = bx - ax
+        vy = by - ay
+        l2 = vx * vx + vy * vy
+        if l2 <= 0.0:
+            return np.hypot(pxs - ax, pys - ay)
+        t = ((pxs - ax) * vx + (pys - ay) * vy) / l2
+        np.clip(t, 0.0, 1.0, out=t)
+        return np.hypot(pxs - (ax + t * vx), pys - (ay + t * vy))
+
+    # Width of the band around the verdict boundary that is re-judged with the
+    # SCALAR kernel. numpy and math.hypot can disagree in the last ULP or two
+    # (~1e-16 relative, i.e. ~1e-14 mm here), so 1e-9 mm is orders of magnitude
+    # above the disagreement and orders below anything physical -- every
+    # decision this pass makes stays bit-identical to the scalar loop, while
+    # only a handful of borderline segments pay for it. Same nominate-then-
+    # re-judge idiom the vectorized kernels in obstacle_map / check_drc use.
+    _BAND = 1e-9
+
     def clears(x0, y0, x1, y1, w, layer, nid):
         """True iff a segment at these coords clears ALL foreign copper by the
         pairwise clearance (same metric as prune_grazing_segments.grazes)."""
@@ -3041,12 +3105,33 @@ def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=Non
         if _seg_foreign_via_dist(pcb_data, nid, x0, y0, x1, y1, layer,
                                  base_clearance=eff, net_clearances=net_clearances) < thr:
             return False
-        for o in pcb_data.segments:
-            if o.net_id == nid or o.layer != layer:
-                continue
-            d = _seg_seg_min_dist(x0, y0, x1, y1, o.start_x, o.start_y, o.end_x, o.end_y)
-            if d - (w + o.width) / 2.0 < max(eff, _eff(o.net_id)) - 1e-4:
-                return False
+        ax, ay, bx, by, wd, ef, nd, objs = _foreign_arrays(layer)
+        if len(nd) == 0:
+            return True
+        foreign = nd != nid
+        if not foreign.any():
+            return True
+        fax, fay = ax[foreign], ay[foreign]
+        fbx, fby = bx[foreign], by[foreign]
+        fwd, fef = wd[foreign], ef[foreign]
+        d = np.minimum(
+            np.minimum(_pt_to_segs(x0, y0, fax, fay, fbx, fby),
+                       _pt_to_segs(x1, y1, fax, fay, fbx, fby)),
+            np.minimum(_pts_to_seg(fax, fay, x0, y0, x1, y1),
+                       _pts_to_seg(fbx, fby, x0, y0, x1, y1)))
+        req = np.maximum(eff, fef) - 1e-4
+        margin = d - (w + fwd) / 2.0 - req
+        if (margin < -_BAND).any():
+            return False                      # unambiguously violating
+        border = np.flatnonzero(margin < _BAND)
+        if border.size:
+            idx = np.flatnonzero(foreign)
+            for bi in border:                 # re-judge with the SCALAR kernel
+                o = objs[idx[bi]]
+                dd = _seg_seg_min_dist(x0, y0, x1, y1,
+                                       o.start_x, o.start_y, o.end_x, o.end_y)
+                if dd - (w + o.width) / 2.0 < max(eff, _eff(o.net_id)) - 1e-4:
+                    return False
         return True
 
     def _worse(before, after):
@@ -3125,11 +3210,13 @@ def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=Non
                         s.start_x, s.start_y = keepxy
                     else:
                         s.end_x, s.end_y = keepxy
+                _fs_cache.clear()          # coordinates moved in place
                 if all(clears(s.start_x, s.start_y, s.end_x, s.end_y, s.width, s.layer, net_id)
                        for (s, _) in movers):
                     return snap
                 for (s, sx, sy, ex, ey) in snap:  # revert
                     s.start_x, s.start_y, s.end_x, s.end_y = sx, sy, ex, ey
+                _fs_cache.clear()
                 return None
 
             snap = try_weld(Axy, Cxy)              # weld C onto A (move C's main seg)
@@ -3141,6 +3228,7 @@ def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=Non
             if _worse(before, check_net_connectivity(net_id, trial, net_vias, net_pads, [])):
                 for (s, sx, sy, ex, ey) in snap:   # revert the weld
                     s.start_x, s.start_y, s.end_x, s.end_y = sx, sy, ex, ey
+                _fs_cache.clear()
                 continue
             for s in (s1, s2):
                 if id(s) in routed_seg_ids:

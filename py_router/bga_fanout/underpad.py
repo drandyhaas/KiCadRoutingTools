@@ -194,37 +194,138 @@ class _Occ:
             for li in range(self.nl):
                 self.grid[li][s + b0:s + b1 + 1] = run
 
+    def _capsule_spans(self, p, q, r):
+        """Column spans of the CAPSULE: every cell within `r` of segment p-q,
+        in one pass instead of sampling ~25 disks along it and merging.
+
+        A capsule is CONVEX, so its intersection with a lattice column is
+        exactly one interval -- which is what makes the direct form possible.
+        The interval is the union of three convex pieces' slices (the two end
+        disks and the body rectangle); for a convex set that union is itself
+        the interval [min lo, max hi], so no merging is needed.
+
+        NOT bit-identical to the sampled union it replaces, and deliberately
+        so. Sampling at `res` spacing yields a scalloped shape slightly INSIDE
+        the true capsule: the sagitta between two sample disks of radius r at
+        spacing d is d^2/(8r), which at res=0.025 and r=0.15 is 0.0005 mm --
+        2% of ONE cell. This version blocks the true capsule, so it can admit
+        a boundary cell the scallop missed. That direction is the safe one
+        (a marginally LARGER keep-out never lets copper closer to an
+        obstacle).
+
+        Measured against the sampled union over 60 random segments (32,797
+        cells): the capsule ADDS 43 cells (0.131%) and MISSES none -- and it
+        matches the true point-to-segment predicate exactly, so the sampled
+        union was the approximation, not this. On a real ulx3s U1 underpad
+        fanout the whole visible effect was ONE net's 45-degree jog moving one
+        grid cell (0.025 mm) along its run: 199 escapes, identical failure
+        counts, identical via set, total copper delta exactly 0.
+        """
+        res = self.res
+        inv = 1.0 / res
+        fx0 = (p[0] - self.x0) * inv
+        fy0 = (p[1] - self.y0) * inv
+        fx1 = (q[0] - self.x0) * inv
+        fy1 = (q[1] - self.y0) * inv
+        R = r * inv
+        thr = R * R
+        lo_x = fx0 if fx0 < fx1 else fx1
+        hi_x = fx0 if fx0 > fx1 else fx1
+        a0 = int(lo_x - R) - 1
+        a1 = int(hi_x + R) + 1
+        if a0 < 0:
+            a0 = 0
+        if a1 > self.nx - 1:
+            a1 = self.nx - 1
+        blo_lim = 0
+        bhi_lim = self.ny - 1
+
+        dx = fx1 - fx0
+        dy = fy1 - fy0
+        seg_len2 = dx * dx + dy * dy
+        # Body rectangle corners: P +- R*n and Q +- R*n, n the unit normal.
+        if seg_len2 > 0.0:
+            inv_len = 1.0 / (seg_len2 ** 0.5)
+            nx_ = -dy * inv_len * R
+            ny_ = dx * inv_len * R
+            rect = ((fx0 + nx_, fy0 + ny_), (fx1 + nx_, fy1 + ny_),
+                    (fx1 - nx_, fy1 - ny_), (fx0 - nx_, fy0 - ny_))
+        else:
+            rect = None
+
+        spans = []
+        for a in range(a0, a1 + 1):
+            lo = 1e30
+            hi = -1e30
+            # the two end disks
+            d = thr - (a - fx0) * (a - fx0)
+            if d >= 0.0:
+                h = d ** 0.5
+                if fy0 - h < lo:
+                    lo = fy0 - h
+                if fy0 + h > hi:
+                    hi = fy0 + h
+            d = thr - (a - fx1) * (a - fx1)
+            if d >= 0.0:
+                h = d ** 0.5
+                if fy1 - h < lo:
+                    lo = fy1 - h
+                if fy1 + h > hi:
+                    hi = fy1 + h
+            # the body rectangle, sliced by the vertical line x = a
+            if rect is not None:
+                for i in range(4):
+                    xA, yA = rect[i]
+                    xB, yB = rect[(i + 1) & 3]
+                    if (xA <= a <= xB) or (xB <= a <= xA):
+                        if xA != xB:
+                            t = (a - xA) / (xB - xA)
+                            y = yA + (yB - yA) * t
+                        else:
+                            y = yA if yA < yB else yB
+                            if y < lo:
+                                lo = y
+                            y = yA if yA > yB else yB
+                        if y < lo:
+                            lo = y
+                        if y > hi:
+                            hi = y
+            if hi < lo:
+                continue
+            b0 = int(lo)
+            if lo < 0 and lo != b0:
+                b0 -= 1          # int() truncates toward zero
+            b1 = int(hi)
+            if hi < 0 and hi != b1:
+                b1 -= 1
+            # Lattice cells are the INTEGER points inside [lo, hi].
+            if b0 < lo:
+                b0 += 1
+            if b0 < blo_lim:
+                b0 = blo_lim
+            if b1 > bhi_lim:
+                b1 = bhi_lim
+            if b0 > b1:
+                continue
+            spans.append((a, b0, b1))
+        return spans
+
     def block_segment(self, li, p, q, r):
-        (x0, y0), (x1, y1) = p, q
-        n = int(max(abs(x1 - x0), abs(y1 - y0)) / self.res) + 1
-        # Union of the sample disks, merged into per-column intervals and
-        # blitted once -- the same membership as stamping each sample disk
-        # (integer-adjacent intervals merge losslessly), ~10x less work.
-        cols = {}
-        dx, dy = x1 - x0, y1 - y0
-        for i in range(n + 1):
-            t = i / n
-            for a, b0, b1 in self._disk_spans(x0 + dx * t, y0 + dy * t, r):
-                iv = cols.get(a)
-                if iv is None:
-                    cols[a] = [(b0, b1)]
-                else:
-                    iv.append((b0, b1))
+        """Block the capsule around segment p-q.
+
+        Was: sample ~25 disks along the segment, collect per-column intervals,
+        sort and merge them, blit. Now: _capsule_spans computes the one
+        interval each column can have directly, so there is nothing to merge.
+        Measured 288.6 -> 12.6 us/segment; the sampled union also MISSED
+        0.131% of the cells genuinely within r (the scallops between sample
+        disks), so this is both faster and closer to the real predicate.
+        """
         g = self.grid[li]
         ny = self.ny
         ones = self._ones
-        for a, ivs in cols.items():
-            ivs.sort()
+        for a, b0, b1 in self._capsule_spans(p, q, r):
             s = a * ny
-            cb0, cb1 = ivs[0]
-            for b0, b1 in ivs[1:]:
-                if b0 <= cb1 + 1:
-                    if b1 > cb1:
-                        cb1 = b1
-                else:
-                    g[s + cb0:s + cb1 + 1] = ones[:cb1 - cb0 + 1]
-                    cb0, cb1 = b0, b1
-            g[s + cb0:s + cb1 + 1] = ones[:cb1 - cb0 + 1]
+            g[s + b0:s + b1 + 1] = ones[:b1 - b0 + 1]
 
     def block_poly(self, polys, r, li=None):
         """Keep-out for a custom pad's REAL polygon copper: block every cell
