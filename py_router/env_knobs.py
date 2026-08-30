@@ -350,11 +350,22 @@ def refresh() -> None:
     # whole and protected from re-ripping. Runs ONCE, at the reroute queue's
     # drain, and only inside a reconcile sub-run.
     #
-    # OPT-IN here, though the source branch shipped it default ON: it changes
-    # which copper survives a rip exchange on every board, and nothing on
-    # main's corpus has measured it yet. Arm it for the A/B; flip the default
-    # only once a sets 1-5 run says it earns it.
-    g['VICTIM_RESTORE'] = _opt_in('KICAD_VICTIM_RESTORE')
+    # DEFAULT ON since the sets 1-5 A/B (2026-08-30). Ported opt-in and armed
+    # for measurement; the arm beat the stack on BOTH axes -- real DRC 23 -> 18
+    # and incomplete nets 125 -> 120 over 74 boards, 4 boards improved and 1
+    # regressed (keks +1). No broad harm, which is the result that would have
+    # argued against it.
+    #
+    # The connectivity win is concentrated (zynq_ad9364 supplies all 5), so this
+    # rests as much on PRINCIPLE as on the corpus: a rip is a trade, #85 already
+    # refuses to commit one that is not a net improvement, but that check runs
+    # at RIP time. When the victim's reroute later fails and its full restore is
+    # refused because the ripper's copper now holds the channel, the trade has
+    # silently failed -- ripper gained, victim ships broken, nothing re-checks.
+    # This closes that gap at the last moment before shipping, and the squatters
+    # are REQUEUED rather than dropped, so it is a re-run of the exchange rather
+    # than a reversal of it. KICAD_VICTIM_RESTORE=0 reverts.
+    g['VICTIM_RESTORE'] = _on_default('KICAD_VICTIM_RESTORE')
     # #622 pocket-stuck rip targeting (ported from bus622-take2 947698d6): when
     # one A* direction exhausts at <=20% of the other side's iterations, the rip
     # ladder re-analyzes THAT direction's blocked cells alone. The union let the
