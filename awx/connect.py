@@ -158,7 +158,8 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
             virtual: Optional[List[Tuple[Point, Point, str]]] = None,
             track_width: Optional[float] = None,
             verbose: bool = False,
-            window_pts: Optional[List[Point]] = None
+            window_pts: Optional[List[Point]] = None,
+            virtual_vias: Optional[List[Point]] = None
             ) -> Optional[Tuple[List[Segment], List[Via]]]:
     """Route `net_id` from the copper end at `a` (on `a_layer`) to the
     copper end at `b` (on `b_layer`).
@@ -198,6 +199,17 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
         window.segments = list(window.segments) + [
             Segment(p[0], p[1], q[0], q[1], w, layer, VIRTUAL_NET)
             for (p, q, layer) in virtual if layer in layer_map]
+    if virtual_vias:
+        # vias that do not exist yet but will: a point a later lane
+        # must change layer at (the corner where it turns onto its exit
+        # leg), stamped as a foreign via so this connection keeps a
+        # via's clearance from it -- a track's band edge is exactly a
+        # via's clearance from the neighbour's centreline, so a lane
+        # hugging its band edge there left the neighbour's corner no
+        # legal via site (K19 SCAS)
+        window.vias = list(window.vias) + [
+            Via(p[0], p[1], cfg.via_size, cfg.via_drill, list(cfg.layers),
+                VIRTUAL_NET) for p in virtual_vias]
 
     obstacles = build_base_obstacle_map(window, cfg, [net_id],
                                         net_clearances=net_clearances)

@@ -29,6 +29,11 @@ bash ladder_head.sh TAG 4 11 15 19 21                       # the same with HEAD
 bash fanout_ladder.sh 4 11 15 19 21                         # fanout boards, restricted (r_) and free (f_)
 bash fanout_plain.sh fb_d45.kicad_pcb OUT 11                # plain bga_fanout (no plan) for a rotated array
 python3 probe_lane.py FO_BOARD K NET [--after]              # route ONE lane under each constraint set
+python3 probe_plan.py FO_BOARD K                            # the corridor plan: legs, offsets, layer rules, no routing
+python3 probe_req.py FO_BOARD K                             # lanes whose rules close BOTH layers somewhere
+python3 probe_map.py FO_BOARD K NET --box x0,y0,x1,y1 [--no-virtual] [--drop NET]   # ASCII obstacle+band map of one lane
+python3 probe_trace.py FO_BOARD K [--nets ..] [--box s0,s1,o0,o1]    # routed copper in (s, o) against the plan
+python3 blocked_cells.py PROBE_OUTPUT [n] [x0 x1]           # a CONNECT_DEBUG failure's frontier, in mm
 python3 probe_cluster.py FO_BOARD K                         # the corridor grouping's decisions
 python3 test_connect.py ch6_fo_k15.kicad_pcb SDQ0           # connect() unit test
 ```
@@ -47,21 +52,28 @@ via/segment census from the parsed board. Never a program's own tally.
 |---|---|---|---|
 | 4 | **4 vias**, 0 / 0 | 4, 0 / 0 | 4 |
 | 11 | **10 vias**, 0 / 0 | 10, 0 / 0 | 14 |
-| 15 | **20 vias**, 0 / 0 | 18, 0 / 0 | 22 |
-| 19 | 21 vias, **4 open** / 0 | 26, 0 / 0 | 30 |
-| 21 | 19 vias, **7 open** / 0 | 30, 0 / 0 | 38 |
+| 15 | **16 vias**, 0 / 0 | 18, 0 / 0 | 22 |
+| 19 | **23 vias**, 0 / 0 | 26, 0 / 0 | 30 |
+| 21 | **28 vias**, 0 / 0 | 30, 0 / 0 | 38 |
 
-Both arms on identical inputs (`fanout_ladder.sh`, `--no-plane-drop`),
-graded the same way. Rotation gate at K15 (`DIRS=left,down chain_rot.sh
-15`): 180° clean at 20 vias, 90° and 270° one open lane each (SDQM0,
-SDQ0), all DRC-clean — HEAD was 6/6 clean. K4/K11 are bit-for-bit HEAD's numbers (one corridor,
-the port at K11 a side exit of it). K15 is clean with the four flank nets as
-side joiners of the trunk corridor and their exits crossing the inner lanes
-by layer. **K19 and K21 regress**: the refused lanes are all flank joiners
-(`SCAS SODT1 SRAS SWE` at K19; those plus `SA7 SA9 SCKE0 SCKE1` at K21),
-DRC-clean otherwise. The 45° bench routes as a diagonal corridor (spine
-corners 28°/12°, 6 head-on + 5 side exits) with 5 of 11 lanes routed. See
-"Known walls".
+(braid vias; open / DRC.) Both arms on identical inputs (`fanout_ladder.sh`,
+`--no-plane-drop`), graded the same way. The whole ladder is clean, at fewer
+vias than HEAD from K15 up. Before the exit-block rework of 2026-08-30 the
+same code refused 4 lanes at K19 and 7 at K21 — all flank joiners — and
+spent 20 at K15; what was wrong and what changed is under "Launch and exit"
+and "Known walls". The 45° bench (`d45_fo_k11`, plain fanout) routes 9 of
+11 lanes at 20 vias, DRC-clean (SDQ14, SDQ15 open; was 5 of 11).
+
+The free-plan arm (`chain_k.sh` without `DIRS`, plane-drop on, so its fanout
+boards carry the plane-drop's cap collisions): K15 2 open (SDQ10, SDQM0),
+K19 1 open (SDQM0), K21 8 open — from 2 / 4 / 14 with the previous braid on
+the same boards. Its refusals are head-on lanes at the launch (SDQM0 at
+K15: forward search boxed at its tooth, band-only refused too), not flank
+joiners: the free plan sends data lanes out DU1's north and south faces,
+and the schedule region then carries side exits on both sides. Rotation
+gate at K15 on that arm: 2 open on every rotation (SDQ14/SDQM0, SDQ0/SDQ14,
+SDQ0/SDQ14) — the same count unrotated, so nothing leans on the axes, but
+the open lanes differ, which says the tie-breaks do.
 
 ## Stage 1 — the plan (`fanout_from_plan.py`)
 
@@ -179,19 +191,45 @@ lanes fan out to the pitch-floored launch slots). Otherwise it JOINS from the
 side: the joiners of a side form a BLOCK beyond everything on that side
 (pushed further out until its innermost lane's run is clear of the static
 copper on both layers — the flank carries every other net's teeth too), the
-first joiner farthest, so no join leg crosses a lane already present; a leg
-that would run through another member's free end (two flank teeth in one
-column) jogs half a pitch along the spine first. The exits mirror this: a
-stub receives its lane HEAD-ON (a diagonal tail from `s1`) when its offset
-is free of every stub upstream, else the lane peels off to it from an exit
-block: ports (head-on launched) inner, in exit order; joiners outer, in JOIN
-order — their exit legs cross the lanes still between them and their stubs
-BY LAYER (the leg's owner is required on one layer over `±0.25` at the
-crossing, every crossed lane on the other, chosen so lanes born on B cross on
-B). That is the constant-layer "river" of the earlier takes, as a rule of
-the exits rather than a mechanism (sorting the joiners' reversal inside the
-shared region cost every column a quarter of its width; sorting it on their
-run-in had no room for the vias).
+first joiner farthest, so no join leg crosses a lane already present. "First"
+is by the LEG's `s`, not the tooth's: a leg that would run through another
+member's free end (two flank teeth in one column) jogs a pitch along the
+spine first, and the legs are placed one at a time so a leg already placed
+counts as in the way too (two stubs ending at one point on two layers — K21
+SRAS on B, SCKE1 on F, the fanout's doing — otherwise sent both legs to the
+same jog). Ordering by the teeth gave the outer lane to a leg that had
+jogged downstream, straight across the other's lane (K19 SRAS over SWE).
+
+The exits mirror this: a stub receives its lane HEAD-ON (a diagonal tail
+from `s1`) when its offset is free of every stub upstream, else the lane
+peels off to it from an exit block: ports (head-on launched) inner, in exit
+order; joiners outer, in JOIN order — their exit legs cross the lanes still
+between them and their stubs BY LAYER. The layer rule is the BLOCK's: all
+its legs are on one layer (the stubs' — a leg ending on its stub's layer
+costs no via there), and a lane is on the other from the first leg that
+crosses it until its own corner, where it turns onto its leg with a via.
+The crossed stretch reaches `±0.35` (`LEG_REQ`) past each crossing leg —
+a via must sit that far from the leg, because a track needs via radius +
+clearance + half a track = 0.29 from a via — and the corner itself is
+stamped as a VIRTUAL VIA while its owner is unrouted, so no neighbour hugs
+its band edge there (the edge is exactly a via's clearance from the
+centreline). The leg's owner carries no rule on its lane: the crossed
+lanes' copper is on the other layer under it, real or virtual, so the leg
+goes where it can. That is the constant-layer "river" of the earlier takes,
+as a rule of the exits rather than a mechanism (sorting the joiners'
+reversal inside the shared region cost every column a quarter of its width;
+sorting it on their run-in had no room for the vias).
+
+What this replaced, measured on K19's south flank (eight joiners, exit legs
+at 0.4 mm pitch): a layer per leg by the majority of the lanes it crossed,
+`±0.25`, and a rule on the owner too. Adjacent legs disagreed, and a lane
+crossed at `s` exiting at `s + 0.4` was required on B until `s + 0.25` and
+on F from `s + 0.15` — closed on both layers, refused before the router saw
+it (SCAS, SWE). Where the rules were consistent, the crossed lanes dived
+and surfaced at the rule's edge, 0.31 from the leg, and two such vias 0.63
+apart walled the leg's layer to 0.02 mm (SODT1). `probe_req.py` lists
+both-layers-closed stretches; `probe_map.py` draws the router's obstacle
+map with the band for one lane, which is what found each of these.
 
 **Schedule** (`schedule.Schedule`). Launch order and target order are the
 lanes' offsets at the two ends of the schedule region `[s0, s1]` (`s0` =
@@ -214,11 +252,18 @@ column; columns are laid in the free length (`u(s)`).
 **Layers.** At the crossing of column *k* the mover is REQUIRED on B and the
 passed net on F over `0.4 W + 0.05` either side (not the whole column: a net
 passed at *k* and moving at *k+2* needs a cell between to put its via in);
-the diver windows are derived from the same intervals. Exit-leg crossings add
-their intervals. Virtual copper of the lanes not yet routed is stamped on the
+the diver windows are derived from the schedule's intervals only (an exit
+block's B stretch lies in the tail, which is open to B anyway; fed to the
+diver formula it read as a dive opening at the last F pass and closed B on a
+B-born tooth — K21 SCAS, stuck after one cell), and a lane born on B may
+stay there until it is first passed on F. Exit-leg crossings add their
+intervals. Virtual copper of the lanes not yet routed is stamped on the
 layers the schedule lets each occupy — per polyline piece SPLIT at every
 required-interval boundary (deciding per whole piece put an 8 mm exit run on
-both layers through the one millimetre where another lane's leg crosses it).
+both layers through the one millimetre where another lane's leg crosses it);
+an exit leg on its block's layer only, a jog on its free end's layer only
+(stamped on both, a jog to a B stub walled the F stub another net ends at
+the same point).
 
 **Copper — the router's.** Every lane is routed by `connect()` from its tooth
 to its stub end inside its BAND — a cell mask in `(s, o)`: between the
@@ -310,15 +355,26 @@ All in track/clearance/via units; none is a board fact.
 
 ## Known walls
 
-- **K19/K21 flank joiners**: 4 and 7 lanes refused, all joiners from U1's
-  south flank (nine teeth in a 6 mm flank interleaved with the other nets'
-  teeth, on both layers). `probe_lane.py --after` shows each routes alone
-  and with the plan, and is refused against the copper of the lanes routed
-  before it — the join zone's freedom vs. the earlier lanes' actual vias.
-  HEAD routed this flank as a separate river through a free window.
-- the 45° bench: 5 of 11 lanes; the side-exit block sits 3 mm from its
-  stubs (it is placed beyond every head-on lane of the schedule region,
-  which have left by then) and the schedule needs 24 columns at W 0.24.
+- **K19/K21 flank joiners — CLOSED 2026-08-30.** The refusals were never
+  the join zone's freedom against the earlier lanes' vias, as the earlier
+  entry here guessed: `probe_map.py` showed each one. Two were plans closed
+  on both layers by adjacent exit-leg rules (SCAS, SWE); one a leg walled
+  by the vias of the lanes it crossed, placed at the rule's edge 0.31 mm
+  from it (SODT1); one a join leg jogged downstream across the lane it
+  should have been outside of (SRAS); then, once those routed, a corner
+  whose neighbours hugged their band edge to exactly a via's clearance
+  (SCAS again), and at K21 two stubs ending at one point on two layers
+  (SRAS/SCKE1) plus a B window that closed a B-born tooth (SCAS). Six
+  distinct mechanisms, one lane each; every one a rule of the plan that
+  contradicted itself or the router's clearances, none of them the router.
+- the free-plan arm: side exits on BOTH sides of the schedule region and a
+  head-on lane refused at its tooth (SDQM0 at K15, both with the plan and
+  with the band alone; the previous braid refused it too). Not looked into.
+- the 45° bench: 9 of 11 lanes (SDQ14, SDQ15); the side-exit block sits
+  3 mm from its stubs (it is placed beyond every head-on lane of the
+  schedule region, which have left by then) and the schedule needs 24
+  columns at W 0.24. The braid now keeps its BEST attempt, not its last
+  (this bench had 9/11 at attempt 1 and wrote 7/11).
 - crossings between corridors are v1 (see "Where corridors meet").
 - the plan's floor and the fanout's stub order are not rotation-invariant
   (tie-breaks in `select_moves`; escape order in `bga_fanout`); the plan has

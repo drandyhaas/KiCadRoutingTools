@@ -83,10 +83,22 @@ LPITCH = 0.35                  # pitch of a side-join / side-exit block
 BLOCK_GAP = 0.45               # a block starts this far beyond what it clears
 HALF_SEP = (TRACK + 0.1) / 2   # two lanes at their band edges clear
 LEG_W = 0.5                    # half-width in s of a join / exit leg's band
-LEG_REQ = 0.25                 # half-width in s of a leg's LAYER rule: the
-                               # crossing itself (a track plus clearance),
-                               # so two exits 0.8 apart do not close both
-                               # layers on each other
+LEG_REQ = 0.35                 # half-width in s of the stretch a lane
+                               # CROSSED by an exit leg must spend on the
+                               # other layer. It is what keeps that lane's
+                               # dive and surface vias out of the leg's way:
+                               # a via must sit LEG_REQ from the leg's
+                               # centreline, and a track needs via radius +
+                               # clearance + half a track = 0.29 from a via
+                               # -- at the old 0.25 the vias landed 0.31
+                               # from the leg and closed it (K19 SODT1: two
+                               # vias of the lane it crossed, 0.02 mm of
+                               # room between them). It is NOT applied to
+                               # the leg's owner: the owner turns onto its
+                               # leg with a via at the corner, and a rule on
+                               # its lane there contradicted the previous
+                               # leg's rule 0.4 mm upstream (K19 SCAS, SWE:
+                               # closed on both layers)
 LEG_O = 0.2                    # ...and beyond its two ends in o: a leg
                                # runs through the densest static copper
                                # (the flank's foreign stubs, both layers)
@@ -376,6 +388,9 @@ class Corridor:
         self.lane_xy = {}          # nm -> planned board polyline (Eco)
         self.req_xy = {}           # nm -> list of B-required polylines
         self.marks = []            # '+' marks (leg ends, corners)
+        self.leg_layer = {}        # side exiter -> the layer of its exit leg
+        self.join_leg_s = {}       # joiner -> s of its join leg (after jog)
+        self.exit_leg_s = {}       # side exiter -> s of its exit leg
 
     # ------------------------------------------------------------ geometry
     def build_spine(self):
@@ -508,6 +523,57 @@ class Corridor:
                      f'(s {s_from:.1f}..{s_to:.1f})')
         return base
 
+    def _leg_s(self, nm, s_l, oa, ob, at_tooth, placed):
+        """Where a leg of `nm` spanning o in [oa, ob] at s_l really runs:
+        straight in (s, o) -- unless another member's free end sits in
+        its way (two flank teeth in one column, 0.28 mm apart: K19's
+        SRAS over SWE), or a leg already placed runs there, when it
+        jogs half a pitch along the spine to the clearer side.
+
+        `placed` is the legs placed before this one, as (s, lo, hi):
+        legs are placed one at a time so two that would coincide cannot
+        both jog to the same place. A free end at the leg's OWN end on
+        the other layer is not in the way -- two stubs can end at one
+        point on two layers (K21 SRAS on B, SCKE1 on F, the fanout's
+        doing), and the two legs can end there too; it is the second
+        leg's run that must move, and the leg-vs-leg test moves it."""
+        own = self.st[nm] if at_tooth else self.se[nm]
+        own_L = (self.ctx.tooth_layer if at_tooth else self.ctx.dest_layer)[nm]
+        ends = []
+        for om in self.members:
+            if om == nm:
+                continue
+            for p, L in ((self.st[om], self.ctx.tooth_layer[om]),
+                         (self.se[om], self.ctx.dest_layer[om])):
+                if (L != own_L and abs(p[0] - own[0]) < 0.05
+                        and abs(p[1] - own[1]) < 0.05):
+                    continue
+                ends.append(p)
+        lo_, hi_ = min(oa, ob), max(oa, ob)
+
+        def clash(s):
+            # a jog is a whole pitch, so an end or a leg exactly a pitch
+            # away is clear -- compared with a tolerance, or the float
+            # residue of 2.6 - 0.35 vs 1.6 + 0.35 reads as a clash and
+            # sends the leg two pitches off, over the next tooth
+            n = sum(1 for p in ends
+                    if abs(p[0] - s) < LPITCH - 1e-6
+                    and lo_ - 0.05 < p[1] < hi_ + 0.05)
+            n += sum(1 for (ps, plo, phi) in placed
+                     if abs(ps - s) < TRACK + 0.1 + 0.02 and plo < hi_ and phi > lo_)
+            return n
+        if not clash(s_l):
+            return s_l
+        best = None
+        for cand in (s_l + LPITCH, s_l - LPITCH, s_l + 2 * LPITCH,
+                     s_l - 2 * LPITCH):
+            n = clash(cand)
+            if not n:
+                return cand
+            if best is None or n < best[0]:
+                best = (n, cand)
+        return best[1]
+
     def offsets(self, ly_floor):
         """Launch and target offsets for the current pitch floor."""
         st, se = self.st, self.se
@@ -519,16 +585,29 @@ class Corridor:
             v = st[nm][1]
             Ly.append(v if not Ly else max(v, Ly[-1] + ly_floor))
         launch_o = {nm: Ly[i] for i, nm in enumerate(hl)}
-        # joiner blocks, per side
+        # joiner blocks, per side: the first joiner takes the lane
+        # farthest from the teeth, so no join leg crosses a lane already
+        # present. "First" is by the LEG's s, not the tooth's: two teeth
+        # in one column jog one leg half a pitch, and ordering by the
+        # teeth gave the outer lane to the leg that had jogged
+        # DOWNSTREAM -- straight across the other's lane (K19 SRAS over
+        # SWE, refused against SWE's virtual copper every attempt).
         self.join_block = {}
+        self.join_leg_s = {}
         for sg in (-1, 1):
-            js = sorted((nm for nm in self.joiners if self.join_side[nm] == sg),
-                        key=lambda nm: st[nm][0])
+            js = [nm for nm in self.joiners if self.join_side[nm] == sg]
             if not js:
                 continue
             ext = max([sg * v for v in Ly] + [sg * st[nm][1] for nm in js])
             base = sg * max(ext + BLOCK_GAP, -LPITCH * (len(js) - 1) / 2)
-            base = self._clear_block(base, sg, min(st[nm][0] for nm in js),
+            far = base + sg * LPITCH * (len(js) - 1)
+            placed = []
+            for nm in sorted(js, key=lambda nm: st[nm][0]):
+                s_l = self._leg_s(nm, st[nm][0], st[nm][1], far, True, placed)
+                self.join_leg_s[nm] = s_l
+                placed.append((s_l, min(st[nm][1], far), max(st[nm][1], far)))
+            js.sort(key=lambda nm: (self.join_leg_s[nm], st[nm][0]))
+            base = self._clear_block(base, sg, min(self.join_leg_s[nm] for nm in js),
                                      self.s0, js[0])
             for k, nm in enumerate(js):
                 launch_o[nm] = base + sg * LPITCH * (len(js) - 1 - k)
@@ -666,34 +745,67 @@ class Corridor:
             for (d, p) in col:
                 req[d].append((a, b, 'B.Cu'))
                 req[p].append((a, b, 'F.Cu'))
-        # EXIT LEGS THAT CROSS LANES: a side exit whose lane is not the
-        # innermost of the lanes still present at its stub's s crosses
-        # them with its leg -- on the other layer. The leg's owner is
-        # required on one layer over the leg's s, every crossed lane on
-        # the other; the layer is chosen so that lanes born on B cross
-        # on B (a B-born crossed lane pays nothing) and the leg's owner
-        # pays the via it needs anyway at a front-layer stub.
-        self.leg_layer = {}
-        for nm in self.exit_block:
+        # EXIT LEGS THAT CROSS LANES. In a side-exit block the lanes
+        # leave one by one, and every leg crosses the lanes still
+        # present between it and its stub. The rule is the block's, not
+        # the leg's: ALL its legs are on one layer -- the stubs' (a leg
+        # ending on its stub's layer costs no via there) -- and a lane
+        # is on the OTHER layer from the first leg that crosses it until
+        # its own corner, where it turns onto its leg with a via. The
+        # per-leg choice this replaces (a layer per leg by the majority
+        # of the lanes it crossed) let two legs 0.4 mm apart disagree,
+        # and put a rule on the leg's OWNER too: a lane crossed at s and
+        # exiting at s + 0.4 was required on B until s + 0.25 and on F
+        # from s + 0.15 (K19 SCAS, SWE -- closed on both layers, refused
+        # before the router saw them). The owner needs no rule: the
+        # crossed lanes' copper, real or virtual, is on the other layer
+        # under its leg, so the leg goes where it can, and its via sits
+        # at the corner, a whole pitch from the previous leg.
+        trank = {nm: i for i, nm in enumerate(self.target)}
+        py = self.py
+        self.exit_leg_s = {}
+        placed = []
+        for nm in sorted(self.exit_block, key=lambda n: (self.se[n][0], abs(self.exit_block[n]))):
             s_e, o_e = self.se[nm]
-            o_l = self.exit_block[nm]
-            lo_, hi_ = min(o_l, o_e), max(o_l, o_e)
-            crossed = [om for om in M if om != nm and om in self.exit_block
-                       and self.se[om][0] > s_e + LEG_REQ
-                       and lo_ < self.exit_block[om] < hi_]
-            crossed += [om for om in M if om != nm and om not in self.exit_block
-                        and self.se[om][0] > s_e + LEG_REQ
-                        and lo_ < self.target_o[om] < hi_]
-            if not crossed:
+            o_l = py[trank[nm]]
+            s_l = self._leg_s(nm, s_e, o_l, o_e, False, placed)
+            self.exit_leg_s[nm] = s_l
+            placed.append((s_l, min(o_l, o_e), max(o_l, o_e)))
+        self.leg_layer = {}
+        crossings = {}                       # crossed lane -> [leg s]
+        for sg in (-1, 1):
+            xs = [nm for nm in self.exit_block if self.exit_side.get(nm) == sg]
+            if not xs:
                 continue
-            b_born = sum(1 for om in crossed
-                         if self.ctx.tooth_layer[om] == 'B.Cu')
-            leg_L = 'F.Cu' if 2 * b_born >= len(crossed) else 'B.Cu'
+            n_b = sum(1 for nm in xs if self.ctx.dest_layer[nm] == 'B.Cu')
+            leg_L = 'B.Cu' if 2 * n_b > len(xs) else 'F.Cu'
+            for nm in xs:
+                self.leg_layer[nm] = leg_L
+                s_l = self.exit_leg_s[nm]
+                o_l, o_e = self.exit_block[nm], self.se[nm][1]
+                lo_, hi_ = min(o_l, o_e), max(o_l, o_e)
+                for om in M:
+                    if om == nm:
+                        continue
+                    if om in self.exit_block:
+                        o_m, s_end = self.exit_block[om], self.exit_leg_s[om]
+                    else:
+                        o_m, s_end = self.target_o[om], self.se[om][0]
+                    if s_end > s_l + 0.05 and lo_ < o_m < hi_:
+                        crossings.setdefault(om, []).append(s_l)
+        self.crossings = crossings
+        for om, legs_s in crossings.items():
+            leg_L = self.leg_layer.get(om) or next(iter(self.leg_layer.values()))
             other = 'B.Cu' if leg_L == 'F.Cu' else 'F.Cu'
-            self.leg_layer[nm] = leg_L
-            req[nm].append((s_e - LEG_REQ, s_e + LEG_REQ, leg_L))
-            for om in crossed:
-                req[om].append((s_e - LEG_REQ, s_e + LEG_REQ, other))
+            a = min(legs_s) - LEG_REQ
+            b = max(legs_s) + LEG_REQ
+            if om in self.exit_block:
+                # ...but never past its own corner: the via goes there
+                b = min(b, self.exit_leg_s[om] - 0.03)
+            else:
+                b = min(b, self.se[om][0] - 0.03)
+            if b > a:
+                req[om].append((a, b, other))
         # POSSIBLE back-layer intervals: a diver may be on B only from
         # after the last foreign pass before its first own swap until
         # before the first foreign crossing after its last -- it must be
@@ -704,14 +816,22 @@ class Corridor:
         bwin = {}
         for nm in M:
             wins = [(self.s1 - 0.1, 1e9)]
-            b_iv = sorted((xa, xb) for (xa, xb, L) in req[nm] if L == 'B.Cu')
+            # the diver window is derived from the SCHEDULE's B rules
+            # (those inside the corridor): a B stretch in the tail --
+            # an exit block's -- is already inside the tail window, and
+            # fed to this formula it read as a dive whose window opened
+            # at the last F pass, which closed B on a B-born tooth
+            # (K21 SCAS: refused at its own tooth, stuck after 1 cell)
+            b_iv = sorted((xa, xb) for (xa, xb, L) in req[nm]
+                          if L == 'B.Cu' and xa < self.s1 - 0.1)
             f_iv = sorted((xa, xb) for (xa, xb, L) in req[nm] if L == 'F.Cu')
             if b_iv:
                 b0, b1 = b_iv[0][0], b_iv[-1][1]
                 lo = max((xb for (xa, xb) in f_iv if xb <= b0), default=-1e9)
                 hi = min((xa for (xa, xb) in f_iv if xa >= b1), default=1e9)
                 wins.append((lo, hi))
-            elif self.ctx.tooth_layer[nm] == 'B.Cu':
+            if self.ctx.tooth_layer[nm] == 'B.Cu':
+                # born on B: may stay there until first passed on F
                 hi = min((xa for (xa, xb) in f_iv), default=1e9)
                 wins.append((-1e9, hi))
             bwin[nm] = wins
@@ -735,39 +855,14 @@ class Corridor:
 
         def slot(t, i):
             return (1 - t) * Ly[i] + t * py[i]
-        trank = {nm: i for i, nm in enumerate(self.target)}
         self.mid, self.legs, self.jogs = {}, {}, {}
-        ends_so = [(self.st[om][0], self.st[om][1]) for om in M] + \
-            [(self.se[om][0], self.se[om][1]) for om in M]
-
-        def leg_s(s_l, oa, ob, own):
-            """A leg drops straight in (s, o) -- unless another member's
-            free end sits in its way (two flank teeth in one column,
-            0.28 mm apart: K19's SRAS over SWE), when it first jogs
-            half a pitch along the spine to the clearer side."""
-            lo_, hi_ = min(oa, ob), max(oa, ob)
-            in_way = [p for p in ends_so if p != own
-                      and abs(p[0] - s_l) < LPITCH and lo_ - 0.05 < p[1] < hi_ + 0.05]
-            if not in_way:
-                return s_l
-            best = None
-            for cand in (s_l + LPITCH, s_l - LPITCH, s_l + 2 * LPITCH,
-                         s_l - 2 * LPITCH):
-                clash = [p for p in ends_so if p != own
-                         and abs(p[0] - cand) < LPITCH
-                         and lo_ - 0.05 < p[1] < hi_ + 0.05]
-                if not clash:
-                    return cand
-                if best is None or len(clash) < best[0]:
-                    best = (len(clash), cand)
-            return best[1]
         for nm in M:
             s_t, o_t = self.st[nm]
             s_e, o_e = self.se[nm]
             legs = []
             jogs = []
             if nm in self.join_block:
-                s_l = leg_s(s_t, o_t, self.join_block[nm], (s_t, o_t))
+                s_l = self.join_leg_s[nm]
                 if abs(s_l - s_t) > 1e-9:
                     jogs.append(((s_t, o_t), (s_l, o_t)))
                 legs.append((s_l, o_t, self.join_block[nm]))
@@ -778,7 +873,7 @@ class Corridor:
                 pts.append((s_m[k], slot(morph_t(s_m[k]), orders[k].index(nm))))
             pts.append((self.s1, py[trank[nm]]))
             if nm in self.exit_block:
-                s_l = leg_s(s_e, py[trank[nm]], o_e, (s_e, o_e))
+                s_l = self.exit_leg_s[nm]
                 pts.append((min(s_l, s_e) if s_l < s_e else s_e, py[trank[nm]]))
                 if s_l > s_e + 1e-9:
                     pts.append((s_l, py[trank[nm]]))
@@ -939,20 +1034,47 @@ class Corridor:
                         for L in ('F.Cu', 'B.Cu'):
                             if self.allowed(om, s_mid, L):
                                 segs.append((p_, q_, L))
-            for (s_l, oa, ob) in self.legs[om]:
+            for i, (s_l, oa, ob) in enumerate(self.legs[om]):
                 a_, b_ = sp.xy(s_l, oa), sp.xy(s_l, ob)
+                # an exit leg is on its block's layer and nothing else:
+                # the lanes it crosses are on the other layer under it,
+                # and a stamp there would wall the very layer they are
+                # required on
+                is_exit = om in self.exit_block and i == len(self.legs[om]) - 1
+                if is_exit and om in self.leg_layer:
+                    segs.append((a_, b_, self.leg_layer[om]))
+                    continue
                 for L in ('F.Cu', 'B.Cu'):
                     if self.allowed(om, s_l, L):
                         segs.append((a_, b_, L))
-            for ((sa, oa), (sb, ob)) in self.jogs.get(om, ()):
+            for j, ((sa, oa), (sb, ob)) in enumerate(self.jogs.get(om, ())):
                 a_, b_ = sp.xy(sa, oa), sp.xy(sb, ob)
-                for L in ('F.Cu', 'B.Cu'):
-                    if self.allowed(om, (sa + sb) / 2, L):
-                        segs.append((a_, b_, L))
+                # a jog runs along the free end's own row, on that end's
+                # layer: the join jog leaves the tooth, the exit jog
+                # arrives at the stub. Stamped on both layers, an exit
+                # jog to a B stub walled the F stub another net ends
+                # at the same point (K21 SCKE1: stuck after one cell)
+                is_exit_jog = (om in self.exit_block and abs(sb - self.se[om][0]) < 1e-6
+                               and abs(ob - self.se[om][1]) < 1e-6)
+                L = (self.ctx.dest_layer[om] if is_exit_jog
+                     else self.ctx.tooth_layer[om])
+                segs.append((a_, b_, L))
         return segs
 
+    def virtual_vias_of(self, unrouted):
+        """The via each unrouted side exiter will need at its corner --
+        where its lane turns onto its exit leg and changes to the leg's
+        layer -- as a via the router must clear. The band alone does
+        not protect the site: a neighbour's band edge sits exactly a
+        via's clearance from this lane's centreline, so a neighbour
+        hugging its edge there (K19 SCAS: SA7 0.23 mm off, SWE 0.26)
+        leaves no legal via cell when the corner's owner is routed."""
+        sp = self.spine
+        return [sp.xy(self.exit_leg_s[om], self.exit_block[om])
+                for om in unrouted if om in self.exit_leg_s]
+
     # ------------------------------------------------------------ routing
-    def route_lane(self, nm, virt):
+    def route_lane(self, nm, virt, virt_vias=None):
         """Route one lane tooth -> stub: ONE connect() search inside its
         band by default. LANE_PIECES=1 routes it as a chain of searches
         between its planned waypoints instead (the end of its join leg,
@@ -985,7 +1107,8 @@ class Corridor:
         for (a, aL), (b, bL) in zip(way, way[1:]):
             res = cn.connect(ctx.pcb, nid, a, aL, b, bL, ctx.cfg, band=band,
                              virtual=virt, margin=0.6,
-                             window_pts=self.lane_xy[nm])
+                             window_pts=self.lane_xy[nm],
+                             virtual_vias=virt_vias)
             if res is None:
                 # discard the partial copper
                 if added:
@@ -1030,6 +1153,7 @@ class Corridor:
         sched = Schedule(self.launch, self.target, ctx.tooth_layer, log=log)
         gaps = {d: 1 for d in sched.divers}
         lead = {d: 0 for d in sched.divers}
+        best = None
         for attempt in range(6):
             self.offsets(ly_floor)
             sched = Schedule(self.launch, self.target, ctx.tooth_layer)
@@ -1038,8 +1162,8 @@ class Corridor:
             swaps = [sw for col in cols for sw in col]
             log(f'  attempt {attempt}: {len(swaps)} swaps in {len(cols)} columns, '
                 f'W={self.W:.3f}, launch pitch >= {ly_floor:.2f}'
-                + (f', {len(self.leg_layer)} exit leg(s) cross by layer'
-                   if self.leg_layer else '')
+                + (f', {len(self.crossings)} lane(s) crossed by exit legs'
+                   if self.crossings else '')
                 + (f', gaps {dict((d, g) for d, g in gaps.items() if g > 1)}'
                    if any(g > 1 for g in gaps.values()) else '')
                 + (f', lead {dict((d, g) for d, g in lead.items() if g)}'
@@ -1055,9 +1179,9 @@ class Corridor:
             routed = set()
             self.refused = []
             for nm in order:
-                virt = self.virtual_of([om for om in M
-                                        if om != nm and om not in routed])
-                res = self.route_lane(nm, virt)
+                unrouted = [om for om in M if om != nm and om not in routed]
+                res = self.route_lane(nm, self.virtual_of(unrouted),
+                                      self.virtual_vias_of(unrouted))
                 if res is None:
                     self.refused.append(nm)
                     log(f'    refused: {nm}')
@@ -1070,6 +1194,14 @@ class Corridor:
                 self.out_vias[nm] = vias_o
             nv = sum(len(v) for v in self.out_vias.values())
             log(f'    lanes: {len(routed)}/{len(M)} routed, {nv} via(s)')
+            # keep the BEST attempt, not the last: the feedback is a
+            # guess, and a later attempt can lose lanes an earlier one
+            # had (the 45-degree bench: 9/11 at attempt 1, 7/11 at the
+            # last, and 7/11 was what got written)
+            if best is None or (len(self.refused), nv) < (len(best[0]), best[1]):
+                best = (list(self.refused), nv, ly_floor, cols,
+                        dict(self.out_segs), dict(self.out_vias),
+                        list(ctx.pcb.segments), list(ctx.pcb.vias))
             if not self.refused:
                 break
             # FEEDBACK. Room across first -- the launch pitch is the
@@ -1097,6 +1229,15 @@ class Corridor:
                         gaps[nm] += 1
                     else:
                         lead[nm] += 1
+        if best is not None and best[0] != self.refused:
+            refused, nv, ly_b, cols_b, segs_b, vias_b, pcb_s, pcb_v = best
+            log(f'  keeping attempt with {len(M) - len(refused)}/{len(M)} '
+                f'routed, {nv} via(s)')
+            self.offsets(ly_b)
+            self.lay_lanes(cols_b)
+            self.refused = refused
+            self.out_segs, self.out_vias = segs_b, vias_b
+            ctx.pcb.segments, ctx.pcb.vias = pcb_s, pcb_v
         self.sched = sched
         self.finish()
 

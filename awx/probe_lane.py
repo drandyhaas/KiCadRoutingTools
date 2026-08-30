@@ -54,28 +54,27 @@ def main():
         for om in order:
             if om == nm:
                 break
-            virt = c.virtual_of([x for x in grp if x != om and x not in routed])
-            res = cn.connect(ctx.pcb, ctx.byname[om][0], c.teeth[om],
-                             ctx.tooth_layer[om], c.stubs[om], ctx.dest_layer[om],
-                             ctx.cfg, band=c.band_of(om), virtual=virt, margin=0.6,
-                             window_pts=c.lane_xy[om])
+            unrouted = [x for x in grp if x != om and x not in routed]
+            # exactly the braid's call (route_lane appends the copper)
+            res = c.route_lane(om, c.virtual_of(unrouted), c.virtual_vias_of(unrouted))
             if res is None:
                 print(f'  (earlier lane {om} refused)')
                 continue
             routed.add(om)
-            ctx.pcb.segments.extend(res[0])
-            ctx.pcb.vias.extend(res[1])
             print(f'  routed {om}: {len(res[1])} via(s) at '
                   + ' '.join(f'({v.x:.2f},{v.y:.2f})' for v in res[1]))
         others = [om for om in grp if om != nm and om not in routed]
     os.environ['CONNECT_DEBUG'] = '1'
-    for label, band, virt in (('plan (band + virtual)', c.band_of(nm), c.virtual_of(others)),
-                              ('band only', c.band_of(nm), None),
-                              ('virtual only', None, c.virtual_of(others)),
-                              ('free', None, None)):
+    vv = c.virtual_vias_of(others)
+    for label, band, virt, vvs in (
+            ('plan (band + virtual)', c.band_of(nm), c.virtual_of(others), vv),
+            ('band only', c.band_of(nm), None, None),
+            ('virtual only', None, c.virtual_of(others), vv),
+            ('free', None, None, None)):
         res = cn.connect(ctx.pcb, nid, c.teeth[nm], ctx.tooth_layer[nm],
                          c.stubs[nm], ctx.dest_layer[nm], ctx.cfg, band=band,
-                         virtual=virt, margin=0.6, window_pts=c.lane_xy[nm])
+                         virtual=virt, margin=0.6, window_pts=c.lane_xy[nm],
+                         virtual_vias=vvs)
         if res is None:
             print(f'{label:24}: REFUSED')
         else:
