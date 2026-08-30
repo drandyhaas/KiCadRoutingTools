@@ -40,7 +40,7 @@ The `JSON_SUMMARY` goes to **stdout only**; `tee` is what makes it citable.
 | key | decision |
 |---|---|
 | `parts_moved` | `0` → nothing happened. Do not render a delta or claim improvement; widen `--max-displacement` or narrow `--lock` |
-| `crossings_before` / `crossings_after` | **Report only -- NEVER a gate** (run-6: crossings correlates POSITIVELY with distance-to-truth, r = +0.78 -- that is distance, NOT routed `blocking`, which nothing has correlated it against; see `docs/placement-predictors.md` -- so gating on it rejects correct homecomings). Gate on hpwl + PAD-PAD + the assembly channel. Any increase → route from the original board |
+| `crossings_before` / `crossings_after` | **Report only -- NEVER a gate** (run-6: crossings correlates POSITIVELY with distance-to-truth, r = +0.78 -- that is distance, NOT routed `blocking`. #703 has since measured it against routed `blocking` too, where it FAILS its sign rule (5 boards right, 1 wrong), so the prohibition now rests on two measurements rather than on a gap; see `docs/placement-predictors.md` -- so gating on it rejects correct homecomings). Gate on hpwl + PAD-PAD + the assembly channel. Any increase → route from the original board |
 | `hpwl_before` / `hpwl_after` | **Discard gate.** Same |
 | `overlap_area` | Courtyard overlap of the output. Must not increase. **Absolute zero is the wrong test** -- one shipped, legitimately placed corpus board carries 81 of its 82 parts in courtyard violation |
 | `oob_count` | Parts leaving the outline. Must not increase, and every one should be in the intent's `edge_connectors` |

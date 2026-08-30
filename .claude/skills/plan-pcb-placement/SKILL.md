@@ -164,9 +164,11 @@ re-emit if in doubt.
    intent says.
 4. Gate on hpwl, PAD-PAD conflicts and the assembly channel's blocking pairs.
    REPORT `crossings` and aggregate courtyard overlap; never gate on them --
-   both correlate POSITIVELY with **distance-to-truth**. That is the measured
-   dependent variable; neither has been correlated with routed `blocking`
-   (`docs/placement-predictors.md`).
+   both correlate POSITIVELY with **distance-to-truth**, which is the dependent
+   variable that evidence was measured against. Against routed `blocking`,
+   `crossings` HAS now been measured and it FAILS its sign rule (5 boards
+   right, 1 wrong; #703), so the prohibition stands on a second measurement
+   rather than on an absence of one (`docs/placement-predictors.md`).
    WHICH pad-pad channel: the pad-INTERSECTION count, which is
    `check_assembly`'s `blocking` and the routing loop's L2 refusal. The
    clearance-GRAZE count (`pad_conflicts`) is reported and not gated -- #788

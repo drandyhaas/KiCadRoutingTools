@@ -614,7 +614,9 @@ candidates, but a tau over 4 and a tau over 11 are not the same evidence.
   boards.
 - Not that `crossings` or `hpwl` are useless. Both are measured against
   distance-to-truth, both retain the roles that measurement supports, and the
-  drivers' existing prohibition on gating `crossings` is untouched.
+  drivers' prohibition on GATING `crossings` is untouched -- and since #789
+  it is no longer contradicted by `rule1_check`, whose crossings clause was
+  withdrawn on this document's own pre-registered criterion.
 - Not that the legality family is ten findings. Six of them share a median to
   three decimals; they are one quantity seen through six counters.
 - Not a corpus-wide result. Six boards, one machine, one router build. Each

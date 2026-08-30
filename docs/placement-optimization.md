@@ -322,7 +322,7 @@ Two design points that were right and are worth keeping if anyone revisits it:
 | Metric | Cost per move | Routability signal at PCB scale | Verdict |
 |---|---|---|---|
 | HPWL / airwire length | O(1) incremental | Necessary, far from sufficient (exact only for 2–3 pin nets; congestion-blind) | Always include |
-| Airwire pin-pair crossings | O(moved part's segments) | Literature proxy (Cypress, NS-Place), grounded in planarity theory. **In this repo: never correlated with a routed outcome** — measured only against distance-to-truth (r = +0.78) and against `vias`. See `docs/placement-predictors.md` | Primary second objective |
+| Airwire pin-pair crossings | O(moved part's segments) | Literature proxy (Cypress, NS-Place), grounded in planarity theory. **In this repo: measured against distance-to-truth (r = +0.78) and against `vias`, and since #703 against routed `blocking` too — where it FAILS its sign rule (5 boards right, 1 wrong, median rho = +0.515). #789 then measured whether its ORDER agrees with the routed order: not shown to agree, N=5.** See `docs/placement-predictors.md` | Primary second objective |
 | Pad/pin density map | ~free | Captures BGA/connector escape limits and fanout room | Cheap secondary term |
 | RUDY congestion map | O(1) incremental rect update | Misses pin-pair conflicts on few-layer boards (Cypress Fig. 3) | Tiebreaker only |
 | Steiner trees (FLUTE) | ~10× HPWL | Marginal over HPWL — PCB nets are mostly 2-pin | Skip |
