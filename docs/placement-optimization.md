@@ -554,6 +554,40 @@ own failure diagnostics* to decide what to move. Each round:
    the anchor so the blocking wall re-routes) — excluding high-pin-count
    parts (`--max-target-pins 40`: moving a resistor that anchors a blocker
    is low-risk; dragging a 144-pin QFP is how placements get destroyed).
+
+   `--target-select diagnosis` (#553) replaces this step; `pins`, the
+   default, is the rule just described and is unchanged. The complaint it
+   answers is that the pin cap is a proxy that picks wrong exactly when it
+   matters — *the part that needs to move is never a passive*, so the cap
+   excludes the IC whose position is the problem and offers the passives that
+   are not. The diagnosis instead ranks blocks and loose parts on three
+   signals and takes the round-robin union of their top-k:
+
+   | signal | what it is | what backs it |
+   |---|---|---|
+   | `block_displacement` | how far a block sits from the centroid of what it connects to | mechanism only — the 80 mm magnetics case, never measured against a routed outcome |
+   | `blocker_cells` | the frontier cells the router attributed to nets this candidate owns | not a predictor at all: the router already failed and already said what blocked it |
+   | `legality_pairs` | pad-clearance, body-overlap and courtyard-blocking pairs incident on the candidate | the only measured one — see `placement-predictors.md` |
+
+   There is deliberately **no combined score**: no measured exchange rate
+   exists between millimetres, blocked cells and defect pairs, and a rank sum
+   would assert the three are equally informative, which is measured-false.
+   The three rank independently and are swept round-robin.
+
+   **No measurement shows `diagnosis` routes better than `pins`, and the one
+   study that was built to support it came back NULL.**
+   `tests/stress/diagnosis_recall.py` displaces a known block and asks whether
+   the ranking concentrates on it, paired against the SAME ranking on the
+   UNDAMAGED board. Evidence arms: `swap` median delta **+0.135** (4 cells up,
+   2 down), `wrong_side` **+0.000** (2 up, 3 down). The pairing is the point --
+   the ranking scores just as well on the pristine board wherever the
+   perturber picks the block the ranking would have picked anyway. The flag
+   ships default-off on that basis, and the study is kept as a recorded
+   negative rather than deleted. The signal
+   `foreign_crossings`, which #553 also named, is **not** included; the three
+   reasons are in `py_placer/placement/diagnosis.py`, and none of them is
+   "#703 measured it and it failed" — #703 measured `crossings`, a different
+   quantity.
 3. Micro-quench only those parts, with the failed nets weighted 3×
    (`--failed-net-weight`) — both their airwire *length* and any *crossing*
    they take part in, the latter priced at the larger of the two nets'

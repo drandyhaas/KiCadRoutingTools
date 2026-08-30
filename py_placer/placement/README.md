@@ -68,6 +68,57 @@ On the kit-dev-coldfire demo board this repaired the hand placement from
 3 failed nets to 0 with 4.8× less router effort, moving only
 resistors/caps/jumpers.
 
+### Choosing the movers: `--target-select` (#553)
+
+`--target-select pins` (the DEFAULT, unchanged) is the rule above: pad owners
+of the failed and blocker nets, minus anything over `--max-target-pins`.
+
+`--target-select diagnosis` ranks blocks and loose parts on three signals —
+connectivity-centroid displacement, blocked cells owned, and legality defect
+pairs — and takes the round-robin union of their top-k. It requires
+`--group-by` (only the displacement signal needs blocks; the other two rank
+loose parts, which is why the flag still does something on a board that
+derives none). Each round is budgeted at the number of parts the pin filter
+would have offered — so the two selectors are *asked* for the same size, but a
+**block is added whole**, which makes the budget a floor rather than a cap.
+Measured at budget 8, glasgow_revC selects 67 parts under `--group-by auto`,
+because its one derivable block has 68 members. The overshoot is reported in
+the run's own output; do not read "budgeted" as "bounded".
+
+The budget is also how #553's own grading rule is answered. The issue asked for
+a check that the diagnosis-selected set "differs from the pin-count set" — but
+that is satisfied by *any* different function, including a random one, so on
+its own it establishes nothing. Matching the two selectors' requested size
+turns it into a comparison of *which* parts, not *how many*, and the per-round
+`target_select_overlap` record (`{pins, diagnosis, overlap, fallback}`) is where
+a run reports it. Equal numbers with `fallback: false` mean the diagnosis
+independently agreed; equal numbers with `fallback: true` mean it was
+discarded. Those are different facts and the flag distinguishes them.
+
+```bash
+python py_placer/place_route_loop.py input.kicad_pcb repaired.kicad_pcb \
+    --route-args '--nets "/*" --track-width 0.2' \
+    --target-select diagnosis --group-by auto,decap --diagnosis-top-k 3
+```
+
+**No measurement shows this routes better than `pins`, and the study built to
+support it came back NULL.** `tests/stress/diagnosis_recall.py` displaces a
+known block and asks whether the ranking concentrates on it, paired against the
+same ranking on the UNDAMAGED board: evidence-arm median deltas **+0.135**
+(4 cells up, 2 down) and **+0.000** (2 up, 3 down). The study, its rows and its
+baseline are committed as a recorded negative rather than deleted; its
+docstring explains the three ways an earlier reading of the same data looked
+like a finding. The flag ships default-off, the run verdict carries the
+disclaimer in `target_select_efficacy`, and
+`target_select_rounds_diagnosis` beside `target_select_rounds_fallback` says
+how often it steered anything at all. See `diagnosis.py`'s own docstring for
+what backs each signal — which is not the same for the three — and for why
+`foreign_crossings` is absent.
+
+A run in this mode prints a group-source census before round 0, because
+`--group-by auto` derives NO BLOCK on five of the six boards this repo grades
+placement on.
+
 ## place_portfolio.py — K diverse candidates from one placement
 
 The quench is deterministic by design (#457), so re-running it never produces
@@ -924,6 +975,8 @@ is followed by a settle beat, so the moves only play once the camera has arrived
 | `../group_routing.py` | Block → net scoping, and the undo, for `route.py` (#459) |
 | `fanout_clearance.py` | Post-fanout decoupling-cap clearance repair (#130) |
 | `groups.py` | Placement blocks: which parts move as one rigid body (#459) |
+| `diagnosis.py` | Which parts to offer the quench, from routing evidence rather than pin count (#553). Ranks; never combines |
+| `routability.py` | Block displacement, corridors, escape lanes, net affinity — the geometry behind `floorplan.grade`'s health block |
 | `lock_advisor.py` | Which parts should not be moved, and why (#431). Advice only |
 | `placement_state.py` | Board-state gates: unplaced, and already-routed (#431) |
 | `cli_gates.py` | argparse shared by both placement CLIs so they cannot drift |

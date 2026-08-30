@@ -1,7 +1,9 @@
 # What predicts routed `blocking` — the first measurement (#703)
 
-**Status: COMPLETE. The declared table is 6 boards x K=20 = 120 placements, and
-all 120 were routed.** No predictor here is "validated" in a strong sense; the
+**Status: COMPLETE. The declared table is 6 boards x K=20 = 120 placements
+planned, of which 119 produced a routed result** — which is what this file's
+own body says at "119 of 120 variants produced a routed result", and which this
+line used to contradict. No predictor here is "validated" in a strong sense; the
 acceptance rule's own false-positive rate at N=6 is **1.5%-5.5%** (median 2.5%)
 over the 21 predictors defined on all six boards, measured, and that number
 belongs beside every PASSES below.
@@ -283,3 +285,88 @@ discharging, not a number chosen afterwards.*
   row records `provenance.measured_git` (`v0.21.3-199-g3b8edc19`), from which
   the router version follows; there is no explicit router-version or machine
   field on a row, and this document previously claimed there was.
+
+## What this study does NOT license for #553
+
+`--target-select diagnosis` (`py_placer/placement/diagnosis.py`) ranks movers on
+three signals, one of which is the legality family measured above. Three
+boundaries, recorded before anyone reads the flag's output as a result:
+
+1. **The extrapolation is untested.** This study measured the legality counts as
+   BOARD-LEVEL scalars ranking a BOARD-LEVEL outcome across many placements.
+   #553 uses them as PER-CANDIDATE counts ranking candidates WITHIN one board.
+   Nobody has measured that, and the module docstring says so where a reader of
+   the code will see it.
+2. **`foreign_crossings` was NOT rejected by this study.** It is absent from
+   #553 for three reasons: no caller has the declared corridor it needs;
+   auto-deriving one manufactures the number (`CORRIDOR_MIN_COVER` exists
+   because a cluster fit returns a confident rectangle for a bus that is not
+   there); and its nearest measured relative, `crossings`, fails the sign test
+   here. That third reason is family-level doubt. `foreign_crossings` is a
+   corridor-pierce count — a different quantity — and it has never been measured
+   against anything. Recording the omission as "#703 measured it and it failed"
+   would be false in a way that survives.
+3. **Recall is not efficacy — and the recall study came back NULL.**
+   `tests/stress/diagnosis_recall.py` displaces a known block and asks whether
+   the ranking concentrates on it. Nothing routes. Its evidence arms' median
+   DELTAS — lift on the damaged board minus the lift the SAME ranking scores
+   on the UNDAMAGED one — are `swap` **+0.135** (4 cells up, 2 down) and
+   `wrong_side` **+0.000** (2 up, 3 down). That is not a finding. The study is
+   kept, and kept committed, as a recorded negative rather than deleted.
+
+   An earlier reading of the same data said "above chance on 4 of 4 boards,
+   median lift 2.32, negative control at chance". It was wrong in three ways,
+   all found by re-measuring rather than by re-reading, and all three are worth
+   carrying because each is a trap the next study of this shape will meet:
+
+   - **No undamaged control.** `perturb.pick_block` ranks units by source and
+     size, and so, largely, does this ranking — so on tigard the damaged block
+     is already ranked #1 by displacement on the PRISTINE board. The raw lift
+     could not tell "found the damage" from "always ranks that block first".
+   - **Lift saturates.** Its ceiling is `movable / n`, reached whenever the
+     selection contains the whole truth, and most cells sat exactly ON it
+     (7 of 8 `wrong_side` cells) — where the number reports how big the
+     selection was and nothing else.
+   - **The negative control mostly did not perturb.**
+     `portfolio.perturb_jitter` skips a part whose incumbent pose is not fully
+     legal, which on a dense board is every part, so three `scatter` cells
+     produced a board byte-identical to the control. The published 0.83 was an
+     interpolated median of `{0, 0, 1.66, 5.06}` — no cell was near 1.0.
+
+   Two limits survive even in the corrected form. `base_rate` is the exact null
+   for a uniform random pick of n PARTS, but this selector picks whole BLOCKS
+   and the truth is a block from the same derivation; the block-structured null
+   runs 0.69–3.12 depending on the board, and under it no cell reaches the 95th
+   percentile. And the study runs the ranking **unbudgeted** while the loop
+   budgets every round — which the module's own `SIGNAL_ORDER` note says can
+   change the selected set outright.
+
+### Pre-registered rule 5 — what would settle it, and why it has not been run
+
+The claim `--target-select diagnosis` does NOT make is that it routes better.
+Settling that needs a paired routed A/B, `pins` against `diagnosis`, on ≥ 3
+boards with the same round budget, graded on `failures` then routed `blocking`,
+by the same accept rule this document uses elsewhere: right direction on ≥ N−1
+boards, wrong on none.
+
+It has not been run, and the cost is the reason: this study's own provenance
+records a median 217 s per route and a maximum of 2012 s over its 87 rows (on
+`tigard:perturb-wrong_side`), plus a single `tigard:perturb-pile` row at
+9877 s — so three boards × five rounds × two arms is hours to overnight
+serially. There is a harder problem than cost, and it is recorded here so the
+next person does not rediscover it: **the tracked corpus has almost no board
+that fails to route at its authored placement.** The one that does is
+kit-dev-coldfire — `py_placer/placement/README.md` records the loop taking its
+hand placement from 3 failed nets to 0, and this document's own table shows no
+zero among its observed `blocking` values — so an A/B would rest on ONE board
+where N ≥ 3 is the acceptance rule. Manufacturing failures elsewhere means
+perturbing, which re-introduces the damage-family caveat the recall study
+already carries.
+
+### Pre-registered rule 6 — the withdrawal
+
+If that A/B runs and `diagnosis` does not win by rule 5's criterion, the flag is
+withdrawn from the default-available set — and the row keeps its measured
+direction, in the `rejected` style `test_placement_ab.py` uses. A rejected
+finding that is deleted becomes folklore; a rejected finding that keeps its row
+stays a change detector.
