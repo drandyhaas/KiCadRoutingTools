@@ -110,22 +110,22 @@ ROWS = [
      "    side = rs.constant_side(xs, ys)\n    if False:",
      (T_HARNESS,), 'KILLED'),
     ('rule5-tolerates-one-dissenting-board', 'l',
-     "    agrees = (n >= rs.MIN_SIGN_BOARDS and len(pos) >= max(1, n - 1) "
-     "and not neg)",
-     "    agrees = (n >= rs.MIN_SIGN_BOARDS and len(pos) >= max(1, n - 1))",
+     "    agrees = st['passes_sign_rule'] and not neg",
+     "    agrees = st['passes_sign_rule']",
      (T_HARNESS,), 'KILLED'),
-    ('rule5-drops-the-three-board-floor', 'l',
-     "    agrees = (n >= rs.MIN_SIGN_BOARDS and len(pos) >= max(1, n - 1) "
-     "and not neg)",
-     "    agrees = (n >= 1 and len(pos) >= max(1, n - 1) and not neg)",
-     (T_HARNESS,), 'KILLED'),
+    # The floor now lives inside `rank_stats.sign_test`, so the mutation
+    # moves there: `passes_sign_rule` is what carries MIN_SIGN_BOARDS.
+    ('rule5-drops-the-three-board-floor', 's',
+     "    passes = (n_boards >= MIN_SIGN_BOARDS",
+     "    passes = (n_boards >= 1",
+     (T_HARNESS, T_STATS), 'KILLED'),
     ('cannot-fire-boards-join-the-denominator', 'l',
      "    able = [b for b, d in per.items()\n"
      "            if d['qbar'].get('verdict') in ('fires', 'does_not_fire')]",
      "    able = list(per)",
      (T_HARNESS,), 'KILLED'),
     ('the-null-rate-is-never-computed', 'l',
-     "                  'qbar_null': qbar_null(rr)}",
+     "                  'qbar_null': qbar_null(rr, verdict=_q.get('verdict'))}",
      "                  'qbar_null': None}",
      (T_HARNESS,), 'KILLED'),
 ]
