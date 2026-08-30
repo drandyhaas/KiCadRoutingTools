@@ -50,6 +50,8 @@ _PACK_OFFSET = 1 << 20  # grid coords stay well within +/-2^20 at any allowed gr
 # (and sites) that violate it - naming the exact leaking interleaving that the
 # whole-map KICAD_OBSTACLE_AUDIT diff can only total. Raw (non-cache) list ops
 # on the working map are accounted separately by get_stats() deltas per site.
+import itertools as _it
+_UID = _it.count(1)
 _LEDGER_ENV = os.environ.get("KICAD_OBSTACLE_LEDGER") == "1"
 _LEDGER = None
 if _LEDGER_ENV:
@@ -521,8 +523,18 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                 _dc_replace(config, via_size=_sp[0], via_drill=_sp[1]),
                 extra_clearance, diagonal_margin, _small_pass=True)
             data.blocked_vias_small = _sd.blocked_vias
+    if not _small_pass:
+        # A STABLE identity for every cache object, armed or not. id() cannot
+        # serve: CPython recycles ids, and make_local_window mints a
+        # short-lived PCBData (and its caches) per tap/rescue, so a freed
+        # object's id is readily handed straight to its successor. Anything
+        # keying bookkeeping on id() therefore attributes one object's state to
+        # another -- net_cost._cache_for documents the same hazard for boards.
+        # Measured: an id-keyed residency tracker misattributed cache objects
+        # and made a repair fire on the wrong ones.
+        data._cache_uid = next(_UID)
     if _LEDGER is not None and not _small_pass:
-        data._audit_serial = next(_LEDGER["serial"])
+        data._audit_serial = data._cache_uid
         _LEDGER["meta"][data._audit_serial] = (net_id, _ledger_site(depth=2))
     return data
 
