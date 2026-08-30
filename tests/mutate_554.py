@@ -104,12 +104,22 @@ ROWS = [
      (T554,), 'KILLED'),
 
     # ---- rigidity ----------------------------------------------------------
-    # Intra-block pairs constrained. A rigid translate leaves that geometry
-    # invariant, and on a real board members sit sub-clearance already, so this
-    # makes a block veto its own every candidate -- the exact reason
-    # `quench.group_move_valid` excludes them.
-    ('intra-unit-edge', 'r',
+    # EXPECTED SURVIVOR, and recording why is the point. This is the early
+    # `ua == ub` fast path, and it is REDUNDANT: `order_graph` resolves both
+    # refs to units a few lines later and drops the pair again on `lo == hi`.
+    # Deleting the fast path costs a little work per intra-block pair and
+    # changes no answer. The load-bearing copy is the next row.
+    ('intra-unit-fast-path', 'r',
      "            if ua == ub:\n                continue\n",
+     "            if False:\n                continue\n",
+     (T554,), 'SURVIVED'),
+
+    # The guard that actually carries it. A rigid translate leaves intra-block
+    # geometry invariant, and on a real board members sit sub-clearance already,
+    # so constraining those pairs makes a block veto its own every candidate --
+    # the exact reason `quench.group_move_valid` excludes them.
+    ('intra-unit-edge-kept', 'r',
+     "            if lo == hi:\n                continue\n",
      "            if False:\n                continue\n",
      (T554,), 'KILLED'),
 
@@ -122,14 +132,24 @@ ROWS = [
      (T554,), 'KILLED'),
 
     # ---- what may be relaxed -----------------------------------------------
-    # Fixed nodes take incoming edges again: a locked part, or a pinned
-    # neighbour in the control arm, can be relaxed off zero. This is the second
-    # defect Phase 1 shipped, and it is invisible in the output -- the answer
-    # still describes a board, just not one where the locked part stayed put.
+    # EXPECTED SURVIVOR, and the reason is a real coupling worth knowing. Fixed
+    # nodes take incoming edges again, so in principle a locked part could be
+    # relaxed off zero. In practice it cannot, because every edge weight is
+    # `-slack` and `identity_violations` guarantees `slack <= 0` -- so all
+    # weights are NON-NEGATIVE, and a shortest path from a source pinned at 0
+    # can never go below 0. The guard is belt to `identity`'s braces: it becomes
+    # load-bearing exactly when the gap clamp breaks, which is the one case
+    # `identity_violations` already refuses first.
+    #
+    # It was still worth adding: the defect it was written for (Phase 1's
+    # envelope relaxing into pinned units) was real, and `pin_all_but` makes
+    # most of the board fixed, so a future edge with positive weight -- a
+    # requirement rather than a baseline -- would need it. Kept, and recorded
+    # here as currently unattackable rather than deleted or marked green.
     ('relax-into-fixed', 'r',
      "        if dst in fixed:\n            continue\n",
      "        if False:\n            continue\n",
-     (T554,), 'KILLED'),
+     (T554,), 'SURVIVED'),
 
     # ---- the pairing itself ------------------------------------------------
     # The control arm stops pinning anything, so frozen == yielding and every
