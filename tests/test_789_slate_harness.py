@@ -22,6 +22,41 @@ ways it can be wrong are mostly not crashes:
     never counted as a board that did not fire, which would put it in the
     denominator of a rule it was never able to satisfy;
   * a `blocking` of None must never read as 0.
+
+WHAT THE BATTERY MEASURED (`python3 tests/mutate_789.py`, 16 rows against
+`tests/stress/rank_stats.py` and `tests/stress/slate_study.py`):
+
+    tau-b-uses-tau-a-denominator                  KILLED
+    tau-b-drops-the-tie-correction                KILLED
+    tau-sign-is-flipped                           KILLED
+    tau-returns-zero-not-nan                      KILLED
+    tau-min-n-lowered-to-two                      KILLED
+    board-tau-drops-the-pooling-guard             KILLED
+    fmt-tau-drops-the-LOO-span                    KILLED
+    tau-measured-against-the-static-order-itself  KILLED
+    fire-drops-the-hpwl-conjunct                  KILLED
+    a-clean-baseline-is-scored-not-classified     KILLED
+    a-none-blocking-is-read-as-zero               KILLED
+    a-saturated-board-scores-tau-zero             KILLED
+    rule5-tolerates-one-dissenting-board          KILLED
+    rule5-drops-the-three-board-floor             KILLED
+    cannot-fire-boards-join-the-denominator       KILLED
+    the-null-rate-is-never-computed               KILLED
+
+    16 rows: 16 killed, 0 survived, 0 broken
+
+The first run of that battery was 14 killed, 1 survived, 1 broken, and both
+non-kills were real:
+
+  * `the-null-rate-is-never-computed` SURVIVED, because this file called
+    `qbar_null` directly and nothing checked that `aggregate` still computed
+    it or that `report` still printed it. A null rate nobody sees is a null
+    rate nobody was told -- and it is the number that says how little rule 2's
+    discharge is worth. Two asserts added.
+  * `tau-returns-zero-not-nan` came back BROKEN, anchor matched twice:
+    `kendall_tau` and `tau_a` open with the same two lines. Reported rather
+    than silently mutating whichever came first, which is the anchor rule
+    doing its job.
 """
 import os
 import sys
