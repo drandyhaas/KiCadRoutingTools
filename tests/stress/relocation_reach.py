@@ -42,13 +42,22 @@ carry the target toward the block):
     splitflap decap:U10          travels  0.00   closes at most  5.72
     watchy decap:J3              travels  0.00   closes at most  4.65
 
-Substituting closure for travel leaves the aggregate verdict standing (11 of 23
-material either way), which is why MECHANISM HOLDS is not withdrawn -- but no
-single cell's number here is the closure, and two of the `both_zero` cells,
+**Those four rows come from a review-time probe that is NOT in this repo, and
+they are not re-derived by anything.** Computing closure needs a second LP per
+cell (maximise `u . (delta_centroid - delta_net_centroid)` over the same
+envelope), and it is not implemented here. Treat the four numbers as an
+order-of-magnitude illustration of the direction and size of the gap, not as a
+measurement this tree can reproduce -- everything else in this file's output IS
+re-derived by `tests/test_554_reach_regen.py`, and this paragraph deliberately
+is not.
+
+What the probe did establish, and what matters for reading the table: the
+substitution leaves the aggregate verdict standing -- material either way on
+essentially the same count -- so MECHANISM HOLDS is not withdrawn. But no single
+cell's number here is the closure, and at least two of the `both_zero` cells,
 which this file calls "the honest limit of the feature", do have room to close.
-Reported rather than repaired: computing closure needs a second LP per cell, and
-the mechanism question -- can neighbours yielding buy travel a frozen board
-cannot -- is answered by travel.
+The mechanism question -- can neighbours yielding buy travel a frozen board
+cannot -- is answered by travel, which is what is measured.
 
 `slide_frozen_mm` is a THIRD number and a different question, kept because it is
 what the rigid translate actually does: slide-until-contact under the block's TOTAL
@@ -88,8 +97,8 @@ TWO MORE WAYS TO MEASURE THE WRONG THING, BOTH AVOIDED HERE
 -----------------------------------------------------------
 * **Rails in the centroid.** `block_displacements` without `ignore_net_ids`
   degenerates into "distance from the middle of the board" -- GND owns 96 of ulx3s's
-  parts. Rails are cut (`--ignore-nets`, defaulting to the same list
-  `tests/stress/perturb_batch.py` uses).
+  parts. Rails are cut (`--ignore-nets`; see IGNORE_NETS for how it relates to
+  `perturb_batch.py`'s list, which it is not identical to).
 * **The wrong direction.** `perturb.max_feasible_dose` is used by the damage rig to
   slide a block AWAY from its net centroid, off the board. Relocation goes TOWARD
   it, and the two are not the same number: measured on the same boards, toward is
@@ -120,9 +129,13 @@ for _p in (ROOT, os.path.join(ROOT, 'py_router'), os.path.join(ROOT, 'py_placer'
 SCHEMA = 1
 
 #: Rails, so the connectivity target does not degenerate into the board centre.
-#: Same list as tests/stress/perturb_batch.py, deliberately -- two studies over the
-#: same corpus disagreeing about what a rail is would be a difference nobody could
-#: attribute.
+#:
+#: A SUPERSET of `tests/stress/perturb_batch.py`'s eight -- it adds VSS, AGND,
+#: VBUS and +3.3V. An earlier comment here claimed the two lists were identical
+#: "deliberately", which was false. Measured, the difference is inert on this
+#: corpus except for `slide_frozen_mm_median`, which moves 0.05 -> 0.10; so the
+#: two studies do not disagree about any number either of them reports, but they
+#: are not the same list and this file no longer says they are.
 IGNORE_NETS = ['GND', 'VCC', 'VDD', 'VSS', '+3V3', '+5V', '+1V8', '+1V1', 'GNDA',
                'AGND', 'VBUS', '+3.3V']
 

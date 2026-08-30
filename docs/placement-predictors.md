@@ -380,7 +380,8 @@ order. Two questions, and only the first is answered.
 **The mechanism question — ANSWERED.** Does yielding buy travel a frozen board
 cannot? `tests/stress/relocation_reach.py`, paired, one variable changed: both
 arms run the same solve over the same graph, and the frozen arm simply pins every
-other unit. Over 24 blocks on 10 boards, yielding bought ≥ 1 mm on **11 cells
+other unit. Over the 24 measurable blocks on the 9 boards that have one (a
+tenth, glasgow_revC, contributes only refusals), yielding bought ≥ 1 mm on **11 cells
 spanning 6 boards**, median gain 0.31 mm, max 16.66 mm; 11 cells move in neither
 arm and are counted, not dropped; 3 are refused by name (glasgow_revC's blocks
 contain KiCad-locked parts).
@@ -398,8 +399,10 @@ identical router argv; one that fails that is `not_placement_limited` and is
 reported with both numbers, never dropped.
 
 Pose `recovery` is a DIAGNOSTIC here for a reason sharper than CLAUDE.md's
-general one: the solve aims at `net_centroid`, and on the ten tracked boards a
-block sits **4.95–54.9 mm from its own net centroid at the human's placement**.
+general one: the solve aims at `net_centroid`, and across the 24 live cells of
+`tests/stress/relocation_reach.py` a block sits **3.39–69.20 mm from its own net
+centroid at the human's placement** (`want_mm` in the committed baseline; median
+10.36 mm).
 The best achievable pose recovery is therefore bounded above by
 `1 − d_ctrl/dose`, which is at or below zero on most cells before anything runs.
 Every pose number is reported with that ceiling beside it, and a pose null on a
@@ -436,8 +439,12 @@ and `pile` because every free part moves so there is no "the block".
 
 ### Pre-registered rule 11 — the dose ladder is amended, not ignored
 
-#411's 5/10/20/40/80 mm ladder is **geometrically impossible** on 9 of the 11
-tracked outlines at 80 mm and on 5 at 40 mm. It is replaced by a probed dose per
+#411's 5/10/20/40/80 mm ladder is **geometrically impossible on most of this
+corpus**: of the 10 boards the reach sweep covers, **5** have a board diagonal
+under 80 mm and **2** under 40 mm, and a diagonal is a generous upper bound on
+how far a block inside the outline can travel. (An earlier revision said "9 of
+the 11", against a set of 11 boards that does not exist in the tree; the numbers
+above are re-derivable from `board_bounds`.) It is replaced by a probed dose per
 (board, block, direction), with the APPLIED damage measured by diffing the
 control against the damaged board — never from `clipped` or
 `max_feasible_dose_mm`, which describe a rigid-translate probe that only two of

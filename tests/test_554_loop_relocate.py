@@ -41,6 +41,7 @@ sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 sys.path.insert(0, os.path.join(ROOT, 'py_tools'))
 
 import place_route_loop as prl                    # noqa: E402
+from placement.writer import write_placed_output as _real_write  # noqa: E402
 from placement import relocate as RL              # noqa: E402
 
 FAILURES = []
@@ -105,7 +106,15 @@ def _run(extra_args, rounds=1, proposal=None, seen=None):
     writes = []
 
     def fake_quench(pcb_data, **kw):
-        calls.append(dict(kw))
+        # Record the POSES, not just the path. Asserting the filename contains
+        # "relocated" passes even if the board handed over is a byte copy of the
+        # round input -- and `QuenchState` reads poses from `pcb_data`, so the
+        # one line that actually delivers the relocation could be deleted with
+        # every test still green.
+        kw = dict(kw)
+        kw['_poses'] = {r: (round(f.x, 4), round(f.y, 4))
+                        for r, f in pcb_data.footprints.items()}
+        calls.append(kw)
         return [{'reference': 'R1', 'new_x': 161.0, 'new_y': 100.0,
                  'new_rotation': 0.0}]
 
@@ -120,10 +129,12 @@ def _run(extra_args, rounds=1, proposal=None, seen=None):
         return proposal
 
     def fake_write(src, dst, pl):
+        # APPLY the placements rather than copying, or the "relocated" board is
+        # a byte copy and the poses the quench reads are never the moved ones.
         writes.append({'src': os.path.basename(src),
                        'dst': os.path.basename(dst),
                        'refs': sorted(p['reference'] for p in pl)})
-        shutil.copy(src, dst)
+        _real_write(src, dst, pl)
 
     board, work = _board()
     saved = (prl.quench, prl.run_route, prl.write_placed_output,
@@ -235,12 +246,20 @@ def t_an_accepted_proposal_is_written_and_the_quench_reads_IT():
     check(reloc_write and reloc_write[0]['refs'] == ['M1'],
           'the relocated board was not written from the proposal moves: %r'
           % reloc_write)
-    # THE wiring claim: the quench must be handed the relocated board, not the
-    # round's input. Otherwise the relocation is written and then ignored.
+    # THE wiring claim, asserted on the POSES rather than the path. A filename
+    # check passes even when the "relocated" board is a byte copy of the round
+    # input -- and `QuenchState` reads poses from `pcb_data`, so the one line
+    # that actually delivers the relocation (`pcb_data = parse_kicad_pcb(
+    # quench_base)`) could be deleted with every test still green.
     check(calls and 'relocated' in os.path.basename(calls[0]['pcb_file']),
-          'the quench read %r, not the relocated board -- a relocation the '
-          'quench cannot see is a relocation the round throws away'
+          'the quench read %r, not the relocated board'
           % (calls[0].get('pcb_file') if calls else None))
+    poses = (calls[0].get('_poses') or {}) if calls else {}
+    check(poses.get('M1') == (124.0, 90.0),
+          'the quench read M1 at %r, but the accepted proposal put it at '
+          '(124.0, 90.0). The board was written and then not handed over -- a '
+          'relocation the quench cannot see is one the round throws away.'
+          % (poses.get('M1'),))
     cand = [w for w in writes if w['dst'] == 'loop_round1.kicad_pcb']
     check(cand and cand[0]['src'].endswith('_relocated.kicad_pcb'),
           'the candidate board was built from the round input rather than from '
@@ -310,6 +329,10 @@ def t_the_verdict_carries_the_proposal_itself_not_just_a_count():
         check(p.get('binding_path'),
               'the recorded proposal lost the chain that bound it, which is the '
               'explanation #459 asked the constraint graph to be: %r' % p)
+        check(p.get('applied') is True,
+              'the applied proposal serialises as applied=%r. A consumer that '
+              'filters relocate_proposals on that field sees ZERO in the same '
+              'JSON that reports rounds_applied: 1.' % p.get('applied'))
 
 
 def t_the_round_sidecar_carries_the_proposal():
@@ -325,6 +348,34 @@ def t_the_round_sidecar_carries_the_proposal():
         check(rec.get('binding_path'),
               'the binding path is not in the record, so the round cannot say '
               'what stopped the block: %r' % rec)
+
+
+def t_the_sidecar_moved_list_is_against_the_parent_it_names():
+    """`moved` is the movie's ONLY input, and it had two bugs at once.
+
+    It was measured against `pcb_data`, which is the re-parsed RELOCATED board by
+    the time the sidecar is written -- so each `from` was the pose the part had
+    AFTER the relocation, disagreeing with the `parent` the same sidecar names.
+    And a part the relocation moved but the quench did not was absent entirely,
+    so the relocation leg was never animated and the shot was framed off the
+    wrong set.
+    """
+    seen = {}
+    _run(['--relocate', '--group-by', 'decap'], proposal=_proposal(), seen=seen)
+    doc = seen['sidecars'].get(1) or {}
+    moved = {m['reference']: m for m in (doc.get('moved') or [])}
+    check('M1' in moved,
+          'M1 was moved by the relocation and not by the quench, and is missing '
+          'from the sidecar entirely: %r' % sorted(moved))
+    if 'M1' in moved:
+        # M1 started at (120, 100) on the fixture board and the proposal puts it
+        # at (124, 90). The `from` must be the PARENT pose, not the relocated one.
+        check(tuple(moved['M1']['from'][:2]) == (120.0, 100.0),
+              "M1's `from` is %r; the parent board has it at (120.0, 100.0). A "
+              '`from` measured on the relocated board makes the tween start '
+              'where the part already was.' % (moved['M1']['from'][:2],))
+        check(tuple(moved['M1']['to'][:2]) == (124.0, 90.0),
+              "M1's `to` is %r, not the relocated pose" % (moved['M1']['to'][:2],))
 
 
 def t_a_refused_round_records_its_refusal_in_the_sidecar():

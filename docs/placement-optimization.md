@@ -893,8 +893,9 @@ Three smaller results worth keeping:
   **And the direction matters as much as the number.** Both of those are travel
   *away* from the block's connectivity target, which is what a damage rig wants.
   A relocation goes the other way, and #554 measured that separately: toward the
-  target, with every neighbour frozen, a block travels a **median 0.1 mm against
-  a median want of 6.1 mm** over 24 blocks on 10 boards
+  target, with every neighbour frozen, a block travels a **median 0.00 mm against
+  a median want of 10.36 mm**, over the 24 measurable blocks on the 9 boards that
+  have one
   (`tests/stress/relocation_reach.py`). Letting the neighbours yield in preserved
   relative order buys ≥ 1 mm more on 11 of those 24, over 6 boards, up to
   16.66 mm. That is the mechanism #554 rests on, and it is *not* a claim that a

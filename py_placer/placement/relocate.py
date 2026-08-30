@@ -8,10 +8,12 @@ move."*
 
 The quench's rigid block translate (#538) caps every member at `max_displacement`
 from its own seed and freezes everybody else. Measured with the neighbours frozen,
-the furthest a block travels TOWARD its connectivity target is a **median 0.1 mm
-against a median want of 6.1 mm** over ten corpus boards
-(`tests/stress/relocation_reach.py`). A shipped board has no vacancy to translate
-into; the only way a block moves is if its neighbours yield.
+the furthest a block travels TOWARD its connectivity target is a **median of
+0.00 mm against a median want of 10.36 mm**, over the 24 measurable blocks on the
+9 boards that have one (`tests/stress/relocation_reach.py`; a tenth board,
+glasgow_revC, contributes only refusals -- its blocks contain KiCad-locked
+parts). A shipped board has no vacancy to translate into; the only way a block
+moves is if its neighbours yield.
 
 THE FORMULATION
 ---------------
@@ -154,7 +156,8 @@ NO_EFFICACY_CLAIM = (
     'NOT MEASURED: no paired routed A/B of relocate-on vs relocate-off exists, '
     'so nothing shows a relocated board ROUTES better. What IS measured is the '
     'mechanism -- letting neighbours yield in preserved order buys a block more '
-    'travel than freezing them, on 11 of 24 blocks over 6 of 10 corpus boards '
+    'travel than freezing them, on 11 of the 24 measurable blocks, spanning 6 '
+    'of the 9 boards that have one '
     '(tests/stress/relocation_reach.py). Reach is not routability.')
 
 #: The two pinned wall nodes per axis, and the super-source. Names chosen so they
@@ -220,8 +223,9 @@ class Reach:
     binding: Dict[str, Tuple] = field(default_factory=dict)  # axis -> path rows
     reach_mm: float = 0.0        # along the requested direction
     #: WHICH axis produced `reach_mm`. Reporting the x chain unconditionally
-    #: names the wrong parts whenever y is the binding one -- measured on 6 of
-    #: 24 corpus cells, including the headline kit-dev-coldfire/net:JTAG, where
+    #: names the wrong parts whenever y is the binding one -- measured on 8 of
+    #: the 24 live corpus cells, and on all 8 the x chain differs -- including
+    #: the headline kit-dev-coldfire/net:JTAG, where
     #: the printed chain was `FB101 -> C114 -> C119` and the chain that actually
     #: stopped it was `Y101 -> R207 -> <wall hi>`. An explanation that names the
     #: wrong parts is worse than none.
@@ -610,8 +614,10 @@ def reach(state, units: Units, edges, unit: str,
       cells and LARGER on a few (a neighbour yielding can carry the target
       toward the block): kit-dev-coldfire `net:JTAG` travels 16.78 mm and closes
       at most 13.05 mm, while splitflap `decap:U10` travels 0.00 and could close
-      5.72. The aggregate mechanism verdict survives the substitution; no
-      individual cell's number is the closure.
+      5.72. Those figures come from a review-time probe that is NOT in this repo
+      and that nothing re-derives -- an order-of-magnitude illustration, not a
+      committed measurement. The aggregate mechanism verdict survives the
+      substitution; no individual cell's number is the closure.
     * **It is not a legality guarantee.** See the graph-is-not-conservative
       section in the module docstring. Only `exact_refusal` gates a board.
     """
@@ -803,8 +809,23 @@ def min_perturbation(state, units: Units, edges, block: str,
             solver = 'sweep'
             got = _sweep_min_perturbation(free, rows, lo[axis], hi[axis], free)
         if got is False:
-            return None, ('no_room_at_any_dose: the %s system is infeasible at '
-                          'this dose' % axis)
+            # The refusal has to name the SWEEP when the sweep produced it.
+            # Measured with scipy absent, 5 of 12 corpus cells flip from a real
+            # relocation to "no room" and a 6th collapses to the frozen answer
+            # with an empty corridor -- because the sweep only ever RAISES a
+            # variable, so any system needing a negative shift is infeasible to
+            # it. Without this, `rel.solver` stays '' on the refusal path and a
+            # reader cannot tell "the heuristic found less room" from "there is
+            # less room" -- which is exactly what this module's own docstring
+            # promised they could.
+            return None, (
+                'no_room_at_any_dose: the %s system is infeasible at this dose%s'
+                % (axis,
+                   ' -- SOLVED BY THE FALLBACK SWEEP, not the LP: scipy is '
+                   'unavailable, and the sweep can only raise variables, so a '
+                   'system needing a negative shift is infeasible to it. This '
+                   'is not necessarily a board with no room.'
+                   if solver == 'sweep' else ''))
         for u, v in got.items():
             out.setdefault(u, {})[axis] = v
     moves = {u: (round(d.get('x', 0.0), ROUND_MM), round(d.get('y', 0.0), ROUND_MM))
@@ -907,8 +928,34 @@ def exact_refusal(state, units: Units, moves, tol: float = 1e-6) -> str:
             if gap is None:
                 continue
             was = pa.gap_to(pb)
-            if gap < min(state.clearance, was if was is not None else 0.0) - 1e-6:
+            if gap < min(state.clearance, was if was is not None else 0.0) - tol:
                 return 'moved_pair_worsened:%s:%s' % (a, b)
+            # ... and the PAD/HOLE currency for the same pair, which the
+            # per-part sweep above cannot reach: it passes `pads_ok` a neighbour
+            # list with every moved ref REMOVED (their stored poses are stale),
+            # so a pair where BOTH parts move is checked on courtyards only.
+            #
+            # That is not hypothetical. Measured on esp_prog/decap:U1, the LP
+            # drives a courtyard gap to EXACTLY the clearance -- so the test
+            # above is satisfied to the micron -- while the pads, which overhang
+            # the courtyard, cross: C4/Q2 and U1/U2 each gained a pad conflict
+            # that `grade_pad_legality` reports and nothing here asked about.
+            # The shortfalls were 80 nm and 50 nm, under the ~8 um grid noise
+            # CLAUDE.md says to filter, so the harm was small -- but "can never
+            # ship an illegal board" was false in KIND, and that is the claim.
+            if ctx is not None and hasattr(ctx, 'pair_shortfall'):
+                pose_a = (moved[a][0], moved[a][1], pa.rot)
+                pose_b = (moved[b][0], moved[b][1], pb.rot)
+                try:
+                    now = ctx.pair_shortfall(a, b, pose_a=pose_a, pose_b=pose_b)
+                    base = ctx.seed_baseline(a, b)
+                except Exception:                          # noqa: BLE001
+                    continue     # no pad model for this pair; courtyards stand
+                for field in ('pad', 'pad_overlap', 'hole', 'stack'):
+                    n_v = getattr(now, field, 0.0) or 0.0
+                    b_v = getattr(base, field, 0.0) or 0.0
+                    if n_v > b_v + tol:
+                        return 'moved_pair_pad_worsened:%s:%s:%s' % (a, b, field)
     return ''
 
 
@@ -917,11 +964,22 @@ def exact_refusal(state, units: Units, moves, tol: float = 1e-6) -> str:
 # ---------------------------------------------------------------------------
 
 #: Fractions of the reach-clamped target, largest first, first survivor wins.
-#: Four solves, not the 80,380 candidate offsets a grid at `--step 0.5` would
-#: enumerate for the same travel.
+#: At most `len(DOSE_LADDER) x (MAX_CUTS + 1)` = 16 solves, and measured on the
+#: corpus exactly `len(DOSE_LADDER)` or fewer, because the cut loop has never
+#: fired (see MAX_CUTS). Against a grid: the largest reach anywhere in the study
+#: is 16.78 mm, where `_group_offsets` at `--step 0.5` enumerates ~3,540
+#: offsets; the 80 mm case #459 was filed about would be ~103,000.
 DOSE_LADDER = (1.0, 0.75, 0.5, 0.25)
 
 #: How many times a refusing unit may be pinned and the system re-solved.
+#:
+#: MEASURED: it has never fired. Over 24 live corpus cells, every one of the 13
+#: accepted proposals came back with `cuts == 0`, and the three cells that DID
+#: reach a pinned re-solve were infeasible at every one of them. The structural
+#: reason is that the unit the exact check refuses is, by construction, one that
+#: had to yield -- so pinning it at 0 makes that same dose infeasible. What
+#: recovers a cell is the LADDER, not the cuts. Kept because it is cheap and
+#: bounded, and recorded here rather than presented as a working mechanism.
 MAX_CUTS = 3
 
 
@@ -1033,6 +1091,16 @@ def relocate_block(state, blocks, block: str, direction: Tuple[float, float], *,
                 # `solver` carries the reason on this path.
                 last_why = solver
                 break
+            # QUANTISE ONCE, BEFORE THE CHECK. The emitted board rounds each
+            # unit's shift to 4 dp, and an earlier revision checked the
+            # UNROUNDED solve and then wrote the rounded one -- so the board
+            # that shipped was not the board that was verified. Measured on
+            # esp_prog/decap:U1: the exact check passed, and the written board
+            # graded two NEW pad conflicts (80 nm and 50 nm) that
+            # `grade_pad_legality` reported and the solve had never proposed.
+            # Sub-micron, and still a gate that validated a different artifact.
+            moves = {u: (round(d[0], 4), round(d[1], 4))
+                     for u, d in moves.items()}
             why = exact_refusal(state, units, moves)
             if not why:
                 rel.dose_mm = dose
@@ -1057,11 +1125,22 @@ def relocate_block(state, blocks, block: str, direction: Tuple[float, float], *,
                                              dose))
                     rel.corridor, rel.corridor_mm = (), 0.0
                     rel.dose_mm, rel.shift, rel.solver = 0.0, (0.0, 0.0), ''
+                    rel.pinned, rel.cuts = (), 0
                     break
+                # ROUND THE SHIFT, NEVER THE RESULTING COORDINATE. Rounding
+                # `x + dx` per member snaps each one independently and SHEARS
+                # the block by up to half a step -- `quench._group_offsets`
+                # states the same rule for the same reason ("snapping each
+                # member independently would shear it by up to a grid step").
+                # Measured: rounding the coordinate to 4 dp sheared esp_prog's
+                # decap:U1 enough to create two pad conflicts of 80 nm and
+                # 50 nm that `grade_pad_legality` reported and the solve had
+                # not proposed. Sub-micron, and still a rigid body that was not
+                # rigid.
                 rel.moves = tuple(
                     {'reference': r,
-                     'new_x': round(state.parts[r].x + moves[uu][0], 4),
-                     'new_y': round(state.parts[r].y + moves[uu][1], 4),
+                     'new_x': state.parts[r].x + moves[uu][0],
+                     'new_y': state.parts[r].y + moves[uu][1],
                      'new_rotation': state.parts[r].rot}
                     for uu, d in sorted(moves.items()) if d != (0.0, 0.0)
                     for r in units.members[uu])
@@ -1083,9 +1162,15 @@ def relocate_block(state, blocks, block: str, direction: Tuple[float, float], *,
                 # first refusal ended the search before the 0.75 rung ran.
                 break
             pinned.append(unit)
+    # The machine fields must agree with the sentence. They were assigned only
+    # on the SUCCESS path, so a refusal whose text said "1 unit(s) pinned"
+    # serialised `pinned: [], cuts: 0` -- and the count was the LAST rung's, not
+    # the run's, so four rungs each pinning one unit reported as one.
+    rel.pinned = tuple(sorted(pinned))
+    rel.cuts = len(pinned)
     rel.refusal = ('no_room_at_any_dose: every rung of the dose ladder was '
-                   'refused (reach %.2f mm, %d unit(s) pinned by the exact '
-                   'check%s)'
+                   'refused (reach %.2f mm; the last rung pinned %d unit(s) by '
+                   'the exact check%s)'
                    % (rel.reach_mm, len(pinned),
                       '; last: ' + last_why if last_why else ''))
     return rel

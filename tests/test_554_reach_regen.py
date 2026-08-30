@@ -184,6 +184,35 @@ def t_the_result_is_bounded_in_both_directions(live):
           'gain_mm_max %.4f outside [%.2f, %.2f]' % (s['gain_mm_max'], lo, hi))
 
 
+def t_the_numbers_the_docs_QUOTE_are_pinned(live):
+    """The medians the module docstring and both docs pages state, by name.
+
+    This exists because they drifted and nothing caught it. The prose said
+    "median 0.1 mm against a median want of 6.1 mm over ten corpus boards"; the
+    committed baseline says **0.00 and 10.36 over 9 boards**, and neither quoted
+    figure was reproducible from any subset of it -- 6.1 needed the 12 decap
+    cells and 0.1 needed a different statistic over a different 27. An
+    unreproducible headline that overstates the case for its own feature is the
+    #694 shape exactly, and the earlier version of this file pinned
+    `cells_material` and `cells_material_boards` while leaving the two numbers a
+    reader actually meets unguarded.
+    """
+    s = live['summary']
+    for key, want in (('want_mm_median', 10.3571),
+                      ('frozen_mm_median', 0.0),
+                      ('reach_mm_median', 1.0259),
+                      ('slide_frozen_mm_median', 0.05)):
+        got = s.get(key)
+        check(isinstance(got, (int, float)) and abs(got - want) <= TOL,
+              'summary.%s is %r, and the docs quote %r. Re-record the baseline '
+              'AND the prose together, or one of them is lying.'
+              % (key, got, want))
+    check(len(s['boards']) == 9,
+          'the sweep now reports %d board(s) with a live cell, not 9. The docs '
+          'say 9 -- glasgow_revC contributes only refusals -- and "10 boards" '
+          'was the wrong count that shipped.' % len(s['boards']))
+
+
 def t_the_limits_of_the_feature_are_still_reported(live):
     s = live['summary']
     check(s['cells_both_zero'] > 0,
@@ -275,6 +304,7 @@ def main():
                    t_a_reported_reach_is_achievable,
                    t_the_verdict_does_not_sell_a_theorem_as_a_finding,
                    t_the_result_is_bounded_in_both_directions,
+                   t_the_numbers_the_docs_QUOTE_are_pinned,
                    t_the_limits_of_the_feature_are_still_reported,
                    t_a_counted_board_is_never_reported_as_skipped):
             fn(live)

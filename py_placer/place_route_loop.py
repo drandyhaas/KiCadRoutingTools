@@ -392,8 +392,20 @@ def relocate_round(pcb_data, pcb_file, blocks, *, block=None, refs=None,
             return _rel.Relocation(
                 refusal='no_diagnosed_block: --relocate-refs matched %d part(s)'
                         % len(named))
-        units_src = {'refs:%s' % ','.join(refs): named}
-        block = list(units_src)[0]
+        # MERGE, never replace. Replacing the derived dict left every OTHER
+        # block as loose singletons, so the pass tore them apart while its own
+        # docstring promised "so does every untouched decap cluster": measured
+        # on tigard, the refs arm split `decap:U5` in half and bought a 2x
+        # larger dose partly by doing so. The named refs are removed from any
+        # block they were in -- they are the unit now -- and the rest keep
+        # their rigidity.
+        chosen = 'refs:%s' % ','.join(refs)
+        named_set = set(named)
+        units_src = {k: [r for r in v if r not in named_set]
+                     for k, v in units_src.items()}
+        units_src = {k: v for k, v in units_src.items() if len(v) >= 2}
+        units_src[chosen] = named
+        block = chosen
     if block is None:
         ranked = sorted(_routab.block_displacements(state, units_src,
                                                     ignore_net_ids=ids),
@@ -652,7 +664,8 @@ def main():
                              "total displacement. DEFAULT OFF. NO MEASUREMENT "
                              "SHOWS THAT A RELOCATED BOARD ROUTES BETTER. What "
                              "IS measured is the mechanism: over 24 blocks on "
-                             "10 corpus boards, letting neighbours yield bought "
+                             "the 9 corpus boards that have a measurable "
+                             "block, letting neighbours yield bought "
                              ">= 1mm more travel than freezing them on 11 of "
                              "them, spanning 6 boards, max 16.66mm -- see "
                              "tests/stress/relocation_reach.py. The round's own "
@@ -1064,6 +1077,7 @@ def main():
         # A rejected round still reverts to `cur_file` byte for byte, because
         # `cur_file` is not reassigned unless the round is accepted.
         quench_base = cur_file
+        parent_pcb = pcb_data          # before the relocation re-parses it
         reloc = None
         if args.relocate:
             # `blocks` is already filtered to the ones with a targeted member,
@@ -1084,6 +1098,11 @@ def main():
                 relocate_reasons.append('round %d: %s' % (rnd, reloc.refusal))
             else:
                 relocate_applied += 1
+                # `applied` is the field a machine consumer filters on, and it
+                # was dead: nothing set it, so three written relocations all
+                # serialised as "applied": false in the same JSON that said
+                # rounds_applied: 3.
+                reloc.applied = True
                 relocate_records.append(dict(reloc.to_dict(), round=rnd))
                 quench_base = os.path.join(work,
                                            f'loop_round{rnd}_relocated.kicad_pcb')
@@ -1095,6 +1114,28 @@ def main():
                 # it; the targets were resolved against the OLD poses and stay
                 # valid as a REF SET, which is all `move_refs` consumes.
                 targets |= set(reloc.members)
+
+        def _round_moved(placements):
+            """Every pose this ROUND changed, against the board it started from.
+
+            Two bugs this closes, both in the movie's only input. `pcb_data` is
+            the RE-PARSED relocated board by the time the sidecar is written, so
+            measuring against it recorded each `from` as the pose the part had
+            AFTER the relocation -- disagreeing with the `parent` the same
+            sidecar names, on 6 of 10 refs. And a part the relocation moved but
+            the quench did not was absent entirely, so `movie_camera` framed the
+            shot off the wrong set and never animated the relocation leg at all.
+
+            The quench's entry wins where both moved the same ref: it is the
+            final pose, and the relocation's is an intermediate.
+            """
+            rows = moves_from_placements(parent_pcb, list(reloc.moves) if
+                                         (reloc is not None and not reloc.refusal)
+                                         else [])
+            by_ref = {r['reference']: r for r in rows}
+            for r in moves_from_placements(parent_pcb, placements or []):
+                by_ref[r['reference']] = r
+            return [by_ref[k] for k in sorted(by_ref)]
 
         name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
         net_weights = {name_to_id[n]: args.failed_net_weight
@@ -1172,7 +1213,7 @@ def main():
             write_round_sidecar(work, rnd, board=None, routed=None,
                                 parent=cur_file, accepted=False, screened=True,
                                 targets=targets, groups=blocks,
-                                moved=moves_from_placements(pcb_data, placements),
+                                moved=_round_moved(placements),
                                 # A screened round writes no board, so this
                                 # sidecar is the ONLY record of what the
                                 # diagnosis chose -- the one round that cannot
@@ -1223,7 +1264,7 @@ def main():
                                 work, f'loop_round{rnd}_routed.kicad_pcb'),
                             parent=cur_file, accepted=_accepted,
                             targets=targets, groups=blocks,
-                            moved=moves_from_placements(pcb_data, placements),
+                            moved=_round_moved(placements),
                             metrics=metrics,
                             diagnosis=(diagnosis_to_json(diag)
                                        if diag is not None else None),

@@ -123,9 +123,9 @@ placement on.
 
 The quench can translate a block rigidly (#538), but only while every member
 stays within `--max-displacement` of its own seed and everybody else is frozen.
-Measured with the neighbours frozen, a block travels a **median 0.1 mm toward
-its connectivity target against a median want of 6.1 mm** over 24 blocks on 10
-boards — a shipped board has no vacancy to translate into. `--relocate`
+Measured with the neighbours frozen, a block travels a **median 0.00 mm toward
+its connectivity target against a median want of 10.36 mm**, over the 24
+measurable blocks on the 9 boards that have one — a shipped board has no vacancy to translate into. `--relocate`
 (**default off**) lets the neighbours yield instead, with their relative order
 as a hard constraint and their total displacement minimised, and writes the
 result as its own board so the quench can refine the new pose. The round's

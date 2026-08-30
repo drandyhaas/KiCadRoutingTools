@@ -347,6 +347,76 @@ def t_the_exact_check_catches_what_the_GRAPH_permits():
           'sub-clearance and the exact check let it through: %r' % why)
 
 
+def t_the_board_that_ships_is_the_board_that_was_CHECKED():
+    """Every emitted coordinate must be its incumbent plus the CHECKED shift.
+
+    Two ways this was false, both measured on esp_prog/decap:U1 and both
+    sub-micron -- which is exactly why neither would have been noticed:
+
+      * the emitted coordinate was rounded PER MEMBER, so a rigid block sheared
+        by up to half a step (`quench._group_offsets` states the same rule: snap
+        the OFFSET, never the member);
+      * and the exact check ran on the UNROUNDED solve while the writer emitted
+        the rounded one, so the gate validated a different artifact than the one
+        that shipped.
+
+    Together they put two NEW pad conflicts on a board whose relocation had been
+    accepted. `grade_pad_legality` saw them; nothing in this module had.
+    """
+    st = row()
+    units = RL.rigid_units(st, {'blk': ['A', 'B']})
+    rel = RL.relocate_block(st, {'blk': ['A', 'B']}, 'blk', (1.0, 0.0),
+                            want_mm=5.75)
+    check(not rel.refusal, 'refused: %s' % rel.refusal)
+    by_ref = {m['reference']: m for m in rel.moves}
+    check(set(by_ref) >= {'A', 'B'}, 'the block members were not emitted: %r'
+                                     % sorted(by_ref))
+    if {'A', 'B'} <= set(by_ref):
+        dx_a = by_ref['A']['new_x'] - st.parts['A'].x
+        dx_b = by_ref['B']['new_x'] - st.parts['B'].x
+        check(abs(dx_a - dx_b) < 1e-12,
+              'the block sheared: A moved %.10f and B moved %.10f. Members of '
+              'one rigid unit must receive the IDENTICAL delta.' % (dx_a, dx_b))
+    for m in rel.moves:
+        for axis, key in (('x', 'new_x'), ('y', 'new_y')):
+            delta = m[key] - getattr(st.parts[m['reference']], axis)
+            check(abs(delta * 10000 - round(delta * 10000)) < 1e-9,
+                  '%s.%s moved by %r, which is not a 1e-4 quantised shift -- so '
+                  'the emitted board is not the one exact_refusal saw'
+                  % (m['reference'], key, delta))
+
+
+def t_a_moved_pair_is_checked_in_the_PAD_currency_too():
+    """The per-part sweep cannot see it: it drops every moved ref from `nbrs`.
+
+    So a pair where BOTH parts move was checked on courtyards alone, and the LP
+    drives courtyard gaps to exactly the clearance -- passing that test to the
+    micron while the pads, which overhang the courtyard, cross.
+    """
+    class _PairCtx:
+        """Courtyards fine, pads not -- which is the whole point."""
+        def pads_ok(self, ref, x, y, rot, neighbors, exclude=None):
+            return True
+
+        def pair_shortfall(self, a, b, pose_a=None, pose_b=None):
+            moved = pose_a is not None and pose_b is not None
+            return type('S', (), {'pad': 0.01 if moved else 0.0,
+                                  'pad_overlap': False, 'hole': 0.0,
+                                  'stack': False})()
+
+        def seed_baseline(self, a, b):
+            return type('S', (), {'pad': 0.0, 'pad_overlap': False,
+                                  'hole': 0.0, 'stack': False})()
+
+    st = _State([_Part('A', 0, 0, 1, 1), _Part('C', 6, 0, 7, 1)])
+    st.legality_ctx = _PairCtx()
+    units = RL.rigid_units(st, None)
+    why = RL.exact_refusal(st, units, {'A': (1.0, 0.0), 'C': (1.0, 0.0)})
+    check(why.startswith('moved_pair_pad_worsened:'),
+          'two moved parts whose PADS conflict were not caught -- the courtyard '
+          'test alone passed them: %r' % why)
+
+
 def t_moving_nothing_is_never_a_refusal():
     st = row()
     check(RL.exact_refusal(st, RL.rigid_units(st, None), {'B': (0.0, 0.0)}) == '',
