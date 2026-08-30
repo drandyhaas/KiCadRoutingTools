@@ -148,6 +148,45 @@ def arm_the_issues_own_cases():
           f"freeing={r3['keepouts_freeing']}")
 
 
+def arm_blame_is_true():
+    """Every keep-out the message NAMES must really free a pose when lifted.
+
+    The message is the whole deliverable of an ERROR-severity finding, and it
+    was false in two ways an adversarial review constructed:
+
+      * `keepouts_freeing` was computed over the RECTS only, so with a disc also
+        binding the member, "lifting any one of them would give it a pose" named
+        entries that do not. Measured: A=[-50,-50,4,50], B=[5.999,-50,50,50],
+        D=circle(7,5,4) -- the message named A and B, and lifting B alone left
+        the part with no pose at all.
+      * a SINGLE freeing entry is not the sole cause: two OVERLAPPING keep-outs
+        mask each other, so neither appears while together they are the reason.
+        The wording says what is computed ("lifting it would leave a pose")
+        rather than the stronger thing that is not.
+
+    This arm asserts the property directly, so it cannot drift from the prose.
+    """
+    print("--- every keep-out the message blames really is a cause")
+    A = ko('A', [-50, -50, 4, 50])
+    B = ko('B', [5.999, -50, 50, 50])
+    D = ko('D', circle=(7.0, 5.0, 4.0))
+    zone, part = (0, 0, 10, 10), P((-1, -1, 1, 1))
+    v = F(zone, 0.0, part, [A, B, D])
+    named = set(v['keepouts_freeing']) | set(v['keepouts_joint'])
+    check("a disc that binds the member is considered in the blame",
+          v['keepouts_freeing'] == ('A',),
+          f"freeing={v['keepouts_freeing']} -- over the rects alone this was "
+          f"('A', 'B'), and lifting B leaves no pose at all")
+    # The self-verifying half: lift each named entry and require a pose.
+    liars = []
+    for n in v['keepouts_freeing']:
+        rest = [k for k in [A, B, D] if k['name'] != n]
+        if not F(zone, 0.0, part, rest)['feasible']:
+            liars.append(n)
+    check("... and lifting each NAMED entry really does leave a pose",
+          not liars, f"{len(named)} named, {len(liars)} that do not free one")
+
+
 def arm_false_error_guards():
     print("--- the four false-ERROR sources, each with its control")
     for tag, rect in (('zero-width', [15, 10, 15, 20]),
@@ -557,6 +596,7 @@ def arm_identity():
 def main():
     with tempfile.TemporaryDirectory() as wd:
         arm_the_issues_own_cases()
+        arm_blame_is_true()
         arm_false_error_guards()
         arm_feasible_means_seated()
         arm_the_eps_limitation()
