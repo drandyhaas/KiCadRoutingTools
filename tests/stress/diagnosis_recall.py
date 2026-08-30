@@ -93,12 +93,17 @@ DEFAULT_DOSE = 20.0
 #: is computed here rather than trusted from the record.
 MIN_DOSE_FRACTION = 0.25
 
-#: A cell is discarded when a size-matched RANDOM pick would hit the damaged
-#: block at least this often. A coin flip cannot distinguish a selector from
-#: chance, so such a cell is not a measurement whichever way it lands. This
-#: bites hardest where it should: on ulx3s the perturber picks a 117-member
-#: block out of 234 movable parts, and almost any selection intersects it.
-MAX_CHANCE = 0.5
+#: WHY THE HEADLINE IS LIFT AND NOT RECALL. The first version of this script
+#: asked "does the selection contain a damaged part". It excluded 33 of its 36
+#: cells and produced no evidence arm at all, for a structural reason:
+#: `perturb.pick_block` picks BIG units -- 117 of ulx3s's 234 movable parts,
+#: 20 of watchy's 84 -- so a size-matched random pick hits the truth 84-100% of
+#: the time and a "hit" carries no information. The cells where the truth was
+#: small were the cells where the dose could not land.
+#:
+#: LIFT does not saturate: what fraction of the SELECTION is damaged, over the
+#: fraction of the board that is damaged. 1.0 is chance. It is defined
+#: whatever the truth size, and its null is exact rather than assumed.
 
 
 def _movable(pcb):
@@ -200,6 +205,9 @@ def run_one(board_path, kind, *, dose, group_by, top_k, workroot):
     low = _low_pin_arm(pcb, movable, n)
     tset = set(truth) & movable
     chance = exact_chance(len(movable), len(tset), n)
+    base = len(tset) / len(movable) if movable else 0.0
+    p_diag = len(sel & tset) / n if n else 0.0
+    p_low = len(low & tset) / len(low) if low else 0.0
     row.update({
         'blocks': len(blocks),
         'movable': len(movable),
@@ -213,6 +221,11 @@ def run_one(board_path, kind, *, dose, group_by, top_k, workroot):
         'hit_diagnosis': bool(sel & tset),
         'hit_low_pin': bool(low & tset),
         'chance': round(chance, 6),
+        'base_rate': round(base, 6),
+        'precision_diagnosis': round(p_diag, 6),
+        'precision_low_pin': round(p_low, 6),
+        'lift_diagnosis': round(p_diag / base, 4) if base else None,
+        'lift_low_pin': round(p_low / base, 4) if base else None,
         'selected_by': {c.key: list(c.selected_by) for c in diag.candidates
                         if c.selected_by},
         'displacement_ranked_truth': any(
@@ -221,13 +234,18 @@ def run_one(board_path, kind, *, dose, group_by, top_k, workroot):
             for c in diag.candidates),
     })
     shutil.rmtree(work, ignore_errors=True)
-    if chance >= MAX_CHANCE:
-        row['skipped'] = (
-            f'a size-matched RANDOM pick hits this truth {chance:.0%} of the '
-            f'time ({len(tset)} of {len(movable)} movable parts are in the '
-            f'damaged block, {n} selected). A coin flip cannot distinguish a '
-            f'selector from chance, whichever way this cell landed')
+    if not tset:
+        row['skipped'] = ('the damaged block holds no MOVABLE part, so no '
+                          'selector could have picked one')
     return row
+
+
+def _median(vals):
+    v = sorted(vals)
+    if not v:
+        return None
+    m = len(v) // 2
+    return round(v[m] if len(v) % 2 else (v[m - 1] + v[m]) / 2.0, 4)
 
 
 def summarise(rows):
@@ -241,17 +259,28 @@ def summarise(rows):
         cells = [r for r in rows if r['kind'] == kind and not r.get('skipped')]
         if not cells:
             continue
+        lift_d = [c['lift_diagnosis'] for c in cells
+                  if c['lift_diagnosis'] is not None]
+        lift_l = [c['lift_low_pin'] for c in cells
+                  if c['lift_low_pin'] is not None]
         out['arms'][kind] = {
             'is_evidence': kind in EVIDENCE_ARMS,
             'boards': len(cells),
-            'hit_diagnosis': sum(1 for c in cells if c['hit_diagnosis']),
-            'hit_low_pin': sum(1 for c in cells if c['hit_low_pin']),
-            'diagnosis_only': sum(1 for c in cells
-                                  if c['hit_diagnosis'] and not c['hit_low_pin']),
-            'low_pin_only': sum(1 for c in cells
-                                if c['hit_low_pin'] and not c['hit_diagnosis']),
-            'mean_chance': round(
-                sum(c['chance'] or 0 for c in cells) / len(cells), 4),
+            'board_names': sorted(c['board'] for c in cells),
+            # The sign test this repo uses elsewhere: direction per board,
+            # never a pooled mean standing in for one.
+            'diagnosis_above_chance': sum(1 for v in lift_d if v > 1.0),
+            'diagnosis_below_chance': sum(1 for v in lift_d if v < 1.0),
+            'beats_low_pin': sum(1 for c in cells
+                                 if (c['lift_diagnosis'] or 0)
+                                 > (c['lift_low_pin'] or 0)),
+            'loses_to_low_pin': sum(1 for c in cells
+                                    if (c['lift_diagnosis'] or 0)
+                                    < (c['lift_low_pin'] or 0)),
+            'median_lift_diagnosis': _median(lift_d),
+            'median_lift_low_pin': _median(lift_l),
+            'mean_base_rate': round(
+                sum(c['base_rate'] for c in cells) / len(cells), 4),
             'mean_selected': round(
                 sum(c['selected'] for c in cells) / len(cells), 2),
             'displacement_ranked_truth': sum(
@@ -263,8 +292,14 @@ def summarise(rows):
 def format_summary(s):
     L = ['', 'RECALL OF KNOWN DAMAGE -- NOT a routing result. Nothing routed.',
          f"boards: {', '.join(s['boards'])}", '']
-    L.append(f"{'arm':<12}{'n':>3}  {'diag':>5} {'lowpin':>7} {'d-only':>7}"
-             f" {'l-only':>7} {'chance':>7} {'|sel|':>6}  role")
+    L.append('LIFT = (share of the SELECTION that is damaged) / (share of the '
+             'BOARD that is damaged).')
+    L.append('1.0 is chance. Direction is counted PER BOARD, never pooled '
+             'into one mean.')
+    L.append('')
+    L.append(f"{'arm':<12}{'n':>3} {'above':>6} {'below':>6} {'med.D':>7}"
+             f" {'med.L':>7} {'D>L':>4} {'D<L':>4} {'base':>6} {'|sel|':>6}"
+             f"  role")
     for kind in ARMS:
         a = s['arms'].get(kind)
         if not a:
@@ -272,17 +307,28 @@ def format_summary(s):
         role = ('evidence' if a['is_evidence'] else
                 'INSTRUMENT CHECK, not evidence' if kind == 'translate' else
                 'negative control for displacement')
-        L.append(f"{kind:<12}{a['boards']:>3}  {a['hit_diagnosis']:>5}"
-                 f" {a['hit_low_pin']:>7} {a['diagnosis_only']:>7}"
-                 f" {a['low_pin_only']:>7} {a['mean_chance']:>7.3f}"
-                 f" {a['mean_selected']:>6.1f}  {role}")
+        md = a['median_lift_diagnosis']
+        ml = a['median_lift_low_pin']
+        L.append(f"{kind:<12}{a['boards']:>3} {a['diagnosis_above_chance']:>6}"
+                 f" {a['diagnosis_below_chance']:>6}"
+                 f" {(f'{md:.2f}' if md is not None else '-'):>7}"
+                 f" {(f'{ml:.2f}' if ml is not None else '-'):>7}"
+                 f" {a['beats_low_pin']:>4} {a['loses_to_low_pin']:>4}"
+                 f" {a['mean_base_rate']:>6.3f} {a['mean_selected']:>6.1f}"
+                 f"  {role}")
+        L.append(f"{'':<12}    boards: {', '.join(a['board_names'])}")
     if 'scatter' in s['arms']:
         sc = s['arms']['scatter']
-        L += ['', f"scatter: the displacement signal ranked the damaged block "
-                  f"in {sc['displacement_ranked_truth']} of {sc['boards']} "
-                  f"cell(s). Per-part jitter leaves the block centroid put, so "
-                  f"a high number here means the signal fires on everything -- "
-                  f"a negative finding, to be recorded, not hidden."]
+        L += ['', f"scatter is the control that makes the first row mean "
+                  f"something: per-part jitter leaves the block centroid where "
+                  f"it was, so the selector SHOULD sit at chance here. Median "
+                  f"lift {sc['median_lift_diagnosis']}, "
+                  f"{sc['diagnosis_above_chance']} board(s) above and "
+                  f"{sc['diagnosis_below_chance']} below. The damaged block "
+                  f"still CARRIES a displacement row in "
+                  f"{sc['displacement_ranked_truth']} of {sc['boards']} cells "
+                  f"-- being ranked at all is not the same as leading, and "
+                  f"only the lift says which."]
     for note in s['skipped']:
         L.append(f'  EXCLUDED {note}')
     L += ['', 'translate is arithmetic: perturb.block_direction calls the very '

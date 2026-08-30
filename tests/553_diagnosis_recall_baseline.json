@@ -1,0 +1,113 @@
+{
+ "arms": {
+  "scatter": {
+   "beats_low_pin": 2,
+   "board_names": [
+    "splitflap_driver",
+    "tigard",
+    "ulx3s",
+    "watchy"
+   ],
+   "boards": 4,
+   "diagnosis_above_chance": 2,
+   "diagnosis_below_chance": 2,
+   "displacement_ranked_truth": 4,
+   "is_evidence": false,
+   "loses_to_low_pin": 1,
+   "mean_base_rate": 0.1659,
+   "mean_selected": 44.25,
+   "median_lift_diagnosis": 0.8298,
+   "median_lift_low_pin": 0.868
+  },
+  "swap": {
+   "beats_low_pin": 4,
+   "board_names": [
+    "splitflap_driver",
+    "tigard",
+    "ulx3s",
+    "watchy"
+   ],
+   "boards": 4,
+   "diagnosis_above_chance": 4,
+   "diagnosis_below_chance": 0,
+   "displacement_ranked_truth": 4,
+   "is_evidence": true,
+   "loses_to_low_pin": 0,
+   "mean_base_rate": 0.3016,
+   "mean_selected": 48.25,
+   "median_lift_diagnosis": 2.3153,
+   "median_lift_low_pin": 0.9936
+  },
+  "translate": {
+   "beats_low_pin": 4,
+   "board_names": [
+    "splitflap_driver",
+    "tigard",
+    "ulx3s",
+    "watchy"
+   ],
+   "boards": 4,
+   "diagnosis_above_chance": 4,
+   "diagnosis_below_chance": 0,
+   "displacement_ranked_truth": 3,
+   "is_evidence": false,
+   "loses_to_low_pin": 0,
+   "mean_base_rate": 0.1659,
+   "mean_selected": 40.75,
+   "median_lift_diagnosis": 3.3788,
+   "median_lift_low_pin": 1.5547
+  },
+  "wrong_side": {
+   "beats_low_pin": 4,
+   "board_names": [
+    "splitflap_driver",
+    "tigard",
+    "ulx3s",
+    "watchy"
+   ],
+   "boards": 4,
+   "diagnosis_above_chance": 4,
+   "diagnosis_below_chance": 0,
+   "displacement_ranked_truth": 2,
+   "is_evidence": true,
+   "loses_to_low_pin": 0,
+   "mean_base_rate": 0.1659,
+   "mean_selected": 55.0,
+   "median_lift_diagnosis": 3.2358,
+   "median_lift_low_pin": 1.4123
+  }
+ },
+ "boards": [
+  "esp_prog",
+  "kit-dev-coldfire-xilinx_5213",
+  "orangecrab_ext_pll",
+  "rp2350_fpga_eensy_prePlane",
+  "sonde_u",
+  "splitflap_driver",
+  "tigard",
+  "ulx3s",
+  "watchy"
+ ],
+ "skipped": [
+  "esp_prog/swap: the dose that landed was 0.316 mm of 20 mm asked for (1.6%); the damage was never applied, so the recovery half is void",
+  "esp_prog/wrong_side: the dose that landed was 0.316 mm of 20 mm asked for (1.6%); the damage was never applied, so the recovery half is void",
+  "esp_prog/scatter: the dose that landed was 0.316 mm of 20 mm asked for (1.6%); the damage was never applied, so the recovery half is void",
+  "esp_prog/translate: the dose that landed was 0.316 mm of 20 mm asked for (1.6%); the damage was never applied, so the recovery half is void",
+  "sonde_u/swap: 1 candidate block(s): a ranking over one candidate made no choice",
+  "sonde_u/wrong_side: 1 candidate block(s): a ranking over one candidate made no choice",
+  "sonde_u/scatter: 1 candidate block(s): a ranking over one candidate made no choice",
+  "sonde_u/translate: 1 candidate block(s): a ranking over one candidate made no choice",
+  "orangecrab_ext_pll/swap: the dose that landed was 0.632 mm of 20 mm asked for (3.2%); the damage was never applied, so the recovery half is void",
+  "orangecrab_ext_pll/wrong_side: the dose that landed was 0.632 mm of 20 mm asked for (3.2%); the damage was never applied, so the recovery half is void",
+  "orangecrab_ext_pll/scatter: the dose that landed was 0.632 mm of 20 mm asked for (3.2%); the damage was never applied, so the recovery half is void",
+  "orangecrab_ext_pll/translate: the dose that landed was 0.632 mm of 20 mm asked for (3.2%); the damage was never applied, so the recovery half is void",
+  "kit-dev-coldfire-xilinx_5213/swap: the dose that landed was 1.404 mm of 20 mm asked for (7.0%); the damage was never applied, so the recovery half is void",
+  "kit-dev-coldfire-xilinx_5213/wrong_side: the dose that landed was 1.404 mm of 20 mm asked for (7.0%); the damage was never applied, so the recovery half is void",
+  "kit-dev-coldfire-xilinx_5213/scatter: the dose that landed was 1.404 mm of 20 mm asked for (7.0%); the damage was never applied, so the recovery half is void",
+  "kit-dev-coldfire-xilinx_5213/translate: the dose that landed was 1.404 mm of 20 mm asked for (7.0%); the damage was never applied, so the recovery half is void",
+  "rp2350_fpga_eensy_prePlane/swap: the dose that landed was 4.384 mm of 20 mm asked for (21.9%); the damage was never applied, so the recovery half is void",
+  "rp2350_fpga_eensy_prePlane/wrong_side: the dose that landed was 4.384 mm of 20 mm asked for (21.9%); the damage was never applied, so the recovery half is void",
+  "rp2350_fpga_eensy_prePlane/scatter: the dose that landed was 4.384 mm of 20 mm asked for (21.9%); the damage was never applied, so the recovery half is void",
+  "rp2350_fpga_eensy_prePlane/translate: the dose that landed was 4.384 mm of 20 mm asked for (21.9%); the damage was never applied, so the recovery half is void"
+ ]
+}
