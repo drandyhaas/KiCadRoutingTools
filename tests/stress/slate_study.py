@@ -523,10 +523,18 @@ def delta(rows):
                     crossings, so a candidate barred for having MORE crossings
                     than the baseline already sorts below every candidate with
                     fewer, and select_best reaches a non-violator first.
-      with-probe    the probe ranked by each candidate's ACTUAL routed
-                    `blocking`. This is an IDEALISED probe -- a real one ranks
-                    on windowed route failures -- so it bounds the effect
-                    rather than predicting one run.
+      oracle_probe  the probe ranked by each candidate's ACTUAL routed
+                    `blocking`. It CANNOT show "worse", and that is a property
+                    of the construction rather than a result: the withdrawn
+                    violator set is a subset of the old one and the list is
+                    sorted by the truth, so `select_best` can only move the
+                    pick earlier. Reported because it bounds the BENEFIT, and
+                    labelled because an earlier version of this study counted
+                    its zero as a second independent arm of safety.
+      worst_probe   a probe whose head is the crossings-barred candidate that
+                    routed WORST. This is the adversarial case a real probe can
+                    stumble into, and it is where the withdrawal can cost
+                    something -- which is the honest other half of the claim.
     """
     from placement import portfolio as PF
     out = {}
@@ -543,8 +551,18 @@ def delta(rows):
         now = {r['index'] for r in R if r['rule1_clauses']}
         after = {r['index'] for r in R if r['rule1_would_bar_on_hpwl']}
         blk = {r['index']: r['truth'].get('blocking') for r in R}
+        # The adversarial probe: head is the crossings-barred candidate that
+        # routed WORST, which is the case a real probe can stumble into.
+        barred_worst = [r['index'] for r in sorted(
+            (r for r in R if r['rule1_would_bar_on_crossings']
+             and not r['rule1_would_bar_on_hpwl']
+             and r['truth'].get('blocking') is not None and r['viable']),
+            key=lambda r: -r['truth']['blocking'])]
+        worst = (barred_worst[:1]
+                 + [i for i in static if i not in barred_worst[:1]])
         arms = {}
-        for name, primary in (('static_only', []), ('with_probe', probe)):
+        for name, primary in (('static_only', []), ('oracle_probe', probe),
+                              ('worst_probe', worst)):
             n = PF.select_best(primary, static, now)
             a = PF.select_best(primary, static, after)
             arms[name] = {
@@ -634,19 +652,27 @@ def report(agg):
     out.append('WHAT THE WITHDRAWAL WOULD CHANGE (the consequence, not the '
                'criterion)')
     for b, arms in sorted((agg.get('delta') or {}).items()):
-        out.append('  %-30s static-only: %-14s with-probe: %s'
-                   % (b, arms['static_only']['verdict'],
-                      arms['with_probe']['verdict']
-                      + ('' if arms['with_probe']['verdict'] == 'unchanged'
-                         else '  (blocking %s -> %s)'
-                         % (arms['with_probe']['blocking_now'],
-                            arms['with_probe']['blocking_after']))))
-    _w = [b for b, a in (agg.get('delta') or {}).items()
-          if 'worse' in (a['static_only']['verdict'],
-                         a['with_probe']['verdict'])]
-    out.append('  => worse on %d board(s)%s'
-               % (len(_w), (': ' + ', '.join(_w)) if _w else
-                  ' in either arm'))
+        def _v(a):
+            return (a['verdict']
+                    + ('' if a['verdict'] == 'unchanged'
+                       else ' (%s->%s)' % (a['blocking_now'],
+                                           a['blocking_after'])))
+        out.append('  %-30s static: %-12s oracle: %-12s worst-probe: %s'
+                   % (b, _v(arms['static_only']), _v(arms['oracle_probe']),
+                      _v(arms['worst_probe'])))
+    _ws = [b for b, a in (agg.get('delta') or {}).items()
+           if a['static_only']['verdict'] == 'worse']
+    _ww = [b for b, a in (agg.get('delta') or {}).items()
+           if a['worst_probe']['verdict'] == 'worse']
+    out.append('  => worse on %d board(s) on the STATIC order%s'
+               % (len(_ws), (': ' + ', '.join(_ws)) if _ws else ''))
+    out.append('     worse on %d board(s) under an adversarial probe%s'
+               % (len(_ww), (': ' + ', '.join(_ww)) if _ww else ''))
+    out.append('     The oracle arm cannot show "worse" -- the new violator '
+               'set is a')
+    out.append('     subset and the list is truth-sorted, so the pick can '
+               'only move')
+    out.append('     earlier. Its zero is construction, not evidence.')
     out.append('')
     out.append('Q-ORDER -- newly pre-registered rule 5 (rank_key slot 1\'s order)')
     for b, d in sorted(agg['per_board'].items()):

@@ -167,11 +167,36 @@ def t_the_record_still_satisfies_the_pre_registered_predicate():
     check(len(fires) == len(m['firing_candidates']) and fires,
           f'every recorded firing candidate satisfies rule 2 as written: '
           f'{len(fires)} of {len(m["firing_candidates"])}')
+    # The null rate must be recorded for EVERY board that discharged the rule.
+    # A fact-check found the first version listing esp_prog, watchy and tigard
+    # and omitting kit-dev -- one of the two boards that fired -- so the record
+    # of the discharge showed the null rate of half of it.
+    fired = {d['measured']['board_key'], d['also_fired_on']['board_key']}
+    missing = sorted(fired - set(d['null_rate']))
+    check(not missing,
+          f'every board that discharged the rule has its null rate recorded '
+          f'(missing: {missing})')
     check(d['null_rate'].get('esp_prog') == 1.0,
           'the null rate is recorded, and it is 1.0 -- the discharge is by a '
           'pre-registered criterion this board satisfies trivially')
-    check(d['behavioural_delta'].get('worse_on') == 0,
-          'and the withdrawal made no board worse in either arm')
+    bd = d['behavioural_delta']
+    check(bd.get('worse_on_static_arm') == 0,
+          'the withdrawal made no board worse on the static order')
+    # THE ARM THAT IS NOT EVIDENCE, pinned so it cannot quietly become evidence
+    # again. The oracle-probe arm ranks by true routed blocking and the new
+    # violator set is a subset of the old, so select_best can only move the
+    # pick earlier in a truth-sorted list: it CANNOT return "worse", and its 0
+    # is a property of the construction. The first version of this record
+    # counted it as a second independent arm of safety.
+    check(bd.get('oracle_probe_cannot_show_worse') is True,
+          'the record says the oracle arm cannot show harm by construction')
+    check(bd.get('mis_ranking_probe_can_be_worse') is True,
+          'and that a mis-ranking probe CAN be worse -- the honest limit of '
+          'the safety claim')
+    check(str(bd.get('_measured_over', '')).find('6') >= 0
+          and d.get('boards_in_run') == 6,
+          f'the delta is recorded over all 6 boards, not the 5 the first '
+          f'version carried ({bd.get("_measured_over")!r})')
 
 
 def main():

@@ -5,8 +5,14 @@
 
 NO `wk/`, NO ROUTING, NO SUBPROCESS. Every fixture here is built in memory, so
 this runs on a clean clone and says something about the analysis even when the
-expensive half has never been run. `tests/test_789_slate_regen.py` is the arm
-that needs real artifacts; this one is the arm that must never need them.
+expensive half has never been run. The arm that needs real artifacts is
+`tests/placement_rule1_withdrawal.json` + `tests/test_789_rule1_withdrawal.py`
+(committed literals from the run, re-checked without them); this file is the
+arm that must never need them.
+
+(An earlier draft of this paragraph promised a `tests/test_789_slate_regen.py`
+that was never written. A fact-check caught the reference; there is no such
+file and this sentence no longer claims one.)
 
 WHAT IT IS FOR. `slate_study.py` decides two pre-registered questions, and the
 ways it can be wrong are mostly not crashes:

@@ -450,8 +450,10 @@ discharging, not a number chosen afterwards.*
    is withdrawn — and the withdrawal keeps its row, with its measured direction,
    in the `rejected` style `test_placement_ab.py` uses.
    **DISCHARGED 2026-08-30** by the slate run below, on esp_prog and
-   kit-dev-coldfire. The clause is withdrawn; the direction survives in
-   `portfolio.rule1_advisory`; the row is
+   kit-dev-coldfire — on a criterion whose own null rate is 100% and 99% on
+   exactly those two boards, so the withdrawal rests on the measured
+   consequence rather than on this firing. The clause is withdrawn; the
+   direction survives in `portfolio.rule1_advisory`; the row is
    `tests/placement_rule1_withdrawal.json` and its detector is
    `tests/test_789_rule1_withdrawal.py`. `rank_key` slot 1 is untouched — rule
    2 was about the bar, and the order is rule 5.
@@ -519,14 +521,18 @@ python3 -X utf8 tests/stress/slate_study.py --out wk/789 -j 4
 python3 -X utf8 tests/stress/slate_study.py --from-rows wk/789/slate_rows.jsonl
 ```
 
-The graft is guarded rather than asserted, and every guard ran: the board's
-#703 `argv_sha`, the input-board sha, each candidate's `variant_board_sha`, a
-regeneration control (two candidates per board re-derived and required to match
-their recorded `poses_sha256`) and a re-route control (one grafted candidate
-re-routed to a fresh path and required to return the `blocking` its `score.json`
-recorded). Zero boards voided. kit-dev-coldfire ran with reduced guards — one
-regeneration check, no re-route control — declared before the run, because its
-quench and route cost hours each.
+The graft is guarded rather than asserted. On five of the six boards every
+guard ran: the board's #703 `argv_sha`, the input-board sha, each candidate's
+`variant_board_sha`, a regeneration control (two candidates re-derived and
+required to match their recorded `poses_sha256`) and a re-route control (one
+grafted candidate re-routed to a fresh path and required to return the
+`blocking` its `score.json` recorded). Zero boards voided.
+
+**kit-dev-coldfire ran with REDUCED guards — one regeneration check and no
+re-route control** — declared before the run, because its quench and route cost
+hours each. That matters more than a footnote, because kit-dev is one of the
+two boards that discharged rule 2, and it is the board whose router was never
+re-verified.
 
 ### Rule 2: DISCHARGED, and the criterion that discharged it is weak
 
@@ -551,35 +557,70 @@ kit-dev, because almost every candidate on those slates routed below their
 baseline. On tigard it is 0%. So the criterion is easy to satisfy exactly where
 it fired, and a discharge on it is evidence of very little.
 
+(These are 200-draw Monte-Carlo estimates at a fixed seed, so a middling one
+carries a standard error near 3 points — watchy's 21% is "about a fifth", not a
+two-digit measurement. The 100% and 0% are not estimates: on esp_prog 9 of 10
+candidates route below the baseline's 4, so every permutation fires, and on
+tigard none can.)
+
 ### What the withdrawal actually changes — the consequence, not the criterion
 
 `select_best` takes the first index in `ranking_primary + ranking_static` that
 is 0 or not a violator, so the answer depends on whether a probe ranking exists.
 `--route-top` defaults to 2, so in a shipped run one does. Both arms:
 
-| arm | result |
-|---|---|
-| static order only (`--route-top 0`) | **6 of 6 unchanged** |
-| with a probe ranked by the candidates' actual routed `blocking` | esp_prog picks `blocking` **2** where the bar forced a fall-through to **3**; the other five unchanged |
-| **worse on** | **0 boards, in either arm** |
+Three arms, all computed by `slate_study.delta()` so they regenerate:
+
+| arm | worse | better | unchanged |
+|---|---|---|---|
+| **static order only** (`--route-top 0`) | **0** | 0 | **6 of 6** |
+| ORACLE probe — ranked by each candidate's *true* routed `blocking` | 0 *(cannot)* | 1 (esp_prog, 3 → 2) | 5 |
+| ADVERSARIAL probe — headed by the crossings-barred candidate that routed worst | **2** (esp_prog 3 → 6, kit-dev 1 → 9) | 0 | 4 |
 
 The static-only result is structural rather than lucky: `rank_key`'s slot 1 *is*
 crossings, so a candidate barred for having more crossings than the baseline
 already sorts below every candidate with fewer, and `select_best` reaches a
 non-violator first. The bar could only ever bite when the head of the static
-order is itself crossings-barred. **That is what makes the withdrawal safe to
-ship** — it rests on a measured consequence, not on the weak criterion alone.
+order is itself crossings-barred.
+
+**The oracle arm's zero is construction, not evidence.** The withdrawn violator
+set is a strict subset of the old one (verified on all six boards) and the list
+is sorted by the truth, so `select_best` can only move the pick *earlier* —
+`blocking_after ≤ blocking_now` always. An earlier draft of this section counted
+that zero as a second independent arm of safety. An adversarial fact-check of
+this branch caught it, and the adversarial arm above is what replaced it.
+
+**The adversarial arm is the honest other half**: on two boards the bar was, in
+that instance, protecting the pick. A real probe ranks on windowed route
+failures and will sometimes mis-rank, so this is reachable rather than
+hypothetical.
+
+So the evidence supports something narrower than "safe": **the withdrawal
+changes nothing on the static order across all six boards; it can only help
+under a perfect probe; it can hurt under a bad one.** The reason to do it is
+that rule 2 pre-registered the criterion and the criterion fired. The reason not
+to fear it is the static-order row — the one arm that is neither a tautology nor
+an adversarial construction.
 
 ### Rule 5: NOT SHOWN TO AGREE
 
-| board | tau-b (static position vs routed `blocking`) |
-|---|---|
-| watchy | +0.816 [LOO +0.816..+0.816, K=4] (7 gate-rejected) |
-| kit-dev-coldfire | +0.250 [LOO +0.094..+0.454, K=11] |
-| esp_prog | −0.070 [LOO −0.218..+0.183, K=11] |
-| sonde_u | −0.341 [LOO −0.447..−0.348, K=11] |
-| tigard | −0.408 [LOO −0.816..+0.000, K=4] (7 gate-rejected) |
-| splitflap_driver | n/a — saturated, every candidate routes to `blocking` 0 |
+| board | tau-b (static position vs routed `blocking`) | tied pairs | C / D |
+|---|---|---|---|
+| watchy | +0.816 [LOO +0.816..+0.816, K=4] (7 gate-rejected) | 2 of 6 | 4 / 0 |
+| kit-dev-coldfire | +0.250 [LOO +0.094..+0.454, K=11] | 6 of 55 | 31 / 18 |
+| esp_prog | −0.070 [LOO −0.218..+0.183, K=11] | 22 of 55 | 15 / 18 |
+| sonde_u | −0.341 [LOO −0.447..−0.348, K=11] | **45 of 55** | **1 / 9** |
+| tigard | −0.408 [LOO −0.816..+0.000, K=4] (7 gate-rejected) | 2 of 6 | 1 / 3 |
+| splitflap_driver | n/a — saturated, every candidate routes to `blocking` 0 | — | — |
+
+**Read sonde_u's row before reading its coefficient.** Its `blocking` column is
+`0, 2, 0×9`: 45 of 55 pairs are tied and the entire sign comes from the single
+candidate that routed to 2. Its LOO span looks tight only because the one
+deletion that would matter — dropping that candidate — leaves the tau undefined
+and is excluded from the min/max. One of the three negative boards is a single
+data point wearing a coefficient. The verdict below is the conservative one
+either way, but the tie counts are in the table because a coefficient alone does
+not say what it was computed over.
 
 2 positive, 3 negative, N=5, two-sided p = 1.000. Rule 5 requires positive on
 ≥ N−1 and negative on none (or the mirror image to license a reorder *issue*).

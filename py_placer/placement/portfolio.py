@@ -756,14 +756,23 @@ def rule1_check(cand: Candidate, baseline: Candidate) -> List[str]:
     found it on TWO -- esp_prog and kit-dev-coldfire -- so it is gone, and the
     measured direction survives in `rule1_advisory` rather than being deleted.
 
-    WHAT THE WITHDRAWAL CHANGED, measured on the same six boards: nothing
-    without a probe ranking (`rank_key`'s slot 1 IS crossings, so a candidate
-    barred for having MORE crossings than the baseline already sorts below
-    every candidate with fewer, and `select_best` reaches a non-violator
-    first), and on one board WITH one it reaches a candidate that routed to
-    `blocking` 2 where the bar had forced a fall-through to 3. Worse on no
-    board in either arm. The record is `tests/placement_rule1_withdrawal.json`
-    and its change detector is `tests/test_789_rule1_withdrawal.py`.
+    WHAT THE WITHDRAWAL CHANGED, measured on the same six boards: NOTHING on
+    the static order, on all six. That is structural -- `rank_key`'s slot 1 IS
+    crossings, so a candidate barred for having MORE crossings than the
+    baseline already sorts below every candidate with fewer, and `select_best`
+    reaches a non-violator first.
+
+    AND THE LIMIT OF THAT, because the first version of this docstring
+    overstated it. The other arm ranked a probe by each candidate's TRUE routed
+    `blocking`, and there the withdrawal reaches a candidate at `blocking` 2
+    where the bar forced a fall-through to 3 -- but that arm CANNOT show harm:
+    the new violator set is a subset of the old, and the list is sorted by the
+    truth, so the pick can only move earlier. Under a probe that MIS-ranks it
+    can be worse -- esp_prog's candidate 3 is crossings-barred and routes to
+    `blocking` 6. So the honest statement is: no change on the static order,
+    help only under a perfect probe, harm possible under a bad one. The record
+    is `tests/placement_rule1_withdrawal.json` and its change detector is
+    `tests/test_789_rule1_withdrawal.py`.
 
     HOW MUCH THAT DISCHARGE IS WORTH, stated because rule 2 pre-registered the
     question: the criterion's own null rate -- permuting `blocking` within a
