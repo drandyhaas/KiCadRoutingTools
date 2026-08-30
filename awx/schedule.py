@@ -65,14 +65,54 @@ class Schedule:
     """Divers, passes and the wave schedule for one corridor."""
 
     def __init__(self, launch: Sequence[str], target: Sequence[str],
-                 tooth_layer: Optional[Dict[str, str]] = None, log=None):
+                 tooth_layer: Optional[Dict[str, str]] = None, log=None,
+                 dest_layer: Optional[Dict[str, str]] = None):
         self.launch = list(launch)
         self.target = list(target)
         assert sorted(self.launch) == sorted(self.target)
         self.trank = {nm: i for i, nm in enumerate(self.target)}
         self.lidx = {nm: i for i, nm in enumerate(self.launch)}
         ranks = [self.trank[nm] for nm in self.launch]
-        keep = lis_keep(ranks)
+        tl = tooth_layer or {}
+        dl = dest_layer or {}
+
+        def on(nm, L):
+            # how many of the net's two ends already sit on L: a page
+            # lane pays a via at each end that does not
+            return ((1.0 if tl.get(nm, 'F.Cu') == L else 0.0)
+                    + (1.0 if dl.get(nm, 'F.Cu') == L else 0.0))
+        # TWO PAGES. The F-page is the largest crossing-free set (the
+        # LIS of the launch -> target permutation, preferring teeth
+        # already on F); the B-page is the largest crossing-free set of
+        # the REST (preferring teeth on B). A page lane keeps its layer
+        # through the whole schedule region, so an F-page lane and a
+        # B-page lane cross for FREE -- no layer rule, no via, no room
+        # -- which is how the human routes a corridor (every net on one
+        # layer end to end, two vias, both escapes). What is left are
+        # the SWIMMERS: they take the other layer from whichever page
+        # lane they cross and pay a via at each change. Measured with
+        # Greene's count, 21-23 of K28's 27 nets fit two pages; the
+        # single-page floor made 13 of them dive. TWO_PAGE=0 keeps the
+        # single page (every non-keeper a swimmer).
+        self.two_page = os.environ.get('TWO_PAGE', '0') == '1'
+        # single page: the plain LIS (the form every recorded ladder
+        # was routed with); two pages: weighted by the ends' layers
+        keep = (lis_keep_weighted(ranks, [on(nm, 'F.Cu') for nm in self.launch])
+                if self.two_page else lis_keep(ranks))
+        self.page: Dict[str, Optional[str]] = {nm: None for nm in self.launch}
+        for i in keep:
+            self.page[self.launch[i]] = 'F.Cu'
+        if self.two_page:
+            rest = [nm for i, nm in enumerate(self.launch) if i not in keep]
+            if len(rest) >= 2:
+                keep_b = lis_keep_weighted([self.trank[nm] for nm in rest],
+                                           [on(nm, 'B.Cu') for nm in rest])
+                for i in keep_b:
+                    self.page[rest[i]] = 'B.Cu'
+            elif rest:
+                self.page[rest[0]] = 'B.Cu'
+        self.b_page = [nm for nm in self.launch if self.page[nm] == 'B.Cu']
+        self.swimmers = [nm for nm in self.launch if self.page[nm] is None]
         self.divers = {self.launch[i] for i in range(len(self.launch))
                        if i not in keep}
         trank, lidx, divers = self.trank, self.lidx, self.divers
@@ -87,9 +127,10 @@ class Schedule:
         # divers to the front made the serial pass place them relative
         # to divers not yet moved (K32: the pass did not reach the
         # target).
-        tl = tooth_layer or {}
         self.birth_b = {d for d in divers if tl.get(d) == 'B.Cu'}
-        self.priority = ups + downs
+        # swimmers first (the most constrained), then the B-page
+        self.priority = ([d for d in ups + downs if self.page[d] is None]
+                         + [d for d in ups + downs if self.page[d] == 'B.Cu'])
 
         # serial pass fixes WHO passes WHOM -- and in which DIRECTION.
         # The target-vs-launch index says where a diver ends up overall,
@@ -133,6 +174,24 @@ class Schedule:
         return ((self.lidx[anm] < self.lidx[bnm])
                 != (self.trank[anm] < self.trank[bnm]))
 
+    def is_free(self, d: str, p: str) -> bool:
+        """A crossing of two page lanes: no layer rule, no via room."""
+        return bool(self.page[d]) and bool(self.page[p])
+
+    def pair_layers(self, d: str, p: str) -> Tuple[str, str]:
+        """(layer of the mover, layer of the passed) at a column's
+        crossing. A page lane is on its page; a swimmer takes the other
+        layer from the page lane it crosses; of two swimmers the mover
+        is on B and the passed on F."""
+        pd, pp = self.page[d], self.page[p]
+        if pd and pp:
+            return pd, pp
+        if pp:
+            return ('B.Cu' if pp == 'F.Cu' else 'F.Cu'), pp
+        if pd:
+            return pd, ('B.Cu' if pd == 'F.Cu' else 'F.Cu')
+        return 'B.Cu', 'F.Cu'
+
     def columns(self, gaps: Dict[str, int], lead: Dict[str, int],
                 gate: Optional[str] = None
                 ) -> List[List[Tuple[str, str]]]:
@@ -170,12 +229,16 @@ class Schedule:
         gate = gate or os.environ.get('SCHED_GATE', 'last')
         assert gate in ('strict', 'last', 'off'), gate
         self.surfaced: List[str] = []
-        trank, divers = self.trank, self.divers
+        trank, divers, page = self.trank, self.divers, self.page
+        swim = set(self.swimmers)
         seq = list(self.launch)
         cols: List[List[Tuple[str, str]]] = []
-        last_passed: Dict[str, int] = {}
-        last_move: Dict[str, int] = {}
-        on_b: Set[str] = set()          # divers in flight (on the back layer)
+        # per swimmer: the column and layer of its last constrained
+        # crossing (a change of layer between two of its crossings
+        # needs `gaps` columns between them for the via)
+        last_col: Dict[str, int] = {}
+        last_layer: Dict[str, str] = {}
+        on_b: Set[str] = set()          # swimmers in flight (on the back layer)
         # the inverted pairs still to be swapped, per net
         todo: Dict[str, Set[str]] = {nm: set() for nm in seq}
         for i, a in enumerate(seq):
@@ -195,29 +258,46 @@ class Schedule:
                 if a in used or trank[a] < trank[b]:
                     i += 1
                     continue
-                # an inverted adjacent pair. The MOVER (back layer at
-                # this crossing): the diver; of two divers the one in
-                # flight (a flying diver passed by a grounded one would
-                # have to surface); of two grounded or two flying, the
-                # one with more crossings left (it flies longest)
-                if a in divers and b in divers:
+                # an inverted adjacent pair. Two page lanes: a FREE
+                # crossing (they are on different pages by construction;
+                # the B-page lane is called the mover). A page lane and a
+                # swimmer: the swimmer moves, on the other layer from the
+                # page. Two swimmers: the MOVER (back layer) is the one in
+                # flight (a flying swimmer passed by a grounded one would
+                # have to surface); of two grounded or two flying, the one
+                # with more crossings left (it flies longest).
+                pa, pb = page[a], page[b]
+                if pa and pb:
+                    assert pa != pb, f'two {pa} page lanes inverted: {a}/{b}'
+                    m, p = (a, b) if pa == 'B.Cu' else (b, a)
+                    free = True
+                elif pa or pb:
+                    m, p = (a, b) if pa is None else (b, a)
+                    free = False
+                else:
                     fa, fb = a in on_b, b in on_b
                     if fa != fb:
                         m, p = (a, b) if fa else (b, a)
                     else:
                         m, p = (a, b) if len(todo[a]) >= len(todo[b]) else (b, a)
-                elif a in divers or b in divers:
-                    m, p = (a, b) if a in divers else (b, a)
-                else:
-                    raise AssertionError(f'two keepers inverted: {a}/{b}')
-                if m not in on_b:
-                    # a take-off: wait while a diver in flight still has
+                    free = False
+                if free:
+                    seq[i], seq[i + 1] = b, a
+                    col.append((m, p))
+                    used.update((a, b))
+                    todo[a].discard(b)
+                    todo[b].discard(a)
+                    i += 2
+                    continue
+                Lm, Lp = self.pair_layers(m, p)
+                if m in swim and m not in on_b and Lm == 'B.Cu':
+                    # a take-off: wait while a swimmer in flight still has
                     # to cross this one (it would be crossed mid-flight
                     # and pay two vias) -- unless waiting stalls the
                     # whole schedule, when the flight goes anyway
                     if not override and gate != 'off' and any(
                             e in on_b and (gate == 'strict' or len(todo[e]) > 1)
-                            for e in todo[m] if e in divers):
+                            for e in todo[m] if e in swim):
                         gate_block = True
                         i += 1
                         continue
@@ -225,15 +305,15 @@ class Schedule:
                         gap_block = True
                         i += 1
                         continue
-                # a layer change needs a column of its own: after being
-                # passed (front) a diver waits gaps[d] columns before it
-                # moves (back), and after moving before it is passed
-                if m in last_passed and len(cols) <= last_passed[m] + gaps[m]:
-                    gap_block = True
-                    i += 1
-                    continue
-                if p in divers and p in last_move and \
-                        len(cols) <= last_move[p] + gaps[p]:
+                # a layer change needs columns of its own: a swimmer
+                # crossing on the other layer from its last crossing
+                # waits gaps[d] columns after it (room for the via)
+                blocked = False
+                for nm, L in ((m, Lm), (p, Lp)):
+                    if nm in swim and nm in last_layer and last_layer[nm] != L \
+                            and len(cols) <= last_col[nm] + gaps.get(nm, 1):
+                        blocked = True
+                if blocked:
                     gap_block = True
                     i += 1
                     continue
@@ -242,17 +322,20 @@ class Schedule:
                 used.update((a, b))
                 todo[a].discard(b)
                 todo[b].discard(a)
-                on_b.add(m)
-                last_move[m] = len(cols)
-                if p in divers:
-                    if p in on_b and todo[p]:
-                        # passed mid-flight with crossings still to
-                        # make: it dives again later, two more vias
-                        self.surfaced.append(p)
-                    on_b.discard(p)             # it surfaced to be passed
-                    last_passed[p] = len(cols)
-                if not todo[m]:
-                    on_b.discard(m)             # landed
+                for nm, L in ((m, Lm), (p, Lp)):
+                    if nm in swim:
+                        if L == 'B.Cu':
+                            on_b.add(nm)
+                        else:
+                            if nm in on_b and todo[nm]:
+                                # surfaced in flight with crossings still
+                                # to make: it dives again, two more vias
+                                self.surfaced.append(nm)
+                            on_b.discard(nm)
+                        last_col[nm] = len(cols)
+                        last_layer[nm] = L
+                        if not todo[nm]:
+                            on_b.discard(nm)     # landed
                 i += 2
             if not col and gate_block and not gap_block:
                 override = True                 # retry this column ungated

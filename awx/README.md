@@ -378,6 +378,44 @@ spacer; nothing passing it before its first swap → a lead. Reserved
 `s`-intervals (corner wedges, crossings of earlier corridors) hold no
 column; columns are laid in the free length (`u(s)`).
 
+**Two pages** (`TWO_PAGE=1`, opt-in, 2026-08-30 late). The single-page
+schedule puts every non-keeper on a dive (two vias) and every crossing in
+a column that needs via room. The human routes a corridor as TWO pages:
+every net on one layer end to end, an F lane and a B lane crossing for
+free, two vias per net and both are escapes. `Schedule` now assigns
+pages — F-page = the LIS (weighted toward nets whose ends are on F),
+B-page = the LIS of the rest (weighted toward ends on B), SWIMMERS = the
+remainder — and `columns()` treats an F×B pair as a FREE swap (no layer
+rule, no gate, no gap); a swimmer takes the other layer from the page
+lane it crosses (`pair_layers`) and needs `gaps` columns between two of
+its crossings on different layers. `Corridor.column_layout` spaces the
+columns non-uniformly: `W_FREE` 0.18 for a free column, `W_GATE` for a
+constrained one, `2 HW_COL + VIA_ROOM` between a swimmer's two crossings
+on different layers, then stretched to the free length (with one page
+this is exactly the old uniform `(k + 1) W`; an empty spacer column keeps
+the full pitch — treating it as free cost K15 +6 vias before that was
+found). `plan_columns` gates on the layout's length need, not a count.
+Measured on the recorded ladder (escapes almost all on F): K4 6 / K11 12
+/ K15 22 / K19 30 vias (+2 each), K21 34 with 2 open, K28 42 vias with 9
+open at a need of 6.9 mm in 4.7. Which is what the accounting predicts:
+a B-page lane whose tooth AND stub are on F still dives in and surfaces
+out (two vias, the diver's price), and a swimmer now alternates layers
+at every page boundary it meets (0.6 mm of corridor each) instead of
+flying through on B. So two pages are necessary but not sufficient; the
+two pieces that make them pay are (a) **escape layers by page** — a
+B-page net fanned out to B at both ends costs 0 in the corridor (Stage
+1's plan chooses kinds and layers; the fanout lays them), and (b) a
+**separated schedule** for the swimmers: since F/B swaps are free, the
+sequence can be re-ordered between launch and target into [all F lanes]
+[all B lanes], where every swimmer crosses one page on B and the other
+on F in two flights (one via pair), then merged back — but a full
+separation is ~n/2 free columns each side, so free columns must be far
+narrower than 0.18 (a B lane crossing 14 F lanes is just a diagonal on
+B; the band's ±0.03 floor must then grow with the slope, the fix that
+was measured inert for SDQ7 but is load-bearing here). At K28 that
+would put the corridor at ~12 swimmer vias + the escapes, against the
+human's 46 total.
+
 **Layers.** At the crossing of column *k* the mover is REQUIRED on B and the
 passed net on F over `0.4 W + 0.05` either side (not the whole column: a net
 passed at *k* and moving at *k+2* needs a cell between to put its via in);

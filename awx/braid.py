@@ -111,6 +111,15 @@ HEAD_RUN = 3.0                 # a head-on stub's straight run-in that must
                                # be clear of static copper (its own row of
                                # balls, when it sits on a flank)
 CROSS_TUBE = 1.0               # a lane's freedom through a crossing region
+RESERVE = 0.3                  # room after the last column
+W_FREE = 0.18                  # pitch of a FREE column (two page lanes
+                               # crossing: no via, only the lanes' slope)
+HW_COL = 0.15                  # half-width of a constrained column's
+                               # required-layer stretch (the converging
+                               # part where two lanes are too close for
+                               # one layer)
+VIA_ROOM = 0.30                # room for a via between two required
+                               # stretches (0.25 dia + clearances)
 W_GATE = 0.33                  # narrowest swap column the gated schedule
                                # gets: every clean gated K on the bench
                                # had W >= 0.343 (K21, W=0.322, needed
@@ -402,6 +411,7 @@ class Corridor:
         self.leg_layer = {}        # side exiter -> the layer of its exit leg
         self.join_leg_s = {}       # joiner -> s of its join leg (after jog)
         self.exit_leg_s = {}       # side exiter -> s of its exit leg
+        self.sched_cur = None      # the Schedule plan_columns last ran
 
     # ------------------------------------------------------------ geometry
     def build_spine(self):
@@ -735,17 +745,68 @@ class Corridor:
         return float(S[k + 1])
 
     # ------------------------------------------------------------ lanes
-    def lay_lanes(self, cols):
+    def column_layout(self, cols, sched):
+        """The columns' positions along the free length (u), and the
+        length they need. A FREE column (two page lanes crossing) is a
+        crossing without a via and takes W_FREE; a constrained one
+        (a swimmer in it) must leave via room from the swimmer's
+        previous crossing when its layer changes there, and from the
+        launch for its first crossing on the other layer from its
+        tooth: HW_COL either side of each column is the converging
+        part where the two lanes are too close for one layer, and the
+        via sits between. Returns (u, need)."""
+        u = []
+        last_col, last_layer = {}, {}
+        tl = self.ctx.tooth_layer
+        for k, col in enumerate(cols):
+            # an EMPTY column is a spacer the schedule put there for a
+            # via: it keeps the full pitch
+            free_col = bool(col) and sched is not None and \
+                all(sched.is_free(d, p) for d, p in col)
+            pitch = W_FREE if free_col else W_GATE
+            uk = (u[-1] + pitch) if u else pitch
+            for (d, p) in col:
+                if sched is not None and sched.is_free(d, p):
+                    continue
+                Ld, Lp = sched.pair_layers(d, p) if sched else ('B.Cu', 'F.Cu')
+                for nm, L in ((d, Ld), (p, Lp)):
+                    if sched is not None and sched.page.get(nm):
+                        continue                 # a page lane never changes
+                    if nm in last_layer and last_layer[nm] != L:
+                        uk = max(uk, u[last_col[nm]] + 2 * HW_COL + VIA_ROOM)
+                    last_col[nm], last_layer[nm] = k, L
+            u.append(uk)
+        # the reserve after the last column is one more pitch, as the
+        # uniform layout had it ((n + 1) columns' worth of length)
+        need = (u[-1] + W_GATE) if u else 0.0
+        return u, need
+
+    def lay_lanes(self, cols, sched=None):
         """From a schedule: column positions, required-layer intervals,
-        the diver windows, and every lane's (s, o) polyline."""
+        the diver windows, and every lane's (s, o) polyline. `sched`
+        (default: the one plan_columns last ran) gives the pages."""
         sp = self.spine
         M = self.members
+        sched = sched or self.sched_cur
         n = len(cols)
-        reserve = 0.3
-        W = (self.L_free - reserve) / (n + 1)
-        self.W, self.cols = W, cols
+        L_avail = self.L_free - RESERVE
+        u, need = self.column_layout(cols, sched)
+        # the layout is stretched (or squeezed) to the free length, as
+        # the uniform layout was: with one page every column is a
+        # constrained one at W_GATE and this is exactly (k + 1) W
+        scale = L_avail / need if need > 0 else 1.0
+        u = [x * scale for x in u]
+        pitches = [b - a for a, b in zip([0.0] + u, u)]
+        self.W = min(pitches) if pitches else L_avail
+        self.layout_need, self.cols = need, cols
         self.all_cols = list(cols)
-        s_m = [self.s_of_u((k + 0.5) * W) for k in range(n + 1)]
+        # slot midpoints: before the first column, between columns,
+        # after the last
+        s_m = [self.s_of_u(u[0] / 2 if u else L_avail / 2)]
+        for k in range(1, n):
+            s_m.append(self.s_of_u((u[k - 1] + u[k]) / 2))
+        if n:
+            s_m.append(self.s_of_u((u[-1] + L_avail) / 2))
         self.invol, self.first, self.last = {}, {}, {}
         for k, col in enumerate(cols):
             for (d, p) in col:
@@ -753,20 +814,27 @@ class Corridor:
                 self.invol.setdefault(p, []).append(k)
                 self.first.setdefault(d, k)
                 self.last[d] = k
-        # REQUIRED layers: at the crossing of column k the mover is on
-        # B and the passed net on F, over the part of the column where
-        # the two lanes are too close for one layer -- and NOT the whole
-        # column: a net passed at k and moving at k+2 must change layer
-        # between the two, and a requirement that spans each whole
-        # column leaves it no cell to put the via in.
+        # REQUIRED layers. A page lane is on its page over the whole
+        # schedule region (from a via's room past s0, so a tooth on the
+        # other layer can dive), which is what makes an F-page / B-page
+        # crossing free. At a constrained column (a swimmer in it) the
+        # two lanes are required on the layers pair_layers gives, over
+        # HW_COL either side of the column -- and NOT the whole column:
+        # a swimmer on F at k and on B at k+2 must change layer between
+        # the two, and a requirement that spans each whole column leaves
+        # it no cell to put the via in.
         req = {nm: [] for nm in M}
-        hw = 0.4 * W + 0.05
         for k, col in enumerate(cols):
-            ua = (k + 1) * W
-            a, b = self.s_of_u(ua - hw), self.s_of_u(ua + hw)
+            pitch = min(u[k] - (u[k - 1] if k else 0.0),
+                        (u[k + 1] if k + 1 < n else L_avail) - u[k])
+            hw = 0.4 * pitch + 0.05
+            a, b = self.s_of_u(u[k] - hw), self.s_of_u(u[k] + hw)
             for (d, p) in col:
-                req[d].append((a, b, 'B.Cu'))
-                req[p].append((a, b, 'F.Cu'))
+                # a free crossing: each lane on its page there (the
+                # router keeps a layer between requirements on its own)
+                Ld, Lp = sched.pair_layers(d, p) if sched else ('B.Cu', 'F.Cu')
+                req[d].append((a, b, Ld))
+                req[p].append((a, b, Lp))
         # EXIT LEGS THAT CROSS LANES. In a side-exit block the lanes
         # leave one by one, and every leg crosses the lanes still
         # present between it and its stub. The rule is the block's, not
@@ -870,7 +938,7 @@ class Corridor:
                 o[i], o[j] = o[j], o[i]
             orders.append(o)
         Ly, py = self.Ly, self.py
-        u_first = W
+        u_first = u[0] if u else L_avail
 
         def morph_t(s):
             return max(0.0, (self.u_of(s) - u_first) / max(self.L_free - u_first, 1e-9))
@@ -1240,11 +1308,12 @@ class Corridor:
         attempt sooner, K28 31 -> 23 columns). SCHED_GATE pins a
         policy. The probe tools go through here too, so they diagnose
         the schedule the braid actually laid."""
+        self.sched_cur = sched
         gate = os.environ.get('SCHED_GATE')
         if gate is None:
             cols = sched.columns(gaps, lead, gate='last')
-            gate = 'last' if (self.L_free - 0.3) / (len(cols) + 1) \
-                >= W_GATE else 'off'
+            _u, need = self.column_layout(cols, sched)
+            gate = 'last' if need <= self.L_free - RESERVE else 'off'
         return sched.columns(gaps, lead, gate=gate), gate
 
     def run(self):
@@ -1274,18 +1343,24 @@ class Corridor:
         if self.reserved:
             log('  reserved: ' + ', '.join(f'[{a:.2f},{b:.2f}]' for a, b in self.reserved)
                 + f'  (free {self.L_free:.2f} of {self.s1 - self.s0:.2f} mm)')
-        sched = Schedule(self.launch, self.target, ctx.tooth_layer, log=log)
+        sched = Schedule(self.launch, self.target, ctx.tooth_layer, log=log,
+                         dest_layer=ctx.dest_layer)
         gaps = {d: 1 for d in sched.divers}
         lead = {d: 0 for d in sched.divers}
         best = None
         for attempt in range(6):
             self.offsets(ly_floor)
-            sched = Schedule(self.launch, self.target, ctx.tooth_layer)
+            sched = Schedule(self.launch, self.target, ctx.tooth_layer,
+                             dest_layer=ctx.dest_layer)
             cols, gate = self.plan_columns(sched, gaps, lead)
             self.lay_lanes(cols)
             swaps = [sw for col in cols for sw in col]
-            log(f'  attempt {attempt}: {len(swaps)} swaps in {len(cols)} columns, '
-                f'W={self.W:.3f}, launch pitch >= {ly_floor:.2f}'
+            n_free = sum(1 for col in cols for (d, p) in col if sched.is_free(d, p))
+            log(f'  attempt {attempt}: {len(swaps)} swaps ({n_free} free) in '
+                f'{len(cols)} columns, need {self.layout_need:.2f} of '
+                f'{self.L_free - RESERVE:.2f} mm, W={self.W:.3f}, launch pitch >= '
+                f'{ly_floor:.2f}; pages F {len(M) - len(sched.divers)} / B '
+                f'{len(sched.b_page)} / swimmers {len(sched.swimmers)}'
                 + (f', gate {gate}' if gate != 'last' else '')
                 + (f', {len(self.crossings)} lane(s) crossed by exit legs'
                    if self.crossings else '')
@@ -1326,7 +1401,7 @@ class Corridor:
             if best is None or (len(self.refused), nv) < (len(best[0]), best[1]):
                 best = (list(self.refused), nv, ly_floor, cols,
                         dict(self.out_segs), dict(self.out_vias),
-                        list(ctx.pcb.segments), list(ctx.pcb.vias))
+                        list(ctx.pcb.segments), list(ctx.pcb.vias), sched)
             if not self.refused:
                 break
             # FEEDBACK. Room across first -- the launch pitch is the
@@ -1339,7 +1414,7 @@ class Corridor:
                 ly_floor = min(0.40, ly_floor + 0.03)
                 continue
             for nm in self.refused:
-                if nm in divers:
+                if nm in sched.swimmers:
                     # a pass within two columns of one of its own moves
                     # (either side) leaves no room for the layer change:
                     # a spacer. Else, nothing passing it before its
@@ -1355,11 +1430,12 @@ class Corridor:
                     else:
                         lead[nm] += 1
         if best is not None and best[0] != self.refused:
-            refused, nv, ly_b, cols_b, segs_b, vias_b, pcb_s, pcb_v = best
+            refused, nv, ly_b, cols_b, segs_b, vias_b, pcb_s, pcb_v, sched = best
             log(f'  keeping attempt with {len(M) - len(refused)}/{len(M)} '
                 f'routed, {nv} via(s)')
             self.offsets(ly_b)
-            self.lay_lanes(cols_b)
+            self.sched_cur = sched
+            self.lay_lanes(cols_b, sched)
             self.refused = refused
             self.out_segs, self.out_vias = segs_b, vias_b
             ctx.pcb.segments, ctx.pcb.vias = pcb_s, pcb_v
