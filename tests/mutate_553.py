@@ -70,8 +70,8 @@ _WINNER = (
     "                values['blocker_cells'][win[0]] = (\n"
     "                    values['blocker_cells'].get(win[0], 0) + cells)\n")
 
-_POOLS = ("    pools = {sig: [k for k, _ in ranked[sig][:max(0, top_k)]] "
-          "for sig in ranked}\n")
+_CLAIM_ANCHOR = ("    selected_by: Dict[str, List[str]] = {}\n"
+                 "    n_parts = 0\n")
 
 
 ROWS = [
@@ -169,11 +169,12 @@ ROWS = [
     # A signal claiming credit for everything it ranked, not for what was
     # selected -- so `selected_by` stops meaning "why this part is moving".
     ('selected-by-claims-the-whole-pool', 'd',
-     _POOLS,
-     _POOLS
-     + "    for _s, _ks in pools.items():\n"
-       "        for _k in _ks:\n"
-       "            selected_by.setdefault(_k, []).append(_s)\n",
+     _CLAIM_ANCHOR,
+     "    selected_by: Dict[str, List[str]] = {}\n"
+     "    for _s, _ks in pools.items():\n"
+     "        for _k in _ks:\n"
+     "            selected_by.setdefault(_k, []).append(_s)\n"
+     "    n_parts = 0\n",
      (T553,), 'KILLED'),
 
     # The budget ignored: a block is still added whole, but nothing stops the
