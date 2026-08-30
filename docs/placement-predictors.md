@@ -370,3 +370,141 @@ withdrawn from the default-available set — and the row keeps its measured
 direction, in the `rejected` style `test_placement_ab.py` uses. A rejected
 finding that is deleted becomes folklore; a rejected finding that keeps its row
 stays a change detector.
+
+## What #554 measured, and the rules recorded before it ran
+
+`--relocate` (`py_placer/placement/relocate.py`) moves one diagnosed block toward
+its connectivity target by letting the neighbours yield in preserved relative
+order. Two questions, and only the first is answered.
+
+**The mechanism question — ANSWERED.** Does yielding buy travel a frozen board
+cannot? `tests/stress/relocation_reach.py`, paired, one variable changed: both
+arms run the same solve over the same graph, and the frozen arm simply pins every
+other unit. Over the 24 measurable blocks on the 9 boards that have one (a
+tenth, glasgow_revC, contributes only refusals), yielding bought ≥ 1 mm on **11 cells
+spanning 6 boards**, median gain 0.31 mm, max 16.66 mm; 11 cells move in neither
+arm and are counted, not dropped; 3 are refused by name (glasgow_revC's blocks
+contain KiCad-locked parts).
+
+**The routed question — NOT ANSWERED by that study, and it must not be read as
+if it were.** Reach is not routability.
+
+### Pre-registered rule 7 — the headline is routed, and `recovery` is not it
+
+A relocation is reported as working only on
+`route_recovery = (blocking(D) − blocking(R)) / (blocking(D) − blocking(C))`
+over failed + open + pad-deficit, where D is the damaged board, C the undamaged
+control and R the repair. A cell counts only if `blocking(D) > blocking(C)` on
+identical router argv; one that fails that is `not_placement_limited` and is
+reported with both numbers, never dropped.
+
+Pose `recovery` is a DIAGNOSTIC here for a reason sharper than CLAUDE.md's
+general one: the solve aims at `net_centroid`, and across the 24 live cells of
+`tests/stress/relocation_reach.py` a block sits **3.39–69.20 mm from its own net
+centroid at the human's placement** (`want_mm` in the committed baseline; median
+10.36 mm).
+The best achievable pose recovery is therefore bounded above by
+`1 − d_ctrl/dose`, which is at or below zero on most cells before anything runs.
+Every pose number is reported with that ceiling beside it, and a pose null on a
+ceiling-bound cell is not evidence about the solver. `compensated` — a routed win
+at recovery ≈ 0 — is a first-class PASS, exactly as #411 concluded for the loop.
+
+### Pre-registered rule 8 — the delta is the evidence, not the raw recovery
+
+The same relocation is applied to the UNDAMAGED control (`R0`) on every counted
+cell, and `route_recovery − route_recovery(R0)` is what is reported. Without it a
+repair arm cannot tell "it fixed the damage" from "it moves that block on every
+board" — which is exactly how #553's recall study produced a finding that
+evaporated. Acceptance: the delta positive on ≥ N−1 evidence cells and negative
+on none, with N ≥ 3, with the `loop@allon` column printed beside it. #554 is only
+interesting if it beats a tool that already exists.
+
+### Pre-registered rule 9 — the contract can fail a cell that routed better
+
+`collateral_pad_rms` must not rise and the block must not tear, whatever
+`blocking` did. "Move only diagnosed blocks; keep the relative order of
+everything else as a hard constraint" is #554's definition, not its bonus: a
+solve that buys routability by walking the neighbours is `place_route_loop`, and
+that already exists.
+
+### Pre-registered rule 10 — `translate` is an instrument, never evidence
+
+`perturb.block_direction` computes the damage direction from
+`routability.block_displacements`, the same quantity this solve consumes, so a
+`translate` recovery is partly arithmetic. It is printed and never aggregated —
+the same convention `diagnosis_recall.py` applies for the same reason. `swap` and
+`wrong_side` are the evidence arms; `scatter` is excluded because
+`portfolio.perturb_jitter` skips illegal-pose parts and it often damages nothing,
+and `pile` because every free part moves so there is no "the block".
+
+### Pre-registered rule 11 — the dose ladder is amended, not ignored
+
+#411's 5/10/20/40/80 mm ladder is **geometrically impossible on most of this
+corpus**: of the 10 boards the reach sweep covers, **5** have a board diagonal
+under 80 mm and **2** under 40 mm, and a diagonal is a generous upper bound on
+how far a block inside the outline can travel. (An earlier revision said "9 of
+the 11", against a set of 11 boards that does not exist in the tree; the numbers
+above are re-derivable from `board_bounds`.) It is replaced by a probed dose per
+(board, block, direction), with the APPLIED damage measured by diffing the
+control against the damaged board — never from `clipped` or
+`max_feasible_dose_mm`, which describe a rigid-translate probe that only two of
+the arms clip against and which was wrong by 79× once. A cell whose applied dose
+is under `2 × recovery.HOME_TOLERANCE_MM` is `unmeasurable_dose` and is reported
+with its numbers.
+
+### Pre-registered rule 12 — the withdrawal, both ways
+
+If the routed study runs and the relocation does not clear rule 8, `--relocate`
+is not offered in the default path, and the row keeps its measured direction in
+the `rejected` style. And symmetrically: if it clears rule 8 while failing
+rule 9, what is recorded is "it routes better by moving the neighbours" — that is
+the loop — and **#554's constraint framing is withdrawn rather than the tool**.
+
+### What #554 does NOT license
+
+- Not that a relocated board routes better. Nothing has measured that.
+- Not that `reach_mm` is closure on the target: it is board-frame travel, and the
+  target moves with the corridor. Bounded by LP, closure is smaller on most cells
+  and larger on a few. The aggregate mechanism verdict survives the substitution;
+  no individual cell's number is the closure.
+- Not that the constraint graph is a conservative model of legality. It is not —
+  a Euclidean gap against a per-axis constraint leaves 73 of 54,841 corpus pairs
+  exposed. The exact re-check, not the graph, is what makes the pass safe.
+
+### What the routed study actually returned (#554)
+
+`tests/stress/block_relocation_study.py` ran on 2026-08-30. Rows and summary are
+committed at `tests/554_block_relocation_baseline.json`;
+`tests/test_554_relocation_regen.py` re-derives the whole summary from those rows
+through the study's own `summarise()` (it does **not** re-run the routes — hours
+— and says so rather than sampling and implying otherwise).
+
+| board / kind | blocking C → D | R | R0 | L (`loop@allon`) | delta |
+|---|---|---|---|---|---|
+| esp_prog / swap | 0 → 6 | 4 (**0.33**) | 0 | 1 (**0.83**) | +0.333 |
+| esp_prog / wrong_side | 0 → 3 | 0 (**1.00**) | 0 | 0 (**1.00**) | +1.000 |
+| splitflap_driver / swap | 0 → 7 | 3 (**0.57**) | 0 | 2 (**0.71**) | +0.571 |
+| esp_prog / translate | 0 → 3 | 0 | — | 0 | instrument only |
+| splitflap / wrong_side, translate | 0 → 0 | — | — | — | `not_placement_limited` |
+
+**Verdict: UNDERPOWERED, and the incumbent won.** The direction is right — 3 of 3
+evidence cells positive against their own undamaged pairing, median **+0.571**,
+none negative — but on **2 boards**, and rule 8 counts boards, because per-board
+spread here is ±2–3 nets. And `place_route_loop` with the pin gate lifted reached
+a **strictly better** routed result on **2 of the 3** cells, tying on the third.
+
+Three things this establishes, none of which is "it works":
+
+1. **The pipeline fires end to end and the arithmetic is sound.** The paired
+   `R0` arm reads 0 on every cell — the relocation does not disturb an undamaged
+   board — so the deltas are not the artefact that voided #553's first reading.
+2. **Two of six cells were `not_placement_limited`**: on splitflap the damage did
+   not make the board route worse at all, so there was nothing to restore. Those
+   are reported with both routed numbers, because the RUNBOOK's definition of a
+   subject is exactly that the dose must threaten routability.
+3. **The feature does not currently beat the tool that exists.** That is the
+   comparison rule 8 pre-registered, and it came back against #554.
+
+What would settle it: the same study over ≥ 3 boards that fail at their authored
+placement or under a dose that threatens routing. On this corpus that means
+adding tigard and kit-dev-coldfire, at roughly 15–40 minutes per cell.

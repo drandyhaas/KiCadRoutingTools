@@ -588,6 +588,63 @@ own failure diagnostics* to decide what to move. Each round:
    reasons are in `py_placer/placement/diagnosis.py`, and none of them is
    "#703 measured it and it failed" — #703 measured `crossings`, a different
    quantity.
+2b. `--relocate` (#554, DEFAULT OFF) proposes ONE bounded block relocation
+   *before* the quench, and writes it as its own board so the quench can then
+   refine the new pose. Where the quench's rigid block translate (#538) caps
+   every member at `--max-displacement` from its own seed and freezes everybody
+   else, this lets the neighbours yield — with their relative order held as a
+   hard constraint, and their total displacement minimised.
+
+   The solve is a difference-constraint system: one variable per rigid unit per
+   axis holding a *shift* from the incumbent, one constraint per interacting
+   pair in the axis it is currently more separated on, every requirement clamped
+   to `min(clearance, what the pair already has)` so `s = 0` — the board as
+   handed over — is always feasible. The block's travel is the envelope's own
+   upper bound, and Bellman-Ford's predecessor chain is the **explanation**:
+   a named chain of parts and gaps ending at the wall or the locked part that
+   stopped it, which is what #459 asked the constraint graph to be. The corridor
+   is an *output* — the units that had to yield — so there is no radius knob.
+
+   | | |
+   |---|---|
+   | `--relocate-block NAME` | relocate a named derived block instead of the most displaced one |
+   | `--relocate-refs GLOB…` | relocate an explicit ref set, bypassing derivation. This is what separates "the relocation worked" from "the diagnosis picked right" |
+   | `--relocate-max-corridor MM` | refuse a dose whose neighbours must travel more than this in total, and try a shorter one |
+
+   **What is measured, and what is not.** The mechanism holds: over the 24
+   measurable blocks on the 9 boards that have one, letting neighbours yield
+   bought ≥ 1 mm more travel than freezing them on 11, spanning 6 of those
+   boards, max 16.66 mm (`relocation_reach.py`, and its `frozen` arm is the
+   *same solve* with everything else pinned, so the two differ in exactly one
+   thing). The scale is worth reading beside it: the MEDIAN cell reaches
+   1.03 mm against a median want of 10.36 mm.
+
+   **The routed A/B has now run, and it does not support the feature**
+   (`block_relocation_study.py`): 3 of 3 evidence cells recovered damage,
+   median delta +0.57 — but over 2 boards where the acceptance rule counts 3,
+   and `loop@allon` reached a strictly better routed result on 2 of those 3.
+   `relocate_efficacy` carries that verdict; reach is not routability.
+
+   Three limits that decide whether it can help you at all:
+
+   - **It never fires on a board that already routes.** The loop stops at
+     `failures == 0` before round 1, and `--target-nets` adds to the target list
+     without adding to `failures`, so it does not lift that stop.
+   - **`--group-by auto` derives no block on five of the six boards this repo
+     grades placement on.** Use `auto,netprefix,decap`, or name the refs.
+   - **The one tracked board where every precondition holds** —
+     kit-dev-coldfire, the only one that fails at its authored placement — is
+     *already* taken from 3 failed nets to 0 by the shipped loop (at a cap
+     widened to 6.75 mm by round 4 — see the table above).
+
+   And one property that is easy to assume and false: the constraint graph is
+   **not** a conservative model of legality. A gap is Euclidean while a
+   constraint is per-axis, so a pair the graph is satisfied with can be driven
+   below clearance (measured on watchy, glasgow_revC and ulx3s). What makes the
+   pass safe is the exact re-check, which re-measures every moved part with the
+   real gate and refuses the dose outright — nothing is applied on the solve's
+   word.
+
 3. Micro-quench only those parts, with the failed nets weighted 3×
    (`--failed-net-weight`) — both their airwire *length* and any *crossing*
    they take part in, the latter priced at the larger of the two nets'
@@ -828,12 +885,28 @@ Three smaller results worth keeping:
   gate was never even consulted. `--target-nets` is the documented answer and it
   works: on both smaller boards the targeted arm beat the shipped one on the
   router's own terms (tigard 13→8 vs 13→12; splitflap 10→5 vs 10→9).
-- **A rigid block translate barely moves on a packed board.** Feasible doses
+- **A rigid block translate barely moves on a packed board.** ~~Feasible doses
   before a member leaves the outline: 1.40 mm for coldfire's 21-part sheet
-  block, 5.10 mm for glasgow's 67-part anchor unit — far below #411's proposed
-  5/10/20/40/80 ladder, because a shipped board has nowhere to translate into.
-  `swap`, which exchanges two units and changes no net area, reaches 14–66 mm.
-  The block-scale ladder is a per-(board, unit) property, not a constant.
+  block, 5.10 mm for glasgow's 67-part anchor unit~~ — **those two numbers are
+  superseded and were wrong by up to 59×.** They predate `perturb`'s
+  four-direction fallback (`perturb.py:464-473`), which was added *because*
+  coldfire clipped to 0.0 in every direction; re-probed with it, the same board
+  and the same block give **82.27 mm**, and glasgow **13.62 mm**. The headline
+  claim survives in a weaker form — a shipped board has little room *outward* —
+  but "the block-scale ladder is a per-(board, unit) property, not a constant"
+  is the part that held. `swap`, which exchanges two units and changes no net
+  area, reaches 14–66 mm.
+
+  **And the direction matters as much as the number.** Both of those are travel
+  *away* from the block's connectivity target, which is what a damage rig wants.
+  A relocation goes the other way, and #554 measured that separately: toward the
+  target, with every neighbour frozen, a block travels a **median 0.00 mm against
+  a median want of 10.36 mm**, over the 24 measurable blocks on the 9 boards that
+  have one
+  (`tests/stress/relocation_reach.py`). Letting the neighbours yield in preserved
+  relative order buys ≥ 1 mm more on 11 of those 24, over 6 boards, up to
+  16.66 mm. That is the mechanism #554 rests on, and it is *not* a claim that a
+  relocated board routes better — see `--relocate` below.
 - **Cost goes as `(cap/step)²`, so a bigger cap is not a slower run.**
   `loop@allon` searched a 7.9× larger radius and ran **4.6× faster** than
   `loop@shipped` (185 s vs 846 s) because `--step` scaled with the cap. Step 0c

@@ -119,6 +119,59 @@ A run in this mode prints a group-source census before round 0, because
 `--group-by auto` derives NO BLOCK on five of the six boards this repo grades
 placement on.
 
+### Moving the block: `--relocate` (#554)
+
+The quench can translate a block rigidly (#538), but only while every member
+stays within `--max-displacement` of its own seed and everybody else is frozen.
+Measured with the neighbours frozen, a block travels a **median 0.00 mm toward
+its connectivity target against a median want of 10.36 mm**, over the 24
+measurable blocks on the 9 boards that have one — a shipped board has no vacancy to translate into. `--relocate`
+(**default off**) lets the neighbours yield instead, with their relative order
+as a hard constraint and their total displacement minimised, and writes the
+result as its own board so the quench can refine the new pose. The round's
+re-route accepts or reverts it, byte for byte.
+
+```bash
+python py_placer/place_route_loop.py in.kicad_pcb out.kicad_pcb \
+    --route-args '--nets "*"' \
+    --relocate --group-by auto,netprefix,decap --relocate-max-corridor 20
+```
+
+Every proposal reports the corridor (*who* yielded, and how far) and a
+**binding chain** — the named parts and gaps that stopped the block, straight
+off the constraint graph's own shortest path. Every refusal is a named reason,
+never a count: `no_room_at_any_dose`, `block_member_locked:<ref>`,
+`geometry_worsened:<ref>`, `declared_keepout_refused_a_shift:<ref>`,
+`corridor_over_budget`, and the rest are enumerated in `relocate.py`.
+
+**The mechanism holds; the routed result does not support the feature.**
+Letting neighbours yield bought ≥ 1 mm more travel than freezing them on 11 of
+the 24 measurable blocks over 6 of the 9 boards that have one, max 16.66 mm
+(`tests/stress/relocation_reach.py`; its frozen arm is the same solve with
+everything else pinned, so the arms differ in exactly one thing — and
+`reach >= frozen` is a theorem, so the evidence is the magnitude, never a win
+rate).
+
+The routed A/B (`tests/stress/block_relocation_study.py`) has been run, and it
+is **UNDERPOWERED and lost to the incumbent**: the relocation recovered damage
+on 3 of 3 evidence cells, median delta **+0.57** — but over only **2 boards**,
+where the acceptance rule counts ≥ 3, and `place_route_loop` with the pin gate
+lifted reached a **strictly better** routed result on **2 of those 3** cells
+(esp_prog/swap 0.83 vs 0.33; splitflap/swap 0.71 vs 0.57; they tie at 1.0 on
+esp_prog/wrong_side). So the flag stays default-off, and the run verdict carries
+that whole sentence as `relocate_efficacy`. Under pre-registered rule 12 this is
+not yet a withdrawal — the study has not met its own N — but it is the
+opposite of support, and the next run of it decides.
+
+Three limits worth knowing before reaching for it: it never fires on a board
+that already routes (the loop stops at `failures == 0`, and `--target-nets` does
+not lift that stop); `--group-by auto` derives no block on most tracked boards;
+and the one board where every precondition holds, kit-dev-coldfire, is already
+taken from 3 failed nets to 0 by the shipped loop (at a cap widened to 6.75 mm
+by round 4). See `relocate.py`'s docstring for
+why the constraint graph is *not* a conservative model of legality, and why the
+exact re-check rather than the graph is what makes the pass safe.
+
 ## place_portfolio.py — K diverse candidates from one placement
 
 The quench is deterministic by design (#457), so re-running it never produces
@@ -481,6 +534,11 @@ python3 tests/test_456_courtyard_parser.py   # courtyard shapes + silk bleed (#4
 python3 tests/test_456_side_and_outline.py   # board side, real outline, graders (#456)
 python3 tests/test_459_groups.py             # block sources + parsing (#459)
 python3 tests/test_459_group_moves.py        # rigid block translation (#459)
+python3 tests/test_554_order_graph.py        # the relocation constraint graph (#554)
+python3 tests/test_554_relocate_solve.py     # min-perturbation + the exact re-check (#554)
+python3 tests/test_554_loop_relocate.py      # --relocate wiring, mocked router (#554)
+python3 tests/test_554_reach_regen.py        # the reach measurement, re-derived in full
+python3 tests/mutate_554.py                  # does the #554 suite bite? (rewrites relocate.py)
 python3 tests/test_portfolio_strategies.py   # perturbation strategy invariants
 python3 tests/test_portfolio_determinism.py  # portfolio seed/replay contract (slow)
 python3 tests/test_portfolio.py              # portfolio smoke + identity anchor (slow)
@@ -976,7 +1034,20 @@ is followed by a settle beat, so the moves only play once the camera has arrived
 | `fanout_clearance.py` | Post-fanout decoupling-cap clearance repair (#130) |
 | `groups.py` | Placement blocks: which parts move as one rigid body (#459) |
 | `diagnosis.py` | Which parts to offer the quench, from routing evidence rather than pin count (#553). Ranks; never combines |
+| `relocate.py` | Bounded block relocation as a constraint solve (#554): the relative-order graph, and how far a block travels when its neighbours yield |
 | `routability.py` | Block displacement, corridors, escape lanes, net affinity — the geometry behind `floorplan.grade`'s health block |
+| `reconstruct.py` | The structural ("puzzle") solver: tier classification, pattern fit, rigid vectors, the assignment ILP, and the minimal-move legalize sweep |
+| `reseat.py` | Hungarian re-assignment of a proximity-tethered cluster onto rings around its anchor. NOT `seeder.reseat_scope`, which is a different mechanism for a different problem |
+| `reachability.py` | Whether a pose is reachable at all, for the repair ladders |
+| `labels.py` | Reference-designator silkscreen geometry (`beautify_labels`, #481) |
+| `perturb.py` | Manufactures known-bad seeds by displacing a block (#411). Damage, never repair |
+| `recovery.py` | Grades a repaired placement against the original it was damaged from (#411) |
+| `floorplan.py` | Floorplan intent: declare where things are supposed to go, then grade it (#549). A checker; it authors no geometry |
+| `escape.py` | Per-face escape-lane ledger: can the nets on this part's face get OUT? |
+| `pair_order.py` | Pin-order inversions between connected part pairs. A LOWER BOUND, not a proxy |
+| `part_class.py` | What determines a part's position — a pose-INDEPENDENT class |
+| `options.py` | When a board cannot hold its parts, say so WITH THE NUMBER and the options |
+| `provenance.py` | Was every pose in this board produced by a registered engine lever? |
 | `lock_advisor.py` | Which parts should not be moved, and why (#431). Advice only |
 | `placement_state.py` | Board-state gates: unplaced, and already-routed (#431) |
 | `cli_gates.py` | argparse shared by both placement CLIs so they cannot drift |
