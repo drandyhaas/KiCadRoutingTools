@@ -216,6 +216,31 @@ def _dirty(path):
     return bool(p.stdout.strip())
 
 
+def _uncache(path):
+    """Delete the target's cached bytecode. MEASURED HAZARD, not hygiene.
+
+    CPython validates a `.pyc` on (source mtime SECONDS, source SIZE). Several
+    rows here are single-character edits -- `TOP_K = 3` -> `TOP_K = 4` -- so the
+    mutated and restored files are the SAME SIZE, and a battery that mutates,
+    runs and restores inside one second leaves a `.pyc` compiled from the
+    MUTATED source that every later import in this checkout accepts as valid.
+
+    Measured on this branch: after a clean run of this file, `diagnosis.py` on
+    disk read `TOP_K = 3` while `import placement.diagnosis` reported 4, and a
+    study script written afterwards silently ran at the mutated value. The
+    battery had exited 0 and the tree was clean, so nothing pointed at it.
+    """
+    import importlib
+    import importlib.util
+    try:
+        cached = importlib.util.cache_from_source(path)
+        if os.path.exists(cached):
+            os.remove(cached)
+    except (OSError, ValueError, NotImplementedError):
+        pass
+    importlib.invalidate_caches()
+
+
 def run(only=None):
     rows = [r for r in ROWS if only is None or r[0] == only]
     if not rows:
@@ -245,6 +270,7 @@ def run(only=None):
             for o, nw in edits:
                 mutated = mutated.replace(o, nw, 1)
             io.open(path, 'w', encoding='utf-8', newline='').write(mutated)
+            _uncache(path)
             killed, failed = False, []
             for t in tests:
                 p = subprocess.run([sys.executable, '-X', 'utf8', t],
@@ -260,12 +286,14 @@ def run(only=None):
                 if 'Traceback' in out:
                     failed.append('raised: ' + out.strip().splitlines()[-1][:70])
             io.open(path, 'w', encoding='utf-8', newline='').write(base)
+            _uncache(path)
             results.append((name, 'KILLED' if killed else 'SURVIVED', expect,
                             '%d' % len(failed), failed[:4]))
             print('  ran %-44s %s' % (name, results[-1][1]))
     finally:
         for k, v in TARGETS.items():
             io.open(v, 'w', encoding='utf-8', newline='').write(orig[k])
+            _uncache(v)
 
     print()
     w = max(len(r[0]) for r in results)
