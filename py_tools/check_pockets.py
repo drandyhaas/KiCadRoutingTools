@@ -638,18 +638,28 @@ def _reseat_target(doc):
                               top['band_rect'][2], top['band_rect'][3]]}
 
 
-def _summary_scalars(doc):
-    """The one-line JSON_SUMMARY: scalars only, and every one finite.
+def census_scalars(doc):
+    """THE derived scalars, for anyone who wants numbers rather than the doc.
 
-    Line-prefixed rather than bare, which is this repo's convention precisely
-    because cli_banner appends a CMD:/EXIT= line around a tool's stdout.
+    Public because there are two consumers -- this tool's own JSON_SUMMARY line
+    and the predictor study's row -- and two copies of one definition is the
+    defect `refs_in_rect` exists to avoid. `centroid_offset` in particular is
+    not a matter of taste: taking only the X term records "dead centre" for a
+    board whose mass sits 14% of the span off in Y (splitflap_driver reads
+    X 0.0002 / Y 0.1395), and the study's own damage kinds -- `translate`,
+    `wrong_side` -- displace mass in Y routinely. So the magnitude is the
+    headline and both axes ship beside it.
     """
     arr = doc.get('arrangement') or {}
     side = (arr.get('sides') or {}).get(arr.get('headline_side')) or {}
     off = side.get('offset_frac_span') or [None, None]
     ctl = side.get('count_control_frac_span') or [None, None]
     top = (doc.get('cold_regions') or [{}])[0]
+    mag = (round(math.hypot(off[0], off[1]), 4)
+           if off[0] is not None and off[1] is not None else None)
     out = {
+        'centroid_offset_frac': mag,
+        'centroid_offset_frac_x': off[0],
         'board': doc['board'], 'bin_mm': doc['bin_mm'],
         'layers': doc['layers'], 'demand_nets': doc['demand_nets'],
         'lane_mm': doc['lane_mm'],
@@ -662,7 +672,6 @@ def _summary_scalars(doc):
         'cold_area_mm2': doc.get('cold_area_mm2'),
         'cold_area_frac': doc.get('cold_area_frac'),
         'cold_top_area_mm2': top.get('area_mm2'),
-        'centroid_offset_frac': off[0],
         'centroid_offset_frac_y': off[1],
         'centroid_count_control_frac': ctl[0],
         'outline_source': (doc.get('outline') or {}).get('source'),
@@ -765,9 +774,10 @@ def format_report(doc, hot, top):
         lines.append(f"  lift:  python3 -X utf8 py_placer/place_seed.py "
                      f"<in> <out> --intent <fp.json> --reseat-region "
                      f"{r[0]:g} {r[1]:g} {r[2]:g} {r[3]:g} --dry-run")
-        lines.append(f"  aim:   a re-seat lands each part at its own net "
-                     f"centroid, NOT here. To make this the destination, "
-                     f"declare it as an intent block zone: "
+        lines.append(f"  aim:   nothing in the seeder aims at this rectangle "
+                     f"-- a lifted part goes to its zone, its edge band, or "
+                     f"its net centroid, NOT here. To make this the "
+                     f"destination, declare it as an intent block zone: "
                      f'{{"name": "cold_{r[0]:g}_{r[1]:g}", "refs": [...], '
                      f'"zone": [{r[0]:g}, {r[1]:g}, {r[2]:g}, {r[3]:g}]}}')
     return lines
@@ -865,7 +875,7 @@ def main():
 
     doc.pop('_clr', None)
     doc.pop('_trk', None)
-    print('JSON_SUMMARY: ' + json.dumps(_summary_scalars(doc), sort_keys=True))
+    print('JSON_SUMMARY: ' + json.dumps(census_scalars(doc), sort_keys=True))
 
     if args.json:
         with open(args.json, 'w', encoding='utf-8') as f:

@@ -139,11 +139,15 @@ CHECKLIST_SCALARS = (
 #: They are here because #703's comment asked the right question of them: a
 #: congestion census has to EARN its place against legality counts already
 #: sitting at median rho +0.785 on 6/6 boards, and the cheap way to know is a
-#: column in the study rather than an argument. Note which scalars: the HOT
-#: ranking is a known constant predictor -- `rank_stats` records that
-#: check_pockets produced an empty ranked list on three of five real boards,
-#: and a constant contributes nothing to a sign test. The COLD ones exist on
-#: every board, which is precisely what makes them askable.
+#: column in the study rather than an argument.
+#:
+#: On which scalars: the HOT ranking is bounded below by the >= 2-net rule and
+#: can empty out, where the COLD ones are defined on every board. Stated that
+#: way deliberately -- `rank_stats` asserts an empty ranked list on three of
+#: five real boards but names none of them and cites no committed measurement,
+#: and re-measured at HEAD the ranked list is NON-empty on all 8
+#: study/calibration boards (esp_prog 15 rows, glasgow_revC 242), so the
+#: causal clause is not one to repeat.
 #:
 #: No recorded handoff carries these, so on harvested rows they land as
 #: `schema_gaps` and `board_rho` drops them by name with its count. That is

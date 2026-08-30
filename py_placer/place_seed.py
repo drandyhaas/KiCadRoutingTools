@@ -151,10 +151,14 @@ Examples:
                         "on-board part -- landed as #698. "
                         "`check_pockets` prints a ready-made rectangle for "
                         "its top cold region. IT IS SCOPE NAMING, NOT AIMING: "
-                        "a re-seat lands each part at its own NET CENTROID, "
-                        "so passing an empty region does not move anything "
-                        "INTO it. Declaring the rectangle as an intent block "
-                        "`zone` is what makes it a destination. Resolves "
+                        "nothing in the seeder aims at the rectangle you pass "
+                        "-- a lifted part goes to its declared zone, its edge "
+                        "band, its owner's pin cluster if it is a decap, else "
+                        "its net centroid (else the board centre when it has "
+                        "no placed partner) -- so passing an EMPTY region "
+                        "moves nothing INTO it. Declaring the rectangle as an "
+                        "intent block `zone` is what makes it a destination. "
+                        "Resolves "
                         "through placement.utility.refs_in_rect, the same "
                         "call check_pockets names its windows with, so the "
                         "rectangle cannot mean two different sets of parts")
@@ -319,6 +323,14 @@ Examples:
                 # this lifts cannot mean two different sets of parts.
                 from placement.utility import refs_in_rect
                 _hits = []
+                #: A typed --reseat opts into glob semantics; a GEOMETRIC
+                #: selection did not. `reseat_scope` runs every ref through
+                #: fnmatch, so a literal reference carrying glob
+                #: metacharacters -- `D[1]` -- would resolve to `D1` and then
+                #: report "matches no reference on this board". Escape them.
+                def _literal(ref):
+                    return ''.join('[%s]' % c if c in '*?[]' else c
+                                   for c in ref)
                 for _r in args.reseat_region:
                     _in = refs_in_rect(cur_pcb, tuple(_r))
                     print("  region [%g,%g]-[%g,%g]: %d part(s)%s"
@@ -329,21 +341,34 @@ Examples:
                     _hits.extend(_in)
                 _region_refs = sorted(set(_hits))
                 if not _region_refs:
-                    # A result, not a failure -- and it must not fall through
-                    # to `refs=None`, which is the AUTO scope under a
-                    # different acceptance rule entirely.
-                    print("Reseat (explicit): the region(s) contain no part; "
-                          "nothing to lift. This is a RESULT, not a failure -- "
-                          "an empty region is exactly what check_pockets ranks."
-                          )
-                    return 0
-                _refs.extend(_region_refs)
+                    # A result, not a failure. It goes THROUGH reseat_scope on
+                    # the explicit branch rather than returning here: an early
+                    # return skipped the output board, the JSON summary and the
+                    # whole --repair pass, so `--repair --reseat-region <empty>`
+                    # exited 0 having produced nothing. `--reseat ZZ99` is the
+                    # same event -- an explicit scope that resolved to zero
+                    # refs -- and seeder's own `_empty()` already handles it,
+                    # returning the full schema so a reader can tell "the
+                    # census found nothing" from "no census ran".
+                    print("  region(s) contain no part; the scope is empty. "
+                          "This is a RESULT, not a failure -- an empty region "
+                          "is exactly what check_pockets ranks.")
+                _refs.extend(_literal(r) for r in _region_refs)
                 _selector = 'region:' + ';'.join(
-                    '%g,%g,%g,%g' % tuple(_r) for _r in args.reseat_region)
+                    # Full precision, not %g: this string is the audit trail
+                    # for which rectangle was resolved, and 6 significant
+                    # digits turns 142.8125 into 142.812, which need not
+                    # re-resolve the same parts.
+                    '%r,%r,%r,%r' % tuple(_r) for _r in args.reseat_region)
                 _refs = sorted(set(_refs))
             reseat = seeder.reseat_scope(
                 cur_pcb, cur, intent,
-                refs=(_refs or None), group_sources=sources,
+                # `[]` is NOT `None`: an explicit scope that resolved to
+                # nothing must stay explicit, because `reseat_accept` switches
+                # policy on `scope_source != 'explicit'` and `None` is the AUTO
+                # damage-witness scope under a different acceptance rule.
+                refs=(_refs if (args.reseat_region or _refs) else None),
+                group_sources=sources,
                 clearance=args.clearance,
                 board_edge_clearance=args.board_edge_clearance,
                 grid_step=args.grid_step, seed=args.seed,
@@ -370,9 +395,17 @@ Examples:
                 # A SEPARATE key. Overloading scope_source is what would have
                 # broken the acceptance policy switch, so the provenance of
                 # the scope is reported beside it rather than inside it.
+                #
+                # The split is over the RESOLVED scope, not over the argument
+                # lists: `len(args.reseat)` counts PATTERNS (`--reseat 'U*'`
+                # is one), and a named ref that also lies in the region would
+                # be counted twice, so the two numbers did not add up to the
+                # scope they described.
+                _named = set(reseat['scope']) - set(_region_refs)
+                _both = set(reseat['scope']) & set(_region_refs)
                 print(f"  scope_selector: {_selector} "
-                      f"({len(_region_refs)} from the region, "
-                      f"{len(args.reseat or ())} named)")
+                      f"({len(_both)} of {len(reseat['scope'])} in scope came "
+                      f"from the region, {len(_named)} from --reseat)")
             print(f"Reseat ({reseat['scope_source']}): "
                   f"{len(reseat['scope'])} in scope, "
                   f"{len(reseat['reseated'])} re-seated "

@@ -180,7 +180,7 @@ def t_the_policy_stays_explicit():
                next((ln for ln in txt.splitlines()
                      if ln.startswith('Reseat')), '<no Reseat line>'))
         report('the selector is disclosed beside it, not inside scope_source',
-               'scope_selector: region:0,0,20,14' in txt,
+               'scope_selector: region:0.0,0.0,20.0,14.0' in txt,
                next((ln for ln in txt.splitlines()
                      if 'scope_selector' in ln), '<none>'))
         line = next((ln for ln in txt.splitlines()
@@ -201,20 +201,50 @@ def t_the_policy_stays_explicit():
 
 
 def t_an_empty_region_is_a_result_not_a_failure():
-    """It must NOT fall through to `refs=None`, which is the AUTO scope under
-    a different acceptance rule entirely."""
-    with tempfile.TemporaryDirectory() as wd:
-        b, it = _fixture(wd)
-        out = os.path.join(wd, 'out.kicad_pcb')
-        r = check(_argv(b, out, '--intent', it, '--dry-run',
-                        '--reseat-region', '900', '900', '910', '910'),
-                  accept=True)
-        report('an empty region exits 0', r.returncode == 0, r.stdout[-300:])
-        report('  ...and says the region is empty, in those words',
-               'contain no part' in r.stdout, r.stdout[-300:])
-        report('  ...and does NOT silently become the auto scope',
-               'auto:damage_witnesses' not in r.stdout
-               and 'Reseat (auto' not in r.stdout, r.stdout[-300:])
+    """A no-op still writes a board, still summarises, and still repairs.
+
+    The first version of this case ran `--dry-run` and asserted rc 0 plus two
+    stdout substrings -- which is a test of the MESSAGE, not of the contract.
+    It passed identically while an early `return 0` skipped the output board,
+    the JSON summary and the entire `--repair` pass, so
+    `--repair --reseat-region <empty>` exited 0 having produced nothing. The
+    invariant place_seed states three lines from the skipped write is the one
+    that was broken: "'nothing needed doing' must not look like 'the tool
+    produced nothing'". So this runs for real, on both arms.
+    """
+    for label, extra in (('alone', []), ('with --repair', ['--repair'])):
+        with tempfile.TemporaryDirectory() as wd:
+            b, it = _fixture(wd)
+            out = os.path.join(wd, 'out.kicad_pcb')
+            r = check(_argv(b, out, '--intent', it,
+                            '--reseat-region', '900', '900', '910', '910',
+                            *extra), accept=True)
+            report('%s: an empty region exits 0' % label,
+                   r.returncode == 0, r.stdout[-300:])
+            report('  %s: the OUTPUT BOARD is still written' % label,
+                   os.path.isfile(out) and os.path.getsize(out) > 0,
+                   'exists=%s' % os.path.isfile(out))
+            line = next((ln for ln in r.stdout.splitlines()
+                         if ln.startswith('JSON_SUMMARY: ')), None)
+            report('  %s: the JSON summary is still emitted' % label,
+                   line is not None, r.stdout[-300:])
+            if line:
+                doc = json.loads(line[len('JSON_SUMMARY: '):])
+                report('  %s: the scope stayed EXPLICIT and empty' % label,
+                       doc.get('scope_source') == 'explicit'
+                       and doc.get('scope') == [],
+                       '%s / %s' % (doc.get('scope_source'), doc.get('scope')))
+                report('  %s: and it is reported ACCEPTED, not refused' % label,
+                       doc.get('accepted') is not False,
+                       str(doc.get('accepted')))
+            report('  %s: says the region is empty, in those words' % label,
+                   'contain no part' in r.stdout, r.stdout[-300:])
+            report('  %s: does NOT silently become the auto scope' % label,
+                   'auto:damage_witnesses' not in r.stdout
+                   and 'Reseat (auto' not in r.stdout, r.stdout[-300:])
+            if extra:
+                report('  %s: the repair pass still RAN' % label,
+                       'Repair:' in r.stdout, r.stdout[-400:])
 
 
 def t_a_bare_reseat_beside_a_region_is_refused():
@@ -259,18 +289,44 @@ def t_a_region_alone_implies_an_explicit_reseat():
 
 
 def t_the_union_with_named_refs():
+    """The union must be a union of the RESOLVED SCOPE, not of a printed line.
+
+    The first version asserted on the disclosure string, which is computed from
+    `args.reseat` and never from `reseat['scope']` -- so replacing
+    `_refs.extend(_region_refs)` with `_refs = list(_region_refs)` silently
+    dropped the named ref and the test stayed green while printing "1 named".
+    """
     with tempfile.TemporaryDirectory() as wd:
         b, it = _fixture(wd)
         out = os.path.join(wd, 'out.kicad_pcb')
+        pcb = parse_kicad_pcb(b)
+        region = (0.0, 0.0, 20.0, 14.0)
+        from_region = refs_in_rect(pcb, region)
+        report('the region and the named ref are DISJOINT, or this proves '
+               'nothing', 'R8' not in from_region, str(from_region))
         r = check(_argv(b, out, '--intent', it, '--dry-run',
                         '--reseat', 'R8',
                         '--reseat-region', '0', '0', '20', '14'), accept=True)
         report('named refs and a region union into one explicit scope',
                'Reseat (explicit)' in r.stdout, r.stdout[-300:])
         line = next((ln for ln in r.stdout.splitlines()
-                     if 'scope_selector' in ln), '')
-        report('  ...and the split is disclosed (n from the region, m named)',
-               'from the region' in line and '1 named' in line, line)
+                     if ln.startswith('JSON_SUMMARY: ')), None)
+        report('a JSON summary is emitted', line is not None)
+        if not line:
+            return
+        scope = set(json.loads(line[len('JSON_SUMMARY: '):]).get('scope') or [])
+        report('  the NAMED ref is in the resolved scope', 'R8' in scope,
+               str(sorted(scope)))
+        report('  every region ref is in it too',
+               set(from_region) <= scope, str(sorted(scope)))
+        report('  and the scope is exactly their union',
+               scope == set(from_region) | {'R8'},
+               '%s vs %s' % (sorted(scope), sorted(set(from_region) | {'R8'})))
+        sel = next((ln for ln in r.stdout.splitlines()
+                    if 'scope_selector' in ln), '')
+        report('  the split is disclosed against the SCOPE, and adds up',
+               ('%d of %d in scope came from the region, 1 from --reseat'
+                % (len(from_region), len(scope))) in sel, sel)
 
 
 TESTS = [

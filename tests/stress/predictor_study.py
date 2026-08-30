@@ -474,26 +474,40 @@ def predictors_for(board_path):
     # #703's comment set the bar and it is the right one: this family has to
     # earn its place against legality counts already at median rho +0.785 on
     # 6/6 boards. Adding the columns is what makes that answerable by the
-    # per-board sign test instead of by argument. Note the CHOICE of scalars:
-    # the hot ranking is a known constant predictor (rank_stats records an
-    # empty ranked list on three of five real boards), and a constant
-    # contributes nothing to a sign test; the cold ones exist on every board.
+    # per-board sign test instead of by argument.
     #
-    # A failure here is recorded as a gap with its exception and every key
-    # stays None -- never 0, which would be a measurement.
+    # On the CHOICE of scalars: the hot ranking is the weaker candidate, not
+    # because of any measurement I can point at -- `rank_stats` asserts an
+    # empty ranked list on three of five boards but names none of them, and at
+    # HEAD the ranked list is NON-empty on all 8 study/calibration boards
+    # (esp_prog 15 rows, glasgow_revC 242) -- but because it is bounded below
+    # by the >= 2-net rule and can empty out, where the cold scalars are
+    # defined on every board. That is the honest form of the argument.
+    #
+    # A failure is recorded as a gap with its exception and every key stays
+    # None -- never a number. Computed into a LOCAL and assigned only once the
+    # whole block has succeeded, because a partial failure that had already
+    # written two of four keys shipped real-looking values from a census that
+    # did not finish, and `board_rho` drops only None/NaN.
     try:
         import check_pockets as _cp
         _doc, _hot = _cp.pocket_census(pcb, board_path)
-        _arr = _doc.get('arrangement') or {}
-        _side = (_arr.get('sides') or {}).get(_arr.get('headline_side')) or {}
-        _off = (_side.get('offset_frac_span') or [None, None])[0]
-        pred['cold_area_frac'] = _doc.get('cold_area_frac')
-        pred['cold_regions'] = len(_doc.get('cold_regions') or [])
-        _top = (_doc.get('cold_regions') or [{}])[0]
-        pred['cold_top_area_mm2'] = _top.get('area_mm2')
-        pred['centroid_offset_frac'] = _off
+        _sc = _cp.census_scalars(_doc)
+        _pock = {
+            'cold_area_frac': _sc.get('cold_area_frac'),
+            'cold_regions': _sc.get('cold_regions'),
+            'cold_top_area_mm2': _sc.get('cold_top_area_mm2'),
+            # The MAGNITUDE, not the X term: the study's own `translate` and
+            # `wrong_side` damage kinds move mass in Y, and an X-only column
+            # is blind to them. Measured on esp_prog, translating every
+            # footprint +10mm in Y leaves the X term at 0.0127 while the Y
+            # term goes 0.0581 -> 0.7478.
+            'centroid_offset_frac': _sc.get('centroid_offset_frac'),
+        }
     except Exception as e:                                      # noqa: BLE001
         gaps.append(f'pockets:{type(e).__name__}: {e}')
+    else:
+        pred.update(_pock)
 
     for k, v in list(pred.items()):
         if v is None and f'metrics.{k}' not in gaps:

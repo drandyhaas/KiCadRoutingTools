@@ -1283,13 +1283,16 @@ printing the command that would lift a scope by that rectangle:
 reseat target: largest landing site is the 4 x 2mm band at [142,94]-[146,96]
   lift:  python3 -X utf8 py_placer/place_seed.py <in> <out> --intent <fp.json> \
            --reseat-region 142 94 146 96 --dry-run
-  aim:   a re-seat lands each part at its own net centroid, NOT here. ...
+  aim:   nothing in the seeder aims at this rectangle -- a lifted part goes to
+         its zone, its edge band, or its net centroid, NOT here. ...
 ```
 
 **That is scope naming, not aiming.** `place_seed --reseat-region` lifts the
-parts *in* the rectangle; it does not move anything *into* it, because a
-re-seat seats each part at its own net centroid. Declaring the rectangle as an
-intent block `zone` is what makes it a destination — which is why the census
+parts *in* the rectangle; it does not move anything *into* it. A lifted part is
+seated at its declared zone, its edge band, its owner's pin cluster if it is a
+decoupling cap, else its net centroid (else the board centre when it has no
+placed partner) — never at the rectangle you named. Declaring the rectangle as
+an intent block `zone` is what makes it a destination, which is why the census
 prints the zone JSON to paste rather than injecting one.
 
 Both sides resolve a rectangle through the same `placement.utility.refs_in_rect`
