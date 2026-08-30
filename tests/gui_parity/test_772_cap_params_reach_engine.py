@@ -97,6 +97,9 @@ PLAN = {
     'cap_board_edge_clearance': 0.85,
     'cap_max_passes': 7,
     'cap_prefix': 'C',
+    # #742: differs from BOTH the panel default (0.3) and the Basic tab's
+    # via_size, so a step that took either instead would show up here.
+    'cap_default_via_size': 0.42,
     'cap_allow_rotation': False,
 }
 # plan param -> the engine kwarg it must arrive as
@@ -110,6 +113,7 @@ TO_ENGINE = {
     'cap_board_edge_clearance': 'board_edge_clearance',
     'cap_max_passes': 'max_passes',
     'cap_prefix': 'cap_prefix',
+    'cap_default_via_size': 'default_via_size',
     'cap_allow_rotation': 'allow_rotations',
 }
 ABSENT = '<<absent>>'

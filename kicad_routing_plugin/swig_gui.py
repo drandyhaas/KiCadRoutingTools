@@ -2558,12 +2558,13 @@ class RoutingDialog(wx.Dialog):
                         _ctl.SetSelection(0)
                     except Exception:
                         pass
-            # #772: the ten "Cap Placement (advanced)" knobs. Only THREE
+            # #772: the eleven "Cap Placement (advanced)" knobs. Only THREE
             # were ever reset here -- optimize_caps above, plus
             # cap_allow_rotation and cap_max_passes, which have moved into
-            # the shared table. The other eight -- capture radius, near
+            # the shared table. The other nine -- capture radius, near
             # margin, search step, max displacement, displacement cap,
-            # growth, board-edge margin, movable prefix -- were not, so an
+            # growth, board-edge margin, movable prefix, and #742's default
+            # via size -- were not, so an
             # interactive tweak or a restored session setting survived
             # every plan step. CLAUDE.md: "add it to
             # reset_params_to_defaults ... or the param leaks between

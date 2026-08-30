@@ -100,7 +100,15 @@ def _plan_pairs(manifest):
             continue
         if any(os.path.basename(a) == 'place_fanout_clearance.py' for a in argv):
             steps.append(m2p.cap_optimization_step(argv))
-            continue  # optimize_caps: no routing flags to assert
+            # A cap step is still appended (route_planes inheritance below
+            # needs the sequence) but never enters `pairs`, because check_pair
+            # validates against the ROUTE-step tables, where `--clearance` and
+            # `--board-edge-clearance` mean different quantities. Its flags are
+            # asserted by check_cap_flags(), against CAP_FLAG_PARAMS -- the
+            # comment that used to sit here said "no routing flags to assert",
+            # which stopped being true at #733 and is now actively misleading:
+            # every cap flag IS asserted, just not from this loop.
+            continue
         step = m2p.parse_command(argv)
         if step is None:
             continue
@@ -360,6 +368,9 @@ _MUST_RESOLVE_ON = {
         'cap_max_displacement', 'cap_max_displacement_cap',
         'cap_displacement_growth', 'cap_board_edge_clearance',
         'cap_max_passes', 'cap_prefix', 'cap_allow_rotation',
+        # #742: the CLI's --default-via-size on its OWN control. It must NOT
+        # resolve as via_size -- see the change detector in check_cap_flags.
+        'cap_default_via_size',
         # the Basic-tab knobs a cap step legitimately drives: `clearance` is
         # the GUI's spelling of "--clearance was GIVEN" (#768), and grid_step
         # is the position snap the pass reads through get_shared_params.
@@ -567,7 +578,8 @@ def check_cap_flags():
             '--step', '0.35', '--max-displacement', '4',
             '--max-displacement-cap', '6', '--displacement-growth', '2',
             '--max-passes', '7', '--cap-prefix', 'C',
-            '--grid-step', '0.05', '--clearance', '0.1', '--no-rotate']
+            '--grid-step', '0.05', '--clearance', '0.1',
+            '--default-via-size', '0.42', '--no-rotate']
     step = m2p.cap_optimization_step(argv)
     if step.get('action') != 'optimize_caps':
         return [('(step)', f"action is {step.get('action')!r}")]
@@ -587,9 +599,21 @@ def check_cap_flags():
             ('--cap-prefix', 'cap_prefix', 'C'),
             ('--grid-step', 'grid_step', 0.05),
             ('--clearance', 'clearance', 0.1),
+            ('--default-via-size', 'cap_default_via_size', 0.42),
             ('--no-rotate', 'cap_allow_rotation', False)):
         if params.get(key) != want:
             bad.append((flag, f"-> {key}={params.get(key)!r}, expected {want!r}"))
+    # #742 CHANGE DETECTOR, same shape as the --board-edge-clearance one below.
+    # `via_size` is the Basic tab's via GEOMETRY: it sets the diameter of the
+    # vias fanout places, ai_plan ticks via_size_check for it, and
+    # PlanExecutor._write_drc_floors writes it into the project. A converter
+    # that landed --default-via-size there would change copper and leave a via
+    # floor behind, so asserting only the new name is not enough.
+    if 'via_size' in params:
+        bad.append(('--default-via-size',
+                    "converted to the Basic tab's via GEOMETRY name "
+                    "'via_size'; on a cap step the flag is the unreadable-via "
+                    'FALLBACK (cap_default_via_size)'))
     # #772 CHANGE DETECTOR: the Basic-tab SIGNAL name must not appear on a cap
     # step. It is a different quantity, and ai_plan ticks edge_clearance_check
     # for it -- which the cap step then leaks into the next step's routing.
@@ -605,7 +629,8 @@ def check_cap_flags():
     # defeat the point of resolving it per board.
     bare = m2p.cap_optimization_step(
         ['python3', 'py_placer/place_fanout_clearance.py', 'in.kicad_pcb'])
-    for _k in ('cap_board_edge_clearance', 'board_edge_clearance'):
+    for _k in ('cap_board_edge_clearance', 'board_edge_clearance',
+               'cap_default_via_size', 'via_size'):
         if _k in (bare.get('params') or {}):
             bad.append(('(omitted)',
                         f'an unset flag was materialised into the plan as {_k}'))

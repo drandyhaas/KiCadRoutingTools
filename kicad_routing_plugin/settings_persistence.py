@@ -205,6 +205,7 @@ def get_dialog_settings(dialog):
         'fanout_bga_cap_board_edge_clearance': dialog.fanout_tab.bga_options.cap_board_edge_clearance.GetValue(),
         'fanout_bga_cap_max_passes': dialog.fanout_tab.bga_options.cap_max_passes.GetValue(),
         'fanout_bga_cap_prefix': dialog.fanout_tab.bga_options.cap_prefix.GetValue(),
+        'fanout_bga_cap_default_via_size': dialog.fanout_tab.bga_options.cap_default_via_size.GetValue(),
         'fanout_bga_cap_allow_rotation': dialog.fanout_tab.bga_options.cap_allow_rotation.GetValue(),
         'fanout_qfn_extension': dialog.fanout_tab.qfn_options.extension.GetValue(),
         # #381 D7: QFN-specific track width / clearance (default 0.1/0.1).
@@ -669,6 +670,9 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.cap_max_passes.SetValue(settings['fanout_bga_cap_max_passes'])
     if 'fanout_bga_cap_prefix' in settings:
         dialog.fanout_tab.bga_options.cap_prefix.SetValue(settings['fanout_bga_cap_prefix'])
+    if 'fanout_bga_cap_default_via_size' in settings:
+        dialog.fanout_tab.bga_options.cap_default_via_size.SetValue(
+            settings['fanout_bga_cap_default_via_size'])
     if 'fanout_bga_cap_allow_rotation' in settings:
         dialog.fanout_tab.bga_options.cap_allow_rotation.SetValue(settings['fanout_bga_cap_allow_rotation'])
     if 'fanout_qfn_extension' in settings:

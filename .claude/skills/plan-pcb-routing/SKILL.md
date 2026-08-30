@@ -1152,8 +1152,8 @@ drew, not copper the board arrived with. Those caps are in the unresolved list
 too, so treat them as you would any other; the extra line says where the
 copper came from. Grade with `check_drc.py` before acting: the repair pass
 deliberately over-blocks a track on a layer the board never declared, so some
-of these grade clean and some are real. By default (`--cap-prefix C,R`) it moves 2-pad
-**caps and resistors** near a BGA (RN-style arrays auto-excluded since only
+of these grade clean and some are real. By default (`--cap-prefix C,R,FB`) it moves 2-pad
+**caps, resistors and ferrite beads** near a BGA (RN-style arrays auto-excluded since only
 2-copper-pad parts move); it never overlaps parts, and is a no-op when nothing
 collides. Feed `board_step1c.kicad_pcb`
 into the next step. **With multiple BGAs, run it ONCE after the LAST fanout,
