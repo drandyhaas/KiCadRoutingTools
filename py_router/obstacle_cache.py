@@ -21,6 +21,7 @@ from net_queries import expand_pad_layers
 
 # Import Rust router
 import sys
+import env_knobs
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'rust_router')))
 import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
@@ -49,6 +50,8 @@ _PACK_OFFSET = 1 << 20  # grid coords stay well within +/-2^20 at any allowed gr
 # (and sites) that violate it - naming the exact leaking interleaving that the
 # whole-map KICAD_OBSTACLE_AUDIT diff can only total. Raw (non-cache) list ops
 # on the working map are accounted separately by get_stats() deltas per site.
+import itertools as _it
+_UID = _it.count(1)
 _LEDGER_ENV = os.environ.get("KICAD_OBSTACLE_LEDGER") == "1"
 _LEDGER = None
 if _LEDGER_ENV:
@@ -62,6 +65,96 @@ if _LEDGER_ENV:
         "raw": {},               # site -> [d_cells, d_vias] cumulative (raw list ops)
         "events": 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# CELL WATCH (#803). The ledger above accounts per cache-OBJECT and per call
+# SITE; neither can answer "who unblocked THIS cell". That is the question a
+# contact DRC violation asks: a track ended on a foreign via's centre, so that
+# cell must have been free when the track routed, and something freed it.
+#
+#   KICAD_CELL_WATCH="77.80,91.20;75.70,90.50"   (board mm, ';'-separated)
+#   KICAD_CELL_WATCH_GRID=0.1                    (grid step; must match the run)
+#
+# Every cache add/remove and every raw list op re-queries the watched cells and
+# prints only TRANSITIONS, with the call site -- so the output is the blocked/
+# free history of exactly those cells, not a flood.
+_CELL_WATCH = None
+_CELL_WATCH_STATE = {}
+
+
+def _cell_watch_spec():
+    global _CELL_WATCH
+    if _CELL_WATCH is not None:
+        return _CELL_WATCH
+    spec = os.environ.get("KICAD_CELL_WATCH", "").strip()
+    if not spec:
+        _CELL_WATCH = []
+        return _CELL_WATCH
+    step = float(os.environ.get("KICAD_CELL_WATCH_GRID", "0.1"))
+    out = []
+    for part in spec.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            xs, ys = part.split(",")
+            x, y = float(xs), float(ys)
+        except ValueError:
+            print(f"[CELLWATCH] bad spec {part!r} -- want 'x,y' in mm")
+            continue
+        out.append((int(round(x / step)), int(round(y / step)), x, y))
+    print(f"[CELLWATCH] watching {len(out)} cell(s) at grid {step}: "
+          + ", ".join(f"({x},{y})->g({gx},{gy})" for gx, gy, x, y in out))
+    _CELL_WATCH = out
+    return _CELL_WATCH
+
+
+def ledger_cell_watch(obstacles, site: str) -> None:
+    """Print blocked/free TRANSITIONS of the watched cells, with the site."""
+    cells = _cell_watch_spec()
+    if not cells:
+        return
+    try:
+        n = obstacles.num_layers
+        n = n() if callable(n) else n
+    except Exception:
+        n = 4
+    # VIA-block state first: it is layer-independent, has NO source/target
+    # override, and it -- not is_blocked -- is what gates via PLACEMENT. A cell
+    # can be correctly cell-blocked while its via-block is missing, which is
+    # exactly how a via lands on a foreign track.
+    for gx, gy, mx, my in cells:
+        try:
+            vb = bool(obstacles.is_via_blocked(gx, gy))
+        except Exception:
+            vb = None
+        if vb is not None:
+            key = (id(obstacles), gx, gy, 'via')
+            prev = _CELL_WATCH_STATE.get(key)
+            if prev is None:
+                _CELL_WATCH_STATE[key] = vb
+            elif prev != vb:
+                _CELL_WATCH_STATE[key] = vb
+                print(f"[CELLWATCH] ({mx},{my}) VIA-BLOCK: "
+                      f"{'BLOCKED' if prev else 'free'} -> "
+                      f"{'BLOCKED' if vb else 'FREE'}   @ {site}")
+    for gx, gy, mx, my in cells:
+        for li in range(int(n)):
+            try:
+                b = bool(obstacles.is_blocked(gx, gy, li))
+            except Exception:
+                continue
+            key = (id(obstacles), gx, gy, li)
+            prev = _CELL_WATCH_STATE.get(key)
+            if prev is None:
+                _CELL_WATCH_STATE[key] = b
+                continue
+            if prev != b:
+                _CELL_WATCH_STATE[key] = b
+                print(f"[CELLWATCH] ({mx},{my}) layer{li}: "
+                      f"{'BLOCKED' if prev else 'free'} -> "
+                      f"{'BLOCKED' if b else 'FREE'}   @ {site}")
 
 
 def _ledger_site(depth: int = 2, frames: int = 3) -> str:
@@ -90,7 +183,13 @@ def ledger_set_working_map(obstacles) -> None:
     phantom UNBALANCED serials."""
     if _LEDGER is not None:
         _LEDGER["wid"] = id(obstacles)
-        _LEDGER["meta"] = {}
+        # KEEP meta across the reset. Serials are unique for the life of the
+        # process, so an old entry can never collide with a new one -- and this
+        # run's caches are precomputed BEFORE its working map is built
+        # (route.py:1928 then :1952), so wiping meta here erased the net-id of
+        # every initially-built cache. The report then printed "net ?" for
+        # exactly the objects most likely to be unbalanced, which is the whole
+        # question it exists to answer.
         _LEDGER["adds"] = {}
         _LEDGER["removes"] = {}
         _LEDGER["raw"] = {}
@@ -283,7 +382,7 @@ def set_rung_unsafe(flag: bool) -> None:
 
 def rung_small_armed() -> bool:
     """True when rung-1 small-via legality may be stamped/trusted this run."""
-    return (os.environ.get('KICAD_VIA_RUNG', '2') == '2') and not _RUNG_UNSAFE
+    return env_knobs.VIA_RUNG_2 and not _RUNG_UNSAFE
 
 
 def _small_via_pair(config, pcb_data):
@@ -374,7 +473,7 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                             else config.route_reserve_width(layer_name))
         # #498: a .kicad_dru layer rule REPLACES the net/class value on its layer.
         clr_l = config.layer_clearance(layer_name, obs_clearance)
-        # #549: a track-scoped DRU rule RAISES the seg-vs-seg capsule only;
+        # A track-scoped DRU rule RAISES the seg-vs-seg capsule only (#735);
         # the via ring keeps clr_l. Add/remove parity is automatic (the same
         # NetObstacleData arrays are batch-added and batch-removed).
         trk_l = config.track_obstacle_clearance(net_id, clr_l)
@@ -425,7 +524,7 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             via_block_mm = via_block_mm_by_layer.get(seg.layer)
         else:
             _clr_l = config.layer_clearance(seg.layer, obs_clearance)  # #498
-            _trk_l = config.track_obstacle_clearance(net_id, _clr_l)  # #549
+            _trk_l = config.track_obstacle_clearance(net_id, _clr_l)  # dru track rule
             expansion_mm = max(coord.grid_step,
                                own_half + _trk_l
                                + config.route_reserve_width(seg.layer) / 2 + extra_clearance)
@@ -514,8 +613,18 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                 _dc_replace(config, via_size=_sp[0], via_drill=_sp[1]),
                 extra_clearance, diagonal_margin, _small_pass=True)
             data.blocked_vias_small = _sd.blocked_vias
+    if not _small_pass:
+        # A STABLE identity for every cache object, armed or not. id() cannot
+        # serve: CPython recycles ids, and make_local_window mints a
+        # short-lived PCBData (and its caches) per tap/rescue, so a freed
+        # object's id is readily handed straight to its successor. Anything
+        # keying bookkeeping on id() therefore attributes one object's state to
+        # another -- net_cost._cache_for documents the same hazard for boards.
+        # Measured: an id-keyed residency tracker misattributed cache objects
+        # and made a repair fire on the wrong ones.
+        data._cache_uid = next(_UID)
     if _LEDGER is not None and not _small_pass:
-        data._audit_serial = next(_LEDGER["serial"])
+        data._audit_serial = data._cache_uid
         _LEDGER["meta"][data._audit_serial] = (net_id, _ledger_site(depth=2))
     return data
 
@@ -750,6 +859,8 @@ def add_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetObst
     _small = getattr(cache_data, 'blocked_vias_small', None)
     if _small is not None and len(_small) > 0:
         obstacles.add_blocked_vias_small_batch(_small)
+    if _CELL_WATCH != []:
+        ledger_cell_watch(obstacles, "cache-add " + _ledger_site(depth=2, frames=3))
 
 
 def remove_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetObstacleData):
@@ -771,6 +882,8 @@ def remove_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetO
     _small = getattr(cache_data, 'blocked_vias_small', None)
     if _small is not None and len(_small) > 0:
         obstacles.remove_blocked_vias_small_batch(_small)
+    if _CELL_WATCH != []:
+        ledger_cell_watch(obstacles, "cache-remove " + _ledger_site(depth=2, frames=3))
 
 
 def build_working_obstacle_map(base_obstacles: GridObstacleMap,

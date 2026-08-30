@@ -59,6 +59,7 @@ redraw happened, with no count, no kind, no block and no dose.
 """
 import contextlib
 import io
+import hashlib
 import json
 import os
 import random
@@ -96,6 +97,166 @@ MIN_MATERIAL_MM = 1.0      #: absolute floor; 10x the 0.1 mm legalize grid step
 MATERIAL_FRAC = 0.35       #: ...and at least this much of what was asked for
 MAX_DRAWS = 12             #: redraw budget before refusing outright
 
+
+
+#: Project keys that are the AUTHOR'S, not the board's spec. Every one is
+#: empty on all 13 in-repo projects and read by nothing in this tree, so
+#: dropping them is lossless for every consumer -- but a hand-placed source
+#: fills them with board coordinates (`drc_exclusions` carries the offending
+#: items' positions; the viewports are named views like "MCU corner"), and
+#: `last_paths` carries the author's directories.
+_LEAKY_PROJECT_KEYS = (
+    ('board', 'design_settings', 'drc_exclusions'),
+    ('board', 'viewports'),
+    ('board', '3dviewports'),
+    ('board', 'layer_presets'),
+    ('pcbnew', 'last_paths'),
+)
+
+#: What replaces a string that names the source. Not deletion: a run reading
+#: the staged project should see that something was withheld, rather than a
+#: project that looks like it never carried provenance at all.
+_REDACTED = '[redacted: named the source board]'
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+#: Subtrees the stem sweep must NEVER enter. These hold SPEC, not provenance,
+#: and their keys and values are short common words that a stem can collide
+#: with: measured, stem `default` destroyed the Default netclass NAME on a
+#: routed project, and `error` / `warning` destroyed 30 and 19
+#: `rule_severities` values. Redacting a netclass name changes what the board
+#: grades at, which is the #441 ratchet by another route.
+_SWEEP_EXCLUDE = ('net_settings', 'rule_severities')
+
+#: Shorter than this, a stem is not evidence -- it is a substring. Measured on
+#: a real project: `a` hit 26 values, `n` 29, `pro` destroyed the
+#: `meta.filename` the sanitiser had just written. A source board named
+#: `a.kicad_pcb` is not a case worth corrupting every project for; the key
+#: list still covers the carriers KiCad actually writes.
+_MIN_STEM = 6
+
+
+def _redact_source_stem(node, stem, path=(), hits=None):
+    """Replace every string ANYWHERE in the project that names `stem`.
+
+    The key list above is a list of carriers known to leak, and the next
+    carrier will have a different name. It did: measured on tigard, the leak
+    was `kicad_routing_tools.floor_provenance._note` ("tigard is a KiCad 5
+    design...") and `.source` (a raw.githubusercontent URL serving the
+    original board) -- an annotation this repo writes itself, in a node no
+    key list contained. `fence_audit` caught it; the stager did not.
+
+    So the backstop is content-shaped rather than key-shaped: whatever key it
+    lives under, a string that spells the source's stem is a path back to the
+    original poses. Numbers are untouched, which is what keeps the #441 floor
+    intact -- every value the floor is graded at is numeric.
+    """
+    if hits is None:
+        hits = []
+    if len(stem) < _MIN_STEM:
+        return hits
+    if isinstance(node, dict):
+        for k, v in list(node.items()):
+            if k in _SWEEP_EXCLUDE:
+                continue
+            if isinstance(v, str) and stem in v.lower():
+                node[k] = _REDACTED
+                hits.append('.'.join(path + (str(k),)))
+            else:
+                _redact_source_stem(v, stem, path + (str(k),), hits)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            if isinstance(v, str) and stem in v.lower():
+                node[i] = _REDACTED
+                hits.append('.'.join(path + (str(i),)))
+            else:
+                _redact_source_stem(v, stem, path + (str(i),), hits)
+    return hits
+
+
+def sanitize_staged_project(out_board, source_stem=None):
+    """Strip the source's IDENTITY from the carried project; declare the rest.
+
+    `source_stem` is the SOURCE board's stem (e.g. `tigard`). Pass it: the
+    key list is a list of known carriers, and the stem sweep is what catches
+    the ones nobody has met yet.
+
+    The project must travel -- without it the staged board grades at the
+    stock netclass (#441). But KiCad stores `meta.filename` inside it, so a
+    verbatim copy puts the SOURCE'S NAME in the work dir, which is the one
+    thing this stager exists to withhold. `.kicad_prl` does not enter the
+    work dir at all: nothing in this repo reads it and it carries the
+    source's name the same way `meta.filename` does.
+
+    Returns a declaration: what travelled, what was sanitized, and the floors
+    the run will actually be graded at.
+    """
+    stem = os.path.splitext(out_board)[0]
+    prl = stem + '.kicad_prl'
+    dropped_prl = os.path.isfile(prl)
+    # Probe the siblings BEFORE the remove below, or `kicad_prl` in the
+    # declaration is a report on this function's own side effect and is
+    # always False.
+    siblings = {ext.lstrip('.'): os.path.isfile(stem + ext)
+                for ext in ('.kicad_dru', '.kicad_prl')}
+    if dropped_prl:
+        os.remove(prl)
+    pro = stem + '.kicad_pro'
+    out = {'carried': os.path.isfile(pro), 'sanitized_keys': [],
+           'dropped_prl': dropped_prl}
+    if out['carried']:
+        with open(pro, encoding='utf-8') as f:
+            doc = json.load(f)
+        # THE SWEEP RUNS FIRST. Setting `meta.filename` to the staged
+        # board's own name and then sweeping would let a stem that is a
+        # substring of the NEW name redact the value just written (measured:
+        # source stem `pro` ate `meta.filename`). Withhold first, then name.
+        if source_stem:
+            hits = _redact_source_stem(doc, source_stem.lower())
+            out['redacted_source_strings'] = hits
+            out['sanitized_keys'].extend(hits)
+        meta = doc.get('meta')
+        # Only DECLARE a key that actually changed. A project already named
+        # after the staged board is not a leak, and listing it anyway makes
+        # the declaration read as "something was withheld" on a work dir
+        # where nothing was.
+        if (isinstance(meta, dict) and meta.get('filename')
+                and meta['filename'] != os.path.basename(pro)):
+            meta['filename'] = os.path.basename(pro)
+            out['sanitized_keys'].append('meta.filename')
+        for path in _LEAKY_PROJECT_KEYS:
+            node = doc
+            for k in path[:-1]:
+                node = node.get(k) if isinstance(node, dict) else None
+                if node is None:
+                    break
+            if isinstance(node, dict) and node.get(path[-1]):
+                node[path[-1]] = [] if path[-1] != 'last_paths' else {}
+                out['sanitized_keys'].append('.'.join(path))
+        # The sweep and the key list can name the same key -- a project called
+        # `<stem>.kicad_pro` has the stem INSIDE `meta.filename`, so the sweep
+        # redacts it and the rename below then sets it properly. One event,
+        # so one entry; order preserved because the first mention is the one
+        # that describes why it went.
+        out['sanitized_keys'] = list(dict.fromkeys(out['sanitized_keys']))
+        with open(pro, 'w', encoding='utf-8') as f:
+            json.dump(doc, f, indent=2)
+        out['sha256'] = sha256_file(pro)
+    # The numbers the run is graded at, whether or not a project travelled.
+    try:
+        from list_nets import board_floor_knobs
+        out['floors'] = board_floor_knobs(out_board)[2]
+    except Exception as e:                                   # noqa: BLE001
+        out['floors'] = f'unavailable: {type(e).__name__}: {e}'
+    out.update(siblings)
+    return out
 
 def board_scale_mm(pcb):
     """The board's smaller outline span, or None when it declares no outline.
@@ -139,7 +300,12 @@ def main(src, workdir, truthdir, kinds=None):
     # the work dir in the first place (run-12 Tier 0).
     control = os.path.join(truthdir, 'control.kicad_pcb')
     shutil.copyfile(src, control)
-    for ext in ('.kicad_pro', '.kicad_prl'):
+    # copy_board.SIBLING_EXTS, not a hand-written pair: this list said
+    # ('.kicad_pro', '.kicad_prl') and dropped `.kicad_dru`, so the per-layer
+    # clearance rules that OUTRANK --clearance (#498) did not reach the
+    # control -- silently, because an absent .kicad_dru reads as "no rules".
+    from copy_board import SIBLING_EXTS
+    for ext in SIBLING_EXTS:
         sib = os.path.splitext(src)[0] + ext
         if os.path.exists(sib):
             shutil.copyfile(sib, os.path.join(truthdir, 'control' + ext))
@@ -194,6 +360,28 @@ def main(src, workdir, truthdir, kinds=None):
             'than emitting a board whose damage is at the grid step -- that '
             'is what voided run 14.' % MAX_DRAWS)
 
+    # The work-dir project must not name the source. `perturb` copies the
+    # siblings so the damaged board still grades at the real floor (#441),
+    # but KiCad stores `meta.filename` inside the project -- measured, the
+    # blind work dir's board.kicad_pro read "watchy.kicad_pro", which is the
+    # one thing this stager exists to withhold. `.kicad_prl` does not
+    # enter the work dir at all.
+    # The stem is passed so the sweep can run: tigard's project carried
+    # `kicad_routing_tools.floor_provenance` -- prose this repo authored, in a
+    # node no key list contained, naming the upstream board AND linking the
+    # URL that serves its original placement. `fence_audit --mode create`
+    # refused the staged work dir over it; the stager had reported success.
+    sanitized = sanitize_staged_project(
+        out, os.path.splitext(os.path.basename(src))[0])
+    # RECORD it, or "declares what it withheld" is a docstring rather than a
+    # fact: the return value was computed and dropped, so a run could not tell
+    # a sanitised work dir from an unsanitised one. It goes in the TRUTH dir
+    # with the rest of the answer key -- naming the withheld strings inside
+    # the fence would be the leak itself.
+    print('  staged project: carried=%s sanitized=%s dropped_prl=%s'
+          % (sanitized.get('carried'), len(sanitized.get('sanitized_keys')
+                                           or ()), sanitized.get('dropped_prl')))
+
     with open(os.path.join(truthdir, 'draw.json'), 'w', encoding='utf-8') as f:
         json.dump({'kind': kind, 'dose_mm': dose, 'seed': seed,
                    'dose_mm_applied': rec.get('dose_mm_applied'),
@@ -201,7 +389,8 @@ def main(src, workdir, truthdir, kinds=None):
                    'board_scale_mm': scale, 'dose_band': list(DOSE_BAND),
                    'material_floor_mm': MIN_MATERIAL_MM,
                    'material_frac': MATERIAL_FRAC,
-                   'draws': attempts, 'source': src}, f, indent=1)
+                   'draws': attempts, 'source': src,
+                   'staged_project': sanitized}, f, indent=1)
     written = os.path.join(truthdir, 'board.perturb.json')
     want = os.path.join(truthdir, 'perturbed.perturb.json')
     if os.path.exists(written):
@@ -234,19 +423,24 @@ def main(src, workdir, truthdir, kinds=None):
 
 
 if __name__ == '__main__':
-    import argparse
-    ap = argparse.ArgumentParser(
-        description=__doc__.strip().splitlines()[0],
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('src'); ap.add_argument('workdir'); ap.add_argument('truthdir')
-    ap.add_argument('--kind', action='append', metavar='KIND',
-                    help='narrow the draw to this perturbation kind '
-                         '(repeatable). Valid: ' + ' '.join(P.KINDS) + '. The '
-                         'kinds displace very different fractions of a board '
-                         '(measured: pile 67%%, translate 27%%), so a run that '
-                         'wants the PLACEMENT half exercised has a reason to '
-                         'ask. It costs one bit of the fence -- still blind to '
-                         'block, dose and seed, but not to kind -- so SAY SO '
-                         'in the report.')
-    _a = ap.parse_args()
-    main(_a.src, _a.workdir, _a.truthdir, _a.kind)
+    # In LEVER_REGISTRY, so it must DECLARE -- an entry that writes
+    # poses without declaring makes an armed regime refuse the engine
+    # itself, which is the failure the registry exists to prevent.
+    from placement.provenance import declare_lever
+    with declare_lever('stage_blind.py', sys.argv):
+        import argparse
+        ap = argparse.ArgumentParser(
+            description=__doc__.strip().splitlines()[0],
+            formatter_class=argparse.RawDescriptionHelpFormatter)
+        ap.add_argument('src'); ap.add_argument('workdir'); ap.add_argument('truthdir')
+        ap.add_argument('--kind', action='append', metavar='KIND',
+                        help='narrow the draw to this perturbation kind '
+                             '(repeatable). Valid: ' + ' '.join(P.KINDS) + '. The '
+                             'kinds displace very different fractions of a board '
+                             '(measured: pile 67%%, translate 27%%), so a run that '
+                             'wants the PLACEMENT half exercised has a reason to '
+                             'ask. It costs one bit of the fence -- still blind to '
+                             'block, dose and seed, but not to kind -- so SAY SO '
+                             'in the report.')
+        _a = ap.parse_args()
+        main(_a.src, _a.workdir, _a.truthdir, _a.kind)

@@ -1394,6 +1394,17 @@ def expand_pad_layers(pad_layers: List[str], routing_layers: List[str]) -> List[
         if layer == "*.Cu":
             # Expand to all copper routing layers
             expanded.extend(routing_layers)
+        elif layer in ("F&B.Cu", "F&B"):
+            # KiCad's OTHER copper layer-set token: front and back only, never
+            # the inners. It ends in ".Cu" but is not a layer, so the
+            # `endswith` branch below used to pass it through VERBATIM -- and
+            # "F&B.Cu" matches no real layer name, so every consumer scoping by
+            # this silently gave such a pad NO copper layer at all: unroutable
+            # to the router, invisible to the connectivity and clearance
+            # scopes. The bare "F&B" spelling is accepted because
+            # obstacle_map.py, plane_fill_model.py and pcb_modification.py all
+            # already accept both for zone layer tokens.
+            expanded.extend(["F.Cu", "B.Cu"])
         elif layer.endswith(".Cu"):
             # Regular copper layer
             expanded.append(layer)

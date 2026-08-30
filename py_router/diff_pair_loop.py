@@ -650,7 +650,17 @@ def route_diff_pairs(
 
             # Try rip-up and reroute with progressive N+1
             ripped_up = False
-            if not polarity_skip and routed_net_paths and result:
+            # #764: a pair whose terminal needs a coupled fanout cannot be helped
+            # by ripping neighbours -- no amount of freed copper makes the pair fit
+            # a corridor its own geometry forbids. Skip the rip ladder and let the
+            # needs-fanout diagnosis stand.
+            if result and result.get('needs_fanout'):
+                _adv = (result.get('fanout_diag') or {}).get('advice')
+                if _adv:
+                    print(_adv)
+                print(f"  Skipping rip-up: no amount of freed copper makes this pair "
+                      f"fit a corridor its own geometry forbids (#764)")
+            elif not polarity_skip and routed_net_paths and result:
                 # Find the direction that failed faster
                 fwd_iters = result.get('iterations_forward', 0)
                 bwd_iters = result.get('iterations_backward', 0)

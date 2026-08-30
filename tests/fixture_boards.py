@@ -48,6 +48,12 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOARDS = os.path.join(ROOT, 'kicad_files')
 
+if os.path.join(ROOT, 'py_router') not in sys.path:
+    sys.path.insert(0, os.path.join(ROOT, 'py_router'))
+# One list, not a hand-written copy -- this file's said
+# ('.kicad_pcb', '.kicad_pro', '.kicad_prl') and dropped `.kicad_dru`.
+from copy_board import SIBLING_EXTS  # noqa: E402
+
 # Mirrors tests/test_fanout_and_route.py's parameter groups.
 _L4 = ['--layers', 'F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
 _L5 = ['--layers', 'F.Cu', 'In1.Cu', 'In2.Cu', 'In3.Cu', 'B.Cu']
@@ -129,11 +135,11 @@ def _build(name, path):
             raise FixtureBuildError(
                 f"could not build {name}:\n  {' '.join(argv[1:])}\n"
                 f"{r.stdout[-1200:]}\n{r.stderr[-800:]}")
-        for ext in ('.kicad_pcb', '.kicad_pro', '.kicad_prl'):
+        for ext in ('.kicad_pcb',) + SIBLING_EXTS:
             if os.path.exists(tmp_stem + ext):
                 os.replace(tmp_stem + ext, stem + ext)
     finally:
-        for ext in ('.kicad_pcb', '.kicad_pro', '.kicad_prl'):
+        for ext in ('.kicad_pcb',) + SIBLING_EXTS:
             if os.path.exists(tmp_stem + ext):
                 os.unlink(tmp_stem + ext)
     return path

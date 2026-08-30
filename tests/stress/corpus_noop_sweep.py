@@ -38,6 +38,14 @@ import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, 'tests'))
+# #718: these three CLIs left the repo root in the #522 reorg (place_reconstruct
+# and place_seed -> py_placer/, check_floorplan -> py_tools/) and this file kept
+# spawning ROOT/<name>.py. It is not discovered by run_all -- which globs
+# tests/test_*.py, non-recursively -- so nothing reported it: the sweep simply
+# died into "can't open file" on every board. `tool()` resolves the layout and
+# RAISES naming what it looked for, so the next move cannot break it silently.
+from run_utils import tool as _tool  # noqa: E402
 CORPUS = os.path.join(ROOT, 'kicad_files')
 TIMEOUT_S = 900
 DEFAULT_BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -82,7 +90,7 @@ def sweep_reconstruct(board, workdir):
     """place_reconstruct --dry-run: proposals and would-move must both be empty."""
     out = os.path.join(workdir, 'out.kicad_pcb')
     argv = [sys.executable, '-X', 'utf8',
-            os.path.join(ROOT, 'place_reconstruct.py'), board, out, '--dry-run']
+            _tool('place_reconstruct.py'), board, out, '--dry-run']
     proc = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
                           errors='replace', cwd=ROOT, timeout=TIMEOUT_S)
     rep = _summary(proc.stdout or '')
@@ -133,7 +141,7 @@ def sweep_repair(board, workdir):
     """
     intent = os.path.join(workdir, 'intent.json')
     emit = subprocess.run(
-        [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'check_floorplan.py'),
+        [sys.executable, '-X', 'utf8', _tool('check_floorplan.py'),
          board, '--emit-intent', intent],
         capture_output=True, text=True, encoding='utf-8', errors='replace',
         cwd=ROOT, timeout=TIMEOUT_S)
@@ -143,7 +151,7 @@ def sweep_repair(board, workdir):
             None, f'emit-intent rc={emit.returncode} '
                   + (emit.stderr or '')[-140:])
     out = os.path.join(workdir, 'rep.kicad_pcb')
-    argv = [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'place_seed.py'),
+    argv = [sys.executable, '-X', 'utf8', _tool('place_seed.py'),
             board, out, '--intent', intent, '--repair', '--dry-run']
     proc = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
                           errors='replace', cwd=ROOT, timeout=TIMEOUT_S)

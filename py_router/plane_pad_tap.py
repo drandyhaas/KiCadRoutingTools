@@ -284,8 +284,31 @@ def _build_tap_spatial_index(pcb_data: PCBData):
 
 
 def _tap_spatial_index(pcb_data: PCBData):
-    sig = (len(pcb_data.segments), len(pcb_data.vias),
-           sum(len(v) for v in pcb_data.pads_by_net.values()))
+    # #803: the signature must be CONTENT-sensitive, not count-only.
+    #
+    # Counts alone are safe only while copper is exclusively ADDED -- then the
+    # lengths strictly increase and every mutation changes the signature. Any
+    # pass that REMOVES copper breaks that: the in-loop stub-debris trim, and
+    # rip_up_net/restore_net cycles. Remove k items, add k others, and the
+    # counts return to a cached value with completely different content, so
+    # this returns a STALE index. make_local_window builds the rescue/tap
+    # window FROM this index, so the window silently omits copper that exists
+    # -- and the rescue then drops a fab-ladder via straight through a foreign
+    # track. Measured on glasgow_revC: a /~{ALERT} rescue via (0.30/0.15, the
+    # fine rung) landed on /RD's B.Cu track, 0.100mm centre-to-axis against a
+    # 0.250mm touch distance. The working obstacle map was CORRECT throughout
+    # -- the rescue never consults it, which is why every ref-count audit of
+    # that map came back clean.
+    #
+    # Summing id()s is O(n) per call, but building the index is O(n) too and
+    # this only replaces a hit that was silently wrong. Identity of the list
+    # objects is included so a REBIND is caught even if the contents' ids
+    # happen to sum the same.
+    segs, vias = pcb_data.segments, pcb_data.vias
+    sig = (len(segs), len(vias),
+           sum(len(v) for v in pcb_data.pads_by_net.values()),
+           id(segs), id(vias),
+           sum(map(id, segs)), sum(map(id, vias)))
     cached = getattr(pcb_data, '_tap_spatial_index_cache', None)
     if cached is not None and cached[0] == sig:
         return cached[1]

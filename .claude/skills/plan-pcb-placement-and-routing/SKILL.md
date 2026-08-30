@@ -145,6 +145,24 @@ the failure, and without `--accept-cmd` its comparator cannot see the thing you
 are trying to fix (a length, a width, a clause). An ACCEPTED round is not a
 verdict -- grade the output with the same battery either skill would use.
 
+## Eyes at the boundaries (run-23)
+
+Numbers gate legality; nothing gates LOOKING, and run 23 shipped a board a
+human rejected at a glance — 15 courtyard interpenetrations and four mid-board
+connectors — while every key read clean. Its orchestrator viewed ONE image in
+4.7 hours, after the failure. So LOOK at each boundary (the placement close,
+the hand-off, after the first route lap, the final close), and look
+BLIND-FIRST: build the sheet with `render_placement.py --review-sheet
+<PATH>`, VIEW it, write your observations — connectors versus edges with
+distances, density pockets versus empty regions, anything wrong that no key
+names — **before reading any checklist key**, then write a reconciliation
+paragraph dispositioning each observation against a named number. Ordering is
+the whole mechanism: a reviewer who reads the keys first has a closed question,
+and run 23's did read past "overlap 26.30mm²" printed in the image banner
+because the keys had already said clean. Observations must carry distances or
+mm² the keys alone cannot produce; that is what separates a review from
+theater.
+
 ## What a run DELIVERS
 
 Four artifacts, every time, in the work dir. A run that produces the board alone
@@ -606,10 +624,17 @@ escalation is allowed, which is what puts sub-spec vias on a board that asked fo
 big ones. Both report the net routed.
 
 So every route call in the loop — not only the first one — carries
-`--fab-overrides <the spec file>` when the spec is tighter than the tier, plus
-`--track-width-floor` for a width clause. Measured, one such file took a board's
-`undersized` from **169 to 0**. Check `min_clearance_used` in the `JSON_SUMMARY`
-afterwards: it is the only place a floor that was silently loosened shows up.
+`--fab-overrides <the spec file>` when the spec is tighter than the tier.
+Measured, one such file took a board's `undersized` from **169 to 0**. Check
+`min_clearance_used` in the `JSON_SUMMARY` afterwards: it is the only place a
+floor that was silently loosened shows up.
+
+A width clause rides on `--track-width` (or the board's Default netclass, which
+is where `route.py` reads it from when the flag is absent). **There is no hard
+per-net width floor any more**: `--track-width-floor` was removed in 53a5a16e
+along with the two engine behaviours it drove, so the rescue path re-necks at
+the class-aware `min(nominal, fab_track, netclass)` with no floor guard.
+Passing the flag is an argparse error — exit 2, mid-chain, with the lap lost.
 
 ##### 9.3c — Ripping blocking nets IS a sanctioned lever
 
@@ -640,10 +665,12 @@ learn:
    exact rip. Name it EXACTLY (the exact-name override now reaches the in-run
    ladders too, not just the pre-run filters), and if it is KiCad-locked,
    nothing overrides that — unlock it or route around it. To protect a
-   SINGLE net YOU verified (not just matcher-produced ones), pass
-   `--protect-nets <name>` on the step that routes it — the protection
-   persists in the `.kicad_pro` and every later step's rip machinery honors
-   it. **A GROUP routed together must NOT be protected on its own pass**: the
+   SINGLE net YOU verified (not just matcher-produced ones), there is no flag
+   — `--protect-nets` was removed in 53a5a16e. Protection is recorded by the
+   step that routes a matched group or a diff pair, it persists in the
+   `.kicad_pro` under `kicad_routing_tools.protected_nets`, and every later
+   step's rip machinery honors it. **A GROUP routed together is NOT protected
+   on its own pass**, and must not be: the
    protection binds that same call's in-run ladder, so the bus can no longer
    rip/reorder itself (measured, run 6: 6/7 with `protected_skipped` on the
    group's own QSPI pass; 7/7 without). Protect the group on the NEXT
@@ -873,7 +900,7 @@ shipped.
 **Take the argv from the tool's own `CMD:` line, not from memory.** Every
 routing tool now self-echoes `CMD: <the exact invocation>` as its first stdout
 line and `EXIT=<rc>` as its last (`route.py`, `route_diff.py`,
-`route_planes.py`, `route_disconnected_planes.py`, and the checkers). That line
+`route_planes.py`, `repair_planes.py`, and the checkers). That line
 comes from `sys.orig_argv`, so it carries interpreter flags like `-X utf8`
 verbatim and is REPLAYABLE truth rather than a reconstruction. Until run 12 the
 three signal/diff/plane routers did not have it, which made "paste the tool's
@@ -981,7 +1008,7 @@ end to end; the final entry's stop condition quoted against its score).
    it, and do not grind iterations against it.**
 
    **When the unsatisfiable clause is a dru rule the router hard-enforces**
-   (#549 track channel or a layer rule), stop-4 scopes to the REGION, not the
+   (the .kicad_dru track channel or a layer rule), stop-4 scopes to the REGION, not the
    run: (1) route the pass WITH the rule first and measure the failure —
    decide on the measurement, not in advance; (2) then stage a sibling dru
    for that pass with ONLY the unsatisfiable rule lifted — never a bare

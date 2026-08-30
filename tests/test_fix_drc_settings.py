@@ -22,6 +22,77 @@ def _md5(path):
     return hashlib.md5(open(path, "rb").read()).hexdigest()
 
 
+
+def _check_in_run_floor_sync():
+    """#650: the in-run audit must grade at the floors the board will SHIP with.
+
+    ``apply_routed_floors`` lowers the sibling project's COPPER floors mid-run,
+    before the plane finalize's oracle grades the board -- until it existed, that
+    sibling was still the INPUT's (seeded by ``seed_project_for_output``) and its
+    looser declared floors made the zone filler pull the pours back further than
+    the shipped board's would, so the audit over-reported opens. Measured on
+    orangecrab: 57 reported vs the 46 that ship (GND 19 vs 11), all of it
+    ``rules.min_hole_clearance`` 0.25 -> 0.0889.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "py_router"))
+    from fix_kicad_drc_settings import apply_routed_floors
+    fails = []
+    with tempfile.TemporaryDirectory() as td:
+        pcb = os.path.join(td, "b.kicad_pcb")
+        pro = os.path.join(td, "b.kicad_pro")
+        shutil.copyfile(BOARD, pcb)
+
+        # No sibling project -> no-op, and none is created (a project-less
+        # board must stay project-less; #441 warns about it, we must not
+        # silently invent one).
+        if apply_routed_floors(pcb, clearance=0.1) != []:
+            fails.append("#650: reported changes with no sibling .kicad_pro")
+        if os.path.exists(pro):
+            fails.append("#650: created a .kicad_pro where the board had none")
+
+        # A board declaring LOOSER floors than the run routed to: hole/copper
+        # comes down to the routed clearance (the measured fill driver), and so
+        # does the Default class.
+        json.dump({"board": {"design_settings": {
+                      "rules": {"min_hole_clearance": 0.25, "min_clearance": 0.2}}},
+                   "net_settings": {"classes": [
+                       {"name": "Default", "clearance": 0.2},
+                       {"name": "HS", "clearance": 0.3}]}},
+                  open(pro, "w"))
+        changes = apply_routed_floors(pcb, clearance=0.0889)
+        rules = json.load(open(pro))["board"]["design_settings"]["rules"]
+        if abs(rules.get("min_hole_clearance", 9) - 0.0889) > 1e-9:
+            fails.append(f"#650: min_hole_clearance = {rules.get('min_hole_clearance')}, "
+                         f"expected 0.0889")
+        if abs(rules.get("min_clearance", 9) - 0.0889) > 1e-9:
+            fails.append(f"#650: min_clearance = {rules.get('min_clearance')}, expected 0.0889")
+        classes = {c["name"]: c for c in json.load(open(pro))["net_settings"]["classes"]}
+        if abs(classes["Default"].get("clearance", 9) - 0.0889) > 1e-9:
+            fails.append("#650: the Default class was not lowered to the routed clearance")
+        # Non-Default classes are the WRITEBACK's call (#439 -- it depends on the
+        # caller having passed a --clearance ceiling, a main() fact). Clamping
+        # them here could ship a tightened class on a run that meant to honor them.
+        if abs(classes["HS"].get("clearance", 0) - 0.3) > 1e-9:
+            fails.append("#650: a non-Default class was clamped by default")
+        if not changes:
+            fails.append("#650: reported no changes on a project that needed lowering")
+
+        # Idempotent -- it runs before every in-run grade.
+        if apply_routed_floors(pcb, clearance=0.0889) != []:
+            fails.append("#650: not idempotent (second call reported changes)")
+
+        # ONLY-loosen: a board already declaring a TIGHTER floor keeps it, so
+        # this can never manufacture a violation on correct copper.
+        json.dump({"board": {"design_settings": {
+                      "rules": {"min_hole_clearance": 0.05}}}}, open(pro, "w"))
+        apply_routed_floors(pcb, clearance=0.0889)
+        rules = json.load(open(pro))["board"]["design_settings"]["rules"]
+        if abs(rules.get("min_hole_clearance", 9) - 0.05) > 1e-9:
+            fails.append(f"#650: RAISED a tighter declared floor to "
+                         f"{rules.get('min_hole_clearance')} (must only loosen)")
+    return fails
+
+
 def main():
     if not os.path.exists(BOARD):
         print(f"FAIL: test board missing ({BOARD})")
@@ -110,11 +181,15 @@ def main():
         if "already consistent" not in r2.stdout:
             fails.append("second run was not idempotent (expected 'already consistent')")
 
+    fails += _check_in_run_floor_sync()
+
     if fails:
         print("FAIL: " + "; ".join(fails))
         return 1
     print("PASS: constraints loosened to the routed floor (never tightened), Default "
-          "net class created, non-routing severities ignored, .kicad_pcb untouched, idempotent")
+          "net class created, non-routing severities ignored, .kicad_pcb untouched, idempotent; "
+          "in-run floor sync (#650) lowers hole/copper to the routed floor, only-loosens, "
+          "is idempotent, and no-ops without a sibling project")
     return 0
 
 

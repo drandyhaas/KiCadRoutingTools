@@ -24,7 +24,7 @@ import sys
 from kicad_parser import parse_kicad_pcb
 import routing_defaults as defaults
 from placement.groups import GroupError, derive_groups, describe, parse_sources
-from placement.cli_gates import (add_board_state_args,
+from placement.cli_gates import (add_board_state_args, add_intent_arg,
                                  add_lock_advisor_args, add_tidiness_args)
 from placement.portfolio import copy_siblings
 from placement.quench import quench
@@ -127,6 +127,7 @@ Examples:
                              "default: the airwire cost cannot see them, so "
                              "only halo/edge terms decide where they go")
     add_board_state_args(parser)
+    add_intent_arg(parser)
     add_lock_advisor_args(parser)
     add_tidiness_args(parser)
 
@@ -147,6 +148,18 @@ Examples:
         if args.swap_max_displacement > args.max_displacement:
             parser.error("--swap-max-displacement must not exceed "
                          "--max-displacement")
+
+    # #702: the intent is loaded BEFORE record_invocation, because an exit 2 on
+    # an unreadable one touches no file -- and a manifest that carries a
+    # command which produced nothing leaves the next step's input made by
+    # nothing, which is exactly why the recorder is conditional below.
+    # Not parser.error on the --suggest-locks combination: a caller that always
+    # passes --intent must not have to special-case the report mode, which
+    # writes no board and never quenches.
+    from placement.cli_gates import load_intent_or_exit
+    intent, _rc = load_intent_or_exit(args)
+    if _rc:
+        return _rc
 
     # Recorded AFTER parsing and only for a real run: this tool MUTATES the
     # board, so a stress manifest that omits it leaves the next step's input
@@ -199,20 +212,31 @@ Examples:
     if sources:
         print(describe(blocks))
 
+    intent_gate = None
+    if intent is not None:
+        from placement.cli_gates import resolve_intent_gate_for_cli
+        intent_gate, _problems = resolve_intent_gate_for_cli(
+            intent, pcb_data, sources, args.intent)
+
     # Exact pad/hole legality of the INPUT (file poses): the before half of
     # the report pair. Gate-currency tallies live inside the quench; this is
     # the phantom-free number an auditor compares.
     from placement.legality import (grade_pad_legality,
-                                    format_oob_clause as _oob_clause)
+                                    format_oob_clause as _oob_clause,
+                                    format_required_clause as _req_clause)
     legality_before = None
     if not args.courtyard_only:
-        legality_before = grade_pad_legality(pcb_data, args.clearance)
+        legality_before = grade_pad_legality(pcb_data, args.clearance,
+                                             pcb_file=args.input_file)
         print(f"Pad legality before: {legality_before['pad_conflicts']} "
               f"conflict pair(s), {legality_before['hole_conflicts']} hole "
               f"conflict(s), {legality_before['oob_pad_count']} part(s) with "
               f"pad copper off-board"
               + (": " + _oob_clause(legality_before)
                  if _oob_clause(legality_before) else ""))
+        if _req_clause(legality_before):
+            print(f"  above the {args.clearance}mm floor: "
+                  f"{_req_clause(legality_before)}")
 
     ratsnest = {}
     summary = {'parts_moved': 0}
@@ -247,6 +271,7 @@ Examples:
         pad_legality=not args.courtyard_only,
         min_gain_per_mm=args.min_gain_per_mm,
         move_unconnected=args.move_unconnected,
+        intent_gate=intent_gate,
     )
 
     print(f"{len(placements)} parts moved")
@@ -288,19 +313,46 @@ Examples:
         'pad_conflicts_currency': 'exact geometry (phantom-free)',
     })
     summary.update(ratsnest.get('legality', {}))
+    # #702: what the declared-intent gate DID. Reported even when it refused
+    # nothing, for the reason docs/floorplan-intent.md gives about the grader's
+    # own rules_run/rules_skipped pair -- "0 violations" and "0 rules ran" must
+    # not look the same to a machine. Here: "the gate refused nothing" and
+    # "there was no gate" must not either.
+    _ig = ratsnest.get('intent_gate')
+    if _ig is not None:
+        print(f"intent gate: enforced {', '.join(_ig['rules_enforced'])} over "
+              f"{_ig['refs_bound']} bound part(s); refused "
+              f"{_ig['rejected']} candidate pose(s)"
+              + (" (" + ", ".join(f"{r} {n}" for r, n
+                                  in sorted(_ig['by_rule'].items())) + ")"
+                 if _ig['by_rule'] else ""))
+        summary['intent'] = args.intent
+        summary['intent_rules_enforced'] = _ig['rules_enforced']
+        summary['intent_refs_bound'] = _ig['refs_bound']
+        summary['intent_moves_refused'] = _ig['rejected']
+        summary['intent_moves_refused_by_rule'] = _ig['by_rule']
+        summary['intent_moves_refused_by_site'] = _ig['by_site']
+    elif args.intent:
+        summary['intent'] = args.intent
+        summary['intent_moves_refused'] = None    # gate built nothing
     # After half of the exact report pair, graded on the WRITTEN file so it
     # covers exactly what the next step will read. WARN on any worsened
     # category -- the in-run gates should make this impossible; a warning here
     # means a gate has a hole and is worth a bug report.
     if legality_before is not None:
         legality_after = grade_pad_legality(parse_kicad_pcb(args.output_file),
-                                            args.clearance)
+                                            args.clearance,
+                                            pcb_file=args.output_file)
         print(f"Pad legality after: {legality_after['pad_conflicts']} "
               f"conflict pair(s), {legality_after['hole_conflicts']} hole "
               f"conflict(s), {legality_after['oob_pad_count']} part(s) with "
               f"pad copper off-board"
               + (": " + _oob_clause(legality_after)
                  if _oob_clause(legality_after) else ""))
+        if _req_clause(legality_after):
+            print(f"  above the {args.clearance}mm floor: "
+                  f"{_req_clause(legality_after)}")
+        summary['pad_clearance_required'] = legality_after['required']
         for key in ('pad_conflicts', 'hole_conflicts', 'oob_pad_count'):
             summary[f'{key}_before'] = legality_before[key]
             summary[f'{key}_after'] = legality_after[key]
@@ -315,8 +367,14 @@ Examples:
 
 
 if __name__ == "__main__":
-    import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
-    # main() already returns 0 from the --suggest-locks branch; that value was
-    # dropped here, so the process exited 0 regardless of what main() decided
-    # (the #551 family). Propagate it so a future refusal is visible to a caller.
-    sys.exit(main() or 0)
+    # Declare the lever for the WHOLE run, so every pose this CLI
+    # writes carries its name. Nothing called declare_lever outside
+    # tests, so the unaided instrument had no armed state at all:
+    # unarmed it is silent, and armed by hand it refused the engine.
+    from placement.provenance import declare_lever
+    with declare_lever('place_optimize.py', sys.argv):
+        import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
+        # main() already returns 0 from the --suggest-locks branch; that value was
+        # dropped here, so the process exited 0 regardless of what main() decided
+        # (the #551 family). Propagate it so a future refusal is visible to a caller.
+        sys.exit(main() or 0)

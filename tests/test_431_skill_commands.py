@@ -80,9 +80,9 @@ SOURCES = [
     # The skill's reference pages carry command blocks too (#549). Without them
     # every block moved out of SKILL.md becomes flag-unchecked, which is the
     # quiet way this gate stops gating.
-    '.claude/skills/plan-pcb-routing/references/evidence-map.md',
-    '.claude/skills/plan-pcb-routing/references/verifier-prompts.md',
-    '.claude/skills/plan-pcb-routing/references/convergence.md',
+    '.claude/skills/plan-pcb-placement-and-routing/references/evidence-map.md',
+    '.claude/skills/plan-pcb-placement-and-routing/references/verifier-prompts.md',
+    '.claude/skills/plan-pcb-placement-and-routing/references/convergence.md',
     # ...and so does the DRIVER that now emits the workflow. This is the same
     # hole one level down, and it opened exactly as the comment above predicts:
     # the stage bodies moved out of SKILL.md into scripts/*.py, the gate kept
@@ -582,8 +582,13 @@ def test_verdict_lines_do_not_collide_with_the_gui_result_contract():
     src = open(os.path.join(ROOT, 'kicad_routing_plugin', 'ai_backend.py'),
                encoding='utf-8').read()
     assert 'RESULT=' in src, "the host contract moved; re-check this gate"
-    for rel in (SOURCES[0],
-                '.claude/skills/plan-pcb-routing/references/verifier-prompts.md'):
+    # The VERDICT= verifier contract lives in the COMBINED skill: when the
+    # skills merged, the verifier stages moved out of plan-pcb-routing (which
+    # is a pure routing planner again) into plan-pcb-placement-and-routing.
+    # Checking SOURCES[0] here asserted the contract against a file that no
+    # longer owns it.
+    for rel in ('.claude/skills/plan-pcb-placement-and-routing/SKILL.md',
+                '.claude/skills/plan-pcb-placement-and-routing/references/verifier-prompts.md'):
         path = os.path.join(ROOT, rel)
         if not os.path.isfile(path):
             continue
@@ -640,7 +645,7 @@ def test_the_score_is_the_gate_and_the_router_is_not_the_judge():
     # Vacuity: ungraded must never read as clean.
     assert 'ungraded' in low, "the skill must distinguish ungraded from passed"
 
-    conv = os.path.join(ROOT, '.claude/skills/plan-pcb-routing/references/convergence.md')
+    conv = os.path.join(ROOT, '.claude/skills/plan-pcb-placement-and-routing/references/convergence.md')
     assert os.path.isfile(conv), "references/convergence.md is missing"
     ctext = open(conv, encoding='utf-8').read()
     # parent_sha / "stop condition" are the REAL schema (board_store.Ledger +
@@ -668,7 +673,7 @@ def test_routed_board_lenses_exist_and_reenter_the_loop():
     """A verifier fan-out that only reports is not a gate. The three
     routed-board lenses must exist, and a FAIL must be documented as
     re-entering the loop rather than becoming a caveat on a shipped board."""
-    rel = '.claude/skills/plan-pcb-routing/references/verifier-prompts.md'
+    rel = '.claude/skills/plan-pcb-placement-and-routing/references/verifier-prompts.md'
     text = open(os.path.join(ROOT, rel), encoding='utf-8').read()
     for lens in ('connectivity', 'drc', 'spec'):
         assert f'`{lens}`' in text, f"routed-board lens `{lens}` is missing"

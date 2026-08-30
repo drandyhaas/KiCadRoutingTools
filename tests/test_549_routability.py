@@ -187,8 +187,8 @@ def test_a_block_with_no_foreign_pads_is_omitted_not_reported_as_zero():
 def test_a_corridor_counts_crossings_with_the_quenchs_own_kernel():
     pcb, st, _blocks = _state()
     corr = corridors_from_intent(st, pcb, [
-        {'name': 'sdram', 'nets': ['sdram_*'], 'width_mm': 8.0}])
-    assert corr, "sdram_* matched no corridor on ulx3s"
+        {'name': 'sdram', 'nets': ['SDRAM_*'], 'width_mm': 8.0}])
+    assert corr, "SDRAM_* matched no corridor on ulx3s"
     c = corr[0]
     assert len(c.net_ids) > 4 and c.length_mm > 1.0
     assert len(c.side_edges()) == 2
@@ -204,7 +204,7 @@ def test_power_would_otherwise_cross_every_corridor():
     top offenders are the same rails on every bus of every board."""
     pcb, st, _blocks = _state()
     c = corridors_from_intent(st, pcb, [
-        {'name': 'sdram', 'nets': ['sdram_*'], 'width_mm': 8.0}])[0]
+        {'name': 'sdram', 'nets': ['SDRAM_*'], 'width_mm': 8.0}])[0]
     raw_n, raw_guilty = foreign_crossings(st, c, max_fanout=0)
     cut_n, cut_guilty = foreign_crossings(st, c)
     names = [pcb.nets[i].name for i in raw_guilty[:3] if i in pcb.nets]
@@ -220,7 +220,7 @@ def test_a_corridor_is_deterministic():
     """#457: the endpoint clustering picks extreme pads, and its orientation is
     fixed rather than left to iteration order."""
     pcb, st, _blocks = _state()
-    spec = [{'name': 'sdram', 'nets': ['sdram_*'], 'width_mm': 8.0}]
+    spec = [{'name': 'sdram', 'nets': ['SDRAM_*'], 'width_mm': 8.0}]
     a = corridors_from_intent(st, pcb, spec)[0]
     b = corridors_from_intent(st, pcb, spec)[0]
     assert (a.a, a.b, a.net_ids) == (b.a, b.b, b.net_ids)
@@ -233,14 +233,14 @@ def test_convergence_is_skipped_rather_than_guessed():
     a fact in the board file. Without a declared list this must not invent one."""
     pcb, st, blocks = _state()
     h = health(st, pcb, blocks, {
-        'bus_corridors': [{'name': 'sdram', 'nets': ['sdram_*']}]})
+        'bus_corridors': [{'name': 'sdram', 'nets': ['SDRAM_*']}]})
     assert 'convergence' not in h
     assert 'convergence' in h['skipped']
     assert 'design intent' in h['skipped']['convergence']
 
     h2 = health(st, pcb, blocks, {
-        'bus_corridors': [{'name': 'sdram', 'nets': ['sdram_*']}],
-        'classes': {'USB': ['usb_*'], 'SDRAM': ['sdram_*']}})
+        'bus_corridors': [{'name': 'sdram', 'nets': ['SDRAM_*']}],
+        'classes': {'USB': ['usb_*'], 'SDRAM': ['SDRAM_*']}})
     assert 'convergence' in h2 and 'convergence' not in h2['skipped']
     print("  PASS: no classes -> skipped with the reason; classes -> measured")
 

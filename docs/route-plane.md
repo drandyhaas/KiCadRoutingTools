@@ -349,7 +349,12 @@ step's in-run plane finalize calls -- with ripping OFF by default.
 
 ### Multi-Net Layer Zone Generation
 
-When multiple nets share the same plane layer (e.g., `--nets "VA19|VA11" --plane-layers In5.Cu`), the tool uses MST-based routing to ensure connected Voronoi zones:
+When multiple nets share the same plane layer (e.g., `--nets "VA19|VA11" --plane-layers In5.Cu`), the layer is composed as a **grammar pour** (#662, the default): the dominant net — largest board-wide reach × consumer pad count, scored on the net's full pad set — owns the layer as a **background sheet**, and every other net becomes **compact hull islands** (single-linkage 5 mm clusters, convex hull + 2 mm inflation). The nested islands outrank the sheet via zone fill priorities, so KiCad's fill performs the subtraction — no polygon booleans. Two connectivity invariants are enforced at composition time:
+
+- each island is one connected region containing all of its cluster's pads (by construction — convex hulls cover their cluster);
+- the background sheet must remain **one connected region after every carve**, checked on a coarse raster: an island that would sever the sheet (leaving a detached piece holding dominant-net pads/seeds, or ≥25% of the sheet) first shrinks its inflation, then **demotes to tracks** (printed; the route step carries every plane net in its `--nets`, so a demoted cluster is still served by copper — just not by a zone). A detached *source-less* sliver is not a severing — fill island removal culls it.
+
+Rationale (measured on orangecrab vs its human original): the previous pad-Voronoi partition scored 0.3–2.6 mm mean cell widths and split the dominant rail into 7 crumbs; the human's grammar is one deep sheet (15.8 mm mean width) plus compact islands. `KICAD_GRAMMAR_POUR=0` reverts to the Voronoi partition, which also remains the fallback when the grammar is degenerate (a single seeded net, or no identifiable dominant net). The Voronoi path uses MST-based routing to ensure connected zones:
 
 1. **Compute MST** - For each net, computes a Minimum Spanning Tree between all its vias
 2. **Route MST edges** - Routes each MST edge on the plane layer using A* pathfinding, avoiding other nets' vias and previously routed paths

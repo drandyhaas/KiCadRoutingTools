@@ -96,26 +96,26 @@ class LabelsOptionsPanel(wx.Panel):
             return ctrl
 
         self.label_size = row(
-            "Text size (mm):",
-            wx.SpinCtrlDouble(self, min=0.3, max=3.0, initial=1.0, inc=0.05),
+            "Text size:",
+            wx.SpinCtrlDouble(self, min=0.3, max=3.0, initial=1.0, inc=0.05, size=(78, -1)),
             "Uniform reference-label font height (and width).")
         self.label_thickness = row(
-            "Thickness (mm):",
-            wx.SpinCtrlDouble(self, min=0.05, max=0.5, initial=0.15, inc=0.01),
+            "Thickness:",
+            wx.SpinCtrlDouble(self, min=0.05, max=0.5, initial=0.15, inc=0.01, size=(78, -1)),
             "Uniform stroke thickness.")
         self.label_min_size = row(
-            "Min size (mm):",
-            wx.SpinCtrlDouble(self, min=0.3, max=3.0, initial=0.7, inc=0.05),
+            "Min size:",
+            wx.SpinCtrlDouble(self, min=0.3, max=3.0, initial=0.7, inc=0.05, size=(78, -1)),
             "Shrink floor when the uniform size does not fit; equal to the "
             "text size disables shrinking.")
         self.label_orientation = row(
-            "Orientation:", wx.Choice(self, choices=["horizontal", "vertical"]),
+            "Orientation:", wx.Choice(self, choices=["horizontal", "vertical"], size=(78, -1)),
             "Preferred label direction; the other direction is a fallback "
             "when the preferred one does not fit.")
         self.label_orientation.SetSelection(0)
         self.label_max_distance = row(
-            "Max distance (mm):",
-            wx.SpinCtrlDouble(self, min=0.5, max=10.0, initial=2.0, inc=0.25),
+            "Max dist:",
+            wx.SpinCtrlDouble(self, min=0.5, max=10.0, initial=2.0, inc=0.25, size=(78, -1)),
             "How far beyond the part's courtyard a label may be pushed.")
         self.label_include_hidden = wx.CheckBox(self, label="Include hidden labels")
         self.label_include_hidden.SetToolTip(
@@ -184,9 +184,20 @@ class FramePreviewPanel(wx.Panel):
         self.Bind(wx.EVT_TIMER, self._on_play_tick, self._play_timer)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
-        self.bitmap = wx.StaticBitmap(self)
-        self.bitmap.SetMinSize((480, 360))
-        sizer.Add(self.bitmap, 1, wx.EXPAND | wx.ALL, 2)
+        # The frame area gets the LISTBOX colour and a sunken border so it
+        # reads as an inset panel, the way the Routing tab's Planned Steps
+        # does. That box is a wx.CheckListBox, which paints its own dark
+        # background; a StaticBitmap with no image paints nothing, so before
+        # a run the whole pane was flat dialog grey with no visible frame.
+        self.frame_panel = wx.Panel(self, style=wx.BORDER_SUNKEN)
+        self.frame_panel.SetBackgroundColour(
+            wx.SystemSettings.GetColour(wx.SYS_COLOUR_LISTBOX))
+        _fp = wx.BoxSizer(wx.VERTICAL)
+        self.bitmap = wx.StaticBitmap(self.frame_panel)
+        _fp.Add(self.bitmap, 1, wx.EXPAND)
+        self.frame_panel.SetSizer(_fp)
+        self.frame_panel.SetMinSize((480, 360))
+        sizer.Add(self.frame_panel, 1, wx.EXPAND | wx.ALL, 2)
         self.caption = wx.StaticText(self, label="No run yet.")
         sizer.Add(self.caption, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 4)
 
@@ -223,7 +234,10 @@ class FramePreviewPanel(wx.Panel):
                 return False
         except Exception:
             return False
-        w, h = self.bitmap.GetSize()
+        # Scale against the FRAME's client area, not the StaticBitmap:
+        # the bitmap is now a child of the inset panel and reports 0x0
+        # until it holds an image.
+        w, h = self.frame_panel.GetClientSize()
         w = max(w, 200)
         h = max(h, 150)
         iw, ih = img.GetWidth(), img.GetHeight()
@@ -234,6 +248,7 @@ class FramePreviewPanel(wx.Panel):
         self.bitmap.SetBitmap(wx.Bitmap(img))
         if caption is not None:
             self.caption.SetLabel(caption)
+        self.frame_panel.Layout()
         self.Layout()
         return True
 
@@ -435,6 +450,14 @@ class PlacementTab(wx.Panel):
         # Claude Code - the skills must write, and e.g. opencode's analysis
         # agent denies edits). self.backend always holds a SUPPORTED backend.
         self.backend = BACKENDS[PLACEMENT_SUPPORTED_BACKENDS[0]]
+        # Model/effort entries remembered PER BACKEND, exactly as the
+        # Routing tab does: without this, switching backend carried the
+        # previous one's model over, so opencode could sit there with a
+        # Claude-only model selected.
+        self._backend_params = {bid: {'model': DEFAULT_CHOICE,
+                                      'effort': DEFAULT_CHOICE}
+                                for bid in BACKEND_IDS}
+        self._last_backend = self.backend
 
         # Plan-executor contract (ai_plan.PlanExecutor): the beautify action
         # is the plan-drivable non-AI action on this tab.
@@ -463,73 +486,100 @@ class PlacementTab(wx.Panel):
         preview_sizer.Add(self.preview, 1, wx.EXPAND | wx.ALL, 2)
         top.Add(preview_sizer, 1, wx.EXPAND | wx.RIGHT, 8)
 
+        # #GUI: the right column SCROLLS. Both boxes sit at proportion 0,
+        # so the column demands its full natural height; without a scroller
+        # a short dialog clipped the last rows of the Beautify Labels box
+        # (the 'Skip locked parts' checkbox vanished under the action
+        # button). Matches the Routing tab's shape -- fixed-width control
+        # column beside a proportion-1 left pane -- but survives being
+        # taller than the frame.
+        sw = wx.ScrolledWindow(self, style=wx.VSCROLL)
+        sw.SetScrollRate(0, 8)
+        self.right_scroll = sw
         right = wx.BoxSizer(wx.VERTICAL)
 
-        ai_box = wx.StaticBox(self, label="AI Placement")
+        ai_box = wx.StaticBox(sw, label="AI")
         ai_sizer = wx.StaticBoxSizer(ai_box, wx.VERTICAL)
-        backend_row = wx.BoxSizer(wx.HORIZONTAL)
-        backend_row.Add(wx.StaticText(self, label="Backend:"), 0,
-                        wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
-        self.backend_choice = wx.Choice(self, choices=[
-            BACKENDS[bid].label if bid in PLACEMENT_SUPPORTED_BACKENDS
-            else f"{BACKENDS[bid].label} (coming soon)"
-            for bid in BACKEND_IDS])
+
+        self.cli_status_label = wx.StaticText(sw, label="")
+        self.cli_status_label.Wrap(280)          # the Routing tab's wrap width
+        ai_sizer.Add(self.cli_status_label, 0, wx.ALL, 5)
+
+        # STACKED selectors in a 2-column grid -- ai_gui's sel_grid exactly.
+        sel_grid = wx.FlexGridSizer(cols=2, hgap=5, vgap=5)
+        sel_grid.AddGrowableCol(1)
+        sel_grid.Add(wx.StaticText(sw, label="Backend:"), 0,
+                     wx.ALIGN_CENTER_VERTICAL)
+        # Plain labels, exactly like the Routing tab's backend choice. The
+        # "(coming soon)" suffix widened this Choice to 184px against Routing's
+        # ~110, and since it is the widest child it set the WHOLE column's
+        # width (297 vs ~230). The same information is in the tooltip below,
+        # and _on_backend_choice refuses an unsupported pick anyway, so the
+        # suffix was costing layout without carrying its weight.
+        self.backend_choice = wx.Choice(
+            sw, choices=[BACKENDS[bid].label for bid in BACKEND_IDS])
         self.backend_choice.SetSelection(BACKEND_IDS.index(self.backend.id))
         self.backend_choice.SetToolTip(
             "Harness that drives the placement skills. Only Claude Code is "
             "supported today (placement runs must WRITE, and the other "
             "harnesses' agents deny edits); more harnesses later.")
         self.backend_choice.Bind(wx.EVT_CHOICE, self._on_backend_choice)
-        backend_row.Add(self.backend_choice, 1)
-        ai_sizer.Add(backend_row, 0, wx.EXPAND | wx.ALL, 3)
-        sel_row = wx.BoxSizer(wx.HORIZONTAL)
-        sel_row.Add(wx.StaticText(self, label="Model:"), 0,
-                    wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
-        self.model_choice = wx.ComboBox(self, value=DEFAULT_CHOICE, choices=[])
-        sel_row.Add(self.model_choice, 1, wx.RIGHT, 6)
-        sel_row.Add(wx.StaticText(self, label="Effort:"), 0,
-                    wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
-        self.effort_choice = wx.ComboBox(self, value=DEFAULT_CHOICE, choices=[])
-        sel_row.Add(self.effort_choice, 1)
-        ai_sizer.Add(sel_row, 0, wx.EXPAND | wx.ALL, 3)
-        self._populate_ai_combos()
-        self.cli_status_label = wx.StaticText(self, label="")
-        ai_sizer.Add(self.cli_status_label, 0, wx.EXPAND | wx.ALL, 3)
+        sel_grid.Add(self.backend_choice, 0, wx.EXPAND)
+        sel_grid.Add(wx.StaticText(sw, label="Model:"), 0,
+                     wx.ALIGN_CENTER_VERTICAL)
+        self.model_choice = wx.ComboBox(sw, value=DEFAULT_CHOICE, choices=[])
+        sel_grid.Add(self.model_choice, 0, wx.EXPAND)
+        sel_grid.Add(wx.StaticText(sw, label="Effort:"), 0,
+                     wx.ALIGN_CENTER_VERTICAL)
+        self.effort_choice = wx.ComboBox(sw, value=DEFAULT_CHOICE, choices=[])
+        sel_grid.Add(self.effort_choice, 0, wx.EXPAND)
+        ai_sizer.Add(sel_grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+        # No combo population here: __init__ calls _refresh_cli_status() once
+        # AFTER _create_ui, like the Routing tab. Doing it mid-construction
+        # now touches place_btn, which does not exist yet.
+
+        ai_sizer.Add(wx.StaticText(sw, label="Extra instructions:"), 0,
+                     wx.LEFT | wx.TOP, 5)
         self.extra_instructions = wx.TextCtrl(
-            self, style=wx.TE_MULTILINE, size=(-1, 40))
+            sw, style=wx.TE_MULTILINE, size=(-1, 40))
         self.extra_instructions.SetToolTip(
             "Optional extra instructions passed to the agent (constraints, "
             "focus areas, budget hints).")
-        ai_sizer.Add(wx.StaticText(self, label="Extra instructions:"), 0,
-                     wx.LEFT | wx.TOP, 3)
-        ai_sizer.Add(self.extra_instructions, 0, wx.EXPAND | wx.ALL, 3)
-        self.place_btn = wx.Button(self, label="Place (AI)")
+        ai_sizer.Add(self.extra_instructions, 0,
+                     wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
+        self.place_btn = wx.Button(sw, label="Place (AI)")
         self.place_btn.SetToolTip(
             "Claude Code runs the /plan-pcb-placement skill headless on a "
             "snapshot of this board. Runs minutes to hours; artifacts land "
             "in a krt_placement folder next to the board file.")
-        self.place_route_btn = wx.Button(self, label="Place + Route (AI)")
+        ai_sizer.Add(self.place_btn, 0,
+                     wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+        self.place_route_btn = wx.Button(sw, label="Place + Route (AI)")
         self.place_route_btn.SetToolTip(
             "Claude Code runs the /plan-pcb-placement-and-routing skill "
             "headless (place, then route, looping on the outcome). Runs "
             "minutes to hours; artifacts land in a krt_placement folder "
             "next to the board file.")
-        ai_sizer.Add(self.place_btn, 0, wx.EXPAND | wx.ALL, 3)
-        ai_sizer.Add(self.place_route_btn, 0, wx.EXPAND | wx.ALL, 3)
+        ai_sizer.Add(self.place_route_btn, 0,
+                     wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
         right.Add(ai_sizer, 0, wx.EXPAND | wx.BOTTOM, 6)
 
-        labels_box = wx.StaticBox(self, label="Beautify Labels (no AI)")
+        labels_box = wx.StaticBox(sw, label="Beautify Labels (no AI)")
         labels_sizer = wx.StaticBoxSizer(labels_box, wx.VERTICAL)
-        self.labels_options = LabelsOptionsPanel(self)
+        self.labels_options = LabelsOptionsPanel(sw)
         labels_sizer.Add(self.labels_options, 0, wx.EXPAND | wx.ALL, 3)
-        self.action_btn = wx.Button(self, label="Beautify Labels")
+        self.action_btn = wx.Button(sw, label="Beautify Labels")
         self.action_btn.SetToolTip(
             "Uniform, non-overlapping reference-designator silkscreen "
             "(#481). Moves/restyles only the labels, never the parts.")
         labels_sizer.Add(self.action_btn, 0, wx.EXPAND | wx.ALL, 3)
         right.Add(labels_sizer, 0, wx.EXPAND | wx.BOTTOM, 6)
 
-        top.Add(right, 0, wx.EXPAND)
+        sw.SetSizer(right)
+        right.Fit(sw)
+        sw.SetMinSize((sw.GetBestSize().width + 20, 260))
+        top.Add(sw, 0, wx.EXPAND)
         sizer.Add(top, 1, wx.EXPAND | wx.ALL, 5)
 
         # Status spans the FULL dialog width (not the narrow right column):
@@ -586,18 +636,9 @@ class PlacementTab(wx.Panel):
         self.Layout()
 
     def _populate_ai_combos(self):
-        """Load the selected backend's model/effort suggestions, keeping a
-        non-default entry the user already typed (AITab per-backend-memory
-        semantics collapse to this while only one backend is supported)."""
-        for ctrl, suggestions, tooltip in (
-                (self.model_choice, self.backend.model_suggestions,
-                 self.backend.model_tooltip),
-                (self.effort_choice, self.backend.effort_suggestions,
-                 self.backend.effort_tooltip)):
-            current = ctrl.GetValue().strip()
-            ctrl.Set(list(suggestions))
-            ctrl.SetValue(current or DEFAULT_CHOICE)
-            ctrl.SetToolTip(tooltip)
+        """Kept as the old entry point; the refresh owns the combos now
+        so there is ONE place that decides what a backend offers."""
+        self._refresh_cli_status()
 
     @staticmethod
     def _combo_value(ctrl):
@@ -621,7 +662,8 @@ class PlacementTab(wx.Panel):
     def _on_backend_choice(self, event):
         bid = BACKEND_IDS[self.backend_choice.GetSelection()]
         if bid not in PLACEMENT_SUPPORTED_BACKENDS:
-            # Revert: shown so the roadmap is visible, but not yet drivable.
+            # Revert: shown (greyed) so the roadmap is visible, but placement
+            # runs must WRITE and only this backend's agent may edit.
             self.backend_choice.SetSelection(BACKEND_IDS.index(self.backend.id))
             self.set_status(
                 f"{BACKENDS[bid].label} cannot drive placement yet - these "
@@ -629,8 +671,12 @@ class PlacementTab(wx.Panel):
                 f"{BACKENDS[PLACEMENT_SUPPORTED_BACKENDS[0]].label} supports "
                 "that today.")
             return
+        # Remember the OUTGOING backend's entries first (ai_gui parity).
+        self._backend_params[self._last_backend.id] = {
+            'model': self.model_choice.GetValue(),
+            'effort': self.effort_choice.GetValue()}
         self.backend = BACKENDS[bid]
-        self._populate_ai_combos()
+        self._last_backend = self.backend
         self._refresh_cli_status()
 
     def get_backend_value(self):
@@ -643,24 +689,32 @@ class PlacementTab(wx.Panel):
         bid = value if value in PLACEMENT_SUPPORTED_BACKENDS else \
             PLACEMENT_SUPPORTED_BACKENDS[0]
         self.backend = BACKENDS[bid]
+        self._last_backend = self.backend
         self.backend_choice.SetSelection(BACKEND_IDS.index(bid))
-        self._populate_ai_combos()
         self._refresh_cli_status()
 
     def _refresh_cli_status(self):
+        """The Routing tab's _refresh_backend_ui, for this tab's controls:
+        status line WITH the CLI path, then the selected backend's own
+        model/effort entries and tooltips."""
         cli = self.backend.find_cli()
         if cli:
-            # One line; the full path rides in the tooltip (column height
-            # is the scarce resource here).
-            self.cli_status_label.SetLabel(f"{self.backend.label} CLI found.")
-            self.cli_status_label.SetToolTip(cli)
+            self.cli_status_label.SetLabel(
+                f"{self.backend.label} CLI found: {cli}")
         else:
             self.cli_status_label.SetLabel(
                 self.backend.not_found_message() + " Then reopen this dialog.")
-            self.cli_status_label.SetToolTip("")
-            self.cli_status_label.Wrap(300)
+        self.cli_status_label.Wrap(280)
+        params = self._backend_params[self.backend.id]
+        self.model_choice.Set(list(self.backend.model_suggestions))
+        self.model_choice.SetValue(params['model'] or DEFAULT_CHOICE)
+        self.model_choice.SetToolTip(self.backend.model_tooltip)
+        self.effort_choice.Set(list(self.backend.effort_suggestions))
+        self.effort_choice.SetValue(params['effort'] or DEFAULT_CHOICE)
+        self.effort_choice.SetToolTip(self.backend.effort_tooltip)
         self.place_btn.Enable(cli is not None)
         self.place_route_btn.Enable(cli is not None)
+        self.Layout()
 
     # ------------------------------------------------------------- AI runs
 

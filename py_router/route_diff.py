@@ -92,7 +92,7 @@ from memory_debug import (
 )
 from diff_pair_loop import route_diff_pairs
 from reroute_loop import run_reroute_loop
-from length_matching import apply_intra_pair_length_matching
+from length_matching import run_intra_pair_matching
 from net_ordering import order_nets_mps, order_nets_inside_out, separate_nets_by_type
 from routing_common import (
     setup_bga_exclusion_zones, resolve_net_ids, filter_already_routed,
@@ -121,7 +121,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 # #498: {layer: mm} per-layer clearance. None (both fronts) ->
                 # auto-read the sibling .kicad_dru; explicit dict (tests) wins.
                 layer_clearances: Optional[Dict[str, float]] = None,
-                # #549: {net_id: mm} track-to-track clearance map; None ->
+                # {net_id: mm} track-to-track clearance map (#735); None ->
                 # auto-read the sibling .kicad_dru track rules.
                 track_clearances: Optional[Dict[int, float]] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
@@ -759,7 +759,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # GUI inherits them with no wiring (see kicad_dru.install_layer_clearances).
     from kicad_dru import install_layer_clearances, install_track_clearances
     install_layer_clearances(config, layer_clearances, input_file, pcb_data)
-    # #549: track-scoped .kicad_dru rules (raise-only on seg-vs-seg stamps).
+    # Track-scoped .kicad_dru rules (#735; raise-only on seg-vs-seg stamps).
     install_track_clearances(config, track_clearances, input_file, pcb_data,
                              routed_net_ids=[nid for _, nid in net_ids])
 
@@ -1226,39 +1226,45 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         run_length_matching(routed_results, length_match_groups, config, pcb_data)
 
     # Apply intra-pair P/N length matching if configured
+    intra_pair_reports = []
     if config.diff_pair_intra_match:
         print("\n" + "=" * 60)
         print("Intra-pair P/N length matching")
         print("=" * 60)
 
-        # Process each diff pair once (using p_net_id as key to avoid duplicates)
-        processed_pairs = set()
-        # AC-coupled (XNet) member pairs are matched end-to-end below, not per-side;
-        # skip them here so the two passes don't fight (double-meander). Gated on
-        # the flag so intra-pair behavior is unchanged when --ac-couple-match is off.
+        # AC-coupled (XNet) member pairs are matched end-to-end below, not
+        # per-side; skip them here so the two passes don't fight
+        # (double-meander). Gated on the flag so intra-pair behavior is
+        # unchanged when --ac-couple-match is off.
         xnet_member_p_net_ids = set()
         if config.ac_couple_match:
             for _xn in ac_xnets:
                 for _m in _xn.members:
                     xnet_member_p_net_ids.add(_m.p_net_id)
-        for net_id, result in routed_results.items():
-            if not result.get('is_diff_pair'):
-                continue
-            p_net_id = result.get('p_net_id')
-            if p_net_id is None or p_net_id in processed_pairs:
-                continue
-            processed_pairs.add(p_net_id)
-            if p_net_id in xnet_member_p_net_ids:
-                continue  # matched end-to-end by the AC-couple pass (#196)
-
-            # Get pair name for logging
-            pair_info = diff_pair_by_net_id.get(net_id)
-            pair_name = pair_info[0] if pair_info else f"net_{net_id}"
-
-            print(f"\n{pair_name}:")
-            seg_count_before = len(result.get('new_segments', []))
-            apply_intra_pair_length_matching(result, config, pcb_data)
-            seg_count_after = len(result.get('new_segments', []))
+        # #766: drive off the PAIR LIST, not the shape of routed_results. The
+        # old loop required each result to carry `is_diff_pair` + `p_net_id`,
+        # which the direct-hybrid escape does not stamp -- so a hybrid-routed
+        # pair was skipped without printing anything, and its P/N skew shipped
+        # unmeasured while the run reported the pair routed.
+        intra_pair_reports = run_intra_pair_matching(
+            diff_pair_ids_to_route, routed_results, config, pcb_data,
+            skip_p_net_ids=xnet_member_p_net_ids)
+        # 'skipped' pairs are matched end-to-end by the AC-couple pass, so they
+        # belong in neither column -- counting them either way misreports.
+        _isk = [r for r in intra_pair_reports if r['status'] == 'skipped']
+        _im = [r for r in intra_pair_reports
+               if r['status'] in ('matched', 'within-tolerance')]
+        _iu = [r for r in intra_pair_reports
+               if r['status'] not in ('matched', 'within-tolerance', 'skipped')]
+        print(f"\n  Intra-pair: {len(_im)}/{len(_im) + len(_iu)} pair(s) within "
+              f"{config.length_match_tolerance}mm"
+              + (f" ({len(_isk)} matched end-to-end by the AC-coupled pass)"
+                 if _isk else ""))
+        if _iu:
+            print(f"  {RED}Intra-pair NOT matched: " + ", ".join(
+                f"{r['pair']} ({r['reason'] or r['status']}"
+                + (f", delta={r['delta_mm']:.3f}mm" if r['delta_mm'] is not None else "")
+                + ")" for r in _iu) + RESET)
 
     # Apply end-to-end AC-coupled (XNet) length matching if configured (#196).
     # Runs AFTER group + intra-pair matching; for its member pairs it supersedes
@@ -1432,6 +1438,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
               f"disconnected member pads at this step "
               f"({', '.join(_member_incomplete)}) — JSON_SUMMARY."
               f"member_incomplete_pairs")
+    # #766: pairs routed by the hybrid escape are fully routed and keep their
+    # credit, but their TERMINAL legs are point-to-point single-ended copper --
+    # not a coupled pair end to end. Name them, because 'coupled' in the JSON
+    # says the opposite and the terminals are where P/N skew is born.
+    _hyb = sorted(r['pair'] for r in pair_reports if r.get('escape') == 'hybrid')
+    if _hyb:
+        print(f"  {YELLOW}Hybrid escape: {len(_hyb)} pair(s) routed as a coupled middle "
+              f"+ point-to-point terminal legs (terminals NOT coupled): "
+              f"{', '.join(_hyb)} — JSON_SUMMARY.pair_reports[].coupled_terminals{RESET}")
     if ripup_success_pairs:
         print(f"  Rip-up success: {len(ripup_success_pairs)} (routes that ripped blockers)")
     if rerouted_pairs:
@@ -1488,6 +1503,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         'skipped_bad_fanout': sorted(skipped_bad_fanout),
         'target_swaps': [{'pair1': k, 'pair2': v} for k, v in summarize_target_swaps(target_swaps)],
         'layer_swaps': total_layer_swaps,
+        # #766: per-pair intra-pair P/N matching outcome. Present whenever
+        # --diff-pair-intra-match ran; one record per pair in the run, so a
+        # caller can see which pairs shipped unmatched (and their skew) instead
+        # of inferring it from `successful`, which says nothing about skew.
+        'intra_pair_matching': intra_pair_reports,
         'successful': successful,
         'failed': failed,
         'total_time': round(total_time, 2),
@@ -1515,6 +1535,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # width floor, {layer: [solved_mm, floor_mm]} -- those layers will NOT
         # meet the impedance request. Key absent when no clamp fired.
         summary['impedance_width_clamped'] = impedance_width_clamped
+    try:                       # #653: env knobs into the machine-readable
+        import env_knobs as _ek653   # summary, so a harness can detect a
+        summary['env_knobs'] = _ek653.active_env_knobs()   # dirty baseline
+    except Exception:          # without re-reading logs
+        pass
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
     # Write output file or return results for direct application

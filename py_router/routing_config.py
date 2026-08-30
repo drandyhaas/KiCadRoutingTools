@@ -284,7 +284,19 @@ class GridRouteConfig:
     # Heuristic tuning
     proximity_heuristic_factor: float = 0.0  # proximity add-on to the A* heuristic (0 since the hw-2.3 default; the base greediness covers it)
     # Layer direction preference - alternates H/V starting with horizontal on top
-    direction_preference_cost: int = 250  # Cost penalty for non-preferred direction (0 = disabled); see routing_defaults
+    # Matches routing_defaults.DIRECTION_PREFERENCE_COST, which is back at 250
+    # after the #663 revert. route.py/route_diff.py always pass the caller's
+    # value, so this default is reached only by configs built field-by-field
+    # that never pass the parameter -- the oracle-weld and plane sub-configs
+    # (route.py, route_planes.py, repair_planes.py).
+    #
+    # Those legs stayed at 250 through #663's 5-era, which made a MIXED state
+    # (signal 5, these legs 250). That was screened directly -- an arm making
+    # these follow the constant -- and measured INERT (94/59 vs 95/58 on
+    # sets1-5), so the divergence never mattered. There is none now. If this is
+    # ever moved off routing_defaults' value again, re-measure rather than
+    # assuming either that coherence is free or that it is harmless.
+    direction_preference_cost: int = 250  # Cost penalty for non-preferred direction (0 = disabled)
     # Bus routing - auto-detection and parallel routing of grouped nets
     bus_enabled: bool = False  # Enable bus detection and routing
     bus_detection_radius: float = 5.0  # mm - max endpoint distance to form bus
@@ -324,7 +336,7 @@ class GridRouteConfig:
     # the rules file is the one source of truth, and the graders (check_drc,
     # staged kicad-cli) read the same file.
     layer_clearances: Dict[str, float] = field(default_factory=dict)
-    # Track-to-track clearance from the board's .kicad_dru (#549),
+    # Track-to-track clearance from the board's .kicad_dru (#735),
     # {obstacle_net_id: mm} -- the EFFECTIVE per-obstacle map for this call's
     # routed set (kicad_dru.effective_track_clearances). RAISE-ONLY, applied
     # by track-vs-track stamp sites over the already-resolved value (so it
@@ -334,7 +346,7 @@ class GridRouteConfig:
     track_clearances: Dict[int, float] = field(default_factory=dict)
 
     def track_obstacle_clearance(self, net_id: int, resolved: float) -> float:
-        """#549 seg-vs-seg pair clearance against obstacle net ``net_id``:
+        """Track-rule seg-vs-seg clearance against obstacle net ``net_id``:
         max(resolved, the track-rule value) -- raise-only, one dict lookup per
         SEGMENT. ``resolved`` is the caller's fully-resolved value (class
         pairwise max, #498 layer replacement already applied)."""

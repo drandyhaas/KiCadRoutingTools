@@ -26,10 +26,31 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # placement split
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # placement split
 
+# #522 reorg + skill merge: engine -> py_router/, placer -> py_placer/,
+# board_score.py -> the placement-and-routing skill. Without these roots the
+# imports below raise and the test never runs (it reports as a failure while
+# asserting nothing).
+_R522 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _p522 in ('py_router', 'py_placer',
+              os.path.join('.claude', 'skills',
+                           'plan-pcb-placement-and-routing', 'scripts')):
+    _d522 = os.path.join(_R522, _p522)
+    if _d522 not in sys.path:
+        sys.path.insert(0, _d522)
+
+
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 from placement.lock_advisor import advise_locks, to_json  # noqa: E402
 from placement.placement_state import (UNPLACED_EXIT, assess_placement)  # noqa: E402
 from placement.writer import write_placed_output  # noqa: E402
+
+#: Measured 516 s ALONE (2026-08-19, exit 0, all checks pass) -- UNDER the
+#: 600 s default, yet it times out in-suite. run_all defaults to -j 4, so
+#: it competes for CPU with three other processes while that clock runs.
+#: A budget for the contended case, not for a hung test: the standalone
+#: number is the evidence that it finishes.
+RUN_ALL_TIMEOUT = 1200
+
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KF = os.path.join(ROOT, 'kicad_files')
@@ -38,9 +59,21 @@ SMALL = os.path.join(KF, 'lvds_converter_dualclk.kicad_pcb')
 ROUTED = os.path.join(KF, 'routed_output.kicad_pcb')
 
 
+def _script_path(script):
+    """#522: the placer CLIs live in py_placer/ now, the engine in
+    py_router/. Resolve wherever the script actually is rather than
+    assuming the repo root, which silently made every case here a
+    'file not found' exit instead of a gate."""
+    for sub in ('', 'py_placer', 'py_router'):
+        cand = os.path.join(ROOT, sub, script) if sub else os.path.join(ROOT, script)
+        if os.path.isfile(cand):
+            return cand
+    return os.path.join(ROOT, script)
+
+
 def _run(script, *args):
     return subprocess.run([sys.executable, '-X', 'utf8',
-                           os.path.join(ROOT, script)] + list(args),
+                           _script_path(script)] + list(args),
                           capture_output=True, text=True, cwd=ROOT, timeout=1800)
 
 

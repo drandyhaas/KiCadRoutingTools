@@ -41,10 +41,14 @@ from kicad_parser import parse_kicad_pcb
 import routing_defaults as defaults
 from placement.portfolio import copy_siblings
 from placement.groups import GroupError, derive_groups, describe, parse_sources
-from placement.cli_gates import (add_board_state_args,
+from placement.cli_gates import (add_board_state_args, add_intent_arg,
                                  add_lock_advisor_args, add_tidiness_args)
 from placement.quench import quench
 from placement.writer import write_placed_output
+from placement.diagnosis import (TOP_K as DIAGNOSIS_TOP_K,
+                                 format_text as diagnosis_format,
+                                 to_json as diagnosis_to_json)
+from placement.relocate import format_text as relocate_format
 
 # The loop shells out to the route.py sitting NEXT TO THIS FILE. A bare
 # relative 'route.py' only resolved when the caller's cwd happened to be the
@@ -120,7 +124,8 @@ def accept_score(cmd: str, placed: str, routed: str, json_file: str):
 
 
 def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str,
-              json_file: str = None, extra_targets=None):
+              json_file: str = None, extra_targets=None, *,
+              keep_blocker_cells: bool = False):
     """Run route.py and return its metrics dict.
 
     `json_file` asks route.py to also write its MERGED summary there
@@ -171,17 +176,75 @@ def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str,
             f"whole-board result.\nsee {log_file}\n"
             + _log_tail(log))
 
-    return metrics_from_summary(summary, log, extra_targets)
+    return metrics_from_summary(summary, log, extra_targets,
+                                keep_blocker_cells=keep_blocker_cells)
+
+
+def _copy_blocker_report(jb):
+    """Detach `summary['blockers']` from the caller's dict without reshaping it.
+
+    Two levels deep, which is how deep the structure goes: the per-failed-net
+    entry and its `blocked_by` items. An entry that carries no `blocked_by`
+    key does NOT gain an empty one -- adding it would be normalisation, and a
+    consumer must be able to tell "attributed nothing" from "did not say".
+    """
+    if jb is None:
+        return None
+    out = []
+    for e in jb:
+        if not isinstance(e, dict):
+            out.append(e)
+            continue
+        c = dict(e)
+        bb = c.get('blocked_by')
+        if isinstance(bb, list):
+            c['blocked_by'] = [dict(b) if isinstance(b, dict) else b
+                               for b in bb]
+        out.append(c)
+    return out
 
 
 def metrics_from_summary(summary: dict, log: str = '',
-                         extra_targets=None) -> dict:
+                         extra_targets=None, *,
+                         keep_blocker_cells: bool = False) -> dict:
     """Round metrics from an already-merged JSON_SUMMARY.
 
     Split out of run_route (#431) so a renderer can caption a recorded round
     from its `loop_roundN_route.log` using THIS arithmetic rather than a second
     implementation that drifts. Pure: no subprocess, no file IO. `log` is only
     the pre-#409 blocker fallback.
+
+    `keep_blocker_cells` (#553) adds ONE key, `blocker_report`, and changes
+    nothing else. The seven-key form is what `write_round_sidecar` serialises
+    verbatim into `loop_round{N}.json`, so an unconditional key would change
+    the sidecar bytes of every run that never asked for #553. Off by default;
+    `--target-select diagnosis` is what turns it on.
+
+    `blocker_report` is a COPY of `summary['blockers']`, or **None** when that
+    key was absent. It is deliberately raw: this function does no arithmetic on
+    it, because `placement.diagnosis.blocker_evidence` already folds it and a
+    second fold here is the drift #431 split this function out to prevent. Do
+    not add a count alongside it -- ask `blocker_evidence`.
+
+    WHAT `None` ACTUALLY MEANS, which is not what it looks like. `route.py`
+    writes the key only `if blockers_report:`, so it is OMITTED both on a
+    pre-#409 log AND on a modern run that attributed nothing. So `None` reads
+    "no structured attribution reached us" -- and it is exactly then that
+    `blockers` above comes from the whole-log regex, which scrapes TRANSIENT
+    blocker lines for nets that later routed. `None` is therefore the signal
+    that those names are not evidence, which is why the diagnosis skips the
+    signal outright rather than ranking them. `[]` is a narrower case
+    (`route_summary.merge_summaries` after reconciliation cleared every
+    failure) and stays distinguishable.
+
+    A COPY, not the caller's list: `write_round_sidecar` serialises this dict,
+    and a consumer that sorted or annotated the report in place would write
+    through into the summary the loop is still holding.
+
+    Why carry it rather than re-read `work/loop_round{N}_route.json`: run_route
+    adds `--json-out` only when the operator did not put their own in
+    `--route-args`, so on a perfectly legal invocation that file is never
+    written. The merged summary is in hand here.
     """
     failed_nets = list(summary.get('failed_single', []))
     # Nets the CALLER named as the thing to work on, whether or not the router
@@ -226,7 +289,7 @@ def metrics_from_summary(summary: dict, log: str = '',
     else:
         blockers = set(re.findall(r'^\s+\d+\.\s+(\S+?):\s+\d+\s+\(', log, re.M))
 
-    return {
+    out = {
         'failures': failures,
         'failed_nets': failed_nets,
         'blockers': sorted(blockers),
@@ -238,12 +301,19 @@ def metrics_from_summary(summary: dict, log: str = '',
         'pad_pairs_connected': summary.get('pad_pairs_connected', 0),
         'pad_pairs_total': summary.get('pad_pairs_total', 0),
     }
+    if keep_blocker_cells:
+        # The cell counts the seven-key form discards above, carried raw. No
+        # coordinates exist anywhere in this JSON
+        # (blocking_analysis.blocking_info_to_dict serialises counts only), and
+        # none is invented here.
+        out['blocker_report'] = _copy_blocker_report(jb)
+    return out
 
 
 def write_round_sidecar(work: str, rnd: int, *, board: str, routed: str,
                         parent: str, accepted: bool, screened: bool = False,
-                        targets=None, groups=None, moved=None, metrics=None
-                        ) -> str:
+                        targets=None, groups=None, moved=None, metrics=None,
+                        diagnosis=None, relocation=None) -> str:
     """Record one round as `loop_round{N}.json` next to its board (#431).
 
     The boards alone are NOT a chain: a REJECTED loop_round2.kicad_pcb sits
@@ -271,6 +341,13 @@ def write_round_sidecar(work: str, rnd: int, *, board: str, routed: str,
         'moved': moved or [],
         'metrics': metrics or {},
     }
+    # #554: same rule -- a run without --relocate keeps the key set it had.
+    if relocation is not None:
+        doc['relocation'] = relocation
+    # #553: added CONDITIONALLY, never as a None placeholder -- a `pins` run's
+    # sidecar keeps the eleven keys it has always had, byte for byte.
+    if diagnosis is not None:
+        doc['diagnosis'] = diagnosis
     try:
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(doc, f, indent=1, sort_keys=True)
@@ -278,6 +355,79 @@ def write_round_sidecar(work: str, rnd: int, *, board: str, routed: str,
         print(f"  (round sidecar not written: {e})")
         return ''
     return path
+
+
+def relocate_round(pcb_data, pcb_file, blocks, *, block=None, refs=None,
+                   ignore_nets=None, max_corridor_mm=None, clearance=None):
+    """Propose ONE bounded block relocation on this round's board (#554).
+
+    Returns a `relocate.Relocation`, always -- a refusal is a result and carries
+    its own named reason, never a count.
+
+    Two things this has to get right, and both are invisible if it does not:
+
+    * The state is built with **`move_refs=None`**. `QuenchState.__init__` locks
+      every ref OUTSIDE `move_refs`, and this loop passes its target selection as
+      `move_refs` a few lines later. Handed such a state the solve would have no
+      free neighbours, would answer `no_room_at_any_dose` on every board, and
+      would look exactly like a correct negative result.
+    * `build_neighbor_lists` is never called, so the travel budget stays infinite
+      and the outline gate's cached reach stays conservative -- which is why the
+      pruning caveat in `quench._group_offsets` does not apply here, and why
+      #554's three named invariants are not engaged rather than "unlocked".
+    """
+    import fnmatch
+    import pose_score
+    from placement import diagnosis as _diag, relocate as _rel
+    from placement import routability as _routab
+
+    pcb = pcb_data
+    state = pose_score.make_state(pcb, pcb_file, clearance=clearance or 0.25)
+    ids = _diag.ignore_net_ids(pcb, ignore_nets or [])
+    units_src = dict(blocks or {})
+    if refs:
+        named = sorted({r for pat in refs
+                        for r in fnmatch.filter(sorted(pcb.footprints), pat)})
+        if len(named) < 2:
+            return _rel.Relocation(
+                refusal='no_diagnosed_block: --relocate-refs matched %d part(s)'
+                        % len(named))
+        # MERGE, never replace. Replacing the derived dict left every OTHER
+        # block as loose singletons, so the pass tore them apart while its own
+        # docstring promised "so does every untouched decap cluster": measured
+        # on tigard, the refs arm split `decap:U5` in half and bought a 2x
+        # larger dose partly by doing so. The named refs are removed from any
+        # block they were in -- they are the unit now -- and the rest keep
+        # their rigidity.
+        chosen = 'refs:%s' % ','.join(refs)
+        named_set = set(named)
+        units_src = {k: [r for r in v if r not in named_set]
+                     for k, v in units_src.items()}
+        units_src = {k: v for k, v in units_src.items() if len(v) >= 2}
+        units_src[chosen] = named
+        block = chosen
+    if block is None:
+        ranked = sorted(_routab.block_displacements(state, units_src,
+                                                    ignore_net_ids=ids),
+                        key=lambda d: (-d.distance_mm, d.block))
+        if not ranked:
+            return _rel.Relocation(
+                refusal='block_has_no_target: no derived block has a foreign-pad '
+                        'centroid to move toward')
+        block = ranked[0].block
+    disp = {d.block: d for d in _routab.block_displacements(
+        state, units_src, ignore_net_ids=ids)}.get(block)
+    if disp is None:
+        return _rel.Relocation(
+            block=block,
+            refusal='block_has_no_target: %s connects to nothing outside itself, '
+                    'so it has no direction to move in' % block)
+    direction = (disp.net_centroid[0] - disp.centroid[0],
+                 disp.net_centroid[1] - disp.centroid[1])
+    return _rel.relocate_block(state, units_src, block, direction,
+                               want_mm=disp.distance_mm,
+                               max_corridor_mm=max_corridor_mm,
+                               clearance=clearance)
 
 
 def moves_from_placements(parent_pcb, placements) -> list:
@@ -324,6 +474,66 @@ def nets_to_refs(pcb_data, net_names, max_pins, locked_patterns):
             continue
         out.add(ref)
     return out
+
+
+def _locked_out(pcb_data, locked_patterns):
+    """Refs an operator's --lock globs exclude. The LOCK rule only.
+
+    Deliberately NOT `nets_to_refs`'s whole filter: that also drops anything
+    over `--max-target-pins`, and bypassing the pin cap is the entire point of
+    #553 -- "the part that needs to move is never a passive". So a diagnosis
+    may offer a 100-pin IC the pin selector would have refused, and that is the
+    feature. It may not offer a part the operator locked, and that is the rule.
+    The ranking says what SHOULD move; the lock says what MAY."""
+    import fnmatch
+    if not locked_patterns:
+        return set()
+    return {r for r in (pcb_data.footprints or {})
+            if any(fnmatch.fnmatch(r, p) for p in locked_patterns)}
+
+
+def block_census(pcb_data) -> str:
+    """One line per group source and what it derives on THIS board.
+
+    Printed once, before round 0, because `--group-by auto` derives NOTHING on
+    most of the tracked corpus -- 5 of the 6 boards `docs/placement-predictors.md`
+    grades on are flat schematics whose `(path ...)` entries are all distinct
+    top-level uuids, and no corpus board carries a KiCad `(group ...)` at all.
+    An operator who asked for a signal that cannot run on their board should
+    read that here rather than infer it from a selection that never changes.
+    """
+    from placement.groups import SOURCES
+    out = []
+    for src in SOURCES:
+        try:
+            got = derive_groups(pcb_data, (src,))
+        except Exception as e:                             # noqa: BLE001
+            out.append(f'    {src:<10} unavailable ({type(e).__name__})')
+            continue
+        n = sum(len(v) for v in got.values())
+        out.append(f'    {src:<10} {len(got):>3} block(s), {n:>4} part(s)'
+                   + ('' if got else '   <- nothing on this board'))
+    return '\n'.join(out)
+
+
+def diagnose_round(pcb_data, pcb_file, blocks, metrics, *, ignore_nets=None,
+                   budget=None, top_k=None):
+    """One round's diagnosis. Always a `placement.diagnosis.Diagnosis`.
+
+    Split out of main() so it can be exercised without a router, and so the
+    expensive parts -- a QuenchState and two legality graders -- are visible in
+    one place. Returns a `placement.diagnosis.Diagnosis`.
+    """
+    from placement import diagnosis as _diag
+    state = _diag.make_state(pcb_data, pcb_file)
+    legality = _diag.legality_defects(pcb_data, pcb_file=pcb_file)
+    return _diag.diagnose(
+        state, pcb_data, blocks,
+        blocker_report=metrics.get('blocker_report'),
+        legality=legality,
+        ignore_net_ids=sorted(_diag.ignore_net_ids(pcb_data, ignore_nets)),
+        budget=budget,
+        top_k=_diag.TOP_K if top_k is None else top_k)
 
 
 def better(a, b):
@@ -405,6 +615,39 @@ def main():
                         help="Cost multiplier for failed nets: scales their "
                              "airwire length and any crossing they take part "
                              "in (default: 3.0)")
+    parser.add_argument("--target-select", choices=('pins', 'diagnosis'),
+                        default='pins',
+                        help="How to choose which parts the quench may move. "
+                             "'pins' (default, unchanged): the pad owners of "
+                             "the failed and blocker nets, minus anything over "
+                             "--max-target-pins. 'diagnosis' (#553): rank "
+                             "blocks and loose parts on three signals -- "
+                             "connectivity-centroid displacement, blocked "
+                             "cells owned, and legality defect pairs -- and "
+                             "take the round-robin union of their top-k. "
+                             "It also changes what --group-by hands the "
+                             "quench as a rigid body: diagnosis mode "
+                             "FREEZES the blocks before round 0, because "
+                             "netprefix and decap membership is a "
+                             "function of poses the optimizer is moving. "
+                             "NO MEASUREMENT SHOWS 'diagnosis' ROUTES BETTER "
+                             "THAN 'pins'; see py_placer/placement/"
+                             "diagnosis.py. Requires --group-by for the "
+                             "displacement signal; the other two need none.")
+    parser.add_argument("--diagnosis-top-k", type=int, default=DIAGNOSIS_TOP_K,
+                        metavar="K",
+                        help=f"How many candidates each diagnosis signal "
+                             f"offers per sweep (default: {DIAGNOSIS_TOP_K}). "
+                             f"A report size, not a threshold. NOT usually "
+                             f"what bounds the move set: the loop budgets "
+                             f"each round at the number of parts the pin "
+                             f"filter would have offered, and that budget "
+                             f"is normally the binding constraint. And a "
+                             f"BLOCK IS ADDED WHOLE, so the budget is a floor "
+                             f"rather than a cap: measured at budget 8, "
+                             f"glasgow_revC selects 67 parts under --group-by "
+                             f"auto, because its one derivable block has 68 "
+                             f"members. The overshoot is reported")
     parser.add_argument("--group-by", default="none",
                         help="Move blocks of parts as one rigid body. Comma "
                              "list of: kicad, sheet, netprefix, decap; 'auto' = "
@@ -412,6 +655,51 @@ def main():
                              "in its whole block, so a block is no longer "
                              "half-frozen because its IC exceeds "
                              "--max-target-pins")
+    parser.add_argument("--relocate", action="store_true",
+                        help="Before each round's quench, propose ONE bounded "
+                             "block relocation (#554): move the diagnosed block "
+                             "toward the centroid of what it connects to, "
+                             "letting neighbours yield while their relative "
+                             "order is held as a hard constraint, minimising "
+                             "total displacement. DEFAULT OFF, AND THE ROUTED "
+                             "A/B WENT AGAINST IT: over 3 evidence cells it "
+                             "recovered damage on all 3 (median delta +0.57), "
+                             "but on only 2 boards where the acceptance rule "
+                             "counts 3, and place_route_loop with the pin gate "
+                             "lifted reached a STRICTLY BETTER routed result on "
+                             "2 of those 3 (tests/stress/"
+                             "block_relocation_study.py). What IS measured is "
+                             "the mechanism: over 24 blocks on the 9 corpus "
+                             "boards that have a measurable block, letting "
+                             "neighbours yield bought >= 1mm more travel than "
+                             "freezing them on 11 of them, spanning 6 boards, "
+                             "max 16.66mm -- though the MEDIAN cell reaches "
+                             "1.03mm against a median want of 10.36mm (tests/"
+                             "stress/relocation_reach.py). The round's own "
+                             "re-route is the judge, and a rejected round "
+                             "reverts byte for byte")
+    parser.add_argument("--relocate-block", default=None, metavar="NAME",
+                        help="Relocate this derived block by name instead of "
+                             "the most displaced one. Names come from "
+                             "--list-groups / the group-source census")
+    parser.add_argument("--relocate-refs", nargs="+", default=None,
+                        metavar="GLOB",
+                        help="Relocate an EXPLICIT set of refs as one rigid "
+                             "body, bypassing block derivation entirely. This "
+                             "is what separates 'the relocation worked' from "
+                             "'the diagnosis picked right' in a study, since "
+                             "--target-select diagnosis is itself a measured "
+                             "null (#553)")
+    parser.add_argument("--relocate-max-corridor", type=float, default=None,
+                        metavar="MM",
+                        help="Refuse a relocation whose neighbours must travel "
+                             "more than this in total, and try a shorter dose. "
+                             "Unset = no budget, and the corridor is reported "
+                             "rather than bounded. Worth setting: measured on "
+                             "sonde_u, relocating a 3-part block 8.96mm moved "
+                             "17 neighbours a combined 53.92mm -- legal, "
+                             "minimal for that dose, and a bigger disturbance "
+                             "than #554's 'move only diagnosed blocks' asks for")
     parser.add_argument("--accept-cmd", default=None, metavar="CMD",
                         help="External accept test, run after each round's route as "
                              "CMD <placed> <routed> <route.json>; print one line "
@@ -471,6 +759,7 @@ def main():
                         help="frames per placement glide in --movie; 0 = no "
                              "glide, cut straight to the new placement")
     add_board_state_args(parser)
+    add_intent_arg(parser)
     add_lock_advisor_args(parser)
     add_tidiness_args(parser)
 
@@ -486,6 +775,76 @@ def main():
     if not args.suggest_locks and not args.output_file:
         parser.error("output_file is required (except with --suggest-locks)")
 
+    # #702: the intent is loaded BEFORE record_invocation, for the reason
+    # place_optimize gives -- an exit 2 on an unreadable intent touches no
+    # file, and a manifest carrying a command that produced nothing leaves the
+    # next step's input made by nothing. It needs only `args`, so it is safe
+    # this early; the board-dependent RESOLVE stays down beside the
+    # board-state gates.
+    from placement.cli_gates import load_intent_or_exit
+    _intent, _rc = load_intent_or_exit(args)
+    if _rc:
+        return _rc
+
+    # BEFORE record_invocation, for the reason stated just above for the
+    # intent: an exit 2 must touch no file, and a manifest carrying a command
+    # that produced nothing leaves the next step's input made by nothing.
+    # These two need only `args`, so nothing forced them to sit after it.
+    #
+    # The numeric checks BELOW still do, and that is pre-existing rather than
+    # made worse here: moving them has its own blast radius, because a manifest
+    # replaying a bad --max-displacement gets a recorded line today and would
+    # stop getting one. So the rule as stated is not yet what the whole
+    # function does -- said here rather than left for a reader to notice.
+    try:
+        group_sources = parse_sources(args.group_by)
+    except GroupError as exc:
+        parser.error(str(exc))
+    # #553. Only the DISPLACEMENT signal needs blocks; the other two rank loose
+    # parts, so a source that derives NOTHING on this board is a warning about
+    # a lost signal (printed by `block_census` before round 0), not a refusal.
+    # `--group-by none` with `--target-select diagnosis` is different: it is a
+    # contradiction the operator can only have typed by accident.
+    #
+    # `--suggest-locks` is report-only -- it advises, prints and exits without
+    # deriving a group, running a diagnosis or routing anything -- so refusing
+    # it for the shape of a flag it never reads is a refusal with no subject.
+    if (args.target_select == 'diagnosis' and not group_sources
+            and not args.suggest_locks):
+        parser.error(
+            "--target-select diagnosis ranks derived BLOCKS on connectivity "
+            "displacement, and --group-by none derives none. Pass a source "
+            "list -- 'auto,netprefix,decap' is the one that derives something "
+            "on most tracked boards; bare 'auto' (kicad,sheet) derives NOTHING "
+            "on five of the six this repo grades placement on -- or drop "
+            "--target-select. (The other two signals, blocked cells and "
+            "legality pairs, do rank loose parts, so a source that derives "
+            "nothing is a warning printed before round 0, not this refusal.)")
+    if args.diagnosis_top_k < 1:
+        parser.error("--diagnosis-top-k must be >= 1")
+
+    # #554. Refused BEFORE round 0's route, so a bad invocation costs no routing.
+    if args.relocate and not group_sources and not args.relocate_refs \
+            and not args.suggest_locks:
+        parser.error(
+            "--relocate moves a derived BLOCK, and --group-by none derives "
+            "none. Pass a source list -- 'auto,netprefix,decap' derives "
+            "something on most tracked boards, while bare 'auto' (kicad,sheet) "
+            "derives NOTHING on five of the six this repo grades placement on "
+            "-- or name the parts yourself with --relocate-refs.")
+    for _flag, _val in (('--relocate-block', args.relocate_block),
+                        ('--relocate-refs', args.relocate_refs),
+                        ('--relocate-max-corridor',
+                         args.relocate_max_corridor)):
+        if _val is not None and not args.relocate:
+            parser.error("%s only applies with --relocate" % _flag)
+    if args.relocate_block and args.relocate_refs:
+        parser.error("--relocate-block names a DERIVED block and "
+                     "--relocate-refs bypasses derivation; pass one or neither")
+    if args.relocate_max_corridor is not None and args.relocate_max_corridor < 0:
+        parser.error("--relocate-max-corridor is a total travel in mm; "
+                     "negative is not a smaller budget")
+
     if not args.suggest_locks:
         try:
             from redo_record import record_invocation
@@ -497,10 +856,6 @@ def main():
         parser.error("--max-displacement must be >= 0")
     if args.ratsnest_screen < 0:
         parser.error("--ratsnest-screen must be >= 0 (0 disables it)")
-    try:
-        group_sources = parse_sources(args.group_by)
-    except GroupError as exc:
-        parser.error(str(exc))
     if args.swap_max_displacement is not None:
         if args.swap_max_displacement < 0:
             parser.error("--swap-max-displacement must be >= 0")
@@ -529,10 +884,56 @@ def main():
     # so refusing here saves minutes-to-hours of A* that would fail everything
     # and then quench a pile.
     from placement.placement_state import gate_or_exit
-    gate_or_exit(parse_kicad_pcb(args.input_file), args.input_file,
+    _pcb0 = parse_kicad_pcb(args.input_file)
+    gate_or_exit(_pcb0, args.input_file,
                  'place_route_loop.py',
                  allow_unplaced=args.allow_unplaced,
                  allow_routed=args.allow_routed)
+
+    # #702: resolved ONCE, here, and FROZEN for the whole run.
+    #
+    # Here, because a malformed intent has the same cost profile as the
+    # board-state gates just above -- round 0 routes the whole board, and
+    # refusing after that has already run wastes exactly what those gates
+    # exist to save.
+    #
+    # Frozen, because block membership is a function of refs, globs and
+    # derived groups, not of poses, so no round can legitimately change it --
+    # and re-deriving under the optimizer's own moves is precisely the
+    # non-stationarity that made `corridor_weight` NOT ADOPTED (quench.py:
+    # "the optimizer minimises against corridors frozen at construction while
+    # the grader re-derives them from the final poses"). A gate that re-elects
+    # its own identity mid-run is not monotone.
+    intent_gate = None
+    if _intent is not None:
+        from placement.cli_gates import resolve_intent_gate_for_cli
+        intent_gate, _ = resolve_intent_gate_for_cli(
+            _intent, _pcb0, group_sources, args.intent)
+
+    # #553: in diagnosis mode the block universe is resolved ONCE, here, and
+    # frozen -- the same non-stationarity argument the intent gate makes just
+    # above. `netprefix` and `decap` derivation both read POSES, so a universe
+    # re-derived each round is re-elected by the optimizer's own moves.
+    #
+    # The `pins` path deliberately keeps its per-round derivation: freezing it
+    # would change the default, and the default must stay byte-identical.
+    _keep_cells = args.target_select == 'diagnosis'
+    frozen_blocks = None
+    diagnosis_rounds = 0
+    fallback_rounds = 0
+    select_overlap = []
+    fallback_reasons = []
+    if args.target_select == 'diagnosis':
+        print("Group sources on this board:")
+        print(block_census(_pcb0))
+        frozen_blocks = derive_groups(_pcb0, group_sources)
+        if frozen_blocks:
+            print(f"  frozen for the run: {describe(frozen_blocks)}")
+        else:
+            print("  WARNING: --group-by "
+                  f"{args.group_by} derives NO block on this board, so the "
+                  "connectivity-displacement signal cannot run. The blocked-"
+                  "cell and legality signals rank loose parts and still can.")
 
     work = args.work_dir or os.path.dirname(os.path.abspath(args.output_file))
     os.makedirs(work, exist_ok=True)
@@ -551,7 +952,8 @@ def main():
     best = run_route(cur_file, os.path.join(work, 'loop_round0_routed.kicad_pcb'),
                      args.route_args, os.path.join(work, 'loop_round0_route.log'),
                      json_file=os.path.join(work, 'loop_round0_route.json'),
-                     extra_targets=args.target_nets)
+                     extra_targets=args.target_nets,
+                     keep_blocker_cells=_keep_cells)
     # Round 0 is the unconditional baseline, so the judge is not a gate here --
     # it is scored only so later rounds have an incumbent to beat.
     best_score = None
@@ -574,6 +976,13 @@ def main():
     # the run cannot report what it started from, which is half of any delta.
     baseline = dict(best)
     accepted_rounds = 0
+    # #554. `relocate_applied == 0` beside a non-zero `relocate_refused` is the
+    # machine-readable statement that the flag did nothing this run -- the same
+    # anti-degeneration device --target-select carries.
+    relocate_applied = 0
+    relocate_refused = 0
+    relocate_reasons: list = []
+    relocate_records: list = []
     rounds_run = 0
 
     max_disp = args.max_displacement
@@ -592,9 +1001,57 @@ def main():
             break
 
         pcb_data = parse_kicad_pcb(cur_file)
-        targets = nets_to_refs(pcb_data,
-                               best['failed_nets'] + best['blockers'],
-                               args.max_target_pins, args.lock)
+        # ALWAYS computed, in both modes. In `pins` it is the selection; in
+        # `diagnosis` it is the BUDGET -- the diagnosis is offered exactly the
+        # number of parts the pin filter would have spent, so the two selectors
+        # are the same size by construction -- and it is the change detector
+        # that says whether the flag did anything at all.
+        pins_targets = nets_to_refs(pcb_data,
+                                    best['failed_nets'] + best['blockers'],
+                                    args.max_target_pins, args.lock)
+        targets = set(pins_targets)
+        diag = None
+
+        if args.target_select == 'diagnosis' and pins_targets:
+            diag = diagnose_round(
+                pcb_data, cur_file, frozen_blocks or {}, best,
+                ignore_nets=args.ignore_nets, budget=len(pins_targets),
+                top_k=args.diagnosis_top_k)
+            print(diagnosis_format(diag))
+            # An operator's --lock is never overridden by a diagnosis: the
+            # ranking says what SHOULD move, the lock says what MAY. Resolved
+            # ONCE per round -- putting the call in a comprehension condition
+            # re-scans every footprint against every glob per selected ref.
+            locked = _locked_out(pcb_data, args.lock)
+            picked = {r for r in diag.selected if r not in locked}
+            why = ''
+            if diag.degenerate:
+                why = diag.fallback_reason()
+            elif not picked:
+                # A selection wholly inside --lock is a FALLBACK, not a
+                # decision. Without this the round reached the "no movable
+                # target parts" stop and ended the whole run, while the verdict
+                # reported rounds_diagnosis=1 and rounds_fallback=0 -- the run
+                # where the flag did the most damage reading as the run where
+                # it worked.
+                why = (f'every one of the {len(diag.selected)} diagnosed '
+                       f'part(s) matches --lock')
+            if why:
+                fallback_rounds += 1
+                fallback_reasons.append(f'round {rnd}: {why}')
+                print(f"  target-select: FALLING BACK to pins this round -- "
+                      f"{why}")
+            else:
+                diagnosis_rounds += 1
+                targets = picked
+            select_overlap.append({'round': rnd, 'pins': len(pins_targets),
+                                   'diagnosis': len(targets),
+                                   'overlap': len(targets & pins_targets),
+                                   # Without this a fallback round and a round
+                                   # where the diagnosis independently agreed
+                                   # with pins carry identical numbers.
+                                   'fallback': bool(why)})
+
         if not targets:
             print("No movable target parts - stopping.")
             break
@@ -605,7 +1062,11 @@ def main():
         # no longer half-frozen because its IC exceeds --max-target-pins.
         blocks = {}
         if group_sources:
-            blocks = derive_groups(pcb_data, group_sources)
+            # In diagnosis mode the universe was frozen before round 0 (poses
+            # move, and `netprefix`/`decap` derivation reads poses); in pins
+            # mode it is derived per round, exactly as before.
+            blocks = (dict(frozen_blocks) if frozen_blocks is not None
+                      else derive_groups(pcb_data, group_sources))
             pulled = {r for refs in blocks.values() for r in refs
                       if any(m in targets for m in refs)}
             if pulled - targets:
@@ -613,6 +1074,75 @@ def main():
             targets |= pulled
             blocks = {n: r for n, r in blocks.items()
                       if any(m in targets for m in r)}
+
+        # #554: ONE bounded block relocation, before the quench, on its own
+        # board. It has to be its own board rather than a merge into the
+        # quench's placements: `_candidate_positions` generates around each
+        # part's SEED, so a block relocated inside one QuenchState would be
+        # frozen out of every local refinement that follows it. Re-seeding from
+        # the written board is what lets the quench polish the new pose.
+        # A rejected round still reverts to `cur_file` byte for byte, because
+        # `cur_file` is not reassigned unless the round is accepted.
+        quench_base = cur_file
+        parent_pcb = pcb_data          # before the relocation re-parses it
+        reloc = None
+        if args.relocate:
+            # `blocks` is already filtered to the ones with a targeted member,
+            # and that is the right scope rather than an accident: #554 says
+            # "move only DIAGNOSED blocks", and a block none of whose members
+            # owns a failed or blocker net is not implicated in this round's
+            # failure. `--relocate-refs` bypasses the whole derivation for a
+            # caller who has decided otherwise.
+            reloc = relocate_round(
+                pcb_data, cur_file, blocks,
+                block=args.relocate_block, refs=args.relocate_refs,
+                ignore_nets=args.ignore_nets,
+                max_corridor_mm=args.relocate_max_corridor,
+                clearance=args.clearance)
+            print('  ' + relocate_format(reloc).replace('\n', '\n  '))
+            if reloc.refusal:
+                relocate_refused += 1
+                relocate_reasons.append('round %d: %s' % (rnd, reloc.refusal))
+            else:
+                relocate_applied += 1
+                # `applied` is the field a machine consumer filters on, and it
+                # was dead: nothing set it, so three written relocations all
+                # serialised as "applied": false in the same JSON that said
+                # rounds_applied: 3.
+                reloc.applied = True
+                relocate_records.append(dict(reloc.to_dict(), round=rnd))
+                quench_base = os.path.join(work,
+                                           f'loop_round{rnd}_relocated.kicad_pcb')
+                write_placed_output(cur_file, quench_base,
+                                    [dict(m) for m in reloc.moves])
+                copy_siblings(cur_file, quench_base)
+                pcb_data = parse_kicad_pcb(quench_base)
+                # The block moved, so every part it may now pull in moved with
+                # it; the targets were resolved against the OLD poses and stay
+                # valid as a REF SET, which is all `move_refs` consumes.
+                targets |= set(reloc.members)
+
+        def _round_moved(placements):
+            """Every pose this ROUND changed, against the board it started from.
+
+            Two bugs this closes, both in the movie's only input. `pcb_data` is
+            the RE-PARSED relocated board by the time the sidecar is written, so
+            measuring against it recorded each `from` as the pose the part had
+            AFTER the relocation -- disagreeing with the `parent` the same
+            sidecar names, on 6 of 10 refs. And a part the relocation moved but
+            the quench did not was absent entirely, so `movie_camera` framed the
+            shot off the wrong set and never animated the relocation leg at all.
+
+            The quench's entry wins where both moved the same ref: it is the
+            final pose, and the relocation's is an intermediate.
+            """
+            rows = moves_from_placements(parent_pcb, list(reloc.moves) if
+                                         (reloc is not None and not reloc.refusal)
+                                         else [])
+            by_ref = {r['reference']: r for r in rows}
+            for r in moves_from_placements(parent_pcb, placements or []):
+                by_ref[r['reference']] = r
+            return [by_ref[k] for k in sorted(by_ref)]
 
         name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
         net_weights = {name_to_id[n]: args.failed_net_weight
@@ -627,7 +1157,7 @@ def main():
 
         ratsnest = {}
         placements = quench(
-            pcb_data, pcb_file=cur_file,
+            pcb_data, pcb_file=quench_base,
             max_displacement=max_disp,
             swap_max_displacement=swap_cap,
             step=args.step,
@@ -649,11 +1179,20 @@ def main():
             metrics_out=ratsnest,
             groups=blocks,
             verbose=args.verbose,
+            intent_gate=intent_gate,
         )
 
-        if not placements:
+        if not placements and (reloc is None or reloc.refusal):
+            # #702: name the declared gate when it is what refused, or
+            # widening the radius reads as "try harder" while every
+            # extra pose it offers is one the gate also refuses.
+            _ref = (ratsnest.get("intent_gate") or {}).get("rejected", 0)
             print(f"  Quench found no improving moves - widening the nudge cap"
-                  f" (swap cap stays {swap_cap:.1f}mm).")
+                  f" (swap cap stays {swap_cap:.1f}mm)."
+                  + (f" NOTE: the declared-intent gate refused {_ref} pose(s)"
+                     f" this round; a wider radius offers more poses it also"
+                     f" refuses. Relax the zone tolerance or drop --intent if"
+                     f" the loop stalls here." if _ref else ""))
             max_disp *= 1.5
             continue
 
@@ -663,7 +1202,12 @@ def main():
         # the board for courtyards and locked refs) and no round-0 bootstrap.
         rn_before = ratsnest.get('before', {})
         rn_after = ratsnest.get('after', {})
-        skip, why = _ratsnest_screen(rn_before, rn_after, args.ratsnest_screen)
+        # A relocation-only round has no quench delta to screen on, and the
+        # screen exists to skip a ROUTE that the ratsnest says cannot help. With
+        # no `before`/`after` it would compare two empty dicts and skip the one
+        # round the relocation was made for.
+        skip, why = ((False, '') if not placements else
+                     _ratsnest_screen(rn_before, rn_after, args.ratsnest_screen))
         if why:
             print(f"  ratsnest: {why}")
         if skip:
@@ -676,18 +1220,27 @@ def main():
             write_round_sidecar(work, rnd, board=None, routed=None,
                                 parent=cur_file, accepted=False, screened=True,
                                 targets=targets, groups=blocks,
-                                moved=moves_from_placements(pcb_data, placements))
+                                moved=_round_moved(placements),
+                                # A screened round writes no board, so this
+                                # sidecar is the ONLY record of what the
+                                # diagnosis chose -- the one round that cannot
+                                # afford to lose it.
+                                diagnosis=(diagnosis_to_json(diag)
+                                           if diag is not None else None),
+                                relocation=(reloc.to_dict()
+                                            if reloc is not None else None))
             max_disp *= 1.5
             continue
 
         cand_file = os.path.join(work, f'loop_round{rnd}.kicad_pcb')
-        write_placed_output(cur_file, cand_file, placements)
+        write_placed_output(quench_base, cand_file, placements)
 
         metrics = run_route(
             cand_file, os.path.join(work, f'loop_round{rnd}_routed.kicad_pcb'),
             args.route_args, os.path.join(work, f'loop_round{rnd}_route.log'),
             json_file=os.path.join(work, f'loop_round{rnd}_route.json'),
-            extra_targets=args.target_nets)
+            extra_targets=args.target_nets,
+            keep_blocker_cells=_keep_cells)
         # Report-only, exactly like the pad_pairs_* keys above: every round now
         # records placement quality next to the routing result. better() is
         # deliberately untouched -- reworking the comparator is #458's scope.
@@ -718,8 +1271,12 @@ def main():
                                 work, f'loop_round{rnd}_routed.kicad_pcb'),
                             parent=cur_file, accepted=_accepted,
                             targets=targets, groups=blocks,
-                            moved=moves_from_placements(pcb_data, placements),
-                            metrics=metrics)
+                            moved=_round_moved(placements),
+                            metrics=metrics,
+                            diagnosis=(diagnosis_to_json(diag)
+                                       if diag is not None else None),
+                            relocation=(reloc.to_dict()
+                                        if reloc is not None else None))
         if _accepted:
             print(f"  ACCEPTED (was failures={best['failures']},"
                   f" iterations={best['iterations']:,})")
@@ -765,9 +1322,43 @@ def main():
         'max_displacement': args.max_displacement,
         'max_target_pins': args.max_target_pins,
         'group_by': args.group_by,
+        # #553. `target_select` is an additive echo, in the same class as
+        # `group_by` above. The rest appear ONLY in diagnosis mode, and
+        # `rounds_diagnosis == 0` beside a non-zero `rounds_fallback` is the
+        # machine-readable statement that the flag did nothing this run.
+        'target_select': args.target_select,
+        'relocate': bool(args.relocate),
         'work_dir': work,
         'output': args.output_file,
     }
+    if args.relocate:
+        from placement.relocate import NO_EFFICACY_CLAIM as _NEC
+        summary.update({
+            'relocate_rounds_applied': relocate_applied,
+            'relocate_rounds_refused': relocate_refused,
+            'relocate_refusals': relocate_reasons,
+            'relocate_proposals': relocate_records,
+            'relocate_max_corridor_mm': args.relocate_max_corridor,
+            # A relocation of a block the diagnosis picked inherits the
+            # diagnosis's own measured null, and the presence of a solver does
+            # not launder it. A machine consumer cannot read the numbers above
+            # without also reading this.
+            'relocate_efficacy': _NEC,
+        })
+    if args.target_select == 'diagnosis':
+        from placement.diagnosis import NO_EFFICACY_CLAIM
+        summary.update({
+            'target_select_rounds_diagnosis': diagnosis_rounds,
+            'target_select_rounds_fallback': fallback_rounds,
+            'target_select_fallback_reasons': fallback_reasons,
+            'target_select_overlap': select_overlap,
+            'target_select_top_k': args.diagnosis_top_k,
+            'target_select_blocks': len(frozen_blocks or {}),
+            # Not a courtesy. A machine consumer reading this verdict cannot
+            # get the numbers without also getting the sentence that says no
+            # measurement supports them.
+            'target_select_efficacy': NO_EFFICACY_CLAIM,
+        })
     print("JSON_SUMMARY: " + json.dumps(summary, sort_keys=True))
 
     if args.movie is not None:
@@ -793,6 +1384,12 @@ def main():
 
 
 if __name__ == "__main__":
-    # The return value used to be dropped here, so a refusal deeper in main()
-    # still exited 0 (the #551 family). Propagate it.
-    sys.exit(main() or 0)
+    # Declare the lever for the WHOLE run, so every pose this CLI
+    # writes carries its name. Nothing called declare_lever outside
+    # tests, so the unaided instrument had no armed state at all:
+    # unarmed it is silent, and armed by hand it refused the engine.
+    from placement.provenance import declare_lever
+    with declare_lever('place_route_loop.py', sys.argv):
+        # The return value used to be dropped here, so a refusal deeper in main()
+        # still exited 0 (the #551 family). Propagate it.
+        sys.exit(main() or 0)

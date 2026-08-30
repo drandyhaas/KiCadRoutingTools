@@ -1222,13 +1222,25 @@ def write_drc_settings_to_project(board, *, clearance=None, hole_to_hole=None,
                                   edge_clearance=None, track_width=None,
                                   via_diameter=None, via_drill=None,
                                   keep_thermal=False, diff_pair_gap=None,
-                                  diff_pair_width=None) -> Optional[str]:
+                                  diff_pair_width=None,
+                                  clamp_nondefault_netclasses=False
+                                  ) -> Optional[str]:
     """Loosen the open project's `.kicad_pro` DRC floors to the routed values.
 
     Returns the `.kicad_pro` path written (the caller should prompt the user to
     reload the project), or None if the live board's project file could not be
     located on disk -- e.g. an unsaved board, where there is no sibling
     `.kicad_pro` to edit yet.
+
+    `clamp_nondefault_netclasses` is #439/#768's writeback half: lower each
+    NON-Default class to the routed floor. It defaults False here and NOT to
+    `fix_project_for_output`'s own True, because the CLI switches it on the
+    PRESENCE of `--clearance` while this function is always called with a
+    clearance value -- so inheriting that default made every IPC writeback
+    clamp, including runs on #768's OMITTED branch, where the tabs priced each
+    net at its OWN class and the writeback then rewrote the class narrower than
+    the run had honoured. The caller decides, off the Min-Clearance override
+    (`gui_utils.apply_drc_settings_fix`).
     """
     from fix_kicad_drc_settings import fix_project_for_output
 
@@ -1242,7 +1254,9 @@ def write_drc_settings_to_project(board, *, clearance=None, hole_to_hole=None,
             edge_clearance=edge_clearance, track_width=track_width,
             via_diameter=via_diameter, via_drill=via_drill,
             diff_pair_gap=diff_pair_gap, diff_pair_width=diff_pair_width,
-            keep_thermal=keep_thermal, verbose=True)
+            keep_thermal=keep_thermal,
+            clamp_nondefault_netclasses=clamp_nondefault_netclasses,
+            verbose=True)
     except Exception as e:
         print(f"(skipped DRC-settings write-back: {e})")
         return None

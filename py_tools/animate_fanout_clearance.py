@@ -228,9 +228,18 @@ def main():
     p.add_argument("input_file", help="Post-fanout KiCad PCB file")
     p.add_argument("output_file", nargs="?", help="Output GIF "
                    "(default: input_capmove.gif)")
-    p.add_argument("--clearance", type=float, default=defaults.CLEARANCE)
+    # #768: None = "resolve it from the board", the same contract
+    # --board-edge-clearance has had since #733. This front writes no
+    # project, but it must PRICE identically to place_fanout_clearance.py
+    # or the GIF shows a repair the tool does not perform.
+    p.add_argument("--clearance", type=float, default=None,
+                   help="Copper clearance CEILING in mm; omitted = the "
+                        "board's own Default net class (see #768).")
     p.add_argument("--grid-step", type=float, default=defaults.GRID_STEP)
-    p.add_argument("--board-edge-clearance", type=float, default=0.55)
+    # None, not 0.55 (#733): the engine resolves it, so the GIF frames the
+    # same usable box the run it visualises actually used. A private copy
+    # here would be a third notion of the margin -- the defect #733 closed.
+    p.add_argument("--board-edge-clearance", type=float, default=None)
     p.add_argument("--capture-radius", type=float, default=2.0)
     p.add_argument("--default-via-size", type=float, default=DEFAULT_VIA_SIZE)
     p.add_argument("--near-margin", type=float, default=1.0)
@@ -259,7 +268,8 @@ def main():
     rec = _Recorder()
     repair_fanout_clearance(
         pcb_data, pcb_file=args.input_file,
-        clearance=args.clearance, grid_step=args.grid_step,
+        clearance=args.clearance, netclass_ceiling=args.clearance,
+        grid_step=args.grid_step,
         board_edge_clearance=args.board_edge_clearance,
         near_margin=args.near_margin, capture_radius=args.capture_radius,
         default_via_size=args.default_via_size, step=args.step,

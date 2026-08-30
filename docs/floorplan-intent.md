@@ -18,13 +18,36 @@ python3 py_tools/check_floorplan.py board.kicad_pcb --intent floorplan.json
 python3 py_tools/check_floorplan.py board.kicad_pcb --intent floorplan.json --json findings.json
 ```
 
-The intent is also a GENERATOR input, not only a grader's: `place_seed.py`
-turns a declared intent into an initial placement for an unplaced board
-(zones, edge bands, locks and decap rules become placement constraints, and
-the emitted seed is graded against the same intent it was built from), and
-`place_portfolio.py` uses the intent as the hard gate plus the `health`
-signals when ranking K perturbed placement candidates. See
-`placement/README.md` for both.
+The intent is also a GENERATOR input, not only a grader's, and it now has
+**three** distinct jobs:
+
+1. **A construction source.** `place_seed.py` turns a declared intent into an
+   initial placement for an unplaced board — zones, edge bands, keep-outs,
+   locks and decap rules become placement constraints, and the emitted seed is
+   graded against the same intent it was built from.
+2. **A hard per-move gate inside the optimizer (#702).** Every CLI that
+   quenches — `place_optimize.py`, `place_route_loop.py`, `place_seed.py`'s
+   polish and `place_portfolio.py`'s per-candidate quench — takes `--intent`
+   and refuses any move that breaks a declared zone, keep-out or exclusive
+   zone. Before this, the intent reached `place_seed` and stopped, so the two
+   tools that run the most quench iterations in a real chain could walk a part
+   straight out of a zone the file declared. Measured on ulx3s: the seed grades
+   clean, an ungated quench manufactures 4 `zone_containment` errors, a gated
+   one manufactures none.
+3. **A rank gate and a health source.** `place_portfolio.py` ranks K perturbed
+   candidates only if they grade error-free, using the `health` signals in the
+   rank key.
+
+See `placement/README.md` for all of them.
+
+**The gate is MONOTONE: it prevents a walk-out, it does not repair one.** A
+part that arrives already outside its zone may improve or hold, never worsen —
+so on a board whose seed already violates, the correct outcome is *the seed's
+count, held*, not zero.
+
+> **Careful with a self-emitted intent.** `--emit-intent` run on the board you
+> are repairing records that board's damage as the requirement. Before #702
+> that only mis-graded; now it also **steers the optimizer toward the damage**.
 
 ## The board outline is not editable by this toolchain
 
@@ -91,6 +114,100 @@ knowingly.)
 }
 ```
 
+### Every key, and what happens to one you misspell
+
+An unknown key is **refused at load time, at every level** — not dropped. A
+typo'd key that is silently ignored is a constraint the author believes they
+set and the grader never checks, which is the same failure `block_unresolved`
+exists to prevent, one level down. The message names the key that was wrong and
+lists the ones that were accepted:
+
+```
+edge_connectors[0]: unknown key(s) max_setback. Known: class, context, edge,
+max_setback_mm, note, observed_overhang_mm, overhang_capped, overhang_mm, ref,
+source, suspect, suspect_reason
+```
+
+| object | keys |
+|---|---|
+| top level | `schema`, `kind`, `board`, `units`, `min_reader`, `envelope`, `defaults`, `blocks`, `keepouts`, `edge_connectors`, `decaps`, `must_lock`, `legality_budget`, `health`, `severity`, `overlap_waivers`, `context` |
+| `envelope` | `rect`, `tolerance_mm` |
+| `defaults` | `zone_tolerance_mm` |
+| `blocks[]` | `name`, `group`, `refs`, `zone`, `side`, `exclusive`, `tolerance_mm`, `note`, `context` |
+| `keepouts[]` | `name`, `rect`, `circle`, `sides`, `allow`, `note`, `context` |
+| `edge_connectors[]` | `ref`, `edge`, `overhang_mm`, `max_setback_mm`, `class`, `note`, `context`, and the emitter-written `source`, `suspect`, `suspect_reason`, `overhang_capped`, `observed_overhang_mm` |
+| `edge_connectors[].overhang_mm` | `min`, `max` |
+| `decaps` | `max_distance_mm`, `exempt`, `search_radius_mm` |
+| `legality_budget` | `overlap_area`, `oob_count`, `oob_amount` (`oob_area` refused — see below) |
+| `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids` |
+| `health.bus_corridors[]` | `name`, `nets`, `width_mm` |
+| `severity` | any of the 13 rule names below |
+| `overlap_waivers[]` | `pair`, `reason`, `context` |
+| `must_lock` | a list of reference globs (no nested keys) |
+
+`severity` keys are checked too. The settable names are the nine rules —
+`envelope`, `zone_containment`, `zone_side`, `zone_exclusive`, `keepout`,
+`edge_connector`, `decap_distance`, `must_lock`, `legality` — plus the four
+findings raised outside the rule loop: `intent_zone_outside_envelope`,
+`intent_zone_overlap`, `block_unresolved`, `intent_zone_in_keepout`.
+`{"decap_distanc": "warn"}` is a
+demotion that never happens, so it is refused rather than accepted.
+
+### `context` is the slot for everything that is not a claim
+
+`context` is **deliberately open** — free-form keys, at the top level and on
+every `blocks[]`, `keepouts[]`, `edge_connectors[]` and `overlap_waivers[]`
+entry. Nothing reads it and no rule grades it; it is where a run records why a
+claim is what it is:
+
+```jsonc
+{ "ref": "J1", "edge": "east",
+  "context": { "why": "the mating face is on the east wall of the enclosure",
+               "rejected_alternative": "north, blocked by the display window" } }
+```
+
+It is open for the same reason everything else is strict. With nowhere to put
+reasoning, it drifts into the graded keys — a recorded run had
+`edge_connectors[]` entries carrying `band_basis`, `why`, `why_not_repaired`
+and `rejected_alternative`, which every consumer ignored. `note` is not the
+place either: it is grepped for the substring `SUSPECT`, so appending prose to
+it can change behaviour. A `context` value must still be an object; the keys
+inside it are yours.
+
+### Versioning: `schema` is the format, `min_reader` is the vocabulary
+
+`schema` is matched **exactly**, so bumping it invalidates every existing
+intent file at once — far too blunt for "this build learned a new field".
+
+So field-level compatibility is a second number. `READER_VERSION` (currently
+`1`) is what this build can act on, and an intent sets `min_reader` when a
+claim must not be silently ignored:
+
+```jsonc
+{ "schema": 1, "kind": "floorplan-intent", "min_reader": 2, ... }
+```
+
+A build whose `READER_VERSION` is lower **refuses the file** rather than
+grading it without the claim — checked before anything else is read, because
+grading it halfway is the same wrong answer as grading it fully. A build older
+than the field itself refuses `min_reader` as an unknown top-level key, which
+is the same answer.
+
+The policy, and what each half is for. Refusing unknown keys already covers
+**new** fields: an older build does not know the key, so it refuses the file
+outright and says which key it did not understand. That is loud, automatic,
+and needs no `min_reader`.
+
+What refusal cannot see is a key an older build *does* know:
+
+- its accepted **values** widened (a new `edge` direction, a new `class`);
+- its **meaning** changed, so an old build acts on it differently;
+- a **default** changed, so the same file grades differently than intended.
+
+Those are what `min_reader` is for, and the file's author is the only one who
+can know it applies. `READER_VERSION` bumps in the commit that makes such a
+change, and files depending on it declare `min_reader`.
+
 ### `refs` is the primitive, not `group`
 
 Sheet group keys are opaque uuid paths — KiCad's `Sheetname` property is absent
@@ -125,11 +242,11 @@ for it, and the reason is printed:
 | rule | fires when | measured with |
 |---|---|---|
 | `envelope` | the declared envelope is not the board's outline | `board_bounds` |
-| `zone_containment` | a member's courtyard leaves its block's zone | `GradedPart.rect` |
+| `zone_containment` | a member's courtyard leaves its block's zone | `GradedPart.rect`. **Enforced, not only graded, since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702)** — the quench refuses such a MOVE, through the same `zone_escape` this rule calls |
 | `zone_side` | a member is on the other face | `legality.footprint_side` |
-| `zone_exclusive` | a non-member intrudes on a reserved zone | `rect_overlap_area` |
-| `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect |
-| `edge_connector` | overhang outside `[min,max]`, or the wrong edge | `BoardOutlineGate.rect_outside_amount` |
+| `zone_exclusive` | a non-member intrudes on a reserved zone | `rect_overlap_area`. **Enforced since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702)**, same way |
+| `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect. **Enforced, not only graded, since [#701](https://github.com/drandyhaas/KiCadRoutingTools/issues/701)** — the seat search refuses such a pose through the same `keepout_hit` this rule calls — and since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702) the quench refuses such a MOVE through it too |
+| `edge_connector` | overhang outside `[min,max]`, or the wrong edge; a `connector_affinity` entry seated more than 3 mm from every edge fires at **warn** whatever the configured severity | `BoardOutlineGate.rect_outside_amount`, `edge_clearance` |
 | `decap_distance` | a decoupling cap is too far from its own IC | `groups.decap_tethers` |
 | `must_lock` | a declared-critical part is not locked in the file | `parser.extract_locked_refs` |
 | `legality` | overlap or off-board parts exceed a budget | `QuenchState.legality_metrics` |
@@ -141,6 +258,42 @@ A grader with its own idea of what "legal" means grades the reimplementation
 rather than the board — so where re-deriving was plausible, a test asserts the
 two agree exactly (all 34 of ulx3s's cap distances identical to the grouper's,
 all five legality numbers identical to the quench's).
+
+### Which rules the SEARCH can see
+
+A constraint the search cannot see can only ever produce a failing grade. This
+is the whole table, and the "no" column is the part worth reading — each of
+them is a decision, not an omission.
+
+There is a **third** consumer beside the two columns below, added by
+[#698](https://github.com/drandyhaas/KiCadRoutingTools/issues/698):
+`place_seed --reseat REF` measures the same three enforced rules *before and
+after* the pass, through the same `zone_escape` / `keepout_hit` /
+`rect_overlap_area` the grade calls, and uses them two ways — the per-term
+**vector** as a licence (no declared claim may get worse, termwise) and the
+breach **count** as one of the terms an explicit re-seat may be accepted *on*.
+It is a measurement, not a per-pose gate: arming the monotone zone gate on that
+path would make the re-seat refuse its own target, which is why
+`pose_score.make_state` hands it keep-outs and withholds zones. `reseat_scope`
+reports the whole picture in `accept_basis`.
+
+| rule | graded | seat search (#701) | quench gate (#702) | if not, why not |
+|---|---|---|---|---|
+| `zone_containment` | yes | via `zone_gate` | **yes** | — |
+| `zone_exclusive` | yes | no | **yes** | the seeder has no verdict string for this refusal yet |
+| `keepout` | yes | **yes** | **yes** | — |
+| `must_lock` | yes | — | **by freezing** | it is a claim about the FILE; no pose satisfies or violates it |
+| `edge_connector` | yes | anchor tier | **by freezing** | two of its three sub-claims are bounds on being *off* the board, so a per-pose term would fight the containment gate rather than complement it |
+| `zone_side` | yes | — | no | **vacuous, not conservative**: the quench never flips a side, so the term is invariant under every move it can make. Reported once at load instead |
+| `envelope` | yes | — | no | a claim about the intent FILE against the board, not about any pose |
+| `decap_distance` | yes | scope stage | no | graded in a currency the optimizer does not carry — pad centroid to an IC's pad bbox inflated 0.5 mm, not courtyard to courtyard. A gate in the wrong currency can *admit what the grade flags*, which is worse than no gate. And the cap→IC tether is re-elected from live poses, so a per-move form would have the `corridor_weight` non-stationarity problem too |
+| `legality` | yes | — | no | a whole-board aggregate against a BUDGET, so a per-pose form is non-local: whether A's move is admissible would depend on B's violation |
+
+Enforcing is not free, and the price is recorded rather than described:
+`tests/test_placement_ab.py` carries four `intent-*` rows and
+`tests/placement_ab_baseline.json` the numbers. A hard constraint removes poses
+from the search, so `crossings` and `hpwl` can get worse — on ulx3s they do,
+and that row is pinned `regress` with the containment errors going 4 → 0.
 
 ### A through-hole part is in a keep-out from either side
 
@@ -324,3 +477,147 @@ This is the same spatial incoherence that makes sheet blocks useless for
 Parts already overhanging the outline are recorded as `edge_connectors` by
 observation, which is what stops `oob_count` reporting a card edge or USB shell
 as a defect forever.
+
+With `--declare-classes`, connector-family parts that claim no edge (headers,
+JST, terminal blocks; `part_class` calls them `connector_affinity`) are also
+recorded, with `"class": "connector_affinity"` and **no `edge`** (naming one
+would be an invention). The grade then flags such a part seated more than
+3 mm from every edge at `warn` only, because legitimately interior connectors
+exist; write `max_setback_mm` or `edge` on the entry to make it a real claim
+at the configured severity.
+
+These entries are **declarations, not seat claims**, and the placement engines
+do not act on them. `edge_connectors` therefore holds two populations, and
+`Intent.edge_claims()` is the split: it drops `connector_affinity` and is what
+`place_seed` (which LOCKS edge refs for its polish quench), `place_reconstruct`
+(banded off-outline allowance, exchange-stage exclusion) and
+`reconstruct.classify` (the anchor tier) read. The `edge_connector` **rule**
+reads the whole key, because flagging an interior pose is the entry's only
+purpose. Writing `max_setback_mm` or `edge` on an entry changes its class-based
+severity, not its membership -- to hand a part the edge-part treatment in the
+engines, declare it with an edge class.
+
+The `overlap_area` budget is **withheld** when the emitting board carries a
+blocking body pair, or an unwaived courtyard interpenetration past the
+blocking floors: baking the number would bless the board it was measured on.
+`context.budget_withheld` names each withheld key and why, so a reader can tell
+"withheld" from "forgot"; declare the budget by hand if the overlap is by
+design.
+
+A withheld key is **abstained at grade time, not passed**. `check_floorplan
+--intent` reads `context.budget_withheld`, reports every withheld key that the
+intent does not also declare under `N declared value(s) NOT DERIVABLE --
+not graded, not passed`, and carries them as `budget_abstained` in `--json` and
+as `budget_abstained` / `budget_abstained_keys` in `JSON_SUMMARY`. When the
+whole budget is empty the `legality` rule does not run at all, and its skip
+reason names the withholding rather than saying only "the intent declares no
+legality_budget". Declaring the key by hand overrides the note: a declared
+budget is graded.
+
+The withholding channel is **not legality-only**. `_WITHHELD_RULE` maps each
+withholdable key to the rule it disarms and to the test for "declared by hand
+anyway", so a withheld `decaps.max_distance_mm` reaches `decap_distance`'s skip
+reason exactly as `overlap_area` reaches `legality`'s. A key that is in
+`budget_withheld` but in no such mapping still abstains — reported as not
+derivable, blamed on no rule — rather than being dropped, so a typo'd
+withholding note is visible instead of silent.
+
+## `--declare-decaps`: a decap limit read off the board (#704)
+
+`emit_intent` wrote `decaps: {}` as a constant, so `rule_decap_distance` could
+never fire on an auto-emitted intent. With `--declare-decaps` it derives
+`max_distance_mm` from the board's own tethers.
+
+**The statistic is `ceil(max)`, and the argument is a fixed point, not a
+statistic.** An emitted intent is a baseline to tighten: emit, grade clean,
+re-emit, get the same limit. Only the max has that property. The median is
+refuted by measurement — `glasgow_revC`'s tether median is **0.0000**, because
+58 of its 87 caps sit inside their IC's bounding box and clamp to zero, so a
+median limit flags 29 caps on a healthy human-routed board at the first
+emission. A high percentile has no fixed point at all: it flags ~5% by
+construction, forever, and every violation is then manufactured by the emitter
+rather than found on the board.
+
+`_ceil4`, not `round`, and derived from the **unrounded** max: `round(v, 4)`
+can land below the measured value, so the document would fail against the very
+board it was written from. That bites on 3 of the 9 tracked boards
+(splitflap_driver 3.4617228369700497 → 3.4617, ulx3s 4.714904558949195 →
+4.7149, glasgow_revC 4.786912496589008 → 4.7869). `context.decap_census`
+therefore carries `max_mm` unrounded and `max_mm_display` for the reader.
+
+### When it is withheld, and why the issue's own guard could not be used
+
+The obvious guard — withhold when the emitting board already violates the
+number — is **unreachable**: `ceil(max(observed))` is ≥ every observed value by
+construction, so it would be a branch that never executes, which is worse than
+absent because it reads like a guard.
+
+The reachable analogue is **censoring**. `groups.decap_tethers` drops any cap
+further than `DECAP_RADIUS_MM` (5 mm) from a chip carrying its rail, so the
+observed distribution is censored and a limit read off the survivors can bless
+a board whose caps have left decoupling range. Measured over the tracked
+boards:
+
+| board | tethers ≤5 mm | beyond | censored | max (≤5 mm) | worst beyond |
+|---|---|---|---|---|---|
+| tigard | 25 | 1 | 0.04 | 3.0650 | 6.17 |
+| glasgow_revC | 87 | 5 | 0.05 | 4.7869 | 10.34 |
+| splitflap_driver | 11 | 1 | 0.08 | 3.4617 | **19.30** |
+| watchy | 24 | 2 | 0.08 | 3.7525 | 11.16 |
+| ulx3s | 53 | 7 | 0.12 | 4.7149 | 12.24 |
+| kit-dev-coldfire | 41 | 12 | 0.23 | 4.8990 | — |
+| interf_u_unrouted | 1 | 4 | **0.80** | 4.5800 | 19.82 |
+| sonde_u | **0** | 5 | **1.00** | — | 15.58 |
+
+Healthy 0.04–0.23, degenerate 0.80–1.00. So the limit is withheld when there
+are **no** tethers, **fewer than `DECAP_MIN_SAMPLE` (3)** — a max over one
+sample is a coordinate, not a limit — or **more than `DECAP_MAX_CENSORED`
+(0.25)** of the rail-sharing caps lie beyond the radius.
+
+A rejected alternative, recorded so it is not re-proposed: withhold when
+`max > K × p75` (the max is a tail outlier over its own body). Built and
+measured, and it does **not** separate — healthy splitflap_driver scores 2.46
+and mid-repair `tigard_placed` 2.22.
+
+### What the census discloses that the rule cannot see
+
+`context.decap_census` is written on **every** emission, with or without the
+flag, so a reader of the document can tell "no cap is far from its IC" from
+"nobody measured". It carries the metric, the search radius, the tether and IC
+counts, the max and median, and — the point of it — `beyond_radius`,
+`beyond_radius_refs` and `worst_beyond_mm`.
+
+That last group is a **known, unfixed hole**, disclosed rather than closed: the
+emitter and the rule both call `decap_tethers` at the same 5 mm truncation, so
+`splitflap_driver` emits a limit of 3.4618 while a rail-sharing cap sits
+**19.30 mm** from its IC, invisible to both. `rules_run` goes up; that cap is
+still ungraded.
+
+### Declaring this key CHANGES PLACEMENT
+
+It is not a grading-only knob, which is why it is opt-in, default off, and on
+its own flag rather than folded into `--declare-classes`. `place_seed` reads
+`decaps.max_distance_mm` and, when it is set, pulls every two-net-bearing-pad
+`C*` out of radial zone packing into its per-supply-pin stage. Measured:
+
+| board | seeder scope | graded tethers | in scope, never graded |
+|---|---|---|---|
+| ulx3s | 70 | 53 | 17 |
+| glasgow_revC | 92 | 87 | 5 |
+| watchy | 28 | 24 | 4 |
+| splitflap_driver | 12 | 11 | 1 |
+
+The two populations differ because the two "is this a decap" predicates
+differ — the grouper tests *exactly two distinct net ids*, the seeder *exactly
+two net-bearing pads* — and the metrics differ too. `context.decap_census`
+carries `seeder_scope` and `seeder_scope_ungraded`, and `--emit-intent` prints
+the same warning. Reconciling the predicates is a separate change.
+
+### `keepouts` stays empty, and says so
+
+A keep-out is a mechanical fact — an enclosure rib, a standoff, a battery, a
+display window, an antenna clearance — and none of those can be read off a
+board, so the emitter keeps writing `[]`. What it should not do is leave the
+reader unable to tell *"none declared"* from *"not considered"*, so
+`context.keepouts_note` states which one it is. At grade time the same
+distinction is already carried by `rules_skipped` and by `--require-rules`.

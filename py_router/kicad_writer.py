@@ -282,16 +282,66 @@ DEFAULT_VIA_TENTING = {'tenting': '(front yes) (back yes)'}
 VIA_PROTECTION_TOKEN_ORDER = ('tenting', 'covering', 'plugging', 'capping', 'filling')
 
 
-def via_protection_sexpr(tenting_attrs: dict = None, net_name: str = None) -> str:
+
+
+def via_protection_sexpr(tenting_attrs: dict = None,
+                         net_name: str = None,
+                         inherit_when_unspecified: bool = False) -> str:
     """The `(tenting ...)` / `(covering ...)` / ... fragment to emit for a via.
 
     `tenting_attrs` is a Via's parsed spec ({token: raw inner text}); passing it
     keeps what the board actually specified. Without it the previous behavior
     stands -- front+back tenting on KiCad 10 output -- since there is no
     board-level policy to consult here (#489 §8).
+
+    `inherit_when_unspecified` is what an EXISTING via needs, and it exists
+    because `None` and `{}` cannot answer the question on their own (#741):
+
+      a real spec, either way            -> emit it
+      empty + inherit_when_unspecified   -> emit NOTHING. The board said
+                                            nothing about this via, so the via
+                                            keeps inheriting
+                                            `(setup (tenting ...))` -- which is
+                                            what it had before it was lifted.
+      empty, KiCad 10 (net_name given)   -> the #489 default, front+back
+      empty, numeric net                 -> nothing, as before
+
+    Pass `inherit_when_unspecified=True` whenever you are RE-PLACING a via --
+    rip-up, sub-grid nudge, tap relocation. `{}` is exactly what
+    `Via.tenting_attrs` holds for a via that carries no spec, so handing it back
+    verbatim without this flag re-stamps the via with front+back tenting it
+    never had.
+
+    A KEYWORD rather than a sentinel value, deliberately. A sentinel object has
+    to survive being copied, and the copy idiom this repo actually uses for a
+    spec is `dict(via.tenting_attrs or {})` (fanout_clearance.py, plane_io.py)
+    -- which turns any dict-shaped sentinel back into a plain `{}` and silently
+    restores the bug. Carrying the DECISION separately from the VALUE cannot be
+    undone by copying the value.
     """
-    spec = tenting_attrs if tenting_attrs else (
-        DEFAULT_VIA_TENTING if net_name is not None else {})
+    # No spec -> emit NOTHING, in either dialect. The via then carries no
+    # protection token, which in KiCad means `*_MODE_FROM_BOARD`: it follows the
+    # board's own `(setup ...)` policy.
+    #
+    # This used to fall through to DEFAULT_VIA_TENTING on KiCad-10 output, and
+    # that was wrong in KiCad's own terms. Probed against pcbnew 10.0.0: a via
+    # left at FROM_BOARD serialises with NO token, and the token appears ONLY
+    # when the via explicitly overrides -- so stamping one converted an
+    # inheriting via into an OVERRIDE, which is not a thing this tool was ever
+    # asked to decide.
+    #
+    # Measured cost of the old behaviour, over 886 corpus boards: three
+    # (nanovoltmeter_marge, hexberry_fpga, pedal_404) declare
+    # `(tenting (front no) (back no))` board-wide -- do not tent -- and every
+    # via the tool added to them was stamped `(front yes) (back yes)`, silently
+    # contradicting the board. Tenting a via meant to stay exposed is a fab
+    # error, not a cosmetic one. On a board whose policy is KiCad's factory
+    # default the two agree, which is why this hid for so long.
+    #
+    # `inherit_when_unspecified` is therefore now the behaviour in ALL cases.
+    # The parameter is kept because callers pass it and it still records, at the
+    # call site, that a via ALREADY EXISTED -- see generate_via_sexpr.
+    spec = tenting_attrs if tenting_attrs else {}
     if not spec:
         return ""
     def _one(token: str, inner: str) -> str:
@@ -306,6 +356,34 @@ def via_protection_sexpr(tenting_attrs: dict = None, net_name: str = None) -> st
     parts += [_one(t, v) for t, v in spec.items()
               if t not in VIA_PROTECTION_TOKEN_ORDER]
     return "".join(f"\n\t\t{p}" for p in parts)
+
+
+def via_net_name(net_id: int, net_id_to_name: dict) -> Optional[str]:
+    """This board's name for a net id, or None to mean "use the numeric dialect".
+
+    THE one resolver for every via emit site (#749 D). `net_id_to_name` has no
+    key `0` on any board -- `extract_nets` records `name_to_id[""] = 0` but never
+    builds a Net for id 0 -- so a legitimate no-net via missed the lookup at
+    every site and fell back to numeric. Measured: orangecrab_ext_pll resolves
+    169 nets and has no key 0.
+
+    That mattered more than a cosmetic dialect slip. `generate_via_sexpr` picks
+    the net dialect from `net_name` and the protection tokens from
+    `tenting_attrs` INDEPENDENTLY, so a numeric `(net N)` emitted alongside a
+    spec used to be a shape `extract_vias` could not read back at all -- the
+    barrel vanished from the model rather than merely losing its spec (#748,
+    fixed in the parser; this keeps the writer from producing the shape in the
+    first place). It also keeps a name-net board from acquiring numeric refs,
+    the mixed-dialect state `tests/stress/fix_mixed_net_refs.py` exists to undo.
+
+    An id the map genuinely does not know still answers None: that is a caller
+    passing an id from another board, and guessing a name for it would be worse
+    than the numeric ref.
+    """
+    if not net_id_to_name:
+        return None
+    name = net_id_to_name.get(net_id)
+    return '' if name is None and net_id == 0 else name
 
 
 def prevailing_via_protection(vias) -> Optional[dict]:
@@ -355,7 +433,8 @@ def prevailing_via_protection_in_text(content: str) -> Optional[dict]:
 
 def generate_via_sexpr(x: float, y: float, size: float, drill: float,
                        layers: List[str], net_id: int, free: bool = False,
-                       net_name: str = None, tenting_attrs: dict = None) -> str:
+                       net_name: str = None, tenting_attrs: dict = None,
+                       inherit_when_unspecified: bool = False) -> str:
     """Generate KiCad S-expression for a via.
 
     Args:
@@ -365,12 +444,18 @@ def generate_via_sexpr(x: float, y: float, size: float, drill: float,
             (Via.tenting_attrs). Pass it for any via that already existed so a
             ripped-and-re-placed via keeps its real tenting/plugging/filling
             instead of being re-stamped with front+back tenting (#489 §8).
+        inherit_when_unspecified: Pass True alongside it for a RE-PLACED via.
+            An empty spec then emits nothing, so a via that was inheriting the
+            board's `(setup (tenting ...))` keeps inheriting it rather than
+            gaining an explicit token it never had (#741). See
+            via_protection_sexpr.
     """
     layers_str = '" "'.join(layers)
     free_str = "\n\t\t(free yes)" if free else ""
     net_str = f'(net "{_escape_net_name(net_name)}")' if net_name is not None else f'(net {net_id})'
     # KiCad 10 adds structured tenting/covering/plugging fields after layers
-    tenting_str = via_protection_sexpr(tenting_attrs, net_name)
+    tenting_str = via_protection_sexpr(tenting_attrs, net_name,
+                                      inherit_when_unspecified)
     return f'''	(via
 		(at {x:.6f} {y:.6f})
 		(size {size})
@@ -859,7 +944,14 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
         input_path: Path to original .kicad_pcb file
         output_path: Path for output file
         tracks: List of track dicts with keys: start, end, width, layer, net_id
-        vias: List of via dicts with keys: x, y, size, drill, layers, net_id
+        vias: List of via dicts with keys: x, y, size, drill, layers, net_id;
+            optionally free, and the two protection keys (#749 A):
+            tenting_attrs (the via's own parsed spec) and
+            inherit_when_unspecified (True for a via that ALREADY EXISTED, so
+            one carrying no spec keeps inheriting the board's `(setup ...)`
+            rather than gaining a token). A via with neither key is new copper
+            and gets the board's prevailing convention. See
+            docs/api-kicad-writer.md.
         remove_vias: List of via dicts with keys: x, y (position to match for removal)
         add_teardrops: Add teardrop settings to every pad and via in the output.
             Here rather than in each fanout main() so bga_fanout and qfn_fanout
@@ -961,7 +1053,31 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
     # Generate via S-expressions
     if vias:
         for via in vias:
-            via_net_name = net_id_to_name.get(via['net_id']) if net_id_to_name else None
+            # #749 A: this writer had NO tenting_attrs parameter at all, and it
+            # also takes remove_vias -- so a via removed and re-added round-trips
+            # through here and comes back re-stamped. Which behaviour is right
+            # depends on the caller, so the via dict carries the answer:
+            #
+            #   fanout / route_planes  -> new copper, no keys: prevailing spec
+            #   route.py's #666 re-emit -> PRE-EXISTING copper the written file
+            #                              lost, so its own spec, and inherit
+            #                              when it had none
+            #
+            # `inherit_when_unspecified` is the second half and not redundant:
+            # {} is what Via.tenting_attrs holds for a via that inherits the
+            # board's `(setup ...)`, so without it such a via would silently
+            # GAIN the prevailing spec on the way back in.
+            # A via this call ADDS carries no spec and so emits no token: it
+            # INHERITS the board's `(setup ...)` policy, which is what pcbnew
+            # does for a via the GUI adds and what KiCad does for one the user
+            # places. Copying the board's PREVAILING per-via spec onto it (the
+            # #489 s8 rule) is retired -- measured over 886 corpus boards, a
+            # prevailing spec never once disagreed with the board's own setup,
+            # so it only ever wrote a redundant token that turned an inheriting
+            # via into an override. Worse, the tool then read its OWN stamps
+            # back as "the board's convention" on the next run.
+            existing = bool(via.get('inherit_when_unspecified'))
+            attrs = via.get('tenting_attrs')
             v = generate_via_sexpr(
                 via['x'],
                 via['y'],
@@ -970,7 +1086,12 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
                 via['layers'],
                 via['net_id'],
                 via.get('free', False),
-                net_name=via_net_name
+                # #749 D: the ONE resolver, so a no-net via does not fall to the
+                # numeric dialect on a name-net board (net 0 is missing from
+                # every map).
+                net_name=via_net_name(via['net_id'], net_id_to_name),
+                tenting_attrs=attrs,
+                inherit_when_unspecified=existing,
             )
             elements.append(v)
 

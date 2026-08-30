@@ -95,6 +95,40 @@ def test_single_summary_degrades_unchanged():
     print("  PASS: single-summary and empty cases")
 
 
+def test_disturbed_unowned_nets_survive_the_merge():
+    """#622 yw1: reconcile rip-victims OUTSIDE the sub-run's --nets scope
+    shipped open (one at ZERO copper) while the merged MIN said deficit 0 --
+    a later, narrower sub-run's summary carried none of the disclosure keys
+    and last-wins erased them. The victims must stay counted unless a later
+    pass CLASSIFIES them (routed = recovered; failed/open = owned there)."""
+    main = {'routed_single': ['X', 'V1', 'V2'], 'failed_single': ['Y'],
+            'total_iterations': 10}
+    reconcile = {'routed_single': ['Y'], 'failed_single': [],
+                 'coverage_gate_nets': ['V1'],
+                 'ripped_open_uncounted': ['V1', 'V2'],
+                 'terminal_restores': {'V1': 'stub', 'V2': 'stub'},
+                 'total_iterations': 5}
+    narrow_final = {'routed_single': [], 'failed_single': ['Z'],
+                    'total_iterations': 2}
+    m = merge_summaries([main, reconcile, narrow_final])
+    assert sorted(m['coverage_gate_nets']) == ['V1', 'V2'], m.get(
+        'coverage_gate_nets')
+    assert m['terminal_restores'] == {'V1': 'stub', 'V2': 'stub'}
+    assert m['multipoint_pads_total'] == 2, (
+        "each unowned victim must widen the deficit denominator by 1")
+    # a victim a LATER pass re-routed is recovered, not broken
+    recovered = merge_summaries(
+        [main, reconcile, dict(narrow_final, routed_single=['V2'])])
+    assert sorted(recovered['coverage_gate_nets']) == ['V1']
+    assert recovered['terminal_restores'] == {'V1': 'stub'}
+    # SAME-pass supersession, single-summary form (yv3: mark stub yet the
+    # pass-end routed_single, re-derived from the union-find, has the net)
+    solo = {'routed_single': ['W'], 'failed_single': [],
+            'terminal_restores': {'W': 'stub'}, 'total_iterations': 1}
+    assert merge_summaries([solo])['terminal_restores'] == {}
+    print("  PASS: disturbed-but-unowned nets survive the merge")
+
+
 def test_end_to_end_file_equals_merged_stdout():
     """The real thing: run route.py on an in-repo fixture and compare."""
     board = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
@@ -105,7 +139,7 @@ def test_end_to_end_file_equals_merged_stdout():
         js = os.path.join(td, 's.json')
         out = os.path.join(td, 's.kicad_pcb')
         r = subprocess.run([sys.executable, '-X', 'utf8',
-                            os.path.join(ROOT, 'route.py'), board, out,
+                            os.path.join(ROOT, 'py_router', 'route.py'), board, out,
                             '--nets', 'GND', '--json-out', js],
                            capture_output=True, text=True, encoding='utf-8',
                            errors='replace', cwd=ROOT)

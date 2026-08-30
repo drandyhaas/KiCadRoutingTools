@@ -972,7 +972,9 @@ def pair_channel_widths(pcb_data, *, clearance: float,
     in the channel -- the run-2 corridor law's inputs, measured instead of
     declared (Corridor.width_mm has only ever been an intent input).
 
-    The corridor is for the PARTS (measured, r=+0.41..+0.90 on 8/8 boards):
+    The corridor is for the PARTS (measured against THE GAP A HUMAN LEFT,
+    r=+0.41..+0.90 on 8/8 boards -- never against routed `blocking`, which no
+    predictor here has been correlated with; see docs/placement-predictors.md):
     each row reports the gap and the small parts whose bodies sit inside
     the channel rectangle between the two anchors."""
     from placement.legality import graded_parts_from_file, rect_gap
@@ -1007,3 +1009,49 @@ def pair_channel_widths(pcb_data, *, clearance: float,
                          'parts_in_channel': sorted(inside)[:12]})
     rows.sort(key=lambda r: r['channel_mm'])
     return rows
+
+
+def relief_move(rect_a, rect_b, need_mm, limit_mm=5.0, tol_mm=1e-6):
+    """How far must B move, per axis direction, for the A-B gap to reach need_mm?
+
+    Answers the question a throat measurement leaves open: "so what do I DO?".
+    Run 20 measured a 0.409 mm gap against a 0.450 mm need and then had to work
+    out by hand that moving R7 east by ~0.042 mm would clear it.
+
+    Bisection on `rect_gap`, which already returns the diagonal corner distance
+    for rects that miss on both axes -- i.e. exactly the geometry being measured.
+    Four axis directions; a direction that cannot reach `need_mm` within
+    `limit_mm` is omitted rather than reported as a large number.
+
+    Every result is stamped `bound: "lower"` and that is not decoration. This is
+    a TWO-BODY answer on a board with hundreds of bodies: moving B by this much
+    clears THIS pair and may create another. It is the smallest move that could
+    possibly work, never a solution.
+    """
+    from placement.legality import rect_gap
+
+    def shifted(d, t):
+        dx, dy = {'east': (t, 0.0), 'west': (-t, 0.0),
+                  'north': (0.0, -t), 'south': (0.0, t)}[d]
+        return (rect_b[0] + dx, rect_b[1] + dy,
+                rect_b[2] + dx, rect_b[3] + dy)
+
+    out = []
+    for d in ('east', 'west', 'north', 'south'):
+        if rect_gap(rect_a, shifted(d, limit_mm)) < need_mm - tol_mm:
+            continue                       # unreachable within the cap: say nothing
+        lo, hi = 0.0, limit_mm
+        if rect_gap(rect_a, rect_b) >= need_mm - tol_mm:
+            out.append({'dir': d, 'min_mm': 0.0, 'bound': 'lower'})
+            continue
+        for _ in range(60):
+            mid = (lo + hi) / 2.0
+            if rect_gap(rect_a, shifted(d, mid)) >= need_mm:
+                hi = mid
+            else:
+                lo = mid
+            if hi - lo < tol_mm:
+                break
+        out.append({'dir': d, 'min_mm': round(hi, 6), 'bound': 'lower'})
+    out.sort(key=lambda r: r['min_mm'])
+    return out

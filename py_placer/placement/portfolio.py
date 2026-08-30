@@ -634,7 +634,22 @@ def rank_key(cand: Candidate, q: int = 0) -> RankKey:
     """The static order: lexicographic over numbers the repo already trusts,
     most significant first, no new magic weights.
 
-      crossings      the first-class pre-route judge (raw count)
+      crossings      the first-class pre-route judge (raw count).
+                     UNRESOLVED, AND DISCLOSED: this slot ranks on crossings
+                     while the placement skill's non-negotiable 4 and
+                     evidence-map.md say to report crossings and NEVER gate on
+                     it. Both cannot be right. The evidence behind
+                     non-negotiable 4 is r = +0.780 against DISTANCE-TO-TRUTH,
+                     which is not a routability measurement; the evidence for
+                     this slot is that crossings is near-injective over a real
+                     slate, so it decides. #703 measured the missing half:
+                     within a board, rho(crossings, blocking) FAILS its sign
+                     rule (3 boards right, 1 wrong) -- and PASSES it once the
+                     quench-produced candidates are excluded, i.e. the answer
+                     depends on whether the sample contains placements made by
+                     an optimizer that minimises crossings. That does not
+                     license a reorder in either direction, so THE ORDER IS
+                     UNCHANGED. See docs/placement-predictors.md.
       inversions     the forced-crossing floor -- equal-crossings ties break
                      toward the more REMOVABLE set (pair_order is a lower
                      bound a router cannot beat)
@@ -720,7 +735,17 @@ def rule1_check(cand: Candidate, baseline: Candidate) -> List[str]:
     The hard gates in score_candidate are legality + intent (rule 2). This
     metric clause was DOCUMENTED as pre-applied but never was, so a
     candidate measuring worse on both proxies could top the slate and ship
-    through JSON_SUMMARY['best'] unremarked. Pure: returns the violation
+    through JSON_SUMMARY['best'] unremarked.
+
+    THE CROSSINGS CLAUSE IS UNRESOLVED AND DISCLOSED. It BARS a candidate on
+    crossings while the drivers forbid gating on it (see `rank_key`). #703
+    measured rho(crossings, blocking) WITHIN a board and it fails the sign rule
+    with the quench candidates included and passes with them excluded, so
+    neither side is licensed. `docs/placement-predictors.md` pre-registers the
+    exit criterion: if a run finds >= 1 board where a rule-1 violator routed to
+    strictly LOWER blocking than the baseline, this clause is withdrawn -- and
+    the withdrawal keeps its row with its measured direction. Until then it
+    stands, unchanged. Pure: returns the violation
     strings; empty means it passes. Violators are still ranked, probed and
     recorded -- they are only barred from being the silent headline pick
     (select_best); a probe verdict that argues for one anyway is a decision

@@ -337,7 +337,7 @@ def _find_open_positions_multilayer(center_x, center_y, dir_x, dir_y, layer_idx,
                                     alt_layers, setback, pad_gap_half, label,
                                     layer_names, spacing_mm, config, obstacles,
                                     connector_obstacles, coord, neighbor_stubs,
-                                    offset_check=None):
+                                    offset_check=None, quiet=False):
     """_find_open_positions_laddered, but free to launch on an alternate routing
     layer reachable through the endpoint's via/THT barrel (issue #195).
 
@@ -350,7 +350,7 @@ def _find_open_positions_multilayer(center_x, center_y, dir_x, dir_y, layer_idx,
     cands, used, rotated = _find_open_positions_laddered(
         center_x, center_y, dir_x, dir_y, layer_idx, setback, pad_gap_half,
         label, layer_names, spacing_mm, config, obstacles, connector_obstacles,
-        coord, neighbor_stubs, offset_check=offset_check)
+        coord, neighbor_stubs, offset_check=offset_check, quiet=quiet)
     if cands and not rotated:
         return cands, used, rotated, layer_idx
 
@@ -361,10 +361,12 @@ def _find_open_positions_multilayer(center_x, center_y, dir_x, dir_y, layer_idx,
         a_cands, a_used, a_rot = _find_open_positions_laddered(
             center_x, center_y, dir_x, dir_y, alt, setback, pad_gap_half,
             label, layer_names, spacing_mm, config, obstacles,
-            connector_obstacles, coord, neighbor_stubs, offset_check=offset_check)
+            connector_obstacles, coord, neighbor_stubs, offset_check=offset_check,
+            quiet=quiet)
         if a_cands and not a_rot:
-            print(f"      {label}: {layer_names[layer_idx]} corridor jammed - "
-                  f"launching on {layer_names[alt]} (reachable through the endpoint via)")
+            if not quiet:
+                print(f"      {label}: {layer_names[layer_idx]} corridor jammed - "
+                      f"launching on {layer_names[alt]} (reachable through the endpoint via)")
             return a_cands, a_used, a_rot, alt
         if fallback is None and a_cands:
             fallback = (a_cands, a_used, a_rot, alt)
@@ -374,11 +376,171 @@ def _find_open_positions_multilayer(center_x, center_y, dir_x, dir_y, layer_idx,
     return [], setback, False, layer_idx
 
 
+def _net_name(pcb_data, net_id):
+    net = (getattr(pcb_data, 'nets', None) or {}).get(net_id)
+    return getattr(net, 'name', None) or f"<net {net_id}>"
+
+
+def _terminal_array_context(pcb_data, x, y, tol):
+    """(reference, pitch_mm, pad_count, has_interior) for the footprint whose pad
+    sits at (x, y), else None.
+
+    `has_interior` marks a true 2-D array -- the shape whose inner pads a surface
+    fan cannot reach, and so the shape that needs an under-pad escape (#764).
+    The pitch is a MINIMUM pad spacing (detect_bga_pitch), which reads half the
+    true pitch on a staggered array -- it is reported, never acted on.
+    """
+    from kicad_parser import detect_bga_pitch
+    for fp in (getattr(pcb_data, 'footprints', None) or {}).values():
+        for pad in fp.pads:
+            if abs(pad.global_x - x) > tol or abs(pad.global_y - y) > tol:
+                continue
+            xs = sorted({round(q.global_x, 3) for q in fp.pads})
+            ys = sorted({round(q.global_y, 3) for q in fp.pads})
+            interior = (len(xs) > 2 and len(ys) > 2 and any(
+                xs[0] < round(q.global_x, 3) < xs[-1] and
+                ys[0] < round(q.global_y, 3) < ys[-1] for q in fp.pads))
+            return fp.reference, detect_bga_pitch(fp), len(fp.pads), interior
+    return None
+
+
+def _own_pad_reach(pcb_data, net_id, term, config):
+    """Half-extent of the terminal's own pad at `term`, or 0 when the terminal is
+    not a pad (a stub tip, which has no own-copper shadow to hide in)."""
+    tol = _launch_assoc_tol(config)
+    best = 0.0
+    for pad in (getattr(pcb_data, 'pads_by_net', None) or {}).get(net_id, []):
+        if abs(pad.global_x - term[0]) <= tol and abs(pad.global_y - term[1]) <= tol:
+            best = max(best, max(pad.size_x, pad.size_y) / 2)
+    return best
+
+
+def _coupled_launch_needs_fanout(center_x, center_y, dir_x, dir_y, layer_idx,
+                                 alt_layers, setback, pad_gap_half, label,
+                                 layer_names, config, connector_obstacles,
+                                 coord, neighbor_stubs, pcb_data, p_term, n_term,
+                                 p_net_id, n_net_id):
+    """Tell "there is no room here" apart from "this needs a fanout I do not build" (#764).
+
+    Called only once the coupled sweep has failed at every rung AND every
+    rotation. Re-probes the identical ladder with the pair collapsed to a SINGLE
+    track: the un-inflated obstacle map (`base_obstacles`, no diff-pair extra
+    clearance), no P/N offset, and no partner-via offset check. A hit means the
+    copper fits and only the PAIR does not -- the terminal needs a coupled escape
+    (fanout), which no setback radius can substitute for. Returns a diagnosis
+    dict, or None when nothing launches here at all: that is a genuine
+    no-escape-path and is left classified as one.
+
+    This is the experiment #764's reporter ran by hand -- route.py routed all six
+    nets single-ended on the board where every pair reported no-escape-path --
+    done automatically on the already-failed path, so it costs nothing on a run
+    that routes.
+    """
+    single, _, _, _ = _find_open_positions_multilayer(
+        center_x, center_y, dir_x, dir_y, layer_idx, alt_layers,
+        setback, pad_gap_half, label, layer_names,
+        0.0,  # single track: no P/N offset from the centerline
+        config, connector_obstacles, connector_obstacles, coord, neighbor_stubs,
+        offset_check=None, quiet=True)
+    # A launch buried inside the terminal's OWN pad is not an escape, it is the
+    # pad: own-net copper is excluded from the obstacle map, so the pad's own
+    # footprint always reads "free" and any dense-enough board would answer
+    # "a single track fits" from the pad centre. Require a launch that has
+    # actually left the pad before believing it (negative control: 0.42mm pads
+    # on 0.5mm pitch, where nothing escapes at all, used to report needs-fanout).
+    reach = max(_own_pad_reach(pcb_data, p_net_id, p_term, config),
+                _own_pad_reach(pcb_data, n_net_id, n_term, config))
+    if reach > 0:
+        single = [c for c in single
+                  if min(math.hypot(coord.to_float(c[0], c[1])[0] - t[0],
+                                    coord.to_float(c[0], c[1])[1] - t[1])
+                         for t in (p_term, n_term)) > reach]
+    if not single:
+        return None
+    diag = {
+        'endpoint': label,
+        'corridor_mm': 2 * config.track_width + config.diff_pair_gap + 2 * config.clearance,
+        'track_width': config.track_width,
+        'diff_pair_gap': config.diff_pair_gap,
+        'clearance': config.clearance,
+        'launch_layer': layer_names[layer_idx],
+    }
+    ctx = _terminal_array_context(pcb_data, p_term[0], p_term[1],
+                                  _launch_assoc_tol(config))
+    if ctx:
+        diag['component'], diag['pitch_mm'], diag['pad_count'], diag['interior'] = ctx
+    return diag
+
+
+def _format_fanout_advice(diag, pcb_data, config, p_net_name, n_net_name):
+    """The user-facing #764 block: what was measured, then what to run.
+
+    Reports the corridor arithmetic and the pitch budget with the run's OWN
+    numbers substituted -- it never invents a via/track size, because the fab
+    floor is not knowable from here (see the budget rule in the routing skill).
+    """
+    label = diag['endpoint']
+    out = [f"  {label}: coupled launch needs a FANOUT, not more setback (#764)",
+           f"    a single track launches at this terminal; the coupled pair does not.",
+           f"    pair corridor = 2x{diag['track_width']:.3f} track + {diag['diff_pair_gap']:.3f} gap "
+           f"+ 2x{diag['clearance']:.3f} clearance = {diag['corridor_mm']:.3f}mm"]
+    pitch = diag.get('pitch_mm')
+    if diag.get('component'):
+        out.append(f"    terminal sits on {diag['component']}: {diag['pad_count']} pads, "
+                   f"min pad spacing {pitch:.3f}mm"
+                   f"{', interior pads present' if diag.get('interior') else ''}")
+    if pitch:
+        budget = config.via_size + config.track_width + 2 * config.clearance
+        verdict = "BUSTS the pitch" if budget > pitch else "fits"
+        out.append(f"    escape budget (via + track + 2x clearance <= pitch): "
+                   f"{config.via_size:.3f} + {config.track_width:.3f} + 2x{config.clearance:.3f} "
+                   f"= {budget:.3f}mm vs {pitch:.3f}mm pitch -- {verdict}")
+    if abs(diag['diff_pair_gap'] - diag['clearance']) < 1e-9:
+        out.append(f"    note: the P/N gap is {diag['diff_pair_gap']:.3f}mm because #441 floors it at "
+                   f"--clearance. A tighter --clearance lowers BOTH, and is the")
+        out.append(f"          cheapest thing to try first -- omitting --clearance takes the "
+                   f"board net-class value, which is often far looser than the fab floor.")
+    if diag.get('interior'):
+        board = getattr(pcb_data, 'source_path', None) or '<board>.kicad_pcb'
+        out += [f"    build a COUPLED escape before route_diff (P and N land on the same layer):",
+                f"      python3 py_router/bga_fanout.py {board} -o fanned.kicad_pcb \\",
+                f"        --component {diag.get('component', '<ref>')} --escape-method underpad "
+                f"--check-for-previous \\",
+                f'        --nets "{p_net_name}" "{n_net_name}" '
+                f'--diff-pairs "{p_net_name}" "{n_net_name}" \\',
+                f"        --track-width {config.track_width:.3f} --clearance {config.clearance:.3f} "
+                f"--via-size {config.via_size:.3f} --via-drill {config.via_drill:.3f}",
+                f"      (add this component's other pairs to --nets/--diff-pairs; size via/track to "
+                f"the budget above if it busts)"]
+    else:
+        out.append(f"    this terminal is not a 2-D array -- give the pair room, or route these "
+                   f"nets single-ended.")
+    return "\n".join(out)
+
+
+def _record_needs_fanout(diag, pcb_data, config, p_net_name, n_net_name, sink):
+    """Stamp the diagnosis (with its rendered advice) on the caller's sink.
+
+    Deliberately does NOT print. `_try_route_direction` runs several times per
+    pair -- both probe directions plus the full searches -- so a terminal whose
+    coupled launch fails in one attempt is routinely reached another way in the
+    next. Printing here cried fanout at pairs that went on to route. The advice
+    is rendered now (while the geometry is in hand) and printed by the caller
+    only once the pair has actually failed.
+    """
+    if sink is None or sink.get('needs_fanout'):
+        return
+    diag['advice'] = _format_fanout_advice(diag, pcb_data, config,
+                                           p_net_name, n_net_name)
+    sink['needs_fanout'] = True
+    sink['fanout_diag'] = diag
+
+
 def _find_open_positions_laddered(center_x, center_y, dir_x, dir_y, layer_idx,
                                   setback, pad_gap_half, label, layer_names,
                                   spacing_mm, config, obstacles,
                                   connector_obstacles, coord, neighbor_stubs,
-                                  offset_check=None):
+                                  offset_check=None, quiet=False):
     """_find_open_positions over a ladder of setback radii (issue #90).
 
     Returns (candidates, used_setback, rotated); `rotated` is True when the
@@ -394,7 +556,7 @@ def _find_open_positions_laddered(center_x, center_y, dir_x, dir_y, layer_idx,
             connector_obstacles, coord, neighbor_stubs,
             quiet_failure=True, offset_check=offset_check)
         if candidates:
-            if i > 0:
+            if i > 0 and not quiet:
                 print(f"      {label}: setback {ladder[0]:.2f}mm blocked, "
                       f"using {s:.2f}mm")
             return candidates, s, False
@@ -415,12 +577,14 @@ def _find_open_positions_laddered(center_x, center_y, dir_x, dir_y, layer_idx,
                 connector_obstacles, coord, neighbor_stubs,
                 quiet_failure=True, offset_check=offset_check)
             if candidates:
-                print(f"      {label}: escape direction blocked at every "
-                      f"setback - launching rotated {rot_deg:+d}deg at {s:.2f}mm")
+                if not quiet:
+                    print(f"      {label}: escape direction blocked at every "
+                          f"setback - launching rotated {rot_deg:+d}deg at {s:.2f}mm")
                 return candidates, s, True
 
-    print(f"  Error: {label} - no valid position at any setback/direction "
-          f"(ladder {', '.join(f'{s:.2f}' for s in ladder)}mm x full sweep)")
+    if not quiet:
+        print(f"  Error: {label} - no valid position at any setback/direction "
+              f"(ladder {', '.join(f'{s:.2f}' for s in ladder)}mm x full sweep)")
     return [], setback, False
 
 
@@ -1671,9 +1835,14 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
                          max_iterations_override=None, neighbor_stubs=None,
                          preferred_angles=None, direction_label=None, is_backward=False,
                          prox_h_cost=0, flip_source=False, flip_target=False,
-                         forced_source_dir=None, forced_target_dir=None):
+                         forced_source_dir=None, forced_target_dir=None,
+                         corridor_diag=None):
     """
     Attempt to route a diff pair in one direction.
+
+    corridor_diag: optional dict the caller owns; when the coupled launch fails
+    at a terminal that a SINGLE track could still launch from, it is stamped with
+    needs_fanout/fanout_diag (#764). Callers that omit it are unaffected.
 
     Args:
         preferred_angles: Optional (src_candidate, tgt_candidate) to use specific angles
@@ -1887,6 +2056,16 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
             offset_check=src_offset_check
         )
     if not src_candidates:
+        # #764: is this "no room" or "a fanout I do not build"? Re-probe single-ended.
+        _diag = _coupled_launch_needs_fanout(
+            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer,
+            src_alt_layers, setback_src, src_pad_gap_half, "source",
+            layer_names, config, connector_obstacles, coord, neighbor_stubs,
+            pcb_data, (p_src_x, p_src_y), (n_src_x, n_src_y), p_net_id, n_net_id)
+        if _diag:
+            _record_needs_fanout(_diag, pcb_data, config,
+                                 _net_name(pcb_data, p_net_id),
+                                 _net_name(pcb_data, n_net_id), corridor_diag)
         blocked = _collect_setback_blocked_cells(
             center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback_src,
             config, obstacles, connector_obstacles, coord
@@ -1910,6 +2089,16 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
             offset_check=tgt_offset_check
         )
     if not tgt_candidates:
+        # #764: is this "no room" or "a fanout I do not build"? Re-probe single-ended.
+        _diag = _coupled_launch_needs_fanout(
+            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer,
+            tgt_alt_layers, setback_tgt, tgt_pad_gap_half, "target",
+            layer_names, config, connector_obstacles, coord, neighbor_stubs,
+            pcb_data, (p_tgt_x, p_tgt_y), (n_tgt_x, n_tgt_y), p_net_id, n_net_id)
+        if _diag:
+            _record_needs_fanout(_diag, pcb_data, config,
+                                 _net_name(pcb_data, p_net_id),
+                                 _net_name(pcb_data, n_net_id), corridor_diag)
         blocked = _collect_setback_blocked_cells(
             center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback_tgt,
             config, obstacles, connector_obstacles, coord
@@ -3160,7 +3349,17 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                      else f"{layer_names[a_layer]}->{layer_names[b_layer]}")
         _pol_note = "" if best['p_sign'] == p_sign else " [polarity flipped: cleaner/shorter legs]"
         _result = {'new_segments': best['all_segs'], 'new_vias': best['all_vias'],
-                   'iterations': best['iters'], 'path_length': len(simplified)}
+                   'iterations': best['iters'], 'path_length': len(simplified),
+                   # #766: this route is a coupled MIDDLE plus point-to-point
+                   # (single-ended) terminal legs -- the terminals are NOT
+                   # coupled. Without this marker the pair reported
+                   # outcome 'coupled', which is defined as "both members
+                   # routed coupled", and nothing downstream could tell it
+                   # apart from a pair that really is coupled end to end. The
+                   # terminals are exactly where P/N geometry breaks, so it is
+                   # the half worth disclosing. Pure disclosure: no routing
+                   # code branches on it.
+                   'hybrid_escape': True}
         _msg = (f"  DIRECT HYBRID: coupled middle on {_mid_desc} + "
                 f"{len(leg_segs)} leg seg(s) ({best['iters']} iters){_pol_note}")
         # #269: reject a coupled middle that self-grazes (its own P/N pinch below
@@ -3955,6 +4154,10 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     probe_iterations = config.max_probe_iterations
 
     # Probe first direction
+    # #764: stamped when a terminal's coupled launch fails somewhere a single
+    # track could still launch -- "needs a fanout", not "no room".
+    _corridor_diag = {}
+
     route_data, first_probe_iters, first_blocked, first_best_combo = _try_route_direction(
         first_src, first_tgt, pcb_data, config, obstacles, base_obstacles,
         coord, layer_names, spacing_mm, p_net_id, n_net_id,
@@ -3962,7 +4165,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
         direction_label=first_label, is_backward=(first_label == "backward"),
         prox_h_cost=prox_h_cost,
         flip_source=flip_source, flip_target=flip_target,
-        forced_source_dir=forced_source_dir, forced_target_dir=forced_target_dir
+        forced_source_dir=forced_source_dir, forced_target_dir=forced_target_dir,
+        corridor_diag=_corridor_diag
     )
 
     # Check if first probe was blocked (all angles failed)
@@ -4001,7 +4205,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
             direction_label=second_label, is_backward=(second_label == "backward"),
             prox_h_cost=prox_h_cost,
             flip_source=flip_source, flip_target=flip_target,
-        forced_source_dir=forced_source_dir, forced_target_dir=forced_target_dir
+        forced_source_dir=forced_source_dir, forced_target_dir=forced_target_dir,
+        corridor_diag=_corridor_diag
         )
 
         # Check if second probe was blocked (all angles failed)
@@ -4046,6 +4251,10 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                     print(f"  {second_label} stuck ({second_probe_iters} < {probe_iterations}), {first_label}={first_probe_iters}")
                 return {
                     'failed': True,
+                    # #764: a setback failure exits HERE (0 iterations = stuck), not
+                    # via the both-directions-failed return below.
+                    'needs_fanout': bool(_corridor_diag.get('needs_fanout')),
+                    'fanout_diag': _corridor_diag.get('fanout_diag'),
                     'iterations': first_probe_iters + second_probe_iters,
                     'blocked_cells_forward': first_blocked if first_label == "forward" else second_blocked,
                     'blocked_cells_backward': second_blocked if first_label == "forward" else first_blocked,
@@ -4082,7 +4291,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                 direction_label=None, is_backward=(promising_label == "backward"),
                 prox_h_cost=prox_h_cost,
                 flip_source=flip_source, flip_target=flip_target,
-        forced_source_dir=forced_source_dir, forced_target_dir=forced_target_dir
+        forced_source_dir=forced_source_dir, forced_target_dir=forced_target_dir,
+        corridor_diag=_corridor_diag
             )
             total_iterations = first_probe_iters + second_probe_iters + full_iters
 
@@ -4115,7 +4325,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                     direction_label=None, is_backward=(fallback_label == "backward"),
                     prox_h_cost=prox_h_cost,
                     flip_source=flip_source, flip_target=flip_target,
-        forced_source_dir=forced_source_dir, forced_target_dir=forced_target_dir
+        forced_source_dir=forced_source_dir, forced_target_dir=forced_target_dir,
+        corridor_diag=_corridor_diag
                 )
                 total_iterations += fallback_full_iters
 
@@ -4148,6 +4359,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
         print(f"  No route found after {total_iterations} iterations (both directions)")
         return {
             'failed': True,
+            'needs_fanout': bool(_corridor_diag.get('needs_fanout')),
+            'fanout_diag': _corridor_diag.get('fanout_diag'),
             'iterations': total_iterations,
             'blocked_cells_forward': first_blocked_cells if first_label == "forward" else second_blocked_cells,
             'blocked_cells_backward': second_blocked_cells if first_label == "forward" else first_blocked_cells,

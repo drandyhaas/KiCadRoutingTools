@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""--protect-nets shields named nets from THIS run's rip machinery (#521).
+"""Protected nets are shielded from a run's rip machinery (#521).
 
 The run-5 defect this guards: only length-matched groups and routed diff pairs
 were protected, so a retry step's `--rip-existing-nets` glob happily ripped a
 hand-verified single-ended net as collateral (test-board: one rail rip opened
-19 pads). The flag gives the operator the same shield the matchers get:
+19 pads).
+
+NOTE: this was once driven by a `--protect-nets` flag, removed in 53a5a16e
+along with the other placement-only routing flags. Protection is deliberately
+FLAGLESS now (CLAUDE.md): the record lives in the sibling .kicad_pro, written
+by the engine and carried down the chain, so this test seeds it there. The
+contract it pins is unchanged:
 
   * matches are protected for the run (reason 'user'),
   * the protection persists to the output .kicad_pro, so LATER chain steps
@@ -21,6 +27,12 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+# #522: the engine lives in py_router/, the placer in py_placer/ --
+# ROOT alone does not make `import kicad_parser` work.
+for _p522 in ('py_router', 'py_placer'):
+    _d522 = os.path.join(ROOT, _p522)
+    if _d522 not in sys.path:
+        sys.path.insert(0, _d522)
 
 BOARD = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
 
@@ -28,7 +40,7 @@ BOARD = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
 def _run(board, out, extra, td):
     js = os.path.join(td, f'{os.path.basename(out)}.json')
     r = subprocess.run([sys.executable, '-X', 'utf8',
-                        os.path.join(ROOT, 'route.py'), board, out,
+                        os.path.join(ROOT, 'py_router', 'route.py'), board, out,
                         '--json-out', js] + extra,
                        capture_output=True, text=True, encoding='utf-8',
                        errors='replace', cwd=ROOT)
@@ -57,12 +69,21 @@ def test_protect_glob_rip_and_exact_override():
         gnd_before = _seg_count(r1, 'GND')
         assert gnd_before > 0, "setup: GND routed no copper"
 
-        # 2. a later step glob-rips it -- but the operator protected it
+        # 2. a later step glob-rips it -- but GND is protected.
+        #    53a5a16e REMOVED --protect-nets (the last placement-only routing
+        #    flags), and per CLAUDE.md protection is deliberately flagless:
+        #    the record lives in the sibling .kicad_pro, written by the engine
+        #    for matched groups / routed diff pairs and carried down the chain.
+        #    Seeding that record IS the modern equivalent of the old flag.
+        pro1 = os.path.splitext(r1)[0] + '.kicad_pro'
+        proj = json.load(open(pro1, encoding='utf-8')) if os.path.isfile(pro1) else {}
+        proj.setdefault('kicad_routing_tools', {})['protected_nets'] = {'GND': 'user'}
+        with open(pro1, 'w', encoding='utf-8') as fh:
+            json.dump(proj, fh, indent=2)
         r2 = os.path.join(td, 'r2.kicad_pcb')
         summary, out = _run(r1, r2,
                             ['--nets', '/OUT_A_PHASE_A',
-                             '--rip-existing-nets', 'GN?',
-                             '--protect-nets', 'GND'], td)
+                             '--rip-existing-nets', 'GN?'], td)
         assert _seg_count(r2, 'GND') == gnd_before, \
             "protected net's copper changed under a glob rip"
         skipped = summary.get('protected_skipped') or {}
@@ -112,7 +133,17 @@ def test_in_run_ladder_honors_exact_override():
     def _pcb(protection):
         p = SimpleNamespace()
         p.nets = {1: _Net('RAIL_A'), 2: _Net('LOCKED_B'), 3: _Net('FREE_C')}
-        p._protection_map_cache = dict(protection)
+        # protection_map also folds in KiCad-LOCKED copper (#521), which reads
+        # the board's segments/vias. The stub predates that and needs the
+        # fields to exist; empty means "nothing locked on the board", so the
+        # 'locked' reason in `protection` below is still what drives the case.
+        p.segments = []
+        p.vias = []
+        # cached_protection_map reads _protection_map_memo (renamed from
+        # _protection_map_cache); the stale name made the stub
+        # silently re-derive an EMPTY map, so the filter refused
+        # nothing and the test asserted against a no-op.
+        p._protection_map_memo = dict(protection)
         return p
 
     blockers = [SimpleNamespace(net_id=i) for i in (1, 2, 3)]

@@ -6,6 +6,7 @@ pair routing to avoid code duplication.
 """
 from __future__ import annotations
 
+import os
 import time
 from typing import List, Optional, Tuple, Dict, Set
 
@@ -354,7 +355,7 @@ def filter_already_routed(
             -- the model accepts pad<->zone kisses the exact fill denies
             (the ~0.10% residual FP class), which false-cleared oracle-punted
             custody nets as "Already fully connected".
-        fragment_gate: #549 A-2 -- a ZONE-LESS net whose pads grade connected
+        fragment_gate: #578 -- a ZONE-LESS net whose pads grade connected
             but whose copper is multiple strict fragments within one outline
             is NOT already routed: a plain --nets call must route the joins
             (run 6's VCC3V3 sat in 7 KiCad islands while this filter said
@@ -429,19 +430,56 @@ def filter_already_routed(
         # burning iterations on impossible edges and reporting phantom fails.
         _broken, _ = net_break_within_outlines(pcb_data, result)
         if not _broken and fragment_gate and not net_zones and net_segments:
-            # #549 A-2 fragment gate: pads connected != copper whole.
+            # #578 fragment gate: pads connected != copper whole.
             from check_connected import net_copper_fragments
             frag = net_copper_fragments(net_id, net_segments, net_vias,
                                         net_pads, net_zones,
                                         pcb_data=pcb_data)
             n = _max_fragments_within_one_outline(
                 pcb_data, frag['fragment_anchors'])
+            # ...but ROUTING only helps when there is live copper to join
+            # (#659). Dead copper -- a cluster tied to no pad and no pour --
+            # cannot improve connectivity no matter what the router welds to
+            # it, and the late orphan sweep deletes it at the end of the run.
+            # Measured on spartan6_4layer, three such nets cost 448s, 2.0M A*
+            # iterations on one link and 28 neighbours pulled in by the rip
+            # escalation, fixed NONE of them, and bred three more debris nets.
+            #
+            # `frag['padless_fragments']` is the WRONG test here and using it
+            # broke this gate's own fixture: STRICT pad-less-ness only says
+            # the fragment misses the pad's copper, which is exactly what a
+            # phantom split looks like -- the net's real route ending a hair
+            # short of the pad, the case #578 was built to route. Ask the
+            # authoritative graph which copper is dead, drop it, and re-count:
+            # only if the REMAINDER is whole is there nothing left to route.
+            if n > 1 and os.environ.get('KICAD_659_DIVERT', '1') != '0':
+                from check_connected import net_dead_copper
+                _dead_s, _dead_v = net_dead_copper(
+                    pcb_data, net_id, net_segments, net_vias, net_pads,
+                    net_zones)
+                if _dead_s or _dead_v:
+                    _ds_ids = {id(s) for s in _dead_s}
+                    _dv_ids = {id(v) for v in _dead_v}
+                    _frag2 = net_copper_fragments(
+                        net_id,
+                        [s for s in net_segments if id(s) not in _ds_ids],
+                        [v for v in net_vias if id(v) not in _dv_ids],
+                        net_pads, net_zones, pcb_data=pcb_data)
+                    _n2 = _max_fragments_within_one_outline(
+                        pcb_data, _frag2['fragment_anchors'])
+                    if _n2 <= 1:
+                        print(f"  {net_name}: pads grade connected and every "
+                              f"extra fragment is DEAD copper "
+                              f"({len(_dead_s)} segment(s), {len(_dead_v)} "
+                              f"via(s) tied to no pad or pour) -- not a route "
+                              f"(#659); the late orphan sweep removes it")
+                        n = _n2
             if n > 1:
                 print(f"  {net_name}: pads grade connected, but its copper "
                       f"is {n} separate track fragment(s)"
                       + (f" ({frag['padless_fragments']} pad-less)"
                          if frag['padless_fragments'] else "")
-                      + " -- routing to join them (#549)")
+                      + " -- routing to join them")
                 nets_to_route.append((net_name, net_id))
                 continue
         if not _broken:

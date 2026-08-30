@@ -69,6 +69,17 @@ Validate routed boards against the *real* spec, with the right checker — most
 - **Routers can report false success.** A router's own "routed" tally may come from
   a local/heuristic proxy while pads stay disconnected; re-verify with the
   authoritative, zone/fill-aware `check_net_connectivity` before trusting it.
+- **A test's own failure path is the path nobody looks at.** A check that dies
+  before it checks anything reports the same non-zero exit as a satisfied guard,
+  so **a non-zero exit is not evidence — assert the REASON.** `tests/run_utils.py`
+  has `check(argv, refuse='<the reason>', code=N)`, which reports an
+  `ImportError`/traceback/argparse accident as a **BROKEN TEST** rather than as a
+  guard that held; use it instead of `assert r.returncode == 2`. Likewise
+  **verify the input before trusting the output**: `run_utils.evidence(path)`
+  refuses a path that is not a real non-empty file, because a check whose input
+  is missing tests nothing — and process substitution (`<(echo ...)`) is not a
+  file on Windows. Measured: a negative control copied to a temp dir died on
+  `ModuleNotFoundError` and was read as "the gate refused".
 - **Read the failure buckets by their real definitions.** `failed_single` = "no
   result at all"; `open_single` = a KEPT result whose pads are still disconnected
   (non-multipoint only — a multipoint shortfall is already the pad deficit). A
@@ -101,6 +112,16 @@ Validate routed boards against the *real* spec, with the right checker — most
     clearance (base = the board's Default class, else `routing_defaults.CLEARANCE`
     0.25), and the writeback PRESERVES the classes. This is how you honor a genuine
     impedance board's class spec — just don't pass `--clearance`.
+  - **`place_fanout_clearance.py` obeys the same two branches (#768/#769)**, and
+    it is the only PLACEMENT step that does, because it is the only one that
+    lays copper (the #313 via nudge) and therefore the only one that writes a
+    DRC floor back. The ceiling caps the NETCLASS tier only -- a `.kicad_dru`
+    rule and a pad `local_clearance` outrank it, since the writeback clamps
+    neither. The project is written in EVERY exit path including the zero-move
+    one, so a run that legitimately moves nothing still ships the spec it was
+    graded against. `grade_pad_legality` and `quench` keep the uncapped
+    `max(base, netclass)` semantics: they write no project, so the class they
+    price at is one KiCad will still enforce.
   - `--hole-to-hole-clearance` / `--board-edge-clearance` work the same way: omitted →
     the board's own `min_hole_to_hole` / `min_copper_edge_clearance` constraint (via
     `list_nets.board_constraint`), else the fixed default.
@@ -225,16 +246,44 @@ before it ships on.** It runs the same board twice (flag off, flag on), writes
 both, and grades both with an *independent* check — `floorplan.grade(...,
 with_health=True)` re-derives its corridors from the FINAL poses, so a term that
 only improves the model it is computed from shows up as "improved nothing". Add
-a row to `ROWS`, do not add a file. Three rules the table encodes and that are
+a row to `ROWS`, do not add a file. Five rules the table encodes and that are
 easy to get wrong:
 
-- **Judge on ≥3 boards, paired and directional** (improve on ≥ N−1, regress on
-  none), never a per-board absolute. Neutral boards are printed, not dropped.
+- **Judge on ≥3 DISTINCT boards, paired and directional** (improve on ≥ N−1,
+  regress on none), never a per-board absolute. Neutral boards are printed, not
+  dropped. This is **enforced in `gate()`**, not just stated here (#694): the
+  old rule counted trial *rows*, so one improving row on one board passed, and
+  `--row` made that the convenient path. The refusal applies to rows **on
+  trial**, and every row in the table today is pinned — so a real run does not
+  reach it and `--self-test` does. A term whose per-board direction is a coin
+  flip passes the rule 1 run in 2^N (1 in 8 at N=3), which the run prints when
+  a term is on trial.
 - **Keep the row that disagrees.** A term that helps on one board of three is
   not a term, and deleting the dissenting row is how that becomes folklore.
 - **A rejected term keeps its rows**, marked `rejected` with its measured
   `expect`, so it stays a change detector instead of a permanent red mark that
   someone eventually deletes along with the finding.
+- **Numbers live in `tests/placement_ab_baseline.json`, never in a `why`
+  string.** Every run re-measures and compares it per key and per arm, reporting
+  a reversed direction (`INVERTED`) apart from a moved value (`DRIFT`), a
+  baseline row `ROWS` no longer declares (`ORPHAN`), and a baseline that is not
+  shaped like one (`MALFORMED`). A `why` records the MECHANISM only. This exists
+  because `corridor-ulx3s` sat rejected on a recorded claim whose signal had
+  reversed while the gate printed PASS (#694) — and the reason is worth getting
+  right, because the obvious reading is wrong: **the gate never compared the
+  signal.** `_verdict` collapses the signal, the guards and intent errors into
+  ONE mark, and only that mark is checked against `expect`, so the reversal was
+  MASKED by a different criterion turning the mark `regress` for its own
+  reasons. An aggregate verdict cannot say which of its inputs moved.
+  **A placement-engine change that moves these numbers re-records the baseline
+  (`--write-baseline`) in the same commit**, after reading the table; a partial
+  run refuses to write one, and a missing baseline FAILs rather than passing.
+  `--baseline ""` is the deliberate way to run without the comparison, and
+  `--self-test` runs the gate and comparator logic in milliseconds at the top of
+  every invocation.
+- **A mark resting on intent errors names the rules that moved**
+  (`intent errors A -> B (zone_containment X -> Y)`). An unattributed error
+  count is what let #694's inverted row keep reading as an intact finding.
 
 Two traps measured the hard way: the first run of that harness reported the
 corridor term inert because it had been pointed at a **merged** net glob whose
@@ -521,6 +570,21 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   KiCad enforces max(the two items' clearances) per pair; the obstacle stamps
   and check_drc honor it the same way. Clearance consumers should read this
   field, never re-derive footprint inheritance.
+  **The PLACEMENT side honors it too, since #697** — `placement.legality`'s
+  `PadClearanceModel` resolves each pad pair at check_drc's own value
+  (`max(clearance, netclass a, netclass b)` → `.kicad_dru` layer rules over the
+  SHARED copper layers, which REPLACE → `max(…, lc_a, lc_b)`), and CALLS
+  check_drc's `pad_copper_layers` / `pads_shared_layer_clearance` rather than
+  mirroring them. It is strictly inert (`model.active` False, every consumer on
+  its original flat-scalar path) when the board declares no netclass, no dru
+  rule and no pad override. Before #697 the census priced every pair at one
+  flat scalar and read `local_clearance` nowhere in `py_placer/`, so a board
+  failing DRC on a 1.016mm fiducial keep-clear reported **0 conflict pairs** to
+  fix. Two consequences worth knowing: a pair graded above the board-wide
+  clearance is disclosed in `grade_pad_legality`'s `required` key (print it via
+  `legality.format_required_clause`, never a hand-copied string), and
+  `placement/fanout_clearance.py` is a SEPARATE flat-scalar channel that still
+  has this bug.
 
 ### Through-Hole vs SMD Pads
 
@@ -559,7 +623,49 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   existed — a RE-PLACED via (rip-up, sub-grid nudge, tap relocation) otherwise
   loses its spec and is re-stamped with front+back tenting, which is wrong for
   via-in-pad (needs IPC-4761 Type VII filled+capped+plated). Vias the tool ADDS
-  default to `kicad_writer.prevailing_via_protection(pcb.vias)` — the board's own
-  convention — instead of a hardcoded policy. GUI side:
-  `gui_utils.apply_via_protection(pcb_via, attrs)`. `fab_notes.print_via_in_pad_note`
+  emit **no protection token at all**, so they inherit the board's own
+  `(setup ...)` policy — what pcbnew does for a via the GUI adds and KiCad for
+  one the user places. Probed against pcbnew 10.0.0: a via at
+  `*_MODE_FROM_BOARD` serialises with NO token and a token appears **only** for
+  an explicit override, so anything stamped turns an inheriting via into an
+  override. The old rules — a hardcoded front+back tenting, then
+  `prevailing_via_protection(pcb.vias)` — are both retired: measured over 886
+  corpus boards a prevailing spec NEVER disagreed with the board's own setup, so
+  it only wrote a redundant token, and the tool then read its OWN stamps back as
+  "the board's convention" next run. The hardcoded default was worse than
+  redundant: three boards (nanovoltmeter_marge, hexberry_fpga, pedal_404) declare
+  `(tenting (front no) (back no))` board-wide and had every added via stamped
+  tented — a fab error, hidden because KiCad's FACTORY policy is tented so the
+  two agree on an ordinary board. `prevailing_via_protection` still exists and is
+  still correct; it is just not a default any more. When RE-PLACING a via, also pass
+  `inherit_when_unspecified=True` (#741). `None` **and `{}`** otherwise both mean
+  "the caller has no opinion", which on KiCad 10 output stamps front+back
+  tenting (on a numeric-net board they emit nothing) — and `{}` is exactly what
+  `Via.tenting_attrs` holds for a via that carries no spec, so handing it back
+  verbatim is the bug. With the flag an empty spec emits nothing, so the via
+  keeps inheriting the board's `(setup ...)` — what it had, and what the GUI
+  side (`gui_utils.apply_via_protection`, early-return on an empty spec) has
+  always done. Spell it `tenting_attrs=v.tenting_attrs,
+  inherit_when_unspecified=True` — a keyword rather than a sentinel VALUE,
+  because the repo's own idiom for carrying a spec is `dict(...)`, which would
+  turn any dict-shaped sentinel back into a plain `{}` and silently restore the
+  bug. **Every emit site must also keep the board's net DIALECT**, via the ONE
+  resolver `kicad_writer.via_net_name(net_id, net_id_to_name)` (#749 D):
+  `net_id_to_name` has no key 0 on ANY board, so a plain `.get` sends every
+  no-net via down the numeric dialect. `docs/api-kicad-writer.md` has the table
+  of which site passes what, and
+  `tests/test_749_via_protection_emit_sites.py` walks the AST to catch a new
+  site that forgets. **#748** is the parser half of the same story: its
+  numeric-net via pattern had no gap for the protection tokens, so a numeric
+  ref emitted next to a spec was a via `extract_vias` could not read back at
+  ALL -- an invisible barrel, not just a lost spec. Both dialects now read the
+  whole family in any position, and each via is matched inside its own
+  paren-balanced block, so no pattern can run out of one via into the next (on
+  a MIXED-dialect board -- which this repo's own fanout step produces -- that
+  used to invent a barrel and swallow a real one). GUI side:
+  `gui_utils.apply_via_protection(pcb_via, attrs)` writes, and
+  `kicad_parser.pcbnew_via_protection_attrs(via, text_specs)` READS -- not the
+  private `_pcbnew_via_protection_attrs`, which answers `{}` for every via on
+  the shipping KiCad 10.0.0 because its SWIG wrapper omits the
+  `TENTING_MODE_*` family (#751); the resolver falls back to the board file. `fab_notes.print_via_in_pad_note`
   emits the IPC-4761 note from the shared engines when a run puts vias in pads.

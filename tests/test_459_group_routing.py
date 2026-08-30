@@ -23,6 +23,20 @@ import os
 import shutil
 import subprocess
 import sys
+
+#: This file routes three real chains and needs more than run_all's 600 s cap
+#: under load. #718 item 4: it timed out in `run_all -j 4` on the reporter's
+#: machine and PASSED alone -- machine contention, not a defect, but a killed
+#: run yields no partial result and no diagnosis, so the fact was read as a
+#: code fact. Measured alone here: 297 s (macOS, py3.14, with a parallel
+#: suite running), so 600 s is roughly 2x headroom before contention and a
+#: slower machine eat it -- which is exactly what happened. 1200 s matches
+#: what test_obstacle_map_balance declares for the same reason.
+#:
+#: A declared budget is a claim the test makes about ITSELF, where the next
+#: reader looks. Raising the global --timeout instead would hide a genuinely
+#: hung test behind the slow ones.
+RUN_ALL_TIMEOUT = 1200
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -42,7 +56,7 @@ FLAT = os.path.join(KF, 'tigard.kicad_pcb')                         # no sheets
 
 
 def _run(*args, timeout=1800):
-    return subprocess.run([sys.executable, os.path.join(ROOT, 'route.py')] + list(args),
+    return subprocess.run([sys.executable, os.path.join(ROOT, 'py_router', 'route.py')] + list(args),
                           capture_output=True, text=True, cwd=ROOT, timeout=timeout)
 
 

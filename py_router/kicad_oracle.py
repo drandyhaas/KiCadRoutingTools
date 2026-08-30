@@ -18,6 +18,7 @@ gui_utils.run_kicad_oracle_on_live_board post-run) -- kicad-cli's exact fill
 needs a real file either way.
 """
 import env_knobs
+import hashlib
 import json
 import math
 import os
@@ -27,7 +28,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from kicad_parser import Segment as _Seg, Via as _Via
 
@@ -151,6 +152,42 @@ def find_kicad_cli() -> Optional[str]:
                 except ValueError:
                     return (0,)
             return sorted(set(hits), key=_ver)[-1]
+    _warn_no_kicad_cli()
+    return None
+
+
+_WARNED_NO_CLI = []
+
+
+def _warn_no_kicad_cli() -> None:
+    """Say loudly, ONCE per process, that KiCad is missing.
+
+    KiCad is expected to be present now -- even the cloud image ships it --
+    so its absence is an ENVIRONMENT DEFECT, not a supported mode. It is
+    worth shouting about because of how it fails: every oracle leg returns
+    available=False and becomes a NO-OP rather than degrading, so a run looks
+    successful while the finalize audit, the #589 re-audit and the oracle-summary
+    check all silently did nothing. A change that acts only through those legs
+    then A/Bs as a PERFECT NULL -- the worst result shape, because it reads as
+    a measurement (#650). Grades are affected too: check_drc's drc_real falls
+    back to raw DRC without kicad-cli.
+    """
+    if _WARNED_NO_CLI:
+        return
+    _WARNED_NO_CLI.append(True)
+    try:
+        from terminal_colors import RED, RESET
+    except Exception:
+        RED = RESET = ''
+    print(f"{RED}WARNING: kicad-cli NOT FOUND. This is not a supported mode "
+          f"-- every KiCad-oracle leg becomes a NO-OP (not a degraded pass): "
+          f"the plane-finalize audit, the #589 re-audit and the oracle-summary "
+          f"check all silently do nothing, and check_drc's drc_real falls "
+          f"back to raw DRC. A result measured here can be a perfect null "
+          f"that looks like data (#650). Install KiCad, or set KICAD_CLI=/path/"
+          f"to/kicad-cli if it lives somewhere non-standard; "
+          f"KICAD_RASTER_ORACLE=1 substitutes a weaker KiCad-free link "
+          f"source (#648).{RESET}")
     return None
 
 
@@ -220,6 +257,12 @@ def _parse_item(item: dict) -> Optional[Tuple[str, float, float, Optional[str]]]
             lm.group(1) if lm else None, kind)
 
 
+# Content-keyed memo for kicad_unconnected (audit finding): one full
+# kicad-cli DRC is seconds, and the re-audit path pays for two identical ones.
+_UNCONNECTED_MEMO: Dict[Tuple, Optional[List[Tuple]]] = {}
+_UNCONNECTED_MEMO_CAP = 8
+
+
 def kicad_unconnected(board_file: str, kicad_cli: str,
                       timeout: int = ORACLE_DRC_TIMEOUT) -> Optional[List[Tuple]]:
     """[(net, (x,y,layer|None), (x,y,layer|None)), ...] per kicad-cli DRC
@@ -228,7 +271,24 @@ def kicad_unconnected(board_file: str, kicad_cli: str,
     Runs against a fast-connectivity staged project (#420) so the DRC skips
     the expensive geometric providers and returns in seconds; a board that
     still blows `timeout` is remembered in _ORACLE_TIMED_OUT so later steps
-    skip it instead of re-burning the wall time."""
+    skip it instead of re-burning the wall time.
+
+    MEMOIZED on the board's CONTENT (audit finding): the #589/#659 re-audit
+    runs this for its scope-widen and then oracle_reconnect immediately runs
+    it again on the same unchanged file -- measured at 5.1s per call on
+    daisho, paid twice for one answer. Keyed on the file bytes, so the moment
+    the oracle rewrites the board between rounds the memo misses and a fresh
+    DRC runs; there is no staleness window. refill_islands memoizes the same
+    way for the same reason."""
+    _memo_key = None
+    try:
+        with open(board_file, 'rb') as _bf:
+            _memo_key = (hashlib.sha1(_bf.read()).hexdigest(),
+                         kicad_cli, timeout)
+        if _memo_key in _UNCONNECTED_MEMO:
+            return _UNCONNECTED_MEMO[_memo_key]
+    except OSError:
+        _memo_key = None
     with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
         out = f.name
     staged, tmpdir = _fast_connectivity_project(board_file)
@@ -272,6 +332,10 @@ def kicad_unconnected(board_file: str, kicad_cli: str,
         if a and b and a[0] == b[0]:
             links.append((a[0], (a[1], a[2], a[3], a[4]),
                           (b[1], b[2], b[3], b[4])))
+    if _memo_key is not None:
+        if len(_UNCONNECTED_MEMO) >= _UNCONNECTED_MEMO_CAP:
+            _UNCONNECTED_MEMO.clear()   # bounded; a chain re-derives cheaply
+        _UNCONNECTED_MEMO[_memo_key] = links
     return links
 
 
@@ -911,6 +975,33 @@ def _largest_track_component_points(pcb_data, net_id, max_pts: int = 40):
     return pts
 
 
+def _via_abuts_graphic(vias_, segs) -> bool:
+    """True if any of `vias_` overlaps a same-net GRAPHIC in `segs` (#337 art).
+
+    Graphics do not conduct in our connectivity graph (#513) but ARE copper to
+    KiCad, so a barrel touching one is joined to the net through it. Every
+    debris deleter has to honour this or it removes a real connection: the
+    segment-based guards test `any(seg.graphic)` over the cluster, which is
+    vacuous for a cluster that has no segments. No layer test -- a barrel
+    spans them.
+    """
+    art = [g for g in segs if getattr(g, 'graphic', False)]
+    if not art:
+        return False
+    for v in vias_:
+        for g in art:
+            dx, dy = g.end_x - g.start_x, g.end_y - g.start_y
+            L2 = dx * dx + dy * dy
+            t = (max(0.0, min(1.0, ((v.x - g.start_x) * dx
+                                    + (v.y - g.start_y) * dy) / L2))
+                 if L2 else 0.0)
+            if math.hypot(v.x - (g.start_x + t * dx),
+                          v.y - (g.start_y + t * dy)) \
+                    <= v.size / 2.0 + g.width / 2 + 1e-6:
+                return True
+    return False
+
+
 def _delete_stranded_link_fragment(pcb_data, net_id, pt_a, pt_b):
     """When either link endpoint sits on a PAD-LESS copper cluster of the
     net (per the authoritative connectivity graph, vias/zone credit
@@ -928,7 +1019,13 @@ def _delete_stranded_link_fragment(pcb_data, net_id, pt_a, pt_b):
     pads = pcb_data.pads_by_net.get(net_id, [])
     zones = [z for z in (getattr(pcb_data, 'zones', None) or [])
              if z.net_id == net_id]
-    if not segs or not pads:
+    # VIA-ONLY copper counts (#659 audit): a failed reroute strips a net's
+    # tracks and keeps the barrels, so `not segs` is a live case, not an
+    # empty one. Measured on spartan6_4layer step 6, this early return plus
+    # the segment-only search below refused ALL 10 of the net's bare orphan
+    # vias -- and the caller then falls through to the WELD path and routes
+    # copper to dead metal, the outcome #659 exists to stop.
+    if not pads or (not segs and not vias):
         return None
     r = check_net_connectivity(net_id, segs, vias, pads, zones,
                                return_graph=True, pcb_data=pcb_data)
@@ -957,7 +1054,19 @@ def _delete_stranded_link_fragment(pcb_data, net_id, pt_a, pt_b):
                            py - (s.start_y + t * dy))
             if d < bd:
                 best, bd = i, d
-        return None if best is None else uf.find(2 * best)
+        if best is not None:
+            return uf.find(2 * best)
+        # No segment within reach: the endpoint can be a BARE VIA (#659
+        # audit). Match the barrel itself, nearest first.
+        vbest, vbd = None, None
+        for j, v in enumerate(vias):
+            rep = via_reprs.get(j)
+            if rep is None:
+                continue
+            d = math.hypot(px - v.x, py - v.y)
+            if d <= max(0.35, v.size / 2.0 + 0.05) and (vbd is None or d < vbd):
+                vbest, vbd = j, d
+        return None if vbest is None else uf.find(via_reprs[vbest])
 
     for pt in (pt_a, pt_b):
         root = _cluster_at(pt)
@@ -965,6 +1074,15 @@ def _delete_stranded_link_fragment(pcb_data, net_id, pt_a, pt_b):
             continue
         csegs = [s for i, s in enumerate(segs) if uf.find(2 * i) == root]
         if any(getattr(s, 'graphic', False) for s in csegs):
+            continue
+        # ...and a VIA-ONLY cluster has no csegs at all, so the test above is
+        # vacuous for it (#659 audit follow-up). A barrel sitting on same-net
+        # ART is joined to it in copper -- KiCad credits the graphic, we do
+        # not -- so deleting it breaks a connection that existed. Measured on
+        # openstint /A-: 0 unconnected items became 2.
+        _cv = [v for j, v in enumerate(vias)
+               if via_reprs.get(j) is not None and uf.find(via_reprs[j]) == root]
+        if _cv and _via_abuts_graphic(_cv, segs):
             continue
         cvias = [v for j, v in enumerate(vias)
                  if via_reprs.get(j) is not None
@@ -1387,6 +1505,28 @@ def _copper_in_corridor(segs, vias, x0, y0, x1, y1, pad: float = 3.0) -> bool:
     return True
 
 
+def _via_drill_radius(via, fallback: float) -> float:
+    """Half the drill of an EXISTING via, for the hole-to-hole gates (#754).
+
+    Every via has a hole, so a via whose drill the board does not carry must
+    NOT be priced as if it had none: `(v.drill or 0) / 2` made the gate weaker
+    for exactly the barrel it could not measure, so a candidate was accepted at
+    a separation the fab floor forbids. Fall back on the drill the CALLER is
+    working at (`config.via_drill` / the ladder's `used_via_drill`) -- the shape
+    the sibling gate 250 lines below already used.
+
+    Guarded as `not d or d <= 0` rather than `or`, so a NEGATIVE drill cannot
+    take a different branch in the two gates (#732/#750 shape). A fallback that
+    is itself unusable yields 0.0 -- there is nothing left to measure with.
+    """
+    d = getattr(via, 'drill', None)
+    if not d or d <= 0:
+        d = fallback
+    if not d or d <= 0:
+        return 0.0
+    return d / 2.0
+
+
 def oracle_reconnect(board_file: str, net_names, config,
                      track_via_clearance: float,
                      hole_to_hole_clearance: float,
@@ -1413,17 +1553,40 @@ def oracle_reconnect(board_file: str, net_names, config,
                                         route_plane_connection_wide)
 
     kicad_cli = find_kicad_cli()
-    if kicad_cli is None:
-        print("  KiCad-oracle recheck: kicad-cli not found, skipping")
+    # Bail iff NOTHING could serve as a link source. The ladder is
+    # exact-fill (pcbnew; tried unless LEGACY_ORACLE) -> kicad-cli -> raster
+    # (opt-in), so kicad-cli being absent only matters when it is the ONLY
+    # rung left.
+    if (kicad_cli is None and env_knobs.LEGACY_ORACLE
+            and not env_knobs.RASTER_ORACLE):
+        # Only bail when kicad-cli really is the only source we could use
+        # (audit finding 7). The DEFAULT source is exact_unconnected ->
+        # pcbnew's ZONE_FILLER, which does not need kicad-cli at all, so this
+        # early return used to throw away a working leg on any machine whose
+        # kicad-cli sits outside the three hard-coded candidates -- a custom
+        # build, nix, an AppImage. Measured: with find_kicad_cli patched to
+        # None, exact_unconnected still returned 2 links on daisho while
+        # oracle_reconnect reported available=False.
+        print("  KiCad-oracle recheck: kicad-cli not found and no other "
+              "source is enabled, skipping")
         return {'available': False, 'rounds': 0, 'links_routed': 0,
                 'links_failed': 0, 'remaining': -1}
 
     # A board whose DRC already blew ORACLE_DRC_TIMEOUT once (#420) will do it
     # again on every later plane-repair step of this run -- skip it outright
     # rather than re-burn minutes of wall time for the same lost result.
-    if _fill_cost_key(board_file) in _ORACLE_TIMED_OUT:
+    # SCOPE (audit finding): this memo records a *kicad-cli DRC* timeout,
+    # caused by the geometric rule providers (#420). The DEFAULT link source
+    # is the pcbnew exact fill, which has its own EXACT_FILL_TIMEOUT and is
+    # unaffected by that pathology -- so short-circuiting the WHOLE leg threw
+    # away a source that would have worked. Skip only when kicad-cli is the
+    # source we would actually use (legacy mode, or the union's demand gate
+    # with no exact source available).
+    if (_fill_cost_key(board_file) in _ORACLE_TIMED_OUT
+            and env_knobs.LEGACY_ORACLE):
         print("  KiCad-oracle recheck: kicad-cli DRC previously timed out on "
-              "this board, skipping")
+              "this board and KICAD_LEGACY_ORACLE makes it the only source, "
+              "skipping")
         return {'available': False, 'rounds': 0, 'links_routed': 0,
                 'links_failed': 0, 'remaining': -1}
 
@@ -1535,7 +1698,27 @@ def oracle_reconnect(board_file: str, net_names, config,
                 and env_knobs.ORACLE_UNION:
             _cli648 = kicad_unconnected(board_file, kicad_cli)
             if _cli648 is not None:
+                # Out-of-scope links from BOTH sources (#659 audit). The
+                # exact source's foreign links were already kept here, but
+                # kicad-cli's were not: `_cli648` is whole-board, yet it is
+                # only consulted `for _net648 in sorted(names)` below, so a
+                # foreign-net link kicad-cli alone reports was dropped by
+                # construction -- and the DEBRIS PASS's "remaining links on
+                # ANY net" promise died with it. Measured on daisho: the one
+                # link kicad-cli reported board-wide (/ddr2/DM6) was out of
+                # scope and discarded.
                 _out648 = [l for l in links if l[0] not in names]
+                _seen_out648 = {(l[0], round(l[1][0], 3), round(l[1][1], 3),
+                                 round(l[2][0], 3), round(l[2][1], 3))
+                                for l in _out648}
+                for _c in _cli648:
+                    if _c[0] in names:
+                        continue        # in-scope: reconciled per net below
+                    _k = (_c[0], round(_c[1][0], 3), round(_c[1][1], 3),
+                          round(_c[2][0], 3), round(_c[2][1], 3))
+                    if _k not in _seen_out648:
+                        _seen_out648.add(_k)
+                        _out648.append(_c)
                 _dropped648 = _added648 = 0
                 for _net648 in sorted(names):
                     _exn = [l for l in links if l[0] == _net648]
@@ -1576,10 +1759,33 @@ def oracle_reconnect(board_file: str, net_names, config,
                           f"does not demand them), {_added648} kicad-cli "
                           f"link(s) added (unseen by the exact source)")
                 links = _out648
-        if links is None:
+        if links is None and kicad_cli:
             links = kicad_unconnected(board_file, kicad_cli)
+        if links is None and env_knobs.RASTER_ORACLE:
+            # THIRD BRANCH (#648): our own fill-aware model, no KiCad at all.
+            # OPT-IN, and deliberately not a silent fallback: making the leg
+            # run off a different source when KiCad is absent would make
+            # COPPER depend on what is installed, which is the exact failure
+            # #675 reverted the B-1 check for. Opt in and you accept a weaker
+            # source knowingly. Validated against kicad-cli on daisho (1 link,
+            # identical), spartan6_4layer (61 of 87 nets) and openstint (0/0):
+            # a strict SUBSET every time -- it never invents demand, it only
+            # misses the model-over-credit class it cannot see by construction.
+            try:
+                from kicad_parser import parse_kicad_pcb as _pk648
+                from check_connected import raster_unconnected as _ru648
+                links = _ru648(_pk648(board_file), names)
+                if rnd == 0:
+                    print(f"  KiCad-oracle recheck: RASTER link source "
+                          f"(KICAD_RASTER_ORACLE=1, no KiCad needed) -- "
+                          f"{len(links)} link(s)")
+            except Exception as _re648:
+                print(f"  (raster link source failed: {_re648})")
+                links = None
         if links is None:
-            print("  KiCad-oracle recheck: kicad-cli DRC failed, skipping")
+            print("  KiCad-oracle recheck: no link source available "
+                  "(kicad-cli DRC failed or absent; KICAD_RASTER_ORACLE=1 "
+                  "enables the KiCad-free raster source), skipping")
             _links_unavailable = True
             break
         ours = [l for l in links if l[0] in names]
@@ -1633,6 +1839,12 @@ def oracle_reconnect(board_file: str, net_names, config,
         with open(board_file, 'r', encoding='utf-8') as f:
             content = f.read()
         v10 = is_kicad_10(content)
+        # #749 B: every via the oracle emits below -- the exact-fill strap weld,
+        # the escalated/sliver weld, the main link route -- is NEW copper. It
+        # emits no protection token and inherits the board's `(setup ...)`
+        # policy; None is spelled out rather than omitted so the three call
+        # sites state the decision instead of relying on a default.
+        _new_via_attrs = None
         new_sexprs = []
         content_dirty = False
         progress = False
@@ -1944,7 +2156,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                         new_sexprs.append(generate_via_sexpr(
                             _v.x, _v.y, _v.size, _v.drill,
                             [routing_layers[0], routing_layers[-1]], net_id,
-                            net_name=net_name if v10 else None))
+                            net_name=net_name if v10 else None,
+                            tenting_attrs=_new_via_attrs))
                         pcb_data.vias.append(_v)
                         emitted_vias.append(_v)
                     print(f"    {net_name}: exact-fill strap OK (escalated: "
@@ -2370,7 +2583,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                     if _ok649:
                         for _v2 in pcb_data.vias:
                             _d2 = math.hypot(_v2.x - _vx, _v2.y - _vy)
-                            if _d2 < _vdr + (_v2.drill or 0) / 2 + _h2h:
+                            if _d2 < _vdr + _via_drill_radius(
+                                    _v2, config.via_drill) + _h2h:
                                 _ok649 = False
                                 break
                             if _v2.net_id != net_id and _d2 <                                         _vr + _v2.size / 2 + config.clearance:
@@ -2447,7 +2661,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                         new_sexprs.append(generate_via_sexpr(
                             _v.x, _v.y, _v.size, _v.drill,
                             [routing_layers[0], routing_layers[-1]], net_id,
-                            net_name=net_name if v10 else None))
+                            net_name=net_name if v10 else None,
+                            tenting_attrs=_new_via_attrs))
                         pcb_data.vias.append(_v)
                         emitted_vias.append(_v)
                     print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
@@ -2617,8 +2832,8 @@ def oracle_reconnect(board_file: str, net_names, config,
             for vx, vy in via_positions:
                 _near = None
                 for _ev in _own_vias:
-                    _lim = (used_via_drill + (_ev.drill or used_via_drill)) / 2 \
-                        + hole_to_hole_clearance
+                    _lim = used_via_drill / 2.0 + _via_drill_radius(
+                        _ev, used_via_drill) + hole_to_hole_clearance
                     if math.hypot(vx - _ev.x, vy - _ev.y) < _lim:
                         _near = _ev
                         break
@@ -2690,7 +2905,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                 new_sexprs.append(generate_via_sexpr(
                     vx, vy, used_via_size, used_via_drill,
                     [routing_layers[0], routing_layers[-1]], net_id,
-                    net_name=net_name if v10 else None))
+                    net_name=net_name if v10 else None,
+                    tenting_attrs=_new_via_attrs))
             # Same-round visibility (cross-net short fix): later links in
             # this round rebuild their obstacle maps from pcb_data, so the
             # copper just routed must exist there -- two different-net links
@@ -2751,6 +2967,16 @@ def oracle_reconnect(board_file: str, net_names, config,
             links = kicad_unconnected(board_file, kicad_cli)
         if links is not None:
             remaining = len([l for l in links if l[0] in names])
+        else:
+            # A FAILED fetch is not an all-clear (audit finding). Without
+            # this the caller sees remaining_links == [] -- empty, not None --
+            # and route.py's `_has_custody = (_rl9 is None and remaining > 0)
+            # or bool(_rl9)` reads falsy-not-None as "no links left", then
+            # declares `_zone_complete9 = set(_zna)`: EVERY zone net marked
+            # hands-off for the final reconciliation on the strength of a
+            # tool failure. The flag exists precisely to stop that; this is
+            # the one exit that forgot to set it.
+            _links_unavailable = True
 
     # DEBRIS PASS (quickfeather XTAL_O class): remaining links on ANY net --
     # including nets outside this pass's scope -- whose cluster is pad-less
@@ -2760,7 +2986,13 @@ def oracle_reconnect(board_file: str, net_names, config,
     # as input copper by every cleanup, so nothing else will EVER touch it
     # and KiCad demands the link on every future run.
     _debris_resolved = set()
-    if rounds and links:
+    # NOT `if rounds and links` (#659 audit): `rounds` counts rounds the weld
+    # loop ran on ITS OWN scope nets, and it is 0 whenever those were already
+    # complete -- the common healthy case. daisho step 9 printed "KiCad
+    # reports all processed nets complete", swept nothing, and shipped a
+    # 7.35mm pad-less fragment that then survived eleven chain steps. Debris
+    # deletion has nothing to do with whether the weld had work to do.
+    if links:
         _stranded_deleted = 0
         _content2 = None
         for lk in links:

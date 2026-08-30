@@ -1127,29 +1127,37 @@ def try_phase3_ripup(
                 # Re-route ripped nets IMMEDIATELY (not deferred) to prevent subsequent
                 # Phase 3 nets from routing through the ripped area
                 stranded = []
-                if ripped_items:
-                    print(f"    Re-routing {len(ripped_items)} ripped net(s)...")
-                    stranded = _reroute_phase3_ripped_nets(
-                        ripped_items, pcb_data, config, state, routed_net_ids, remaining_net_ids,
-                        all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
-                        results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
-                        reroute_depth=reroute_depth + 1,
-                        ancestor_net_ids=exclude_ids,
-                        rip_sinks=child_sinks
-                    )
-
-                # IMPORTANT: Remove the temporarily added tap segments before returning.
-                # The caller will add them properly via obstacle cache update, which handles
-                # ref-counting correctly. If we don't remove them here, they'll be added twice
-                # and won't be properly removed when the net is later ripped.
-                if tap_segments_added or tap_vias_added:
-                    remove_segments_list_from_obstacles(state.working_obstacles, tap_segments_added, config)
-                    # diagonal_margin MUST match the add above (0.25): the margin
-                    # inflates every via's per-layer track disc, so removing
-                    # without it leaves a quarter-cell ring ref-counted forever
-                    # (the working-map blocked_cells leak of issue #309).
-                    remove_vias_list_from_obstacles(state.working_obstacles, tap_vias_added, config, diagonal_margin=0.25)
-                    pop_inflight_copper(pcb_data, inflight_token)
+                # #803: the add above and the remove below MUST be paired on
+                # every exit path. Control flow between them is currently
+                # straight-line, but the call is a deep recursive reroute -- an
+                # exception out of it would skip the removal and strand the tap
+                # copper in the PERSISTENT working map forever (the #309 leak
+                # class). The correct sibling at :225-253 already uses
+                # try/finally; this pair did not.
+                try:
+                    if ripped_items:
+                        print(f"    Re-routing {len(ripped_items)} ripped net(s)...")
+                        stranded = _reroute_phase3_ripped_nets(
+                            ripped_items, pcb_data, config, state, routed_net_ids, remaining_net_ids,
+                            all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
+                            results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
+                            reroute_depth=reroute_depth + 1,
+                            ancestor_net_ids=exclude_ids,
+                            rip_sinks=child_sinks
+                        )
+                finally:
+                    # Remove the temporarily added tap copper. The caller adds it
+                    # properly via the obstacle cache update, which ref-counts
+                    # correctly; leaving these would add it twice and it would
+                    # not be removed when the net is later ripped.
+                    if tap_segments_added or tap_vias_added:
+                        remove_segments_list_from_obstacles(state.working_obstacles, tap_segments_added, config)
+                        # diagonal_margin MUST match the add above (0.25): the
+                        # margin inflates every via's per-layer track disc, so
+                        # removing without it leaves a quarter-cell ring
+                        # ref-counted forever (the blocked_cells leak of #309).
+                        remove_vias_list_from_obstacles(state.working_obstacles, tap_vias_added, config, diagonal_margin=0.25)
+                        pop_inflight_copper(pcb_data, inflight_token)
 
                 # Issue #85: only commit the rip-up if it is a net improvement.
                 # Stranding (totally losing) a previously-routed victim is fine

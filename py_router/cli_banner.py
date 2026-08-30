@@ -126,6 +126,18 @@ def install() -> None:
         except Exception:      # non-reconfigurable wrapper: keep the banner
             pass
     print(f"CMD: {command_line()}", flush=True)
+    # #653: the knobs that were actually in the environment. Printed next to
+    # CMD because they are the OTHER half of "how was this invoked" -- a knob
+    # exported in the launching shell changes routing exactly like a flag
+    # does, but left no trace, so an env-contaminated baseline could only be
+    # found by re-running it. `ENV KNOBS: none` is the clean statement, and it
+    # is printed too: silence must not be the answer for both cases (the #654
+    # lesson).
+    try:
+        import env_knobs
+        print(env_knobs.env_knobs_line(), flush=True)
+    except Exception:              # a diagnostic must never break the tool
+        pass
 
     state = {'rc': 0}
 

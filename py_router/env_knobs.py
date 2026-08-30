@@ -69,12 +69,30 @@ def refresh() -> None:
     g['BUS_MULTIPOINT_SPAN'] = _on_default('KICAD_BUS_MULTIPOINT_SPAN')
     g['BARE_BALL_ZONE_EXEMPT'] = _on_default('KICAD_BARE_BALL_ZONE_EXEMPT')
     g['DIRECT_FIRST'] = _on_default('KICAD_DIRECT_FIRST')
+    # In-loop stub-debris trim (default ON, KICAD_STUB_DEBRIS_TRIM=0
+    # reverts): when a route commits, immediately prune the unused
+    # branches of its own pre-existing stub tree AND any via they leave
+    # dangling, so the freed cells are routable by the very next net --
+    # sweep_dead_ends does the same board-wide but only at cleanup,
+    # after every net has already routed around the debris (and it never
+    # touches input vias at all).
+    g['STUB_DEBRIS_TRIM'] = _on_default('KICAD_STUB_DEBRIS_TRIM')
     g['IMPEDANCE_NECKDOWN'] = (_s('KICAD_IMPEDANCE_NECKDOWN', '1').strip().lower()
                                not in ('0', 'false', 'no', 'off'))
     # #648 oracle source union: kicad-cli DRC gates the demand set, the
     # exact-fill source carries the geometry. =0 restores the pure exact
     # source for A/B.
     g['ORACLE_UNION'] = _s('KICAD_ORACLE_UNION', '1') != '0'
+    # #650 in-run DRC floor sync: before anything grades the board mid-run,
+    # lower the output's sibling .kicad_pro to the COPPER floors this run
+    # routed to, so the in-run audit fills the pours the way the SHIPPED
+    # board will. Until this, that sibling was the input's (seeded by
+    # seed_project_for_output) and its looser declared floors pulled the
+    # pours back further than the shipped board's -- measured on orangecrab:
+    # 57 reported opens vs the 46 that ship (GND 19 vs 11), all of it
+    # rules.min_hole_clearance 0.25 -> 0.0889. =0 restores the old staleness
+    # for A/B.
+    g['INRUN_FLOOR_SYNC'] = _s('KICAD_INRUN_FLOOR_SYNC', '1') != '0'
     # #667 net-tie band pricing (mm-equivalent cost per band cell,
     # DIFFERENTIAL: the own-pad approach stays free, off-pad corridor
     # cells are priced). Measured INERT on cynthion at 0.5 and 5.0 --
@@ -202,6 +220,15 @@ def refresh() -> None:
     # economy. '0' reverts. Default ON.
     g['FANOUT_POUR_TRACK'] = _s('KICAD_FANOUT_POUR_TRACK', '1') != '0'
     g['FANOUT_POUR_TRACK_R'] = float(_s('KICAD_FANOUT_POUR_TRACK_R', '2.0') or 2.0)
+    # #669: '1' makes escape-method 'auto' retry channel drops with DOGBONE
+    # first, then underpad only if dogbone still dropped balls. Default OFF:
+    # the sets1-5 corpus A/B REJECTED it as a default (autodb0/autodb1 arms
+    # at 21b1c0e5: +10 incomplete nets and +59 kicad DRC vs the underpad-only
+    # retry -- dogbone gap vias claim inter-ball streets that recorded chains'
+    # later steps collide with). Explicit --escape-method dogbone remains the
+    # populated-array doctrine; this knob is the opt-in ladder for chains
+    # whose params are chosen for dogbone.
+    g['FANOUT_AUTO_DOGBONE'] = _s('KICAD_FANOUT_AUTO_DOGBONE', '0') == '1'
     # #652 directive 2: rip-swap rescue for terminally dropped fanout balls
     # (evict the nearest committed neighbour escape, re-escape both as a pair
     # at the fab floor; strict-win only). '0' reverts. Default ON.
@@ -249,7 +276,7 @@ def refresh() -> None:
     g['PLANE_MAP_PARITY'] = _truthy('KICAD_PLANE_MAP_PARITY')
     g['SETTLE_DEBUG'] = _truthy('KICAD_SETTLE_DEBUG')
     g['LEGACY_GATE_ORACLE'] = _truthy('KICAD_LEGACY_GATE_ORACLE')
-    # #549 D: route.py's end-of-run oracle summary check (one staged
+    # route.py's end-of-run oracle summary check (one staged
     # kicad-cli DRC per run). Now OPT-IN (KICAD_ORACLE_SUMMARY=1), reverted
     # from default-on: it was billed as "strictly additive -- only ADDS
     # failure disclosure", but it also APPENDS to failed_multipoint, which
@@ -261,6 +288,37 @@ def refresh() -> None:
     # and it silently breaks A/B comparability. Disclosure is fine to make
     # environment-dependent; copper is not. See issue #675.
     g['ORACLE_SUMMARY'] = _opt_in('KICAD_ORACLE_SUMMARY')
+    # #648's third link-source branch (exact-fill -> kicad-cli -> raster).
+    # OPT-IN on purpose: a silent fallback would make the oracle run off a
+    # different source depending on whether KiCad is installed, i.e. make
+    # COPPER environment-dependent -- the exact failure #675 reverted the B-1
+    # check for. Opt in and you accept a weaker source knowingly.
+    g['RASTER_ORACLE'] = _opt_in('KICAD_RASTER_ORACLE')
+    # HOT knobs (measured, not guessed): on splitflap_driver one route reads
+    # KICAD_VIA_RUNG 902 times and KICAD_POUR_LAUNCH 316 -- they sit inside
+    # per-net / per-endpoint loops, which is exactly the "hammers the environ
+    # dict from hot paths" this module exists for. Every other bare-read knob
+    # in the tree measured 1-2 reads per run and is left at its call site.
+    # Parse semantics preserved: VIA_RUNG is a =='2' string test with default
+    # '2' (so '1' or anything else disarms), the POUR_LAUNCH pair are =='1'
+    # tests with default '1' (default ON, any other value disables), and
+    # POUR_LAUNCH_FRAG keeps its `or 0` empty-value rule -- see below for the
+    # one deliberate deviation.
+    g['VIA_RUNG_2'] = os.environ.get('KICAD_VIA_RUNG', '2') == '2'
+    g['POUR_LAUNCH'] = os.environ.get('KICAD_POUR_LAUNCH', '1') == '1'
+    g['POUR_LAUNCH_COPPER'] = os.environ.get('KICAD_POUR_LAUNCH_COPPER', '1') == '1'
+    # NOT _f(): the call site was `float(get(name, '1.0') or 0)`, so an
+    # EMPTY value means 0.0 (threshold disabled) where _f would hand back the
+    # 1.0 default -- silently re-enabling a threshold someone turned off,
+    # which is precisely the "stricter parse disables a recorded workflow"
+    # this module's docstring warns about. Preserved exactly. The one
+    # deliberate difference: garbage used to raise ValueError mid-route, and
+    # now falls back to the default; a crash is nobody's workflow.
+    _plf = os.environ.get('KICAD_POUR_LAUNCH_FRAG', '1.0')
+    try:
+        g['POUR_LAUNCH_FRAG'] = float(_plf or 0)
+    except ValueError:
+        g['POUR_LAUNCH_FRAG'] = 1.0
     g['NO_GATE_ORACLE'] = _truthy('KICAD_NO_GATE_ORACLE')
     g['GATE_DEBUG'] = _truthy('KICAD_GATE_DEBUG')
     g['NO_SWEEP_PLATED'] = _truthy('KICAD_NO_SWEEP_PLATED')
@@ -285,6 +343,41 @@ def refresh() -> None:
     g['RASTER_CACHE_MB'] = _f('KICAD_RASTER_CACHE_MB', 256.0)
     g['BUS_XLAYER_PCT'] = _i('KICAD_BUS_XLAYER_PCT', 35)
     g['BUS_OFFLANE_MULT'] = _f('KICAD_BUS_OFFLANE_MULT', 1.0)   # off-lane surcharge (1.0 = off)
+    # #622 victim-priority restore (ported from bus622-take2 a693919b): a rip
+    # victim whose terminal reroute failed AND whose full restore is
+    # short-refused gets its channel back -- the squatting nets (routed since
+    # the rip, rippable this run) are ripped + requeued, the victim restored
+    # whole and protected from re-ripping. Runs ONCE, at the reroute queue's
+    # drain, and only inside a reconcile sub-run.
+    #
+    # DEFAULT ON since the sets 1-5 A/B (2026-08-30). Ported opt-in and armed
+    # for measurement; the arm beat the stack on BOTH axes -- real DRC 23 -> 18
+    # and incomplete nets 125 -> 120 over 74 boards, 4 boards improved and 1
+    # regressed (keks +1). No broad harm, which is the result that would have
+    # argued against it.
+    #
+    # The connectivity win is concentrated (zynq_ad9364 supplies all 5), so this
+    # rests as much on PRINCIPLE as on the corpus: a rip is a trade, #85 already
+    # refuses to commit one that is not a net improvement, but that check runs
+    # at RIP time. When the victim's reroute later fails and its full restore is
+    # refused because the ripper's copper now holds the channel, the trade has
+    # silently failed -- ripper gained, victim ships broken, nothing re-checks.
+    # This closes that gap at the last moment before shipping, and the squatters
+    # are REQUEUED rather than dropped, so it is a re-run of the exchange rather
+    # than a reversal of it. KICAD_VICTIM_RESTORE=0 reverts.
+    g['VICTIM_RESTORE'] = _on_default('KICAD_VICTIM_RESTORE')
+    # #622 pocket-stuck rip targeting (ported from bus622-take2 947698d6): when
+    # one A* direction exhausts at <=20% of the other side's iterations, the rip
+    # ladder re-analyzes THAT direction's blocked cells alone. The union let the
+    # wide frontier's cell counts swamp the pocket's wall -- SDQ11 sat frozen at
+    # 44 backward iterations across 6 rips with its two wallers named at attempt
+    # 0 and never ripped.
+    #
+    # OPT-IN here, though the source shipped it default ON -- its own commit
+    # message says "Corpus screen owed before any main merge (default-ON search
+    # change)", and that screen has not run on main's corpus. KICAD_POCKET_RIP=1
+    # arms it for the A/B.
+    g['POCKET_RIP'] = _opt_in('KICAD_POCKET_RIP')
     g['BUS_CORRIDOR_PROBE_VIA_MULT'] = _f('KICAD_BUS_CORRIDOR_PROBE_VIA_MULT', 20.0)
     g['BUS_MAX_CORRIDOR_LAYER_CHANGES'] = _i('KICAD_BUS_MAX_CORRIDOR_LAYER_CHANGES', 1)
     g['TAP_RELOCATION_MAX'] = _i('KICAD_TAP_RELOCATION_MAX', 2)
@@ -450,3 +543,55 @@ def refresh() -> None:
 
 
 refresh()
+
+
+# --- #653: what was actually set, for the log and the JSON summary ----------
+#
+# Knobs are read once at import and never echoed, so a wave launched from a
+# shell that exported KICAD_* inherited them SILENTLY and its logs were
+# indistinguishable from a clean run. Measured cost: a whole A/B baseline
+# (orangecrab, "33 issues") was env-contaminated -- same commit, flags, .so and
+# python graded 37 clean -- and the cause could only be INFERRED, because
+# nothing in the log recorded what was set. These two helpers make a dirty
+# baseline detectable post-hoc instead of by re-running.
+#
+# Reported as the RAW environment, not the parsed attributes above: the point
+# is to record what the operator's shell actually handed this process,
+# including a knob this build does not know about (a knob from a branch, or
+# one deleted since) -- exactly the case a parsed inventory would hide.
+
+# KiCad's own installation variables are NOT knobs: the versioned dirs
+# (KICAD9_FOOTPRINT_DIR, KICAD8_3DMODEL_DIR, ...) and the stock data paths say
+# nothing about routing behaviour and would bury the real knobs in noise
+# inside the GUI, where KiCad sets a dozen of them.
+_INSTALL_PREFIX = __import__('re').compile(r'^KICAD\d+_')
+_INSTALL_NAMES = frozenset({
+    'KICAD_USER_TEMPLATE_DIR', 'KICAD_TEMPLATE_DIR', 'KICAD_STOCK_DATA_HOME',
+    'KICAD_DOCUMENTS_HOME', 'KICAD_CONFIG_HOME', 'KICAD_DATA', 'KICAD_PATH',
+    'KICAD_RUN_FROM_BUILD_DIR', 'KICAD_ALIAS_SUPPORT',
+})
+
+
+def active_env_knobs() -> dict:
+    """{name: value} for every KICAD_*/KRT_* variable set in the environment.
+
+    Installation paths (see _INSTALL_NAMES / KICAD<n>_*) are excluded. Read
+    from os.environ LIVE rather than from the import-time snapshot, so a
+    harness that sets a knob and calls refresh() is reported accurately.
+    """
+    out = {}
+    for k, v in os.environ.items():
+        if not (k.startswith('KICAD') or k.startswith('KRT_')):
+            continue
+        if _INSTALL_PREFIX.match(k) or k in _INSTALL_NAMES:
+            continue
+        out[k] = v if len(v) <= 200 else v[:197] + '...'
+    return dict(sorted(out.items()))
+
+
+def env_knobs_line() -> str:
+    """One-line, log-greppable inventory of the active knobs."""
+    knobs = active_env_knobs()
+    if not knobs:
+        return "ENV KNOBS: none"
+    return "ENV KNOBS: " + ' '.join(f"{k}={v}" for k, v in knobs.items())

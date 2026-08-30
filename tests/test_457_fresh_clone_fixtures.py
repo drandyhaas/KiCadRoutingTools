@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import fixture_boards
 from fixture_boards import _RECIPES, ROOT, ensure
 
-SIBLINGS = ('.kicad_pro', '.kicad_prl')
+SIBLINGS = ('.kicad_pro', '.kicad_prl', '.kicad_dru')
 
 
 def _tracked():

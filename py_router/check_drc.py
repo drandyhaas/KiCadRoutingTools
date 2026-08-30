@@ -61,7 +61,54 @@ _EXPAND_ROUTING = None
 from routing_constants import SOFT_JOINT_MIN_GAP as _SOFT_JOINT_MIN_GAP
 
 # The one endpoint-coincidence radius (same value everywhere: 0.02mm / 20um).
-from connectivity import COINCIDENCE_TOL
+from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad,
+                          endpoint_reaches_via)
+
+
+def pad_copper_layers(pad, board_copper) -> set:
+    """The set of real copper layers a pad's copper occupies.
+
+    KiCad writes two wildcards a pad's `layers` list can carry: ``*.Cu`` (every
+    copper layer -- a through-hole barrel) and ``F&B.Cu`` (front and back only).
+    #697 lifted this out of ``run_drc`` so the PLACEMENT side
+    (placement/legality.py) resolves layer scope from the same function rather
+    than a hand-mirrored copy.
+
+    It now DELEGATES to ``expand_pad_layers`` rather than re-implementing the
+    expansion. It originally forked because that function passed ``F&B.Cu``
+    through verbatim; #722 fixed it there instead, which is the right place --
+    ``expand_pad_layers`` is what check_connected and the ROUTER scope pads
+    with, so the fork left the authority and the router wrong while curing only
+    the clearance paths. Two spellings of one expansion is the defect class
+    #695/#722 are about; this is the set-returning adapter, not a second answer.
+    """
+    return set(expand_pad_layers(list(getattr(pad, 'layers', None) or []),
+                                 list(board_copper)))
+
+
+def pads_shared_layer_clearance(eff: float, layer_rules, layers_a, layers_b=None):
+    """KiCad's per-layer (.kicad_dru) clearance for two items that meet on their
+    SHARED copper layers, with REPLACE semantics (#498).
+
+    A custom rule REPLACES the net/class-resolved value on its layer rather than
+    raising it, so: every shared layer ruled -> max(rule values); only some
+    ruled -> max(eff, rule values); none ruled -> eff unchanged. TH geometry is
+    identical on every layer, so the max over shared layers is exact.
+
+    Returns `eff` untouched when there are no rules -- the strict no-op that
+    makes this free for boards without a .kicad_dru (i.e. almost all of them).
+    """
+    if not layer_rules:
+        return eff
+    shared = set(layers_a)
+    if layers_b is not None:
+        shared &= set(layers_b)
+    vals = [layer_rules[l] for l in shared if l in layer_rules]
+    if not vals:
+        return eff
+    if all(l in layer_rules for l in shared):
+        return max(vals)        # every shared layer ruled: rules replace
+    return max([eff] + vals)
 
 
 def _expand_cu(pad_layers: List[str], routing_layers: List[str]) -> List[str]:
@@ -1925,12 +1972,12 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             print("Per-layer clearance rules (.kicad_dru, #498): "
                   + ", ".join(f"{l}:{v:g}" for l, v in sorted(_lcl.items())))
 
-    # #549: track-scoped clearance rules from the same .kicad_dru. Grader-side
+    # Track-scoped clearance rules from the same .kicad_dru (#735). Grader-side
     # they are PAIR-EXACT (a rule binds a specific (a, b) pair, other_only
     # exempts member siblings), which is <= the router's per-obstacle-net
     # over-approximation -- so router output always grades clean. Applied at
     # the SEG-SEG site only (KiCad's Type=='track' binds tracks).
-    from kicad_dru import read_board_track_clearances
+    from kicad_dru import read_board_track_clearances, track_pair_clearance
     _track_rules, _track_notes = read_board_track_clearances(pcb_file)
     _cls_of: Dict[int, set] = {}
     if _track_rules:
@@ -1944,29 +1991,32 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     if not quiet and _track_rules:
         for _n in _track_notes:
             print(f"  .kicad_dru: {_n}")
-        print("Track-to-track clearance rules (.kicad_dru, #549): "
+        print("Track-to-track clearance rules (.kicad_dru): "
               + ", ".join(f"'{r.cls}':{r.clearance_mm:g}"
                           f"{'(other-only)' if r.other_only else ''}"
                           for r in _track_rules))
 
     def _track_pair_cl(net_a: int, net_b: int, layer: str):
-        """Effective seg-seg clearance for the pair, plus the #549 TrackRule
+        """Effective seg-seg clearance for the pair, plus the TrackRule
         that RAISED it (None when no track rule binds above the base value).
         The rule identity is what lets the violation record distinguish a
-        structural, floor-governed rule pair from a physical graze."""
+        structural, floor-governed rule pair from a physical graze.
+
+        The binding predicate itself lives in `kicad_dru.track_pair_clearance`
+        (#735) so the fanout-clearance connector gate resolves a track pair
+        through THIS code rather than a second copy of it. Only the base value
+        is this grader's own -- `_pair_cl` reads the netclass/layer state that
+        exists nowhere else.
+
+        The empty-list early-out stays HERE rather than inside the resolver:
+        this runs per nearby seg-seg pair, and a board with no rules must not
+        pay a call for it (the same zero-cost-when-undeclared property the
+        netclass and override channels above have)."""
         eff = _pair_cl(net_a, net_b, layer=layer)
-        rule = None
         if not _track_rules:
-            return eff, rule
-        a_cls = _cls_of.get(net_a, ())
-        b_cls = _cls_of.get(net_b, ())
-        for r in _track_rules:
-            a_in, b_in = r.cls in a_cls, r.cls in b_cls
-            binds = ((a_in != b_in) or (a_in and b_in and not r.other_only))
-            if binds and r.clearance_mm > eff:
-                eff = r.clearance_mm
-                rule = r
-        return eff, rule
+            return eff, None
+        return track_pair_clearance(_track_rules, _cls_of.get(net_a, ()),
+                                    _cls_of.get(net_b, ()), eff)
 
     def _layer_cl(layer: str, eff: float) -> float:
         v = _lcl.get(layer) if _lcl else None
@@ -1978,29 +2028,19 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         return max([eff] + list(_lcl.values())) if _lcl else eff
 
     def _pad_copper(pad):
-        out = set()
-        for l in (pad.layers or []):
-            if l in ('*.Cu', 'F&B.Cu'):
-                out |= set(_board_copper) if l == '*.Cu' else {'F.Cu', 'B.Cu'}
-            elif l.endswith('.Cu'):
-                out.add(l)
-        return out
+        return pad_copper_layers(pad, _board_copper)
 
     def _pads_cl(eff: float, pad, other_pad=None) -> float:
         # Pad-vs-via / pad-vs-pad meet on their SHARED copper layers; TH
         # geometry is identical on every layer, so the max over shared layers
-        # is the exact requirement.
+        # is the exact requirement. The body lives at module level
+        # (pads_shared_layer_clearance) so placement/legality.py resolves the
+        # same rule rather than a hand-mirrored copy -- #697.
         if not _lcl:
-            return eff
-        shared = _pad_copper(pad)
-        if other_pad is not None:
-            shared &= _pad_copper(other_pad)
-        vals = [_lcl[l] for l in shared if l in _lcl]
-        if not vals:
-            return eff
-        if len([l for l in shared if l not in _lcl]) == 0:
-            return max(vals)  # every shared layer ruled: rules replace
-        return max([eff] + vals)
+            return eff          # strict no-op: expand nothing (see the helper)
+        return pads_shared_layer_clearance(
+            eff, _lcl, _pad_copper(pad),
+            _pad_copper(other_pad) if other_pad is not None else None)
 
     def _pair_cl(net_a: int, net_b: int, layer: str = None) -> float:
         base = clearance if not _ncl_by_id else \
@@ -2148,7 +2188,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 net2_name = pcb_data.nets.get(net2, None)
                 net1_str = net1_name.name if net1_name else f"net_{net1}"
                 net2_str = net2_name.name if net2_name else f"net_{net2}"
-                # #549 classification: the pair is RULE-governed (not a
+                # Track-rule classification: the pair is RULE-governed (not a
                 # physical graze) when a track rule raised the clearance AND
                 # the copper gap (eff - overlap) still clears the base pair
                 # value -- i.e. the violation exists only because of the rule.
@@ -2243,15 +2283,25 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             continue
         _ep_count[(s.net_id, s.layer, _rk(s.start_x, s.start_y))] += 1
         _ep_count[(s.net_id, s.layer, _rk(s.end_x, s.end_y))] += 1
-    _via_by_net = _dd(list)
+    _vias_by_net = _dd(list)
     for v in pcb_data.vias:
-        _via_by_net[v.net_id].append((v.x, v.y, (getattr(v, 'size', 0) or 0) / 2.0))
-    def _at_anchor(nid, x, y):
-        for vx, vy, vr in _via_by_net.get(nid, []):
-            if math.hypot(x - vx, y - vy) <= vr + 0.01:
+        _vias_by_net[v.net_id].append(v)
+    _copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or ())
+    def _at_anchor(nid, x, y, layer, width):
+        """Does this end's own COPPER reach a same-net via barrel or pad?
+
+        Shared predicate (connectivity.endpoint_reaches_*), so this stays
+        byte-identical to check_weird's soft-joint anchor and to the repair
+        pass. The cap is what physically touches, so the cap radius is the
+        credit -- for the pad exactly as for the via (#722) -- and the pad
+        must actually carry copper on this layer, as check_connected requires.
+        """
+        r = (width or 0.0) / 2.0
+        for v in _vias_by_net.get(nid, []):
+            if endpoint_reaches_via(x, y, r, v, (layer,), _copper):
                 return True
         for p in pcb_data.pads_by_net.get(nid, []):
-            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
+            if endpoint_reaches_pad(x, y, r, (layer,), p):
                 return True
         return False
     _dangles = _dd(list)  # (net_id, layer) -> [(x, y, width)]
@@ -2261,17 +2311,25 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
             if _ep_count[(s.net_id, s.layer, _rk(x, y))] != 1:
                 continue  # shared vertex = clean joint
-            if _at_anchor(s.net_id, x, y):
+            if _at_anchor(s.net_id, x, y, s.layer, s.width):
                 continue  # terminates on a via / own pad = legitimate
-            _dangles[(s.net_id, s.layer)].append((x, y, s.width))
+            # A soft joint is a PAIR: a graphic is carried as a flag so
+            # only an art-MEETS-art pair is dropped, never the actionable
+            # TRACK end paired with art (#337, #722).
+            _dangles[(s.net_id, s.layer)].append(
+                (x, y, s.width, getattr(s, 'graphic', False)))
     for (net_id, layer), ends in _dangles.items():
         for i in range(len(ends)):
-            xi, yi, wi = ends[i]
+            xi, yi, wi, gi = ends[i]
             for j in range(i + 1, len(ends)):
-                xj, yj, wj = ends[j]
+                xj, yj, wj, gj = ends[j]
                 gap = math.hypot(xi - xj, yi - yj)
                 cap = (wi + wj) / 2.0
+                if gi and gj:
+                    continue  # art meets art: nothing anyone can act on
                 if _SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
+                    if gi:  # report where the fix goes: the TRACK end
+                        xi, yi, xj, yj = xj, yj, xi, yi
                     net_name = pcb_data.nets.get(net_id, None)
                     net_str = net_name.name if net_name else f"net_{net_id}"
                     violations.append({
@@ -3309,7 +3367,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"  {v['net1']} <-> {v['net2']}")
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
                         if v.get('track_rule'):
-                            print(f"    Track rule: '{v['track_rule']}' (#549; floor-governed pair)")
+                            print(f"    Track rule: '{v['track_rule']}' (floor-governed pair)")
                         print(f"    Seg1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})-({v['loc1'][2]:.2f},{v['loc1'][3]:.2f})")
                         print(f"    Seg2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})-({v['loc2'][2]:.2f},{v['loc2'][3]:.2f})")
                     elif vtype == 'via-segment':

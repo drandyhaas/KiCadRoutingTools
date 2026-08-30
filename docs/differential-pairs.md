@@ -562,6 +562,25 @@ not boxed, or open the obstruction in placement. The hybrid is gated by
 path (single-ended follow-up) when it can't lay a clean route, so it never makes a
 pair worse.
 
+**How it is reported (#766).** A hybrid-routed pair is genuinely routed — its pads
+connect and its copper is DRC-clean — so it keeps its place in `routed_diff_pairs`
+and in `successful`. But its **terminal legs are point-to-point single-ended
+copper**, which is not what `outcome: "coupled"` claims ("both members routed
+coupled"), and the terminals are exactly where P/N geometry breaks and intra-pair
+skew is born. The pair report therefore discloses it rather than reclassifying it:
+
+```
+"outcome": "coupled", "escape": "hybrid", "coupled_terminals": false
+```
+
+plus a `Hybrid escape: N pair(s) ...` line in the printed summary. **If you hold an
+intra-pair skew budget, gate on `coupled_terminals`** — a `false` there is the
+signal that the pair's terminals want a coupled fanout (see `bga_fanout.py
+--escape-method underpad --diff-pairs`) rather than more routing effort.
+Deliberately *not* demoted to `partial`: a partial pair's terminals are peeled to a
+downstream single-ended pass, whereas a hybrid's are already routed, so demoting
+would drop it out of the routed column and imply follow-up work that does not exist.
+
 ## Debug Visualization
 
 With `--debug-lines`, debug geometry is output on User layers as graphic lines:

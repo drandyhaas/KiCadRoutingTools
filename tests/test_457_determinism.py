@@ -33,6 +33,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_placer'))  # placement split
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
+from run_utils import tool_env as _tool_env  # #522 PYTHONPATH
+
+# #522 reorg + skill merge: engine -> py_router/, placer -> py_placer/,
+# board_score.py -> the placement-and-routing skill. Without these roots the
+# imports below raise and the test never runs (it reports as a failure while
+# asserting nothing).
+_R522 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _p522 in ('py_router', 'py_placer',
+              os.path.join('.claude', 'skills',
+                           'plan-pcb-placement-and-routing', 'scripts')):
+    _d522 = os.path.join(_R522, _p522)
+    if _d522 not in sys.path:
+        sys.path.insert(0, _d522)
+
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SEEDS = ('0', '1', '12345')
@@ -70,12 +84,10 @@ sys.stdout.write("RESULT" + json.dumps({
 
 
 def _run(board, seed):
-    # #522: kicad_parser/placement live under py_router/ now; the probe
-    # subprocess needs them on ITS path too (rust_router for grid_router).
-    env = dict(os.environ, PYTHONHASHSEED=seed,
-               PYTHONPATH=os.pathsep.join(
-                   (os.path.join(ROOT, 'py_router'),
-                    os.path.join(ROOT, 'rust_router'), ROOT)))
+    # PYTHONPATH must reach py_router/ py_tools/ py_placer/ (and rust_router
+    # for grid_router) -- the probe imports kicad_parser, which #522 moved
+    # out of the repo root. run_utils.tool_env covers them all.
+    env = dict(_tool_env(), PYTHONHASHSEED=seed)
     r = subprocess.run([sys.executable, '-c', _PROBE,
                         os.path.join(ROOT, 'kicad_files', board)],
                        capture_output=True, text=True, cwd=ROOT, env=env)

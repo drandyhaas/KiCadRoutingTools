@@ -17,6 +17,23 @@ import subprocess
 import sys
 import tempfile
 
+#: #716: this test gives its OWN subprocess `timeout=3600` (below), so under
+#: run_all's 600 s default it was killed at 600 s -- long before its internal
+#: limit could fire -- and reported a machine-speed fact as a code fact. The
+#: budget declaration added in #691 was written FOR this test and
+#: test_obstacle_map_balance, and neither actually declared one; measured on the
+#: #691 branch, this still timed out at 600 s. Matches the internal budget so
+#: the subprocess limit is the one that governs.
+#:
+#: Measured 455 s ALONE (2026-08-22, exit 0, ALL PASS) -- UNDER the 600 s
+#: default, yet it timed out in-suite. Same shape as test_431_board_gates
+#: (516 s alone, also timing out in-suite): run_all defaults to -j 4, so this
+#: competes for CPU with three other processes while that clock runs. This is
+#: a budget for the CONTENDED case, and the standalone number is the evidence
+#: that the test finishes rather than hangs -- do not read a future timeout
+#: here as "it is stuck" without re-measuring it alone first.
+RUN_ALL_TIMEOUT = 3600
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split

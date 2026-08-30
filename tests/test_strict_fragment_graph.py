@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""#549 A-1: the strict-fragment view of check_net_connectivity.
+"""The strict-fragment view of check_net_connectivity.
 
 Run 6's VCC3V3 graded 25/27 pads connected while KiCad saw the copper in 7
 islands -- the permissive credit rules (0.4mm pad proximity, grading-epsilon

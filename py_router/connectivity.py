@@ -184,6 +184,116 @@ def is_edge_stub(pad_x: float, pad_y: float, bga_zones: List) -> bool:
 COINCIDENCE_TOL = 0.02
 
 
+def endpoint_reaches_pad(x, y, radius, layers, pad) -> set:
+    """Which of `layers` a disc of copper -- centre (x, y), radius `radius` --
+    both SHARES with `pad`'s copper and physically OVERLAPS. Empty set = no
+    contact.
+
+    THE one predicate for "does this copper reach this pad". A track
+    endpoint's round cap and a via barrel are the SAME question with a
+    different radius; answering them separately is how #695 and #722 shipped
+    four lines apart, in four copies across three modules.
+
+    GEOMETRY mirrors check_connected's endpoint-in-pad rule exactly --
+    ``_m = max(ewidth / 2 - 1e-6, tolerance)`` -- and its via twin,
+    ``_m = max(vsize / 2 - 1e-6, tolerance)``, whose `tolerance` default IS
+    COINCIDENCE_TOL. `margin` inflates the EXACT pad outline (custom-pad
+    polygons, roundrect corners and rect_rotation all hold), so this reads
+    "the copper overlaps the pad copper", not "the centre is inside it".
+    COINCIDENCE_TOL is a FLOOR under the credit, never a replacement for it,
+    exactly as it is there.
+
+    Note the role split this file documents above: COINCIDENCE_TOL grades
+    geometric INTENT. Asking a copper-reaches-copper question with it is a
+    category error -- it made these checkers contradict check_net_connectivity
+    on copper KiCad grades joined, and their exit codes are chain-blocking.
+
+    LAYERS come from `net_queries.expand_pad_layers`, the SAME expansion
+    check_connected uses, rather than a local reading of `pad.layers`:
+
+      * `*.Cu` means every copper layer; `*.Mask` and `*.Paste` mean NO copper
+        layer. A local `any('*' in L)` test reads a mask wildcard as an
+        all-layer copper pad -- and 641 pads in kicad_files/ carry `*.Mask`.
+      * a drilled pad occupies the layers it DECLARES. `drill > 0 -> every
+        layer` over-credits a PTH pad declared ("F.Cu" "B.Cu") on a 4-layer
+        board, which the authority grades as not reaching In1.Cu at all.
+      * an NPTH pad is a hole with no copper whatever its layer list says
+        (#328). `pad_is_plated_through` is the spelling for the neighbouring
+        question ("does this barrel tie copper layers"); here the pad simply
+        has no copper to land on.
+
+    Crediting the cap WITHOUT the layer guard trades one contradiction for
+    another: B.Cu ends near an F.Cu-only pad are genuinely split, and a
+    layer-blind widening silences that -- the direction that ships broken
+    copper.
+    """
+    if getattr(pad, 'pad_type', '') == 'np_thru_hole':
+        return set()                        # a hole, not copper (#328)
+    # Local import: net_queries imports this module, so a module-level import
+    # would cycle -- the same reason check_net_connectivity is imported below.
+    from net_queries import expand_pad_layers
+    want = list(layers)
+    on = set(want) & set(expand_pad_layers(list(getattr(pad, 'layers', None)
+                                                or ()), want))
+    if not on:
+        return set()                        # cheap test first; geometry is the cost
+    from check_connected import _point_in_pad
+    if _point_in_pad(x, y, pad, margin=max(radius - 1e-6, COINCIDENCE_TOL)):
+        return on
+    return set()
+
+
+def via_copper_layers(via, copper_layers=None) -> set:
+    """The copper layers `via`'s barrel actually occupies.
+
+    check_connected's rule: a via listing both F.Cu and B.Cu (or listing
+    nothing) spans every copper layer; otherwise it spans what it declares.
+    When `copper_layers` is supplied, a blind/buried via also gets the layers
+    BETWEEN its endpoints -- a buried F.Cu-In2.Cu via touches In1.Cu, and
+    treating the span as the two endpoints alone manufactured phantom
+    unsupported-via findings (check_weird._via_span, same rule).
+    """
+    declared = [L for L in (getattr(via, 'layers', None) or ()) if L.endswith('.Cu')]
+    if not declared or ('F.Cu' in declared and 'B.Cu' in declared):
+        return set(copper_layers or declared or ())
+    if copper_layers:
+        order = list(copper_layers)
+        idx = [order.index(L) for L in declared if L in order]
+        if len(idx) >= 2:
+            return set(order[min(idx):max(idx) + 1])
+    return set(declared)
+
+
+def endpoint_reaches_via(x, y, radius, via, layers, copper_layers=None) -> bool:
+    """Does a disc of copper -- centre (x, y), radius `radius`, living on
+    `layers` -- overlap `via`'s barrel?
+
+    The via twin of `endpoint_reaches_pad`, and the same mirror of the
+    authority: check_connected credits a via against a segment at
+    ``max((psize + seg.width) / 2 - eps, tolerance)`` -- barrel radius PLUS
+    the copper's own radius -- and creates via points ONLY on the via's own
+    copper layers.
+
+    Both halves matter, and only together. The soft-joint anchors used a flat
+    ``vr + 0.01``: barrel-aware but CAP-BLIND, the very defect #722 reports on
+    the pad branch. Widening that to `vr + radius` WITHOUT the layer test just
+    makes a layer-blind credit ~37% wider -- on a 0.6mm via and a 0.25mm track,
+    0.310mm becomes 0.425mm -- so a blind F.Cu/In1.Cu via would anchor B.Cu
+    track ends it carries no copper for, silencing a real open.
+
+    A via with no declared size claims the 0.6 default, matching
+    ``getattr(via, 'size', 0.6)`` in check_connected. A via whose size IS zero
+    keeps zero there, so it keeps zero here.
+    """
+    if not (set(layers) & via_copper_layers(via, copper_layers)):
+        return False
+    vr = (getattr(via, 'size', 0.6) if getattr(via, 'size', None) is not None
+          else 0.6) / 2.0
+    return math.hypot(x - via.x, y - via.y) <= max(vr + radius - 1e-6,
+                                                   COINCIDENCE_TOL)
+
+
+
 _CLUSTER_MEMO: "OrderedDict[tuple, tuple]" = OrderedDict()
 _CLUSTER_MEMO_CAP = 4096
 

@@ -91,8 +91,11 @@ def run():
                   js_ch['failed'] > 0)
             check("auto escapes every ball channel dropped",
                   js_auto['failed'] == 0 and js_auto['escaped'] > js_ch['escaped'])
+            # #669: auto's retry ladder announces dogbone first; underpad
+            # follows only when dogbone still dropped balls.
             check("auto retry message printed",
-                  'retrying with the under-pad grid escape' in res_auto.stdout)
+                  'retrying with the dog-bone escape' in res_auto.stdout
+                  or 'retrying with the under-pad escape' in res_auto.stdout)
 
         # --layer-costs: forbidding In2.Cu must leave it free of NEW copper.
         out_lc = os.path.join(td, 'lc.kicad_pcb')

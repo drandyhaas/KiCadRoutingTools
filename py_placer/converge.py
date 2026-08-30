@@ -463,6 +463,28 @@ def cmd_where(a):
     return subprocess.run(argv, cwd=ROOT).returncode
 
 
+def _load_defects(paths):
+    """The defect documents behind `--defect-json`, inlined into the row.
+
+    A path into a work dir is not a measurement: work dirs are deleted and
+    the ledger outlives them. An unreadable path is kept as
+    `{'path': ..., 'error': ...}` rather than dropped -- "the lap named a
+    defect record we cannot read" is a different fact from "the lap named
+    none", and silently collapsing the two is how a ledger stops being
+    evidence.
+    """
+    if not paths:
+        return None
+    out = []
+    for p in paths:
+        try:
+            with open(p, encoding='utf-8') as f:
+                out.append(json.load(f))
+        except (OSError, ValueError) as exc:                    # noqa: BLE001
+            out.append({'path': p, 'error': f'{type(exc).__name__}: {exc}'})
+    return out
+
+
 def cmd_record(a):
     from board_store import BoardStore, Ledger
     # --score-file: the payload as a PATH, not as argv.
@@ -767,6 +789,19 @@ def cmd_record(a):
              'lever_argv': list(a.argv) if a.argv else None,
              'score': json.loads(a.score) if a.score else None,
              'renders': list(a.render_json) if a.render_json else None,
+             # The MEASUREMENT the next lap is aimed at, not a paragraph
+             # about it. Run 20 recorded "throat 0.409mm vs 0.450 needed,
+             # blocked by U4.53/R7.2" as English inside `lever`, so the
+             # re-entry could be read by a person and by nothing else.
+             #
+             # INLINED, unlike `renders`: a render is a large file a reader
+             # opens, a defect record is a handful of numbers the ledger
+             # itself should still hold once the work dir is gone.
+             'defects': _load_defects(a.defect_json),
+             # L4 requires a --shape and the ledger has never kept it, so
+             # "which shape did we re-enter at, and did it work" was not a
+             # question the record could answer.
+             'shape': a.shape,
              'lenses': list(a.lens) if a.lens else None,
              # Split on whitespace and commas so `--scope-refs "$(cat locks.txt)"`
              # records 45 refs rather than one 45-ref string.
@@ -868,9 +903,10 @@ def cmd_replay(a):
 
 CONTINUE, DONE, STUCK, BUDGET = 4, 0, 5, 6
 
-#: Which half of the loop a ledger row belongs to. `systemic` is neither -- it
-#: changes how the chain measures itself, not the board -- so it can never make
-#: a half look like it is still improving.
+#: Which half of the loop a ledger row belongs to. `systemic` and
+#: `classification` are neither -- one changes how the chain measures itself,
+#: the other decides where to re-enter -- and neither changes the board, so
+#: neither can make a half look like it is still improving.
 _HALF = {'placement': 'placement', 'completion': 'routing'}
 
 
@@ -1312,8 +1348,16 @@ def build_parser():
     r.add_argument('--ledger', required=True)
     r.add_argument('--board', required=True)
     r.add_argument('--store', default=None)
-    r.add_argument('--kind', choices=('completion', 'placement', 'systemic'),
-                   default='completion')
+    r.add_argument('--kind',
+                   choices=('completion', 'placement', 'systemic',
+                            'classification'),
+                   default='completion',
+                   help="which half of the loop this lap belongs to. "
+                        "`classification` is the L3 lap that DECIDES the shape "
+                        "of the next re-entry; it changes no board, so like "
+                        "`systemic` it belongs to neither half. It had to be "
+                        "filed as `systemic` before, which made a decision "
+                        "look like a tool change.")
     r.add_argument('--lever', default=None)
     r.add_argument('--score', default=None, help='JSON')
     r.add_argument('--score-file', default=None, metavar='PATH',
@@ -1322,6 +1366,19 @@ def build_parser():
                         '~32kB and the shell then exits 126 BEFORE record '
                         'runs, so the lap is lost with no error. Mutually '
                         'exclusive with --score.')
+    r.add_argument('--defect-json', action='append', default=None,
+                   metavar='PATH',
+                   help='defect-record document(s) this lap was aimed at; '
+                        'repeatable. The CONTENTS are inlined into '
+                        'entry["defects"] (not the path -- work dirs are '
+                        'deleted and the ledger outlives them). A ledger that '
+                        'keeps the MEASUREMENT can tell a later reader what '
+                        'the lap was for; a ledger that keeps a paragraph '
+                        'about it cannot.')
+    r.add_argument('--shape', choices=('parameter', 'placement', 'floorplan'),
+                   default=None,
+                   help='the re-entry shape this lap acted on (the same word '
+                        'L4 demands). Stored as entry["shape"].')
     r.add_argument('--render-json', action='append', default=None,
                    metavar='PATH',
                    help='render_placement --json-out document(s) that were '
@@ -1425,7 +1482,13 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    # NO cli_banner here (deliberate): converge's stdout is a JSON API --
-    # `record` and `status` print documents that callers json.loads() whole
-    # (tests/test_converge.py does). The other instruments' stdout is a log.
-    sys.exit(main())
+    # Declare the lever for the WHOLE run, so every pose this CLI
+    # writes carries its name. Nothing called declare_lever outside
+    # tests, so the unaided instrument had no armed state at all:
+    # unarmed it is silent, and armed by hand it refused the engine.
+    from placement.provenance import declare_lever
+    with declare_lever('converge.py', sys.argv):
+        # NO cli_banner here (deliberate): converge's stdout is a JSON API --
+        # `record` and `status` print documents that callers json.loads() whole
+        # (tests/test_converge.py does). The other instruments' stdout is a log.
+        sys.exit(main())

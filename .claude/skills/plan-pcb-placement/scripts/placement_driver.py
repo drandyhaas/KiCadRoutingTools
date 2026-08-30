@@ -31,7 +31,11 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(HERE)
-REFS = os.path.join(os.path.dirname(SKILL_DIR), 'plan-pcb-routing', 'references')
+#: The reference pages live with the combined skill; there is no
+#: plan-pcb-routing/references directory, so the old path resolved to
+#: nothing and every stage that cited a reference cited a missing file.
+REFS = os.path.join(os.path.dirname(SKILL_DIR),
+                    'plan-pcb-placement-and-routing', 'references')
 
 
 # --------------------------------------------------------------------------
@@ -420,7 +424,9 @@ Rank rules, in this order:
   2. Prefer a ranking that ROUTED something over one that only measured the
      placement. A placement metric cannot see the thing you are choosing for.
   3. hpwl and crossings ANNOTATE the slate; they do not rank it. Both correlate
-     positively with distance-to-truth on damaged boards.
+     positively with distance-to-truth on damaged boards -- that is the
+     measured dependent variable, not routed blocking; nothing here has
+     correlated either with blocking (docs/placement-predictors.md).
 
 Adopt one deliberately, say why in writing, and re-run P4 on the adopted board.
 Adoption is a decision, not a step -- it is not replayable, so it belongs in
@@ -819,7 +825,8 @@ def _guard_congestion(a):
     moment a lever could still be pulled. The executor decides.
 
     hpwl and not crossings, still: non-negotiable 4, r(crossings) = +0.780
-    against distance-to-truth. crossings is printed and never tested.
+    against distance-to-truth -- not against routed blocking, which nothing has
+    correlated it against (docs/placement-predictors.md). crossings is printed and never tested.
     """
     # THE WAIVER IS PARSED HERE AND SPENT AT THE BOTTOM. It used to return
     # (True, '') on the spot, ABOVE the evidence loads -- so a waived gate
@@ -886,7 +893,8 @@ def _guard_congestion(a):
     # crossings and aggregate courtyard overlap; never gate on them -- both
     # correlate POSITIVELY with distance-to-truth." Measured across 29
     # candidates on one board, r(crossings) = +0.780 against
-    # distance-to-the-correct-placement, and one candidate reached 233 crossings
+    # distance-to-the-correct-placement -- NOT against routed blocking; see
+    # docs/placement-predictors.md -- and one candidate reached 233 crossings
     # -- better than the human original's 276 -- while sitting 18.7 mm out of
     # position. A gate on crossings pressures the search toward LOWER crossings,
     # which by that correlation is pressure toward a WORSE placement. hpwl is
@@ -1331,7 +1339,8 @@ def _self_test():
                         ).startswith('<error>'),
              'a written disposition closes it out')
         # crossings is printed and never tested -- non-negotiable 4,
-        # r(crossings) = +0.780 against distance-to-truth.
+        # r(crossings) = +0.780 against distance-to-truth, not against routed
+        # blocking (docs/placement-predictors.md).
         want('crossings' in out, 'P-close prints crossings alongside')
         # A proportionate repair gets the numbers and none of the warning.
         out = _close(_fake_render(_pb, halo=400.0, crossings=1200.0, hpwl=700.0),

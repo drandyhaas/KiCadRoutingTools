@@ -88,6 +88,179 @@ def test_an_emitted_intent_grades_clean_on_every_tracked_board():
     print(f"  PASS: {checked} boards emit -> grade with zero errors")
 
 
+def _stray_keys(doc):
+    """Every key an emitted intent writes that the loader would now refuse.
+
+    The emitter and the loader's key sets (#710) are two halves of one
+    contract with nothing else holding them together: `emit_intent` writes
+    `suspect`, `overhang_capped`, `class` and friends that no rule reads, so
+    a set that forgot one would not fail any rule -- it would fail months
+    later, on an artifact that used to load.
+    """
+    from placement.floorplan import (_BLOCK_KEYS, _BUDGET_KEYS, _CORRIDOR_KEYS,
+                                     _DECAP_KEYS, _DEFAULTS_KEYS,
+                                     _EDGE_CONNECTOR_KEYS, _ENVELOPE_KEYS,
+                                     _HEALTH_KEYS, _KEEPOUT_KEYS,
+                                     _OVERHANG_KEYS, _TOP_LEVEL_KEYS)
+    out = []
+
+    def chk(obj, allowed, where):
+        if isinstance(obj, dict):
+            out.extend(f"{where}.{k}" for k in sorted(set(obj) - set(allowed)))
+
+    chk(doc, _TOP_LEVEL_KEYS, 'top')
+    chk(doc.get('envelope'), _ENVELOPE_KEYS, 'envelope')
+    chk(doc.get('defaults'), _DEFAULTS_KEYS, 'defaults')
+    chk(doc.get('decaps'), _DECAP_KEYS, 'decaps')
+    chk(doc.get('legality_budget'), _BUDGET_KEYS, 'legality_budget')
+    chk(doc.get('health'), _HEALTH_KEYS, 'health')
+    for i, spec in enumerate((doc.get('health') or {}).get('bus_corridors')
+                             or []):
+        chk(spec, _CORRIDOR_KEYS, f'health.bus_corridors[{i}]')
+    for i, b in enumerate(doc.get('blocks') or []):
+        chk(b, _BLOCK_KEYS, f'blocks[{i}]')
+    for i, k in enumerate(doc.get('keepouts') or []):
+        chk(k, _KEEPOUT_KEYS, f'keepouts[{i}]')
+    for i, c in enumerate(doc.get('edge_connectors') or []):
+        chk(c, _EDGE_CONNECTOR_KEYS, f'edge_connectors[{i}]')
+        chk(c.get('overhang_mm'), _OVERHANG_KEYS,
+            f'edge_connectors[{i}].overhang_mm')
+    return out
+
+
+def _emitted_connector_keys():
+    """Every key `emit_intent` can write on an `edge_connectors[]` entry, read
+    from the SOURCE rather than from a run.
+
+    The dynamic check below only sees branches a test board reaches, and
+    `suspect` / `suspect_reason` need rigid pattern vectors -- which is a
+    property of a DAMAGED corpus board, not of anything tracked here. A source
+    scan sees every branch; the dynamic half proves the keys are the ones a
+    real emission actually produces. Neither alone is the guard.
+    """
+    import ast
+    import inspect
+    import textwrap
+    from placement import floorplan as fp
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fp.emit_intent)))
+
+    def dict_keys(node):
+        return {k.value for k in node.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+
+    def is_entry(node):
+        return (isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == 'entry'
+                and isinstance(node.slice, ast.Constant)
+                and isinstance(node.slice.value, str))
+
+    keys = set()
+    for node in ast.walk(tree):
+        # entry['k'] = ...   and   entry['k'] += ...
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if is_entry(t):
+                    keys.add(t.slice.value)
+            # entry = {...}
+            if (len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == 'entry'
+                    and isinstance(node.value, ast.Dict)):
+                keys |= dict_keys(node.value)
+        elif isinstance(node, ast.AugAssign) and is_entry(node.target):
+            keys.add(node.target.slice.value)
+        # conns.append({...}), entry.update({...}), entry.setdefault('k', ..)
+        elif isinstance(node, ast.Call) and isinstance(node.func,
+                                                       ast.Attribute):
+            recv = node.func.value
+            named = isinstance(recv, ast.Name) and recv.id in ('conns', 'entry')
+            if not named or not node.args:
+                continue
+            if node.func.attr in ('append', 'update') and isinstance(
+                    node.args[0], ast.Dict):
+                keys |= dict_keys(node.args[0])
+            elif node.func.attr == 'setdefault' and isinstance(
+                    node.args[0], ast.Constant) and isinstance(
+                    node.args[0].value, str):
+                keys.add(node.args[0].value)
+    return keys
+
+
+def _damaged_board(td):
+    """A board with two parts stacked well outside the outline.
+
+    That is what drives `emit_intent` down its capped-overhang branch --
+    the one that writes `overhang_capped` and `observed_overhang_mm`, keys
+    no healthy tracked board ever emits.
+    """
+    from placement.writer import write_placed_output
+    src = _board('splitflap_driver')
+    pcb = parse_kicad_pcb(src)
+    b = pcb.board_info.board_bounds
+    small = sorted(r for r, f in pcb.footprints.items()
+                   if r[0] in 'RC' and len(f.pads) == 2)[:2]
+    assert len(small) == 2, small
+    x, y = b[2] + 6.0, (b[1] + b[3]) / 2.0
+    dst = os.path.join(td, 'damaged.kicad_pcb')
+    assert write_placed_output(src, dst, [
+        {'reference': r, 'new_x': x, 'new_y': y, 'new_rotation': 0.0}
+        for r in small], pcb_data=pcb)
+    return dst
+
+
+def test_what_emit_writes_is_what_the_loader_accepts():
+    """The #710 drift detector.
+
+    `emit_intent` and the loader's key sets are two halves of one contract
+    with nothing else holding them together: the emitter writes `suspect`,
+    `overhang_capped`, `class` and friends that no RULE reads, so a set that
+    forgot one would fail no rule here -- it would fail months later, on an
+    artifact that used to load.
+    """
+    checked, rare = 0, set()
+    for name in ROUND_TRIP:
+        p = _board(name)
+        if not os.path.exists(p):
+            continue
+        pcb = parse_kicad_pcb(p)
+        for classes in (False, True):
+            doc = emit_intent(pcb, p, declare_classes=classes)
+            assert not _stray_keys(doc), (name, classes, _stray_keys(doc))
+            intent_from_dict(doc)          # and the loader itself agrees
+            for c in doc.get('edge_connectors') or []:
+                rare |= set(c) - {'ref', 'edge', 'overhang_mm'}
+            checked += 1
+    assert checked >= 10, f"only {checked} emissions checked"
+
+    # The capped branch, which no healthy board reaches.
+    with tempfile.TemporaryDirectory() as td:
+        dmg = _damaged_board(td)
+        doc = emit_intent(parse_kicad_pcb(dmg), dmg, declare_classes=True)
+        assert not _stray_keys(doc), _stray_keys(doc)
+        intent_from_dict(doc)
+        for c in doc.get('edge_connectors') or []:
+            rare |= set(c) - {'ref', 'edge', 'overhang_mm'}
+
+    # Anti-vacuity: without this, a run that emitted only `ref`/`edge` would
+    # pass while checking none of the keys the test exists for.
+    assert {'class', 'source', 'overhang_capped',
+            'observed_overhang_mm'} <= rare, sorted(rare)
+
+    # And the branches no board here can reach, from the source. `emit_intent`
+    # builds its BLOCK entries with the same local name, so the scan sees both
+    # vocabularies and is checked against both; which key belongs to which
+    # level is what the dynamic half above pins, on every level a board
+    # reaches.
+    from placement.floorplan import _BLOCK_KEYS, _EDGE_CONNECTOR_KEYS
+    written = _emitted_connector_keys()
+    known = _EDGE_CONNECTOR_KEYS | _BLOCK_KEYS
+    assert {'suspect', 'suspect_reason'} <= written, sorted(written)
+    assert written <= known, sorted(written - known)
+    print(f"  PASS: {checked + 1} emissions carry only accepted keys; "
+          f"{len(written)} emitter-source keys all known "
+          f"(seen live: {', '.join(sorted(rare))})")
+
+
 def test_the_round_trip_is_not_vacuous():
     """Guards the failure the round trip cannot see: every rule skipped."""
     raw = _emit()
@@ -382,10 +555,13 @@ def test_an_edge_connector_outside_its_declared_overhang_is_caught():
     print(f"  PASS: {hits[0].message[:84]}")
 
 
-def test_a_board_whose_outline_did_not_parse_is_refused_not_graded():
-    """#550 in miniature: a round board parses its ring fine but reports
-    board_bounds None, and every containment check would silently degrade to a
-    bounding box that does not exist."""
+def test_a_round_board_now_parses_its_outline():
+    """The #550 case this used to reproduce is FIXED: a gr_circle Edge.Cuts
+    ring is tessellated (64 edge segments) and yields real bounds, so the
+    round board is gradeable rather than refused. Kept as a regression guard
+    on the parse, with the refusal path itself moved to the test below --
+    which uses a board that genuinely HAS no bounds, since a round one no
+    longer does."""
     d = tempfile.mkdtemp()
     p = os.path.join(d, 'round.kicad_pcb')
     with open(p, 'w', encoding='utf-8') as fh:
@@ -397,14 +573,38 @@ def test_a_board_whose_outline_did_not_parse_is_refused_not_graded():
                  '  (net 0 "")\n)\n')
     pcb = parse_kicad_pcb(p)
     st = outline_state(pcb, p)
+    assert st['trustworthy'], st
+    assert st['outlines'] == 1 and st['edge_segments'] > 8, st
+    # r=20 at (50,50) -> the tessellated ring's extent, not a phantom box.
+    assert st['bounds'] == (30.0, 30.0, 70.0, 70.0), st
+    assert not st['problems'], st['problems']
+    print("  PASS: a round outline tessellates and grades (was #550-refused)")
+
+
+def test_a_board_with_no_outline_at_all_is_refused_not_graded():
+    """The refusal itself, on a board that genuinely has no bounds: every
+    containment check would otherwise degrade to a bounding box that does not
+    exist."""
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, 'noedge.kicad_pcb')
+    with open(p, 'w', encoding='utf-8') as fh:
+        fh.write('(kicad_pcb (version 20221018) (generator pcbnew)\n'
+                 '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal)'
+                 ' (44 "Edge.Cuts" user))\n'
+                 '  (net 0 "")\n)\n')
+    pcb = parse_kicad_pcb(p)
+    st = outline_state(pcb, p)
     assert not st['trustworthy'], st
-    assert st['bounds'] is None and st['outlines'] == 1, st
-    assert any('550' in s for s in st['problems']), st['problems']
+    assert st['bounds'] is None and st['outlines'] == 0, st
+    assert st['problems'], st
     try:
         emit_intent(pcb, p)
         raise AssertionError("emit_intent graded a board with no usable bounds")
     except UntrustworthyOutline as exc:
-        assert '550' in str(exc), exc
+        # The message names the reason. It used to be pinned to '550' because
+        # the fixture was a ROUND board; that case now parses (see the test
+        # above), so this one has no Edge.Cuts at all and says so.
+        assert 'outline' in str(exc).lower(), exc
     print(f"  PASS: refused -- {st['problems'][0][:80]}")
 
 
@@ -458,6 +658,7 @@ def test_state_signals_reach_the_summary():
 
 TESTS = [
     test_an_emitted_intent_grades_clean_on_every_tracked_board,
+    test_what_emit_writes_is_what_the_loader_accepts,
     test_the_round_trip_is_not_vacuous,
     test_a_part_pushed_out_of_its_zone_is_caught_with_the_distance,
     test_an_unresolved_block_is_an_error_not_a_silent_pass,
@@ -475,7 +676,8 @@ TESTS = [
     test_emit_never_claims_a_zone_it_cannot_defend,
     test_emit_records_the_overhanging_parts_as_edge_connectors,
     test_an_edge_connector_outside_its_declared_overhang_is_caught,
-    test_a_board_whose_outline_did_not_parse_is_refused_not_graded,
+    test_a_round_board_now_parses_its_outline,
+    test_a_board_with_no_outline_at_all_is_refused_not_graded,
     test_a_plain_rectangular_board_is_trustworthy_with_no_rings,
     test_the_summary_says_how_many_rules_RAN,
     test_state_signals_reach_the_summary,

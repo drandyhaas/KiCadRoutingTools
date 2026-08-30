@@ -1,0 +1,88 @@
+{
+  "board": {
+    "design_settings": {
+      "defaults": {},
+      "diff_pair_dimensions": [],
+      "drc_exclusions": [],
+      "rules": {
+        "min_clearance": 0.15,
+        "min_track_width": 0.15,
+        "min_via_diameter": 0.5
+      },
+      "rule_severities": {},
+      "track_widths": [],
+      "via_dimensions": []
+    },
+    "layer_presets": [],
+    "viewports": []
+  },
+  "boards": [],
+  "cvpcb": {
+    "equivalence_files": []
+  },
+  "libraries": {
+    "pinned_footprint_libs": [],
+    "pinned_symbol_libs": []
+  },
+  "meta": {
+    "filename": "tigard.kicad_pro",
+    "version": 1
+  },
+  "net_settings": {
+    "classes": [
+      {
+        "bus_width": 12,
+        "clearance": 0.15,
+        "diff_pair_gap": 0.2032,
+        "diff_pair_width": 0.205232,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "Default",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.15,
+        "via_diameter": 0.5,
+        "via_drill": 0.25,
+        "wire_width": 6
+      }
+    ],
+    "meta": {
+      "version": 3
+    },
+    "net_colors": null,
+    "netclass_assignments": null,
+    "netclass_patterns": []
+  },
+  "pcbnew": {
+    "last_paths": {},
+    "page_layout_descr_file": ""
+  },
+  "schematic": {},
+  "sheets": [],
+  "text_variables": {},
+  "kicad_routing_tools": {
+    "floor_provenance": {
+      "_note": "MIGRATED, not authored and not guessed. tigard is a KiCad 5 design (board version 20171130) which stored its design rules INSIDE the .kicad_pcb, and KiCad 5 had no .kicad_pro at all -- so no project file exists upstream to copy. The board in kicad_files/ was re-saved through pcbnew 10.0 (version 20260206) during corpus staging, which dropped the (setup ...) constraints and every (net_class ...) stanza. The values below were read back out of the upstream board and are the author's own; none is a default, a fab tier, or an inference.",
+      "source": "https://raw.githubusercontent.com/tigard-tools/tigard/master/tigard.kicad_pcb",
+      "source_version": 20171130,
+      "verified": "85 net names upstream vs 85 parsed here, 79 identical; the 6 differences are the KiCad 5->9 overbar syntax change (/~ENABLE -> /~{ENABLE}), not a design difference",
+      "fields": {
+        "net_settings.classes[Default].clearance": "(net_class Default (clearance 0.15))",
+        "net_settings.classes[Default].track_width": "(net_class Default (trace_width 0.15))",
+        "net_settings.classes[Default].via_diameter": "(net_class Default (via_dia 0.5))",
+        "net_settings.classes[Default].via_drill": "(net_class Default (via_drill 0.25))",
+        "net_settings.classes[Default].diff_pair_width": "(net_class Default (diff_pair_width 0.205232))",
+        "net_settings.classes[Default].diff_pair_gap": "(net_class Default (diff_pair_gap 0.2032))",
+        "net_settings.classes[Default].microvia_diameter": "(net_class Default (uvia_dia 0.3))",
+        "net_settings.classes[Default].microvia_drill": "(net_class Default (uvia_drill 0.1))",
+        "board.design_settings.rules.min_clearance": "(setup (trace_clearance 0.15))",
+        "board.design_settings.rules.min_track_width": "(setup (trace_min 0.15))",
+        "board.design_settings.rules.min_via_diameter": "(setup (via_min_size 0.5))"
+      },
+      "deliberately_absent": {
+        "board.design_settings.rules.min_copper_edge_clearance": "KiCad 5 had no copper-to-edge constraint, so the author never declared one. Left absent so board_floor_knobs reports `fixed default` 0.55 with an honest source, rather than a number nobody chose wearing a board's name."
+      }
+    }
+  }
+}

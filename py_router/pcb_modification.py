@@ -199,7 +199,8 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
 # is deliberately asymmetric (measure reality physically; refuse to ship
 # fragility). See issue #322 (smartknob +5V: mid-chain removals each passed
 # the overlap gate until 5 pads were genuinely disconnected).
-from connectivity import COINCIDENCE_TOL
+from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad,
+                          endpoint_reaches_via)
 _STRICT_GATE_WIDTH = COINCIDENCE_TOL  # one constant (#320): strict twin gate width
 
 
@@ -452,6 +453,31 @@ def _duplicate_connector(px: float, py: float, tx: float, ty: float,
     return False
 
 
+def _own_net_npth_hole_dist(pcb_data, net_id, x1, y1, x2, y2) -> float:
+    """Distance from segment (x1,y1)-(x2,y2) to the drill of any SAME-net
+    UNPLATED pad. inf when there is none.
+
+    The foreign-hole scan deliberately skips own-net holes, because a plated
+    own-net barrel IS this net's copper. An unplated one is not copper at all
+    (#328) -- it is a hole, and a track crossing it is a fab defect no
+    clearance check was looking at."""
+    from kicad_parser import pad_drill_circles
+    best = float('inf')
+    for pads in pcb_data.pads_by_net.values():
+        for pad in pads:
+            if getattr(pad, 'pad_type', '') != 'np_thru_hole':
+                continue
+            if getattr(pad, 'net_id', 0) != net_id:
+                continue          # foreign NPTH holes: the foreign scan has them
+            # pad_drill_circles yields (x, y, DIAMETER), and a slot yields
+            # several circles along its axis -- so this follows a slotted
+            # mounting hole rather than treating it as one disc.
+            for (hx, hy, hdia) in pad_drill_circles(pad):
+                best = min(best,
+                           _pt_seg_dist(hx, hy, x1, y1, x2, y2) - hdia / 2.0)
+    return best
+
+
 def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                       clearance: float = None) -> int:
     """Bridge same-net SOFT JOINTS with a TINY coincident segment (#soft-joint).
@@ -499,33 +525,58 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
     for s in pcb_data.segments:
         if scope_net_ids is not None and s.net_id not in scope_net_ids:
             continue
-        if getattr(s, 'graphic', False):
-            continue  # #337: immutable art -- its termini are not dangles
+        # Copper-layer GRAPHICS COUNT toward the degree, exactly as they do
+        # in check_drc's detector and check_weird's -- they were skipped here,
+        # so a track end sharing a vertex with copper art was degree 1 in this
+        # pass and degree 2 there: check_drc reported nothing while this pass
+        # wrote a bridge. This function's contract is "check_drc's exact
+        # soft-joint definition, so detection and repair agree"; that only
+        # holds if the degree is counted the same way. Graphics are still not
+        # CANDIDATES (below) -- #337 keeps the art itself untouchable.
         ep_count[(s.net_id, s.layer, rk(s.start_x, s.start_y))] += 1
         ep_count[(s.net_id, s.layer, rk(s.end_x, s.end_y))] += 1
+    vias_by_net = defaultdict(list)
     via_by_net = defaultdict(list)
     for v in pcb_data.vias:
-        via_by_net[v.net_id].append((v.x, v.y, (getattr(v, 'size', 0) or 0) / 2.0))
+        vias_by_net[v.net_id].append(v)
+        # (x, y, radius) tuples for the via->pad GRAZE bridge below and the
+        # terminal-web via-terminal skip: those ask a DIFFERENT question (a
+        # graze band, a "is this a via terminal" test), not "does this end's
+        # own copper reach the barrel", so they keep their own geometry.
+        via_by_net[v.net_id].append((v.x, v.y,
+                                     (getattr(v, "size", 0) or 0) / 2.0))
 
-    def at_anchor(nid, x, y):
-        for vx, vy, vr in via_by_net.get(nid, []):
-            if math.hypot(x - vx, y - vy) <= vr + 0.01:
+    _copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or ())
+    def at_anchor(nid, x, y, layer, width):
+        """Does this end's own COPPER reach a same-net via barrel or pad?
+
+        Shared predicate (connectivity.endpoint_reaches_*). This function and
+        check_drc's soft-joint detector MUST agree -- this pass repairs what
+        that one reports -- and they did not: a pad was credited by its CENTRE
+        while a via was credited by its RADIUS, so two ordinary stubs landing
+        on one pad were "dangling" and this pass bridged them with a segment
+        laid across copper both ends already touched (#722).
+        """
+        r = (width or 0.0) / 2.0
+        for v in vias_by_net.get(nid, []):
+            if endpoint_reaches_via(x, y, r, v, (layer,), _copper):
                 return True
         for p in pcb_data.pads_by_net.get(nid, []):
-            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
+            if endpoint_reaches_pad(x, y, r, (layer,), p):
                 return True
         return False
 
-    dangles = defaultdict(list)  # (net_id, layer) -> [(x, y, width)]
+    dangles = defaultdict(list)  # (net_id, layer) -> [(x, y, width, graphic)]
     for s in pcb_data.segments:
         if scope_net_ids is not None and s.net_id not in scope_net_ids:
             continue
         for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
             if ep_count[(s.net_id, s.layer, rk(x, y))] != 1:
                 continue
-            if at_anchor(s.net_id, x, y):
+            if at_anchor(s.net_id, x, y, s.layer, s.width):
                 continue
-            dangles[(s.net_id, s.layer)].append((x, y, s.width))
+            dangles[(s.net_id, s.layer)].append(
+                (x, y, s.width, getattr(s, 'graphic', False)))
 
     def clears(nid, x1, y1, x2, y2, layer, w):
         d = min(_seg_foreign_pad_dist(pcb_data, nid, x1, y1, x2, y2, layer,
@@ -533,6 +584,14 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 _seg_foreign_seg_dist(pcb_data, nid, x1, y1, x2, y2, layer),
                 _seg_foreign_via_dist(pcb_data, nid, x1, y1, x2, y2, layer))
         hd = _seg_foreign_hole_dist(pcb_data, nid, x1, y1, x2, y2)
+        # _seg_foreign_hole_dist filters `nid != net_id` ("own-net holes are
+        # excluded"), which is right for a PLATED barrel -- that copper is the
+        # net. It is wrong for an UNPLATED one: an NPTH pad has no copper
+        # whatever net it is tagged with (#328), so a net-tied mounting hole is
+        # a hole this bridge must clear like any other. Without this the gate
+        # was structurally blind to the one hole a same-net bridge is most
+        # likely to cross.
+        hd = min(hd, _own_net_npth_hole_dist(pcb_data, nid, x1, y1, x2, y2))
         return (d >= clr + w / 2.0 - 1e-4 and
                 hd >= npth_clr + w / 2.0 - 1e-4)
 
@@ -542,11 +601,13 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
         for i in range(len(ends)):
             if i in used:
                 continue
-            xi, yi, wi = ends[i]
+            xi, yi, wi, gi = ends[i]
             for j in range(i + 1, len(ends)):
                 if j in used:
                     continue
-                xj, yj, wj = ends[j]
+                xj, yj, wj, gj = ends[j]
+                if gi and gj:
+                    continue  # art meets art: #337 forbids touching either end
                 gap = math.hypot(xi - xj, yi - yj)
                 cap = (wi + wj) / 2.0
                 if SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
@@ -654,8 +715,9 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 continue  # anchored on a same-net via: a via terminal, not this
             target = None
             for pad in pcb_data.pads_by_net.get(s.net_id, []):
-                if getattr(pad, 'shape', None) not in ('rect', 'roundrect', 'oval'):
-                    continue  # sharp-corner necks: skip circle/custom pads
+                if getattr(pad, 'shape', None) not in ('rect', 'roundrect',
+                                                       'oval', 'circle'):
+                    continue  # custom-polygon pads have no closed-form web
                 if not pad.size_x or not pad.size_y:
                     continue
                 if not (s.layer in pad.layers or any('*' in L for L in pad.layers)):
@@ -667,9 +729,13 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 continue
             elx, ely = _to_pad_frame(ex, ey, target)
             nlx, nly = _to_pad_frame(nx, ny, target)
-            is_neck, tloc = terminal_pad_web_shortfall(
-                nlx, nly, elx, ely, target.size_x / 2.0, target.size_y / 2.0,
-                r, e416)
+            if _is_round_pad(target):
+                is_neck, tloc = circular_pad_web_shortfall(
+                    elx, ely, target.size_x / 2.0, r, e416)
+            else:
+                is_neck, tloc = terminal_pad_web_shortfall(
+                    nlx, nly, elx, ely, target.size_x / 2.0,
+                    target.size_y / 2.0, r, e416)
             if not is_neck:
                 continue
             # Confirm the cheap (over-reporting) pre-filter with KiCad's exact
@@ -810,6 +876,53 @@ def _pad_web_polygon(pad):
     if rot:
         shp = aff.rotate(shp, rot, origin=(pad.global_x, pad.global_y))
     return shp
+
+
+def _is_round_pad(pad) -> bool:
+    """A true circle: `circle`, or an `oval` whose axes are equal (KiCad writes
+    a round pad either way). Only these have the rotationally-symmetric web
+    circular_pad_web_shortfall solves; an elongated oval is a stadium and stays
+    on the conservative rectangular pre-filter."""
+    if not pad.size_x or not pad.size_y:
+        return False
+    return (getattr(pad, 'shape', None) in ('circle', 'oval')
+            and abs(pad.size_x - pad.size_y) < 1e-9)
+
+
+def circular_pad_web_shortfall(elx, ely, R, r, e, target_margin=0.0):
+    """The terminal-web pre-filter for a ROUND pad, in the pad's local frame.
+
+    terminal_pad_web_shortfall models the pad as a rectangle, so both callers
+    skipped circle pads entirely -- "a circle has no corner to graze". It has no
+    corner, but it still has a RIM: a cap landing near the edge of a round pad
+    joins it through a lens whose chord can be far thinner than the floor, which
+    is the same connection_width hazard (#416) the rect model catches. The
+    exact confirm (terminal_web_neck_exact -> _pad_web_polygon) has handled
+    circles all along; only this pre-filter and the shape gate did not.
+
+    Two circles, radii R (pad) and r (cap), centres d apart, intersect in a lens
+    whose chord half-width is h = sqrt(R^2 - a^2), a = (d^2 - r^2 + R^2) / 2d.
+    The joint is sub-floor when 2h < 2e. This is exact for the pair, and the
+    caller still confirms with KiCad's own erosion.
+
+    Returns ``(maybe_neck, target_local_or_None)`` like its rectangular twin.
+    """
+    d = math.hypot(elx, ely)
+    if R <= e + 1e-6:
+        return False, None      # pad narrower than the floor: unfixable
+    if d + r <= R + 1e-9:
+        return False, None      # cap fully inside: the web is the full cap
+    if d <= 1e-9 or d >= R + r:
+        return False, None      # concentric, or no contact at all
+    a = (d * d - r * r + R * R) / (2.0 * d)
+    h = math.sqrt(max(0.0, R * R - a * a))
+    if h >= e - 1e-9:
+        return False, None      # the chord already clears the floor
+    reach = R - e - target_margin
+    if reach <= 1e-6:
+        return False, None      # no floor-width band exists inside this pad
+    t = min(d, reach) / d
+    return True, (elx * t, ely * t)
 
 
 def terminal_web_neck_exact(pcb_data, net_id, layer, ex, ey, floor,
@@ -1383,14 +1496,22 @@ def _soft_joint_pairs(segs, vias, pads):
     from routing_constants import SOFT_JOINT_MIN_GAP
     from check_drc import point_to_pad_distance
 
-    via_pts = [(v.x, v.y, (getattr(v, 'size', 0) or 0) / 2.0) for v in (vias or [])]
+    def anchored(x, y, layer, width):
+        """Does this end's own COPPER reach a same-net via barrel or pad?
 
-    def anchored(x, y):
-        for vx, vy, vr in via_pts:
-            if math.hypot(x - vx, y - vy) <= vr + 0.01:
+        Shared predicate (connectivity.endpoint_reaches_*). This function and
+        check_drc's soft-joint detector MUST agree -- this pass repairs what
+        that one reports -- and they did not: a pad was credited by its CENTRE
+        while a via was credited by its RADIUS, so two ordinary stubs landing
+        on one pad were "dangling" and this pass bridged them with a segment
+        laid across copper both ends already touched (#722).
+        """
+        r = (width or 0.0) / 2.0
+        for v in (vias or []):
+            if endpoint_reaches_via(x, y, r, v, (layer,)):
                 return True
         for p in (pads or []):
-            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
+            if endpoint_reaches_pad(x, y, r, (layer,), p):
                 return True
         return False
 
@@ -1398,23 +1519,29 @@ def _soft_joint_pairs(segs, vias, pads):
     for s in segs:
         deg[(s.layer, _rk3(s.start_x, s.start_y))] += 1
         deg[(s.layer, _rk3(s.end_x, s.end_y))] += 1
-    dangles = defaultdict(list)  # layer -> [(key, x, y, width)]
+    dangles = defaultdict(list)  # layer -> [(key, x, y, width, is_graphic)]
     seen = set()
     for s in segs:
         for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
             key = (s.layer, _rk3(x, y))
             if deg[key] != 1 or key in seen:
                 continue
-            if anchored(x, y):
+            if anchored(x, y, s.layer, s.width):
                 continue
             seen.add(key)
-            dangles[s.layer].append((key, x, y, s.width))
+            dangles[s.layer].append((key, x, y, s.width,
+                                     getattr(s, 'graphic', False)))
     pairs = set()
     for layer, ends in dangles.items():
         for i in range(len(ends)):
-            ki, xi, yi, wi = ends[i]
+            ki, xi, yi, wi, gi = ends[i]
             for j in range(i + 1, len(ends)):
-                kj, xj, yj, wj = ends[j]
+                kj, xj, yj, wj, gj = ends[j]
+                if gi and gj:
+                    # Art meets art: nothing anyone can act on (#337 forbids
+                    # touching it), and check_weird/check_drc drop the same
+                    # pair. A MIXED pair is kept -- the track end is real.
+                    continue
                 gap = math.hypot(xi - xj, yi - yj)
                 if SOFT_JOINT_MIN_GAP < gap < (wi + wj) / 2.0 - 1e-6:
                     pairs.add(frozenset((ki, kj)))
@@ -1680,6 +1807,201 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
     return segs_removed, len(removed_via_ids), original_to_remove
 
 
+def _via_support_layers(v, segs, pads, zones, copper_layers):
+    """Copper layers on which same-net copper actually reaches the via
+    barrel: segments (body distance, not endpoint coincidence), pads
+    (plated barrel credits the whole span; SMD its own copper layers),
+    zone polygons. A via supported on <=1 layer of its span joins
+    nothing -- KiCad's own `via_dangling` rule."""
+    from check_weird import _via_span
+    span = _via_span(v, copper_layers)
+    r = (getattr(v, 'size', 0.6) or 0.6) / 2.0
+    sup = set()
+    for s in segs:
+        if s.layer in span and s.layer not in sup and _pt_seg_dist(
+                v.x, v.y, s.start_x, s.start_y,
+                s.end_x, s.end_y) < r + s.width / 2 - 1e-6:
+            sup.add(s.layer)
+    for p in pads:
+        if getattr(p, 'pad_type', '') == 'np_thru_hole':
+            continue
+        if p.drill and p.drill > 0:
+            on = set(span)
+        else:
+            pl = set(p.layers or [])
+            on = set(span) if any('*' in L for L in pl) else (span & pl)
+        if not on or on <= sup:
+            continue
+        px = getattr(p, 'global_x', 0.0)
+        py = getattr(p, 'global_y', 0.0)
+        ps = max(getattr(p, 'size_x', 0.5), getattr(p, 'size_y', 0.5))
+        if math.hypot(v.x - px, v.y - py) < ps / 2 + r:
+            sup |= on
+    if zones:
+        from check_connected import point_in_polygon
+        for z in zones:
+            if z.layer in span and z.layer not in sup and point_in_polygon(
+                    v.x, v.y, z.polygon):
+                sup.add(z.layer)
+    return sup & span
+
+
+def trim_net_stub_debris(pcb_data: PCBData, net_id: int, result, config,
+                         swap_vias=None, vias_only=False):
+    """In-loop stub-debris trim: the moment a net's route COMMITS, prune
+    the branches of its own pre-existing stub tree the route left unused
+    -- and any via those branches leave DANGLING (same-net copper on <=1
+    layer of its span).
+
+    Timing is the point (#622): sweep_dead_ends does this board-wide but
+    runs in the post-route cleanup, AFTER every net has routed -- so an
+    orphaned fanout tail, and worse its via barrel (which blocks every
+    layer), holds its space against ALL later nets and is only swept
+    when nobody can use it anymore. This runs between
+    add_route_to_pcb_data and update_net_obstacles_after_routing, so the
+    freed cells never enter the recomputed obstacle cache and the very
+    NEXT net can route through them. Measured motive (allwinner DDR
+    microscope): a member attaching at its ball orphans its escape stub;
+    the tail plus the ball via then blocked the under-field channels its
+    own siblings needed.
+
+    Safety mirrors sweep_dead_ends: per-segment connectivity-validated
+    prune (_safe_prune_net), soft-joint restore, graphics and LOCKED
+    copper anchored (never removed), and via drops verified by a whole-
+    net before/after connectivity check (locked vias exempt). Mutates
+    pcb_data and the result's write-lists in place; input copper removed
+    here leaves the written output via the #220/#284 stale-input strip,
+    whose reference snapshot freezes later (at cleanup); in
+    --keep-input-copper runs (config._keep_input_copper) input copper is
+    read-only. Returns (segments_removed, vias_removed).
+
+    `vias_only` runs the DANGLING-VIA pass WITHOUT the stub prune. It is NOT
+    USED, and the reason is worth keeping: it was written to let MULTIPOINT nets
+    trim their dangling vias, on the argument that the exemption protects stubs
+    (Phase-3 landing sites) and a via is not one. THAT ARGUMENT IS WRONG and the
+    corpus said so -- on glasgow_revC, one pass from an identical input went from
+    2 open nets to 5, and the log shows one net losing 8 vias at once. On a
+    multipoint net the via IS where a later Phase-3 tap lands, and
+    `_via_support_layers(...) <= 1` measures support BEFORE those taps arrive --
+    so a via that is legitimately half-connected at trim time reads as dangling.
+    The exemption is load-bearing exactly as the original author wrote it.
+
+    The DRC symptom that motivated this is real and still open (see below); it
+    needs a remedy that runs AFTER Phase 3, not an in-loop trim.
+
+    Measured on glasgow_revC: a multipoint net kept a via carrying copper on
+    B.Cu only, 50 um from its own functional via, against a 250 um hole-to-hole
+    rule -- a real DRC violation. The board-wide sweep does not catch it either:
+    sweep_dead_ends never calls _via_support_layers and never removes input
+    vias, which is the whole reason this in-loop pass exists.
+
+    `swap_vias` is the run's stub-layer-swap via list (`state.all_swap_vias`),
+    and it MUST be passed or this pass ships DRC violations. The output writer
+    emits vias from TWO sources -- each result's `new_vias`, and that list --
+    and a swap via also lives in `pcb_data.vias`. Dropping it from `pcb_data`
+    alone frees its cells in the obstacle map while the writer still emits it
+    from `all_swap_vias`: a later net routes through the vacated space and the
+    via reappears beside the new track. Measured on tinytapeout_qfn: 10 of 34
+    swap vias were freed here and every one was still written (a "ghost" -- in
+    the file, absent from the board model), producing 12 Via<->Seg clearance
+    violations on a board that graded clean before this pass existed. The
+    `vias_to_remove` writer channel cannot help: it strips vias from the
+    verbatim copy of the INPUT file, so it never reaches copper this run
+    appended. The list is filtered IN PLACE because the writer holds the same
+    list object.
+    """
+    pads = pcb_data.pads_by_net.get(net_id, [])
+    if not pads:
+        return 0, 0
+    net_segs = [s for s in pcb_data.segments if s.net_id == net_id]
+    net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+    if not net_segs and not net_vias:
+        return 0, 0
+    zones = [z for z in (getattr(pcb_data, 'zones', []) or [])
+             if z.net_id == net_id]
+    _zcv = None
+    _zfa = None
+    if zones:
+        from check_connected import make_real_fill_validator
+        _fvb = {}
+        _zcv = make_real_fill_validator(pcb_data, net_id, shared_buckets=_fvb)
+        _zfa = make_model_fill_anchor(
+            pcb_data, net_id,
+            fallback=make_real_fill_validator(pcb_data, net_id, margin=0.02,
+                                              shared_buckets=_fvb))
+    from connectivity import COINCIDENCE_TOL as _tol
+    _keep_input = bool(getattr(config, '_keep_input_copper', False))
+    _new_seg_ids = {id(s) for s in (result.get('new_segments') or [])}
+    _new_via_ids = {id(v) for v in (result.get('new_vias') or [])}
+    anchor = [s for s in net_segs
+              if getattr(s, 'graphic', False) or getattr(s, 'locked', False)
+              or (_keep_input and id(s) not in _new_seg_ids)]
+    prunable = [s for s in net_segs if id(s) not in {id(a) for a in anchor}]
+    if vias_only:
+        # Multipoint: keep every stub (Phase-3 landing sites); vias below only.
+        kept, removed = list(net_segs), []
+    else:
+        kept, removed = _safe_prune_net(net_id, prunable, net_vias, pads, zones,
+                                        anchor_segments=anchor or None,
+                                        zone_credit_validator=_zcv,
+                                        fill_anchor_validator=_zfa,
+                                        aggressive=True, tol=_tol,
+                                        pcb_data=pcb_data)
+        kept, removed = _restore_soft_joint_bridges(list(kept) + anchor, removed,
+                                                    net_vias, pads)
+        removed = [s for s in removed if not getattr(s, 'graphic', False)
+                   and not getattr(s, 'locked', False)]
+    kept_all = [s for s in net_segs
+                if id(s) not in {id(x) for x in removed}]
+
+    # Dangling-via pass over the post-prune copper. Locked vias exempt.
+    copper_layers = pcb_data.board_info.copper_layers or ['F.Cu', 'B.Cu']
+    via_candidates = [
+        v for v in net_vias
+        if not getattr(v, 'locked', False)
+        and not (_keep_input and id(v) not in _new_via_ids)
+        and len(_via_support_layers(v, kept_all, pads, zones,
+                                    copper_layers)) <= 1]
+    if via_candidates:
+        from check_connected import check_net_connectivity
+        keep_v = [v for v in net_vias
+                  if id(v) not in {id(c) for c in via_candidates}]
+        before = check_net_connectivity(net_id, kept_all, net_vias, pads,
+                                        zones, zone_credit_validator=_zcv,
+                                        pcb_data=pcb_data)
+        after = check_net_connectivity(net_id, kept_all, keep_v, pads, zones,
+                                       zone_credit_validator=_zcv,
+                                       pcb_data=pcb_data)
+        if (before.get('connected') and not after.get('connected')) or \
+           len(after.get('disconnected_pads') or []) > \
+           len(before.get('disconnected_pads') or []) or \
+           (after.get('num_components') or 1) > \
+           (before.get('num_components') or 1):
+            via_candidates = []
+
+    if not removed and not via_candidates:
+        return 0, 0
+    rm_seg_ids = {id(s) for s in removed}
+    rm_via_ids = {id(v) for v in via_candidates}
+    if rm_seg_ids:
+        pcb_data.segments = [s for s in pcb_data.segments
+                             if id(s) not in rm_seg_ids]
+        segs = result.get('new_segments')
+        if segs:
+            result['new_segments'] = [s for s in segs
+                                      if id(s) not in rm_seg_ids]
+    if rm_via_ids:
+        pcb_data.vias = [v for v in pcb_data.vias if id(v) not in rm_via_ids]
+        vias = result.get('new_vias')
+        if vias:
+            result['new_vias'] = [v for v in vias if id(v) not in rm_via_ids]
+        # The writer's OTHER via source (see `swap_vias` in the docstring).
+        # In place: the writer holds this same list object.
+        if swap_vias:
+            swap_vias[:] = [v for v in swap_vias if id(v) not in rm_via_ids]
+    return len(rm_seg_ids), len(rm_via_ids)
+
+
 def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None,
                               keep_input_copper: bool = False
                               ) -> Tuple[int, List[Segment]]:
@@ -1881,9 +2203,11 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
     art) are skipped whole. Nets with no pads at all are left alone.
 
     Returns (islands_removed, segments_removed, original_segments_to_strip,
-    original_vias_to_strip); this-run copper is dropped from its result's
-    write-list in place, original input copper is returned for the writer's
-    strip lists (an island's via barrel would otherwise ship floating).
+    original_vias_to_strip, vias_removed); this-run copper is dropped from its
+    result's write-list in place, original input copper is returned for the
+    writer's strip lists (an island's via barrel would otherwise ship
+    floating). `vias_removed` counts BOTH sources, so a via-only island (#659)
+    is reportable -- it has no segments at all.
     """
     from collections import defaultdict
     from check_connected import check_net_connectivity
@@ -1898,8 +2222,16 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
         for v in r.get('new_vias') or []:
             via_owner[id(v)] = r
 
+    # Nets are gathered from VIAS as well as segments (#659 follow-up): a
+    # failed reroute strips a net's tracks and leaves the barrels behind, so
+    # the net's whole remaining copper can be via-only -- invisible to a scan
+    # seeded from pcb_data.segments. Measured on spartan6_4layer step 6:
+    # /GPIOS/GPIO-P27 went from 28 segments + 6 vias to 0 segments + 6 bare
+    # vias, and no cleanup in the codebase could see any of them.
     net_ids = {s.net_id for s in pcb_data.segments
                if scope_net_ids is None or s.net_id in scope_net_ids}
+    net_ids |= {v.net_id for v in pcb_data.vias
+                if scope_net_ids is None or v.net_id in scope_net_ids}
     net_ids.discard(0)
 
     islands_removed = 0
@@ -1915,7 +2247,7 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
         net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
         net_zones = [z for z in (getattr(pcb_data, 'zones', []) or [])
                      if z.net_id == net_id]
-        if not net_segs:
+        if not net_segs and not net_vias:
             continue
         r = check_net_connectivity(net_id, net_segs, net_vias, pads,
                                    net_zones, return_graph=True,
@@ -1928,10 +2260,26 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
             uf.union(a, b)
         pad_roots = {uf.find(rep)
                      for rep in graph.get('pad_index_repr', {}).values()}
+        # Zone-anchored copper is NOT orphaned (#659 follow-up): a stitch via
+        # or a feed stub whose only tie is the net's pour reaches the net
+        # through the fill, and `pad_index_repr` alone cannot say so. The
+        # oracle's own debris deleter already excludes zone roots; matching it
+        # here can only make this pass MORE conservative, never delete more.
+        pad_roots |= {uf.find(rep)
+                      for rep in graph.get('zone_index_repr', {}).values()}
+        via_reprs = graph.get('via_index_repr', {})
         comp_segs = defaultdict(list)
         for i, s in enumerate(net_segs):
             comp_segs[uf.find(2 * i)].append(s)
-        via_reprs = graph.get('via_index_repr', {})
+        # A component can be VIA-ONLY, and such a component has no entry in
+        # comp_segs -- the loop below would never visit it. Seed those roots
+        # with an empty segment list so a bare barrel is a candidate island in
+        # its own right (the graphics/keep-input guards below still apply, and
+        # the via-collection step already sweeps each island's barrels).
+        for j, v in enumerate(net_vias):
+            rep = via_reprs.get(j)
+            if rep is not None:
+                comp_segs.setdefault(uf.find(rep), [])
         # #513 item 6 made graphics NON-conductive in the connectivity graph
         # (correct for grading: KiCad never credits them), so a track that
         # touches only a graphic is now its OWN pad-less component and the
@@ -1941,7 +2289,7 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
         # an island whose copper overlaps a same-net graphic capsule is kept.
         net_graphics = [g for g in net_segs if getattr(g, 'graphic', False)]
 
-        def _touches_graphic(segs):
+        def _touches_graphic(segs, vias_=()):
             from geometry_utils import segment_to_segment_distance
             for s in segs:
                 for g in net_graphics:
@@ -1952,6 +2300,26 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
                         g.start_x, g.start_y, g.end_x, g.end_y)
                     if d <= (s.width + g.width) / 2 + 1e-6:
                         return True
+            # VIAS too (#659 audit follow-up). A via-only component has NO
+            # segments, so the loop above was vacuous for it and a barrel
+            # sitting ON a same-net graphic was swept as debris -- measured
+            # on openstint /A-, where the via bridging the net's copper to
+            # its 216-segment graphic disappeared and KiCad went from 0
+            # unconnected items to 2. Our model does not credit graphics
+            # (#513), so such a via looks pad-less; KiCad DOES credit them,
+            # so it is load-bearing. No layer test: a barrel spans layers.
+            import math as _m
+            for v in vias_:
+                for g in net_graphics:
+                    dx, dy = g.end_x - g.start_x, g.end_y - g.start_y
+                    L2 = dx * dx + dy * dy
+                    tt = (max(0.0, min(1.0, ((v.x - g.start_x) * dx
+                                            + (v.y - g.start_y) * dy) / L2))
+                          if L2 else 0.0)
+                    d = _m.hypot(v.x - (g.start_x + tt * dx),
+                                 v.y - (g.start_y + tt * dy))
+                    if d <= v.size / 2.0 + g.width / 2 + 1e-6:
+                        return True
             return False
 
         for root, segs in comp_segs.items():
@@ -1959,7 +2327,10 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
                 continue
             if any(getattr(s, 'graphic', False) for s in segs):
                 continue  # immutable input art anchors the island
-            if net_graphics and _touches_graphic(segs):
+            _cv_gfx = [v for j, v in enumerate(net_vias)
+                       if via_reprs.get(j) is not None
+                       and uf.find(via_reprs[j]) == root]
+            if net_graphics and _touches_graphic(segs, _cv_gfx):
                 continue  # copper abutting input art (#337): physically joined
             if keep_input_copper and (
                     any(id(s) not in seg_owner for s in segs)
@@ -1985,7 +2356,7 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
                         original_vias.append(v)
 
     if not removed_ids and not removed_via_ids:
-        return 0, 0, [], []
+        return 0, 0, [], [], 0
     for r in results:
         segs = r.get('new_segments')
         if segs:
@@ -1997,7 +2368,8 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
                          if id(s) not in removed_ids]
     pcb_data.vias = [v for v in pcb_data.vias
                      if id(v) not in removed_via_ids]
-    return islands_removed, len(removed_ids), originals, original_vias
+    return (islands_removed, len(removed_ids), originals, original_vias,
+            len(removed_via_ids))
 
 
 def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None,
@@ -3538,7 +3910,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
       * keeps clearance from all foreign copper (pads / segments / vias),
         NPTH holes at their higher floor, and the board edge -- with a
         .kicad_dru layer rule replacing the base clearance on ruled layers
-        (#498, which the older graze passes never honored);
+        (#498, which the older graze passes never honored) and a .kicad_dru
+        TRACK rule raising the seg-vs-seg term on top of it (#735);
       * is strictly shorter than the copper it replaces (min_gain);
       * strands no same-net copper: mid-span via taps, pad touches, and
         T/X-touching sibling tracks hold their span un-collapsed unless the
@@ -3585,6 +3958,18 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
         if config is not None and hasattr(config, 'layer_clearance'):
             return config.layer_clearance(layer, base)
         return base
+
+    # The track-scoped .kicad_dru channel (#735), {obstacle_net_id: mm}. It is
+    # a seg-vs-seg rule (KiCad's Type=='track' binds tracks only), so it rides
+    # the FOREIGN-SEGMENT term below and never the pad/via/hole ones. Without
+    # it a shortcut that clears the class floor could still collapse a
+    # staircase to inside the rule -- the router stamps the raise into its
+    # obstacle map, then this pass hands the space straight back (measured on
+    # the track-rule e2e fixture: 0.47 mm routed, 0.40 mm after smoothing, under a
+    # 0.45 mm rule). Raise-only over the already-resolved pair value, exactly
+    # like config.track_obstacle_clearance does at the stamp sites.
+    _trk_clr = (getattr(config, 'track_clearances', None) or None
+                if config is not None else None)
 
     edge_rings, edge_outer, edge_cutouts = board_edge_geometry(pcb_data.board_info)
     board_bounds = pcb_data.board_info.board_bounds
@@ -3686,7 +4071,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                    base_clearance=eff, net_clearances=net_clearances)
         d = min(pd,
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff),
+                                      net_clearances=net_clearances, base_clearance=eff,
+                                      track_clearances=_trk_clr),  # dru track rules
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                       net_clearances=net_clearances, base_clearance=eff))
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
@@ -4113,14 +4499,28 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
     # shortfall ranking sees the same band check_drc grades at. This is a
     # DETECTOR -- raising it can only make a real violation visible to the
     # micro-shift, never refuse a repair.
-    hole_required = max(clearance, NPTH_TO_TRACK_CLEARANCE,
-                        resolve_hole_clearance(pcb_data, config)) + s.width / 2.0
+    # #760: the hole PAD's own local_clearance is the remaining term. check_drc
+    # grades copper-to-hole at max(npth_clr, lc) (#326/#505), so a hole carrying
+    # an override above the fab floor was ranked below what the grader requires.
+    # It is per-hole, not board-wide, so it is folded into the DISTANCE as a
+    # class-style excess (like the pad/seg/via terms' #436 _excess) and the
+    # scalar `hole_required` still names the flat floor.
+    hole_floor = max(clearance, NPTH_TO_TRACK_CLEARANCE,
+                     resolve_hole_clearance(pcb_data, config))
+    hole_required = hole_floor + s.width / 2.0
+    # The per-hole excess also has to be SEEABLE: the sampling window `R`
+    # below is sized from the requirement, so an override wider than it would
+    # window out the very hole it applies to. Widen by the largest excess on
+    # the board (cached with the capsules, so this costs nothing).
+    _hcaps = _foreign_hole_capsules(pcb_data)
+    hole_excess_max = (float(np.maximum(0.0, _hcaps[6] - hole_floor).max())
+                       if _hcaps[6].size else 0.0)
     x1, y1, x2, y2 = s.start_x, s.start_y, s.end_x, s.end_y
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.005) + 1)
     ts = np.linspace(0.0, 1.0, n + 1)
     sx = x1 + (x2 - x1) * ts
     sy = y1 + (y2 - y1) * ts
-    R = max(required, hole_required) + 0.2
+    R = max(required, hole_required + hole_excess_max) + 0.2
     best = None  # (shortfall, t, qx, qy)
 
     def consider(dist, i, qx, qy, req=required):
@@ -4225,7 +4625,7 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, fcx[j], fcy[j])
 
-    hnid, hax, hay, hbx, hby, hr = _foreign_hole_capsules(pcb_data)
+    hnid, hax, hay, hbx, hby, hr, hlc = _hcaps
     if hnid.size:
         near = ((np.maximum(hax, hbx) + hr >= sx.min() - R) &
                 (np.minimum(hax, hbx) - hr <= sx.max() + R) &
@@ -4233,6 +4633,8 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
                 (np.minimum(hay, hby) - hr <= sy.max() + R) & (hnid != net_id))
         if near.any():
             ax, ay, bx, by, rr = hax[near], hay[near], hbx[near], hby[near], hr[near]
+            # #760 per-hole override excess over the flat floor (see hole_floor)
+            hex_ = np.maximum(0.0, hlc[near] - hole_floor)
             abx, aby = bx - ax, by - ay
             L2 = np.where(abx * abx + aby * aby > 0, abx * abx + aby * aby, 1.0)
             tt = np.clip(((sx[:, None] - ax[None, :]) * abx[None, :] +
@@ -4242,6 +4644,7 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
             # Edge distance = axis distance - hole radius; direction points away
             # from the axis point (== away from the hole edge).
             d = np.hypot(sx[:, None] - qx, sy[:, None] - qy) - rr[None, :]
+            d = d - hex_[None, :]  # #760 per-hole local_clearance excess
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, qx[i, j], qy[i, j], hole_required)
 
@@ -4320,6 +4723,24 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     # would manufacture a counted DRC hit), but it is a trade, not a free
     # win: on a silent board the same repair proceeds.
     # tests/test_617_pcb_modification_hole_clearance.py pins both arms.
+    #
+    # #760: `npth_clr` is the board-wide floor; the hole PAD's own
+    # local_clearance is per-hole, so it is folded into the DISTANCE by passing
+    # `base_clearance=npth_clr` to _seg_foreign_hole_dist (excess over the floor
+    # is subtracted, #436 style) rather than into this scalar -- otherwise ONE
+    # overriding hole would raise the floor for every hole on the board. The
+    # same term goes to the fast pre-filter below AND to the candidate-
+    # acceptance clears(); splitting them would be worse than leaving both flat,
+    # since a graze the pre-filter cannot see is never offered a repair.
+    # This inherits #617's trade in full: on a board declaring an override, a
+    # repair whose only escape points at that hole is now REFUSED rather than
+    # made, which is the right side of the trade (check_drc counts the declared
+    # band) but is a trade. Corpus scope: ulx3s AUDIO1 only (2 pads, 0.400 over
+    # the 0.20 floor); the other 35 NPTH pads on the 22 tracked boards carry no
+    # binding override, so this is numerically inert on all of them.
+    #
+    # The IDENTICAL clears() block in nudge_grazing_octolinear (~:3687) is one
+    # of the sites #617 left flat and stays flat -- match by function, not text.
     npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE,
                    resolve_hole_clearance(pcb_data, config))
 
@@ -4362,7 +4783,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                                       net_clearances=net_clearances, base_clearance=eff),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                       net_clearances=net_clearances, base_clearance=eff))
-        hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
+        hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2,
+                                    base_clearance=npth_clr)  # #760
         return (d >= eff + w / 2.0 - 1e-4 and
                 hd >= npth_clr + w / 2.0 - 1e-4 and
                 edge_clears(x1, y1, x2, y2, w))
@@ -4409,10 +4831,12 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                                      s.end_x, s.end_y, s.layer,
                                      net_clearances=net_clearances, base_clearance=eff)) < thr:
             return True
-        # NPTH-hole graze uses the higher NPTH-to-track floor (issue #308).
+        # NPTH-hole graze uses the higher NPTH-to-track floor (issue #308),
+        # with each hole's own override folded into the distance (#760).
         hole_thr = npth_clr + s.width / 2.0 - 1e-4
         return _seg_foreign_hole_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                      s.end_x, s.end_y) < hole_thr
+                                      s.end_x, s.end_y,
+                                      base_clearance=npth_clr) < hole_thr
 
     MAX_ROUNDS = 3   # a fixed worst offender can expose the second-worst
 

@@ -192,10 +192,27 @@ def test_escape_via_routes_directly():
     pcb = parse_kicad_pcb(out)
     kept = {v.uuid for v in pcb.vias}
     assert {"v1", "v2"} <= kept, "existing escape vias must survive"
+    # And NO via of its own. The upfront layer swap used to decide this net
+    # "needs a via" by comparing sources[0]'s layer to targets[0]'s -- which in
+    # full-stack mode were the F.Cu PAD and an In1.Cu VIA terminal, though the
+    # two terminal SETS were identical and both escape vias already reached
+    # every routing layer. It then moved the source stub off F.Cu and minted a
+    # via IN the pad, orphaning v1; the #622 stub-debris trim later collected
+    # that orphan as dangling, which is how this surfaced as "v1 vanished".
+    # The other end survived only because targets[0] happened to sort to a via
+    # terminal rather than a pad. The verdict now compares the ROUTABLE layer
+    # sets, so neither end is swapped and no via is minted.
+    assert kept == {"v1", "v2"}, \
+        (f"the route must use the existing escape vias, not mint its own: "
+         f"expected exactly v1+v2, got {sorted(kept)}")
     assert len(pcb.segments) <= 8, \
         f"expected a direct route, got {len(pcb.segments)} segments"
+    on_f = [s for s in pcb.segments if s.layer == "F.Cu"]
+    assert len(on_f) == 2, \
+        (f"both pad stubs must stay on F.Cu as drawn; got {len(on_f)} F.Cu "
+         f"segment(s) -- a stub swapped off F.Cu is the bug above")
     print(f"  e2e: direct route, {len(pcb.segments)} segment(s), "
-          f"{len(pcb.vias)} via(s), no rescue")
+          f"{len(pcb.vias)} via(s), no rescue, no via minted")
 
 
 def main():

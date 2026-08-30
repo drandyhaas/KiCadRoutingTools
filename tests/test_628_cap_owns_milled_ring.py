@@ -155,9 +155,9 @@ def main():
               'C1' in rep.caps)
         check("fixture: the edge gate is ACTIVE (else nothing is tested)",
               rep.edge_gate.active)
-        check(f"fixture: gate margin is non-zero ({rep._edge_margin}) -- the "
+        check(f"fixture: gate margin is non-zero ({rep.edge_margin}) -- the "
               f"'margin-0 is inert' argument does not cover this gate",
-              rep._edge_margin > 0.0)
+              rep.edge_margin > 0.0)
 
         # --- API surface (reported, not fatal -- see _owned/_blocked above)
         check("API: _Repair grows _owned_rings",

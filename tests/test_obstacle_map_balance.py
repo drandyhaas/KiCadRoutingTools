@@ -45,6 +45,23 @@ import sys
 import tempfile
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+#: #716: matches the 1200 s this test already puts on its own subprocess
+#: (below). Under run_all's 600 s default it was killed before reaching its
+#: final checks, so a REAL failing check ("repairs actually performed")
+#: presented as a timeout and was dismissed as slowness. Measured in #691: it
+#: passes ALONE in 681 s with all 18 checks green, so this is a budget for the
+#: contended case, not cover for a hung test.
+#:
+#: Raised to 2400 s because 1200 was still not a contended-case budget on a
+#: slower box. Measured here: ALONE 994 s, all checks green -- 1.46x the #691
+#: figure -- while the same test TIMED OUT inside a full `run_all.py` (which
+#: runs 4 at a time) on that same machine. A budget with 1.2x headroom over
+#: the solo time is not a budget for contention, and the failure mode it
+#: produces is the one this comment already warns about: a real result
+#: presented as slowness. The subprocess timeout below is raised to match, or
+#: the inner kill would just move the same problem one level down.
+RUN_ALL_TIMEOUT = 2400
+
 ROOT_DIR = os.path.dirname(TESTS_DIR)
 KF = os.path.join(ROOT_DIR, "kicad_files")
 
@@ -86,8 +103,11 @@ def run_cmd(args, audit=True, ledger=False, tap_verify=False,
         # test environment-dependent. Pin the field off for that stage; the
         # audit under churn is what this test exists to exercise.
         env["KICAD_PLANE_FRAGILITY_COST"] = "0"
+    # Kept equal to RUN_ALL_TIMEOUT above: an inner kill lower than the outer
+    # budget just relocates the same "a real result presented as slowness"
+    # failure one level down, where it reads as a router hang instead.
     p = subprocess.run([sys.executable, "-X", "utf8"] + args, cwd=ROOT_DIR,
-                       env=env, capture_output=True, text=True, timeout=1200)
+                       env=env, capture_output=True, text=True, timeout=2400)
     return p.returncode, p.stdout + p.stderr
 
 
@@ -200,10 +220,36 @@ def main():
     check("repair: run completed under TAP_MAP_VERIFY", rc == 0, f"rc={rc}")
     check("repair: no shared-map divergence",
           "TAP_MAP_VERIFY" not in log or "divergence" not in log)
+    # The vacuity guard for this stage: TAP_MAP_VERIFY's asserts run SILENTLY
+    # (plane_pad_tap._TAP_MAP_VERIFY, read at import; it speaks only on
+    # divergence), so an empty log is indistinguishable from a stage that did
+    # nothing. Something must therefore prove work happened.
+    #
+    # #716: this asserted `total_routes >= 1` alone and went red at
+    # total_routes=0 -- read as "the repair step stopped performing repairs".
+    # It had not. Measured on this exact recipe (2026-08-22): repair_planes
+    # reports `Pad repair: 2 pad(s) with no connection to the VCC plane` and
+    # `Pad repair: 2/2 unconnected pad(s) reconnected`, with
+    # `total_regions: 0, total_routes: 0`. The pour damage now takes the form
+    # of STRANDED ISLANDS ("1 anchored region plus 2 stranded island(s)
+    # (60.2 mm^2) with no pad, via or track on them") which repair_planes
+    # correctly does not route -- there is nothing on them to reconnect --
+    # while the real work went down the PAD-REPAIR path.
+    #
+    # Both paths place taps, which is what exercises the shared via maps this
+    # stage exists to verify, so the guard accepts either. Do NOT narrow this
+    # back to total_routes without re-tuning the recipe to produce genuinely
+    # routable regions: a guard that cannot see the work that happened reports
+    # a healthy engine as broken, which is exactly what #716 caught.
     m = re.search(r'"total_routes": (\d+)', log)
+    routes = int(m.group(1)) if m else 0
+    mp = re.search(r'Pad repair: (\d+)/(\d+) unconnected pad\(s\) reconnected', log)
+    pads = int(mp.group(1)) if mp else 0
     check("repair: repairs actually performed (recipe still has work)",
-          m is not None and int(m.group(1)) >= 1,
-          f"total_routes={m.group(1) if m else 'none'}")
+          routes >= 1 or pads >= 1,
+          f"total_routes={routes}, pads_reconnected={pads} -- neither path did "
+          f"work, so the TAP_MAP_VERIFY coverage above is vacuous; re-tune the "
+          f"recipe for more congestion rather than relaxing this check")
 
     print()
     if FAILS:

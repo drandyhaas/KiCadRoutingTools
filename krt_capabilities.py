@@ -12,7 +12,7 @@ detects it.
 So: publish the capability set and let the consumer assert against it.
 
     python3 krt_capabilities.py                 # everything, as JSON
-    python3 krt_capabilities.py --require route.py:--track-width-floor board_score
+    python3 krt_capabilities.py --require route.py:--rip-existing-nets check_drc.py
     python3 route.py --capabilities             # same JSON, from the router
 
 `--require` takes `module` or `module:--flag` tokens and exits non-zero listing

@@ -540,7 +540,7 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
             f"cannot be), then bisect if you want a minimal rip." + prot_txt, names)
 
 
-def static_boxin_hint(result, config, pcb_data=None) -> str:
+def static_boxin_hint(result, config, pcb_data=None, *, return_verdict=False):
     """One-line hint when a route died immediately with nothing rippable.
 
     A failure with almost no A* iterations and no rippable blockers means the
@@ -548,12 +548,20 @@ def static_boxin_hint(result, config, pcb_data=None) -> str:
     clearance expansion) - typical for fine-pitch (0.4-0.65 mm) packages at
     coarse grid/clearance settings - not by other nets' routes (issue #95).
     Returns '' when the failure doesn't match that signature.
+
+    `return_verdict=True` returns `(hint, verdict_or_None)` -- the same shape
+    `preexisting_blocker_hint`'s `return_names=True` uses -- so callers can
+    record the static-vs-congestion decision as data (`boxed_in` in the
+    summary) instead of only printing it.
     """
+    def _ret(hint, verdict=None):
+        return (hint, verdict) if return_verdict else hint
+
     if result is None:
-        return ""
+        return _ret("")
     iters = result.get('iterations_forward', 0) + result.get('iterations_backward', 0)
     if iters >= 20000:
-        return ""
+        return _ret("")
     finer = config.grid_step / 2
     # Don't steer users into an OOM (issue #105): halving the grid step
     # quadruples cell count. Above ~4M cells per layer, suggest scoping the
@@ -566,10 +574,18 @@ def static_boxin_hint(result, config, pcb_data=None) -> str:
             grid_advice = (f"--grid-step {finer:g} scoped to just the failing nets "
                            f"via --nets (board-global it is ~{cells / 1e6:.0f}M "
                            f"cells/layer and may exhaust memory)")
-    return (f"Hint: search exhausted after only {iters} iterations with no rippable "
-            f"blockers - the start/target pads are boxed in by static obstacles "
-            f"(neighboring pads + clearance), not by congestion. For fine-pitch "
-            f"parts try a finer grid and/or smaller clearance/track, e.g. "
-            f"{grid_advice} --clearance 0.15 --track-width 0.15 "
-            f"(current: grid {config.grid_step:g}, clearance {config.clearance:g}, "
-            f"track {config.track_width:g} mm)")
+    return _ret(
+        f"Hint: search exhausted after only {iters} iterations with no rippable "
+        f"blockers - the start/target pads are boxed in by static obstacles "
+        f"(neighboring pads + clearance), not by congestion. For fine-pitch "
+        f"parts try a finer grid and/or smaller clearance/track, e.g. "
+        f"{grid_advice} --clearance 0.15 --track-width 0.15 "
+        f"(current: grid {config.grid_step:g}, clearance {config.clearance:g}, "
+        f"track {config.track_width:g} mm)",
+        # The same decision as data: the iteration count it was made on and
+        # the geometry that was in force.
+        {'verdict': 'boxed_in_static', 'iterations': iters,
+         'geometry': {'grid_step': config.grid_step,
+                      'clearance': config.clearance,
+                      'track_width': config.track_width,
+                      'via_diameter': getattr(config, 'via_diameter', None)}})

@@ -41,12 +41,14 @@ def _seg_points(s, step_mm: float = 0.2):
                s.start_y + (s.end_y - s.start_y) * t)
 
 
-def _copper_conflicts(pcb_data: PCBData, config: GridRouteConfig,
-                      own_ids: set, segments, vias) -> bool:
-    """True if any candidate segment/via violates clearance against any
-    foreign segment/via currently on the board. Pads are not re-checked:
-    the saved copper was DRC-clean against them before the rip and pads do
-    not move; only copper routed SINCE the rip can conflict."""
+def _conflict_sweep(pcb_data: PCBData, config: GridRouteConfig,
+                    own_ids: set, segments, vias, collect: bool = False):
+    """Owners (net_ids) of board copper violating clearance against the
+    candidate segments/vias. collect=False returns at the FIRST hit (the
+    boolean-speed path `_copper_conflicts` wraps); collect=True sweeps the
+    whole board and returns every conflicting owner. Pads are not
+    re-checked: the saved copper was DRC-clean against them before the rip
+    and pads do not move; only copper routed SINCE the rip can conflict."""
     from geometry_utils import point_to_segment_distance
     clr_of = (config.obstacle_clearance
               if hasattr(config, 'obstacle_clearance') else lambda n: config.clearance)
@@ -63,44 +65,77 @@ def _copper_conflicts(pcb_data: PCBData, config: GridRouteConfig,
         return v
 
     def _track_pair_clr(a_net, b_net, layer):
-        # #549: a track-scoped DRU rule raises the SEG-SEG requirement only.
+        # A track-scoped DRU rule raises the SEG-SEG requirement only (#735).
+        #
+        # NOT `kicad_dru.track_pair_clearance`, and do not unify them (#735).
+        # That one is PAIR-EXACT and needs both nets' class memberships; this
+        # one reads `config.track_clearances`, the ROUTER's per-obstacle-net
+        # OVER-approximation, because that is the map the copper being
+        # restored was routed against. Substituting the exact resolver here
+        # would price a restore BELOW what the router stamped for it.
         v = _pair_clr(a_net, b_net, layer)
         if hasattr(config, 'track_obstacle_clearance'):
             v = max(config.track_obstacle_clearance(a_net, v),
                     config.track_obstacle_clearance(b_net, v))
         return v
 
+    owners: set = set()
     for cand in segments:
         c_clr_half = cand.width / 2
         for s in pcb_data.segments:
-            if s.net_id in own_ids or s.layer != cand.layer:
+            if s.net_id in own_ids or s.layer != cand.layer \
+                    or s.net_id in owners:
                 continue
             need = c_clr_half + s.width / 2 + _track_pair_clr(cand.net_id, s.net_id, cand.layer)
             if any(point_to_segment_distance(px, py, s.start_x, s.start_y,
                                              s.end_x, s.end_y) < need
                    for px, py in _seg_points(cand)):
-                return True
+                owners.add(s.net_id)
+                if not collect:
+                    return owners
         for v in pcb_data.vias:
-            if v.net_id in own_ids:
+            if v.net_id in own_ids or v.net_id in owners:
                 continue
             need = c_clr_half + v.size / 2 + _pair_clr(cand.net_id, v.net_id, cand.layer)
             if any(math.hypot(px - v.x, py - v.y) < need for px, py in _seg_points(cand)):
-                return True
+                owners.add(v.net_id)
+                if not collect:
+                    return owners
     for cv in vias:
         for v in pcb_data.vias:
-            if v.net_id in own_ids:
+            if v.net_id in own_ids or v.net_id in owners:
                 continue
             need = cv.size / 2 + v.size / 2 + _pair_clr(cv.net_id, v.net_id)
             if math.hypot(cv.x - v.x, cv.y - v.y) < need:
-                return True
+                owners.add(v.net_id)
+                if not collect:
+                    return owners
         for s in pcb_data.segments:
-            if s.net_id in own_ids:
+            if s.net_id in own_ids or s.net_id in owners:
                 continue
             need = cv.size / 2 + s.width / 2 + _pair_clr(cv.net_id, s.net_id, s.layer)
             if point_to_segment_distance(cv.x, cv.y, s.start_x, s.start_y,
                                          s.end_x, s.end_y) < need:
-                return True
-    return False
+                owners.add(s.net_id)
+                if not collect:
+                    return owners
+    return owners
+
+
+def _copper_conflicts(pcb_data: PCBData, config: GridRouteConfig,
+                      own_ids: set, segments, vias) -> bool:
+    """True if any candidate segment/via violates clearance against any
+    foreign segment/via currently on the board."""
+    return bool(_conflict_sweep(pcb_data, config, own_ids, segments, vias,
+                                collect=False))
+
+
+def conflict_owner_ids(pcb_data: PCBData, config: GridRouteConfig,
+                       own_ids: set, segments, vias) -> set:
+    """Every net owning board copper that blocks a full restore of the
+    candidate copper (#622 victim-priority restore)."""
+    return _conflict_sweep(pcb_data, config, own_ids, segments, vias,
+                           collect=True)
 
 
 def _stub_subset(pcb_data: PCBData, net_id: int, segments, vias,

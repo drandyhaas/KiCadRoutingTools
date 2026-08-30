@@ -164,24 +164,82 @@ else:
     # comes from the env var stamped in at build time.
     _src_dir, GIT_SHA = "/tmp", os.environ.get("KICAD_SWEEP_GIT", "unknown")
 
+# numpy/scipy/shapely are the ENTIRE runtime dependency set of the default
+# image: check_drc.py and the router are pure python + the compiled grid_router.
+# PINNED exactly (2026-08-11): unpinned ranges let image rebuilds float the
+# numeric stack, and a float-behavior drift between two builds routed
+# 28/96 boards DIFFERENTLY at identical config -- silently voiding every
+# cross-era comparison (verified: both code eras identical locally).
+# Bump only deliberately, expecting a new baseline era.
+_PY_PINS = ("numpy==2.5.2", "scipy==1.18.0", "shapely==2.1.2")
+
+# OPT-IN KiCad in the image (#650). KICAD_SWEEP_WITH_KICAD=1, which
+# cloud_replay_sets.py --with-kicad sets; read CLIENT-side, where the image is
+# defined.
+#
+# WHY it is opt-in and not the default: a different base image is a different
+# numeric stack, i.e. a NEW BASELINE ERA (see the pin note above), so flipping
+# it for everyone would silently void every cross-wave comparison. An arm pair
+# launched --with-kicad shares one image, so ITS comparison stays internally
+# valid while nobody else's baseline moves.
+#
+# WHY you would want it: without KiCad every oracle leg is DEAD, not degraded.
+# oracle_reconnect returns {'available': False} the moment find_kicad_cli()
+# comes back None, so the plane finalize's audit, its #589 re-audit and the
+# the oracle summary check all no-op -- and a change that only acts
+# through them (e.g. #650's in-run floor sync) A/Bs as a perfect null that
+# looks like a measurement.
+KICAD_IMAGE = os.environ.get("KICAD_SWEEP_KICAD_IMAGE", "kicad/kicad:10.0.0")
+WITH_KICAD = os.environ.get("KICAD_SWEEP_WITH_KICAD", "") in ("1", "true", "on")
+
+
+def _base_image():
+    """The base + runtime deps, with or without KiCad."""
+    if not WITH_KICAD:
+        return (
+            modal.Image.debian_slim(python_version="3.12")
+            .pip_install(*_PY_PINS)
+            # procps: redo_stress_test's peak-RSS sampler shells out to ps/pgrep;
+            # absent from debian_slim, the sampler's except-pass reported 0 MB for
+            # every cloud task -- which is exactly the data needed to right-size
+            # (and stop over-paying for) the container memory tiers.
+            .apt_install("curl", "procps", "build-essential")
+        )
+    return (
+        modal.Image.from_registry(
+            KICAD_IMAGE,
+            # The official KiCad image runs as USER kicad; apt and pip need root.
+            setup_dockerfile_commands=["USER root"])
+        # python-is-python3: the image ships python3 but NO `python`, and
+        # Modal's own builder shells out to `python -m pip` -- so pip_install
+        # dies with exit 127 ("command not found") before installing anything.
+        .apt_install("curl", "procps", "build-essential", "python3-pip",
+                     "python-is-python3")
+        # PEP 668: Ubuntu marks its system python externally managed, so a bare
+        # pip install REFUSES rather than installing. Same pins either way --
+        # the whole point is that only KiCad differs between the two images.
+        .pip_install(*_PY_PINS, extra_options="--break-system-packages")
+        .run_commands(
+            # Prove BOTH oracle front-ends work before any board depends on
+            # them, in the same spirit as the grid_router import probe below.
+            # pcbnew specifically: it is the DETERMINISTIC link source (#490),
+            # and its absence is silent -- the oracle just falls back to
+            # kicad-cli, whose threaded connectivity reported 103/65/92 on
+            # identical input on orangecrab. That noise would swamp a 75-board
+            # A/B, so a missing pcbnew must kill the BUILD, not the result.
+            #
+            # This is also why the image must run on its OWN system python:
+            # from_registry(add_python=...) installs a standalone interpreter
+            # that cannot import the distro-built pcbnew.
+            'python3 -c "import pcbnew, sys; print(\'pcbnew\', '
+            'pcbnew.GetBuildVersion(), \'on python\', sys.version.split()[0])"',
+            "kicad-cli version",
+        )
+    )
+
+
 image = (
-    modal.Image.debian_slim(python_version="3.12")
-    # numpy/scipy/shapely are the ENTIRE runtime dependency set: check_drc.py and
-    # the router are pure python + the compiled grid_router. No KiCad needed --
-    # replay+grade never calls pcbnew or kicad-cli. (Cost: ab_replay_grade's
-    # optional kicad-cli cross-check degrades to None. Cross-check the winning
-    # arm locally, where KiCad already lives -- that check caught #487.)
-    # PINNED exactly (2026-08-11): unpinned ranges let image rebuilds float the
-    # numeric stack, and a float-behavior drift between two builds routed
-    # 28/96 boards DIFFERENTLY at identical config -- silently voiding every
-    # cross-era comparison (verified: both code eras identical locally).
-    # Bump only deliberately, expecting a new baseline era.
-    .pip_install("numpy==2.5.2", "scipy==1.18.0", "shapely==2.1.2")
-    # procps: redo_stress_test's peak-RSS sampler shells out to ps/pgrep;
-    # absent from debian_slim, the sampler's except-pass reported 0 MB for
-    # every cloud task -- which is exactly the data needed to right-size
-    # (and stop over-paying for) the container memory tiers.
-    .apt_install("curl", "procps", "build-essential")
+    _base_image()
     # Rust toolchain, for the source-build fallback in _build_step(). Placed
     # BEFORE add_local_dir on purpose: a layer after it rebuilds on every
     # source change, and rustup is a ~1 min download we do not want to repay
@@ -190,7 +248,10 @@ image = (
     .run_commands("curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal")
     # Carry the source commit to the containers. They cannot compute it: no git
     # binary, no repo -- see the is_local() guard above.
-    .env({"KICAD_SWEEP_GIT": GIT_SHA})
+    .env({"KICAD_SWEEP_GIT": GIT_SHA,
+          # Provenance: a wave built WITH KiCad ran its oracle legs and one
+          # built without did not, so the two are not comparable.
+          "KICAD_SWEEP_WITH_KICAD": "1" if WITH_KICAD else "0"})
     .add_local_dir(_src_dir, REPO, copy=True, ignore=[
         "**/.git/**", "**/__pycache__/**", "**/target/**", "**/.claude/worktrees/**",
     ])

@@ -20,6 +20,49 @@ expression engine would silently manufacture wrong clearances):
   - later rules override earlier ones per layer (KiCad evaluates last-to-
     first, first match wins)
   - ``(severity ignore)`` rules are skipped
+
+THE SECOND CHANNEL, and it is not the same shape. TRACK-SCOPED rules
+(``A.Type=='track' && B.Type=='track'`` plus one net-class term) cannot be a
+layer map at all -- they are a predicate on a PAIR of nets -- so they parse out
+of the same single pass as a ``TrackRule`` list and are **raise-only** over an
+already-resolved pair value, never a replacement. Two resolvers consume them,
+and the difference matters when reading a number back:
+
+  * ``track_pair_clearance`` is PAIR-EXACT and is what a grader or a
+    geometry gate that knows both nets must use (check_drc's seg-seg site,
+    the fanout-clearance connector gate).
+  * ``effective_track_clearances`` OVER-APPROXIMATES per obstacle net,
+    because the router's obstacle map is shared across the routed set and
+    has no room for a per-pair value. Router output therefore always grades
+    clean, never the reverse.
+
+A track rule binds tracks and nothing else: no pad, no via, no zone. That is
+KiCad's own ``Type=='track'`` and it is why the pad channels above are
+untouched by this half of the module.
+
+HISTORICAL NOTE -- the `#549` label, and why this module no longer carries it.
+
+Commits dated 2026-08-02 label four unrelated topics `#549 A-1`, `#549 A-2`,
+`#549 B-1`, `#549 B-2`; comments added `#549 C3` and `#549 D`. That label was a
+session work plan, NOT GitHub #549 -- which was CLOSED on 2026-08-01 by PR #555
+("Floorplan intent graded") and is about the placement skill. Its sub-letters
+collide with each other too: `A-1` marks both this parser and the
+strict-fragment view, `A-2` marks both this channel going live and the planner
+riding that view, `B-1` marks both the corridor seeds and the oracle summary
+check. The map, for `git log`:
+
+  fa685741  #549 A-1  -> .kicad_dru TRACK channel, parse (inert)    -> #735
+  8856c0e4  #549 A-2  -> .kicad_dru TRACK channel, live             -> #735
+  972131a4  #549      -> TRACK channel, octolinear smoothing        -> #735
+  56dea0cf  #549 A-1  -> strict-fragment view (check_connected)
+  a29d3f88  #549 A-2  -> planner rides the strict view              -> #578
+  b0dfaeb2  #549 B-1  -> corridor seeds (inert)      REMOVED f93bd946 (#575)
+  ab650b93  #549 B-2  -> --corridor-nets live        REMOVED f93bd946 (#575)
+  b9a527fd  #549 B-1  -> end-of-run oracle summary check
+
+The floorplan-intent, routability and skill families KEEP `#549`: those really
+are GitHub #549 (adc17a39, 0095aee9, dfdfe7c8, 7bef8b90, 4af27f51, all in
+PR #555). Retagging them would have removed the one accurate pointer.
 """
 
 import os
@@ -30,14 +73,14 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 _VAL = re.compile(r"^(-?[0-9.]+)\s*(mm|mil|in|um|nm)?$")
 _UNIT_MM = {"mm": 1.0, "mil": 0.0254, "in": 25.4, "um": 0.001, "nm": 1e-6, None: 1.0}
 _ONLAYER = re.compile(r"[AB]\s*\.\s*onLayer\s*\(\s*['\"]([^'\"]+)['\"]\s*\)")
-# #549 track-scoped clearance subset: A.Type=='track' && B.Type=='track' plus
+# The TRACK-scoped clearance subset (#735): A.Type=='track' && B.Type=='track' plus
 # exactly one X.NetClass=='C' term (optionally the mirror Y.NetClass!='C').
 _TRACK_TYPE = re.compile(r"([AB])\s*\.\s*Type\s*==\s*['\"]track['\"]", re.IGNORECASE)
 _NC_TERM = re.compile(r"([AB])\s*\.\s*NetClass\s*([!=]=)\s*['\"]([^'\"]+)['\"]")
 
 
 class TrackRule(NamedTuple):
-    """A #549 track-to-track clearance rule scoped to one net class.
+    """A track-to-track clearance rule scoped to one net class (#735).
 
     ``other_only`` is True for the ``A.NetClass=='C' && B.NetClass!='C'``
     shape: the requirement binds only member-vs-NON-member pairs, so a
@@ -177,7 +220,7 @@ def _parse_dru(text: str, copper_layers: List[str]
     ({layer: clearance_mm}, [TrackRule], notes).
 
     Later rules override earlier ones per layer. A rule whose condition is the
-    #549 track-pair subset becomes a TrackRule (and never a layer entry); any
+    honored track-pair subset becomes a TrackRule (and never a layer entry); any
     other out-of-subset scope is skipped with a note.
     """
     result: Dict[str, float] = {}
@@ -217,7 +260,7 @@ def _parse_dru(text: str, copper_layers: List[str]
             notes.append(f"rule '{name}': track-to-track clearance "
                          f"{clearance_mm}mm for class '{cls}'"
                          f"{' vs other classes only' if other_only else ''}"
-                         f" -- handled by the track channel (#549)")
+                         f" -- handled by the track channel")
             continue
         layers = _rule_layers(node, copper_layers, notes)
         if layers is None:
@@ -242,7 +285,7 @@ def parse_dru_layer_clearances(text: str, copper_layers: List[str]
 
 
 def parse_dru_track_clearances(text: str) -> Tuple[List[TrackRule], List[str]]:
-    """Parse .kicad_dru text -> ([TrackRule], notes) for the #549 track
+    """Parse .kicad_dru text -> ([TrackRule], notes) for the track
     channel. Copper layers are irrelevant to track rules; a synthetic list
     keeps the shared single-pass parser happy."""
     copper = ["F.Cu", "B.Cu"] + [f"In{i}.Cu" for i in range(1, 31)]
@@ -278,7 +321,7 @@ def read_board_layer_clearances(board_path: str, copper_layers: List[str],
 
 
 def read_board_track_clearances(board_path: str) -> Tuple[List[TrackRule], List[str]]:
-    """Auto-read the sibling ``<board>.kicad_dru`` #549 track rules.
+    """Auto-read the sibling ``<board>.kicad_dru`` track rules (#735).
 
     Returns ([], []) when there is no dru file. Unlike the layer map there is
     deliberately NO fab pinning: the track channel is raise-only over the
@@ -292,6 +335,85 @@ def read_board_track_clearances(board_path: str) -> Tuple[List[TrackRule], List[
     except OSError as e:
         return [], [f"could not read {dru}: {e}"]
     return parse_dru_track_clearances(text)
+
+
+def track_pair_clearance(track_rules: List[TrackRule], a_cls, b_cls,
+                         resolved: float) -> Tuple[float, Optional[TrackRule]]:
+    """THE pair-exact track-rule resolver: (effective mm, the rule that RAISED
+    it or None).
+
+    ``resolved`` is the caller's already-resolved pair value -- class pairwise
+    max with the #498 layer replacement applied -- and this is **raise-only**
+    over it, so a rule at or below it is inert and the fab floor can never be
+    dragged down. ``a_cls`` / ``b_cls`` are the two nets' class-membership sets
+    from ``list_nets.net_class_memberships``.
+
+    One site, deliberately. ``check_drc`` graded the seg-seg pair through a
+    closure of this body and ``fanout_clearance``'s connector gate had no
+    equivalent at all (#735), which is how the cap-repair pass could draw
+    copper closer than the grader accepts. Both now call this.
+
+    The rule identity comes back because check_drc's violation record uses it
+    to tell a structural, rule-governed pair from a physical graze; a caller
+    that only needs the number takes ``[0]``.
+    """
+    eff, rule = resolved, None
+    if not track_rules:
+        return eff, rule
+    for r in track_rules:
+        a_in, b_in = r.cls in a_cls, r.cls in b_cls
+        binds = ((a_in != b_in) or (a_in and b_in and not r.other_only))
+        if binds and r.clearance_mm > eff:
+            eff = r.clearance_mm
+            rule = r
+    return eff, rule
+
+
+def board_track_rules(pcb_data, board_path: str = None):
+    """([TrackRule], {net_id: frozenset of class names}) for a PCBData.
+
+    The QUIET, pcb_data-shaped reader -- the track-channel twin of
+    ``board_layer_clearance_map``, for engines that resolve pairs outside a
+    GridRouteConfig (the placement passes). Path discovery is the #498 rule:
+    the caller's ``board_path`` when it has one, else ``PCBData.source_path``.
+
+    ``([], {})`` for no path, no sibling .kicad_dru, no rule, and for a
+    membership resolution that comes back EMPTY -- a rule whose class has no
+    members can never bind a pair, and returning it would leave a caller
+    paying for a live channel that is arithmetically dead. That last case
+    covers the ordinary "project declares no netclass_patterns" board, which
+    `net_class_memberships` answers with ``{}`` rather than an exception.
+
+    It does not raise for any input `net_class_memberships` can produce; the
+    two expressions outside the guards are the ``source_path`` read and the
+    final comprehension, and neither is reachable through that resolver. The
+    point is that a board declaring nothing must cost its caller nothing, and
+    a failed read must not become a crash in a pass that worked before the
+    rules file appeared.
+    """
+    path = board_path or getattr(pcb_data, 'source_path', "") or ""
+    if not path:
+        return [], {}
+    try:
+        rules, _notes = read_board_track_clearances(path)
+    except Exception:                                       # noqa: BLE001
+        return [], {}
+    if not rules:
+        return [], {}
+    try:
+        from list_nets import net_class_memberships
+        nets = {nid: n.name for nid, n in (pcb_data.nets or {}).items()
+                if getattr(n, 'name', None)}
+        raw = net_class_memberships(path, nets)
+    except Exception:                                       # noqa: BLE001
+        # The rules parsed but nobody can be said to be IN a class, so no pair
+        # can bind. Drop the rules with them rather than keep a channel that
+        # would silently grade every pair as a non-member. This mirrors
+        # check_drc, which clears its own rule list on the same failure.
+        return [], {}
+    if not raw:
+        return [], {}
+    return rules, {nid: frozenset(cls) for nid, cls in raw.items()}
 
 
 def effective_track_clearances(track_rules: List[TrackRule],
@@ -337,7 +459,7 @@ _TRACK_ANNOUNCED = set()  # (board path, rules) already printed this process
 
 def install_track_clearances(config, track_clearances, input_file,
                              pcb_data=None, routed_net_ids=None):
-    """Resolve and install the #549 track-to-track clearance map on ``config``,
+    """Resolve and install the track-to-track clearance map on ``config``,
     engine-side so BOTH fronts inherit it (like install_layer_clearances: no
     flag, no GUI control -- the .kicad_dru is the single source of truth). An
     explicit {net_id: mm} dict (tests) wins and stops the auto-read; None ->
@@ -370,7 +492,7 @@ def install_track_clearances(config, track_clearances, input_file,
         _TRACK_ANNOUNCED.add(_key)
         for r in rules:
             print(f"Track-to-track clearance rule from the board's .kicad_dru "
-                  f"(#549, raise-only on seg-seg pairs): '{r.name}' class "
+                  f"(raise-only on seg-seg pairs): '{r.name}' class "
                   f"'{r.cls}' {r.clearance_mm:g}mm"
                   f"{' (vs other classes only)' if r.other_only else ''}"
                   f" -- {len(eff)} net(s) priced")

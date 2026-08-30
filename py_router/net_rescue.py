@@ -48,6 +48,151 @@ from routing_state import record_net_event
 from terminal_colors import RED, GREEN, YELLOW, RESET
 
 
+# ---------------------------------------------------------------------------
+# NOTE: the PCBData annotations below are STRINGS on purpose. net_rescue does
+# not import PCBData at module level (it imports Segment/Via lazily INSIDE a
+# function to avoid an import cycle), and Python evaluates annotations at `def`
+# time before 3.14. So a bare `pcb_data: PCBData` here raises NameError the
+# moment this module is imported under KiCad's bundled python -- 3.9.13, where
+# annotations are eager -- while passing silently on the CLI's 3.14, where
+# PEP 649 makes them lazy. That asymmetry took GUI signal routing to ZERO copper
+# while the CLI stayed perfect (#805 parity regression, f2100875).
+#
+# #666 would-short guard helpers, ported verbatim from bus622-take2's
+# bus_terminal.py (c3725b31). That module does not exist on main, and the guard
+# below is the portable half of that commit -- its other half (an unyield
+# refcount leak) lives in bus_terminal and has no counterpart here; the SAME
+# bug class on main was fixed separately in single_ended_loop._stub_swap_rescue.
+#
+# Ported rather than re-expressed with main's _seg_foreign_*_dist helpers: those
+# are POINT-based for pads, so rebuilding the leg check on them would change the
+# guard's semantics. Verbatim keeps the behaviour the branch measured.
+def _pt_seg_d(px, py, x1, y1, x2, y2):
+    dx, dy = x2 - x1, y2 - y1
+    L2 = dx * dx + dy * dy
+    t = 0.0 if L2 <= 0 else max(0.0, min(1.0, ((px - x1) * dx
+                                               + (py - y1) * dy) / L2))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+def _seg_seg_d(x1, y1, x2, y2, u1, v1, u2, v2):
+    """Segment-segment distance, 0 when they properly intersect.
+    Endpoint distances alone are BLIND to a crossing (two legs crossed
+    mid-span with every endpoint 0.5mm clear -- shipped an F.Cu short,
+    h1_8 SA10xSDQ5)."""
+    d1x, d1y = x2 - x1, y2 - y1
+    d2x, d2y = u2 - u1, v2 - v1
+    denom = d1x * d2y - d1y * d2x
+    if abs(denom) > 1e-12:
+        t = ((u1 - x1) * d2y - (v1 - y1) * d2x) / denom
+        s = ((u1 - x1) * d1y - (v1 - y1) * d1x) / denom
+        if 0.0 <= t <= 1.0 and 0.0 <= s <= 1.0:
+            return 0.0
+    return min(_pt_seg_d(u1, v1, x1, y1, x2, y2),
+               _pt_seg_d(u2, v2, x1, y1, x2, y2),
+               _pt_seg_d(x1, y1, u1, v1, u2, v2),
+               _pt_seg_d(x2, y2, u1, v1, u2, v2))
+
+
+def _leg_clear(pcb_data: "PCBData", pts: List[Tuple[float, float]],
+               layer: str, width: float, clearance: float,
+               net_id: int) -> bool:
+    """Exact clearance check of the leg polyline against real geometry --
+    the fanout _seg_conflict pattern, standalone over pcb_data. Foreign
+    pads (their true shape radius for circles, circumscribed for rects),
+    foreign same-layer segments, and all via barrels are checked; own-net
+    copper and pads are exempt (the leg lands ON the own ball)."""
+    hw = width / 2.0
+    for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+        for fp in pcb_data.footprints.values():
+            for p in fp.pads:
+                if p.net_id == net_id:
+                    continue
+                if getattr(p, 'drill', 0):
+                    r = max(p.size_x, p.size_y) / 2.0
+                elif layer in p.layers:
+                    if p.shape == 'circle':
+                        r = p.size_x / 2.0
+                    else:
+                        r = math.hypot(p.size_x, p.size_y) / 2.0
+                else:
+                    continue
+                if _pt_seg_d(p.global_x, p.global_y, x1, y1, x2, y2) \
+                        < r + hw + clearance - 1e-6:
+                    return False
+        for s in pcb_data.segments:
+            if s.net_id == net_id or s.layer != layer:
+                continue
+            if _seg_seg_d(x1, y1, x2, y2, s.start_x, s.start_y,
+                          s.end_x, s.end_y) \
+                    < s.width / 2.0 + hw + clearance - 1e-6:
+                return False
+        for v in pcb_data.vias:
+            if v.net_id == net_id:
+                continue
+            if _pt_seg_d(v.x, v.y, x1, y1, x2, y2) \
+                    < v.size / 2.0 + hw + clearance - 1e-6:
+                return False
+    return True
+
+
+def _via_site_clear(pcb_data: "PCBData", x: float, y: float, config,
+                    net_id: int) -> bool:
+    """Exact via-landing check for a planned dive pocket: the via's
+    copper pad must clear foreign copper on BOTH outer layers, and its
+    drill must keep hole-to-hole distance from every foreign drill
+    (vias and thru/NPTH pads). Own-net copper is exempt (the dive
+    starts on the own ball's jog)."""
+    vr = (getattr(config, 'via_size', 0.6) or 0.6) / 2.0
+    vd = (getattr(config, 'via_drill', 0.3) or 0.3) / 2.0
+    clr = config.clearance
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.2) or 0.2
+    for v in pcb_data.vias:
+        d = math.hypot(x - v.x, y - v.y)
+        if v.net_id != net_id:
+            if d < vr + v.size / 2.0 + clr:
+                return False
+        # #671: the DRILL check is NOT net-aware. Copper clearance is exempt
+        # between same-net items -- two barrels of one net may touch -- but a
+        # hole-to-hole minimum is a mechanical fab rule and applies to every
+        # pair of drills on the board. _via_drill_exclusion_radius states the
+        # same rule in single_ended_routing: "same-net vias may touch copper but
+        # not drills". Skipping same-net vias here let a rescue via land inside
+        # hole-to-hole of its OWN net's barrel, which KiCad flags.
+        if d < vd + (v.drill or 0.0) / 2.0 + h2h:
+            return False
+    for fp in pcb_data.footprints.values():
+        for p in fp.pads:
+            # Drill hole-to-hole first: same rule as the vias above, so an
+            # own-net THT pad's hole constrains this via too (#671).
+            if p.drill and p.drill > 0:
+                hx = p.hole_x if p.hole_x is not None else p.global_x
+                hy = p.hole_y if p.hole_y is not None else p.global_y
+                if math.hypot(x - hx, y - hy) < vd + p.drill / 2.0 + h2h:
+                    return False
+            if p.net_id == net_id:
+                continue
+            if p.pad_type == 'np_thru_hole':
+                continue
+            dx = max(abs(x - p.global_x) - p.size_x / 2.0, 0.0)
+            dy = max(abs(y - p.global_y) - p.size_y / 2.0, 0.0)
+            if math.hypot(dx, dy) < vr + clr:
+                return False
+    for s in pcb_data.segments:
+        if s.net_id == net_id:
+            continue
+        vx, vy = s.end_x - s.start_x, s.end_y - s.start_y
+        L2 = vx * vx + vy * vy
+        t = 0.0 if L2 < 1e-12 else max(
+            0.0, min(1.0, ((x - s.start_x) * vx
+                           + (y - s.start_y) * vy) / L2))
+        d = math.hypot(x - (s.start_x + t * vx),
+                       y - (s.start_y + t * vy))
+        if d < vr + s.width / 2.0 + clr:
+            return False
+    return True
+
+
 def _net_component_info(pcb_data, net_id):
     """Connected components of a net's pads+copper on the REAL board.
 
@@ -891,8 +1036,48 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                             if v.get('net_id') == net_id]
                     if not _gsegs and not _gvias:
                         continue
+                    # Would-short guard (#468 doctrine, rescue-escape
+                    # edition): generate_bga_fanout's conflict model
+                    # covers balls/teeth/passives, NOT this run's
+                    # routed tracks -- at rescue time the board is
+                    # ROUTED, and an unchecked escape ships a short
+                    # (measured yh1 K=51: SDQ4's lap-rescue escape at
+                    # the 0.127 fab-floor clamp laid 8 segs from
+                    # DU1.E3 straight across SDQ3's F.Cu straight --
+                    # in-CONTACT + crossing DRC; the trace proved no
+                    # choke-point writer laid it). Exact-check every
+                    # emitted seg and via against foreign copper;
+                    # decline the escape like any other no-escape
+                    # outcome rather than ship it.
+                    _lc666, _vc666 = _leg_clear, _via_site_clear
+                    _short666 = None
+                    for _sg6 in _gsegs:
+                        if not _lc666(pcb_data,
+                                      [(_sg6.start_x, _sg6.start_y),
+                                       (_sg6.end_x, _sg6.end_y)],
+                                      _sg6.layer, _sg6.width,
+                                      config.clearance, net_id):
+                            _short666 = 'seg'
+                            break
+                    if _short666 is None:
+                        for _v6 in _gvias:
+                            if not _vc666(pcb_data, _v6.x, _v6.y,
+                                          config, net_id):
+                                _short666 = 'via'
+                                break
+                    if _short666 is not None:
+                        print(f"    bare-ball escape: "
+                              f"{_pad.component_ref}.{_pad.pad_number} "
+                              f"declined (escape {_short666} would "
+                              f"short routed copper)")
+                        continue
                     pcb_data.segments.extend(_gsegs)
                     pcb_data.vias.extend(_gvias)
+                    # #803: bump the copper epoch -- _blockid_geom_memo and
+                    # _via_place_fail_memo key on it, and without this they keep
+                    # serving answers computed before this escape existed.
+                    pcb_data._copper_epoch = getattr(
+                        pcb_data, '_copper_epoch', 0) + 1
                     tap_results.append({'new_segments': _gsegs,
                                         'new_vias': _gvias,
                                         'iterations': 0})
@@ -920,6 +1105,9 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                     continue
                 pcb_data.segments.extend(_tsegs)
                 pcb_data.vias.extend(_tvias)
+                # #803: bump the copper epoch (see the sibling append above).
+                pcb_data._copper_epoch = getattr(
+                    pcb_data, '_copper_epoch', 0) + 1
                 tap_results.append({'new_segments': _tsegs,
                                     'new_vias': _tvias, 'iterations': 0})
                 _tapped += 1

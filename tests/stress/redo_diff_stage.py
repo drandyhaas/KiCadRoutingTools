@@ -42,6 +42,12 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 REDO = os.path.join(REPO, "tests", "stress", "redo_stress_test.py")
 CHECK_DRC = os.path.join(REPO, 'py_router', 'check_drc.py')
+# Everything else here shells out to the engine, so nothing had put py_router
+# on sys.path -- a bare `from copy_board import ...` fails at runtime. Insert
+# it before the one engine import this script does.
+if os.path.join(REPO, 'py_router') not in sys.path:
+    sys.path.insert(0, os.path.join(REPO, 'py_router'))
+from copy_board import SIBLING_EXTS  # one list, never a hand-written copy
 DEFAULT_ROOT = os.path.expanduser("~/Documents/kicad_stress_test")
 DEFAULT_OUT = os.path.expanduser("~/Documents/diff2")
 
@@ -249,7 +255,7 @@ def process_board(set_board, manifest, work_root, out_dir, drc_size_checks):
         dest = os.path.join(out_dir, set_board)
         os.makedirs(dest, exist_ok=True)
         base = os.path.splitext(os.path.basename(out_board))[0]
-        for ext in (".kicad_pcb", ".kicad_pro", ".kicad_prl"):
+        for ext in (".kicad_pcb",) + SIBLING_EXTS:
             p = os.path.join(wdir, base + ext)
             if os.path.isfile(p):
                 shutil.copy(p, os.path.join(dest, board + "_diff" + ext))

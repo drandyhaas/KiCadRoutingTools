@@ -109,7 +109,7 @@ def test_a_flag_from_a_SHARED_registrar_is_not_reported_missing():
     assert k.missing(caps, ['qfn_fanout.py:--width']) == [],         "a package shim's flags live in <pkg>/__init__.py"
     # and a script outside the repo root, named by path
     assert k.missing(caps, [
-        '.claude/skills/plan-pcb-routing/scripts/board_score.py:--net-min-widths'
+        '.claude/skills/plan-pcb-placement-and-routing/scripts/board_score.py:--net-min-widths'
     ]) == [], "a required script may be named by path"
     # a genuinely absent flag must still be reported
     assert k.missing(caps, ['route.py:--not-a-real-flag']),         "a real gap must still be reported"

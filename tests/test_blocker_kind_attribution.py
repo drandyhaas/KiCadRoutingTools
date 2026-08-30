@@ -80,10 +80,19 @@ def test_printer_stashes_track_blame_only():
             pcb_data=pcb, config=cfg, current_net_id=1)
     text = buf.getvalue()
     assert 'track' in text and 'pad' in text, f"kinds absent from print:\n{text}"
-    blame = getattr(pcb, '_stuck_wall_blame', {})
-    assert blame.get(1) == {2}, \
-        f"blame must carry the TRACK owner only, got {blame}"
-    print("  PASS: print names kinds; blame stashes track owners only")
+    # The diagnostic must NOT feed the rip cascade. 1a903195 stashed the track
+    # owners on pcb_data._stuck_wall_blame, which phase-3 consumed as
+    # validator-named blockers -- and those "sort ahead of every
+    # frontier-inferred tier", so a DIAGNOSTIC pass silently became an input to
+    # rip VICTIM SELECTION. Measured cost on neo6502: 8 disconnected nets
+    # against main's 0, with the final --rip-existing-nets '*' repairing none
+    # of them; across sets 1-5 removing it went DRC 27 -> 21 and incomplete
+    # nets 125 -> 114. The kind split above is kept (a pad is not a rip
+    # candidate and the merged count hid that); only the feed is gone.
+    blame = getattr(pcb, '_stuck_wall_blame', None)
+    assert not blame, \
+        f"the stuck-probe diagnostic must not feed the rip cascade, got {blame}"
+    print("  PASS: print names kinds; diagnostic does NOT feed the rip cascade")
 
 
 if __name__ == '__main__':

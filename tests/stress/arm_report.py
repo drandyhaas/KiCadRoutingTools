@@ -46,8 +46,8 @@ sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # #522/py_placer layout
 sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522/py_placer layout
 os.environ.setdefault('KRT_NO_BANNER', '1')
 
-SKILL_SCRIPTS = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-routing',
-                             'scripts')
+SKILL_SCRIPTS = os.path.join(ROOT, '.claude', 'skills',
+                             'plan-pcb-placement-and-routing', 'scripts')
 PY = [sys.executable, '-X', 'utf8']
 
 

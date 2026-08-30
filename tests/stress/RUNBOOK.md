@@ -365,8 +365,14 @@ harmless.
    those caps clear and pulls each pad toward its nearest same-net ball (so a
    later power/GND via shares the via). It reads each via's real size from the
    board, only moves 2-pad caps near a BGA, never overlaps caps, and is a no-op
-   when nothing collides. It prints `resolved R/M ... K unresolved`; unresolved
-   caps need a manual nudge. Feed `<out>` into the next step; verify with
+   when nothing collides. It prints `resolved R/V initial violations; K
+   unresolved`, with `(F freed by via-nudge)` when the #313 last resort moved
+   a via to free a boxed cap; `resolved` is graded at the END of the pass and
+   credits both mechanisms (#746). Unresolved caps are still grazing foreign
+   copper (via, track or pad) and need a manual nudge; a `Re-grazed by this
+   pass's own connector copper:` line names the ones that were clean before
+   the nudge, i.e. copper this step drew rather than copper the board arrived
+   with. Feed `<out>` into the next step; verify with
    `check_drc.py <out> -c <floor>` (PAD-VIA drops).
 6. Diff pairs: if `--diff-pairs` reports pairs, route them with route_diff.py
    AFTER fanout and BEFORE signal routing (gap from --design-rules; use
@@ -716,6 +722,36 @@ boards" and "which commit broke connectivity".
 - **`corpus_bisect.sh`** — score ONE engine commit across the corpus, for
   bisecting a regression: `bash tests/stress/corpus_bisect.sh <sha> <tag>`.
   5-6 points bracket a 38-commit range for under $10.
+
+- **`cloud_arms_to_sweep.py`** — score a knob screened as SEPARATE
+  `cloud_replay_sets.py` arms. Each arm lands in its own wave dir, and the
+  wave-dir readers (`ab_wave_report.py`, `--compare`) do a two-wave roll-up
+  with no chain pairing, no rescue-clean cell and no `--hard` split — i.e.
+  without rules 3, 5 and the congestion dilution below. Merge the arms into
+  one sweep json and score them with the tool that applies all of it:
+
+  ```bash
+  # one control arm + one knob arm, launched separately, at the SAME commit
+  python3 tests/stress/cloud_replay_sets.py --sets set1-set5 --label dirs250
+  python3 tests/stress/cloud_replay_sets.py --sets set1-set5 --label dirs5 \
+      --defaults DIRECTION_PREFERENCE_COST=5 --no-baseline
+  python3 tests/stress/cloud_arms_to_sweep.py \
+      ~/Documents/kicad_stress_test/cloud_dirs250_<sha> \
+      ~/Documents/kicad_stress_test/cloud_dirs5_<sha> --out sweep_dirs.json
+  python3 tests/stress/modal_sweep/rank_arms.py sweep_dirs.json --drop-rescue-clean
+  ```
+
+  It merges each wave's REGRADED grading with the `_raw` provenance the local
+  regrade drops (`arm`, `steps`, `rescue_steps`, `patched_defaults`) — feed
+  rank_arms the regraded rows alone and you silently disable its arm
+  identification, its chain-identity guard and its rescue cell at once. Rows
+  the regrade could not re-score (cloud-graded, so no kicad-cli `drc_real`)
+  are dropped rather than paired against locally-graded rows, per rule 2.
+
+  **Launch the arms at ONE commit and do not commit in between.** The image is
+  `git archive HEAD`, so a commit landing between two launches makes the arms
+  differ by more than the knob — the arm name records the sha it was launched
+  at, so check that both wave dirs carry the same one.
 
 ### Rules that make these trustworthy
 
@@ -1070,3 +1106,71 @@ that record embeds the human placement pose-for-pose. Stage with `control_out=`
 pointing at a **sibling** `_truth/` (never a child of the work dir — the audit
 recurses into it) and neither file ever enters. The record test reads bytes, so
 re-saving it as UTF-16 does not evade it.
+
+### Staging blind, in one call
+
+`tests/stress/stage_blind.py` does the whole staging above and draws the
+perturbation itself, so the operator never learns the kind, dose, block or
+seed:
+
+```bash
+python3 -X utf8 tests/stress/stage_blind.py \
+    kicad_files/tigard.kicad_pcb wk/run12/tigard wk/run12/_truth/tigard
+```
+
+It also SANITISES the project it carries into the work dir. The project must
+travel or the board grades at the stock netclass (#441), but KiCad writes
+`meta.filename` into it and `pcbnew.last_paths` holds the author's own
+directories, so a verbatim copy puts the source board's NAME inside the fence.
+The declaration of what it withheld is written to `_truth/draw.json` under
+`staged_project`, not into the work dir, because naming the withheld strings
+inside the fence would be the leak itself.
+
+### Auditing that every pose came from the engine
+
+`fence_audit` answers "did the answer key get in". It cannot answer "did a
+human place this by hand", because a hand-placed board is not the control's
+placement either. That is a separate question with a separate instrument:
+
+```bash
+python3 -X utf8 tests/stress/provenance_audit.py --workdir wk/run12/tigard
+# 0 CLEAN   every moved pose traces to a registered lever, and is where that
+#           lever put it
+# 4 VIOLATION a moved pose has no lever, or drifted after the lever wrote it
+# 5 UNPROVEN  nothing was measured (no regime, or no board)
+```
+
+Arm it by staging the work dir with `placement.provenance.start_regime`; the
+CLIs in `LEVER_REGISTRY` then record every pose they write to
+`.pose-provenance.jsonl`, and an undeclared write RAISES instead of landing.
+
+### Watching a long run
+
+`tests/stress/run_watch.py` has two modes, both of which emit one stdout line
+per event so they can be armed once and left alone:
+
+```bash
+python3 -X utf8 tests/stress/run_watch.py bugs   --workdir wk/run12/tigard
+python3 -X utf8 tests/stress/run_watch.py cheats --workdir wk/run12/tigard \
+    --truthdir wk/run12/_truth/tigard --done wk/run12/tigard/DONE
+```
+
+`bugs` reports new problems as they appear and runs until you stop it.
+`cheats` reports the ways the run could report success without earning it (a
+scope narrowed to the failing nets, a grader floor overridden, a waiver spent)
+and ends when the `DONE` marker appears, running `fence_audit` and
+`provenance_audit` as it goes. Neither budgets on a clock.
+
+`cheats` reads a tool's argv from its `CMD:` banner line. The two skill
+drivers install no banner, so wrap timed invocations in
+`tests/stress/tee_cmd.py`, which tees the output and appends one
+`cmd_timing.jsonl` row per invocation carrying the argv, the exit code and the
+elapsed time:
+
+```bash
+python3 -X utf8 tests/stress/tee_cmd.py --workdir wk/run12/tigard \
+    route4 -- python3 -X utf8 py_router/route.py in.kicad_pcb out.kicad_pcb
+```
+
+Wait on `logs/<label>.done`, which appears exactly when the child exits and
+holds its exit code. Nothing else is a completion signal.

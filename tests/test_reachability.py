@@ -45,8 +45,14 @@ class _Pad:
 
 
 class _Fp:
-    def __init__(self, pads):
+    # `reference` because the real Footprint always has one and
+    # `nearest_foreign` names its blockers by REF.PAD. The stand-in got away
+    # without it only while blockers were measured to their CENTRES: nothing in
+    # this fixture was within 2 mm of the throat that way, so the naming walk
+    # never ran. Measured edge-to-edge the walls are 0.2 mm away and it does.
+    def __init__(self, pads, reference='?'):
         self.pads = pads
+        self.reference = reference
 
 
 class _Net:
@@ -61,7 +67,7 @@ class _Info:
 class _Pcb:
     """The slice of PCBData the field reads."""
     def __init__(self, pads_by_ref, nets):
-        self.footprints = {k: _Fp(v) for k, v in pads_by_ref.items()}
+        self.footprints = {k: _Fp(v, k) for k, v in pads_by_ref.items()}
         self.nets = {i: _Net(n) for i, n in nets.items()}
         self.segments, self.vias = [], []
         self.board_info = _Info()

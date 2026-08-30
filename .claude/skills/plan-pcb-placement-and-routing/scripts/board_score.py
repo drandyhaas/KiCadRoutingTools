@@ -66,7 +66,7 @@ import tempfile
 # Source: check_drc.py's `by_type` grouping (:2801) over the 'type' key.
 SIZE_TYPES = frozenset({'track-width', 'via-size', 'via-drill-size'})
 
-# #549: seg-seg pairs whose violation exists ONLY because a .kicad_dru track
+# Seg-seg pairs whose violation exists ONLY because a .kicad_dru track
 # rule raised the pair clearance (check_drc tags them with a distinct type and
 # the binding rule's name). They are the structural, registered-floor-governed
 # population -- a repo's check_dru gate is their arbiter -- so board_score
@@ -386,7 +386,7 @@ def score_assembly(root: str, board: str, intent: str, tmp: str,
 
 def score_drc(root: str, board: str, clearance=None, sizes=None) -> tuple:
     """(drc, undersized, rule_pairs) -- physical clearance violations,
-    sub-floor copper, and #549 track-rule-governed pairs (advisory).
+    sub-floor copper, and .kicad_dru track-rule-governed pairs (advisory).
 
     Both come from ONE check_drc run, split on the violation type. Omitting
     --clearance is the norm and not an oversight: check_drc then reads the
@@ -883,7 +883,7 @@ def main():
              'assembly': assembly,
              'impedance': imped, 'length': length, 'net_widths': net_widths}
 
-    # #549 rule-governed pairs are ADVISORY: their gate is the repo's own
+    # Track-rule-governed pairs are ADVISORY: their gate is the repo's own
     # registered-floor checker (check_dru), not this scalar. They live beside
     # `parts`, never in it -- the blocking sum below iterates parts, and 610
     # floor-governed pairs must not drown ~17 physical defects (run 6).

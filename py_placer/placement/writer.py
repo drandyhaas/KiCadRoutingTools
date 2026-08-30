@@ -254,19 +254,101 @@ def write_placed_output(input_file: str, output_file: str,
         from plane_io import _remove_vias_at_positions
         from kicad_writer import generate_via_sexpr, generate_segment_sexpr
         n2n = getattr(pcb_data, 'net_id_to_name', None) if pcb_data is not None else None
+
+        def _net_name(net_id):
+            """This board's name for a net id, or None if it has none.
+
+            net 0 is spelled out because it is a hole in the map rather than an
+            unknown net: `extract_nets` records `name_to_id[""] = 0` but never
+            creates a Net for id 0, so a legitimate no-net `(net "")` via --
+            which the parser models and this writer emits -- misses the lookup
+            on EVERY board. Measured: orangecrab_ext_pll resolves 169 nets and
+            has no key 0.
+
+            Getting this wrong is not cosmetic. Falling back to the numeric
+            dialect while also emitting a protection spec produces a via
+            `kicad_parser.extract_vias` CANNOT read back -- its KiCad-9 pattern
+            has strict field ordering and no gap for the protection tokens --
+            so the barrel disappears from the model entirely. Invisible copper
+            the router then plans tracks through, which is the hazard PR #534
+            was written against and strictly worse than the wrong-tenting bug
+            #741 set out to fix. The parser asymmetry itself is #748.
+            """
+            if not n2n:
+                return None
+            nm = n2n.get(net_id)
+            return '' if nm is None and net_id == 0 else nm
+
         elements = []
         if via_moves:
             content, _ = _remove_vias_at_positions(
                 content, [(m[0], m[1]) for m in via_moves],
                 net_ids=[m[2]['net_id'] for m in via_moves],
-                net_names=[n2n.get(m[2]['net_id']) if n2n else None
-                           for m in via_moves])
+                # through the same resolver as the emit: passing None here for
+                # net 0 dropped the removal to POSITIONAL matching for exactly
+                # the via this fix is about.
+                net_names=[_net_name(m[2]['net_id']) for m in via_moves])
             for m in via_moves:
                 v = m[2]
-                nm = n2n.get(v['net_id']) if n2n else None
-                elements.append(generate_via_sexpr(v['x'], v['y'], v['size'],
-                                                   v['drill'], v['layers'],
-                                                   v['net_id'], net_name=nm))
+                nm = _net_name(v['net_id'])
+                # Every via in via_moves came OFF this board a few lines up,
+                # so its OWN spec is the whole answer. That much is
+                # plane_io.py:862-866's form -- the rip-up restore, which is
+                # structurally the same act -- and deliberately NOT
+                # plane_io.py:557-563's `or
+                # prevailing_via_protection_in_text(...)`, the right default
+                # for vias this tool ADDS but a THIRD answer for one that
+                # already existed: it would stamp the majority spec of OTHER
+                # vias onto this one.
+                #
+                # `inherit_when_unspecified=True` is where this call goes
+                # BEYOND plane_io's form, and it is the second half of #741. An
+                # absent or empty spec is not silence from the CALLER, it is the
+                # board saying nothing about this via -- so emit nothing and let
+                # it keep inheriting `(setup (tenting ...))`. Without the flag,
+                # None/{} reaches kicad_writer's front+back default and the via
+                # GAINS a fab attribute it never had. The GUI twin has never
+                # done that: gui_utils.apply_via_protection returns early on an
+                # empty spec, because pcbnew's *_MODE_FROM_BOARD already means
+                # inherit. plane_io's restore carries the spec but not this
+                # flag, so it still has the residue; #749 rather than changed
+                # from here.
+                #
+                # Stating the rule HERE rather than relying on the engine key
+                # means the two halves of #741 fail independently: a move dict
+                # that lost the key inherits rather than re-tents.
+                #
+                # `.get` for this one key, and the asymmetry with the
+                # hard-indexed geometry below is deliberate rather than sloppy:
+                # a dict with no 'x'/'net_id' is not a via and SHOULD raise,
+                # while a dict with no spec is a via nobody recorded one for --
+                # a meaning this line has an answer for.
+                spec = v.get('tenting_attrs')
+                if nm is None and spec:
+                    # Belt for the residue of the same hazard: a numeric-net
+                    # emission that still carries a spec is the unreadable
+                    # pairing described in _net_name. Losing the spec is the
+                    # #741 bug; losing the VIA is worse, so this trades back
+                    # deliberately and only where the two conflict.
+                    #
+                    # Reachable, though not from a real board: no KiCad-9 board
+                    # carries per-via protection (that is a KiCad-10 feature and
+                    # those boards are name-net), but `write_placed_output`
+                    # takes an arbitrary pcb_data, and a synth.make_pcb() one
+                    # has an EMPTY net_id_to_name -- which sends every via
+                    # numeric.
+                    spec = None
+                elements.append(generate_via_sexpr(
+                    v['x'], v['y'], v['size'], v['drill'], v['layers'],
+                    v['net_id'], net_name=nm, tenting_attrs=spec,
+                    # The DECISION, carried separately from the value: `{}` is
+                    # what Via.tenting_attrs holds for a via that inherits, and
+                    # handing it back without this would re-stamp the via with
+                    # front+back tenting it never had (#741). A sentinel VALUE
+                    # cannot do this job -- the repo's own idiom for carrying a
+                    # spec is `dict(...)`, which would turn any dict-shaped
+                    # sentinel back into a plain {}.
+                    inherit_when_unspecified=True))
         for nsd in (new_segments or []):
             nm = n2n.get(nsd['net_id']) if n2n else None
             elements.append(generate_segment_sexpr(
@@ -276,8 +358,29 @@ def write_placed_output(input_file: str, output_file: str,
             close = content.rindex(')')
             content = content[:close] + '\n'.join(elements) + '\n)' + content[close+1:]
 
+    # THE SINGLE POSE FUNNEL, and it must run BEFORE the write. Every
+    # footprint `(at ...)` rewrite in py_placer comes through here, so this is
+    # the one place that can answer "was every pose in this board produced by
+    # a registered engine lever?". Outside an unaided regime it is a no-op and
+    # the behaviour is byte-identical; inside one, an undeclared write raises.
+    #
+    # It used to raise AFTER `f.write(content)`, which made the refusal
+    # decorative: the poses were already on disk, so the "gate" reported a
+    # violation about a file it had just helped produce. Refusing means not
+    # writing.
+    #
+    # NOTE the qualifier -- "in py_placer". The GUI writes poses through
+    # pcbnew (`ai_plan._run_place_plan`, `fanout_gui`, `placement_gui`) and
+    # does NOT come through here, so a GUI-driven placement leaves no row.
+    # See provenance.record_write for what that means for a verdict.
+    from placement import provenance
+    provenance.record_write(input_file, output_file, placements,
+                            pending=True)
+
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(content)
+
+    provenance.commit_write(output_file)
 
     print(f"Modified {modified_count} footprint positions")
     print(f"Successfully wrote {output_file}")

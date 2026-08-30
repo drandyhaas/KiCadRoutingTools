@@ -236,7 +236,7 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
         # #498: a .kicad_dru layer rule REPLACES the pair clearance on seg.layer.
         seg_clearance = config.layer_clearance(seg.layer, _obstacle_clearance(seg.net_id))
-        # #549: a track-scoped DRU rule RAISES the seg-vs-seg requirement only
+        # A track-scoped DRU rule RAISES the seg-vs-seg requirement only (#735)
         # (the track capsule); via_block keeps the resolved value.
         trk_clearance = config.track_obstacle_clearance(seg.net_id, seg_clearance)
         expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance
@@ -1520,12 +1520,22 @@ _HOLE_CLR_ORIGIN = set()      # paths whose floor came from fab_floor_origin,
                               # live rule below what the board declared
 
 
-def resolve_hole_clearance(pcb_data: PCBData, config) -> float:
+def resolve_hole_clearance(pcb_data: PCBData, config,
+                           pcb_file: str = None) -> float:
     """The copper-to-HOLE floor this board declares, in mm (0.0 = none).
 
     Resolved ENGINE-SIDE off ``PCBData.source_path`` (the #498 mechanism built
     for exactly this), so both fronts inherit it with no wiring. An explicit
     ``config.hole_clearance`` wins and stops the read.
+
+    ``pcb_file`` overrides the parsed ``source_path`` when a caller holds the
+    authoritative path -- the #498 rule the rest of the toolchain follows,
+    "the CALLER's path when it has one, else ``PCBData.source_path``". Added
+    for #761: a board staged into a temp dir and parsed from there carries a
+    ``source_path`` that is not the board the caller means, and
+    ``grade_pad_legality``/``QuenchState`` already thread ``pcb_file`` to
+    ``PadClearanceModel.for_board`` for exactly that reason. Default ``None``
+    keeps every existing caller bit-identical.
 
     TWO sources, and the larger wins: ``design_settings.rules`` (what the
     project declares NOW) and ``kicad_routing_tools.fab_floor_origin`` (what it
@@ -1565,9 +1575,41 @@ def resolve_hole_clearance(pcb_data: PCBData, config) -> float:
       defect they exist to fix (measured: a -0.1 mm net-to-net overlap left in
       place; a #130 pad-via graze left unrelocated) rather than routing around
       the hole.
+
+      **This bullet survived #756, which tried to raise a floor there and
+      found out why not.** That change wanted
+      ``nudge_vias_for_unresolved``'s via-DRILL-to-via-DRILL floor to follow
+      the board's ``min_hole_to_hole`` (a different key from this helper's --
+      ``list_nets._FLOOR_SOURCES``' ``hole_to_hole`` rather than
+      ``hole_clearance``), because ``check_drc`` ``_pin_up``s exactly that
+      value and both of its drill arms add it, so the pass was emitting drill
+      pairs its own grader then flagged.
+
+      A ONE-RUNG RAISE WAS MEASURED AND REJECTED, by this bullet's own
+      argument: a review swept 8673 configurations of that pass's rig shape and
+      625 lost the repair at the shipped 0.6 mm budget, 13 of them abandoning a
+      landing ``check_drc`` grades CLEAN. What shipped is a two-rung ladder --
+      prefer the declared floor, re-sweep at the fab floor when nothing clears
+      -- whose second rung is the pre-#756 behaviour exactly. So the site
+      stopped being all-or-nothing for that floor rather than the rule being
+      bent for it, and the copper-to-hole floors this helper serves are
+      untouched and still flat.
+
+      **The lesson to carry, and it cost two reviews to get right:** "the
+      grader raises this floor too" is a reason to WANT a raise, never on its
+      own a licence to take one here. The question this bullet asks -- what
+      happens when the one candidate is refused -- still has to be answered,
+      and a ladder is how you answer it without giving up either.
     * ``placement/legality.PartPads`` builds its NPTH keep-out radii from a bare
-      ``fp``/``clearance`` pair with no board pointer in hand, so it cannot call
-      this helper without a threaded parameter.
+      ``fp``/``clearance`` pair with no board pointer in hand. **#761 threaded
+      the parameter rather than the board**: ``legality.resolve_npth_floor``
+      calls this helper ONCE in the caller and passes the resolved float down,
+      so ``PartPads`` still holds no board pointer while the two call sites
+      that read hole keep-outs (``grade_pad_legality``, ``QuenchState``) do
+      carry the declared floor. The four that read only pad rects, extents or
+      silk deliberately do not. This bullet is kept, corrected rather than
+      deleted, because "it cannot reach here" was true for two issues and a
+      reader who remembers it needs to see that it stopped being true.
 
     The rule the first three encode: raise this floor on passes that CHOOSE
     where new copper goes or that MOVE copper by a measured shortfall, not on
@@ -1588,7 +1630,7 @@ def resolve_hole_clearance(pcb_data: PCBData, config) -> float:
     explicit = getattr(config, 'hole_clearance', 0.0) or 0.0
     if explicit > 0:
         return float(explicit)
-    path = getattr(pcb_data, 'source_path', "") or ""
+    path = pcb_file or getattr(pcb_data, 'source_path', "") or ""
     if not path:
         return 0.0
     if path not in _HOLE_CLR_CACHE:
@@ -1814,7 +1856,7 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
         # #498: a .kicad_dru layer rule REPLACES the pair clearance on seg.layer.
         seg_clearance = config.layer_clearance(seg.layer, obs_clearance)
-        # #549: a track-scoped DRU rule RAISES the seg-vs-seg requirement only.
+        # A track-scoped DRU rule RAISES the seg-vs-seg requirement only (#735).
         trk_clearance = config.track_obstacle_clearance(seg.net_id, seg_clearance)
         expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance
         via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
@@ -2078,9 +2120,15 @@ def _ledger_bracket(obstacles):
 
 
 def _ledger_close(obstacles, pre, tag: str):
+    import obstacle_cache as _oc
+    # The cell watch is armed by its own env var and must see RAW ops too --
+    # they are the other half of a cell's history -- so it runs before the
+    # ledger's own early return.
+    if _oc._CELL_WATCH != []:
+        _oc.ledger_cell_watch(obstacles, f"raw {tag} @ "
+                              + _oc._ledger_site(depth=3, frames=2))
     if pre is None:
         return
-    import obstacle_cache as _oc
     st = obstacles.get_stats()
     site = _oc._ledger_site(depth=3, frames=2)
     _oc.ledger_raw_delta(obstacles, f"{tag} @ {site}", st[0] - pre[0], st[1] - pre[1])
@@ -2218,7 +2266,7 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
             seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
             seg_clearance = config.layer_clearance(  # #498: layer rule replaces
             seg.layer, config.obstacle_clearance(getattr(seg, 'net_id', 0)))
-            # #549: track rule raises the seg-vs-seg capsule; identical line in
+            # The track rule raises the seg-vs-seg capsule; identical line in
             # the REMOVE twin below (ref-count symmetry).
             trk_clearance = config.track_obstacle_clearance(
                 getattr(seg, 'net_id', 0), seg_clearance)
@@ -2288,7 +2336,7 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
         seg_clearance = config.layer_clearance(  # #498: layer rule replaces
             seg.layer, config.obstacle_clearance(getattr(seg, 'net_id', 0)))
-        # #549: identical raise to the ADD twin, or ref-counts desync.
+        # Identical track-rule raise to the ADD twin, or ref-counts desync.
         trk_clearance = config.track_obstacle_clearance(
             getattr(seg, 'net_id', 0), seg_clearance)
         expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance

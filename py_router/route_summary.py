@@ -21,10 +21,17 @@ import json
 import re
 from typing import Dict, List, Optional
 
-__all__ = ['merge_summaries', 'merge_route_summaries',
-           'SUMMARY_RE', 'RECONCILE_ABORTED', 'EFFORT_KEYS']
+__all__ = ['merge_summaries', 'merge_route_summaries', 'summary_min',
+           'SUMMARY_RE', 'SUMMARY_MIN_RE', 'RECONCILE_ABORTED', 'EFFORT_KEYS']
 
 SUMMARY_RE = re.compile(r'JSON_SUMMARY: (\{.*\})')
+
+# The one-line compact tally route.py prints at the end of every OUTERMOST
+# run (CLI and GUI alike): the merged verdict in <1KB, where the big
+# JSON_SUMMARY lines run 6-20KB each with scope semantics the log has to warn
+# about. The trailing colon-space differs from SUMMARY_RE's subject, so
+# neither regex can eat the other.
+SUMMARY_MIN_RE = re.compile(r'JSON_SUMMARY_MIN: (\{.*\})')
 
 # route.py prints this from the except around its reconciliation self-invoke.
 # The sub-run prints its JSON_SUMMARY BEFORE the board is written, so a summary
@@ -133,12 +140,79 @@ def merge_summaries(summaries: List[Dict], aborted: bool = False) -> Optional[Di
                 merged['pad_pairs_connected'] = first.get('pad_pairs_connected', 0)
                 if 'pad_pairs_open' in first:
                     merged['pad_pairs_open'] = first['pad_pairs_open']
-        if 'blockers' in first and 'blockers' not in merged:
-            _failed = set(merged.get('failed_single') or [])
-            _failed |= {d.get('net_name') if isinstance(d, dict) else d
-                        for d in (merged.get('failed_multipoint') or [])}
-            merged['blockers'] = [e for e in first['blockers']
-                                  if e.get('net') in _failed]
+        # `blockers` and `boxed_in` are both first-pass attribution: the
+        # reconcile sub-run re-routes a SUBSET and its summary carries neither,
+        # so without this a merged summary loses the evidence for nets that are
+        # still failing. Filtered to the nets that ARE still failing, so a net
+        # the reconcile fixed does not carry a stale accusation.
+        _failed = None
+        for _k in ('blockers', 'boxed_in'):
+            if _k in first and _k not in merged:
+                if _failed is None:
+                    _failed = set(merged.get('failed_single') or [])
+                    _failed |= {d.get('net_name') if isinstance(d, dict) else d
+                                for d in (merged.get('failed_multipoint') or [])}
+                merged[_k] = [e for e in first[_k] if e.get('net') in _failed]
+        # `finalize_excluded_nets` carries WHOLE, not through the
+        # still-failing filter: it is a list of net NAMES rather than per-net
+        # records, and it states what the finalize declined to do BY PLAN --
+        # something the reconcile sub-run neither repeats nor revokes. It is
+        # stamped on the summary AFTER the JSON_SUMMARY line printed, so it
+        # exists only on `first`; without this carry, last-wins drops it on
+        # exactly the runs that reconciled -- i.e. the failing ones, where
+        # telling "declined by plan" from "failed to" is the whole point.
+        if ('finalize_excluded_nets' in first
+                and 'finalize_excluded_nets' not in merged):
+            merged['finalize_excluded_nets'] = first['finalize_excluded_nets']
+
+    # DISTURBED-BUT-UNOWNED NETS ARE STICKY (#622 yw1: SA1 shipped with ZERO
+    # copper, SA2/SA6 open, and the merged MIN said failed:2 deficit:0). A
+    # middle pass's coverage_gate_nets / ripped_open_uncounted name rip
+    # victims OUTSIDE that pass's --nets scope, verified broken against real
+    # copper at emission time -- and a later, narrower sub-run's summary
+    # carries neither key, so last-wins erased the only record of them.
+    # Union them across all passes, dropping any net a LATER summary
+    # CLASSIFIED (routed_single = recovered; failed/open/multipoint = that
+    # pass took ownership and already counts it), so nothing double-counts.
+    # terminal_restores merges the same way (per-net) so summary_min's
+    # terminal_restores_broken survives the merge -- and a restore mark can
+    # be superseded WITHIN its own pass: the reroute loop re-routes the
+    # victim after the stub restore, and the pass-end routed_single
+    # (re-derived from the final-board union-find) is the truth (yt1:
+    # SDQ7/SDQ6/SA4 marked stub, same-pass routed, board grades clean; yv3:
+    # single-summary form of the same). So a mark survives only while its
+    # net is in neither its own pass's routed_single nor any later pass's
+    # classification. This applies to SINGLE-summary logs too. When aborted,
+    # only pass 1 (what is on disk) participates.
+    _use = summaries[:1] if aborted else summaries
+
+    def _classified_names(s):
+        names = set(s.get('routed_single') or [])
+        names |= set(s.get('failed_single') or [])
+        names |= set(s.get('open_single') or [])
+        names |= {d.get('net_name') if isinstance(d, dict) else d
+                  for d in (s.get('failed_multipoint') or [])}
+        return names
+
+    _gate_all: List[str] = []
+    _tr_merged: Dict = {}
+    for _i, _s in enumerate(_use):
+        _later: set = set()
+        for _t in _use[_i + 1:]:
+            _later |= _classified_names(_t)
+        for _n in (list(_s.get('coverage_gate_nets') or [])
+                   + list(_s.get('ripped_open_uncounted') or [])):
+            if _n not in _later and _n not in _gate_all:
+                _gate_all.append(_n)
+        _own_routed = set(_s.get('routed_single') or [])
+        for _n, _v in (_s.get('terminal_restores') or {}).items():
+            if _v == 'full' or (_n not in _later
+                                and _n not in _own_routed):
+                _tr_merged[_n] = _v
+    if _gate_all or 'coverage_gate_nets' in merged:
+        merged['coverage_gate_nets'] = _gate_all
+    if _tr_merged or 'terminal_restores' in merged:
+        merged['terminal_restores'] = _tr_merged
 
     # Coverage-gate nets have NO routed result, so their pads never reach
     # multipoint_pads_total and a caller's
@@ -168,3 +242,66 @@ def merge_route_summaries(log: str) -> Optional[Dict]:
     summaries = [json.loads(s) for s in raw]
     aborted = log.rfind(RECONCILE_ABORTED) > log.rfind(raw[-1])
     return merge_summaries(summaries, aborted)
+
+
+def summary_min(merged: Dict, name_cap: int = 20) -> Dict:
+    """The <1KB verdict an agent reads INSTEAD of the big summaries.
+
+    Every value here is derived from the MERGED tally, so it carries the
+    "run-scope plus recoveries" semantics automatically -- the trap the log
+    warns about ("never scrape the LAST JSON_SUMMARY") cannot be re-imported
+    through this line. Name lists are capped at `name_cap` with an explicit
+    '+N more' marker, never silently truncated.
+
+    `finalize_excluded_nets` (plane nets outside the route's --nets scope,
+    excluded from the finalize by plan) is set on the summary AFTER the
+    `JSON_SUMMARY:` line was printed, so it reaches `--json-out`, the dict
+    `batch_route` returns, and this line -- not the printed big summary. It
+    is included here only when present.
+
+    Deliberately ABSENT: power_widths, ampacity, stacked copper --
+    forensics that stay in the big summaries / --json-out. And the DRC-floor
+    writeback verdict, which does not exist yet when this prints: the
+    writeback runs afterwards and reports on its own, so a consumer must
+    read both -- this line says nothing about whether the floors held.
+    """
+    def _names(vals) -> List[str]:
+        names = [str(v) for v in (vals or [])]
+        if len(names) > name_cap:
+            return names[:name_cap] + [f'+{len(names) - name_cap} more']
+        return names
+
+    pairs = merged.get('pad_pairs_open') or []
+    tr = merged.get('terminal_restores') or {}
+    broken_restores = sorted(n for n, v in tr.items()
+                             if v in ('full_open', 'stub'))
+    total = merged.get('multipoint_pads_total') or 0
+    conn = merged.get('multipoint_pads_connected') or 0
+    out = {
+        'scope': 'merged',
+        'routed': merged.get('successful'),
+        'failed': merged.get('failed'),
+        'failed_single': _names(merged.get('failed_single')),
+        'open_single': _names(merged.get('open_single')),
+        'multipoint_deficit': max(0, total - conn),
+        'pad_pairs_open': {
+            'count': len(pairs),
+            'nets': _names(sorted({p.get('net') for p in pairs
+                                   if p.get('net')}))},
+        'terminal_restores_broken': _names(broken_restores),
+        'min_clearance_used': merged.get('min_clearance_used'),
+        'vias': merged.get('total_vias'),
+        # NOT wall clock, and named for what it actually counts. `total_time`
+        # is the single-ended loop plus the reroute loop and nothing else --
+        # phase-3 taps, rescues, the plane finalize, and parse/write all sit
+        # outside it. Measured on splitflap_driver: 0.35 against 20.72 s of
+        # real wall time, a 59x under-report. The big summary can afford to
+        # call it `total_time` among thirty other keys; a one-line verdict an
+        # agent reads INSTEAD of those cannot call it `duration_s` without
+        # asserting the run took that long.
+        'main_loop_time_s': merged.get('total_time'),
+    }
+    if merged.get('finalize_excluded_nets'):
+        out['finalize_excluded_nets'] = _names(
+            merged['finalize_excluded_nets'])
+    return out

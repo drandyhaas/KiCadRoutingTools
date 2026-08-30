@@ -204,30 +204,80 @@ which the fanout cut correctly drops. Body obstruction and airwire crossing are
 two different measurements, and only `corridor_intrusions` was ever measuring
 the first.
 
-**3. It does change the placement — and the gain does not survive.** The first
-A/B reported the term completely inert, and *that run was wrong*: it had been
-pointed at `sdram_*`, a merged glob whose `cover` is 0.46, i.e. a phantom
-corridor. Re-run against `SDRAM_A*` and `SDRAM_D*` declared separately, the
-term moves parts on every board — and the independent grade says:
+**3. It does change the placement — and whether the gain survives depends on a
+layer that shipped after this was first measured.** The first A/B reported the
+term completely inert, and *that run was wrong*: it had been pointed at
+`sdram_*`, a merged glob whose `cover` is 0.46, i.e. a phantom corridor. Re-run
+against `SDRAM_A*` and `SDRAM_D*` declared separately, the term moves parts on
+every board.
 
-| board | crossings | hpwl | `bus_foreign_crossings` (re-derived) |
-|---|---|---|---|
-| ulx3s | 2417 → 2390 | 7512 → **7634** | 62 → **63** |
-| orangecrab_ext_pll | 1051 → 1041 | 2120 → 2116 | 32 → **33** |
-| kit-dev-coldfire | 1377 → 1371 | 7413 → 7219 | 148 → 143 |
+What the independent grade *says* has since reversed on ulx3s, and the reversal
+went unnoticed because the numbers lived in prose rather than in a file anything
+re-ran (#694). Re-measured with the same probe at the commit that recorded the
+row and at the current tip:
 
-One board of three improved the number the term exists to improve. **The
-mechanism is the frozen model:** the optimizer minimises the cut against
+| ulx3s | crossings | hpwl | `bus_foreign_crossings` (re-derived) | intent errors |
+|---|---|---|---|---|
+| re-measured at `82dbf662` | 2417 → 2390 | 7512.72 → **7634.27** | 62 → **63** | 15 → 13 |
+| re-measured at `81a3c193` | 2477 → 2407 | 7437.99 → 7416.23 | 62 → **55** | 14 → **17** |
+
+(The first row is a re-measurement, not a transcript: the recorded `why` gave
+hpwl as "7512 → 7634" and never recorded intent errors at all.)
+
+**At the current tip the direction is decided by the hard pad+drill legality
+layer** (`quench(pad_legality=...)`, default on, introduced in `be97da7e` —
+which is *not* an ancestor of the commit that recorded the row). Force it off
+and ulx3s goes back the recorded way on every signal: `bus_foreign_crossings`
+62 → 63, hpwl 7437.99 → 7548.02, intent errors 14 → 12, with the OFF arm
+byte-identical either way — so the layer is not moving the baseline placement,
+it is redirecting the corridor-priced descent. On orangecrab and coldfire the
+same toggle leaves both written boards byte-identical, so this is a
+ulx3s-specific interaction, not a global one.
+
+**That is a sufficient cause TODAY, not the historical one.** The OFF arm also
+moved between the two commits (crossings 2417 → 2477, hpwl 7512.72 → 7437.99),
+so other changes moved the baseline placement too, and disabling the layer
+restores the direction but not the values. The historical attribution cannot be
+settled by this method at all: `corridor_weight` does not exist on the branch
+that introduced the layer, so the two cannot be measured together at that point.
+The `corridor-orangecrab` row blamed the same layer for its own earlier flip;
+that claim is likewise unestablished — the layer is simply inert on that board
+now, which says nothing about what the code looked like then.
+
+**The mechanism argument still stands:** the optimizer minimises the cut against
 corridors frozen at construction, but the corridor is *defined by the pads of
 the bus*, so when parts move the corridor moves with them and the grader's
 re-derived rectangle is not the one that was minimised. Freezing is still
 required — an unfrozen corridor makes the objective non-stationary — so the
-term is caught between two necessities.
+term is caught between two necessities. What the re-measurement changes is the
+*claim about the outcome*, not the reasoning about the model.
+
+**The term remains NOT adopted, and now for a stated reason.** At HEAD all three
+boards improve the signal the term exists to improve, and both guards improve on
+all three. ulx3s still marks REGRESS, because the ON arm raises
+`zone_containment` from 4 to 7 — the only error rule that moves. It is a net +3,
+not three extra offenders: six members start violating (`C35 C63 C65 C68 C71
+C72`) and three stop (`C39 C43 C69`), which is a rearrangement that costs
+containment, not a local slip. So the
+term fails the harness's own rule — improve on ≥ N−1 boards **and** regress on
+none — by buying its signal with containment.
+
+**Those are the only A/B measurements this section states, and only because
+they are the before/after of the finding itself — each labelled with the commit
+it was measured at.** The live numbers are in
+`tests/placement_ab_baseline.json`, which `tests/test_placement_ab.py`
+re-measures and compares on every run, reporting a reversed direction
+(`INVERTED`) apart from a moved value (`DRIFT`). This section used to carry a
+three-row table in which 15 of 18 numbers had gone stale, next to a `--help`
+text that had gone stale differently.
 
 Worth keeping from run 3: **a term that helps on one board of three is not a
-term.** The `corridor-coldfire` row stays in the A/B table precisely because it
-disagrees with the other two; dropping the disagreeing row is how a one-in-three
-result becomes folklore about a term that "works".
+term**, and the row that disagrees is the one to keep. But note which row that
+is has changed: `corridor-coldfire` was the lone dissenter when this was
+written, and today the dissenter is `corridor-ulx3s`. All three rows stay in
+the table — dropping the disagreeing row is how a one-in-three result becomes
+folklore about a term that "works", and *which* board disagrees is not a stable
+property of a term.
 
 So the cut ships as a **diagnostic**, not as an objective term:
 
@@ -246,10 +296,13 @@ So the cut ships as a **diagnostic**, not as an objective term:
   merge sub-buses.** `SDRAM_*` scores cover 0.62 where `SDRAM_A*` and
   `SDRAM_D*` separately score 1.0, because address and data leave the part on
   different faces and the average lands between them.
-- `--corridor-weight` remains, default 0.0, flagged experimental with this
-  result in its `--help`. It is kept rather than deleted because the kernel is
-  exact and tested, and because a future move set that can relocate a part
-  *across* a bus is exactly the regime where the term would bite.
+- `--corridor-weight` remains, default 0.0, flagged experimental in its
+  `--help` — which states the mechanism and points at
+  `tests/placement_ab_baseline.json` rather than quoting counts, because the
+  counts it used to quote went stale twice. It is kept rather than deleted
+  because the kernel is exact and tested, and because a future move set that
+  can relocate a part *across* a bus is exactly the regime where the term would
+  bite.
 
 Two design points that were right and are worth keeping if anyone revisits it:
 
@@ -269,7 +322,7 @@ Two design points that were right and are worth keeping if anyone revisits it:
 | Metric | Cost per move | Routability signal at PCB scale | Verdict |
 |---|---|---|---|
 | HPWL / airwire length | O(1) incremental | Necessary, far from sufficient (exact only for 2–3 pin nets; congestion-blind) | Always include |
-| Airwire pin-pair crossings | O(moved part's segments) | Best single PCB proxy (Cypress, NS-Place); grounded in planarity theory | Primary second objective |
+| Airwire pin-pair crossings | O(moved part's segments) | Literature proxy (Cypress, NS-Place), grounded in planarity theory. **In this repo: never correlated with a routed outcome** — measured only against distance-to-truth (r = +0.78) and against `vias`. See `docs/placement-predictors.md` | Primary second objective |
 | Pad/pin density map | ~free | Captures BGA/connector escape limits and fanout room | Cheap secondary term |
 | RUDY congestion map | O(1) incremental rect update | Misses pin-pair conflicts on few-layer boards (Cypress Fig. 3) | Tiebreaker only |
 | Steiner trees (FLUTE) | ~10× HPWL | Marginal over HPWL — PCB nets are mostly 2-pin | Skip |
@@ -501,6 +554,97 @@ own failure diagnostics* to decide what to move. Each round:
    the anchor so the blocking wall re-routes) — excluding high-pin-count
    parts (`--max-target-pins 40`: moving a resistor that anchors a blocker
    is low-risk; dragging a 144-pin QFP is how placements get destroyed).
+
+   `--target-select diagnosis` (#553) replaces this step; `pins`, the
+   default, is the rule just described and is unchanged. The complaint it
+   answers is that the pin cap is a proxy that picks wrong exactly when it
+   matters — *the part that needs to move is never a passive*, so the cap
+   excludes the IC whose position is the problem and offers the passives that
+   are not. The diagnosis instead ranks blocks and loose parts on three
+   signals and takes the round-robin union of their top-k:
+
+   | signal | what it is | what backs it |
+   |---|---|---|
+   | `block_displacement` | how far a block sits from the centroid of what it connects to | mechanism only — the 80 mm magnetics case, never measured against a routed outcome |
+   | `blocker_cells` | the frontier cells the router attributed to nets this candidate owns | not a predictor at all: the router already failed and already said what blocked it |
+   | `legality_pairs` | pad-clearance, body-overlap and courtyard-blocking pairs incident on the candidate | the only measured one — see `placement-predictors.md` |
+
+   There is deliberately **no combined score**: no measured exchange rate
+   exists between millimetres, blocked cells and defect pairs, and a rank sum
+   would assert the three are equally informative, which is measured-false.
+   The three rank independently and are swept round-robin.
+
+   **No measurement shows `diagnosis` routes better than `pins`, and the one
+   study that was built to support it came back NULL.**
+   `tests/stress/diagnosis_recall.py` displaces a known block and asks whether
+   the ranking concentrates on it, paired against the SAME ranking on the
+   UNDAMAGED board. Evidence arms: `swap` median delta **+0.135** (4 cells up,
+   2 down), `wrong_side` **+0.000** (2 up, 3 down). The pairing is the point --
+   the ranking scores just as well on the pristine board wherever the
+   perturber picks the block the ranking would have picked anyway. The flag
+   ships default-off on that basis, and the study is kept as a recorded
+   negative rather than deleted. The signal
+   `foreign_crossings`, which #553 also named, is **not** included; the three
+   reasons are in `py_placer/placement/diagnosis.py`, and none of them is
+   "#703 measured it and it failed" — #703 measured `crossings`, a different
+   quantity.
+2b. `--relocate` (#554, DEFAULT OFF) proposes ONE bounded block relocation
+   *before* the quench, and writes it as its own board so the quench can then
+   refine the new pose. Where the quench's rigid block translate (#538) caps
+   every member at `--max-displacement` from its own seed and freezes everybody
+   else, this lets the neighbours yield — with their relative order held as a
+   hard constraint, and their total displacement minimised.
+
+   The solve is a difference-constraint system: one variable per rigid unit per
+   axis holding a *shift* from the incumbent, one constraint per interacting
+   pair in the axis it is currently more separated on, every requirement clamped
+   to `min(clearance, what the pair already has)` so `s = 0` — the board as
+   handed over — is always feasible. The block's travel is the envelope's own
+   upper bound, and Bellman-Ford's predecessor chain is the **explanation**:
+   a named chain of parts and gaps ending at the wall or the locked part that
+   stopped it, which is what #459 asked the constraint graph to be. The corridor
+   is an *output* — the units that had to yield — so there is no radius knob.
+
+   | | |
+   |---|---|
+   | `--relocate-block NAME` | relocate a named derived block instead of the most displaced one |
+   | `--relocate-refs GLOB…` | relocate an explicit ref set, bypassing derivation. This is what separates "the relocation worked" from "the diagnosis picked right" |
+   | `--relocate-max-corridor MM` | refuse a dose whose neighbours must travel more than this in total, and try a shorter one |
+
+   **What is measured, and what is not.** The mechanism holds: over the 24
+   measurable blocks on the 9 boards that have one, letting neighbours yield
+   bought ≥ 1 mm more travel than freezing them on 11, spanning 6 of those
+   boards, max 16.66 mm (`relocation_reach.py`, and its `frozen` arm is the
+   *same solve* with everything else pinned, so the two differ in exactly one
+   thing). The scale is worth reading beside it: the MEDIAN cell reaches
+   1.03 mm against a median want of 10.36 mm.
+
+   **The routed A/B has now run, and it does not support the feature**
+   (`block_relocation_study.py`): 3 of 3 evidence cells recovered damage,
+   median delta +0.57 — but over 2 boards where the acceptance rule counts 3,
+   and `loop@allon` reached a strictly better routed result on 2 of those 3.
+   `relocate_efficacy` carries that verdict; reach is not routability.
+
+   Three limits that decide whether it can help you at all:
+
+   - **It never fires on a board that already routes.** The loop stops at
+     `failures == 0` before round 1, and `--target-nets` adds to the target list
+     without adding to `failures`, so it does not lift that stop.
+   - **`--group-by auto` derives no block on five of the six boards this repo
+     grades placement on.** Use `auto,netprefix,decap`, or name the refs.
+   - **The one tracked board where every precondition holds** —
+     kit-dev-coldfire, the only one that fails at its authored placement — is
+     *already* taken from 3 failed nets to 0 by the shipped loop (at a cap
+     widened to 6.75 mm by round 4 — see the table above).
+
+   And one property that is easy to assume and false: the constraint graph is
+   **not** a conservative model of legality. A gap is Euclidean while a
+   constraint is per-axis, so a pair the graph is satisfied with can be driven
+   below clearance (measured on watchy, glasgow_revC and ulx3s). What makes the
+   pass safe is the exact re-check, which re-measures every moved part with the
+   real gate and refuses the dose outright — nothing is applied on the solve's
+   word.
+
 3. Micro-quench only those parts, with the failed nets weighted 3×
    (`--failed-net-weight`) — both their airwire *length* and any *crossing*
    they take part in, the latter priced at the larger of the two nets'
@@ -741,12 +885,28 @@ Three smaller results worth keeping:
   gate was never even consulted. `--target-nets` is the documented answer and it
   works: on both smaller boards the targeted arm beat the shipped one on the
   router's own terms (tigard 13→8 vs 13→12; splitflap 10→5 vs 10→9).
-- **A rigid block translate barely moves on a packed board.** Feasible doses
+- **A rigid block translate barely moves on a packed board.** ~~Feasible doses
   before a member leaves the outline: 1.40 mm for coldfire's 21-part sheet
-  block, 5.10 mm for glasgow's 67-part anchor unit — far below #411's proposed
-  5/10/20/40/80 ladder, because a shipped board has nowhere to translate into.
-  `swap`, which exchanges two units and changes no net area, reaches 14–66 mm.
-  The block-scale ladder is a per-(board, unit) property, not a constant.
+  block, 5.10 mm for glasgow's 67-part anchor unit~~ — **those two numbers are
+  superseded and were wrong by up to 59×.** They predate `perturb`'s
+  four-direction fallback (`perturb.py:464-473`), which was added *because*
+  coldfire clipped to 0.0 in every direction; re-probed with it, the same board
+  and the same block give **82.27 mm**, and glasgow **13.62 mm**. The headline
+  claim survives in a weaker form — a shipped board has little room *outward* —
+  but "the block-scale ladder is a per-(board, unit) property, not a constant"
+  is the part that held. `swap`, which exchanges two units and changes no net
+  area, reaches 14–66 mm.
+
+  **And the direction matters as much as the number.** Both of those are travel
+  *away* from the block's connectivity target, which is what a damage rig wants.
+  A relocation goes the other way, and #554 measured that separately: toward the
+  target, with every neighbour frozen, a block travels a **median 0.00 mm against
+  a median want of 10.36 mm**, over the 24 measurable blocks on the 9 boards that
+  have one
+  (`tests/stress/relocation_reach.py`). Letting the neighbours yield in preserved
+  relative order buys ≥ 1 mm more on 11 of those 24, over 6 boards, up to
+  16.66 mm. That is the mechanism #554 rests on, and it is *not* a claim that a
+  relocated board routes better — see `--relocate` below.
 - **Cost goes as `(cap/step)²`, so a bigger cap is not a slower run.**
   `loop@allon` searched a 7.9× larger radius and ran **4.6× faster** than
   `loop@shipped` (185 s vs 846 s) because `--step` scaled with the cap. Step 0c

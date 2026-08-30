@@ -100,14 +100,20 @@ def main():
 
     check('the placement skill owns the placement gate',
           '## Step 0: Placement gate' in ptext)
-    check('the routing skill points AT it rather than restating it',
-          '/plan-pcb-placement' in rtext and 'invoke' in rtext)
+    # ca6bb455 deliberately reshaped both of these, so the old expectations
+    # are stale rather than violated:
+    #   * the routing skill is now main's file VERBATIM (it had grown from
+    #     2293 to 5479 lines with placement-domain sections). It therefore does
+    #     NOT point at /plan-pcb-placement -- the COMBINED skill owns the
+    #     cross-references, which is what we check instead.
+    #   * the combined skill absorbed Step 9's 892-line convergence loop, the
+    #     hub of the place->route cycle, so "thin" no longer describes it. The
+    #     property that still matters -- it must not RESTATE either half -- is
+    #     checked separately just below and is left untouched.
+    check('the combined skill points at both halves',
+          '/plan-pcb-placement' in btext and '/plan-pcb-routing' in btext)
     check('the routing skill kept its routing half',
           'Step 1: Load and Analyze PCB Structure' in rtext)
-    check('the combined skill sequences the other two, and is thin',
-          '/plan-pcb-placement' in btext and '/plan-pcb-routing' in btext
-          and len(btext.splitlines()) < 200,
-          f'{len(btext.splitlines())} lines')
     check('the combined skill does not restate either half',
           'Step 0a-0' not in btext and 'Load and Analyze' not in btext)
 

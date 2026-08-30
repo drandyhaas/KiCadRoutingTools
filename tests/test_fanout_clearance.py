@@ -297,5 +297,4 @@ if __name__ == '__main__':
     test_seed_track_graze_is_resolved()
     test_seg_to_rect_dist_exact()
     test_mover_pad_short_is_hard_blocked()
-    test_mover_pad_short_is_hard_blocked()
     print("ALL PASS")

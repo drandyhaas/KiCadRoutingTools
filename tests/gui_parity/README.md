@@ -226,6 +226,50 @@ diff pairs emitted as net names, layerless repair_planes). The apply-side
 gaps (escape_method value->index, no_gnd_vias inversion) are ai_plan.py's
 job and belong to the wx harness / a future stub-dialog apply test.
 
+## Cap-param delivery (test_772_cap_params_reach_engine.py)
+
+Needs KiCad's python (wx + pcbnew); re-execs into it automatically.
+
+    python3 tests/gui_parity/test_772_cap_params_reach_engine.py
+
+The converter gate above asserts a flag survives into `step['params']`, and
+`check_param_resolution` asserts the param NAME matches some control
+somewhere. **#772 shipped past both of them.** `ai_plan._owners()` returned
+`[dialog]` for an `optimize_caps` step, and all ten "Cap Placement
+(advanced)" controls live on `fanout_tab.bga_options` -- so every `cap_*`
+param was logged "no control, ignored" and the cap engine ran at its
+signature defaults, while `--board-edge-clearance` resolved onto the Basic
+tab's SIGNAL copper-to-edge control and left its override box ticked for the
+next step. Conversion was fine; DELIVERY was not, and nothing measured
+delivery.
+
+This gate drives the REAL `PlanExecutor._next_step` on a real headless
+`RoutingDialog` and reads the kwargs `repair_fanout_clearance` is handed.
+Eleven groups: all ten knobs delivered; the Basic-tab override left
+unticked; the legacy spelling re-homed; 0-means-UNSET on both fronts; no
+leak between two consecutive cap steps; a bare step still inheriting; the
+shared Basic-tab knobs untouched; #768's clearance and ceiling still
+arriving; the full reset covering all ten controls; the defaults table true
+of a freshly constructed panel; and that table equal to the engine
+signature.
+
+**The spy must patch `placement.fanout_clearance`, not `fanout_gui`** --
+`_optimize_decoupling_caps` imports the engine inside the method body, so a
+`fanout_gui` patch records nothing, silently. The gate also refuses a run in
+which the engine was never reached, because otherwise every kwarg reads back
+absent and it passes vacuously.
+
+Its wx-free half is `tests/test_772_ai_plan_cap_params.py` (16 arms over the
+shape of the fix, ~0.1 s, collected by `run_all.py`), which also asserts
+this file exists -- `run_all.py`'s flat glob never collects this directory.
+
+`check_owner_scoping` in the converter gate is the third piece: it
+AST-extracts `ai_plan._ACTION_OWNERS` and a PER-CLASS control map (where
+`_gui_control_attrs` is a flat union) and asks whether the action carrying a
+param can actually REACH it. Verified as a change detector: removing
+`bga_options` from the cap step's owners makes it name all ten dropped
+params and exit 1.
+
 ## Class-2 post-pass coverage (test_cli_postpass_coverage.py)
 
 The converter gate above covers the plan->params translation; this one covers

@@ -38,6 +38,32 @@ from placement import reconstruct                              # noqa: E402
 import pose_score                                              # noqa: E402
 
 BOARD = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
+
+#: A big part with a .Fab body, a small part, and a fiducial. The pads never
+#: touch, so NOTHING in the pad_intersection channel fires -- that is the
+#: defect shape: it reported blocking 0.
+BODY_BOARD = """(kicad_pcb (version 20221018) (generator pcbnew)
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (net 0 "") (net 1 "VCC") (net 2 "GND")
+  (gr_rect (start 0 0) (end 40 40) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+  (footprint "t:BIG" (layer "F.Cu") (at 20 20)
+    (property "Reference" "U1" (at 0 0) (layer "F.SilkS"))
+    (fp_rect (start -4 -4) (end 4 4) (stroke (width 0.05) (type default)) (layer "F.Fab"))
+    (fp_rect (start -4.2 -4.2) (end 4.2 4.2) (stroke (width 0.05) (type default)) (layer "F.CrtYd"))
+    (pad "1" smd rect (at -3.7 0) (size 0.4 0.4) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd rect (at 3.7 0) (size 0.4 0.4) (layers "F.Cu") (net 1 "VCC")))
+  (footprint "t:SMALL" (layer "F.Cu") (at 32 20)
+    (property "Reference" "RN1" (at 0 0) (layer "F.SilkS"))
+    (fp_rect (start -0.5 -0.3) (end 0.5 0.3) (stroke (width 0.05) (type default)) (layer "F.Fab"))
+    (fp_rect (start -0.7 -0.5) (end 0.7 0.5) (stroke (width 0.05) (type default)) (layer "F.CrtYd"))
+    (pad "1" smd rect (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 2 "GND")))
+  (footprint "MountingHole:MountingHole_3.2mm_M3" (layer "F.Cu") (at 32 30)
+    (property "Reference" "FID1" (at 0 0) (layer "F.SilkS"))
+    (fp_rect (start -0.5 -0.5) (end 0.5 0.5) (stroke (width 0.05) (type default)) (layer "F.Fab"))
+    (fp_rect (start -0.7 -0.7) (end 0.7 0.7) (stroke (width 0.05) (type default)) (layer "F.CrtYd"))
+    (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu") (net 0 "")))
+)
+"""
 FAILURES = []
 
 
@@ -134,6 +160,55 @@ def main():
           'and not cross_group_hit' in src)
     check('a refusal is reported, not silent',
           'REJECTED an assignment' in src)
+
+    print("E8: a candidate pose INSIDE another part's body is refused")
+    # Run 22's defect, verbatim. assign/exchange moved parts by a derived
+    # +/-v with only pad legality and hpwl in the objective, so a teleport
+    # landed a part wholly inside another part's body and scored clean --
+    # twice, on two different pairs, both reporting `blocking 0` because no
+    # pad copper intersects.
+    with tempfile.TemporaryDirectory() as td:
+        bp = os.path.join(td, 'body.kicad_pcb')
+        with open(bp, 'w', encoding='utf-8') as f:
+            f.write(BODY_BOARD)
+        bst = state_for(bp)
+        big = bst.parts['U1']
+        inside = (big.x, big.y)          # dead centre of U1's body
+        clear = (big.x + 12.0, big.y)    # well away from it
+
+        check("a pose inside another part's body conflicts",
+              reconstruct._pair_conflicts(bst, 'RN1', inside, 'U1',
+                                          (big.x, big.y)),
+              'the teleport that shipped twice in run 22 is still accepted')
+        check("a pose clear of it does not",
+              not reconstruct._pair_conflicts(bst, 'RN1', clear, 'U1',
+                                              (big.x, big.y)))
+        # The marker exemption is load-bearing and measured: orangecrab ships
+        # FID2 wholly inside J5 (frac 1.000) and FID1 inside J4 (0.867).
+        # Without it a displaced fiducial could never come home.
+        check('a fiducial inside a body is EXEMPT, not a conflict',
+              not reconstruct._pair_conflicts(bst, 'FID1', inside, 'U1',
+                                              (big.x, big.y)),
+              'the marker exemption was dropped; orangecrab FID1/FID2 break')
+        # The run-4 lesson, pinned into the predicate: a kiss is not a
+        # containment and must not be charged as one.
+        kiss = (big.x + 4.4, big.y)
+        check('a body KISS is not charged as containment',
+              not reconstruct._pair_conflicts(bst, 'RN1', kiss, 'U1',
+                                              (big.x, big.y)),
+              'courtyard/body kisses are being charged -- run-4 regression')
+
+    print('the containment fix did NOT re-promote courtyard in the gate')
+    # run-4 measured courtyard overlap at r=+0.72 with distance-to-truth (not
+    # with routed blocking -- docs/placement-predictors.md) and
+    # demoted it below hpwl deliberately. Containment is a hard predicate,
+    # not a gate term, so the tuple must be untouched.
+    check('the gate tuple is still 7 terms ending hpwl, overlap',
+          len(reconstruct.GATE_TERMS) == 7
+          and reconstruct.GATE_TERMS[5:] == ('hpwl', 'overlap'),
+          str(reconstruct.GATE_TERMS))
+    check('the engine wires containment into the pair predicate',
+          '_body_contained(state, a, pos_a, b, pos_b)' in src)
 
     print()
     if FAILURES:

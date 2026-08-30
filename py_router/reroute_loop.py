@@ -108,7 +108,171 @@ def run_reroute_loop(
     # (measured: +3V3 was rebuilt 54 times, median 4 events before the next rip).
     # release_deferred is idempotent, so the released nets cannot be deferred a
     # second time and stranded.
-    while reroute_index < len(reroute_queue) or release_deferred(state):
+    #
+    # Victim-priority restore (#622), ENDGAME ONLY. A rip exchange must not
+    # end with the victim shipped broken while the ripper keeps the stolen
+    # channel (measured: SDQ6/SA9 + yw1's SA1/SA2/SA6 all shipped
+    # stub/partial exactly this way -- a net-zero exchange plus debris).
+    # This sweep runs ONCE, when the reroute queue has fully drained
+    # (deferred releases included): for every 'stub'-restored victim whose
+    # FULL restore is blocked only by copper this run routed since the rip
+    # (rippable, unprotected, single-ended squatters), rip the squatters and
+    # requeue them, strip the victim's stub copper, and land the full
+    # restore. The restored victim joins restore_protected_net_ids
+    # (rip_exclude_set folds it in), so the requeued squatter must route
+    # around it or fail honestly -- no ping-pong. Firing MID-loop instead
+    # was measured harmful (yz2: the control's natural later queue rounds
+    # used to recover such victims by themselves; pre-empting them traded a
+    # clean board for 1 failed); after the drain, a stub really is about to
+    # ship broken, so the rescue can only help.
+    # KICAD_VICTIM_RESTORE=0 reverts.
+    _vr_swept622 = [False]
+
+    def _victim_priority_sweep622() -> bool:
+        nonlocal successful
+        import env_knobs as _ek622
+        from rip_restore import try_terminal_restore, conflict_owner_ids
+        from obstacle_cache import (add_net_obstacles_from_cache,
+                                    precompute_net_obstacles,
+                                    remove_net_obstacles_from_cache)
+        # RECONCILE SUB-RUNS ONLY (config.final_reconcile stamped False
+        # there): in the outermost run, later tiers (queue rounds, the
+        # nested reconciliation) recover most stub victims on their own,
+        # and firing earlier was measured to regress a clean control both
+        # times it was tried (yz2 mid-loop, za2 at the drain). Inside the
+        # reconcile sub-run there is no deeper tier -- a stub at ITS drain
+        # ships broken (yw1's SA1/SA2/SA6, the motivating class).
+        if (_vr_swept622[0] or not _ek622.VICTIM_RESTORE
+                or getattr(config, 'final_reconcile', True)):
+            return False
+        _vr_swept622[0] = True
+        _reg = getattr(pcb_data, '_rip_saved', None) or {}
+        _queued_any = False
+        for _vid in sorted(state.terminal_restores):
+            if state.terminal_restores.get(_vid) != 'stub':
+                continue
+            if _vid in state.victim_authority_used or _vid in routed_results:
+                continue
+            _pay = _reg.get(_vid)
+            if _pay is None:
+                continue
+            _sv0, _rids0, _wir0 = _pay
+            _segs0 = _sv0.get('new_segments') or []
+            _vias0 = _sv0.get('new_vias') or []
+            _own0 = set(_rids0) | {_vid}
+            _owners0 = conflict_owner_ids(pcb_data, config, _own0,
+                                          _segs0, _vias0)
+            # NOT rip_exclude_set: the squatter is almost always the
+            # victim's own RIPPER, i.e. its rip ancestry -- the exact net
+            # the ancestry guard forbids ripping back (the mid-loop build
+            # fired on 0 arms for that reason). Protection replaces the
+            # ancestry guard here.
+            _prot0 = set(state.restore_protected_net_ids) | {_vid}
+            if not _owners0 or len(_owners0) > 3 or not all(
+                    _o in routed_results and _o not in _prot0
+                    and _o not in diff_pair_by_net_id for _o in _owners0):
+                continue
+            state.victim_authority_used.add(_vid)
+            _vname = (pcb_data.nets[_vid].name
+                      if _vid in pcb_data.nets else str(_vid))
+            _onames0 = [pcb_data.nets[_o].name
+                        if _o in pcb_data.nets else str(_o)
+                        for _o in sorted(_owners0)]
+            print(f"  VICTIM-PRIORITY RESTORE (#622, endgame): {_vname} "
+                  f"would ship broken; its channel is held by "
+                  f"{', '.join(_onames0)} -- ripping the squatter(s) and "
+                  f"requeueing them so the victim restores whole")
+            for _o in sorted(_owners0):
+                _osv, _orids, _owir = rip_up_net(
+                    _o, pcb_data, routed_net_ids, routed_net_paths,
+                    routed_results, diff_pair_by_net_id, remaining_net_ids,
+                    results, config, track_proximity_cache,
+                    state.working_obstacles, state.net_obstacles_cache,
+                    state.ripped_route_layer_costs,
+                    state.ripped_route_via_positions, layer_map)
+                if _osv is None:
+                    continue
+                if _owir:
+                    successful -= 1
+                for _orid in _orids:
+                    invalidate_obstacle_cache(obstacle_cache, _orid)
+                    record_rip_ancestry(state, _vid, _orid)
+                    record_net_event(state, _orid, "ripped_by", {
+                        "ripping_net_id": _vid,
+                        "ripping_net_name": _vname,
+                        "reason": "victim-priority restore (#622 endgame)"})
+                    _on0 = (pcb_data.nets[_orid].name
+                            if _orid in pcb_data.nets else str(_orid))
+                    # Unconditional: a squatter queued (and processed) in an
+                    # earlier round must still get a reroute for THIS rip --
+                    # the body skips nets already back in routed_results, so
+                    # a duplicate entry is harmless, but a skipped one ships
+                    # the squatter stripped.
+                    reroute_queue.append(('single', _on0, _orid))
+                    queued_net_ids.add(_orid)
+                    _queued_any = True
+            # Strip the stub copper the earlier stub-restore inserted (same
+            # OBJECTS as the payload's) -- restore_net re-adds the payload
+            # wholesale, and a duplicate is never harmless (dup_trap lore).
+            # Cache discipline mirrors the stub insert: remove entry ->
+            # mutate pcb_data -> recompute -> add entry.
+            _ids0 = {id(_x) for _x in _segs0}
+            _vds0 = {id(_x) for _x in _vias0}
+            _had_cache = (state.working_obstacles is not None
+                          and state.net_obstacles_cache is not None
+                          and _vid in state.net_obstacles_cache)
+            if _had_cache:
+                remove_net_obstacles_from_cache(
+                    state.working_obstacles,
+                    state.net_obstacles_cache[_vid])
+            pcb_data.segments[:] = [_s for _s in pcb_data.segments
+                                    if id(_s) not in _ids0]
+            pcb_data.vias[:] = [_v for _v in pcb_data.vias
+                                if id(_v) not in _vds0]
+            if _had_cache:
+                state.net_obstacles_cache[_vid] = precompute_net_obstacles(
+                    pcb_data, _vid, config)
+                add_net_obstacles_from_cache(
+                    state.working_obstacles,
+                    state.net_obstacles_cache[_vid])
+            _tr2 = try_terminal_restore(
+                pcb_data, config, _vid,
+                working_obstacles=state.working_obstacles,
+                net_obstacles_cache=state.net_obstacles_cache)
+            if _tr2 in ('full', 'full_open'):
+                restore_net(_vid, _sv0, _rids0, _wir0,
+                            pcb_data, routed_net_ids, routed_net_paths,
+                            routed_results, diff_pair_by_net_id,
+                            remaining_net_ids, results, config,
+                            track_proximity_cache, layer_map,
+                            state.working_obstacles,
+                            state.net_obstacles_cache,
+                            state.ripped_route_layer_costs,
+                            state.ripped_route_via_positions,
+                            refused_sink=state.collision_refused_net_ids)
+                state.terminal_restores[_vid] = _tr2
+                state.restore_protected_net_ids.add(_vid)
+                if _tr2 == 'full':
+                    if _wir0:
+                        successful += 1
+                    print(f"  VICTIM-PRIORITY RESTORE (#622): {_vname} "
+                          f"restored WHOLE and protected for the rest of "
+                          f"the run")
+                else:
+                    print(f"  VICTIM-PRIORITY RESTORE (#622): {_vname} "
+                          f"restored its copper but remains OPEN (payload "
+                          f"was partial) -- counted failed")
+            else:
+                # Still blocked (e.g. a squatter's own pre-existing stubs)
+                # -- try_terminal_restore's stub path just re-inserted the
+                # landing stubs, so the board is back where it started.
+                print(f"  VICTIM-PRIORITY RESTORE (#622): {_vname} still "
+                      f"blocked after the squatter rip (verdict {_tr2!r}) "
+                      f"-- stub state kept")
+        return _queued_any
+
+    while (reroute_index < len(reroute_queue) or release_deferred(state)
+           or _victim_priority_sweep622()):
         # Check for cancellation at start of each reroute iteration
         if cancel_check and cancel_check():
             print("\nReroute cancelled by user")
@@ -588,9 +752,14 @@ def run_reroute_loop(
                     if not ripped_items:
                         print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
                         from routing_diagnostics import static_boxin_hint, condense_hint
-                        hint = condense_hint(static_boxin_hint(result, config, pcb_data))
+                        hint, _boxin = static_boxin_hint(
+                            result, config, pcb_data, return_verdict=True)
+                        hint = condense_hint(hint)
                         if hint:
                             print(f"  {hint}")
+                        if _boxin:
+                            record_net_event(state, ripped_net_id,
+                                             "boxed_in_static", _boxin)
                     # Remove from pending_multipoint_nets to prevent Phase 3 from
                     # trying to route taps for a net with no main route.
                     if ripped_net_id in state.pending_multipoint_nets:

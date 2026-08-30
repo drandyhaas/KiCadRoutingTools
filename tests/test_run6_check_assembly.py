@@ -94,3 +94,48 @@ class TestRenderBodyChannel(unittest.TestCase):
             cl = doc['checklist']
             self.assertIn(['C14', 'R14'], cl['b_body_overlap_pairs'])
             self.assertIn('b_pad_clearance_pairs', cl)
+
+
+class TestContainmentDisclosure(unittest.TestCase):
+    """Run 22: a board with two parts wholly inside two other parts' bodies
+    printed `VERDICT: buildable`. The containment must be visible in stdout
+    AND in the JSON, and the verdict must be untouched -- the corpus ships
+    legitimate frac-1.0 containments (fiducials under connector bodies), so
+    this channel discloses and never gates."""
+
+    BOARD = os.path.join(ROOT, 'kicad_files', 'orangecrab_ext_pll.kicad_pcb')
+
+    def test_containment_prints_and_lands_in_json(self):
+        if not os.path.exists(self.BOARD):
+            self.skipTest('corpus board not present')
+        with tempfile.TemporaryDirectory() as td:
+            jp = os.path.join(td, 'a.json')
+            r = _run(self.BOARD, '--json', jp)
+            # The verdict is NOT changed by containment.
+            self.assertEqual(r.returncode, 0, r.stdout[-400:])
+            self.assertIn('buildable (blocking 0)', r.stdout)
+            # ...but the containment can no longer hide.
+            self.assertIn('CONTAINMENT', r.stdout)
+            doc = json.load(open(jp, encoding='utf-8'))
+            self.assertEqual(doc['buildable'], True)
+            self.assertEqual(doc['blocking'], 0)
+            self.assertEqual(doc['contained'], 2)
+            pairs = {(c['a'], c['b']) for c in doc['containments']}
+            self.assertEqual(pairs, {('FID2', 'J5'), ('FID1', 'J4')})
+            # Both are WAIVED by part class, and both are still reported --
+            # that omission is the whole fix (run-22 lost D4-inside-SW2 to an
+            # edge_class waiver that no geometry ever tested).
+            self.assertTrue(all(c['waived'] for c in doc['containments']))
+
+    def test_body_coverage_is_disclosed(self):
+        """An unjudged part is not a clean part."""
+        if not os.path.exists(self.BOARD):
+            self.skipTest('corpus board not present')
+        with tempfile.TemporaryDirectory() as td:
+            jp = os.path.join(td, 'a.json')
+            r = _run(self.BOARD, '--json', jp)
+            self.assertIn('BODY COVERAGE', r.stdout)
+            doc = json.load(open(jp, encoding='utf-8'))
+            self.assertGreater(doc['fab_unjudged'], 0)
+            self.assertEqual(len(doc['fab_unjudged_refs']),
+                             doc['fab_unjudged'])

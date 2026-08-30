@@ -18,6 +18,8 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
 sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # placement split
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from run_utils import tool as _tool, tool_env as _tool_env  # noqa: E402
 SWAP = os.path.join(ROOT, 'wk', 'b2', 'tigard__swap', 'd0',
                     'perturbed.kicad_pcb')
 HEALTHY = os.path.join(ROOT, 'kicad_files', 'tigard.kicad_pcb')
@@ -30,10 +32,15 @@ def _state(board):
 
 
 def _run(script, *argv):
-    env = dict(os.environ, PYTHONPATH=ROOT, PYTHONIOENCODING='utf-8',
-               KRT_NO_BANNER='1')
+    # #718/#522: check_floorplan.py -> py_tools/, place_reconstruct.py ->
+    # py_placer/ (a241b5ac, not an ancestor of this file's branch). The joined
+    # ROOT path went stale on merge, CPython exited 2 with "can't open file" on
+    # STDERR, and `assertEqual(r0.returncode, 0)` read that as a tool exit code
+    # -- so TestLadderEndToEnd's body never ran at all. `tool()` raises here.
+    env = _tool_env(dict(os.environ, PYTHONIOENCODING='utf-8',
+                         KRT_NO_BANNER='1'))
     return subprocess.run(
-        [sys.executable, '-X', 'utf8', os.path.join(ROOT, script), *argv],
+        [sys.executable, '-X', 'utf8', _tool(script), *argv],
         capture_output=True, text=True, env=env, cwd=ROOT)
 
 

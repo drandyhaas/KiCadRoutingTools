@@ -15,7 +15,7 @@ wrong basin is legal. Measured:
     a wrong-basin placement      1 locked-contact pair
     its TRUTH control            0
     its damaged input            3
-    all 33 healthy corpus boards 0
+    every tracked corpus board  0   (22 boards; see below)
 
 That last line is what makes it gateable rather than advisory.
 
@@ -29,7 +29,6 @@ on were same-net too.
 
 Run: python3 -X utf8 tests/test_run8_locked_contact.py
 """
-import glob
 import os
 import re
 import shutil
@@ -43,8 +42,13 @@ sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # #522/py_placer layout
 sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522/py_placer layout
 os.environ.setdefault('KRT_NO_BANNER', '1')
 
+# Fast (~4 s) despite importing run_utils for corpus_boards, which makes one
+# cheap `git ls-files` call. Without this, --fast silently stops running it.
+RUN_ALL_FAST_OK = True
+
 from kicad_parser import parse_kicad_pcb                       # noqa: E402
 from placement.legality import grade_body_overlap              # noqa: E402
+from run_utils import corpus_boards                            # noqa: E402
 
 FAILURES = []
 
@@ -78,16 +82,32 @@ def lock_ref(path, ref):
 
 def main():
     print('the channel is silent on every healthy in-repo board')
+    # The TRACKED corpus, never a glob of the directory. kicad_files/ also
+    # accumulates GENERATED boards (routed/fanout/plane outputs, several of
+    # them gitignored), so a glob returns 22 entries on a clean clone, 27 on a
+    # lightly used one and 33+ on a machine that has run the suite for a
+    # while. The guard below used to read `quiet >= 30`, which no clean
+    # checkout can satisfy -- it failed on every fresh clone and in CI while
+    # passing on the author's machine, so a TEST bug reported as a product one.
+    boards = corpus_boards()
+    if not boards:
+        print('  SKIP  git cannot identify the tracked corpus (tarball '
+              'export?); refusing to grade against a set it cannot name')
+        return 0
     fires, quiet = [], 0
-    for f in sorted(glob.glob(os.path.join(ROOT, 'kicad_files', '*.kicad_pcb'))):
+    for f in boards:
         g = grade_body_overlap(parse_kicad_pcb(f), 0.1, pcb_file=f)
         if g['locked_contact_pairs']:
             fires.append(os.path.basename(f))
         else:
             quiet += 1
     check(f'{quiet} board(s) silent, 0 firing', not fires, str(fires))
-    check('the corpus is the one the channel was calibrated on', quiet >= 30,
-          f'{quiet} boards')
+    # Anti-vacuity only: the claim above is "silent on every board", so this
+    # needs to catch a gutted or partial checkout, not pin an exact count that
+    # churns whenever a board is added. A FLOOR under the tracked set (22)
+    # does that and stays true when the corpus grows.
+    check('the corpus is the one the channel was calibrated on',
+          len(boards) >= 20, f'{len(boards)} tracked boards')
 
     print('it fires when copper lands on a locked part')
     with tempfile.TemporaryDirectory() as tmp:

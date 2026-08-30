@@ -192,7 +192,7 @@ def main():
     # cells to survive grid rounding (verified: it diverges from the cache here),
     # so this case genuinely exercises the per-layer fix.
     impedance.layer_widths = {"F.Cu": 0.1, "In1.Cu": 0.4, "In2.Cu": 0.1, "B.Cu": 0.1}
-    # #549: a track-scoped clearance rule inflates the SEG capsule (net 1 owns
+    # A track-scoped clearance rule inflates the SEG capsule (net 1 owns
     # the SEGS fixtures) without touching via geometry -- the add/remove twins
     # and the base/cache pair must stay symmetric under the raise.
     tracked = _config()
@@ -200,7 +200,7 @@ def main():
     fails = []
     for label, config in [("uniform width", uniform),
                           ("per-layer/impedance widths", impedance),
-                          ("#549 track-clearance raise", tracked)]:
+                          ("dru track-clearance raise", tracked)]:
         print(f"=== {label} ===")
         print("A: add/remove ref-count symmetry (#198)")
         fails += test_add_remove_empty(args.verbose, config)

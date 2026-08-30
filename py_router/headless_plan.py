@@ -80,7 +80,14 @@ def reexec_into_kicad(script=None, argv=None):
             continue
         if subprocess.run([cand, '-c', PLUGIN_IMPORTS],
                           capture_output=True).returncode == 0:
-            os.execv(cand, [cand, script] + argv)
+            child = [cand, script] + argv
+            if os.name == 'nt':
+                # os.execv goes through the CRT on Windows, which re-splits the
+                # argument vector on spaces: "C:\Program Files\KiCad\10.0\bin\
+                # python.exe" arrives torn in two and the run dies with a bogus
+                # "can't open file ...\Files\KiCad\...". subprocess quotes it.
+                sys.exit(subprocess.run(child).returncode)
+            os.execv(cand, child)
     return False
 
 

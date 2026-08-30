@@ -52,6 +52,53 @@ def _get_net_classes_from_board(pcb_data):
     return net_to_class, sorted_classes
 
 
+def cap_optimization_summary(result):
+    """The one-line summary for a repair_fanout_clearance result (#130/#746).
+
+    A module-level function rather than a method body so it can be driven with
+    a plain dict: it needs no board, no dialog and no wx, and before #746 the
+    only way to reach it was a live pcbnew board, so nothing tested it and the
+    wording below went wrong unnoticed.
+
+    Reads every key with `.get` -- the engine's two early returns carry neither
+    'via_moves'/'new_segments' nor 'via_resolved'/'regrazed'.
+
+    #746: `resolved` is graded at the END of the pass, so it spans BOTH
+    mechanisms -- a cap the descent walked clear and a cap only the via-nudge
+    could free. `via_resolved` says which, so this line does too instead of
+    leaving the operator to infer it from the engine's stdout. `regrazed`
+    names the caps that were clean before the nudge and are grazing after it
+    -- the pass broke them, whether or not it had fixed them first. Silence
+    there is the normal case.
+    """
+    moved = len(result.get('placements') or [])
+    nudged = len(result.get('via_moves') or [])
+    unresolved = result.get('unresolved') or []
+    via_resolved = result.get('via_resolved') or []
+    regrazed = result.get('regrazed') or []
+    summary = f"Decoupling caps optimized: {moved} moved"
+    if nudged:
+        summary += f"; {nudged} via(s) nudged with reconnect (#313)"
+    if via_resolved:
+        summary += f"; {len(via_resolved)} cap(s) freed by that nudge"
+    if unresolved:
+        # The verdict has ALWAYS been via + track + pad (the engine's
+        # graze_penalty is via #130 + track #278 + pad #275). This line said
+        # "could not clear a foreign via", naming one of the three: wrong
+        # before #736 and more visibly wrong after it -- not because the
+        # track channel was new (it has been in graze_penalty since the module
+        # landed) but because #736 made the pass's OWN connector tracks
+        # reachable in this verdict for the first time. Worded to match the
+        # engine's own seed disclosure.
+        summary += (f"; {len(unresolved)} still grazing foreign copper "
+                    f"(via/track/pad) "
+                    f"(manual: {', '.join(sorted(unresolved))})")
+    if regrazed:
+        summary += (f"; {len(regrazed)} re-grazed by this pass's own "
+                    f"connector copper: {', '.join(sorted(regrazed))}")
+    return summary
+
+
 class NetSelectionPanel(wx.Panel):
     """Reusable net selection panel with filtering."""
 
@@ -728,6 +775,48 @@ class BGAOptionsPanel(wx.ScrolledWindow):
     # wx.Choice index -> engine escape_method value (order matches the dropdown)
     ESCAPE_METHODS = ('auto', 'channel', 'underpad', 'dogbone')
 
+    #: The "Cap Placement (advanced)" knobs: control attribute -> the value
+    #: the control is CREATED with -- which is ALSO
+    #: place_fanout_clearance.py's argparse default for the same flag and
+    #: repair_fanout_clearance's signature default for the same kwarg
+    #: (--capture-radius / --near-margin / --step / --max-displacement /
+    #: --max-displacement-cap / --displacement-growth /
+    #: --board-edge-clearance / --max-passes / --cap-prefix / --no-rotate).
+    #:
+    #: ONE table, three readers (#772):
+    #:   swig_gui.reset_params_to_defaults      CLAUDE.md's "add it to
+    #:       reset_params_to_defaults ... or the param leaks between
+    #:       steps". EIGHT of these ten had never been in it -- only
+    #:       optimize_caps, cap_allow_rotation and cap_max_passes were.
+    #:   swig_gui.reset_cap_params_to_defaults  the SCOPED reset the plan
+    #:       executor runs before a cap step that names any of them (the
+    #:       per-step reset is skipped for optimize_caps by design).
+    #:   ai_plan._next_step                     reads the NAMES, to decide
+    #:       whether the step named a cap knob at all.
+    #:
+    #: Hand-written next to the _cap_spin calls rather than derived from
+    #: them, so tests/gui_parity/test_772_cap_params_reach_engine.py can
+    #: assert on a FRESHLY CONSTRUCTED panel that every name exists and
+    #: every default matches -- and, separately, that each equals the
+    #: engine signature default. Drift is caught by the gate, not hoped
+    #: away.
+    CAP_PARAM_DEFAULTS = (
+        ('cap_capture_radius', 2.0),
+        ('cap_near_margin', 1.0),
+        ('cap_step', 0.2),
+        ('cap_max_displacement', 2.0),
+        ('cap_max_displacement_cap', 3.0),
+        ('cap_displacement_growth', 1.5),
+        # 0.0 == UNSET, not a margin of zero: get_config maps it to None,
+        # and the engine's resolve_cap_edge_clearance applies the same
+        # non-positive-is-unset rule to an EXPLICIT CLI value, so both
+        # fronts land on the same resolved margin.
+        ('cap_board_edge_clearance', 0.0),
+        ('cap_max_passes', 30),
+        ('cap_prefix', 'C,R,FB'),
+        ('cap_allow_rotation', True),
+    )
+
     def __init__(self, parent, on_differential_changed=None):
         """
         Create BGA options panel.
@@ -912,6 +1001,24 @@ class BGAOptionsPanel(wx.ScrolledWindow):
         self.cap_displacement_growth = _cap_spin(
             "Displacement growth:", 1.5, 1.0, 4.0, 0.1, 2,
             "Per-pass multiplier on the displacement budget (--displacement-growth)")
+        # #733 follow-up: the cap repair's OWN board-edge margin. It lives HERE,
+        # with the other cap knobs, and NOT on the Basic tab's shared "Min Edge
+        # Clearance" control -- that one is the SIGNAL copper-to-edge keep-out,
+        # a different quantity that happens to share the CLI flag SPELLING
+        # (route.py --board-edge-clearance vs place_fanout_clearance.py
+        # --board-edge-clearance, two independent tools). Driving both from one
+        # control meant ticking the shared override for signal routing at a
+        # normal 0.20-0.25 silently dropped the cap margin from 0.55 to that
+        # value, which is the direction #733 exists to close. The CLI can set
+        # the two independently; so can this panel.
+        self.cap_board_edge_clearance = _cap_spin(
+            "Board edge margin (mm):", 0.0, 0.0, 10.0, 0.05, 2,
+            "Hard clearance from the board edge for MOVED CAPS "
+            "(--board-edge-clearance of place_fanout_clearance.py). "
+            "0 = let the engine resolve it: the board's own "
+            "min_copper_edge_clearance when it asks for MORE than 0.55mm, "
+            "else 0.55mm. This is NOT the Basic tab's Min Edge Clearance, "
+            "which is the signal copper-to-edge keep-out.")
 
         cap_grid.Add(wx.StaticText(self, label="Max passes:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.cap_max_passes = wx.SpinCtrl(self, min=1, max=200, initial=30)
@@ -987,6 +1094,11 @@ class BGAOptionsPanel(wx.ScrolledWindow):
             'cap_max_displacement': self.cap_max_displacement.GetValue(),
             'cap_max_displacement_cap': self.cap_max_displacement_cap.GetValue(),
             'cap_displacement_growth': self.cap_displacement_growth.GetValue(),
+            # 0 in the spin control is UNSET, not a margin of zero -- None lets
+            # the shared engine resolve it, exactly as an omitted CLI flag does.
+            'cap_board_edge_clearance': (
+                self.cap_board_edge_clearance.GetValue()
+                if self.cap_board_edge_clearance.GetValue() > 1e-9 else None),
             'cap_max_passes': self.cap_max_passes.GetValue(),
             'cap_prefix': self.cap_prefix.GetValue().strip() or 'C,R,FB',
             'cap_allow_rotation': self.cap_allow_rotation.GetValue(),
@@ -1569,8 +1681,36 @@ class FanoutTab(wx.Panel):
                 # Advanced cap-placement knobs (#130) so the inline checkbox
                 # path honours them too, not just defaults.
                 **{k: v for k, v in config.items() if k.startswith('cap_')},
+                # #780: ...and the #768 netclass CEILING, which is NOT a
+                # cap_* key and so is not swept up by the line above.
+                # _optimize_decoupling_caps reads `clearance_ceiling` off
+                # THIS dict, and the standalone path
+                # (run_cap_optimization) has always supplied it from
+                # `shared` -- this one did not, so the INLINE cap pass ran
+                # #768's OMITTED branch whatever the operator typed and
+                # ticked. Measured on the real headless dialog before this
+                # existed: Min Clearance override CHECKED at 0.2 ->
+                # get_shared_params carried clearance_ceiling=0.2 and the
+                # engine still received netclass_ceiling=None.
+                #
+                # `clamp_netclasses` rides along for parity with the
+                # standalone dict, which has carried it since #768.
+                # NOTHING ON THIS TAB READS IT -- grepped: the signal,
+                # differential and planes tabs each consume their own copy
+                # as `clamp_nondefault_netclasses`, and this tab has no
+                # such writeback (#782). It is carried rather than dropped
+                # because it is precisely the argument that writeback will
+                # need, and because the two values coming from different
+                # places is how they came apart here in the first place --
+                # but it is inert today, and an earlier draft of this
+                # comment implied otherwise.
+                'clamp_netclasses': shared.get('clamp_netclasses', False),
+                'clearance_ceiling': shared.get('clearance_ceiling'),
                 # Shared "Add teardrops" checkbox (#489 section 9).
                 'add_teardrops': shared.get('add_teardrops', False),
+                # #693: shared "Fix DRC settings after routing" checkbox --
+                # the apply path gates its live-floor writeback on this.
+                'fix_drc_settings': shared.get('fix_drc_settings', True),
             },
             optimize_caps=config.get('optimize_caps', False),
         )
@@ -1639,6 +1779,9 @@ class FanoutTab(wx.Panel):
                 'extension': extension,
                 # Shared "Add teardrops" checkbox (#489 section 9).
                 'add_teardrops': shared.get('add_teardrops', False),
+                # #693: shared "Fix DRC settings after routing" checkbox --
+                # the apply path gates its live-floor writeback on this.
+                'fix_drc_settings': shared.get('fix_drc_settings', True),
             },
             fanout_kind='qfn',
         )
@@ -1784,6 +1927,26 @@ class FanoutTab(wx.Panel):
         if self.sync_pcb_data_callback:
             self.sync_pcb_data_callback()
 
+        # Per-step DRC floors (the IPC twin of bga_fanout's per-step
+        # fix_project_for_output). The fanout tab had NO counterpart at all, so
+        # a plan whose first steps are fanouts left the Default class at stock
+        # values while the CLI had already tightened it: on eth_tap the CLI was
+        # at clearance 0.09 / via 0.25-0.15 after step 1, the GUI still at
+        # 0.125 / 0.5-0.25 after step 9. Later steps resolve their geometry from
+        # that class, so the fronts diverge from there.
+        #
+        # Through apply_drc_settings_fix, not the SWIG front's
+        # update_live_drc_floors: kipy cannot write live design settings, so the
+        # floors go to the sibling .kicad_pro like every other IPC tab's. That
+        # shared helper already carries BOTH gates this block would otherwise
+        # spell out -- #693's "Fix DRC settings after routing" checkbox, and
+        # #782's non-Default class clamp gated on the Min-Clearance override --
+        # and `fanout_config` carries `fix_drc_settings`, `clamp_netclasses` and
+        # `clearance_ceiling`, so both arrive set.
+        if tracks_added or vias_added:
+            from .gui_utils import apply_drc_settings_fix
+            apply_drc_settings_fix(fanout_config or {})
+
         msg = f"Fanout complete!\n\n"
         msg += f"Added to board:\n"
         msg += f"  {tracks_added} tracks\n"
@@ -1859,7 +2022,37 @@ class FanoutTab(wx.Panel):
                 pcb_data,
                 pcb_file=self.board_filename,
                 clearance=cfg.get('clearance', defaults.BGA_CLEARANCE),
+                # #768: the --clearance ceiling. The CLI switches it on the
+                # PRESENCE of the flag; a dialog has no "absent", so the switch
+                # is the control that already MEANS "I am overriding the board's
+                # clearance": the Basic tab's Min Clearance override, exported
+                # as `clamp_netclasses` (routing_dialog.py, `self.clearance_check`)
+                # and consumed as `clamp_nondefault_netclasses` by every other
+                # step. ai_plan.py spells the same equivalence.
+                #
+                # It is NOT `fix_drc_settings`, which an earlier cut of this
+                # change used, on the premise that a checked box means the
+                # classes get clamped -- measured, that premise is false, and
+                # gated there the GUI priced every pair at the ceiling and
+                # clamped no class at all (#768 pointing the other way).
+                #
+                # #782's writeback half IS wired up on this branch, unlike the
+                # SWIG one: the IPC tab records its floors through
+                # gui_utils.apply_drc_settings_fix (see _apply_fanout_results),
+                # which passes this same ceiling to fix_project_for_output. So
+                # a class priced at min(class, ceiling) is also written back at
+                # it, and the pricing and writeback halves cannot disagree.
+                #
+                # Default None, not a value: an absent key means the operator
+                # never ticked the override, and the safe reading of that is
+                # "honour the board", which is what an omitted CLI flag means.
+                netclass_ceiling=cfg.get('clearance_ceiling'),
                 grid_step=cfg.get('grid_step', defaults.GRID_STEP),
+                # #733: the plugin used to pass NOTHING here, so it silently took
+                # the signature default whatever the board or the operator said,
+                # while the cap mover insets by max(clearance, this). None = the
+                # engine resolves it, which is what an omitted CLI flag does too.
+                board_edge_clearance=cfg.get('cap_board_edge_clearance'),
                 default_via_size=cfg.get('via_size', defaults.BGA_VIA_SIZE),
                 # Advanced cap-placement knobs from the BGA fanout tab (#130)
                 capture_radius=cfg.get('cap_capture_radius', 2.0),
@@ -1883,21 +2076,30 @@ class FanoutTab(wx.Panel):
             # boxed-in cap's offending fanout via off the pad and adds connector
             # segment(s) back to the stub start. The CLI applies these via
             # write_placed_output; the adapter lands them in the SAME commit as
-            # the footprint moves, so the board is never half-repaired.
+            # the footprint moves, so the board is never half-repaired. (No
+            # refill_all_zones afterwards, unlike the SWIG front: KiCad refills
+            # server-side on the commit, so re-placed vias never sit under a
+            # stale pour long enough to have their netcodes flipped.)
             via_moves = result.get('via_moves', []) or []
             moved = apply_footprint_moves(
                 board, result.get('placements', []),
                 via_moves=via_moves,
                 new_segments=result.get('new_segments', []) or [],
                 pcb_data=self.pcb_data)
-            nudged = len(via_moves)
-            unresolved = result.get('unresolved', [])
-            summary = f"Decoupling caps optimized: {moved} moved"
-            if nudged:
-                summary += f"; {nudged} via(s) nudged with reconnect (#313)"
-            if unresolved:
-                summary += (f"; {len(unresolved)} could not clear a foreign via "
-                            f"(manual: {', '.join(sorted(unresolved))})")
+            # The SHARED wording (#746): says which mechanism freed each cap
+            # (`via_resolved`) and names caps the nudge REGRAZED, and drops the
+            # old line's "could not clear a foreign via" -- the verdict has
+            # always been via + track + pad. Built by hand here until this
+            # merge, which is exactly how the two fronts came to report the
+            # same result in different words.
+            summary = cap_optimization_summary(result)
+            # ...plus the one fact the SWIG front cannot have: it adds objects
+            # to a live board object, while we hand ours to an IPC commit that
+            # can land fewer than it was given. Silent unless they disagree.
+            requested = len(result.get('placements') or [])
+            if moved != requested:
+                summary += (f"; NOTE only {moved} of {requested} move(s) "
+                            f"reached the board")
             return summary
         except Exception as e:
             import traceback
@@ -1924,6 +2126,15 @@ class FanoutTab(wx.Panel):
             'clearance': shared.get('clearance', defaults.BGA_CLEARANCE),
             'grid_step': shared.get('grid_step', defaults.GRID_STEP),
             'via_size': shared.get('via_size', defaults.BGA_VIA_SIZE),
+            # #768: this path builds its config from a HANDFUL of shared keys,
+            # so anything the engine call reads off `fanout_config` and that is
+            # not listed here silently takes its `.get` default. That is how the
+            # first cut of the ceiling gate came to be INERT on the standalone
+            # and plan-executor path while looking correct on the inline one --
+            # the same shape as the #693 finding the parity ledger records.
+            'clamp_netclasses': shared.get('clamp_netclasses', False),
+            'clearance_ceiling': shared.get('clearance_ceiling'),
+            'fix_drc_settings': shared.get('fix_drc_settings', True),
         })
         # Log tee: this runs on the main thread with no worker stdout redirect
         # in place, so without it the repair narration reaches the terminal but
@@ -1932,6 +2143,26 @@ class FanoutTab(wx.Panel):
         from .gui_utils import redirect_prints_to_log
         with redirect_prints_to_log(self.append_log):
             summary = self._optimize_decoupling_caps(board, cfg)
+            # KNOWN IPC GAP (#782, standalone button): the SWIG front follows
+            # this with clamp_nondefault_netclasses_on_board(), lowering each
+            # NON-Default class's clearance to the #768 ceiling this pass priced
+            # at. That helper writes a LIVE pcbnew board, which kipy cannot do,
+            # and the obvious .kicad_pro substitute overshoots: this button lays
+            # no escape copper, and #782 pointedly leaves the DEFAULT class
+            # alone, whereas fix_project_for_output(clearance=ceiling) would
+            # lower it too. So the clamp is deliberately NOT ported here rather
+            # than ported wrong. Consequence, and it is narrow: on a board with
+            # non-Default classes, pressing the STANDALONE cap button with the
+            # Min-Clearance override ticked prices pairs at min(class, ceiling)
+            # and leaves the class declaring the wider value. The INLINE path is
+            # unaffected -- it records its floors through apply_drc_settings_fix
+            # -- as is any plan run, covered by ai_plan's end-of-run writeback.
+            # Closing this wants a non-Default-only project clamp in
+            # fix_kicad_drc_settings, which is a change to shared code and
+            # belongs to whoever wants it, not to a sync merge.
+            #
+            # No refill_all_zones / pcbnew.Refresh here either: KiCad refills
+            # and repaints server-side on each IPC commit.
         if summary:
             self.status_text.SetLabel(summary)
             if log:

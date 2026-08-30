@@ -2034,10 +2034,40 @@ def apply_single_ended_layer_swaps(
         sources, targets, error = get_net_endpoints(pcb_data, net_id, config)
         if error or not sources or not targets:
             continue
+        # "Needs a via" is a question about the terminal SETS, not about their
+        # first elements. get_net_endpoints returns EVERY terminal -- pads, and
+        # (since via terminals) each layer an existing via already reaches -- so
+        # a net whose two ends both reach some common layer needs no via and
+        # wants no upfront swap.
+        #
+        # Comparing sources[0] to targets[0] asked whichever question the list
+        # order happened to encode. Measured on the #534 escape-via board: with
+        # F.Cu/B.Cu appended to config.layers as forbidden obstacles, sources[0]
+        # was the F.Cu PAD while targets[0] was an In1.Cu VIA terminal, so the
+        # net was declared to need a via -- though the two sets were IDENTICAL
+        # ({F.Cu, B.Cu, In1.Cu, In2.Cu}) and both escape vias already reached
+        # every routing layer. The swap then moved the source stub off F.Cu and
+        # minted a via IN the pad, orphaning the designer's own escape via,
+        # which the #622 stub-debris trim then correctly collected as dangling.
+        # The other end was untouched purely because targets[0] sorted to a via
+        # terminal rather than a pad.
+        # ROUTABLE layers only. Full-stack mode appends the board's unrequested
+        # copper layers with FORBIDDEN cost (-1) so their copper blocks vias;
+        # terminals land on those too, and a shared FORBIDDEN layer is not a
+        # place the two ends can meet -- counting it would skip the swap for a
+        # net that genuinely needs one.
+        _costs = getattr(config, 'layer_costs', None) or []
+
+        def _routable(idx):
+            return idx >= len(_costs) or _costs[idx] >= 0
+
+        src_layers = {config.layers[e[2]] for e in sources if _routable(e[2])}
+        tgt_layers = {config.layers[e[2]] for e in targets if _routable(e[2])}
+        if src_layers & tgt_layers:
+            continue
         src_layer = config.layers[sources[0][2]]
         tgt_layer = config.layers[targets[0][2]]
-        if src_layer != tgt_layer:  # Only track nets needing via
-            single_net_layer_info[net_name] = (src_layer, tgt_layer, sources, targets, net_id)
+        single_net_layer_info[net_name] = (src_layer, tgt_layer, sources, targets, net_id)
 
     if not single_net_layer_info and not multipoint_candidates:
         return 0

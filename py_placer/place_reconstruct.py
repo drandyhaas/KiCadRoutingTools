@@ -219,7 +219,11 @@ Examples:
     # set is part of the run's record.
     edge_bands = {}
     if intent is not None:
-        for c in intent.edge_connectors:
+        # edge_claims(): a connector_affinity entry declares a class, not a
+        # band. Reading the raw key gave every generic header the 2.0mm
+        # default allowance below, which is an off-outline licence nobody
+        # asked for.
+        for c in intent.edge_claims():
             if c['ref'] not in state.parts:
                 continue
             # EVERY banded entry keeps its allowance, suspect or not: with
@@ -317,7 +321,10 @@ Examples:
     # proxy would anchor them to their possibly-misplaced partners).
     edge_pref = {}
     if intent is not None:
-        for c in intent.edge_connectors:
+        # edge_claims(): the receptacle filter below already excluded the
+        # weak class, but every engine read goes through the one split so a
+        # future edit to this filter cannot re-open it.
+        for c in intent.edge_claims():
             # Receptacles ONLY (run-5): the edge metric is the right
             # objective for a part whose class says the mating face must
             # reach the edge. An edge-less ACTUATOR entry (a suspect
@@ -341,7 +348,7 @@ Examples:
     # under investigation, not a seat.
     excl_x = set(tiers.locked) | set(tiers.zero_net)
     if intent is not None:
-        for c in intent.edge_connectors:
+        for c in intent.edge_claims():   # seat claims only; see edge_claims
             ref = c['ref']
             if ref not in state.parts:
                 continue
@@ -550,7 +557,11 @@ Examples:
         return rep
 
     def _reseat_report(rep, preview=False):
-        d = {'scope': rep['scope'], 'scope_source': rep['scope_source'],
+        # #698: the same vocabulary as `place_seed`'s summary. This rung's
+        # scope is always `auto:damage_witnesses`, so the basis is `oob` or
+        # None -- but the two CLIs must not describe one pass differently.
+        d = {'accept_basis': rep.get('accept_basis'),
+             'scope': rep['scope'], 'scope_source': rep['scope_source'],
              'reseated': rep['reseated'], 'unseated': rep['unseated'],
              'refused': rep['refused'], 'pruned': rep['pruned'],
              'edge_bands_dropped': rep['edge_bands_dropped'],
@@ -645,7 +656,8 @@ Examples:
     _promote_staged(staged, args.output_file)
 
     out_pcb = parse_kicad_pcb(args.output_file)
-    final = grade_pad_legality(out_pcb, args.clearance)
+    final = grade_pad_legality(out_pcb, args.clearance,
+                               pcb_file=args.output_file)
     report['final'] = {k: final[k] for k in
                        ('pad_conflicts', 'pad_shortfall', 'hole_conflicts',
                         'oob_pad_count', 'oob_pad_amount', 'exact')}
@@ -666,7 +678,13 @@ Examples:
           f"{final['hole_conflicts']} hole conflict(s), "
           f"{final['oob_pad_count']} part(s) with pad copper off-board, "
           f"{body['blocking']} blocking body pair(s)")
-    _oc = __import__('placement.legality', fromlist=['x']).format_oob_clause(final)
+    _leg_mod = __import__('placement.legality', fromlist=['x'])
+    # #697: name the pairs graded above args.clearance and what raised them,
+    # before the count above is read as a violation of the announced floor.
+    _rq = _leg_mod.format_required_clause(final)
+    if _rq:
+        print(f"  above the {args.clearance}mm floor: {_rq}")
+    _oc = _leg_mod.format_oob_clause(final)
     if _oc:
         # Printed BEFORE the edge_connectors advice below, because that advice
         # tells the reader to declare a by-design overhang -- and this measure
@@ -692,5 +710,11 @@ Examples:
 
 
 if __name__ == "__main__":
-    import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
-    sys.exit(main())
+    # Declare the lever for the WHOLE run, so every pose this CLI
+    # writes carries its name. Nothing called declare_lever outside
+    # tests, so the unaided instrument had no armed state at all:
+    # unarmed it is silent, and armed by hand it refused the engine.
+    from placement.provenance import declare_lever
+    with declare_lever('place_reconstruct.py', sys.argv):
+        import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
+        sys.exit(main())

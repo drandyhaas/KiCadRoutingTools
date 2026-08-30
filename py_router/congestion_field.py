@@ -167,22 +167,31 @@ def congestion2_knobs():
     return dict(env_knobs.CONGESTION2)
 
 
-def build_congestion2(pcb_data, config, net_ids_to_route,
-                      extra_demand_points=None):
-    """Precompute bins {(bx,by): (free_area_mm2, owners frozenset)} plus
-    per-net terminal coords. Returns None when disabled.
+def congestion_bins(pcb_data, net_ids, num_layers, bin_mm,
+                    extra_demand_points=None):
+    """THE demand/capacity census: {(bx,by): (free_area_mm2, owners)} plus
+    per-net terminal coords, and the BIN IT ACTUALLY USED.
+
+    That third return value is not decoration: `bin_mm` is floored at 0.25,
+    and a caller that builds coordinates from its own requested value puts
+    the report on the wrong part of the board (check_pockets at --bin 0.1
+    named windows ~39mm from the ones it measured). Ask, do not assume.
+
+    One definition, two consumers (run-23): `build_congestion2` attaches it
+    as an A* cost (env-gated), and `check_pockets.py` reports it PRE-ROUTE
+    at the placement->routing handoff -- because every per-net gate
+    (check_channels, check_reachability) passed run 23's board while two
+    nets died in one bin whose demand/free-area no instrument ever printed.
 
     extra_demand_points (#589): optional {net_id: [(x_mm, y_mm), ...]} of
     predicted-corridor samples (the global plan's rough paths) folded into
     each net's terminal set -- the net then claims demand along its whole
     predicted path instead of only at its endpoints, and its own exemption
-    disks follow the corridor (owner-exempt by construction)."""
-    k = congestion2_knobs()
-    if k['cost'] <= 0:
-        return None
-    bin_mm = max(0.25, k['bin'])
-    num_layers = max(1, len(config.layers))
-    to_route = set(net_ids_to_route)
+    disks follow the corridor (owner-exempt by construction).
+    """
+    bin_mm = max(0.25, bin_mm)
+    num_layers = max(1, num_layers)
+    to_route = set(net_ids)
 
     copper = {}
     for s in pcb_data.segments:
@@ -211,8 +220,6 @@ def build_congestion2(pcb_data, config, net_ids_to_route,
         terminals[nid] = pts
         for (x, y) in pts:
             owners.setdefault((int(x // bin_mm), int(y // bin_mm)), set()).add(nid)
-    for p in getattr(pcb_data, 'pads', []) or []:
-        pass  # pad copper folded via per-net pads below
     for nid, plist in getattr(pcb_data, 'pads_by_net', {}).items():
         for p in plist:
             b = (int(p.global_x // bin_mm), int(p.global_y // bin_mm))
@@ -223,6 +230,22 @@ def build_congestion2(pcb_data, config, net_ids_to_route,
         used = copper.get(b, 0.0)
         free = max(bin_area_total * 0.05, bin_area_total - used)
         bins[b] = (free, frozenset(own))
+    return bins, terminals, bin_mm
+
+
+def build_congestion2(pcb_data, config, net_ids_to_route,
+                      extra_demand_points=None):
+    """Precompute bins {(bx,by): (free_area_mm2, owners frozenset)} plus
+    per-net terminal coords. Returns None when disabled.
+
+    extra_demand_points (#589): see `congestion_bins` -- forwarded through."""
+    k = congestion2_knobs()
+    if k['cost'] <= 0:
+        return None
+    bin_mm = max(0.25, k['bin'])
+    bins, terminals, bin_mm = congestion_bins(
+        pcb_data, net_ids_to_route, len(config.layers), bin_mm,
+        extra_demand_points=extra_demand_points)
     n_hot = sum(1 for b, (fa, ow) in bins.items()
                 if len(ow) / fa > k['thresh'])
     print(f"Congestion2 field: {len(bins)} demand bins, {n_hot} above "

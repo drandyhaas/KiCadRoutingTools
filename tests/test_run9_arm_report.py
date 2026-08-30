@@ -102,6 +102,24 @@ def main():
     check('...and guards a copper-less human reference',
           'original_degeneracy' in src)
 
+    # #716: every check above greps SOURCE TEXT, and a source-text check cannot
+    # see a path that does not RESOLVE. `arm_report.SKILL_SCRIPTS` pointed at
+    # `.claude/skills/plan-pcb-routing/scripts` -- a directory that has never
+    # existed, board_score.py living under plan-pcb-placement-and-routing -- and
+    # this file passed for as long as the path was wrong, because the strings it
+    # greps for were all present. Assert the path itself, and the script it
+    # exists to reach: this is the verdict path, not a helper.
+    sys.path.insert(0, os.path.join(ROOT, 'tests', 'stress'))
+    import arm_report  # noqa: E402
+    check('arm_report.SKILL_SCRIPTS resolves to a real directory',
+          os.path.isdir(arm_report.SKILL_SCRIPTS),
+          arm_report.SKILL_SCRIPTS + ' does not exist')
+    check('...and board_score.py is actually in it',
+          os.path.isfile(os.path.join(arm_report.SKILL_SCRIPTS,
+                                      'board_score.py')),
+          'arm_report builds an argv around this path; a missing script is an '
+          'exec failure at run time, not an import error here')
+
 
     print('an EQUAL tuple is no tie-break in favour of an unevidenced move')
     # The hole A2 closes: a zero-net part in free space touches no term the

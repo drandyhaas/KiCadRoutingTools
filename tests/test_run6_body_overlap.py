@@ -36,7 +36,10 @@ class TestCorpusCalibration(unittest.TestCase):
         board, or the channel may not gate anywhere (run-6 invariant)."""
         boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
                                                '*.kicad_pcb')))
-        self.assertGreaterEqual(len(boards), 30)
+        # The TRACKED corpus is 22 boards; generated fixture chains add more on a
+        # developed tree. Guard against an empty or half-checked-out corpus, not
+        # against the generated surplus (a fresh clone has exactly 22).
+        self.assertGreaterEqual(len(boards), 22)
         bad = []
         for b in boards:
             try:
@@ -170,3 +173,213 @@ class TestIntentKey(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestContainment(unittest.TestCase):
+    """The containment channel: run-22's defect, and why it may not gate.
+
+    Run 22 shipped a board every gate called buildable while RN3 sat wholly
+    inside U5's body and RN7 inside U6's -- reported as `fab 2.0mm2`, which is
+    also what a large connector's by-design graze measures. `area_mm2` cannot
+    tell a KISS from a part WHOLLY INSIDE another; `contained_frac` can.
+    """
+
+    #: A big part with a .Fab body, and a small one whose body sits inside it.
+    #: The pads are deliberately clear of each other, so NOTHING in the
+    #: pad_intersection channel fires -- that is the whole point. This is the
+    #: defect shape that reported blocking 0.
+    BOARD = '''(kicad_pcb (version 20221018) (generator pcbnew)
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (net 0 "") (net 1 "VCC") (net 2 "GND")
+  (gr_rect (start 0 0) (end 30 30) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+  (footprint "t:BIG" (layer "F.Cu") (at 10 10)
+    (property "Reference" "{big}" (at 0 0) (layer "F.SilkS"))
+    (fp_rect (start -4 -4) (end 4 4) (stroke (width 0.05) (type default)) (layer "F.Fab"))
+    (fp_rect (start -4.2 -4.2) (end 4.2 4.2) (stroke (width 0.05) (type default)) (layer "F.CrtYd"))
+    (pad "1" smd rect (at -3.7 0) (size 0.4 0.4) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd rect (at 3.7 0) (size 0.4 0.4) (layers "F.Cu") (net 1 "VCC")))
+  (footprint "t:SMALL" (layer "F.Cu") (at {sx} 10)
+    (property "Reference" "{small}" (at 0 0) (layer "F.SilkS"))
+    (fp_rect (start -0.5 -0.3) (end 0.5 0.3) (stroke (width 0.05) (type default)) (layer "F.Fab"))
+    (fp_rect (start -0.7 -0.5) (end 0.7 0.5) (stroke (width 0.05) (type default)) (layer "F.CrtYd"))
+    (pad "1" smd rect (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 2 "GND")))
+)
+'''
+
+    def _board(self, sx, big='U1', small='RN1'):
+        text = self.BOARD.format(sx=sx, big=big, small=small)
+        td = tempfile.mkdtemp()
+        path = os.path.join(td, 'b.kicad_pcb')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        return path
+
+    def _fab(self, g):
+        return [p for p in g['pairs'] if p.kind == 'fab']
+
+    def test_containment_is_measured(self):
+        """The small part's body wholly inside the big one's."""
+        g = _grade(self._board(sx=10.0))
+        fab = self._fab(g)
+        self.assertEqual(len(fab), 1)
+        self.assertEqual(fab[0].contained_frac, 1.0)
+        self.assertTrue(fab[0].contained)
+        self.assertEqual(g['contained'], 1)
+        self.assertEqual([(p.a, p.b) for p in g['containment_pairs']],
+                         [('RN1', 'U1')])
+
+    def test_a_kiss_is_not_a_containment(self):
+        """The run-4 lesson pinned into the new channel: two bodies meeting at
+        their edges is not a part inside a part, and must not report as one."""
+        g = _grade(self._board(sx=14.4))
+        fab = self._fab(g)
+        self.assertEqual(len(fab), 1)
+        self.assertLess(fab[0].contained_frac, 0.5)
+        self.assertFalse(fab[0].contained)
+        self.assertEqual(g['contained'], 0)
+
+    def test_a_waived_containment_is_still_disclosed(self):
+        """THE run-22 hole. `_waiver_for` is a part-class lookup with no
+        geometry in it, so a part sitting WHOLLY inside an edge_actuator gets
+        the same label as a 0.01mm2 graze and then leaves `advisory`,
+        `advisory_pairs` AND `new_advisory_pairs` in one step. D4-inside-SW2
+        vanished exactly that way, twice, and nothing in the chain reported it.
+        `containment_pairs` is the one list a waiver cannot empty."""
+        g = _grade(self._board(sx=10.0), intent_waivers=[('U1', 'RN1')])
+        self.assertEqual(g['advisory'], 0)
+        self.assertTrue(all(p.waived for p in self._fab(g)))
+        self.assertEqual(g['contained'], 1)
+        self.assertTrue(g['containment_pairs'][0].waived)
+
+    def test_containment_does_not_change_the_verdict(self):
+        """Zero blast radius, pinned. The corpus ships legitimate frac-1.0
+        containments (orangecrab FID2/J5), so this channel may not gate."""
+        g = _grade(self._board(sx=10.0))
+        self.assertEqual(g['contained'], 1)
+        self.assertEqual(g['blocking'], 0)
+        self.assertEqual(g['blocking_pairs'], [])
+
+    def test_a_nonexempt_containment_GATES(self):
+        """The verdict change: a part wholly inside another part's body makes
+        the board NOT BUILDABLE, unless something says it is by design."""
+        g = _grade(self._board(sx=10.0))
+        self.assertEqual(g['containment_blocking'], 1, g['containment_pairs'])
+        # ...and `blocking` is UNTOUCHED. Three consumers read that count --
+        # board_score, the seeder's repair census, and placement_driver's
+        # _guard_damage with INVERTED polarity ("run repair only if blocking").
+        # Folding containment in would change all three.
+        self.assertEqual(g['blocking'], 0)
+
+    def test_an_AUTHORED_waiver_lifts_the_gate(self):
+        """The escape hatch, and the only one: name the pair in the intent.
+        That is written down by a person; a class waiver is inherited."""
+        g = _grade(self._board(sx=10.0), intent_waivers=[('U1', 'RN1')])
+        self.assertEqual(g['contained'], 1)          # still DISCLOSED
+        self.assertEqual(g['containment_blocking'], 0)   # but not blocking
+
+    def test_the_corpus_still_grades_buildable(self):
+        """0 boards may gate. The only corpus containments are orangecrab's
+        FID2/J5 (frac 1.000) and FID1/J4 (0.867), both marker_class and both
+        correct -- fiducials under a connector body."""
+        boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
+                                               '*.kicad_pcb')))
+        self.assertGreaterEqual(len(boards), 30)
+        gating = {os.path.basename(b): [(q.a, q.b, q.waiver)
+                                        for q in _grade(b)['containment_blocking_pairs']]
+                  for b in boards}
+        offenders = {k: v for k, v in gating.items() if v}
+        self.assertEqual(offenders, {}, offenders)
+
+    def test_bodyless_footprints_are_disclosed(self):
+        """A part drawing no .Fab outline cannot be judged by this channel.
+        Measured 10-25 per corpus board, so it is a large limit rather than a
+        corner case -- and an unjudged part is not a clean part."""
+        g = _grade(os.path.join(ROOT, 'kicad_files', 'tigard.kicad_pcb'))
+        self.assertGreater(g['fab_unjudged'], 0)
+        self.assertEqual(len(g['fab_unjudged_refs']), g['fab_unjudged'])
+
+    def test_the_bodyless_hole_is_exactly_what_was_measured(self):
+        """144 of 1583 footprints draw no .Fab body, and that is the FINAL
+        answer, not a TODO.
+
+        Measured over all 33 boards: every one of those 144 draws ZERO .Fab
+        geometric primitives -- there is no footprint whose .Fab geometry the
+        parser fails to read. So a tolerance or polygon-closure fix moves
+        nothing (313 footprints DO have non-closing .Fab chains, tigard Q1
+        among them, and all 313 are judged correctly because a bbox is a
+        min/max over points).
+
+        This test exists so a future "helpful" parser change that alters the
+        count has to come and argue with the number. The dangerous direction
+        is a FALLBACK body for bodyless parts: measured, that adds 77 fab
+        pairs, 65 above the threshold, and breaks the calibration gate below.
+        """
+        boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
+                                               '*.kicad_pcb')))
+        self.assertGreaterEqual(len(boards), 30)
+        total_unjudged = sum(_grade(b)['fab_unjudged'] for b in boards)
+        self.assertEqual(total_unjudged, 144,
+                         f'corpus fab_unjudged moved to {total_unjudged}; if '
+                         f'that was deliberate, re-measure the 4-pair census '
+                         f'below and this number together')
+
+    def test_no_unjudged_part_has_fab_geometry_to_read(self):
+        """The INVARIANT behind the count above, and the stronger claim.
+
+        `fab_unjudged == 144` is a census of THIS corpus, and 11 of the 33
+        boards it sweeps are untracked generated fixtures, so the number moves
+        when someone regenerates one. This assertion does not depend on corpus
+        membership: whatever the set is, every unjudged part must draw NO .Fab
+        geometry at all.
+
+        That is what licenses "a parser tolerance or polygon-closure fix moves
+        zero footprints" -- not the 144. If this ever fails, the parser really
+        is failing to read a body it was handed, and the disclosure-not-a-fix
+        conclusion has to be revisited.
+        """
+        from placement.parser import extract_fab_sides
+        boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
+                                               '*.kicad_pcb')))
+        self.assertGreaterEqual(len(boards), 30)
+        readable, checked = [], 0
+        for b in boards:
+            sides = extract_fab_sides(b)
+            for ref in _grade(b)['fab_unjudged_refs']:
+                checked += 1
+                if sides.get(ref):
+                    readable.append((os.path.basename(b), ref))
+        self.assertGreater(checked, 0, 'nothing was checked')
+        self.assertEqual(readable, [], f'{len(readable)} part(s) are reported '
+                                       f'unjudged while their .Fab geometry '
+                                       f'parses fine: {readable[:5]}')
+
+    def test_corpus_carries_no_nonexempt_body_containment(self):
+        """THE calibration gate for the threshold, sibling of
+        test_all_healthy_boards_grade_zero_blocking.
+
+        Measured over all 33 boards: the fab census is exactly 4 pairs, and
+        every non-exempt one is a shell KISS three orders of magnitude below
+        the threshold (GPDI1/J5 at 0.011, GPDI1/SW1 at 0.001) against a
+        measured defect of 1.000. That ~90x separation is what licenses
+        CONTAINMENT_FRAC.
+
+        It is also why the ENGINE predicate may use the fab currency and never
+        the courtyard: the courtyard ships frac-1.0 containment on four healthy
+        boards (esp_prog, orangecrab_ext_pll, rp2350_fpga_eensy_prePlane,
+        ulx3s), so a courtyard-based predicate would false-veto legitimate
+        poses on 12% of the corpus -- the run-4 lesson in a new costume.
+        """
+        from placement.legality import CONTAINMENT_FRAC
+        boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
+                                               '*.kicad_pcb')))
+        self.assertGreaterEqual(len(boards), 30)
+        census = []
+        for b in boards:
+            for p in _grade(b)['pairs']:
+                if p.kind == 'fab':
+                    census.append((os.path.basename(b), p.a, p.b,
+                                   p.contained_frac, bool(p.waiver)))
+        self.assertEqual(len(census), 4, census)
+        offenders = [c for c in census
+                     if c[3] >= CONTAINMENT_FRAC and not c[4]]
+        self.assertEqual(offenders, [], offenders)

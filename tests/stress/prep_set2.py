@@ -15,6 +15,13 @@ import os
 import re
 import sys
 import pcbnew
+from pathlib import Path
+
+# #795: KiCad's own __iter__ for GetTracks()/GetDrawings() calls the py2
+# `SwigPyIterator.next()`, which a current SWIG no longer supplies.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'py_router'))
+from swig_compat import patch_swig_iterators  # noqa: E402
+patch_swig_iterators()
 
 
 def rdp(points, eps):

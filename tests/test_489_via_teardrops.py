@@ -10,10 +10,15 @@ escape) -- were never emitted.
 Covers:
   * every via gains a teardrop block; the count is reported
   * a via that already has one is left alone (idempotent, no double block)
-  * the block lands AFTER (uuid ...): this repo's own via regexes require
+  * the block lands AFTER (uuid ...), and the boards we write stay parseable by
+    us in BOTH the numeric-net (KiCad 9) and named-net (KiCad 10) forms.
+    That position used to be load-bearing -- the via regexes required
     layers -> (free)? -> net -> uuid to be CONTIGUOUS, so an earlier insertion
-    would make the boards we write unparseable by us. Both the numeric-net
-    (KiCad 9) and named-net (KiCad 10) forms are checked.
+    made our own output unreadable. #748 retired that constraint (each via is
+    matched inside its own block, and every field after (layers ...) is read by
+    its own token), so this is now a WRITER convention rather than a parser
+    requirement. The checks stay: the position is still what KiCad itself
+    writes, and a silent move is still worth catching.
   * pads are untouched by the via pass (and vice versa)
 
 KiCad's own acceptance of that position was verified separately against pcbnew

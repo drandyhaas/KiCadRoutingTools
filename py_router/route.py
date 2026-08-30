@@ -266,6 +266,7 @@ def _empty_results_data() -> dict:
         'segments_to_remove': [],
         'vias_to_remove': [],
         'blockers': [],
+        'boxed_in': [],
         'pad_pairs_open': [],
     }
 
@@ -292,6 +293,131 @@ def _finalize_depth(delta: int) -> None:
 
 def _plane_finalize_active() -> bool:
     return _PLANE_FINALIZE_DEPTH > 0
+
+
+def _emit_summary_min(gate_report: Optional[dict] = None,
+                      status: Optional[str] = None) -> None:
+    """Print the ONE compact verdict line for an outermost run.
+
+    Shared by the normal end-of-run path and the two "nothing to route" early
+    returns. The contract a consumer relies on is "exactly one
+    JSON_SUMMARY_MIN per outermost run", and a step that legitimately did
+    nothing -- "All nets are already fully connected", the routine state a
+    replay or a retry step lands in -- must still satisfy it. A missing line
+    there is indistinguishable from a crash, which is the one reading that
+    would make an agent do the wrong thing.
+
+    `status` names WHY the tally is empty on those paths; it is absent on an
+    ordinary run.
+    """
+    try:
+        from route_summary import merge_summaries as _ms, summary_min
+        _m = _ms(list(_SUMMARY_SINK), _RECONCILE_RAISED[0])
+        if _m is None and status is not None:
+            # The early returns fire before any summary is built, so there is
+            # nothing in the sink to merge: synthesize the empty tally rather
+            # than print nothing.
+            _m = {'successful': 0, 'failed': 0}
+        if not _m:
+            return
+        _min = summary_min(_m)
+        if status is not None:
+            _min['status'] = status
+        if gate_report and gate_report.get('verdict') == 'reject':
+            _min['improvement_gate'] = 'reverted'
+        print("JSON_SUMMARY_MIN: " + json.dumps(_min, sort_keys=True))
+    except Exception as _e:                                     # noqa: BLE001
+        print(f"  WARNING: could not emit JSON_SUMMARY_MIN: {_e}")
+
+
+def _late_orphan_sweep659(pcb_data, output_file, return_results, results_data,
+                          protect_unfinished, keep_input_copper, skip_routing):
+    """Sweep pad-less copper islands off the FINAL board (#659).
+
+    run_post_route_cleanup is the only whole-scope cleanup and it runs long
+    before the plane finalize and the final reconciliation, both of which lay
+    copper WITH RIP AUTHORITY. Their rip-restore debris therefore lands after
+    the last pass that could remove it, and the only cleanups that DO run
+    later are the reconcile sub-runs', scoped to the reconcile subset. Same
+    staleness shape as #650's stale oracle audit.
+
+    Measured: daisho's /ddr2/DM6 carried a 7.35mm pad-less fragment -- born at
+    step 1, a BGA fanout, which runs no cleanup pipeline at all -- through
+    eleven chain steps and a full `--nets '*'` route; its step-9 log printed no
+    "Orphan islands" line at all. spartan6_4layer step 6 shipped 10 bare vias a
+    failed reroute left behind.
+
+    Deletion is safe by construction: an island reaching no pad and no zone of
+    its net conducts nothing, so removing it cannot change any pad's
+    connectivity. --keep-input-copper still makes input copper read-only, and
+    UNFINISHED nets are scoped out exactly as the main pipeline scopes them
+    (#473: a fragment graded "orphan" on a net this run could not finish is the
+    copper the NEXT chain step welds to).
+
+    Called from BOTH the normal end of a run and the "nothing to route" early
+    return -- the fragment gate now diverts pad-less-only nets to this sweep,
+    and a step whose whole scope is diverted takes that early path, where a
+    sweep that only ran at the normal end would silently never happen.
+
+    Cost: ~1s on a 12k-segment board. KICAD_LATE_ORPHAN_SWEEP=0 disables.
+    """
+    if (skip_routing or keep_input_copper
+            or os.environ.get('KICAD_LATE_ORPHAN_SWEEP', '1') == '0'):
+        return
+    try:
+        from pcb_modification import remove_orphan_islands as _roi659
+
+        def _scope(_p):
+            # Derived from the board being SWEPT, not from pcb_data: the CLI
+            # branch re-parses the written file, and a scope built from a
+            # different board object is only accidentally right.
+            if not protect_unfinished:
+                return None
+            return ({s.net_id for s in _p.segments}
+                    | {v.net_id for v in _p.vias}) - set(protect_unfinished)
+
+        if return_results:
+            # GUI: the copper lives in the write-lists + pcb_data. The pass
+            # drops this-run copper from `results` in place and hands back the
+            # INPUT copper for the applier's removal lists (the same channels
+            # the reconciliation sub-run's strips ride).
+            _n, _s, _strip, _vstrip, _nv = _roi659(
+                (results_data or {}).get('results') or [], pcb_data,
+                _scope(pcb_data))
+            if _n and results_data is not None:
+                if _strip:
+                    results_data.setdefault('segments_to_remove', []).extend(_strip)
+                if _vstrip:
+                    results_data.setdefault('vias_to_remove', []).extend(_vstrip)
+        elif output_file and os.path.exists(output_file):
+            # CLI: the finalize and the reconcile wrote through to the file, so
+            # the board on disk -- not pcb_data -- is the final state. Re-parse
+            # it, and strip what the sweep condemns from the file text (the
+            # oracle's own debris pass works the same way).
+            from kicad_parser import parse_kicad_pcb as _pk, is_kicad_10 as _k10
+            from kicad_writer import (remove_segments_from_content as _rsc,
+                                      remove_vias_from_content as _rvc)
+            _pcb = _pk(output_file)
+            _n, _s, _strip, _vstrip, _nv = _roi659([], _pcb, _scope(_pcb))
+            if _n and (_strip or _vstrip):
+                with open(output_file, 'r', encoding='utf-8') as _f:
+                    _c = _f.read()
+                _map = ({nid: n.name for nid, n in _pcb.nets.items()}
+                        if _k10(_c) else None)
+                if _strip:
+                    _c, _ = _rsc(_c, _strip, net_id_to_name=_map)
+                if _vstrip:
+                    _c, _ = _rvc(_c, _vstrip, net_id_to_name=_map)
+                with open(output_file, 'w', encoding='utf-8') as _f:
+                    _f.write(_c)
+        else:
+            return
+        if _n:
+            print(f"  Late orphan sweep (#659): removed {_n} pad-less copper "
+                  f"island(s) the finalize/reconcile left behind "
+                  f"({_s} segment(s), {_nv} via(s))")
+    except Exception as _e:
+        print(f"  (late orphan sweep skipped: {_e})")
 
 
 def batch_route(input_file: str, output_file: str, net_names: List[str],
@@ -374,7 +500,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # #498: {layer: mm} per-layer clearance. None (both fronts) ->
                 # auto-read the sibling .kicad_dru; explicit dict (tests) wins.
                 layer_clearances: Optional[Dict[str, float]] = None,
-                # #549: {net_id: mm} track-to-track clearance (effective
+                # {net_id: mm} track-to-track clearance (#735; effective
                 # per-obstacle map). None (both fronts) -> auto-read the
                 # sibling .kicad_dru track rules; explicit dict (tests) wins.
                 track_clearances: Optional[Dict[int, float]] = None,
@@ -530,7 +656,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # previous board in the same (GUI) process.
     from routing_diagnostics import reset_hint_condenser
     reset_hint_condenser()
-    if json_out:
+    # Every OUTERMOST entry starts the summary sink clean, not only a
+    # --json-out one: the GUI calls batch_route once per click in ONE
+    # process with no json_out, and a sink that survived the previous
+    # click would merge the next run's JSON_SUMMARY_MIN onto the previous
+    # run's summaries (effort keys summed, pad-pair attribution from the
+    # old run) and stamp its summaries 'reconciliation-subset'. Nested
+    # sub-runs pass final_reconcile=False and so keep the live sink.
+    if json_out or final_reconcile:
         _SUMMARY_SINK.clear()
         _RECONCILE_RAISED[0] = False
     if not _SUMMARY_SINK:
@@ -971,6 +1104,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(f"Same-net pad via clearance {_snpc581:g}mm (from {_snpc_src}, "
               f"#581): vias stay off same-net pads")
     config = GridRouteConfig(**config_kwargs)
+    # The in-loop stub-debris trim must treat input copper as read-only in
+    # --keep-input-copper runs; the loop only sees config, so carry it there.
+    if keep_input_copper:
+        object.__setattr__(config, '_keep_input_copper', True)
 
     try:
         config.bus_rip_resistance = float(
@@ -982,6 +1119,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
               f"(bus members deprioritized in the rip ladder)")
     # The SE loop needs the strategy to apply the explicit 'bus' ordering.
     config.ordering_strategy = ordering_strategy
+    # #622 victim-priority restore scoping: the endgame sweep fires only in
+    # a reconcile SUB-run (final_reconcile=False), where no deeper recovery
+    # tier exists to pre-empt -- measured, firing in the outermost run's
+    # loop or drain regressed a clean control both times (yz2, za2).
+    config.final_reconcile = final_reconcile
     if config.ripup_blocker_select != 'count':
         print(f"Rip-up blocker-select algorithm: {config.ripup_blocker_select}")
 
@@ -1096,6 +1238,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 f"a trailing carriage return) or a stale net list. "
                 f"First few: {', '.join(repr(n) for n in list(net_names)[:5])}")
         print("No valid nets to route!")
+        if final_reconcile:
+            _emit_summary_min(status='no_valid_nets')
         if return_results:
             return 0, 0, 0.0, _empty_results_data()
         _write_passthrough_output(input_file, output_file)
@@ -1176,7 +1320,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # oracle_links by the CALLER (the lap loop's landed-export), so re-laps
     # skip them the normal way.
     _assume_open572 = {l[0] for l in (oracle_links or []) if l and l[0]}
-    # fragment_gate (#549 A-2): a zone-less net whose copper KiCad holds in
+    # fragment_gate (#578): a zone-less net whose copper KiCad holds in
     # pieces must not be skipped as "Already fully connected". route_diff
     # deliberately keeps the default (a fragmented net entering the diff
     # engine is a separate behavior question).
@@ -1202,9 +1346,23 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"from scratch (#515).")
     if not net_ids:
         print("All nets are already fully connected - nothing to route!")
+        if final_reconcile:
+            _emit_summary_min(status='already_connected')
+        # The sweep runs HERE too (#659). The fragment gate diverts a net whose
+        # extra fragments are all pad-less to this sweep instead of the router,
+        # so a step whose WHOLE scope is diverted lands on this early return --
+        # and the debris the gate's message promises to remove would ship
+        # untouched. Measured on spartan6_4layer: three diverted nets took the
+        # run from 448s to 6s, and every one of their bare vias survived
+        # because the sweep only ran at the normal end of a run.
         if return_results:
-            return 0, 0, 0.0, _empty_results_data()
+            _rd659 = _empty_results_data()
+            _late_orphan_sweep659(pcb_data, output_file, True, _rd659,
+                                  None, keep_input_copper, skip_routing)
+            return 0, 0, 0.0, _rd659
         _write_passthrough_output(input_file, output_file)
+        _late_orphan_sweep659(pcb_data, output_file, False, None,
+                              None, keep_input_copper, skip_routing)
         return 0, 0, 0.0
 
     # Track all segment layer modifications for file output
@@ -1687,7 +1845,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # GUI inherits them with no wiring (see kicad_dru.install_layer_clearances).
     from kicad_dru import install_layer_clearances, install_track_clearances
     install_layer_clearances(config, layer_clearances, input_file, pcb_data)
-    # #549: track-scoped .kicad_dru rules, same engine-side pattern (raise-only
+    # Track-scoped .kicad_dru rules (#735), same engine-side pattern (raise-only
     # on seg-vs-seg stamps; effective map over THIS call's routed set).
     install_track_clearances(config, track_clearances, input_file, pcb_data,
                              routed_net_ids=base_map_exclusions)
@@ -1996,6 +2154,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         for _v in pcb_data.vias:
             if _v.net_id in _reg_set:
                 _reg_vias.setdefault(_v.net_id, []).append(_v)
+    # #734: remember WHICH nets are mere rip candidates -- the audit gate
+    # below must not depend on the is_existing_route flag surviving in
+    # routed_results (later passes replace result dicts), so it keys on
+    # this id set instead.
+    state.preexisting_registered = set(existing_rippable)
     for nid in existing_rippable:
         state.routed_net_ids.append(nid)
         state.routed_net_paths[nid] = []
@@ -2883,11 +3046,73 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # follow-up). Filled by the sweep below and by the straggler grading at
     # summary time.
     _pad_pair_stats: Dict[int, Tuple[int, int]] = {}
+    # #734: nets this run actually DISTURBED -- the only pre-existing
+    # candidates whose brokenness is this run's to report and to hand the
+    # final reconciliation. Everything else with an is_existing_route
+    # custody entry was merely rip-ELIGIBLE.
+    _pe_reg734 = getattr(state, 'preexisting_registered', None) or set()
+    _scope734 = ({nid for _nm, nid in single_ended_nets}
+                 | set(all_net_ids_to_route or ()))
+    _pe_disturbed_audit = (set(_pe_ripped_reg)
+                           | set(getattr(state, 'casualty_custody', {}) or {})
+                           | set(state.collision_refused_net_ids or set())
+                           | {s.net_id for s in _stale_input_segs}
+                           | {v.net_id for v in stale_input_vias}
+                           | set(force_ripped or {})
+                           | {nid for nid, v in
+                              (getattr(state, 'terminal_restores', None)
+                               or {}).items() if v != 'full'})
+    if os.environ.get('KICAD_SCOPE_DEBUG'):
+        _b734 = {
+            'ripped_reg': set(_pe_ripped_reg),
+            'casualty': set(getattr(state, 'casualty_custody', {}) or {}),
+            'collision': set(state.collision_refused_net_ids or set()),
+            'stale_segs': {s.net_id for s in _stale_input_segs},
+            'stale_vias': {v.net_id for v in stale_input_vias},
+            'force': set(force_ripped or {}),
+            'trestore': {nid for nid, v in
+                         (getattr(state, 'terminal_restores', None)
+                          or {}).items() if v != 'full'},
+        }
+        for _bk, _bs in _b734.items():
+            if _bs:
+                _nmz = sorted((pcb_data.nets[n].name.split('/')[-1]
+                               if n in pcb_data.nets else str(n))
+                              for n in _bs)[:12]
+                print(f"  [scope-dbg] disturbed[{_bk}] = {len(_bs)}: {_nmz}")
     for _nid, _res in routed_results.items():
         if _nid in state.diff_pair_by_net_id:
             continue  # diff pairs report via their own path
         _pads = pcb_data.pads_by_net.get(_nid, [])
         if len(_pads) < 2:
+            continue
+        # #734 reconcile scoping: every pre-existing rip CANDIDATE gets a
+        # routed_results entry (custody registration, is_existing_route),
+        # so on a narrow --nets run this audit minted failed_pads for the
+        # WHOLE board's open stub nets and the final reconciliation then
+        # routed all of them (measured: a 2-net run on a mid-chain board
+        # routed 48 extras, with the reconcile pricing layers on its own
+        # AUTO ladder -- different economics than the requested nets).
+        # Candidacy makes a net rip-ELIGIBLE; responsibility transfers at
+        # an ACTUAL rip. An is_existing_route entry whose net this run
+        # never disturbed is neither this run's failure nor the
+        # reconcile's to route: a net the run ripped is in the
+        # _preexisting_rips registry (or its entry was replaced by the
+        # rip/restore machinery, dropping the flag) and still audits.
+        if os.environ.get('KICAD_SCOPE_DEBUG'):
+            _nm734 = (pcb_data.nets[_nid].name.split('/')[-1]
+                      if _nid in pcb_data.nets else str(_nid))
+            print(f"  [scope-dbg] audit {_nm734}: registered="
+                  f"{_nid in _pe_reg734} "
+                  f"requested={_nid in _scope734} "
+                  f"disturbed={_nid in _pe_disturbed_audit}")
+        if (_nid in _pe_reg734 and _nid not in _scope734
+                and _nid not in _pe_disturbed_audit):
+            # Clear, don't just skip: an earlier stage may have stamped
+            # failed_pads_info on this untouched candidate's entry, and
+            # the failed_multipoint export below reads the flag verbatim.
+            if _res.get('failed_pads_info'):
+                _res['failed_pads_info'] = []
             continue
         _r = check_net_connectivity(
             _nid, _segs_by_net.get(_nid, []), _vias_by_net.get(_nid, []),
@@ -3001,17 +3226,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for _p in _dp],
         })
 
-    # ---- FRAGMENT SWEEP (#549 C3) ------------------------------------------
+    # ---- FRAGMENT SWEEP -----------------------------------------------------
     # The grading verdict above is pad-oriented: a zone-less net can grade
     # "connected" while its copper sits in several KiCad islands (run 6's
     # VCC3V3: 25/27 reported, 7 islands real). Census every such net with the
     # strict-fragment model and report splits honestly. DISCLOSURE ONLY since
-    # the #549 A-2 fragment gate was removed for main parity (#578): these
+    # the #578 fragment gate was removed for main parity and ported back: these
     # entries name the splits, they no longer re-queue the net for routing.
     fragmented_nets = []
     _frag_already = {m['net_id'] for m in failed_multipoint}
     for _nid, _res in sorted(routed_results.items()):
         if _nid in _frag_already or _zones_by_net.get(_nid):
+            continue
+        # #734: an untouched pre-existing candidate's fragmented input
+        # copper (e.g. a fanout stub at each end of an unrouted net) is
+        # the CHAIN's business, not this run's -- without this gate the
+        # sweep re-enrolled every net the audit gate had just scoped out.
+        if (_nid in _pe_reg734 and _nid not in _scope734
+                and _nid not in _pe_disturbed_audit):
             continue
         _segs = _segs_by_net.get(_nid, [])
         if not _segs:
@@ -3030,6 +3262,41 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             continue
         _net_name = (pcb_data.nets[_nid].name if _nid in pcb_data.nets
                      else f"Net {_nid}")
+        # Same #659 rule as the fragment gate in filter_already_routed, and
+        # the same trap: STRICT pad-less-ness is not "dead". Ask the
+        # authoritative graph which copper is dead, drop it, and re-count --
+        # only if the remainder is whole does the reconciliation have nothing
+        # to route (it would otherwise weld to copper the late sweep deletes).
+        try:
+            if os.environ.get('KICAD_659_DIVERT', '1') == '0':
+                raise RuntimeError('KICAD_659_DIVERT=0')
+            from check_connected import net_dead_copper as _ndc659
+            _dead_s659, _dead_v659 = _ndc659(
+                pcb_data, _nid, _segs, _vias_by_net.get(_nid, []),
+                pcb_data.pads_by_net.get(_nid, []), [])
+        except Exception:
+            _dead_s659, _dead_v659 = [], []
+        if _dead_s659 or _dead_v659:
+            _ds659 = {id(s) for s in _dead_s659}
+            _dv659 = {id(v) for v in _dead_v659}
+            try:
+                _frag2_659 = net_copper_fragments(
+                    _nid, [s for s in _segs if id(s) not in _ds659],
+                    [v for v in _vias_by_net.get(_nid, [])
+                     if id(v) not in _dv659],
+                    pcb_data.pads_by_net.get(_nid, []), [], pcb_data=pcb_data)
+                _nf2_659 = _max_fragments_within_one_outline(
+                    pcb_data, _frag2_659['fragment_anchors'])
+            except Exception:
+                _nf2_659 = _nf
+            if _nf2_659 <= 1:
+                print(f"  Fragment sweep: {_net_name} grades pad-connected "
+                      f"and every extra fragment is DEAD copper "
+                      f"({len(_dead_s659)} segment(s), {len(_dead_v659)} "
+                      f"via(s) tied to no pad or pour) -- not a route (#659); "
+                      f"left to the late orphan sweep instead of the "
+                      f"reconciliation")
+                continue
         print(f"{RED}FRAGMENT SWEEP: {_net_name} grades pad-connected but its "
               f"copper is {_nf} separate fragment(s) "
               f"({_frag['padless_fragments']} pad-less) -- reporting as "
@@ -3043,15 +3310,27 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for (_x, _y) in _frag['fragment_anchors'][1:]],
         })
 
-    # ---- ORACLE SUMMARY CHECK (#549 B-1) -----------------------------------
+    # ---- ORACLE SUMMARY CHECK (KICAD_ORACLE_SUMMARY) ------------------------
     # KiCad's own connectivity over the AS-WRITTEN board, once per run.
     # Strictly ADDITIVE: it can only add failure disclosure (kicad-cli's
     # threaded connectivity is nondeterministic, so it never reclassifies a
     # failure as success). Entries land in failed_multipoint BEFORE the
     # reconcile gate reads it, so oracle-open nets are retried automatically.
-    # KICAD_ORACLE_SUMMARY=0 disables; the GUI path (return_results) skips
+    # OPT-IN: KICAD_ORACLE_SUMMARY=1 ENABLES this; it is OFF by default and
+    # this comment used to claim the opposite. It was reverted from default-on
+    # under #675 for a good reason -- it appends to failed_multipoint, which
+    # the reconcile gate reads, so it CHANGES COPPER, which made routing
+    # depend on whether kicad-cli happens to be installed (lora_v3: 7 DRC
+    # without KiCad, 0 with) and silently broke A/B comparability. Disclosure
+    # may be environment-dependent; copper may not. Do not flip this default
+    # without answering that. The GUI path (return_results) skips regardless
     # (in-memory board, file fidelity unavailable) with disclosure.
     oracle_open: Dict[str, int] = {}
+    # #659: the GENUINE opens among the flagged links -- both endpoints on
+    # live copper -- kept in kicad_unconnected's own shape so the final
+    # reconciliation can route the exact endpoints (#572 forced links)
+    # instead of re-deriving them and skipping the net as already connected.
+    _oracle_open_links: List = []
     oracle_check = 'skipped'
     if not (final_reconcile and not skip_routing and output_file
             and not return_results):
@@ -3091,6 +3370,21 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     add_teardrops=False,
                     segments_to_remove=dead_end_input_segments,
                     vias_to_remove=stale_input_vias)
+                # #650: the staged board's sibling project is the INPUT's
+                # (seed_project_for_output), whose declared floors are LOOSER
+                # than the ones this run routed to -- the zone filler then
+                # pulls the pours back further than the shipped board's will
+                # and this check over-reports opens. Its entries land in
+                # failed_multipoint before the reconcile gate reads them, so
+                # a phantom open costs a real retry. Grade at what ships.
+                if env_knobs.INRUN_FLOOR_SYNC:
+                    try:
+                        from fix_kicad_drc_settings import apply_routed_floors
+                        apply_routed_floors(_staged,
+                                            clearance=config.clearance,
+                                            clamp_nondefault_netclasses=False)
+                    except Exception as _e650:
+                        print(f"  (in-run DRC floor sync skipped: {_e650})")
                 _links = (kicad_unconnected(_staged, _ocli) if _ow else None)
                 if _links is None:
                     oracle_check = 'failed'
@@ -3109,16 +3403,68 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         if (_net in _scope_names
                                 and _net not in _zone_names):
                             _by_net.setdefault(_net, []).append((_a, _b))
+                    # #659: KiCad saying "open" does NOT say which repair is
+                    # called for, and the three answers are different
+                    # operations. Classify each link by what its endpoints
+                    # actually sit on:
+                    #   live <-> live -> a GENUINE open; weld it (and hand the
+                    #       reconciliation the EXACT endpoints, or its own
+                    #       model skips the net as already connected).
+                    #   pad-less end -> rip/reroute DEBRIS; it conducts
+                    #       nothing, so welding adds dead metal. The late
+                    #       orphan sweep deletes it at the end of the run.
+                    #   graphic end -> net-tagged copper ART (#337/#513):
+                    #       immutable, so neither operation applies.
+                    # Measured over the recorded corpus the zone-less signal
+                    # links split 9 pad-less / 36 graphic / 6 live, so
+                    # enrolling all of them sends the router after 45 links it
+                    # cannot help -- which is exactly what cost spartan6 448s
+                    # and bred three fresh debris nets.
+                    from check_connected import classify_unconnected_link
+                    _routable_layers659 = set(config.layers or [])
                     for _net, _pairs in sorted(_by_net.items()):
                         oracle_open[_net] = len(_pairs)
                         if _net in _flagged:
                             continue
-                        print(f"{RED}ORACLE CHECK: {_net}: KiCad reports "
-                              f"{len(_pairs)} open link(s) the in-process "
-                              f"grading passed -- reporting as failed and "
-                              f"queuing for the final reconciliation{RESET}")
                         _onid = next((i for i, n in pcb_data.nets.items()
                                       if n.name == _net), None)
+                        _genuine659, _debris659, _art659 = [], 0, 0
+                        for (_a, _b) in _pairs:
+                            try:
+                                _ca, _cb = classify_unconnected_link(
+                                    pcb_data, _onid, _a, _b,
+                                    _a[3] if len(_a) > 3 else None,
+                                    _b[3] if len(_b) > 3 else None)
+                            except Exception:
+                                _ca = _cb = 'unknown'
+                            if 'graphic' in (_ca, _cb):
+                                _art659 += 1
+                            elif 'padless' in (_ca, _cb):
+                                _debris659 += 1
+                            elif _ca == 'live' and _cb == 'live':
+                                _genuine659.append((_a, _b))
+                        if not _genuine659:
+                            _why659 = []
+                            if _debris659:
+                                _why659.append(
+                                    f"{_debris659} to pad-less debris (the "
+                                    f"late orphan sweep removes it)")
+                            if _art659:
+                                _why659.append(
+                                    f"{_art659} to net-tagged copper GRAPHICS "
+                                    f"(#513: convert them to pads/tracks)")
+                            print(f"  ORACLE CHECK: {_net}: KiCad reports "
+                                  f"{len(_pairs)} open link(s), none weldable"
+                                  + (" -- " + "; ".join(_why659)
+                                     if _why659 else "")
+                                  + " -- not queued for the reconciliation "
+                                    "(#659)")
+                            continue
+                        print(f"{RED}ORACLE CHECK: {_net}: KiCad reports "
+                              f"{len(_genuine659)} GENUINE open link(s) the "
+                              f"in-process grading passed -- reporting as "
+                              f"failed and queuing for the final "
+                              f"reconciliation{RESET}")
                         failed_multipoint.append({
                             'net_name': _net,
                             'net_id': _onid if _onid is not None else -1,
@@ -3126,8 +3472,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             'failed_pads': [
                                 {'x': _a[0], 'y': _a[1],
                                  'component_ref': '?', 'pad_number': '?'}
-                                for (_a, _b) in _pairs],
+                                for (_a, _b) in _genuine659],
                         })
+                        # Forward only links the weld router can actually
+                        # take: route_oracle_links returns on the FIRST
+                        # failure and discards the copper of every link
+                        # already routed for that net, so one endpoint on a
+                        # layer outside this run's stack would abort the rest.
+                        for (_a, _b) in _genuine659:
+                            if (len(_a) > 2 and len(_b) > 2
+                                    and _a[2] in _routable_layers659
+                                    and _b[2] in _routable_layers659):
+                                _oracle_open_links.append((_net, _a, _b))
             except Exception as _oe:
                 oracle_check = 'failed'
                 print(f"  (oracle summary check failed: {_oe})")
@@ -3320,7 +3676,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             (pcb_data.nets[_n].name if _n in pcb_data.nets else str(_n)): _v
             for _n, _v in sorted(state.terminal_restores.items())}
     if fragmented_nets:
-        # #549 C3: pad-connected nets whose copper is several KiCad islands
+        # Fragment sweep: pad-connected nets whose copper is several KiCad islands
         # (additive; also present as failed_multipoint entries above).
         summary['fragmented_nets'] = fragmented_nets
     if stacked_copper_findings:
@@ -3330,7 +3686,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         summary['stacked_copper'] = stacked_copper_findings
     summary['oracle_check'] = oracle_check
     if oracle_open:
-        # #549 B-1: KiCad's own open-link counts for this run's scope
+        # Oracle summary: KiCad's own open-link counts for this run's scope
         # (additive; nets not already flagged also gained failed_multipoint
         # entries marked oracle_only).
         summary['oracle_open'] = oracle_open
@@ -3376,6 +3732,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # a net that failed early but was later rescued/rerouted is filtered out
     # here because the final failed sets are authoritative.
     blockers_report = []
+    boxed_in_report = []
     try:
         _final_failed_ids = list(dict.fromkeys(
             failed_single_ids + [m['net_id'] for m in failed_multipoint]))
@@ -3406,8 +3763,21 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     'net': _name, 'stage': 'preexisting',
                     'blocked_by': [{'net': _bn, 'preexisting': True}
                                    for _bn in _pre103]})
+            # The static-vs-congestion verdict (the "boxed in by static
+            # obstacles" hint, #95) as its OWN key, beside `blockers` rather
+            # than inside it: `blockers` names WHICH routed copper is in the
+            # way, `boxed_in` says whether anything rippable is in the way at
+            # all, and a consumer reads both.
+            _bx = None
+            for _ev in (state.net_history.get(_nid) or []):
+                if _ev.get('event') == 'boxed_in_static':
+                    _bx = _ev.get('details') or _bx
+            if _bx:
+                boxed_in_report.append(dict(_bx, net=_name))
         if blockers_report:
             summary['blockers'] = blockers_report
+        if boxed_in_report:
+            summary['boxed_in'] = boxed_in_report
     except Exception:
         blockers_report = []
     # #409 follow-up: pad-pair routability tallies (PRR ingredients: connected
@@ -3520,6 +3890,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                                     'power_trace_ampacity',
                                                     'min_clearance_used')
                                         if k in summary]
+    try:                       # #653: env knobs into the machine-readable
+        import env_knobs as _ek653   # summary, so a harness can detect a
+        summary['env_knobs'] = _ek653.active_env_knobs()   # dirty baseline
+    except Exception:          # without re-reading logs
+        pass
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
     _SUMMARY_SINK.append(summary)
 
@@ -3543,6 +3918,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             'vias_to_remove': stale_input_vias,
             # #409: same data as JSON_SUMMARY['blockers'] (may be empty).
             'blockers': blockers_report,
+            # ...and the static-vs-congestion verdict beside it, same data as
+            # JSON_SUMMARY['boxed_in']. The GUI reads results_data, not the
+            # printed summary, so a key that only reaches stdout does not
+            # reach the plugin (CLAUDE.md's Class-1 CLI/GUI gap).
+            'boxed_in': boxed_in_report,
             # #409 follow-up: same data as JSON_SUMMARY['pad_pairs_open']
             # (may be empty).
             'pad_pairs_open': pad_pairs_open_report,
@@ -3582,6 +3962,42 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # in-memory contract checked before the write.
             verify_written_file_parity(output_file, pcb_data, sweep_scope_ids,
                                        label=' route')
+        if output_file and os.path.isfile(output_file):
+            # #650: sync the output's sibling .kicad_pro to the floors this run
+            # ROUTED to, BEFORE anything grades the board in-run (the plane
+            # finalize's oracle audit, its #589 re-audit). Until now that
+            # sibling was the input's, seeded by seed_project_for_output, and
+            # the audit graded the pours at the input's declared floors while
+            # the shipped board is graded at the clamped ones -- measured on
+            # orangecrab, 57 reported opens vs the 46 that ship (GND 19 vs
+            # 11), all of it rules.min_hole_clearance 0.25 -> 0.0889.
+            # Only-loosen and idempotent, so main()'s writeback stays
+            # authoritative.
+            #
+            # SIZE OF THE GAP IS CHAIN-POSITION DEPENDENT, so do not read that
+            # 57/46 as a per-step cost: the declared floors survive only until
+            # the FIRST writeback (down the recorded orangecrab chain
+            # min_hole_clearance goes 0.25 -> 0.09 at step 1 and stays there,
+            # leaving later steps stale by ~1 um -- inert). This earns its
+            # keep on the first step over a board still carrying its declared
+            # floors, which includes the ordinary case of a board that arrives
+            # with pours already drawn, and on the aspirational stock netclass
+            # (0.2 declared, routed 0.1) that CLAUDE.md describes.
+            #
+            # clamp_nondefault_netclasses is deliberately FALSE: whether the
+            # non-Default classes get clamped is the writeback's call (#439 --
+            # it depends on the caller having passed a --clearance ceiling,
+            # which is a main() fact, not an engine one). Lowering them here
+            # could ship a tightened class on a run that meant to honor them.
+            if env_knobs.INRUN_FLOOR_SYNC:
+                try:
+                    from fix_kicad_drc_settings import apply_routed_floors
+                    apply_routed_floors(output_file,
+                                        clearance=config.clearance,
+                                        clamp_nondefault_netclasses=False,
+                                        verbose=True)
+                except Exception as _e650b:
+                    print(f"  (in-run DRC floor sync skipped: {_e650b})")
         if wrote and output_file:
             # #666 always-on write-divergence repair: a rip/restore cycle can
             # leave a net's copper in the MODEL while the write lists dropped
@@ -3619,7 +4035,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _vi666 = [
                         {'x': v.x, 'y': v.y, 'size': v.size,
                          'drill': v.drill, 'layers': v.layers,
-                         'net_id': v.net_id}
+                         'net_id': v.net_id,
+                         # #749 A: these are PRE-EXISTING vias -- copper the
+                         # model still holds and the write dropped -- so they
+                         # carry their own protection back, and one that had
+                         # none keeps INHERITING the board's `(setup ...)`
+                         # rather than gaining the prevailing spec on the way
+                         # in. Without both keys a re-emitted via-in-pad ships
+                         # tented instead of filled+capped+plated.
+                         'tenting_attrs': dict(
+                             getattr(v, 'tenting_attrs', None) or {}),
+                         'inherit_when_unspecified': True}
                         for _, _, _mv in _lost666 for v in _mv]
                     import tempfile as _tf666, shutil as _sh666
                     _fd666, _tmp666 = _tf666.mkstemp(suffix='.kicad_pcb')
@@ -3857,6 +4283,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                           f"PLAN. Since #562 a pour alone connects nothing: "
                           f"unless a later route step covers these nets, "
                           f"their pads ship disconnected.{RESET}")
+                    # ...and in the SUMMARY, not only in the log, so a later
+                    # grade can tell a step that declined to weld these pads
+                    # BY PLAN from one that failed to. The printed
+                    # `JSON_SUMMARY:` line predates the finalize, so it does
+                    # NOT carry this key; `summary` sits in `_SUMMARY_SINK` by
+                    # reference, so `--json-out`, the returned dict and the
+                    # JSON_SUMMARY_MIN line (printed last) do.
+                    summary['finalize_excluded_nets'] = _excluded9
             # PRE-GATE for the MODEL-BASED legs (engine taps/joins +
             # cleanup): run them only for zone nets the fill-aware checker
             # says are incomplete on THIS run's board (pcb_data == file
@@ -4152,6 +4586,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     'hole_to_hole_clearance': config.hole_to_hole_clearance,
                     # #498: the applier's temp save has no .kicad_dru sibling
                     'layer_clearances': dict(config.layer_clearances or {}),
+                    # #658 (audit finding): the CLI finalize prices layers for
+                    # its oracle leg; this posted param set omitted them, so
+                    # the GUI's counterpart built a BARE config and its weld
+                    # router ran at UNIFORM layer economics -- welds crossing
+                    # a priced-up plane layer for free, and the #658
+                    # forbidden-layer guards inert. Class-1 parity gap: a new
+                    # engine parameter has to reach BOTH fronts.
+                    'layers': list(config.layers or []),
+                    'layer_costs': (list(config.layer_costs)
+                                    if getattr(config, 'layer_costs', None)
+                                    else []),
+                    'power_net_widths': dict(
+                        getattr(config, 'power_net_widths', None) or {}),
                 }
                 # Hands-off for the reconcile comes from the FILL-AWARE
                 # checker instead of the oracle verdict: zone nets the model
@@ -4413,11 +4860,57 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     # connected" and, past the skip, derives no missing
                     # edge -- a 0-copper vacuous success, measured on
                     # ghoul GND).
+                    # CLASSIFY before welding (#659), on the DEFAULT path.
+                    # The same rule the opt-in summary check applies: a
+                    # remaining link whose endpoint sits on pad-less copper
+                    # is DEBRIS, and handing it to the reconcile as a forced
+                    # edge routes copper to dead metal. The oracle's own
+                    # debris pass is meant to delete such copper, but its
+                    # locator cannot see a via-only cluster, so those links
+                    # arrive here intact. Deletion is handled by the late
+                    # orphan sweep; what matters here is not WELDING them.
                     _custody_links9 = list(_rl9 or [])
+                    try:
+                        from check_connected import (
+                            classify_unconnected_link as _cul9)
+                        _name2id9 = {n.name: i
+                                     for i, n in pcb_data.nets.items()}
+                        _live9, _dead9 = [], 0
+                        for _lk9 in _custody_links9:
+                            _lid9 = _name2id9.get(_lk9[0])
+                            if _lid9 is None:
+                                _live9.append(_lk9)
+                                continue
+                            _ca9, _cb9 = _cul9(
+                                pcb_data, _lid9, _lk9[1], _lk9[2],
+                                _lk9[1][3] if len(_lk9[1]) > 3 else None,
+                                _lk9[2][3] if len(_lk9[2]) > 3 else None)
+                            if 'padless' in (_ca9, _cb9):
+                                _dead9 += 1
+                            else:
+                                _live9.append(_lk9)
+                        if _dead9:
+                            print(f"  Plane finalize: {_dead9} of "
+                                  f"{len(_custody_links9)} remaining link(s) "
+                                  f"point at PAD-LESS copper (#659) -- not "
+                                  f"weld targets; the late orphan sweep "
+                                  f"removes them")
+                            _custody_links9 = _live9
+                            # A net left with no live link has nothing for
+                            # the reconcile to route. Drop it from custody --
+                            # but do NOT add it to _zone_complete9 below,
+                            # which asserts KiCad verified it complete. It
+                            # did not; its debris is simply not routable.
+                            _custody_nets9 = sorted({l[0] for l in _live9}) \
+                                if _live9 else []
+                    except Exception as _ce9:
+                        print(f"  (finalize link classification skipped: "
+                              f"{_ce9})")
                     # Zone nets KiCad verified COMPLETE are hands-off for
                     # the reconcile: the main run's failure buckets are
                     # STALE after the finalize fixes nets.
-                    _zone_complete9 = set(_zna) - set(_custody_nets9)
+                    _zone_complete9 = set(_zna) - set(_custody_nets9) \
+                        - {l[0] for l in (_rl9 or [])}
                     print(f"  Plane finalize: {_orc['remaining']} oracle "
                           f"link(s) unroutable without rip authority on "
                           f"{', '.join(_custody_nets9)} -- joining the "
@@ -4447,10 +4940,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # Drop the GUI oracle's staging files (locals() guard: the names
             # only exist once the finalize body got that far).
             for _p9 in (locals().get('_orc_tmp9') or []):
+                # ...and its SIBLINGS (audit finding): write_routed_output
+                # seeds a .kicad_pro next to the staged board, which this
+                # loop never removed -- one leaked temp per GUI route with
+                # planes. gui_utils already does this via copy_board's
+                # shared SIBLING_EXTS; use the same list rather than a
+                # second hand-rolled one.
                 try:
-                    os.unlink(_p9)
-                except OSError:
-                    pass
+                    from copy_board import SIBLING_EXTS as _sib9
+                except Exception:
+                    _sib9 = ('.kicad_pro', '.kicad_prl', '.kicad_dru')
+                for _q9 in (_p9,) + tuple(os.path.splitext(_p9)[0] + _e
+                                          for _e in _sib9):
+                    try:
+                        os.unlink(_q9)
+                    except OSError:
+                        pass
 
     # #655: the zero-copper scan must run BEFORE the reconcile gate --
     # when the only casualties are phase-3 victims outside every bucket,
@@ -4502,6 +5007,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"with NO copper yet absent from every failure bucket "
                   f"-- enrolling: {', '.join(_zero9)}")
             _rec_names.extend(_zero9)
+        if os.environ.get('KICAD_SCOPE_DEBUG'):
+            print(f"  [scope-dbg] reconcile buckets: "
+                  f"failed_single={len(failed_single)} "
+                  f"failed_multipoint={len(failed_multipoint)} "
+                  f"custody={len(_custody_nets9)} "
+                  f"victims={len(_victim_retry_names)} "
+                  f"open_single={len(open_single)} "
+                  f"zero={len(_zero9)}")
+            for _m in failed_multipoint[:6]:
+                print(f"  [scope-dbg] fm entry: {_m['net_name']} "
+                      f"oracle={_m.get('oracle_only', False)} "
+                      f"pads={len(_m.get('failed_pads', []))}")
         print(f"\nFinal reconciliation: retrying {len(_rec_names)} "
               f"incomplete/custody net(s) against the finished board: "
               f"{', '.join(_rec_names)}")
@@ -4520,8 +5037,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # while every retry claims success. With them the sub-run routes
             # the exact endpoints, and a blocked link feeds the standard
             # frontier analysis -> rip ladder -> retries.
-            if _custody_links9:
-                _rk['oracle_links'] = _custody_links9
+            # #659: the oracle summary check's GENUINE opens ride the same
+            # channel as the plane finalize's custody links. Without them the
+            # sub-run's own model both skips the net ("Already fully
+            # connected" -- the very verdict KiCad just contradicted) and,
+            # past the skip, derives no missing edge: the net was enrolled,
+            # retried, and reported success while shipping the same open.
+            _forced659 = list(_custody_links9)
+            if _oracle_open_links:
+                _rec_set659 = set(_rec_names)
+                _fresh659 = [l for l in _oracle_open_links
+                             if l[0] in _rec_set659]
+                if _fresh659:
+                    print(f"  Oracle-open forced links (#659): "
+                          f"{len(_fresh659)} exact endpoint pair(s) on "
+                          f"{', '.join(sorted({l[0] for l in _fresh659}))}")
+                    _forced659.extend(_fresh659)
+            if _forced659:
+                _rk['oracle_links'] = _forced659
             # #527 follow-up: the inner run forwards the SAME progress
             # callback, so its routing/rescue/cleanup messages were pixel-
             # identical to the first pass's and the GUI looked like it ran
@@ -4646,6 +5179,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         _rk['oracle_links'] = _kept572
                 _flh = dict(getattr(batch_route, '_forced_link_hints',
                                     None) or {})
+                # #651's kill switch has to cover THIS self-grant too (audit
+                # finding): KICAD_RECONCILE_RIP_ESCALATION=0 was honoured for
+                # the #103 hint list but not here, so a run with the
+                # escalation "disabled" could still grant itself rip
+                # authority for one more lap. Given what motivated the
+                # switch -- the RAM-bus massacre, 3 failures in and 13
+                # zero-copper ships out -- a half-open kill switch is worse
+                # than none, because it reads as off.
+                if not _esc_on:
+                    return False
                 if not _flh or '*' in (_rk.get('rip_existing_nets') or []):
                     return False
                 _have = set(_rk.get('rip_existing_nets') or [])
@@ -4917,6 +5460,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         except Exception as _e10:
             print(f"  post-reconciliation re-audit failed: {_e10}")
 
+    _late_orphan_sweep659(
+        pcb_data, output_file, return_results,
+        locals().get('results_data'), _protect_unfinished, keep_input_copper,
+        skip_routing)
+
     # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
     # net -- bus membership, ordering, failures with named blockers, rips,
     # rescues, Phase-3 tap order, costs -- assembled from state.
@@ -5086,7 +5634,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # the diagnostics (blockers / open pad pairs) -- they are
                 # why the caller asked -- and the gate report itself.
                 _keep6 = {k: results_data.get(k) or []
-                          for k in ('blockers', 'pad_pairs_open')}
+                          for k in ('blockers', 'pad_pairs_open',
+                                    'boxed_in')}
                 results_data = _empty_results_data()
                 results_data.update(_keep6)
                 _action = ("DISCARDED this run's changes (nothing is applied "
@@ -5127,12 +5676,47 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # A gate that crashes must not take the run's board with it.
             print(f"  (improvement gate skipped: {_ge})")
 
+    # ONE compact authoritative line per outermost run, CLI and GUI alike.
+    # The big JSON_SUMMARY lines are 6-20KB each with scope semantics the log
+    # itself has to warn about; this one is the merged tally in <1KB.
+    # `final_reconcile` is True only on the outermost call (every sub-run --
+    # plane finalize, end-of-run reconcile -- passes False, the #562 recursion
+    # guard), so nested passes never emit a second MIN line. Deliberately the
+    # LAST thing printed: after the reconcile block, so it carries the merged
+    # tally, and after the improvement gate, so it describes the copper that
+    # is actually on the board -- a rejected run says so here, because its
+    # tallies describe a board that was reverted. It is the last line
+    # batch_route prints, NOT the last line of a run: main()'s .kicad_pro
+    # DRC-floor writeback reports after this, so read the log for the line,
+    # do not tail it.
+    if final_reconcile:
+        _emit_summary_min(_gate_report)
+
     if return_results:
         return successful, failed, total_time, results_data
     return successful, failed, total_time
 
 if __name__ == "__main__":
     import argparse
+    # #666's scoped cap move calls `write_placed_output`, which makes this a
+    # registered pose author (LEVER_REGISTRY). Declare it for the whole
+    # process: this `__main__` is one long inline block rather than a call to
+    # a main(), so an ExitStack closed at interpreter exit gives exactly the
+    # lifetime a `with` around the block would. Best-effort -- a flat install
+    # without py_placer/ must still route.
+    try:
+        import atexit
+        import contextlib
+        # Imported for its SIDE EFFECT only (it appends py_placer/ to
+        # sys.path), and without binding a name, because two later blocks in
+        # this same __main__ import it under that name for the same reason.
+        __import__('_placer_path')
+        from placement.provenance import declare_lever as _declare_lever
+        _lever_stack = contextlib.ExitStack()
+        _lever_stack.enter_context(_declare_lever('route.py', sys.argv))
+        atexit.register(_lever_stack.close)
+    except Exception:                                        # noqa: BLE001
+        pass
     # Windows consoles default to cp1252, which can't encode the non-ASCII glyphs
     # some log lines use (arrows in bus order, Ohm in impedance, the fab-floor
     # warning sign); reconfigure stdout/stderr to UTF-8 so a print never crashes

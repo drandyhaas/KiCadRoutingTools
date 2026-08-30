@@ -202,6 +202,7 @@ def get_dialog_settings(dialog):
         'fanout_bga_cap_max_displacement': dialog.fanout_tab.bga_options.cap_max_displacement.GetValue(),
         'fanout_bga_cap_max_displacement_cap': dialog.fanout_tab.bga_options.cap_max_displacement_cap.GetValue(),
         'fanout_bga_cap_displacement_growth': dialog.fanout_tab.bga_options.cap_displacement_growth.GetValue(),
+        'fanout_bga_cap_board_edge_clearance': dialog.fanout_tab.bga_options.cap_board_edge_clearance.GetValue(),
         'fanout_bga_cap_max_passes': dialog.fanout_tab.bga_options.cap_max_passes.GetValue(),
         'fanout_bga_cap_prefix': dialog.fanout_tab.bga_options.cap_prefix.GetValue(),
         'fanout_bga_cap_allow_rotation': dialog.fanout_tab.bga_options.cap_allow_rotation.GetValue(),
@@ -655,6 +656,9 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.optimize_caps.SetValue(settings['fanout_bga_optimize_caps'])
     if 'fanout_bga_cap_capture_radius' in settings:
         dialog.fanout_tab.bga_options.cap_capture_radius.SetValue(settings['fanout_bga_cap_capture_radius'])
+    if 'fanout_bga_cap_board_edge_clearance' in settings:
+        dialog.fanout_tab.bga_options.cap_board_edge_clearance.SetValue(
+            settings['fanout_bga_cap_board_edge_clearance'])
     if 'fanout_bga_cap_near_margin' in settings:
         dialog.fanout_tab.bga_options.cap_near_margin.SetValue(settings['fanout_bga_cap_near_margin'])
     if 'fanout_bga_cap_step' in settings:

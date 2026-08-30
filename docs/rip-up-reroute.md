@@ -151,9 +151,9 @@ does: the file front rewrites the output as the input board; the GUI front
 returns an empty change-set, which is a true rollback rather than an un-apply
 because the plugin's applier runs *after* `batch_route` returns and therefore
 never touches the live board. The GUI also receives the verdict as
-`results_data['improvement_gate']`; diagnostics (`blockers`, `pad_pairs_open`)
-survive a rejection, since they are what the caller needs in order to try
-something different.
+`results_data['improvement_gate']`; diagnostics (`blockers`, `pad_pairs_open`,
+`boxed_in`) survive a rejection, since they are what the caller needs in order
+to try something different.
 
 The gate is skipped when it cannot mean anything: a run whose input board has
 no copper at all (nothing to regress), an in-place run (`output == input`,

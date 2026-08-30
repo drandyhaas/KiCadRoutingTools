@@ -14,7 +14,7 @@ from typing import List, Dict, Optional
 from terminal_colors import RED, RESET
 from kicad_parser import is_kicad_10, board_uses_name_nets, KICAD_10_MIN_VERSION
 from kicad_writer import (
-    generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr,
+    generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr, via_net_name,
     generate_gr_text_sexpr, swap_segment_nets_at_positions,
     swap_via_nets_at_positions, swap_pad_nets_in_content, modify_segment_layers,
     move_copper_text_to_silkscreen, move_copper_graphics_to_silkscreen,
@@ -180,14 +180,12 @@ def write_routed_output(
             print(f"Removed {removed_v2} swapped input via(s) from the output "
                   f"(post-transform strip)")
 
-    # Generate routing text (new segments and vias)
-    # Vias this run adds inherit the board's own via protection convention
-    # rather than a hardcoded tenting policy (#489 §8).
-    from kicad_writer import prevailing_via_protection
-    _default_via_attrs = prevailing_via_protection(getattr(pcb_data, 'vias', None))
+    # Generate routing text (new segments and vias). A via this run ADDS emits
+    # no protection token and inherits the board's `(setup ...)` policy -- see
+    # kicad_writer.via_protection_sexpr for why copying the board's prevailing
+    # PER-VIA spec onto it was retired.
     routing_text = _generate_routing_text(results, all_swap_vias, net_id_to_name if kicad_v10 else None,
-                                          all_swap_segments=all_swap_segments,
-                                          default_via_attrs=_default_via_attrs)
+                                          all_swap_segments=all_swap_segments)
 
     # Add debug paths if enabled
     if debug_lines:
@@ -223,7 +221,12 @@ def _apply_diff_pair_target_swaps(content: str, target_swap_info: List[Dict],
         return content
 
     def _net_name(net_id):
-        return net_id_to_name.get(net_id) if net_id_to_name else None
+        # #749 D: ONE resolver. net 0 is absent from every map, so a no-net
+        # element used to fall to the numeric dialect on a name-net board -- and
+        # for a VIA a numeric ref emitted alongside a protection spec was a
+        # shape extract_vias could not read back at all (#748). This file has
+        # FOUR copies of this function; they all get it.
+        return via_net_name(net_id, net_id_to_name)
 
     print(f"Applying {len(target_swap_info)} target swap(s) to output file...")
     for swap in target_swap_info:
@@ -287,7 +290,12 @@ def _apply_single_ended_target_swaps(content: str, single_ended_target_swap_info
         return content
 
     def _net_name(net_id):
-        return net_id_to_name.get(net_id) if net_id_to_name else None
+        # #749 D: ONE resolver. net 0 is absent from every map, so a no-net
+        # element used to fall to the numeric dialect on a name-net board -- and
+        # for a VIA a numeric ref emitted alongside a protection spec was a
+        # shape extract_vias could not read back at all (#748). This file has
+        # FOUR copies of this function; they all get it.
+        return via_net_name(net_id, net_id_to_name)
 
     print(f"Applying {len(single_ended_target_swap_info)} single-ended target swap(s) to output file...")
     for swap in single_ended_target_swap_info:
@@ -328,7 +336,12 @@ def _apply_polarity_swaps(content: str, pad_swaps: List[Dict], pcb_data,
         return content
 
     def _net_name(net_id):
-        return net_id_to_name.get(net_id) if net_id_to_name else None
+        # #749 D: ONE resolver. net 0 is absent from every map, so a no-net
+        # element used to fall to the numeric dialect on a name-net board -- and
+        # for a VIA a numeric ref emitted alongside a protection spec was a
+        # shape extract_vias could not read back at all (#748). This file has
+        # FOUR copies of this function; they all get it.
+        return via_net_name(net_id, net_id_to_name)
 
     print(f"Applying {len(pad_swaps)} polarity fix(es) (swapping target pads and stubs)...")
     for swap in pad_swaps:
@@ -373,20 +386,27 @@ def _apply_polarity_swaps(content: str, pad_swaps: List[Dict], pcb_data,
 
 def _generate_routing_text(results: List[Dict], all_swap_vias: List,
                            net_id_to_name: Dict = None,
-                           all_swap_segments: List = None,
-                           default_via_attrs: Dict = None) -> str:
+                           all_swap_segments: List = None) -> str:
     """Generate routing text for new segments and vias.
 
-    default_via_attrs: protection spec for vias that carry none of their own --
-    the board's prevailing convention (#489 §8).
+    A via carries its OWN protection spec or none at all; there is no
+    board-derived default any more (see kicad_writer.via_protection_sexpr).
     """
     routing_text = ""
 
     def _net_name(net_id):
-        return net_id_to_name.get(net_id) if net_id_to_name else None
+        # #749 D: ONE resolver. net 0 is absent from every map, so a no-net
+        # element used to fall to the numeric dialect on a name-net board -- and
+        # for a VIA a numeric ref emitted alongside a protection spec was a
+        # shape extract_vias could not read back at all (#748). This file has
+        # FOUR copies of this function; they all get it.
+        return via_net_name(net_id, net_id_to_name)
 
     def _via_attrs(via):
-        return getattr(via, 'tenting_attrs', None) or default_via_attrs
+        # The via's OWN spec, or nothing. A via with no spec emits no token and
+        # inherits the board's `(setup ...)`; it does not inherit the majority
+        # spec of OTHER vias (see add_tracks_and_vias_to_pcb).
+        return getattr(via, 'tenting_attrs', None)
 
     # Add segments and vias from routing results
     for result in results:

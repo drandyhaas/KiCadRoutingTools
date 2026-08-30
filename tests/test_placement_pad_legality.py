@@ -84,17 +84,34 @@ class TestPartPads(unittest.TestCase):
         c = abs(math.cos(math.radians(45)))
         self.assertAlmostEqual(w, 2 * (1.0 * c + 0.5 * c), places=6)
 
-    def test_npth_hole_inflation_matches_fanout_convention(self):
-        clearance = 0.09
-        fp = FakeFP('H1', 5, 5, pads=[FakePad(5, 5, 3.2, 3.2, net=0,
-                                              layers=('*.Cu',), drill=2.2,
-                                              pad_type='np_thru_hole')])
-        pp = PartPads(fp, clearance)
-        self.assertEqual(pp.n_pads, 0)          # no copper
-        self.assertEqual(len(pp.holes_local), 1)
-        (_ox, _oy, r) = pp.holes_local[0]
-        grow = max(0.0, defaults.NPTH_TO_TRACK_CLEARANCE - clearance)
-        self.assertAlmostEqual(r, 2.2 / 2.0 + grow, places=9)
+    def test_npth_hole_inflation_and_STANDOFF_match_the_fanout_convention(self):
+        """Renamed by #761, because the old name was for the half that was
+        right.
+
+        It asserted the INFLATION -- which did match fanout_clearance -- and
+        stopped there, at `clearance = 0.09` only, below the 0.20 fab floor.
+        The comparison did not match: legality tested that circle against raw
+        pad rects and added nothing, so the modelled standoff was
+        `max(0, requirement - clearance)` and collapsed to zero at and above
+        the requirement. This arm now pins BOTH halves, and the second
+        clearance is above the floor, where the old assertion is vacuous."""
+        for clearance in (0.09, 0.25):
+            fp = FakeFP('H1', 5, 5, pads=[FakePad(5, 5, 3.2, 3.2, net=0,
+                                                  layers=('*.Cu',), drill=2.2,
+                                                  pad_type='np_thru_hole')])
+            pp = PartPads(fp, clearance)
+            with self.subTest(clearance=clearance):
+                self.assertEqual(pp.n_pads, 0)          # no copper
+                self.assertEqual(len(pp.holes_local), 1)
+                (_ox, _oy, r) = pp.holes_local[0]
+                grow = max(0.0, defaults.NPTH_TO_TRACK_CLEARANCE - clearance)
+                self.assertAlmostEqual(r, 2.2 / 2.0 + grow, places=9)
+                # ...and the standoff the consumers actually charge.
+                (_kx, _ky, kr) = pp.hole_keepouts(5, 5, 0)[0]
+                self.assertAlmostEqual(
+                    kr - 2.2 / 2.0,
+                    max(clearance, defaults.NPTH_TO_TRACK_CLEARANCE),
+                    places=9)
 
     def test_paste_only_aperture_skipped(self):
         fp = FakeFP('C1', 0, 0, pads=[FakePad(0, 0, 1, 1, layers=('F.Paste',))])

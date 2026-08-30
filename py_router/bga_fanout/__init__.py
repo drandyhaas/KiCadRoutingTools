@@ -604,6 +604,14 @@ def create_single_ended_route(
     )
 
 
+# Keyed on (path, resolved, declared), because `manage_vias` runs once per
+# RETRY pass and the floor cannot change between them -- four identical
+# lines per fanout is noise, not information. PROCESS-wide, like
+# obstacle_map's `_HOLE_CLR_ANNOUNCED`, and with the same trap: an
+# in-process A/B sees the line on ONE arm only.
+_H2H_ANNOUNCED = set()
+
+
 def manage_vias(
     routes: List[FanoutRoute],
     pcb_data: 'PCBData',
@@ -645,10 +653,22 @@ def manage_vias(
     enough to make the pair legal anyway. Whether this bites needs measuring
     on a real fine-pitch BGA before anyone claims it does.
 
-    `via_in_pad_conflict` also prices its drill floor at the flat
-    `routing_defaults.HOLE_TO_HOLE_CLEARANCE` rather than the board's own
-    `min_hole_to_hole` -- the D9/D11 substitute-a-constant class, unclosed
-    here (qfn_fanout resolves it board-first, wrapped at the fab floor).
+    `via_in_pad_conflict`'s drill floor was the OTHER gap here -- priced at
+    the flat `routing_defaults.HOLE_TO_HOLE_CLEARANCE` rather than the
+    board's own `min_hole_to_hole`, the D9/D11 substitute-a-constant class.
+    **Closed by #756**, in the shape `qfn_fanout` and `underpad.py` already
+    use: board-first through `list_nets.board_floor`, wrapped raise-only at
+    the fab floor. Both of its arms take that one number; it deliberately does
+    NOT adopt the 0.45 `pad_hole_to_hole` the via-nudge charges for the same
+    via-drill-to-pad-drill pair (see the comment at the resolution site).
+
+    **The cost, which the via-nudge half does not pay:** a refusal here
+    DROPS the escape rather than searching again, so a tighter floor can
+    turn an escaped ball into a failed net. The via-nudge answers that with
+    a two-rung ladder; this pass has no second rung to descend to. Stated
+    at the resolution site with the numbers.
+
+    The self-blindness above is untouched and still open.
     """
     def find_nearby_via(x: float, y: float, net_id: int, max_dist: float):
         """Find an existing via on the same net within max_dist of position."""
@@ -674,6 +694,92 @@ def manage_vias(
     # are static and manage_vias runs before any of ITS vias exist.
     from routing_defaults import HOLE_TO_HOLE_CLEARANCE
     from kicad_parser import pad_drill_capsule
+    # #756: DRILL FLOOR, board-first and RAISE-only. `via_in_pad_conflict`
+    # below spaced every drill it places at the flat HOLE_TO_HOLE_CLEARANCE and
+    # read the board nowhere -- the gap this function's own docstring named as
+    # "the D9/D11 substitute-a-constant class, unclosed here". So a board
+    # declaring min_hole_to_hole 0.3 got its via-in-pad drills spaced at 0.2,
+    # while check_drc graded them at 0.3 (`_pin_up`, check_drc.py:3686) and
+    # flagged the pairs this pass had just placed.
+    #
+    # Shape follows the sibling that already does it -- `underpad.py`'s
+    # `_h2h_decl`/`_h2h_fab`/`max` block -- so a reviewer diffs the two and
+    # sees one rule. NOT verbatim, and an earlier draft of this comment said
+    # it was: underpad spells the fab lookup `.get('hole_to_hole', 0.0)` and
+    # this one defaults to the packaged floor instead, which is the safer
+    # miss. RAISE-ONLY IN THE CODE, not only in this comment: `board_floor`
+    # is board-AUTHORITATIVE and will happily hand back a declared 0.10, so
+    # the fab floor is wrapped in explicitly.
+    #
+    # A REFUSAL HERE DROPS THE ESCAPE, and that is the cost of the
+    # board-first read. Unlike the via-nudge -- which re-sweeps at the fab
+    # floor rather than abandon a repair -- `via_in_pad_conflict`'s reason
+    # sends the route to `via_blocked_routes`, whose tracks are removed and
+    # whose net joins `failed_nets`. So a tighter floor can turn an escaped
+    # ball into a failed net whenever it is the only thing refusing it.
+    # Measured on this file's own rig shape: a foreign 0.30 pad drill at
+    # 0.45mm separation is ADDED on a board declaring nothing and BLOCKED on
+    # one declaring 0.25.
+    #
+    # ON A REAL BOARD IT IS INERT, and the honest way to say that is a
+    # HEAD-vs-BASE comparison rather than a 0.20-vs-0.30 one. An independent
+    # re-measurement ran `bga_fanout.py -c U4` on orangecrab_ext_pll with a
+    # planted project at 0.20 and at 0.30: the two DECLARATIONS differ (2
+    # tracks / 12 vias vs 1 / 12), but that difference is PRE-EXISTING --
+    # `underpad.py` already read the board -- and running the same pair on
+    # the base tree gives byte-identical summaries on both arms. So #756's
+    # change to THIS function is inert there. An earlier version of this
+    # comment cited '9 tracks, 20 vias on both arms', which does not
+    # reproduce and compared the wrong pair.
+    #
+    # A ladder like the via-nudge's would need this pass to have a second
+    # rung to descend to, and it does not.
+    #
+    # NARROW ON PURPOSE. Both arms keep the 0.20 `hole_to_hole` fab term; this
+    # does NOT adopt the 0.45 `pad_hole_to_hole` that
+    # placement/fanout_clearance's via-nudge charges for the very same
+    # via-drill-to-pad-drill pair. The two passes disagree by 0.25mm about that
+    # pair and #756 reconciles neither: doing so would move keep-outs on every
+    # fine-pitch BGA via-in-pad escape and needs its own before/after. Named
+    # here rather than silently unified.
+    #
+    # Layer count off `board_info`, matching the `copper` this function already
+    # derives for `fab_floor_ladder` below -- one board, one count.
+    from list_nets import board_floor as _board_floor
+    _cu_n = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
+    _h2h_fab = fab_floor_min(_cu_n).get('hole_to_hole', HOLE_TO_HOLE_CLEARANCE)
+    # GUARDED, unlike the qfn/underpad twins. `board_floor("")` ->
+    # `read_design_rules("")` -> `splitext("")[0] + '.kicad_pro'`, probed
+    # relative to the PROCESS CWD, so a stray file of that name is read as
+    # this board's rules -- and `build_pcb_data_from_board` yields
+    # `source_path=""` for an unsaved board, which is the GUI fanout path.
+    # Measured before the guard: a CWD project declaring 5.0 made this pass
+    # announce "Hole-to-hole 5mm (from the board's own min_hole_to_hole)"
+    # for a board it had never read. `isdir` too, for a directory-shaped
+    # path, which `splitext` leaves intact.
+    _src_path = getattr(pcb_data, 'source_path', "") or ""
+    if not _src_path or os.path.isdir(_src_path):
+        _h2h_decl, _h2h_src = HOLE_TO_HOLE_CLEARANCE, 'fixed default'
+    else:
+        _h2h_decl, _h2h_src = _board_floor(_src_path, 'hole_to_hole', None,
+                                           HOLE_TO_HOLE_CLEARANCE)
+    _h2h = max(_h2h_decl, _h2h_fab)
+    # `routes` guard: `manage_vias([])` is a real call shape and used to
+    # read the project and announce a floor for a pass with nothing to
+    # place. The dedupe is because this runs once per RETRY pass.
+    if routes and _h2h_src == 'board constraint':
+        _key = (_src_path, _h2h, _h2h_decl)
+        if _key in _H2H_ANNOUNCED:
+            pass
+        elif _h2h_decl > _h2h_fab:
+            _H2H_ANNOUNCED.add(_key)
+            print(f"  Hole-to-hole {_h2h:g}mm (from the board's own "
+                  f"min_hole_to_hole)")
+        elif _h2h_decl < _h2h_fab:
+            _H2H_ANNOUNCED.add(_key)
+            print(f"  Board min_hole_to_hole {_h2h_decl:g}mm is below the "
+                  f"{_h2h_fab:g}mm fab hole-to-hole floor; using "
+                  f"{_h2h:g}mm.")
     drill_capsules = []
     for _pads in pcb_data.pads_by_net.values():
         for _p in _pads:
@@ -693,7 +799,7 @@ def manage_vias(
         for ov in pcb_data.vias:
             if math.hypot(ov.x - x, ov.y - y) < \
                     vdr + (getattr(ov, 'drill', 0) or 0) / 2.0 \
-                    + HOLE_TO_HOLE_CLEARANCE - 1e-6:
+                    + _h2h - 1e-6:
                 return "drill hole-to-hole vs an existing via"
         for (c1x, c1y), (c2x, c2y), prad in drill_capsules:
             ddx, ddy = c2x - c1x, c2y - c1y
@@ -703,7 +809,7 @@ def manage_vias(
                 d = math.hypot(x - (c1x + t * ddx), y - (c1y + t * ddy))
             else:
                 d = math.hypot(x - c1x, y - c1y)
-            if d < vdr + prad + HOLE_TO_HOLE_CLEARANCE - 1e-6:
+            if d < vdr + prad + _h2h - 1e-6:
                 return "drill hole-to-hole vs a pad drill"
         vr = v_size / 2.0
         for s in pcb_data.segments:
@@ -2332,7 +2438,10 @@ def _generate_bga_fanout_core(footprint: Footprint,
         no_inner_top_layer: If True, inner pads cannot use F.Cu (top layer)
         escape_method: 'auto' (default) runs the channel router and, if it drops
             any ball, retries with the under-pad grid escape and keeps whichever
-            escapes more (issue #288). 'channel' is the 45-stub + channel router (with
+            escapes more (issue #288). KICAD_FANOUT_AUTO_DOGBONE=1 opts the
+            retry into a dogbone-first ladder instead -- rejected as the
+            default by the #669 sets1-5 corpus A/B (+10 incomplete, +59 DRC).
+            'channel' is the 45-stub + channel router (with
             differential-pair support). 'underpad' is the dense-array grid escape
             (issue #122): every signal ball drops a via in its pad and routes
             straight UNDER the pad field on an inner layer, jogging into a
@@ -3514,68 +3623,114 @@ def _generate_bga_fanout_core(footprint: Footprint,
               f"--via-size / --track-width / --clearance")
 
     # Under-pad auto-fallback (issue #288). On dense/locked-neighbour arrays the
-    # channel engine deterministically drops balls the under-pad grid escape
-    # handles (ecp5_mini HyperRAM 11/14 -> 14/14, icepi_zero ECP5 120/124 ->
-    # 124/124). When the channel pass dropped any ball, re-run with underpad and
-    # keep whichever escapes more; ties keep the channel result (surface
-    # routing, no via-in-pad).
+    # channel engine deterministically drops balls the grid escapes handle
+    # (ecp5_mini HyperRAM 11/14 -> 14/14, icepi_zero ECP5 120/124 ->
+    # 124/124). When the channel pass dropped any ball, re-run with underpad
+    # and keep whichever escapes strictly more; ties keep the channel result
+    # (surface routing, no via-in-pad). KICAD_FANOUT_AUTO_DOGBONE=1 opts the
+    # retry into a dogbone-first ladder (underpad only if dogbone still
+    # dropped; a dogbone/underpad tie keeps dogbone -- fewer via-in-pad).
+    # The ladder was REJECTED as the default by the #669 sets1-5 corpus A/B
+    # (+10 incomplete nets, +59 kicad DRC vs underpad-only: dogbone gap vias
+    # claim inter-ball streets that chains not authored for dogbone collide
+    # with). Explicit --escape-method dogbone stays the populated-array
+    # doctrine when the chain's params are chosen for it.
     if failed_nets and escape_method == 'auto':
-        print(f"\n  Channel escape dropped {len(failed_nets)} ball(s) "
-              f"({', '.join(failed_nets)}) - retrying with the under-pad grid "
-              f"escape (issue #288)...")
-        _prog(f"channel escape dropped {len(failed_nets)} ball(s) - "
-              f"retrying under-pad...")
-        up_tracks, up_vias, up_vias_rm, up_failed = _generate_bga_fanout_core(
-            footprint, pcb_data, net_filter=net_filter,
-            diff_pair_patterns=diff_pair_patterns, layers=underpad_layers,
-            layer_costs=underpad_layer_costs,  # filtered to match (#519)
-            track_width=track_width, clearance=clearance,
-            diff_pair_gap=diff_pair_gap, exit_margin=exit_margin,
-            primary_escape=primary_escape,
-            force_escape_direction=force_escape_direction,
-            rebalance_escape=rebalance_escape,
-            via_size=via_size, via_drill=via_drill,
-            check_for_previous=check_for_previous,
-            no_inner_top_layer=no_inner_top_layer, escape_method='underpad',
-            grid_step=grid_step, _pad_filter=_pad_filter,
-            _ignore_prefanned=_ignore_prefanned, _single_pass=_single_pass,
-            same_net_pad_clearance=same_net_pad_clearance,
-            progress_callback=progress_callback,
-            cancel_check=cancel_check)
-        # #621: same rule as the escape-priority comparison above -- a retry the
-        # budget cut short reports a short failed list because untried balls are
-        # not failures, so it must not be allowed to displace the completed
-        # channel result on that basis.
-        if cancel_check and cancel_check():
-            # No fall-through print here: the "did not improve (0 dropped)"
-            # line reads as the under-pad pass having succeeded perfectly,
-            # which is the opposite of what a truncated pass measured.
-            #
-            # The guard prefers the incumbent's copper over a truncated pass's
-            # silence. Measured on ulx3s U1 (cancel ~4s in) by neutering it: with
-            # the guard 26 balls escape (96 segments, 10 vias); without it the
-            # truncated pass wins and 0 do (29 segments, 144 plane barrels).
-            # It is WRONG when the completed engine would itself have discarded
-            # the incumbent -- orangecrab_ext_pll U4, where the under-pad pass
-            # legitimately concludes "0/0 signals escaped, 54 already-fanned
-            # skipped" and its EMPTY result wins, so the finished run ships no
-            # signal escape at all (drc total 937, matching this guard turned
-            # OFF) while a cancelled run keeps 22 channel escapes (1108). A
-            # cancelled pass and a legitimately-empty one return the same
-            # ([], []) from here, so the divergence is DISCLOSED, not guessed.
-            print(f"  Under-pad escape: cancelled mid-pass -- keeping the "
-                  f"channel result and its {len(failed_nets)} dropped ball(s); "
-                  f"a truncated pass has measured nothing. Those balls are "
-                  f"UNRESCUED, not clearance failures -- and this copper is "
-                  f"kept on the strength of a comparison that never ran, so a "
-                  f"completed run may legitimately ship less of it.")
-        elif len(up_failed) < len(failed_nets):
-            print(f"  Under-pad escape wins: {len(failed_nets)} -> "
-                  f"{len(up_failed)} dropped ball(s); using it")
-            return up_tracks, up_vias, up_vias_rm, up_failed
-        else:
-            print(f"  Under-pad escape did not improve ({len(up_failed)} dropped) - "
-                  f"keeping the channel result")
+        def _auto_retry(method):
+            return _generate_bga_fanout_core(
+                footprint, pcb_data, net_filter=net_filter,
+                diff_pair_patterns=diff_pair_patterns, layers=underpad_layers,
+                layer_costs=underpad_layer_costs,  # filtered to match (#519)
+                track_width=track_width, clearance=clearance,
+                diff_pair_gap=diff_pair_gap, exit_margin=exit_margin,
+                primary_escape=primary_escape,
+                force_escape_direction=force_escape_direction,
+                rebalance_escape=rebalance_escape,
+                via_size=via_size, via_drill=via_drill,
+                check_for_previous=check_for_previous,
+                no_inner_top_layer=no_inner_top_layer, escape_method=method,
+                grid_step=grid_step, _pad_filter=_pad_filter,
+                _ignore_prefanned=_ignore_prefanned, _single_pass=_single_pass,
+                same_net_pad_clearance=same_net_pad_clearance,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check)
+
+        # KICAD_FANOUT_AUTO_DOGBONE=0 reverts to the pre-#669 underpad-only
+        # retry (the corpus A/B control arm).
+        ladder = (['dogbone', 'underpad'] if env_knobs.FANOUT_AUTO_DOGBONE
+                  else ['underpad'])
+        best_label, best = None, None
+        for method in ladder:
+            label = 'Dog-bone' if method == 'dogbone' else 'Under-pad'
+            if best is None:
+                print(f"\n  Channel escape dropped {len(failed_nets)} ball(s) "
+                      f"({', '.join(failed_nets)}) - retrying with the "
+                      f"{label.lower()} escape "
+                      f"(issue{'s #288/#669' if method == 'dogbone' else ' #288'})...")
+                _prog(f"channel escape dropped {len(failed_nets)} ball(s) - "
+                      f"retrying {label.lower()}...")
+            else:
+                # The prior grid escape completed but still dropped balls ->
+                # the next rung gets its shot (underpad can serve arrays with
+                # no legal inter-ball gap site at all).
+                print(f"  {best_label} escape still dropped {len(best[3])} "
+                      f"ball(s) ({', '.join(best[3])}) - also retrying with "
+                      f"the {label.lower()} escape (issue #288)...")
+                _prog(f"{best_label.lower()} still dropped {len(best[3])} "
+                      f"ball(s) - retrying {label.lower()}...")
+            res = _auto_retry(method)
+            # #621: same rule as the escape-priority comparison above -- a
+            # retry the budget cut short reports a short failed list because
+            # untried balls are not failures, so it must not be allowed to
+            # displace a completed result on that basis. cancel_check is
+            # level-triggered (once true it stays true), so checking after
+            # each pass attributes the truncation to the pass it landed in.
+            if cancel_check and cancel_check():
+                # No fall-through print here: the "did not improve (0 dropped)"
+                # line reads as the retry pass having succeeded perfectly,
+                # which is the opposite of what a truncated pass measured.
+                #
+                # The guard prefers the incumbent's copper over a truncated
+                # pass's silence. Measured on ulx3s U1 (cancel ~4s in) by
+                # neutering it: with the guard 26 balls escape (96 segments,
+                # 10 vias); without it the truncated pass wins and 0 do (29
+                # segments, 144 plane barrels). It is WRONG when the completed
+                # engine would itself have discarded the incumbent --
+                # orangecrab_ext_pll U4, where the under-pad pass legitimately
+                # concludes "0/0 signals escaped, 54 already-fanned skipped"
+                # and its EMPTY result wins, so the finished run ships no
+                # signal escape at all (drc total 937, matching this guard
+                # turned OFF) while a cancelled run keeps 22 channel escapes
+                # (1108). A cancelled pass and a legitimately-empty one return
+                # the same ([], []) from here, so the divergence is DISCLOSED,
+                # not guessed.
+                if best is None:
+                    print(f"  {label} escape: cancelled mid-pass -- keeping "
+                          f"the channel result and its {len(failed_nets)} "
+                          f"dropped ball(s); a truncated pass has measured "
+                          f"nothing. Those balls are UNRESCUED, not clearance "
+                          f"failures -- and this copper is kept on the "
+                          f"strength of a comparison that never ran, so a "
+                          f"completed run may legitimately ship less of it.")
+                else:
+                    print(f"  {label} escape: cancelled mid-pass -- "
+                          f"discarding it (a truncated pass has measured "
+                          f"nothing); the completed {best_label.lower()} "
+                          f"result stays in the contest.")
+                break
+            # Strictly-fewer wins; a tie keeps the earlier rung (dogbone over
+            # underpad: fewer via-in-pad).
+            if best is None or len(res[3]) < len(best[3]):
+                best_label, best = label, res
+            if not best[3]:
+                break
+        if best is not None:
+            if len(best[3]) < len(failed_nets):
+                print(f"  {best_label} escape wins: {len(failed_nets)} -> "
+                      f"{len(best[3])} dropped ball(s); using it")
+                return best
+            print(f"  {best_label} escape did not improve ({len(best[3])} "
+                  f"dropped) - keeping the channel result")
 
     # Write-list invariant (#508 findings 6/7): every surviving FanoutRoute
     # must have at least one track in the write list -- a route still counted
@@ -3985,8 +4140,13 @@ def main():
                         help='Component reference (auto-detected if not specified)')
     parser.add_argument('--layers', '-l', nargs='+', default=['F.Cu', 'B.Cu'],
                         help='Routing layers (default: F.Cu B.Cu)')
-    parser.add_argument('--track-width', '-w', type=float, default=defaults.BGA_TRACK_WIDTH,
-                        help=f'Track width in mm (default: {defaults.BGA_TRACK_WIDTH})')
+    # --width is an ALIAS (see the qfn_fanout twin): the two fanout CLIs used
+    # to disagree on the name for the same concept. dest stays `track_width`.
+    parser.add_argument('--track-width', '--width', '-w', type=float,
+                        default=defaults.BGA_TRACK_WIDTH,
+                        help=f'Track width in mm '
+                             f'(default: {defaults.BGA_TRACK_WIDTH}; '
+                             f'--width is an alias)')
     parser.add_argument('--clearance', type=float, default=defaults.BGA_CLEARANCE,
                         help=f'Track clearance in mm (default: {defaults.BGA_CLEARANCE})')
     parser.add_argument('--via-size', type=float, default=defaults.BGA_VIA_SIZE,
@@ -4037,7 +4197,9 @@ def main():
                              'stub -> staggered gap via, keeping ball-grid positions free of '
                              'barrels on the inner layers (the standard hand-layout escape). '
                              '"auto" = channel first, and if it drops any ball, retry with '
-                             'underpad and keep whichever escapes more (issue #288).')
+                             'underpad and keep whichever escapes more (issue #288; '
+                             'KICAD_FANOUT_AUTO_DOGBONE=1 opts the retry into a '
+                             'dogbone-first ladder, rejected as default by the #669 A/B).')
     parser.add_argument('--plane-net-layers', nargs='+', default=None,
                         metavar='NET:LAYER[,LAYER...]',
                         help="Declare the FUTURE plane plan: "
@@ -4313,6 +4475,11 @@ def main():
         # empty when the pass is off or the part has no plane balls.
         'plane_drop': dict(LAST_PLANE_DROP_REPORT),
     }
+    try:                       # #653: env knobs into the machine-readable
+        import env_knobs as _ek653   # summary, so a harness can detect a
+        summary['env_knobs'] = _ek653.active_env_knobs()   # dirty baseline
+    except Exception:          # without re-reading logs
+        pass
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
     return 0
 

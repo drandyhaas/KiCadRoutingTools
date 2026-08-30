@@ -1099,9 +1099,140 @@ def _grammar_inflate(hull, r):
     return out
 
 
+def _grammar_point_in_poly(x, y, poly):
+    """Even-odd ray cast; robust for the slightly non-convex polygons that
+    per-vertex board-bounds clamping can produce."""
+    inside = False
+    j = len(poly) - 1
+    for i in range(len(poly)):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if (yi > y) != (yj > y) and \
+                x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _grammar_seg_dist2(px, py, x1, y1, x2, y2):
+    dx, dy = x2 - x1, y2 - y1
+    L2 = dx * dx + dy * dy
+    if L2 <= 0:
+        ex, ey = px - x1, py - y1
+        return ex * ex + ey * ey
+    t = ((px - x1) * dx + (py - y1) * dy) / L2
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    ex, ey = px - (x1 + t * dx), py - (y1 + t * dy)
+    return ex * ex + ey * ey
+
+
+def _grammar_sheet_raster(sheet_polygon):
+    """Coarse raster of the background sheet for the #662 invariant-3b
+    check. Returns (x0, y0, sx, sy, nx, ny, free) with free a bytearray
+    (1 = sheet cell)."""
+    import math as _m
+    xs = [p[0] for p in sheet_polygon]
+    ys = [p[1] for p in sheet_polygon]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+    diag = _m.hypot(x1 - x0, y1 - y0) or 1.0
+    step = max(0.6, min(3.0, diag / 100.0))
+    nx = max(2, int(round((x1 - x0) / step)))
+    ny = max(2, int(round((y1 - y0) / step)))
+    sx = (x1 - x0) / nx
+    sy = (y1 - y0) / ny
+    free = bytearray(nx * ny)
+    for i in range(nx):
+        cx = x0 + (i + 0.5) * sx
+        for j in range(ny):
+            if _grammar_point_in_poly(cx, y0 + (j + 0.5) * sy, sheet_polygon):
+                free[i * ny + j] = 1
+    return (x0, y0, sx, sy, nx, ny, free)
+
+
+def _grammar_sheet_ok(raster, islands, carve_mm, dom_pts):
+    """#662 invariant 3b: True when the background sheet minus the islands
+    (each widened by carve_mm, the fill's clearance band) is still ONE
+    usable connected region. A detached piece counts as a severing only
+    when it holds a dominant-net pad/seed (its copper would ship as an
+    open or a weld obligation) or >=25% of the sheet; a source-less sliver
+    is culled by fill island removal and is not a severing."""
+    from collections import deque
+    x0, y0, sx, sy, nx, ny, base = raster
+    free = bytearray(base)
+    # Half a raster cell rides on the carve: a neck narrower than a cell is
+    # sampled unreliably, and a sub-millimetre neck is the confetti
+    # anti-pattern this invariant exists to reject, not connectivity.
+    carve_mm = carve_mm + 0.5 * max(sx, sy)
+    c2 = carve_mm * carve_mm
+    for poly in islands:
+        pxs = [p[0] for p in poly]
+        pys = [p[1] for p in poly]
+        i0 = max(0, int((min(pxs) - carve_mm - x0) / sx) - 1)
+        i1 = min(nx - 1, int((max(pxs) + carve_mm - x0) / sx) + 1)
+        j0 = max(0, int((min(pys) - carve_mm - y0) / sy) - 1)
+        j1 = min(ny - 1, int((max(pys) + carve_mm - y0) / sy) + 1)
+        n = len(poly)
+        for i in range(i0, i1 + 1):
+            cx = x0 + (i + 0.5) * sx
+            for j in range(j0, j1 + 1):
+                k = i * ny + j
+                if not free[k]:
+                    continue
+                cy = y0 + (j + 0.5) * sy
+                if _grammar_point_in_poly(cx, cy, poly):
+                    free[k] = 0
+                    continue
+                for e in range(n):
+                    ax, ay = poly[e]
+                    bx, by = poly[(e + 1) % n]
+                    if _grammar_seg_dist2(cx, cy, ax, ay, bx, by) <= c2:
+                        free[k] = 0
+                        break
+    total_free = sum(free)
+    if total_free == 0:
+        return False
+    # label connected components (4-neighbour flood fill)
+    comp = [0] * (nx * ny)
+    sizes = {}
+    ncomp = 0
+    for start in range(nx * ny):
+        if not free[start] or comp[start]:
+            continue
+        ncomp += 1
+        comp[start] = ncomp
+        size = 1
+        q = deque([start])
+        while q:
+            k = q.popleft()
+            i, j = divmod(k, ny)
+            for kk in ((k - ny) if i > 0 else -1,
+                       (k + ny) if i < nx - 1 else -1,
+                       (k - 1) if j > 0 else -1,
+                       (k + 1) if j < ny - 1 else -1):
+                if kk >= 0 and free[kk] and not comp[kk]:
+                    comp[kk] = ncomp
+                    size += 1
+                    q.append(kk)
+        sizes[ncomp] = size
+    if ncomp <= 1:
+        return True
+    meaningful = set()
+    for c, size in sizes.items():
+        if size >= 0.25 * total_free:
+            meaningful.add(c)
+    for px, py in dom_pts:
+        i = int((px - x0) / sx)
+        j = int((py - y0) / sy)
+        if 0 <= i < nx and 0 <= j < ny and comp[i * ny + j]:
+            meaningful.add(comp[i * ny + j])
+    return len(meaningful) <= 1
+
+
 def _grammar_zone_polygons(seeds_by_net, zone_polygon, board_bounds,
                            name_of, verbose=False,
-                           inflate_mm=2.0, link_mm=5.0, pads_by_net=None):
+                           inflate_mm=2.0, link_mm=5.0, pads_by_net=None,
+                           carve_mm=0.8):
     """#662: build {net_id: [polygons]} as background sheet + hull islands.
     Returns None when degenerate (a single seeded net, or the dominant net
     cannot be identified) so the caller falls back to Voronoi."""
@@ -1128,31 +1259,63 @@ def _grammar_zone_polygons(seeds_by_net, zone_polygon, board_bounds,
                      for nid in seeded), reverse=True)
     dom = scored[0][2]
     out = {dom: [list(zone_polygon)]}
+    # Invariant 3b: the background sheet must remain ONE connected region
+    # after every carve. Checked on a coarse raster against the islands
+    # committed so far; a severing island first shrinks its inflation,
+    # then demotes to tracks (the route step carries every plane net in
+    # its --nets, #562, so a demoted cluster is served by copper, just
+    # not by a zone).
+    raster = _grammar_sheet_raster(zone_polygon)
+    dom_pts = list((pads_by_net or {}).get(dom) or []) + list(seeded[dom])
+    committed = []
     n_islands = 0
+    n_shrunk = 0
+    n_demoted = 0
     for nid, pts in seeded.items():
         if nid == dom:
             continue
         polys = []
         for cl in _grammar_cluster(pts, link=link_mm):
-            hull = _grammar_hull(cl)
-            if hull is None:
-                # 1-2 points: a small box around them
-                xs = [p[0] for p in cl]; ys = [p[1] for p in cl]
-                m = inflate_mm
-                hull = [(min(xs) - m, min(ys) - m), (max(xs) + m, min(ys) - m),
-                        (max(xs) + m, max(ys) + m), (min(xs) - m, max(ys) + m)]
-            else:
-                hull = _grammar_inflate(hull, inflate_mm)
-            # clamp to board bounds (also keeps hulls off the edge band)
-            hull = [(min(max(x, bx0 + 0.3), bx1 - 0.3),
-                     min(max(y, by0 + 0.3), by1 - 0.3)) for x, y in hull]
-            polys.append(hull)
-        out[nid] = polys
+            placed = None
+            for r in (inflate_mm, inflate_mm / 2.0, 0.0):
+                hull = _grammar_hull(cl)
+                if hull is None:
+                    # 1-2 points (or collinear): a small box around them
+                    xs = [p[0] for p in cl]; ys = [p[1] for p in cl]
+                    m = max(r, 0.5)
+                    hull = [(min(xs) - m, min(ys) - m), (max(xs) + m, min(ys) - m),
+                            (max(xs) + m, max(ys) + m), (min(xs) - m, max(ys) + m)]
+                elif r > 0:
+                    hull = _grammar_inflate(hull, r)
+                # clamp to board bounds (also keeps hulls off the edge band)
+                hull = [(min(max(x, bx0 + 0.3), bx1 - 0.3),
+                         min(max(y, by0 + 0.3), by1 - 0.3)) for x, y in hull]
+                if _grammar_sheet_ok(raster, committed + [hull], carve_mm,
+                                     dom_pts):
+                    placed = hull
+                    if r != inflate_mm:
+                        n_shrunk += 1
+                        print(f"  Grammar pour: '{name_of.get(nid, nid)}' "
+                              f"island shrunk (inflate {inflate_mm} -> {r}) "
+                              f"to keep the background sheet connected")
+                    break
+            if placed is None:
+                n_demoted += 1
+                print(f"  Grammar pour: '{name_of.get(nid, nid)}' cluster of "
+                      f"{len(cl)} point(s) demoted to tracks -- its island "
+                      f"severs the background sheet (#662 invariant 3b)")
+                continue
+            committed.append(placed)
+            polys.append(placed)
+        if polys:  # a fully-demoted net gets NO zone entry (tracks serve it)
+            out[nid] = polys
         n_islands += len(polys)
     print(f"  Grammar pour (#662): '{name_of.get(dom, dom)}' = background "
           f"sheet; {n_islands} hull island(s) across "
-          f"{len(seeded) - 1} net(s) "
-          f"(KICAD_GRAMMAR_POUR=0 reverts to Voronoi)")
+          f"{len(seeded) - 1} net(s)"
+          + (f"; {n_shrunk} shrunk" if n_shrunk else "")
+          + (f"; {n_demoted} demoted to tracks" if n_demoted else "")
+          + " (KICAD_GRAMMAR_POUR=0 reverts to Voronoi)")
     return out
 
 
@@ -1647,7 +1810,8 @@ def _generate_multinet_layer_zones(
              for nid in augmented_vias_by_net}, verbose,
             pads_by_net={nid: [(pd.global_x, pd.global_y)
                                for pd in pcb_data.pads_by_net.get(nid, [])]
-                         for nid in augmented_vias_by_net})
+                         for nid in augmented_vias_by_net},
+            carve_mm=zone_clearance + min_thickness / 2.0)
         if _gz is not None:
             zone_polygons = _gz
             _skip_voronoi = True
@@ -1762,6 +1926,8 @@ def _generate_multinet_layer_zones(
     resistance_results = {}
     copper_oz = stackup_copper_oz(pcb_data, layer)
     for net_id, polygons in zone_polygons.items():
+        if not polygons:  # every island demoted (#662 invariant 3b)
+            continue
         net = pcb_data.nets.get(net_id)
         net_name = net.name if net else f"net_{net_id}"
         mst_edges = net_mst_edges.get(net_id, [])
@@ -4599,6 +4765,11 @@ Examples:
     import json as _json
     _summary.setdefault('complete', True)
     _summary.setdefault('status', 'ok')
+    try:                       # #653: env knobs into the machine-readable
+        import env_knobs as _ek653   # summary, so a harness can detect a
+        _summary['env_knobs'] = _ek653.active_env_knobs()   # dirty baseline
+    except Exception:          # without re-reading logs
+        pass
     print('JSON_SUMMARY: ' + _json.dumps(_summary, sort_keys=True, default=str),
           flush=True)
     return 0

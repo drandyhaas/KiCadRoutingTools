@@ -21,8 +21,10 @@ Examples:
 
 import argparse
 import json
+import math
 import os
 import re
+from collections import defaultdict
 from fnmatch import fnmatch, fnmatchcase
 from kicad_parser import parse_kicad_pcb, find_components_by_type
 
@@ -576,7 +578,7 @@ def net_class_memberships(pcb_path, nets, design_rules=None):
     """{net_id: set of net-class names} from the sibling .kicad_pro: the
     explicit ``netclass_assignments`` entry UNION every matching
     ``netclass_patterns`` glob (KiCad merges memberships). The SHARED membership
-    resolver -- net_clearance_map_by_id and the #549 .kicad_dru track-clearance
+    resolver -- net_clearance_map_by_id and the .kicad_dru track-clearance
     channel both resolve through this, so router and grader cannot drift on who
     is in a class. Nets with no membership are omitted (not mapped to set()).
 
@@ -786,6 +788,104 @@ def print_design_rules(pcb_path):
           f"--clearance {eff['drc_clearance']} "
           f"--hole-to-hole-clearance {eff['drc_hole_to_hole']} "
           f"--board-edge-clearance {eff['drc_edge_clearance']}")
+
+
+def net_islands(pcb, net_id, tol=0.05):
+    """The net's copper as ISLANDS: union-find over coincident points.
+
+    Returns a list of components, largest first; each component is a list of
+    `(kind, obj, points)` where kind is 'seg' | 'via' | 'pad'. Two items join
+    when a point of one lies within `max(tol, radius_a, radius_b)` of a point
+    of the other -- a pad's radius is half its larger dimension, a via's half
+    its diameter, a track endpoint's a 60 um nub.
+
+    Lives HERE, not in a py_tools CLI, because two front-ends need it:
+    `net_forensics` (which is where it was written) and `check_reachability`'s
+    auto-widen, which has to find the nearest OTHER island of a net without
+    rasterising the board. The reachability tool used to reach across and
+    import `net_forensics._components` -- a sibling CLI's private name, from a
+    directory `_path` does not put on `sys.path`, so the ImportError would have
+    escaped as exit **1**, which in that tool is the CAGED geometry verdict.
+
+    The pair scan is bucketed by a uniform grid at the largest join radius, so
+    a net with thousands of endpoints does not pay the O(P^2) all-pairs walk
+    the first version did. The join rule is unchanged.
+    """
+    items = []
+    for s in pcb.segments:
+        if s.net_id == net_id:
+            items.append(('seg', s, [(s.start_x, s.start_y),
+                                     (s.end_x, s.end_y)]))
+    for v in pcb.vias:
+        if v.net_id == net_id:
+            items.append(('via', v, [(v.x, v.y)]))
+    for fp in pcb.footprints.values():
+        for p in fp.pads:
+            if p.net_id == net_id:
+                items.append(('pad', p, [(p.global_x, p.global_y)]))
+    parent = list(range(len(items)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    pts = []
+    for idx, (_, obj, ps) in enumerate(items):
+        r = (max(obj.size_x, obj.size_y) / 2 if hasattr(obj, 'size_x')
+             else getattr(obj, 'size', 0) / 2 or 0.06)
+        for (x, y) in ps:
+            pts.append((x, y, idx, r))
+    # Bucket at the largest join radius: two points can only join if they are
+    # within it, so only the 3x3 neighbourhood of a point's cell can hold a
+    # partner. Same answer as the all-pairs scan, without the P^2.
+    # `or tol` was not a guard: with tol=0 and every radius 0 (a caller
+    # asking for exact coincidence only) the fallback is 0 too, and the
+    # bucket index divides by it. Any positive cell is correct here -- the
+    # 3x3 neighbourhood still contains every point within `cell`.
+    cell = max([tol] + [p[3] for p in pts]) or 1e-6
+    buckets = defaultdict(list)
+    for i, (x, y, _a, _r) in enumerate(pts):
+        buckets[(int(math.floor(x / cell)), int(math.floor(y / cell)))].append(i)
+    for i, (x1, y1, a, r1) in enumerate(pts):
+        cx, cy = int(math.floor(x1 / cell)), int(math.floor(y1 / cell))
+        for gx in (cx - 1, cx, cx + 1):
+            for gy in (cy - 1, cy, cy + 1):
+                for j in buckets.get((gx, gy), ()):
+                    if j <= i:
+                        continue
+                    x2, y2, b, r2 = pts[j]
+                    if a != b and math.hypot(x1 - x2, y1 - y2) <= max(tol, r1, r2):
+                        union(a, b)
+    comps = defaultdict(list)
+    for idx in range(len(items)):
+        comps[find(idx)].append(items[idx])
+    return sorted(comps.values(), key=len, reverse=True)
+
+
+def island_gap(comp_a, comp_b):
+    """Closest approach between two islands: (mm, (x, y), (x, y)).
+
+    The unclosed MST edge between them, which is the number a rip-set decision
+    needs. `(None, None, None)` when either island has no points. One
+    implementation because there were two, in the same file, one printing and
+    one returning a dict, and they could drift.
+    """
+    best = (None, None, None)
+    for _k, _o, ps in comp_a:
+        for p1 in ps:
+            for _k2, _o2, ps2 in comp_b:
+                for p2 in ps2:
+                    d = math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+                    if best[0] is None or d < best[0]:
+                        best = (d, p1, p2)
+    return best
 
 
 def find_differential_pairs(pcb_data):

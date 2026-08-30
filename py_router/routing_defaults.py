@@ -132,7 +132,41 @@ RIPUP_BLOCKER_SELECT_CHOICES = ('count', 'near-target', 'bidir', 'mincut', 'cost
 
 # Layer direction preference (0=horizontal, 1=vertical, 255=none)
 # Alternates H/V starting with horizontal on top layer
-DIRECTION_PREFERENCE_COST = 250  # Cost penalty for non-preferred direction (0 = disabled).
+DIRECTION_PREFERENCE_COST = 250  # Cost penalty per off-axis move (0 = disabled).
+# 5 -> 250: REVERTS #663 (be73378b), re-screened with the ORACLE LEGS LIVE.
+#
+# #663 took this 250 -> 5 and reported -22 incomplete nets on sets1-5. That screen
+# ran on the old cloud image, which ships NO KiCad -- so find_kicad_cli() returned
+# None, oracle_reconnect returned available=False, and every oracle leg (the plane
+# finalize audit, the #589 re-audit, the oracle-summary check) was a no-op. Re-screened
+# at ONE commit with kicad/kicad:10.0.0 in the image, sets1-5, decision rule
+# pre-registered before any arm reported:
+#
+#     dirs    verdict (incomplete nets)   real DRC
+#       5            95                      58     <- #663's value
+#      25           116                      57
+#      50           117                      62
+#     250            89                      43     <- this
+#
+# 250 wins on BOTH axes (-6 nets; -15 DRC over 8 boards better / 1 worse) and lands
+# exactly on v0.21.2's own numbers -- paired against the released engine it is
+# W0/L0/T69 with identical DRC. This ONE constant accounted for 100% of main's
+# regression against 0.21.2; nothing else in the 21 commits since the tag moved it.
+#
+# 25 and 50 are worse than either end: a genuine interior WORST, not a plateau.
+# Do not "split the difference" here without measuring.
+#
+# Why #663 concluded the opposite: its 5 came from a 4-point sweep on ONE board
+# (orangecrab), and that board is an outlier for this knob -- a single-board
+# optimum that did not generalize. Do not re-derive this from one board.
+#
+# Two follow-ups measured and RETIRED, so they need not be re-litigated:
+#   * Coherence: making the oracle-weld/plane sub-configs follow this constant
+#     instead of their hardcoded 250 moved nothing (94/59 vs 95/58). The VALUE
+#     mattered; the mixed state did not.
+#   * Diff pairs at base/10 (the theory that a coupled pair cannot pay an
+#     off-axis tax): +6 nets and +52 real DRC vs plain 250, over 5 boards worse
+#     / 1 better. Refuted; the divisor was dropped.
 # 250 is a compromise: 5000 (5x a move) reproduced human H/V lane style but
 # starved routability on dense boards (sets 6-11 A/B: +104 incomplete nets,
 # kbic65 98.9%->15.1%, route.py ~2x slower); the old 50 (~5% of a move) was

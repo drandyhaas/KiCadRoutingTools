@@ -31,7 +31,6 @@ reason (not just the symptom) when falling back.
 """
 from __future__ import annotations
 
-import glob
 import os
 import re
 import shutil
@@ -39,6 +38,14 @@ import subprocess
 import sys
 import tempfile
 from typing import Dict, List, Optional, Tuple
+
+import kicad_locate
+from swig_compat import patch_swig_iterators as _patch_swig_iterators
+
+# #795: repin_netcodes_from_file() walks board.GetTracks() in the pcbnew
+# subprocess, which imports THIS module -- so the alias must be restored here
+# too, not only via kicad_parser.
+_patch_swig_iterators()
 
 EXACT_FILL_TIMEOUT = 300
 
@@ -158,15 +165,48 @@ def _win_version_key(path: str):
     <ver>. Plain string sorting orders "9.0" above "10.0", which would hand a
     KiCad 10 user their old KiCad 9 interpreter.
 
-    Matches BOTH separators instead of using os.path: off-Windows,
-    os.path.dirname does not split a backslash path, so an os.path-based key
-    collapses to a constant -- correct on the only platform that matters, and
-    untestable everywhere else.
+    Thin wrapper over kicad_locate.path_version_key (#763 moved the platform
+    knowledge to ONE module); kept because it is this module's published name
+    for the key and is pinned by tests. `(0,)` rather than `()` for an
+    unversioned path, preserving the original ordering contract.
     """
-    m = re.search(r'[\\/]KiCad[\\/]([0-9][0-9.]*)[\\/]', path)
-    if not m:
-        return (0,)
-    return tuple(int(p) for p in re.findall(r'\d+', m.group(1))) or (0,)
+    return kicad_locate.path_version_key(path) or (0,)
+
+
+def _this_interpreter() -> str:
+    """Path of a REAL python interpreter for THIS process ('' if none found).
+
+    Inside KiCad's embedded python -- i.e. the GUI plugin -- `sys.executable`
+    is the HOST C++ BINARY (`.../MacOS/pcbnew`, `pcbnew.exe`), not python3.
+    Handing that to subprocess.run([exe, script, board, ...]) does not run a
+    script: pcbnew treats every argument as a FILE TO OPEN, so the exact-fill
+    refill re-launched the APPLICATION -- once per call -- and KiCad answered
+    "Pcbnew:OpenProjectFiles() takes a single filename" (the output path in
+    that argv does not exist yet, which is the empty filename in the message).
+
+    So reconstruct the interpreter from sys.prefix, the same way the plugin's
+    deps_check._find_python_executable does for `-m pip`. Returning '' is
+    correct when nothing is found: the caller then falls through to the
+    platform paths below rather than spawning the host binary.
+    """
+    exe = sys.executable or ""
+    if exe and os.path.basename(exe).lower().startswith('python'):
+        return exe                      # already a python (CLI, KiCad python3)
+    prefix = sys.prefix or getattr(sys, 'base_prefix', '') or ""
+    if not prefix:
+        return ""
+    v = sys.version_info
+    if sys.platform == 'win32':
+        cands = [os.path.join(prefix, 'python.exe'),
+                 os.path.join(prefix, 'Scripts', 'python.exe')]
+    else:
+        cands = [os.path.join(prefix, 'bin', n) for n in
+                 (f'python{v.major}.{v.minor}', f'python{v.major}',
+                  'python3', 'python')]
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    return ""
 
 
 def kicad_python_candidates() -> List[str]:
@@ -176,45 +216,23 @@ def kicad_python_candidates() -> List[str]:
     `py_tools/validate_pcb_data`) so a platform's install layout is described
     ONCE. Each caller still verifies -- they want different modules (pcbnew
     here, pcbnew + wx for the GUI launchers).
+
+    The platform layouts themselves live in `kicad_locate` (#763): they were
+    duplicated here and in install_plugin.py, and BOTH copies hardcoded drive
+    C:, so a KiCad on D: was invisible to every consumer. `_this_interpreter()`
+    stays here -- it is about THIS process (the GUI's pcbnew host binary), not
+    about where KiCad is installed.
     """
-    cands = [os.environ.get('KICAD_PYTHON') or '',
-             # THIS interpreter, when it is already KiCad's python (the GUI
-             # plugin) or a Linux system python with pcbnew installed.
-             sys.executable,
-             "/Applications/KiCad/KiCad.app/Contents/Frameworks/"
-             "Python.framework/Versions/Current/bin/python3"]
-    # Windows installs into a VERSIONED directory
-    # (C:\Program Files\KiCad\10.0\bin\python.exe). The unversioned path
-    # kept below exists on no KiCad >= 6, so globbing is the only thing that
-    # finds a real Windows install -- without it find_kicad_python() returned
-    # None for EVERY Windows user and every exact-fill consumer silently
-    # degraded to its raster approximation (#647).
-    for base in (r"C:\Program Files\KiCad", r"C:\Program Files (x86)\KiCad"):
-        base = os.path.expandvars(base)
-        cands.extend(sorted(glob.glob(os.path.join(base, '*', 'bin',
-                                                   'python.exe')),
-                            key=_win_version_key, reverse=True))
-        cands.append(os.path.join(base, 'bin', 'python.exe'))
-    cands.append("/usr/bin/python3")  # Linux distro KiCad ships pcbnew here
-    seen, out = set(), []
-    for c in cands:
-        if c and c not in seen:
-            seen.add(c)
-            out.append(c)
-    return out
+    return kicad_locate.kicad_python_candidates(
+        # THIS interpreter, when it is already KiCad's python (the GUI plugin)
+        # or a Linux system python with pcbnew installed. _this_interpreter(),
+        # NOT sys.executable: in the GUI the latter is the pcbnew HOST BINARY
+        # and spawning it opens the app instead of running a script (see
+        # _this_interpreter's docstring).
+        this_interpreter=_this_interpreter())
 
 
 _KICAD_PYTHON_MEMO: List[Optional[str]] = []
-
-
-def _windows_versioned_pythons():
-    """Standard Windows installs are VERSIONED (C:\\Program Files\\KiCad\\
-    10.0\\bin\\python.exe); the versionless path above matches none of them,
-    which silently disabled every exact-fill consumer on Windows. Newest
-    version first."""
-    import glob
-    return sorted(glob.glob(r"C:\Program Files\KiCad\*\bin\python.exe"),
-                  reverse=True)
 
 
 def find_kicad_python() -> Optional[str]:
@@ -235,8 +253,13 @@ def find_kicad_python() -> Optional[str]:
         return _KICAD_PYTHON_MEMO[0]
     found = None
     for cand in kicad_python_candidates():
-        if cand == sys.executable and 'pcbnew' in sys.modules:
-            found = cand           # the GUI plugin: already KiCad's python
+        # The free settle: this IS the running interpreter and pcbnew is
+        # already imported, so no probe can tell us anything new. Requires
+        # `cand is sys.executable` LITERALLY -- a path DERIVED from sys.prefix
+        # (the GUI case, see _this_interpreter) is a reconstruction, so it
+        # gets probed like any other candidate rather than trusted.
+        if cand and cand == sys.executable and 'pcbnew' in sys.modules:
+            found = cand           # the GUI plugin on a python-exe front
             break
         if not os.path.isfile(cand):
             continue
@@ -356,6 +379,9 @@ def _polygon_area(poly) -> float:
 
 _REFILL_MEMO: Dict[tuple, dict] = {}
 _REFILL_MEMO_CAP = 8
+# Keys whose refill FAILED (audit finding): remember the "no" so N consumers
+# do not each pay a pcbnew subprocess to rediscover it.
+_REFILL_FAILED: set = set()
 
 
 def _refill_memo_key(board_file: str, project_from: str = None):
@@ -404,6 +430,13 @@ def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
     if kpy is None:
         return None
     _mk = _refill_memo_key(board_file, project_from)
+    # FAILURES are memoized too (audit finding): the memo used to store only
+    # successes, so a board whose refill fails re-spawned a pcbnew subprocess
+    # for every consumer and every oracle round -- the slowest possible way to
+    # learn the same "no" repeatedly. Keyed on content like the success path,
+    # so the next edit to the board retries for real.
+    if _mk is not None and _mk in _REFILL_FAILED:
+        return None
     if _mk is not None and _mk in _REFILL_MEMO:
         import copy as _copy
         return _copy.deepcopy(_REFILL_MEMO[_mk])
@@ -434,12 +467,27 @@ def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
             if verbose:
                 print(f"  (exact-fill refill failed: rc={r.returncode} "
                       f"{(r.stderr or '').strip()[-200:]})")
+            if _mk is not None:
+                if len(_REFILL_FAILED) >= _REFILL_MEMO_CAP:
+                    _REFILL_FAILED.clear()
+                _REFILL_FAILED.add(_mk)
             return None
         with open(filled, 'r', encoding='utf-8') as f:
             text = f.read()
+    except subprocess.TimeoutExpired:
+        # A TIMEOUT is not remembered as a failure: it is a budget verdict,
+        # not a property of the board, and a later step may legitimately have
+        # more headroom. (The kicad-cli twin has _ORACLE_TIMED_OUT for that.)
+        if verbose:
+            print("  (exact-fill refill timed out)")
+        return None
     except Exception as e:
         if verbose:
             print(f"  (exact-fill unavailable: {e})")
+        if _mk is not None:
+            if len(_REFILL_FAILED) >= _REFILL_MEMO_CAP:
+                _REFILL_FAILED.clear()
+            _REFILL_FAILED.add(_mk)
         return None
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -749,8 +797,14 @@ def exact_unconnected(board_file: str, net_names=None, pcb_data=None,
     # ORIGINAL board mid-plan -- refilling it would price the oracle against a
     # board missing every step's copper. When pcb_data carries a provider it IS
     # the current board, so ask it. Same {(net, layer): [poly, ...]} shape.
-    # (plane_fragility.py has consumed this provider since #424; the oracle was
-    # the last exact-fill consumer still insisting on a file.)
+    # (plane_fragility.py has consumed this provider since #424. The oracle
+    # was MEANT to be the last consumer still insisting on a file, but it
+    # never adopted this: all three of its call sites -- kicad_oracle's rounds
+    # loop and its for-else refetch, and repair_planes -- still pass no
+    # pcb_data, so from the oracle this branch is dead and every round pays a
+    # file round-trip + pcbnew refill. Audit finding; left as-is rather than
+    # wired blind, because the oracle mutates the board FILE between rounds
+    # and a live provider would have to be re-derived each round to match.)
     provider = getattr(pcb_data, 'exact_fill_provider', None)
     if provider is not None:
         try:
@@ -827,16 +881,49 @@ def exact_unconnected(board_file: str, net_names=None, pcb_data=None,
             pts = []
             for i, s in enumerate(csegs):
                 if comp_of_seg[i] == root:
+                    # BOTH ends (audit, #659): a component whose only contact
+                    # with a pad is at a segment's END was credited to nothing
+                    # and, worse, a component whose START merely passed over a
+                    # foreign-layer pad was credited to it.
                     pts.append((s.start_x, s.start_y, s.layer))
+                    pts.append((s.end_x, s.end_y, s.layer))
             for j, v in enumerate(cvias):
                 if j < len(comp_of_via) and comp_of_via[j] == root:
                     pts.append((v.x, v.y, None))
             if not pts:
                 continue
-            has_pad = any(
-                _m.hypot(p.global_x - x, p.global_y - y)
-                <= max(p.size_x, p.size_y) / 2.0 + 0.06
-                for p in pads for x, y, _l in pts)
+
+            def _pad_reaches(p, x, y, lyr):
+                """Could this pad actually TOUCH this point -- same layer,
+                not just the same XY?
+
+                The old test was pure XY, so an SMD pad on F.Cu credited a
+                B.Cu component sitting under it. Measured on daisho:
+                /ddr2/DM6's dead 3-segment B.Cu component starts at
+                (124.50, 87.50), the centre of U1.AB9 -- an F.Cu-only SMD pad
+                -- so has_pad was True, no link was emitted, and the
+                authoritative deletion below never got to look at it. That is
+                the fragment that then survived eleven chain steps.
+
+                This filter only decides whether to ASK: the caller's
+                _delete_stranded_link_fragment re-derives the verdict from the
+                authoritative graph. So erring toward emitting costs one
+                cheap check, while erring toward skipping loses the fragment
+                for good -- the filter must be conservative in THAT
+                direction."""
+                if _m.hypot(p.global_x - x, p.global_y - y) > \
+                        max(p.size_x, p.size_y) / 2.0 + 0.06:
+                    return False
+                if lyr is None:
+                    return True      # via barrel: spans layers, any pad plausible
+                from kicad_parser import pad_is_plated_through
+                if pad_is_plated_through(p):
+                    return True      # plated barrel ties every copper layer
+                _pl = p.layers or ()
+                return lyr in _pl or any(str(_l).startswith('*') for _l in _pl)
+
+            has_pad = any(_pad_reaches(p, x, y, lyr)
+                          for p in pads for x, y, lyr in pts)
             if not has_pad:
                 x, y, lyr = pts[0]
                 links.append((net.name, (x, y, lyr, 'track'),

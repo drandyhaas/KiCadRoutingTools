@@ -362,6 +362,23 @@ def _stub_swap_rescue(pcb_data, net_id, config, state, results,
                     pcb_data, net_id, config, layer_map)
                 if state.working_obstacles is not None and \
                         state.net_obstacles_cache is not None:
+                    # #803: REMOVE the old entry from the working map before
+                    # replacing it. update_net_obstacles_after_routing only
+                    # swaps the cache dict entry -- it never touches the map --
+                    # so without this the previous object's cells are stranded
+                    # there for the rest of the run while the recomputed
+                    # object's are added on top: the net is counted TWICE.
+                    # Every other commit path does this remove/recompute/add
+                    # cycle (rip_up_reroute x3, sync_pcb_data_segments, the
+                    # phase-3 pair); this one skipped the remove.
+                    # Measured on glasgow_revC: +3V3 stranded 30510 cells here
+                    # and added 30983, which is exactly the
+                    # "blocked_cells: +30510 unaccounted" the #309 audit
+                    # reported for the whole run.
+                    if net_id in state.net_obstacles_cache:
+                        remove_net_obstacles_from_cache(
+                            state.working_obstacles,
+                            state.net_obstacles_cache[net_id])
                     update_net_obstacles_after_routing(
                         pcb_data, net_id, result, config,
                         state.net_obstacles_cache)
@@ -744,6 +761,21 @@ def route_single_ended_nets(
             total_iterations += result['iterations']
             # Record success (inline version to avoid circular import)
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
+            # In-loop stub-debris trim (KICAD_STUB_DEBRIS_TRIM=0 reverts):
+            # prune the stub branches this route left unused and any via
+            # they leave dangling NOW -- before the obstacle-cache
+            # recompute below -- so the freed cells are routable by the
+            # very next net instead of blocking until sweep_dead_ends at
+            # cleanup. Multipoint mains keep everything: their stubs are
+            # Phase-3 landing sites.
+            if env_knobs.STUB_DEBRIS_TRIM and not result.get('is_multipoint'):
+                from pcb_modification import trim_net_stub_debris
+                _td_s, _td_v = trim_net_stub_debris(
+                    pcb_data, net_id, result, config,
+                    swap_vias=getattr(state, 'all_swap_vias', None))
+                if _td_s or _td_v:
+                    print(f"    stub-debris trim: {_td_s} unused stub "
+                          f"segment(s), {_td_v} dangling via(s) freed")
             from plane_fragility import fragility_on_copper_change  # #466
             fragility_on_copper_change(config, pcb_data,
                                        result.get('new_segments'),
@@ -1208,6 +1240,19 @@ def route_single_ended_nets(
                             successful += 1
                             total_iterations += retry_result['iterations']
                             add_route_to_pcb_data(pcb_data, retry_result, debug_lines=config.debug_lines)
+                            # In-loop stub-debris trim -- same rationale as
+                            # the first-pass site above.
+                            if (env_knobs.STUB_DEBRIS_TRIM
+                                    and not retry_result.get('is_multipoint')):
+                                from pcb_modification import trim_net_stub_debris
+                                _td_s, _td_v = trim_net_stub_debris(
+                                    pcb_data, net_id, retry_result, config,
+                                    swap_vias=getattr(state, 'all_swap_vias',
+                                                      None))
+                                if _td_s or _td_v:
+                                    print(f"    stub-debris trim: {_td_s} unused "
+                                          f"stub segment(s), {_td_v} dangling "
+                                          f"via(s) freed")
                             from plane_fragility import fragility_on_copper_change  # #466
                             fragility_on_copper_change(config, pcb_data,
                                                        retry_result.get('new_segments'),
@@ -1422,7 +1467,37 @@ def route_single_ended_nets(
                             if retry_result:
                                 retry_fwd_cells = retry_result.pop('blocked_cells_forward', [])
                                 retry_bwd_cells = retry_result.pop('blocked_cells_backward', [])
-                                last_retry_blocked_cells = list(set(retry_fwd_cells + retry_bwd_cells))
+                                # #622 POCKET RIP (KICAD_POCKET_RIP=1, opt-in):
+                                # when one A* direction dies in a tiny enclosed
+                                # pocket, its blocked cells name the pocket's
+                                # wall -- but the UNION with the other,
+                                # wide-open direction lets that side's cell
+                                # counts swamp them, so the rip ladder never
+                                # rips the wall. Measured on the branch (SDQ11):
+                                # backward frozen at 44 iterations across 6
+                                # rips, its two wallers named at attempt 0 and
+                                # never ripped. Re-analyze the stuck direction's
+                                # cells ALONE so the ladder rips what actually
+                                # encloses it.
+                                _fi = retry_result.get('iterations_forward', 0)
+                                _bi = retry_result.get('iterations_backward', 0)
+                                _stuck = None
+                                if env_knobs.POCKET_RIP and _fi > 0 and _bi > 0:
+                                    if _fi <= _bi * 0.2 and retry_fwd_cells:
+                                        _stuck = ('forward', _fi, _bi,
+                                                  retry_fwd_cells)
+                                    elif _bi <= _fi * 0.2 and retry_bwd_cells:
+                                        _stuck = ('backward', _bi, _fi,
+                                                  retry_bwd_cells)
+                                if _stuck is not None:
+                                    last_retry_blocked_cells = list(set(_stuck[3]))
+                                    print(f"    Retry {_stuck[0]} pocket-stuck at "
+                                          f"{_stuck[1]} iters (other side "
+                                          f"{_stuck[2]}): re-analyzing its "
+                                          f"{len(last_retry_blocked_cells)} "
+                                          f"blocked cells only")
+                                else:
+                                    last_retry_blocked_cells = list(set(retry_fwd_cells + retry_bwd_cells))
                                 del retry_fwd_cells, retry_bwd_cells  # Free memory immediately
                                 if last_retry_blocked_cells:
                                     print(f"    Retry had {len(last_retry_blocked_cells)} blocked cells")
@@ -1457,11 +1532,18 @@ def route_single_ended_nets(
                 from routing_diagnostics import (static_boxin_hint,
                                                  preexisting_blocker_hint,
                                                  condense_hint)
-                hint = static_boxin_hint(result, config, pcb_data)
+                hint, _boxin = static_boxin_hint(result, config, pcb_data,
+                                                 return_verdict=True)
                 if hint:
                     hint = condense_hint(hint)
                     if hint:
                         print(f"  {hint}")
+                if _boxin:
+                    # The verdict, not just the sentence. `preexisting_blockers`
+                    # below has been recorded and serialized since #301; this
+                    # one -- the static-vs-congestion decision the whole retry
+                    # ladder turns on -- was print-only.
+                    record_net_event(state, net_id, "boxed_in_static", _boxin)
                 # #301: the blockers may be PRE-EXISTING copper (earlier run/
                 # step) the rip-up attribution cannot see -- name them and the
                 # --rip-existing-nets retry. Cells were popped into

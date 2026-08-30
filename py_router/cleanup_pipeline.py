@@ -370,15 +370,19 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # the dead-end sweep so the sweep's unsupported-via pass drops the
     # islands' freed this-run vias.
     _prog("orphan islands")
-    _oi_n, _oi_segs, _oi_strip, _oi_via_strip = remove_orphan_islands(
+    _oi_n, _oi_segs, _oi_strip, _oi_via_strip, _oi_nv = remove_orphan_islands(
         results, pcb_data, _sub_scope, keep_input_copper=keep_input_copper)
     out.input_strip_vias.extend(_oi_via_strip)
     counts['orphan_islands'] = _oi_n
     _trace('orphan_islands')
     strip.extend(_oi_strip)
     if _oi_n:
+        # Vias are named separately: since #659 an island can be a BARE VIA
+        # with no track at all, where "(0 segment(s))" alone would read as a
+        # no-op report.
         print(f"{label}Orphan islands: removed {_oi_n} pad-less copper "
-              f"island(s) ({_oi_segs} segment(s))")
+              f"island(s) ({_oi_segs} segment(s)"
+              + (f", {_oi_nv} via(s)" if _oi_nv else "") + ")")
 
     _prog("dead-end sweep")
     _de_segs, _de_vias, _de_strip = sweep_dead_ends(results, pcb_data, scope_net_ids,

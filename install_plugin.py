@@ -37,11 +37,23 @@ from typing import Optional
 # resolves no matter what cwd install_plugin.py is invoked from.
 from py_router.startup_checks import get_cargo_version
 
+# ...and put py_router itself on sys.path so the shared modules can be imported
+# FLAT, the way they import each other (kicad_exact_fill does `import
+# kicad_locate`). #763: this installer used to carry its own hardcoded copy of
+# every KiCad path, which is how a KiCad on drive D: became invisible to it.
+# Both modules are stdlib-only, so this stays safe on the bare system python an
+# installer runs under, before any dependency exists.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "py_router"))
+import kicad_locate  # noqa: E402
+from kicad_exact_fill import find_kicad_python  # noqa: E402
+
 
 PLUGIN_NAME = "KiCadRoutingTools"
 PLUGIN_DISPLAY_NAME = "KiCad Routing Tools"
 PLUGIN_IDENTIFIER = "com.github.drandyhaas.kicadroutingtools"
-KICAD_VERSIONS = ["10.0"]  # IPC plugins are KiCad 10+ only
+# IPC plugins are KiCad 10+ only. A KEY, not a fixed list: #763 made version
+# discovery a glob, so a KiCad 11 is found without a code change here.
+MIN_IPC_VERSION_KEY = (10,)
 # PCM (Plugin & Content Manager) package identifier from metadata.json. A PCM
 # install lands in the plugins directory under <identifier-with-dots-as-
 # underscores>/ next to our dev install, putting the same top-level modules on
@@ -50,55 +62,54 @@ PCM_IDENTIFIER = PLUGIN_IDENTIFIER
 
 
 def get_kicad_base_dir() -> Path:
-    """Get the KiCad documents directory for the current platform."""
-    system = platform.system()
+    """
+    Get the KiCad user-data directory for the current platform.
 
-    if system == "Linux":
-        return Path.home() / ".local" / "share" / "kicad"
-    elif system == "Darwin":  # macOS
-        return Path.home() / "Documents" / "KiCad"
-    elif system == "Windows":
-        # On modern Windows, Documents is usually redirected into OneDrive.
-        # Try the env vars OneDrive sets, then ~/OneDrive/Documents, then
-        # plain ~/Documents. Return the first that exists; if none do, fall
-        # back to the OneDrive path so a fresh install lands somewhere KiCad
-        # will pick up (KiCad itself follows the same redirection).
-        onedrive = (
-            os.environ.get("OneDrive")
-            or os.environ.get("OneDriveConsumer")
-            or os.environ.get("OneDriveCommercial")
-        )
-        candidates = []
-        if onedrive:
-            candidates.append(Path(onedrive) / "Documents" / "KiCad")
-        candidates.extend([
-            Path.home() / "OneDrive" / "Documents" / "KiCad",
-            Path.home() / "Documents" / "KiCad",
-        ])
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-        return candidates[0]
-    else:
-        raise RuntimeError(f"Unsupported operating system: {system}")
+    #763: the Windows branch preferred `%OneDrive%\\Documents\\KiCad` whenever
+    it merely EXISTED. OneDrive creates a `Documents` folder on machines where
+    the Documents known folder is NOT redirected into it, so the installer
+    wrote the plugin somewhere KiCad never reads and the reporter had to move
+    it by hand. `kicad_locate` asks Windows where Documents actually is (the
+    same known-folder API KiCad calls) and breaks ties on EVIDENCE -- a
+    candidate already holding a version directory -- rather than on existence.
+    """
+    return Path(kicad_locate.kicad_user_base())
 
 
 def get_kicad_plugin_dirs() -> list:
-    """Get KiCad 10+ plugin directories that exist on this machine."""
+    """
+    Get KiCad 10+ plugin directories that exist on this machine.
+
+    #763: the "is this version installed" test was a hardcoded
+    `C:\\Program Files\\KiCad\\<version>`, so on Windows a KiCad anywhere else
+    counted as absent, and the versions considered came from a fixed list, so a
+    KiCad 11 install would need a code change to be seen. Both are discovered
+    now: version directories are GLOBBED under the user base, and the install
+    roots come from the registry / every drive.
+
+    IPC plugins are KiCad 10+ only, so anything older is filtered out -- and
+    they live in `<base>/<version>/plugins`, not the SWIG `3rdparty/plugins`.
+
+    Returns:
+        List of (version, plugin_dir) tuples for KiCad 10+ versions found
+    """
     base_dir = get_kicad_base_dir()
-    plugin_dirs = []
-
-    for version in KICAD_VERSIONS:
-        version_dir = base_dir / version
-        if platform.system() == "Windows":
-            install_dir = Path(rf"C:\Program Files\KiCad\{version}")
-        else:
-            install_dir = version_dir
-        if install_dir.exists() or version_dir.exists():
-            plugin_dir = version_dir / "plugins"
-            plugin_dirs.append((version, plugin_dir))
-
-    return plugin_dirs
+    # Versions that already have a user-data directory -- the common case, and
+    # the only signal available on macOS/Linux where the install path carries
+    # no version.
+    versions = list(kicad_locate.kicad_user_versions(str(base_dir)))
+    # ...plus versions of the INSTALLS we found, so a KiCad that has never been
+    # launched (no user dir yet) is still a target.
+    for root in kicad_locate.kicad_install_roots():
+        v = kicad_locate.path_version_key(str(root) + os.sep)
+        if v:
+            name = ".".join(str(p) for p in v)
+            if name not in versions:
+                versions.append(name)
+    versions = [v for v in versions
+                if kicad_locate.version_key(v) >= MIN_IPC_VERSION_KEY]
+    versions.sort(key=kicad_locate.version_key, reverse=True)
+    return [(v, base_dir / v / "plugins") for v in versions]
 
 
 def get_source_dir() -> Path:
@@ -324,7 +335,41 @@ Examples:
         return 1
 
     versions_found = [v for v, _ in plugin_dirs]
+    # #763: an empty list used to print "KiCad versions found: " and then fail
+    # at the very end with nothing but a symlink hint -- the reporter's "it
+    # fails more or less silently ... nor any error". A failed search must say
+    # WHERE it looked, because from the outside a bad search and a bad install
+    # look identical.
+    if not versions_found:
+        print("KiCad versions found: NONE")
+        print()
+        if args.uninstall:
+            # Nothing to remove is a clean outcome, not an error -- don't send
+            # someone who is UNinstalling off to file a discovery bug.
+            print("Nothing to uninstall.")
+            return 0
+        print("Could not find a KiCad installation. Searched:")
+        for line in kicad_locate.describe_search():
+            print(f"  {line}")
+        print()
+        print("  If KiCad IS installed, tell the installer where:")
+        # Show the example in THIS platform's spelling -- a Windows path on a
+        # mac is noise the reader has to translate before they can act.
+        if platform.system() == "Windows":
+            print(r"    set KICAD_INSTALL_DIR=D:\Program Files\KiCad\10.0")
+            print(r"    set KICAD_PYTHON=D:\Program Files\KiCad\10.0\bin\python.exe")
+        elif platform.system() == "Darwin":
+            print("    export KICAD_INSTALL_DIR=/Applications/KiCad/KiCad.app")
+            print("    export KICAD_PYTHON=/Applications/KiCad/KiCad.app/Contents"
+                  "/Frameworks/Python.framework/Versions/Current/bin/python3")
+        else:
+            print("    export KICAD_INSTALL_DIR=/usr")
+            print("    export KICAD_PYTHON=/usr/bin/python3")
+        print("  and re-run. Please also report this with the lines above:")
+        print("    https://github.com/drandyhaas/KiCadRoutingTools/issues")
+        return 1
     print(f"KiCad versions found: {', '.join(versions_found)}")
+    print(f"Plugin base: {get_kicad_base_dir()}")
     print()
 
     if not args.uninstall:

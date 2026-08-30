@@ -191,7 +191,8 @@ def measure(state, edge_bands=None) -> Tuple:
     Two measured lessons live in this order. Run 4 demoted the AGGREGATE
     overlap_area below hpwl (it had vetoed a 44 mm hpwl homecoming over
     +0.73 mm^2 of courtyard kiss; run 2 measured it POSITIVELY correlated
-    with distance-to-truth, r = +0.72 -- courtyards carry their own margin
+    with distance-to-truth -- DISTANCE, not routed blocking
+    (docs/placement-predictors.md) -- r = +0.72; courtyards carry their own margin
     and human boards have a nonzero floor). Run 5 then shipped two 0402s
     STACKED because nothing above hpwl could see them: the stack-pair COUNT
     is the non-gameable per-pair channel (corpus-calibrated ZERO on all 33
@@ -306,7 +307,9 @@ def classify(state, intent=None, anchor_extent='auto') -> Tiers:
     else:
         thr = float(anchor_extent)
     t.threshold = round(thr, 3)
-    edge_refs = ({c['ref'] for c in intent.edge_connectors}
+    # edge_claims(): forcing a connector_affinity part into the anchor tier
+    # would let a class declaration reshape the reconstruction.
+    edge_refs = ({c['ref'] for c in intent.edge_claims()}
                  if intent is not None else set())
     t.edge = edge_refs & set(state.parts)   # run-4 F2: kept, not discarded
     t.anchors = {r for r in free
@@ -956,7 +959,8 @@ def prune_assignment(state, old: Dict[str, Tuple[float, float, float]],
                      notes: Optional[List[str]] = None,
                      edge_bands: Optional[Dict[str, float]] = None,
                      exempt: Optional[Set[str]] = None,
-                     evidenced: Optional[Set[str]] = None) -> List[str]:
+                     evidenced: Optional[Set[str]] = None,
+                     intent_probe=None) -> List[str]:
     """Per-part revert sweep after an ACCEPTED assignment (run-4 F3b).
 
     The stage gate is one board-wide lexicographic tuple, so an assignment
@@ -982,9 +986,38 @@ def prune_assignment(state, old: Dict[str, Tuple[float, float, float]],
     displaced hole coming home is gate-neutral by construction for the same
     reason, so requiring strict improvement there would reject the homecoming
     the whole fit exists to produce.
+
+    `intent_probe(ref) -> tuple` (#698) is the DECLARED-CLAIM conjunct on the
+    revert: a callable returning `ref`'s intent term vector at its CURRENT
+    pose, sampled either side of the tentative restore. A revert that would
+    make any term WORSE is refused -- termwise and never summed, matching
+    `quench.QuenchState.intent_ok`.
+
+    It is needed because the tuple this sweep compares has **no intent term at
+    all**, so a part that escaped a declared keep-out looks like a pure
+    hpwl loss and is reverted before the pass gate ever runs. Measured on
+    #698's fixture: `prune: reverted 1 per-part mis-move(s) ... U1`, on 20 of
+    20 seeds, undoing a seat that had cleared the keep-out.
+
+    It is a CONJUNCT rather than an `exempt` entry deliberately. `exempt` skips
+    the part entirely, so a ref that escaped a 0.1mm2 keep-out kiss would also
+    become immune to prune reverting a 30mm mis-move. With the probe the sweep
+    still reverts everything the tuple wants reverted, unless doing so would
+    re-break a declaration -- so it stays monotone by construction, now on
+    `(tuple, intent vector)` jointly, which is the property the paragraph above
+    claims.
+
+    Sampling `ref`'s vector mid-sweep is safe while OTHER parts are moving, and
+    `_incumbent_intent`'s docstring is why: the intent terms are
+    part-vs-DECLARED-GEOMETRY, never part-vs-part.
+
+    With `intent_probe=None` both vectors are `()`, `zip` is empty, `any(())`
+    is False, and the expression is character-for-character the original -- so
+    every existing caller is inert.
     """
     evidenced = evidenced or set()
     pruned: List[str] = []
+    held: List[str] = []
 
     def moved_dist(item):
         ref, (x, y, _r) = item
@@ -1001,16 +1034,35 @@ def prune_assignment(state, old: Dict[str, Tuple[float, float, float]],
         if math.hypot(p.x - x, p.y - y) < 1e-9 and abs(p.rot - rot) < 1e-9:
             continue
         base = measure(state, edge_bands)
+        base_intent = intent_probe(ref) if intent_probe is not None else ()
         cur = (p.x, p.y, p.rot)
         state.apply_move(ref, x, y, rot)
         after = measure(state, edge_bands)
-        if after < base or (after == base and ref not in evidenced):
+        after_intent = intent_probe(ref) if intent_probe is not None else ()
+        # `legality.EPS`, the same tolerance `quench.IntentProbe.licence` uses
+        # for the same question -- "did a declared term RISE". One pass must
+        # not answer it two ways.
+        undoes_intent = any(a > b + legality.EPS
+                            for a, b in zip(after_intent, base_intent))
+        wanted = (after < base or (after == base and ref not in evidenced))
+        if not undoes_intent and wanted:
             pruned.append(ref)
         else:
+            # `and wanted`: without it this credits the probe for every revert
+            # the TUPLE refused on its own, so a part the sweep was never going
+            # to touch is reported as "a declared claim justifies it". A note
+            # that overstates what the new conjunct did is how the conjunct
+            # comes to look load-bearing when it is inert.
+            if undoes_intent and wanted:
+                held.append(ref)
             state.apply_move(ref, *cur)
     if notes is not None and pruned:
         notes.append(f"prune: reverted {len(pruned)} per-part mis-move(s) "
                      f"the global gate could not see: {', '.join(pruned)}")
+    if notes is not None and held:
+        notes.append(f"prune: KEPT {len(held)} move(s) that a declared claim "
+                     f"justifies and the gate tuple cannot rank: "
+                     f"{', '.join(held)}")
     return pruned
 
 
@@ -1414,11 +1466,27 @@ def airwire_cluster_vectors(state, *, cluster_tol: float = 1.5,
     vectors should CLUSTER on the damage while a healthy design's long
     airwires point in unrelated directions.
 
-    They do not. Measured over the 33 in-repo boards and two recorded
-    perturbed ones, at the endorsed filters (nets of 2-4 pads, airwires over
-    8mm, three agreeing within 1.5mm):
+    They do not. Measured over the in-repo boards and two recorded perturbed
+    ones, at the endorsed filters (nets of 2-4 pads, airwires over 8mm, three
+    agreeing within 1.5mm) -- which are this function's defaults, so the
+    numbers below are what a plain call returns:
 
-        healthy boards firing          6 of 33, with support up to 112
+        healthy boards firing          18 of 22, with support up to 112
+
+    That count is over the boards git TRACKS under kicad_files/ (22), which is
+    the only fixed set: the directory also fills with generated boards, so a
+    plain glob of it gives 22 / 27 / 33+ depending on how used the working copy
+    is (see run_utils.corpus_boards). On the 33-entry glob it is 29 of 33.
+
+    The line originally recorded here said `6 of 33`, and that number could not
+    be reproduced -- not by today's code, and not by the code of the commit
+    that wrote it (f5cee877, 0812), which already measured 18 of 22 and 29 of
+    33 at these defaults on the same 22 tracked boards. It is corrected rather
+    than deleted because the refutation does not depend on it and is only
+    STRENGTHENED: the finding is "healthy boards fire", and far more of them
+    fire than was recorded. How `6` was obtained is unknown; the test below
+    now RE-MEASURES rather than grepping this text for a substring, so a
+    number in this docstring can no longer disagree with the code silently.
         a board translated by (4.5, -2.4), |v| = 5.1
                                        top cluster (6.7, 21.4), support 28
                                        -- not the damage, and not close
@@ -1559,6 +1627,97 @@ def solve_assignment(state, candidates: Dict[str, List[Tuple[float, float]]],
                                edge_pref=edge_pref or {})
 
 
+def _body_exempt_refs(state):
+    """Refs whose body may legitimately swallow, or be swallowed by, another.
+
+    Cached on the state. Two classes only, and both are MEASURED necessary on
+    the 33-board corpus, not assumed:
+
+      marker  (mount_hole / fiducial / testpoint) -- orangecrab_ext_pll ships
+              FID2 wholly inside J5 (frac 1.000) and FID1 inside J4 (0.867).
+              Without this exemption a displaced fiducial or mounting hole
+              could never come home under a connector, which is where they
+              belong.
+      container (courtyard >= CONTAINER_RATIO of the board) -- a part that
+              covers half the board contains things by construction.
+
+    EDGE classes (edge_receptacle / edge_actuator) are deliberately NOT
+    exempt here, although `legality._waiver_for` waives them for REPORTING.
+    That difference is the point: run-22's D4 landed wholly inside SW2, and
+    SW2 is a declared `edge_actuator`, so an edge exemption would re-permit
+    the exact defect this predicate exists to stop. It is safe by
+    measurement -- the only non-exempt fab pairs on the whole corpus are
+    ulx3s GPDI1/J5 at frac 0.011 and GPDI1/SW1 at 0.001, both far under
+    CONTAINMENT_FRAC.
+    """
+    cached = getattr(state, '_body_exempt', None)
+    if cached is not None:
+        return cached
+    exempt = set(getattr(state, 'container_refs', ()) or ())
+    try:
+        from placement.part_class import classify_part
+        fps = getattr(getattr(state, 'pcb_data', None), 'footprints', None)
+        if fps is None:
+            fps = {}
+        for ref in state.parts:
+            fp = fps.get(ref)
+            if fp is None:
+                continue
+            try:
+                if classify_part(fp, ref).name in ('mount_hole', 'fiducial',
+                                                   'testpoint'):
+                    exempt.add(ref)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    state._body_exempt = exempt
+    return exempt
+
+
+def _body_contained(state, a: str, pos_a, b: str, pos_b) -> bool:
+    """Would one of these two poses put a part's BODY inside the other's?
+
+    The run-22 defect, verbatim: `assign`/`exchange` moved parts by a derived
+    +/-v with only pad legality and hpwl in the objective, so a teleport could
+    land a part wholly inside another part's body and score clean. It did,
+    twice, on two different pairs -- and every gate downstream reported
+    `blocking 0`, because no pad copper intersects.
+
+    FAB currency, never the courtyard. Measured on the corpus: the courtyard
+    ships frac-1.0 containment on four healthy boards, so a courtyard test
+    would veto legal poses on 12% of the corpus -- the run-4 lesson in a new
+    costume. `.Fab` is the drawn body, and non-exempt fab containment is
+    unknown on the corpus.
+
+    This charges CONTAINMENT, not a kiss. Two courtyards touching is not a
+    defect and is not priced here; that ordering decision (run-4, r=+0.72 of
+    courtyard overlap with distance-to-truth, never with routed blocking) is
+    untouched, and `measure()`
+    still carries `overlap` as its last tiebreak below hpwl.
+
+    A part whose footprint draws no `.Fab` outline is UNJUDGED: this returns
+    False for it, and `place_reconstruct` discloses the count rather than
+    implying coverage it does not have.
+    """
+    if a in _body_exempt_refs(state) or b in _body_exempt_refs(state):
+        return False
+    pa, pb = state.parts[a], state.parts[b]
+    if pa.side != pb.side:          # same rule as legality's fab channel
+        return False
+    ra = state.fab_rect(a, pos_a[0], pos_a[1], pa.rot)
+    if ra is None:
+        return False
+    rb = state.fab_rect(b, pos_b[0], pos_b[1], pb.rot)
+    if rb is None:
+        return False
+    area = legality.rect_overlap_area(ra, rb)
+    if area <= legality.EPS:
+        return False
+    frac = legality.containment_frac(area, ra, rb)
+    return frac is not None and frac >= legality.CONTAINMENT_FRAC
+
+
 def _pair_conflicts(state, a: str, pos_a, b: str, pos_b) -> bool:
     """Do these two candidate poses conflict, ABSOLUTELY? Repair semantics:
     unlike the quench's baseline-relative gate, the assign stage exists to
@@ -1566,6 +1725,11 @@ def _pair_conflicts(state, a: str, pos_a, b: str, pos_b) -> bool:
     damaged status quo feasible at zero cost (measured: the ILP chose
     all-stay on the swap corpus). The outer stage gate still reverts any
     application that worsens the board."""
+    # Body containment first: two memoized rect lookups against
+    # pair_shortfall's full pad-set geometry, so a contained pair now costs
+    # LESS to reject than it used to cost to wrongly accept.
+    if _body_contained(state, a, pos_a, b, pos_b):
+        return True
     ctx = state.legality_ctx
     pa, pb = state.parts[a], state.parts[b]
     cur = ctx.pair_shortfall(a, b, pose_a=(pos_a[0], pos_a[1], pa.rot),
@@ -1578,7 +1742,16 @@ def _pair_conflicts(state, a: str, pos_a, b: str, pos_b) -> bool:
 
 
 def _interacting_pairs(state, candidates):
-    """Part pairs whose candidate extents can come near each other."""
+    """Part pairs whose candidate extents can come near each other.
+
+    Reach is the union of the PAD extent and the .Fab BODY, because a row
+    only exists for a pair this yields, and `_pair_conflicts` now refuses
+    body containment as well as pad contact. A part whose body is far larger
+    than its pad reach -- a shield can with four corner pads, a connector
+    whose shell overhangs its own pins -- would otherwise never be paired
+    with the small part sitting inside it, and the containment predicate
+    would never be asked.
+    """
     ctx = state.legality_ctx
     reach: Dict[str, Tuple[float, float, float, float]] = {}
     for ref, cands in candidates.items():
@@ -1590,6 +1763,9 @@ def _interacting_pairs(state, candidates):
             e = pp.extent(x, y, state.parts[ref].rot)
             if e is not None:
                 boxes.append(e)
+            fb = state.fab_rect(ref, x, y, state.parts[ref].rot)
+            if fb is not None:
+                boxes.append(fb)
         if boxes:
             reach[ref] = (min(b[0] for b in boxes), min(b[1] for b in boxes),
                           max(b[2] for b in boxes), max(b[3] for b in boxes))

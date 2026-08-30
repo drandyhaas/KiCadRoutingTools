@@ -48,6 +48,15 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+# #522 reorg + skill merge: the engine moved to py_router/, the placer to
+# py_placer/, and board_score.py into the placement-and-routing skill. Tests
+# that shell out to or import them need those roots on sys.path.
+for _p in ('py_router', 'py_placer',
+           os.path.join('.claude', 'skills', 'plan-pcb-placement-and-routing',
+                        'scripts')):
+    _d = os.path.join(ROOT, _p)
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522/py_placer layout
 sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # #522/py_placer layout
 sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522/py_placer layout
@@ -282,7 +291,7 @@ def test_undeclared_floor(tmp):
           json.load(open(asm_json, encoding='utf-8'))
           .get('board_declares_no_floor') is True)
 
-    score = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-routing',
+    score = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-placement-and-routing',
                          'scripts', 'board_score.py')
     sc_json = os.path.join(tmp, 'score.json')
     rc, log = run([score, NO_FLOOR_BOARD, '--json', sc_json])

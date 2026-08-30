@@ -31,7 +31,7 @@ def test_rescue_reports_requested_vs_delivered():
         # A 5.0mm track cannot leave this board's pads: the primary fails and
         # the rescue delivers at a thinner rung.
         r = subprocess.run([sys.executable, '-X', 'utf8',
-                            os.path.join(ROOT, 'route.py'), staged,
+                            os.path.join(ROOT, 'py_router', 'route.py'), staged,
                             os.path.join(td, 'out.kicad_pcb'),
                             '--nets', '/OUT_A_PHASE_A',
                             '--track-width', '5.0', '--json-out', js],

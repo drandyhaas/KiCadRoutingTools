@@ -31,6 +31,7 @@ import sys
 
 def main():
     import routing_defaults as defaults
+    from placement.cli_gates import add_intent_arg
 
     p = argparse.ArgumentParser(
         description="Intent-driven initial placement for an unplaced board.",
@@ -41,9 +42,9 @@ Examples:
 """)
     p.add_argument("input_file", help="Input KiCad PCB (unplaced parts + outline)")
     p.add_argument("output_file", help="Output board with the seeded placement")
-    p.add_argument("--intent", required=True, metavar="JSON",
-                   help="Floorplan intent: the constraint source AND the "
-                        "acceptance gate for the emitted seed")
+    add_intent_arg(p, required=True, extra=(
+        "Here it is also the CONSTRUCTION source for the seed and the "
+        "acceptance gate the emitted seed is graded against."))
     p.add_argument("--seed", type=int, default=0,
                    help="Packing-order/jitter seed; same seed reproduces byte "
                         "for byte (default: 0)")
@@ -79,6 +80,36 @@ Examples:
                         "non-obstacles either way (the existing exclude "
                         "mechanism); this changes only WHO goes first "
                         "(run-4 C)")
+    p.add_argument("--evict-depth", type=int, default=0, choices=(0, 1, 2),
+                   metavar="N",
+                   help="Eviction rung (#630, #699). At every depth a part "
+                        "with NO legal pose gets a census of its seated "
+                        "neighbours (JSON_SUMMARY no_pose_blockers: how many "
+                        "poses lifting each one would free). 0 (default) "
+                        "moves nothing. 1 evicts the neighbour that frees "
+                        "the most, seats the part, then re-seats the "
+                        "neighbour (inside its own zone) with the part in "
+                        "place; the trade is kept only if both seats are "
+                        "legal against every seated part and the seated "
+                        "board's overlap count did not rise, else both parts "
+                        "are put back and the revert is recorded. 2 also "
+                        "censuses PAIRS when no single lift frees a pose, "
+                        "and trades the best pair under the same rule -- at "
+                        "most 16 of the pairs its 8 candidates form, so it "
+                        "costs nothing on a part a single lift already "
+                        "solves. APPLIES TO --reseat TOO, and there it "
+                        "relaxes that pass's contract: --reseat normally "
+                        "holds every part outside its scope fixed, and a "
+                        "depth >= 1 lets it trade one out. Those parts are "
+                        "named in the JSON's `evicted` and in a NOTE, and "
+                        "the pass additionally refuses any trade that raised "
+                        "the board's stack count or overlap area. Parts "
+                        "locked in the file or by the intent's must_lock, "
+                        "and declared edge connectors, are never evicted; a "
+                        "blocker's own blocker is not chased, at either "
+                        "depth, and there is one trade per part. Only fires "
+                        "on a part that was going to be reported unseated. "
+                        "Opt-in until an A/B row on three boards exists")
     p.add_argument("--anchor-rounds", type=int, default=1,
                    help="With --anchors-first: gated re-seat passes after "
                         "the first full placement (default 1 = none). Each "
@@ -109,6 +140,21 @@ Examples:
                         "pose being discarded). Composes with --repair and "
                         "runs BEFORE it. Judge it on witnesses_after, not on "
                         "how far anything moved")
+    p.add_argument("--reseat-min-gain", type=float, default=0.0, metavar="MM",
+                   help="With --reseat REF (an EXPLICIT scope): the smallest "
+                        "wirelength win, in mm, that counts as a re-seat. 0 "
+                        "(the default) means any strict win. It gates the "
+                        "MILLIMETRE basis only -- the scope's own HPWL, which "
+                        "is where a sideways shuffle can score. The "
+                        "intent-violation, blocking-pair and stack bases are "
+                        "COUNTS, whose smallest meaningful gain is one whole "
+                        "defect: one number compared against both currencies "
+                        "would be asserting an exchange rate between half a "
+                        "millimetre of wire and half a keep-out violation. "
+                        "Inert on the AUTO scope (bare --reseat), whose rule "
+                        "is unchanged. JSON_SUMMARY accept_basis reports every "
+                        "basis, whether this applied to it, and by how much "
+                        "each one missed")
     p.add_argument("--dry-run", action="store_true",
                    help="With --repair/--reseat: print the move list and "
                         "grades, write nothing")
@@ -130,6 +176,17 @@ Examples:
                 "everything)")
     if args.dry_run and not (args.repair or args.reseat is not None):
         p.error("--dry-run only applies to --repair / --reseat")
+    if args.reseat_min_gain and args.reseat is None:
+        p.error("--reseat-min-gain only applies to --reseat")
+    if args.reseat_min_gain < 0:
+        p.error("--reseat-min-gain is a magnitude in mm; negative is not a "
+                "looser threshold, it is a typo")
+    if args.reseat_min_gain and args.reseat == []:
+        # An inert knob says so, rather than reading as a threshold that
+        # happened to find nothing wrong (cli_gates' own disclosure rule).
+        print("--reseat-min-gain is inert on the AUTO scope: that rule is "
+              "'the off-board amount strictly improved', which this does not "
+              "gate", file=sys.stderr)
 
     try:
         from redo_record import record_invocation
@@ -207,11 +264,22 @@ Examples:
                 refs=(args.reseat or None), group_sources=sources,
                 clearance=args.clearance,
                 board_edge_clearance=args.board_edge_clearance,
-                grid_step=args.grid_step, seed=args.seed)
+                grid_step=args.grid_step, seed=args.seed,
+                # The same flag, not a second one: it was parsed and
+                # silently ignored on this path (#699).
+                evict_depth=args.evict_depth,
+                min_gain=args.reseat_min_gain)
             for note in reseat['notes']:
                 print(f"  NOTE: {note}")
+            # Over the SCOPE only: the line prints it as "{n} re-seated
+            # (max X mm)", and `n` deliberately excludes the parts the
+            # eviction rung moved, so measuring over both mixes the two
+            # counts the engine went to the trouble of separating.
+            _scope = set(reseat['scope'])
             _rmax = 0.0
             for mv in reseat['moves']:
+                if mv['reference'] not in _scope:
+                    continue
                 fp = cur_pcb.footprints.get(mv['reference'])
                 if fp is not None:
                     _rmax = max(_rmax, _math.hypot(mv['new_x'] - fp.x,
@@ -220,11 +288,34 @@ Examples:
                   f"{len(reseat['scope'])} in scope, "
                   f"{len(reseat['reseated'])} re-seated "
                   f"(max {_rmax:.2f}mm), {len(reseat['unseated'])} unseated, "
-                  f"{len(reseat['refused'])} refused; "
+                  f"{len(reseat['refused'])} refused, "
+                  f"{len(reseat.get('evicted') or [])} evicted; "
                   f"OFF-OUTLINE PARTS {len(reseat['witnesses_before'])} -> "
                   f"{len(reseat['witnesses_after'])}"
                   + ('' if reseat['accepted'] else '  [GATE REFUSED]'))
             print(f"  gate {reseat['gate_before']} -> {reseat['gate_after']}")
+            # #698: WHICH scope-relevant term carried the pass, or -- on a
+            # refusal -- what every basis measured. A verdict with no basis is
+            # how this pass came to refuse on a term the operator never asked
+            # about for a whole release.
+            _ab = reseat.get('accept_basis') or {}
+            if _ab.get('fired'):
+                _t = next((t for t in _ab.get('terms') or []
+                           if t['term'] == _ab['fired']), {})
+                print(f"  accepted on {_ab['fired']}: "
+                      f"{_t.get('before')} -> {_t.get('after')} "
+                      f"({_t.get('units')}); {_ab.get('policy')}")
+            elif _ab.get('policy') == 'explicit:one-term-strict':
+                # "would have fired", never "no basis fired": on a safety or
+                # licence refusal the top-level `fired` is None by design while
+                # a term still carries `first`, and printing "no basis fired"
+                # then contradicts the record right beside it.
+                _first = next((t['term'] for t in (_ab.get('terms') or [])
+                               if t.get('first')), None)
+                print(("  refused despite " + _first + " improving: "
+                       if _first else "  no basis improved: ") + ", ".join(
+                    f"{t['term']} {t['before']}->{t['after']}"
+                    for t in (_ab.get('terms') or [])))
             summary.update({
                 'reseat': True,
                 'scope': reseat['scope'],
@@ -232,6 +323,14 @@ Examples:
                 'reseated': len(reseat['reseated']),
                 'reseated_refs': reseat['reseated'],
                 'unseated': reseat['unseated'],
+                'no_pose_blockers': reseat.get('no_pose_blockers') or {},
+                'no_pose_verdict': reseat.get('no_pose_verdict') or {},
+                # Parts moved OUTSIDE the declared scope by the eviction
+                # rung. Empty at depth 0, which is the default.
+                'evicted': reseat.get('evicted') or [],
+                'no_pose_census': reseat.get('no_pose_census') or {},
+                'evictions': reseat.get('evictions', 0),
+                'evictions_reverted': reseat.get('evictions_reverted', 0),
                 'refused': reseat['refused'],
                 'edge_bands_dropped': reseat['edge_bands_dropped'],
                 # THE load-bearing number: it is the one that predicts
@@ -242,6 +341,11 @@ Examples:
                 'gate_before': reseat['gate_before'],
                 'gate_after': reseat['gate_after'],
                 'accepted': reseat['accepted'],
+                # #698: the whole basis record, not just the winner -- a basis
+                # that measured nothing and a basis that measured no change
+                # must not look alike to a reader of the summary either.
+                'accept_basis': reseat.get('accept_basis'),
+                'reseat_min_gain': args.reseat_min_gain,
                 'reseat_max_move_mm': round(_rmax, 3),
             })
             _advance(reseat['moves'], 'reseat')
@@ -299,7 +403,8 @@ Examples:
             copy_siblings(cur, args.output_file)
             from placement.legality import grade_pad_legality
             pcb_out = parse_kicad_pcb(args.output_file)
-            pads_after = grade_pad_legality(pcb_out, args.clearance)
+            pads_after = grade_pad_legality(pcb_out, args.clearance,
+                                            pcb_file=args.output_file)
             graded = floorplan.grade(intent, pcb_out, args.output_file,
                                      group_sources=sources,
                                      clearance=args.clearance,
@@ -308,6 +413,13 @@ Examples:
                 print(f"  GRADE ERROR [{v.rule}] {v.message}")
             summary['grade_errors'] = len(graded.errors)
             summary['pad_conflicts_after'] = pads_after['pad_conflicts']
+            # #697: the requirement each counted pair was graded at, when it
+            # sits above args.clearance, so the count is explainable.
+            summary['pad_clearance_required'] = pads_after.get('required') or []
+            from placement.legality import format_required_clause as _req_cl
+            if _req_cl(pads_after):
+                print(f"  above the {args.clearance}mm floor: "
+                      f"{_req_cl(pads_after)}")
             summary['hole_conflicts_after'] = pads_after['hole_conflicts']
             summary['oob_pad_count_after'] = pads_after['oob_pad_count']
             if graded.errors:
@@ -384,7 +496,8 @@ Examples:
         board_edge_clearance=args.board_edge_clearance,
         grid_step=args.grid_step, seed_refs=seed_refs,
         anchors_first=args.anchors_first,
-        anchor_rounds=args.anchor_rounds)
+        anchor_rounds=args.anchor_rounds,
+        evict_depth=args.evict_depth)
     for note in result['notes']:
         print(f"  NOTE: {note}")
     print(f"Seeded {len(result['placements'])} part(s); "
@@ -405,7 +518,16 @@ Examples:
         # polished by the objective the later steps rank with. Locks ride in
         # from the file (must_lock was just stamped); edge connectors are
         # locked per-call so the polish cannot walk them off their band.
-        edge_refs = [c['ref'] for c in intent.edge_connectors]
+        # #702: edge_claims(), must_lock and the declared zones all now
+        # ride in through `intent_gate`, resolved by the ONE function
+        # every quenching CLI uses. The edge_claims()-not-edge_connectors
+        # filter that used to live here moved with it -- see
+        # `floorplan.resolve_intent_gate`, which is the point: a filter
+        # that must be remembered at each call site is one that will be
+        # forgotten at the next.
+        from placement.cli_gates import resolve_intent_gate_for_cli
+        _gate, _ = resolve_intent_gate_for_cli(
+            intent, pcb_seeded, sources, args.intent)
         placements = quench(
             pcb_seeded, pcb_file=args.output_file,
             max_displacement=args.max_displacement,
@@ -414,7 +536,7 @@ Examples:
             crossing_penalty=30.0, length_weight=0.3, halo_base=0.5,
             halo_coef=0.15, halo_weight=2.0, edge_halo=2.0, edge_weight=2.0,
             ignore_nets=args.ignore_nets,
-            lock_refs=edge_refs or None, metrics_out=ratsnest,
+            metrics_out=ratsnest, intent_gate=_gate,
             corridor_weight=args.corridor_weight,
             corridor_specs=list((intent.health or {}).get('bus_corridors')
                                 or ()) or None)
@@ -440,16 +562,28 @@ Examples:
         # space too (measured: 0.784mm2 of new overlap) -- so the part is
         # RE-SEATED: the seeder's own search, targeted at its seeded pose,
         # constrained to its zone, against the post-polish board.
+        # #701: and it has no keep-out term either, so the same nudge can walk
+        # a part into a declared keep-out -- on a board this tool's own seeder
+        # placed correctly, which then exits 4 against its own intent. Same
+        # repair, same reason, one more rule name.
         if not args.no_polish:
+            _repairable = ('zone_containment', 'keepout')
             broke = sorted({v.ref for v in graded.errors
-                            if v.rule == 'zone_containment' and v.ref})
+                            if v.rule in _repairable and v.ref})
+            _rules = sorted({v.rule for v in graded.errors
+                             if v.rule in _repairable and v.ref})
             if broke:
                 import pose_score
                 pcb_cur = parse_kicad_pcb(args.output_file)
                 st = pose_score.make_state(
                     pcb_cur, args.output_file, clearance=args.clearance,
                     board_edge_clearance=args.board_edge_clearance,
-                    grid_step=args.grid_step)
+                    grid_step=args.grid_step,
+                    # #701: the ONLY seat-predicate call site outside
+                    # seeder.py. Without this the re-seat below would be free
+                    # to put the part back into a declared keep-out while
+                    # fixing its zone.
+                    keepouts=intent.keepouts)
                 blocks2, _p = floorplan.resolve_blocks(intent, pcb_cur,
                                                        sources)
                 zone_of = {}
@@ -463,20 +597,25 @@ Examples:
                 for ref in broke:
                     z = zone_of.get(ref)
                     sp = seeded_pose.get(ref)
-                    if z is None or sp is None or ref not in st.parts:
+                    # #701: a keep-out violation does NOT imply a zone. The
+                    # zone-only version required one and skipped a zone-less
+                    # part entirely, which would have left the keep-out half
+                    # of this repair silently inert on most boards.
+                    if sp is None or ref not in st.parts:
                         continue
                     clr = seeder._try_place(
                         st, ref, sp['new_x'], sp['new_y'], set(),
-                        constraint=z.rect, tol=intent.zone_tolerance(z))
+                        constraint=z.rect if z is not None else None,
+                        tol=intent.zone_tolerance(z) if z is not None else 0.5)
                     if clr is not None:
                         p2 = st.parts[ref]
                         fixes.append({'reference': ref, 'new_x': p2.x,
                                       'new_y': p2.y, 'new_rotation': p2.rot})
                 if fixes:
                     print(f"  polish walked "
-                          f"{', '.join(f['reference'] for f in fixes)} out "
-                          f"of a declared zone; re-seated in-zone against "
-                          f"the polished board")
+                          f"{', '.join(f['reference'] for f in fixes)} out of "
+                          f"a declared {' / '.join(_rules)}; re-seated "
+                          f"against the polished board")
                     tmp = args.output_file + '.reseat'
                     write_placed_output(args.output_file, tmp, fixes)
                     os.replace(tmp, args.output_file)
@@ -490,6 +629,23 @@ Examples:
     after = ratsnest.get('after', {})
     summary = {'placed': len(result['placements']),
                'unseated': len(result['unseated']),
+               # NAMES, not just a count. #629's complaint is that a verdict
+               # you cannot act on is a dead end, and a count names nobody.
+               'unseated_refs': list(result['unseated']),
+               'no_pose_blockers': result.get('no_pose_blockers') or {},
+               # WHY each of them has no pose, not just who is nearby (#699).
+               # "nothing is near it" and "everything near it is locked" were
+               # the same empty dict, and they need different answers.
+               'no_pose_verdict': result.get('no_pose_verdict') or {},
+               'no_pose_census': result.get('no_pose_census') or {},
+               # Trades KEPT, and trades REVERTED, separately: a reader who
+               # sees `evictions: 1` must not have to guess whether the board
+               # changed. The records themselves are in the NOTE lines.
+               'evictions': sum(1 for e in (result.get('evictions') or [])
+                                if e.get('accepted')),
+               'evictions_reverted': sum(
+                   1 for e in (result.get('evictions') or [])
+                   if not e.get('accepted')),
                'locked': n_locked,
                'grade_errors': len(graded.errors),
                'grade_warnings': len(graded.warnings),
@@ -507,5 +663,11 @@ Examples:
 
 
 if __name__ == "__main__":
-    import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
-    sys.exit(main())
+    # Declare the lever for the WHOLE run, so every pose this CLI writes
+    # carries its name in the provenance record -- place_reconstruct.py
+    # does the same. Without it a seeded board carries no lever at all, and
+    # the provenance instrument is silent about where its poses came from.
+    from placement.provenance import declare_lever
+    with declare_lever('place_seed.py', sys.argv):
+        import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
+        sys.exit(main())

@@ -28,7 +28,7 @@ import routing_defaults as defaults                            # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ULX = os.path.join(ROOT, 'kicad_files', 'ulx3s.kicad_pcb')
-SPEC = [{'name': 'sdram', 'nets': ['sdram_*'], 'width_mm': 8.0}]
+SPEC = [{'name': 'sdram', 'nets': ['SDRAM_*'], 'width_mm': 8.0}]
 
 _PCB = {}
 

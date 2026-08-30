@@ -72,6 +72,56 @@ Expect `recovery` to get no better and `collateral_pad_rms` to grow: this puts
 parts where the netlist wants them, not where they were. That is the intended
 trade.
 
+**On a `[GATE REFUSED]`, read `accept_basis`, not the gate tuple (#698).** A
+named scope and the bare auto scope are judged by different rules, and the
+summary says which: `policy` is `auto:oob-strict` or
+`explicit:one-term-strict`, `fired` is the basis that carried the pass, and
+`terms` lists *every* basis with its before/after — so a refusal tells you what
+would have to change. The auto rule is unchanged (the off-board amount must
+strictly improve). A named scope is accepted when the off-outline count did not
+grow, no hard gate term got worse, no declared claim got worse, and one
+scope-relevant basis strictly improved; `hpwl` is the one term it is licensed to
+pay, because a seat made for a declared reason is hpwl-worse by construction.
+`--reseat-min-gain MM` raises the bar on the wirelength basis only (the count
+bases threshold at one whole defect). The default is 0: measured over 16
+explicit re-seats on four corpus boards, every **non-zero** gain was ≥1 mm, so a
+floor would buy nothing there — see `tests/measure_698_min_gain.py`, and read its
+`pre_prune` and `moved` columns rather than the headline, because 9 of the 10
+zero rows are seats the prune sweep reverted rather than shuffles.
+
+#### When a part will not seat, read the verdict before reaching for a hammer
+
+Every part the rung leaves unseated carries a **`no_pose_verdict`** in the
+JSON_SUMMARY and as a NOTE, and it tells you whether eviction can help at all
+— `no_pose_blockers == {}` used to mean two opposite things, *nothing is near
+this part* and *everything near it is locked*.
+
+| verdict | what it means | what to do |
+| --- | --- | --- |
+| `keepout_blocks` | a **declared keep-out** refuses it — measured, by recounting the poses with that keep-out lifted (#701) | move the keep-out, or add the part to its `allow` list if it owns it |
+| `no_movable_neighbour` | nothing seated is near it | eviction cannot help — the pocket does not exist; re-check the outline or the intent |
+| `immovable_given_frozen` | everything near it is frozen (it names each neighbour **and the decision that froze it**) | unlock one of them, or accept it |
+| `blocker_available` | a useful blocker exists, the rung is disarmed | raise `--evict-depth` |
+| `no_single_lift_frees` | lifting any ONE neighbour frees no pose | try `--evict-depth 2` |
+| `no_pair_lift_frees` | pairs do not free one either | stop; this is a floorplan problem |
+| `trade_reverted` | the trade was made and scored worse | the pocket is real but costs more than it buys |
+| `seated_after_eviction` | it worked | — |
+| `no_target_recorded` | the part reached `unseated` with no ledger entry | a bug; report it |
+
+`--evict-depth 1` trades out the single neighbour that frees the most poses;
+`2` also sweeps **pairs**, and only for a part no single lift helped — in the
+case pairs exist for, every single-lift count is zero, so the sweep cannot be
+pruned by them. Bounded by counts and never a clock (#621): at most 8
+candidates per part, 16 pairs, and **one trade per part**; what a cap drops is
+reported. Depth 2 costs the most, and depth 3 is refused rather than defined.
+
+Two things to know before arming it. Locked parts and declared edge connectors
+are never evicted, and `--lock` is honoured by the rung — so lock what must not
+move. And **an evicted blocker is WRITTEN**: it is named in `evicted` and in a
+NOTE, but it is by construction outside the scope you asked for, so the board
+that comes back has moved a part you did not name. `reseated` deliberately does
+not count it — an eviction is not a re-seat.
+
 ### An observed violation is evidence, never permission
 
 **Never derive an intent from a damaged board and then use it to gate that
@@ -103,12 +153,20 @@ re-emit if in doubt.
        new routing failures.
    "Clean" is a measured verdict, never an impression of the board.
 2. THE BOARD OUTLINE IS NOT YOURS TO CHANGE. Size, cutouts and slots are
-   mechanical decisions the user owns.
+   mechanical decisions the user owns. NEVER RESIZE A BOARD to make parts fit
+   -- if they do not fit, say so and stop. This holds today only by
+   construction (no writer here emits an Edge.Cuts primitive), so it is
+   written down rather than left implied. Three tools in the repo DO rewrite
+   Edge.Cuts and are not part of placement: `stress/fix_outline_gaps.py`,
+   `stress/strip_routing.py` and `stress/prep_set2.py`. They exist to prepare
+   corpus boards; never run them on a user's board.
 3. A part the file marks `(locked yes)` is never yours to move, whatever an
    intent says.
 4. Gate on hpwl, PAD-PAD conflicts and the assembly channel's blocking pairs.
    REPORT `crossings` and aggregate courtyard overlap; never gate on them --
-   both correlate POSITIVELY with distance-to-truth.
+   both correlate POSITIVELY with **distance-to-truth**. That is the measured
+   dependent variable; neither has been correlated with routed `blocking`
+   (`docs/placement-predictors.md`).
 5. Every proposal is decided by a MEASUREMENT on the board in front of you, not
    by what a pattern suggests. If no instrument confirms it, do not apply it.
 6. Placement invalidates every downstream routed board. Never run it mid-chain.
@@ -238,7 +296,9 @@ and AABB currencies.
 
 **Do not gate on the AGGREGATE `overlap_area`** — it has a legitimate nonzero floor on
 human boards (one human-routed 2-layer board in the corpus carries 5.375 mm2 of
-mount-hole-under-shell courtyard kisses in its own shipped layout) and run 2 measured it positively correlated with distance-to-truth. The
+mount-hole-under-shell courtyard kisses in its own shipped layout) and run 2 measured it positively correlated with **distance-to-truth** — a
+different question from routed `blocking`, which nothing here has measured it
+against (`docs/placement-predictors.md`). The
 per-pair blocking COUNT is the gateable quantity; courtyard/fab pairs are ADVISORY
 (`check_assembly` labels each with its waiver class), fix targets for the placement
 loop below, never a gate alone.
@@ -380,11 +440,16 @@ actually left are 2.9–9.8 mm — 2 to 6× more. **The corridor is for the PART
 against the gap a human chose, per board (gaps scale with board size, so the comparison
 is within a board, never pooled across them):
 
-| predictor | what it is | correlation with the human's gap |
+| predictor | what it is | correlation with the human's gap (NOT with routed `blocking`) |
 |---|---|---|
 | **small parts in the corridor** | count, or summed extent | **positive on 8 of 8 distinct boards, r = +0.41 … +0.90** |
 | routing cut | nets crossing ÷ layers | ~0, and often negative (−0.48 … +0.08) |
 | **the quench's own whitespace term** | `halo_base + halo_coef·sqrt(pin_count)` | **no consistent sign — 5 boards negative, 3 positive** |
+
+The dependent variable in that table is **the gap a human left**, not routed
+`blocking`. The corridor law has never been correlated with a routed outcome,
+and the A/B recorded below found that widening the two deficit corridors bought
+no completion benefit at all — see `docs/placement-predictors.md`.
 
 So **do not expect `--halo-coef` to reserve the corridor**: it is a function of pin count,
 which is not the quantity that decides. The assignment you need already exists — `route.py
@@ -685,6 +750,22 @@ python3 -X utf8 py_placer/place_optimize.py board.kicad_pcb placed.kicad_pcb \
     --lock 'J*' 'H*' 'U1' --max-displacement 2
 ```
 
+**And pass the INTENT to every placement invocation, for the same reason.**
+Since #702 `--intent` is not a grading flag: its declared zones, keep-outs and
+exclusive zones are HARD per-move gates inside the quench, and its `must_lock`
+globs and edge claims are locked. A step you forget to pass it to is a step
+that optimises against no constraint at all — which is exactly the defect #702
+fixed, one level up. `place_optimize`, `place_route_loop`, `place_seed` and
+`place_portfolio` all take it:
+
+```bash
+python3 -X utf8 py_placer/place_optimize.py board.kicad_pcb placed.kicad_pcb     --intent wk/intent.json --lock 'J*' 'H*' 'U1' --max-displacement 2
+```
+
+It is MONOTONE — it prevents a part being walked out of its zone, it does not
+walk one back in. A part that is already out stays out; re-seating it is
+`place_seed --repair`'s job, not the gate's.
+
 `(locked yes)` stamped in the board file (a seeder's `must_lock` output)
 satisfies this for every place_* tool — the file lock is honored everywhere
 `--lock` is. When you rely on it instead of `--lock`, say so once in the
@@ -862,7 +943,12 @@ three parts are required:
    built entirely out of the quench's own cost function, so it can only measure whether
    the quench succeeded at being a quench. Measured across 29 candidates on one board,
    against distance-to-the-correct-placement: **r(crossings) = +0.780** and
-   **r(overlap_area) = +0.723** — *lower crossings goes with a WORSE placement*. One
+   **r(overlap_area) = +0.723** — *lower crossings goes with a WORSE placement*.
+   **Both are measured against distance-to-the-correct-placement, NOT against
+   routed `blocking`** (29 candidates, ONE board, run 6). See
+   `docs/placement-predictors.md` for what has and has not been correlated with a
+   routed outcome. The decision this supports — gate `hpwl`, never `crossings`
+   — is unchanged by that correction: it never rested on a routability claim. One
    candidate reached **233 crossings, better than the human original's 276**, while
    sitting 18.7 mm out of position. `hpwl` behaves (its minimum is at the truth) and is
    what actually does the work in this rule. **Gate on `hpwl`, on PAD-PAD DRC, and on
@@ -1071,6 +1157,13 @@ and `blocks` with a `zone` **only where the parts really are one contiguous
 area**. Schematic sheets usually are not: on one 4-layer corpus board all ten sheet
 bounding boxes overlap each other, so `--emit-intent` claims a zone for only 4 of 10 and
 says why for the rest.
+
+A misspelled key is **refused**, at every level of the file and including
+`severity` keys — you will be told the key that was wrong and the ones that
+were accepted, so fix the spelling rather than assuming the claim landed.
+Reasoning about *why* a claim is what it is goes in `context`, which every
+entry accepts and nothing grades; do not put it in `note`, which is read for
+the substring `SUSPECT`.
 
 `--health` adds the routability signals: how far each block sits from the parts
 it connects to, and what crosses each declared bus corridor. Advisory — they say

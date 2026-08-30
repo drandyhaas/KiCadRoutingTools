@@ -46,14 +46,73 @@ def test_windows_versioned_layout_sorts_newest_first():
 
 
 def test_candidates_cover_the_real_windows_install():
-    """The versioned glob and both Program Files roots are searched."""
-    src = kef.kicad_python_candidates.__doc__ + \
-        open(kef.__file__, encoding='utf-8').read()
-    assert 'Program Files (x86)' in src
-    assert "'*', 'bin'" in src or '*\\bin' in src
+    """The versioned layout and both Program Files roots are searched.
+
+    This asserted the module SOURCE contained 'Program Files (x86)' and a
+    `'*', 'bin'` glob. That is a prose scan: it passes just as happily when the
+    strings sit in a comment, and it broke the moment #763 moved the platform
+    knowledge into `kicad_locate` -- while the behaviour it named was intact.
+    Asserted behaviourally now, against a simulated Windows tree, which also
+    covers the drives the old wording could not describe.
+    """
+    import kicad_locate as kl
+
+    tree = {r'C:\Program Files', r'C:\Program Files\KiCad',
+            r'C:\Program Files\KiCad\10.0', r'C:\Program Files\KiCad\10.0\bin',
+            r'C:\Program Files (x86)', r'C:\Program Files (x86)\KiCad',
+            r'C:\Program Files (x86)\KiCad\9.0'}
+    got = kl.kicad_python_candidates(
+        system='Windows', environ={'ProgramFiles': r'C:\Program Files',
+                                   'ProgramFiles(x86)': r'C:\Program Files (x86)'},
+        globber=lambda pat: sorted(
+            d for d in tree
+            if len(d.split('\\')) == len(pat.split('\\'))
+            and all(a == b or b == '*'
+                    for a, b in zip(d.split('\\'), pat.split('\\')))),
+        isdir=lambda p: p in tree, drives=[], winreg_mod=False)
+    assert r'C:\Program Files\KiCad\10.0\bin\python.exe' in got, got
+    assert r'C:\Program Files (x86)\KiCad\9.0\bin\python.exe' in got, got
+    # ...and the newest version comes first, or a KiCad 10 user is handed 9.
+    assert got.index(r'C:\Program Files\KiCad\10.0\bin\python.exe') < \
+        got.index(r'C:\Program Files (x86)\KiCad\9.0\bin\python.exe'), got
     # sys.executable is a candidate: under the GUI plugin, THIS interpreter is
     # KiCad's python and needs no search at all.
     assert sys.executable in kef.kicad_python_candidates()
+
+
+def test_gui_host_binary_is_never_a_candidate():
+    """Inside KiCad's embedded python (the GUI plugin) `sys.executable` is the
+    pcbnew HOST BINARY, not python3. It must never reach the candidate list:
+    subprocess.run([pcbnew, script, board, out, dir]) does not run a script --
+    pcbnew opens every argument as a FILE, so the exact-fill refill re-launched
+    the APPLICATION once per call and KiCad reported
+    "Pcbnew:OpenProjectFiles() takes a single filename" (the `out` path in that
+    argv does not exist yet -- the empty filename in the message)."""
+    import types
+    memo, real = list(kef._KICAD_PYTHON_MEMO), sys.executable
+    had_pcbnew = 'pcbnew' in sys.modules
+    try:
+        kef._KICAD_PYTHON_MEMO.clear()
+        sys.modules.setdefault('pcbnew', types.ModuleType('pcbnew'))
+        for host in ("/Applications/KiCad/KiCad.app/Contents/MacOS/pcbnew",
+                     r"C:\Program Files\KiCad\10.0\bin\pcbnew.exe",
+                     "/usr/bin/pcbnew"):
+            sys.executable = host
+            assert host not in kef.kicad_python_candidates(), \
+                f"host binary {host} leaked into the candidate list"
+            kef._KICAD_PYTHON_MEMO.clear()
+            got = kef.find_kicad_python()
+            assert got != host, f"find_kicad_python() returned the host binary {host}"
+            assert got is None or \
+                os.path.basename(got).lower().startswith('python'), \
+                f"find_kicad_python() returned a non-python: {got}"
+    finally:
+        sys.executable = real
+        if not had_pcbnew:
+            sys.modules.pop('pcbnew', None)
+        kef._KICAD_PYTHON_MEMO.clear()
+        kef._KICAD_PYTHON_MEMO.extend(memo)
+    print("  PASS: the pcbnew host binary never reaches a subprocess spawn")
 
 
 def test_finder_verifies_pcbnew_rather_than_file_existence():
@@ -127,6 +186,7 @@ def test_fragility_survives_unavailable_refill(capsys_print=None):
 def main():
     test_windows_versioned_layout_sorts_newest_first()
     test_candidates_cover_the_real_windows_install()
+    test_gui_host_binary_is_never_a_candidate()
     test_finder_verifies_pcbnew_rather_than_file_existence()
     test_fragility_survives_unavailable_refill()
     print("PASS: KiCad-python discovery + exact-fill unavailable contract")

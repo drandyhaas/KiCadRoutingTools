@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""#549 A-2: filter_already_routed's fragment gate.
+"""#578: filter_already_routed's fragment gate.
 
 Run 6's VCC3V3 sat in 7 KiCad islands while this filter said "Already fully
 connected" and a plain --nets call routed nothing. With fragment_gate=True a

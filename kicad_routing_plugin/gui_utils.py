@@ -29,6 +29,20 @@ def set_ui_status_mirror(fn):
 _LAST_UI_YIELD = 0.0
 
 
+def save_board_via_ui_thread(path, board, timeout_s=None):
+    """Plugin-side alias for :func:`ui_thread.save_board_on_ui_thread` (#688).
+
+    The implementation is ENGINE-side because the engine makes worker-thread
+    pcbnew calls of its own (the live-fill provider in
+    ``kicad_parser.build_pcb_data_from_board``), so the guard cannot live only
+    here. See that module for the py-spy evidence and the reasoning.
+    """
+    from ui_thread import save_board_on_ui_thread, SAVE_BOARD_UI_TIMEOUT_S
+    return save_board_on_ui_thread(
+        path, board,
+        SAVE_BOARD_UI_TIMEOUT_S if timeout_s is None else timeout_s)
+
+
 def ui_thread_status(status_text, progress_bar, message):
     """Show `message` for work running ON the wx main thread.
 
@@ -188,6 +202,22 @@ def apply_drc_settings_fix(cfg, *, diff_pair=False):
             via_diameter=cfg.get('via_size'),
             via_drill=cfg.get('via_drill'),
             keep_thermal=cfg.get('keep_thermal', False),
+            # #439/#768 writeback half. The Min-Clearance override IS the
+            # GUI's "--clearance was GIVEN": ticked -> each net routed at
+            # min(its class, the ceiling), so the classes must be clamped down
+            # to match or KiCad grades correct copper against the wider stock
+            # class. Unticked -> every net routed at its OWN class and the
+            # classes are PRESERVED.
+            #
+            # Gated rather than left to fix_project_for_output's own True
+            # default, which clamped on both branches: the tabs read
+            # `clamp_netclasses` when they PRICE (routing_dialog's net_clearances
+            # cap, fanout's netclass_ceiling), so the writeback must read the
+            # same key or the two halves decide differently -- #782 in the
+            # other direction. Every tab's config carries it (signal, diff,
+            # planes and fanout all set it off self.clearance_check); the
+            # False default matches "the operator never ticked the override".
+            clamp_nondefault_netclasses=bool(cfg.get('clamp_netclasses', False)),
         )
         if diff_pair:
             kwargs['diff_pair_gap'] = cfg.get('diff_pair_gap')

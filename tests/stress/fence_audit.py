@@ -198,7 +198,15 @@ def _json_poses(path):
 #: Extensions the scan opens. This module's thesis -- "the next carrier will
 #: have a different name" -- applies to EXTENSIONS exactly as it does to stems,
 #: and the scan used to stop at `.kicad_pcb`.
-SCANNED_EXT = ('.kicad_pcb', '.json')
+#:
+#: `.kicad_pro` earns its place the same way. The project MUST travel with a
+#: staged board or it grades at the stock netclass (#441), but KiCad stores
+#: `meta.filename` and `pcbnew.last_paths` inside it -- so a verbatim copy
+#: put the SOURCE'S NAME and the author's directories in the work dir, and
+#: this scan opened one file and returned CLEAN. A `.kicad_pro` carries no
+#: poses, so it is checked for IDENTITY rather than placement: see
+#: `_names_control`.
+SCANNED_EXT = ('.kicad_pcb', '.json', '.kicad_pro')
 
 
 #: A pad centre and a track end are "the same point" within this. Run 14
@@ -298,7 +306,48 @@ def copper_carries_poses(pcb, control_pads):
     return len(displaced), hits, rate, base
 
 
-def scan(workdir, control_poses, allow, control_pads=None):
+def _names_control(path, control_stem):
+    """Strings in this file that name the control's board.
+
+    A `.kicad_pro` carries no poses, so the leak it can commit is IDENTITY:
+    KiCad writes `meta.filename`, and `pcbnew.last_paths` holds the author's
+    own directories. Either one is a path back to the original placement,
+    which is exactly what "the source is recorded by HASH, not by path"
+    exists to prevent. Substring, not equality: `last_paths` embeds the stem
+    inside a longer path.
+
+    CASE-INSENSITIVE, because the stager's own sweep is: a project written by
+    a run whose title-block says `Tigard` escaped a stem of `tigard`, so the
+    two halves of this fence disagreed about the same file.
+
+    Read as BYTES and decoded with `replace`, so an encoding this reader does
+    not expect cannot make the file look clean. That was the defeat
+    `_json_poses` was hardened against: a bare `except: return []` on a
+    UnicodeDecodeError reports CLEAN for a file it could not read.
+
+    A file that cannot be OPENED at all (OSError) yields no hits and so no
+    row. That is deliberate and it is the one blind spot here: this function
+    reports what it FOUND, it is not a coverage claim. Nothing in the work dir
+    is expected to be unopenable, and a project that is would be a bigger
+    problem than its identity.
+    """
+    if not control_stem:
+        return []
+    needle = control_stem.lower()
+    try:
+        with open(path, 'rb') as f:
+            raw = f.read().decode('utf-8', 'replace')
+    except OSError:
+        return []
+    hits = []
+    for line in raw.splitlines():
+        if needle in line.lower():
+            hits.append(line.strip()[:120])
+    return hits[:6]
+
+
+def scan(workdir, control_poses, allow, control_pads=None,
+         control_stem=None):
     """Every scannable file in workdir, scored against the control's poses."""
     rows = []
     for root, _dirs, files in os.walk(workdir):
@@ -312,6 +361,27 @@ def scan(workdir, control_poses, allow, control_pads=None):
                 continue
             _copper = None
             try:
+                if name.endswith('.kicad_pro'):
+                    # Identity, not poses: does this project name the board
+                    # the control came from? The stem is what a Read would
+                    # follow back to the original placement.
+                    hit = _names_control(path, control_stem)
+                    if hit:
+                        rows.append({
+                            # NOT a pose score: this file carries no poses.
+                            # It read 1.000 before, which is the number the
+                            # report prints as "matches the control", so a
+                            # reader was handed a fabricated pose match for a
+                            # project file.
+                            'file': rel, 'kind': 'project',
+                            'match_frac': None, 'refs_shared': 0,
+                            'worst_mm': None,
+                            'carries_truth': True,
+                            'truth_channel': 'identity',
+                            'names_source': hit,
+                            'sha256': _sha256(path),
+                            'mtime': os.path.getmtime(path)})
+                    continue
                 if name.endswith('.json'):
                     poses = _json_poses(path)
                     if poses is None:
@@ -368,6 +438,21 @@ def main(argv=None):
     ap.add_argument('--json', action='store_true', help='machine-readable report')
     args = ap.parse_args(argv)
 
+    #: Diagnostics that are NOT the verdict -- "there was nothing to check
+    #: against", not "this work dir is clean". They must reach both readers,
+    #: and `--json` has exactly one: the document on stdout. Printing them to
+    #: stderr in JSON mode put a second, non-JSON thing in front of every
+    #: caller that reads stdout+stderr together (tests/test_run15_fence_and_
+    #: channels.py does), so `json.loads` saw "Extra data" and a working audit
+    #: read as a crash. They ride in `notes` instead, and stderr keeps them in
+    #: the human mode where nothing is parsing it.
+    _notes = []
+
+    def _note(msg):
+        _notes.append(msg)
+        if not args.json:
+            print(msg, file=sys.stderr)
+
     if not os.path.isfile(args.control):
         print(f'fence_audit: control not found: {args.control}', file=sys.stderr)
         return 2
@@ -383,7 +468,42 @@ def main(argv=None):
     # report the audit's own reference as a leak.
     control_real = os.path.realpath(args.control)
 
-    rows = [r for r in scan(args.workdir, control_poses, allow, control_pads)
+    # WHICH name is the leak: the SOURCE's, not the control's. A stager
+    # writes the control as `control.kicad_pcb`, so its own stem names
+    # nothing; the source basename is recorded in the staging record beside
+    # it, which is the whole point of recording the source by hash and name
+    # THERE (outside the fence) rather than in the work dir.
+    # TWO record shapes are read, because a check that knows only one is
+    # inert for the other: `stage_blind.py` writes `draw.json` with a
+    # `source` key, and a truth dir staged by any other means is read from
+    # `stage.json`/`source_basename`. Reading one alone returned CLEAN on a
+    # blind work dir whose project said "watchy.kicad_pro".
+    _stem = None
+    _truth = os.path.dirname(os.path.abspath(args.control))
+    for _name, _key in (('stage.json', 'source_basename'),
+                        ('draw.json', 'source')):
+        _p = os.path.join(_truth, _name)
+        if _stem or not os.path.isfile(_p):
+            continue
+        try:
+            with open(_p, encoding='utf-8') as _f:
+                _raw = json.load(_f).get(_key) or ''
+            _stem = os.path.splitext(os.path.basename(_raw))[0] or None
+        except Exception:                            # noqa: BLE001
+            _stem = None
+    if not _stem:
+        # NO FALLBACK to the control's own basename. Both stagers write it as
+        # `control.kicad_pcb`, so the fallback stem is the English word
+        # "control" -- which appears in `board.design_settings` on ordinary
+        # projects and made every one of them a hard exit 4. With no staging
+        # record there is nothing to compare against, and saying so beats
+        # inventing a needle.
+        _note('fence_audit: no staging record beside the control '
+              '(draw.json/source or stage.json/source_basename), so no '
+              'project can be checked for the SOURCE name. Pose scanning '
+              'is unaffected.')
+    rows = [r for r in scan(args.workdir, control_poses, allow, control_pads,
+                            control_stem=_stem)
             if os.path.realpath(os.path.join(args.workdir, r['file'])) != control_real]
 
     manifest_path = os.path.join(args.workdir, MANIFEST_NAME)
@@ -392,18 +512,17 @@ def main(argv=None):
         try:
             manifest = json.load(open(manifest_path, encoding='utf-8'))
         except Exception as exc:
-            print(f'fence_audit: manifest unreadable ({exc}); every '
-                  f'truth-carrying board is reported as a LEAK', file=sys.stderr)
+            _note(f'fence_audit: manifest unreadable ({exc}); every '
+                  f'truth-carrying board is reported as a LEAK')
 
     if args.mode == 'audit' and manifest is None:
         # SAY it. The unreadable-manifest path above warns; the ABSENT one said
         # nothing, so audit silently became strict where create had been silent
         # -- and a reader could not tell "no board carried truth" from "there
         # was no record to check against".
-        print('fence_audit: no creation manifest in this work dir, so no board '
+        _note('fence_audit: no creation manifest in this work dir, so no board '
               'has provenance. Every truth-carrying board will be reported as '
-              'a LEAK. Run --mode create BEFORE the run to record one.',
-              file=sys.stderr)
+              'a LEAK. Run --mode create BEFORE the run to record one.')
 
     at_creation = set((manifest or {}).get('files', []))
     at_creation_shas = (manifest or {}).get('shas') or {}
@@ -428,6 +547,24 @@ def main(argv=None):
             row['reason'] = ('a pose RECORD inside the fence -- records are '
                              'never reconstructed, so this is truth arriving, '
                              'not recovery')
+            leaks.append(row)
+        elif row.get('truth_channel') == 'identity':
+            # SECOND, and for the same reason the `record` branch is first:
+            # every branch below this one reasons about POSES -- was the file
+            # present at creation, does it match the control byte for byte,
+            # did the run produce it. A project carries no poses, so all of
+            # them are the wrong question and it fell through to the `else`,
+            # where `audit` printed the leak as
+            # `ok ... matches the control (1.000) -- produced by the run`.
+            # `audit` is the WATCHER-TIME mode, so that is the mode a real
+            # recovery run actually uses.
+            #
+            # Nor can the creation manifest excuse it: a CLEAN project emits
+            # no row at all, so an identity row can only ever appear because
+            # the name arrived after creation.
+            row['reason'] = ('this project NAMES the source board -- identity, '
+                             'not poses, and one Read away from the original '
+                             'placement')
             leaks.append(row)
         elif manifest is None:
             row['reason'] = 'no creation manifest -- provenance unknown'
@@ -478,6 +615,9 @@ def main(argv=None):
         'leaks': leaks,
         'recovered_to_truth': recovered,
         'unparseable': errors,
+        # What could NOT be checked, beside what was. A reader who sees
+        # CLEAN is entitled to know the project channel never ran.
+        'notes': _notes,
         'verdict': 'LEAK' if leaks else 'CLEAN',
     }
     if args.json:
@@ -527,6 +667,14 @@ def main(argv=None):
                         f'stripped -- the tracks point at where each part '
                         f'belongs. Strip it with '
                         f'tests/stress/strip_copper_only.py')
+            elif row.get('truth_channel') == 'identity':
+                # A project carries no poses; what it can leak is the SOURCE'S
+                # NAME, which is one Read away from the original placement.
+                _how = ('NAMES THE SOURCE: '
+                        + '; '.join(row.get('names_source') or [])
+                        + '. A project must travel (#441) but KiCad stores '
+                          'meta.filename and pcbnew.last_paths inside it -- '
+                          'sanitise those before it enters the work dir')
             else:
                 _how = (f'carries the control\'s placement '
                         f'({row["match_frac"]:.3f} of {row["refs_shared"]} '

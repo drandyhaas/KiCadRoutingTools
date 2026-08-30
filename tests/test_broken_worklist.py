@@ -17,11 +17,26 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-sys.path.insert(0, os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-routing', 'scripts'))
+sys.path.insert(0, os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-placement-and-routing', 'scripts'))
 # board_score's own main() puts the clone root on sys.path before it calls
 # anything; a test calling those functions directly has to do the same, or
 # `kicad_parser` is missing and the net-name audit reports UNGRADED forever.
 sys.path.insert(0, ROOT)
+# #522: the engine lives in py_router/, the placer in py_placer/ --
+# ROOT alone does not make `import kicad_parser` work.
+for _p522 in ('py_router', 'py_placer'):
+    _d522 = os.path.join(ROOT, _p522)
+    if _d522 not in sys.path:
+        sys.path.insert(0, _d522)
+# #522 reorg + skill merge: the engine moved to py_router/, the placer to
+# py_placer/, and board_score.py into the placement-and-routing skill. Tests
+# that shell out to or import them need those roots on sys.path.
+for _p in ('py_router', 'py_placer',
+           os.path.join('.claude', 'skills', 'plan-pcb-placement-and-routing',
+                        'scripts')):
+    _d = os.path.join(ROOT, _p)
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
 
 import board_score as bs                                        # noqa: E402
 

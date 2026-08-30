@@ -60,7 +60,8 @@ def main():
     pcb = _pcb(route + island, [via], pads)
     write_list = [{'new_segments': [island[0]], 'new_vias': []}]
 
-    n_isl, n_segs, strip, via_strip = remove_orphan_islands(write_list, pcb, None)
+    n_isl, n_segs, strip, via_strip, n_vias = remove_orphan_islands(
+        write_list, pcb, None)
     results.append(("island removed (1 island, 3 segments)",
                     n_isl == 1 and n_segs == 3))
     results.append(("this-run segment dropped from write-list",
@@ -80,13 +81,13 @@ def main():
     keep = [_seg(0, 0, 5, 0, 7), _seg(5, 0, 10, 0, 7)]
     art_island = [_seg(30, 5, 32, 5, 7), _seg(32, 5, 34, 5, 7, graphic=True)]
     pcb2 = _pcb(keep + art_island, [], pads2)
-    n_isl, n_segs, strip, _vs = remove_orphan_islands([], pcb2, None)
+    n_isl, n_segs, strip, _vs, _nv = remove_orphan_islands([], pcb2, None)
     results.append(("graphics-anchored island kept; route kept",
                     n_isl == 0 and len(pcb2.segments) == 4))
 
     # Scope: an out-of-scope net's orphan island stays.
     pcb3 = _pcb(route[:] + [_seg(50, 5, 52, 5, 7)], [], pads)
-    n_isl, _, _, _ = remove_orphan_islands([], pcb3, scope_net_ids={99})
+    n_isl, _, _, _, _ = remove_orphan_islands([], pcb3, scope_net_ids={99})
     results.append(("out-of-scope island untouched", n_isl == 0))
 
     passed = 0
