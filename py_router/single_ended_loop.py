@@ -362,6 +362,23 @@ def _stub_swap_rescue(pcb_data, net_id, config, state, results,
                     pcb_data, net_id, config, layer_map)
                 if state.working_obstacles is not None and \
                         state.net_obstacles_cache is not None:
+                    # #803: REMOVE the old entry from the working map before
+                    # replacing it. update_net_obstacles_after_routing only
+                    # swaps the cache dict entry -- it never touches the map --
+                    # so without this the previous object's cells are stranded
+                    # there for the rest of the run while the recomputed
+                    # object's are added on top: the net is counted TWICE.
+                    # Every other commit path does this remove/recompute/add
+                    # cycle (rip_up_reroute x3, sync_pcb_data_segments, the
+                    # phase-3 pair); this one skipped the remove.
+                    # Measured on glasgow_revC: +3V3 stranded 30510 cells here
+                    # and added 30983, which is exactly the
+                    # "blocked_cells: +30510 unaccounted" the #309 audit
+                    # reported for the whole run.
+                    if net_id in state.net_obstacles_cache:
+                        remove_net_obstacles_from_cache(
+                            state.working_obstacles,
+                            state.net_obstacles_cache[net_id])
                     update_net_obstacles_after_routing(
                         pcb_data, net_id, result, config,
                         state.net_obstacles_cache)
