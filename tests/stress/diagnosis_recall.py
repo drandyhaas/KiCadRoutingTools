@@ -1,15 +1,52 @@
 #!/usr/bin/env python3
-"""#553: does the mover ranking recover a block somebody broke? No routing.
+"""#553: does the mover ranking recover a block somebody broke? MEASURED: NO.
 
-THE CLAIM THIS CAN SUPPORT, AND THE ONE IT CANNOT
--------------------------------------------------
-It measures RECALL of known damage: displace a block by a known dose with
-`placement/perturb.py`, hand the damaged board to `placement.diagnosis`, and
-ask whether the selected set contains a member of the block that was broken.
+THE RESULT FIRST, BECAUSE IT IS A NULL
+---------------------------------------
+This study was built to support `--target-select diagnosis` and it does not.
+Run as committed, the evidence arm's median DELTA -- the lift on the damaged
+board minus the lift the SAME ranking scores on the UNDAMAGED one -- is +0.135
+over 8 cells, 4 up and 2 down. `wrong_side`, the second evidence arm, is
++0.000, 2 up and 3 down. That is not a finding. It is recorded rather than
+tuned away, and the flag it was meant to support ships default-off with no
+efficacy claim either way.
 
-It does NOT measure whether the selected set ROUTES better. Nothing here
-routes. `--target-select diagnosis` ships with no efficacy claim, and no number
-this script prints is one; see `py_placer/placement/diagnosis.py`.
+The number that read like a finding was the raw lift on the damaged board, and
+two things were wrong with it:
+
+  * NO UNDAMAGED CONTROL. `perturb.pick_block` ranks units by source and size,
+    and so, largely, does this ranking -- so on tigard the "damaged" block is
+    already ranked #1 by displacement on the PRISTINE board. "Above chance on
+    the damaged board" could not be told apart from "always ranks that block
+    first". The paired arm exists now and is the only evidence column.
+  * SATURATION. Lift has a ceiling of `movable / n`, reached whenever the
+    selection contains the whole truth, and most cells sit ON it -- 7 of 8
+    `wrong_side` cells. There the lift reports how big the selection was and
+    nothing else. `lift_ceiling` travels beside every lift now.
+
+A third defect was in the exclusions rather than the numbers. The dose gate
+read `max_feasible_dose_mm`, which is RIGID-TRANSLATE travel that only two of
+the four arms clip against, so kit-dev-coldfire's `wrong_side` cell was
+excluded as "1.404 mm landed" while its 21 members had moved 111 mm. The gate
+now diffs the control against the damaged board and uses what the parts DID --
+which is also how three `scatter` cells turned out to have moved nothing at all
+(`portfolio.perturb_jitter` skips a part whose incumbent pose is not fully
+legal, which on a dense board is every part), so the "negative control" board
+was byte-identical to the control on those cells.
+
+WHAT WOULD BE NEEDED, if anyone wants to finish this
+-----------------------------------------------------
+A null measured against a null that is itself wrong is worth little.
+`base_rate` is the exact null for a uniform random pick of n PARTS; this
+selector picks whole BLOCKS, and the truth is a block from the same derivation,
+so the honest null is a random pick of the same number of candidate blocks.
+Measured over 2000 permutations per cell that null runs 0.69 to 3.12 -- biased
+in both directions depending on the board -- and under it no cell reached the
+95th percentile. Anyone reviving this should build that null in, and should
+size the selection well below the truth so the ceiling stops binding.
+
+It does not measure whether the selected set ROUTES better either. Nothing here
+routes; see `py_placer/placement/diagnosis.py`.
 
 WHY THERE IS NO `pins` ARM, AND WHAT STANDS IN FOR IT
 -----------------------------------------------------
@@ -24,9 +61,14 @@ That is exactly the preference `--max-target-pins` encodes and exactly what
 #553 says is wrong -- "the part that needs to move is never a passive". It is
 named `low_pin` here, never `pins`, so nobody reads it as the shipped selector.
 
-The second control is CHANCE: N / |movable|, the probability that a size-matched
-random pick contains a damaged member. A selector that picks nearly everything
-has near-perfect recall and no value, so recall is never reported without it.
+`low_pin` is a WEAK control and the weakness is measured: it reads only pin
+counts, which are pose-invariant, so `low_pin(damaged) == low_pin(undamaged)`
+on every cell -- it cannot respond to damage at all, where the real selector
+starts from the nets the router failed. Most of its membership is decided by
+its `(pins, ref)` alphabetical tie-break (88-92% on ulx3s). A damage-aware
+pin-style proxy is NOT at chance: an oracle running the shipped `nets_to_refs`
+over the truth block's own nets beats the diagnosis on 2 of 8 evidence cells.
+Read `low_pin` as a floor, never as "a pin-based selector sits at chance".
 
 THE ARMS, AND WHY ONE OF THEM IS NOT EVIDENCE
 ----------------------------------------------
@@ -45,18 +87,20 @@ THE ARMS, AND WHY ONE OF THEM IS NOT EVIDENCE
               -- but the arms are not the same experiment on the same block,
               and reading them as a matched set would be wrong.
   wrong_side  Weak evidence. A reflection through the board centre.
-  scatter     NEGATIVE CONTROL for displacement HERE. `perturb.py` calls the
-              same arm a POSITIVE control, for its own purpose -- it is the
-              arm a RECOVERY run must undo. Both readings are right for their
-              own question and the collision is named so nobody has to guess:
-              per-part jitter leaves the
-              block centroid roughly where it was, so the displacement signal
-              SHOULD stay quiet. If it fires here it fires on everything, and
-              that is a finding to record, not to hide.
+  scatter     Intended as a negative control for displacement -- per-part
+              jitter should leave the block centroid roughly where it was.
+              MEASURED, it mostly does not perturb at all:
+              `portfolio.perturb_jitter` skips a part whose incumbent pose is
+              not fully legal, which on a dense board is every part, so three
+              of its cells produced a board byte-identical to the control and
+              are excluded by name. NOTE also that `perturb.py` calls this arm
+              a POSITIVE control for its own purpose (it is the arm a RECOVERY
+              run must undo). Both readings are right for their own question;
+              the collision is named so nobody has to guess.
   pile        Excluded. Every free part moves, so there is no "the block".
 
-A board whose damaged block is the only candidate is EXCLUDED and named: recall
-1.0 out of one candidate is not a measurement.
+A board whose damaged block is the only candidate is EXCLUDED and named: a
+ranking over one candidate made no choice.
 
 THE CONFIGURATION GAP, DISCLOSED
 --------------------------------
@@ -76,6 +120,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import sys
@@ -104,15 +149,16 @@ DEFAULT_BOARDS = ('esp_prog', 'splitflap_driver', 'watchy', 'tigard',
 
 DEFAULT_DOSE = 20.0
 
-#: A cell is discarded when the dose that actually landed is below this
-#: fraction of the dose asked for. NOT a tuned constant: it is the line between
-#: "a block was displaced" and "a block was nudged", and the recovery half of
-#: an experiment whose damage never happened is void.
+#: A cell is discarded when NO member of the damaged block actually moved this
+#: far, measured by diffing the control against the damaged board. Below a
+#: millimetre there is nothing to recover and the recovery half is void.
 #:
-#: `perturb`'s own `clipped` flag does NOT catch this -- measured on esp_prog,
-#: a 20 mm request landed 0.316 mm and reported `clipped: false`. So the ratio
-#: is computed here rather than trusted from the record.
-MIN_DOSE_FRACTION = 0.25
+#: This replaced a gate on `max_feasible_dose_mm`, which was wrong for three of
+#: the four arms: that number is the max feasible RIGID-TRANSLATE travel and
+#: only `translate`/`wrong_side` clip against it. kit-dev-coldfire's wrong_side
+#: cell was excluded as "1.404 mm landed" while its 21 members had in fact
+#: moved 111 mm. `perturb`'s own `clipped` flag catches neither case.
+MIN_DAMAGE_MM = 1.0
 
 #: WHY THE HEADLINE IS LIFT AND NOT RECALL. The first version of this script
 #: asked "does the selection contain a damaged part". It excluded 33 of its 36
@@ -194,17 +240,35 @@ def run_one(board_path, kind, *, dose, group_by, top_k, workroot):
                 'truth_members': truth,
                 'dose_mm_applied': rec.get('max_feasible_dose_mm'),
                 'clipped': rec.get('clipped')})
-    applied = rec.get('max_feasible_dose_mm') or 0.0
-    if dose and applied < MIN_DOSE_FRACTION * dose:
-        # NOT read off `clipped`: measured on esp_prog, a 20 mm request landed
-        # 0.316 mm and the record still said `clipped: false`.
+    # THE DAMAGE, MEASURED. Not `max_feasible_dose_mm`: that is the max feasible
+    # RIGID-TRANSLATE travel, computed before perturb's kind branch, and only
+    # `translate` and `wrong_side` clip against it. `swap` and `scatter` never
+    # read the dose at all (`predictor_study.UNDOSED_KINDS` says so in one
+    # line), so gating them on it was wrong by up to 79x -- kit-dev-coldfire's
+    # wrong_side cell was excluded as "1.404 mm" while its members had actually
+    # moved 111 mm. So: diff the control against the damaged board and use what
+    # the parts DID.
+    ctrl_pcb = parse_kicad_pcb(control)
+    pcb = parse_kicad_pcb(damaged)
+    moved = {}
+    for r in truth:
+        a = (ctrl_pcb.footprints or {}).get(r)
+        b = (pcb.footprints or {}).get(r)
+        if a is not None and b is not None:
+            moved[r] = math.hypot(b.x - a.x, b.y - a.y)
+    max_move = max(moved.values()) if moved else 0.0
+    n_moved = sum(1 for v in moved.values() if v > 1e-6)
+    row.update({'max_member_move_mm': round(max_move, 4),
+                'members_moved': n_moved,
+                'members': len(truth)})
+    if max_move < MIN_DAMAGE_MM:
         row['skipped'] = (
-            f'the dose that landed was {applied:.3f} mm of {dose:g} mm asked '
-            f'for ({applied / dose:.1%}); the damage was never applied, so the '
+            f'the damaged block moved at most {max_move:.3f} mm '
+            f'({n_moved} of {len(truth)} members moved at all) -- below '
+            f'{MIN_DAMAGE_MM} mm there is no damage to recover, so the '
             f'recovery half is void')
         return row
 
-    pcb = parse_kicad_pcb(damaged)
     blocks = derive_groups(pcb, parse_sources(group_by))
     movable = _movable(pcb)
     if len(blocks) < 2:
@@ -213,13 +277,27 @@ def run_one(board_path, kind, *, dose, group_by, top_k, workroot):
         row['blocks'] = len(blocks)
         return row
 
-    state = D.make_state(pcb, damaged)
-    legality = D.legality_defects(pcb, pcb_file=damaged)
+    def _lift(board_pcb, board_path):
+        st = D.make_state(board_pcb, board_path)
+        leg = D.legality_defects(board_pcb, pcb_file=board_path)
+        dg = D.diagnose(st, board_pcb, derive_groups(board_pcb,
+                                                     parse_sources(group_by)),
+                        blocker_report=None, legality=leg, top_k=top_k)
+        return st, leg, dg
+
+    state, legality, _ = _lift(pcb, damaged)
     # blocker_report is None ON PURPOSE: nothing routed, so the router
     # attributed nothing, and imputing an attribution would invent the
     # evidence. Two of the three signals run; the third reports why it did not.
     diag = D.diagnose(state, pcb, blocks, blocker_report=None,
                       legality=legality, top_k=top_k)
+    # THE PAIRED ARM, and the one whose absence voided the first version of
+    # this study: the SAME ranking on the UNDAMAGED board, scored against the
+    # SAME truth. Without it "the ranking is above chance on the damaged board"
+    # cannot be told apart from "the ranking always ranks that block first" --
+    # and measured, tigard's truth block is already ranked #1 by displacement
+    # on the pristine board. Only the DELTA is evidence.
+    _, _, diag0 = _lift(ctrl_pcb, control)
 
     sel = set(diag.selected)
     n = len(sel)
@@ -247,6 +325,17 @@ def run_one(board_path, kind, *, dose, group_by, top_k, workroot):
         'precision_low_pin': round(p_low, 6),
         'lift_diagnosis': round(p_diag / base, 4) if base else None,
         'lift_low_pin': round(p_low / base, 4) if base else None,
+        # THE CEILING. Lift DOES saturate: a selection at least as big as the
+        # truth can at best contain all of it, so max lift is movable/n. A cell
+        # at 100% of ceiling says only "the selection is this fraction of the
+        # board", which is why this column is reported beside every lift.
+        'lift_ceiling': round(min(n, len(tset)) / (n * base), 4)
+                        if (n and base) else None,
+        # The undamaged pairing.
+        'selected_undamaged': len(diag0.selected),
+        'lift_undamaged': (round((len(set(diag0.selected) & tset)
+                                  / len(diag0.selected)) / base, 4)
+                           if diag0.selected and base else None),
         'selected_by': {c.key: list(c.selected_by) for c in diag.candidates
                         if c.selected_by},
         'displacement_ranked_truth': any(
@@ -278,8 +367,10 @@ def summarise(rows):
     # can only check that the baseline is shaped like a baseline -- which is
     # what the first version of it did.
     out['cells'] = {f"{r['board']}/{r['kind']}": {
-        k: r[k] for k in ('lift_diagnosis', 'lift_low_pin', 'base_rate',
-                          'selected', 'movable', 'truth_movable',
+        k: r[k] for k in ('lift_diagnosis', 'lift_undamaged', 'lift_low_pin',
+                          'lift_ceiling', 'base_rate', 'selected',
+                          'selected_undamaged', 'movable', 'truth_movable',
+                          'max_member_move_mm', 'members_moved',
                           'hit_diagnosis', 'hit_low_pin')}
         for r in rows if not r.get('skipped')}
     for r in rows:
@@ -293,6 +384,16 @@ def summarise(rows):
                   if c['lift_diagnosis'] is not None]
         lift_l = [c['lift_low_pin'] for c in cells
                   if c['lift_low_pin'] is not None]
+        # THE ONLY EVIDENCE COLUMN. Raw lift on the damaged board is not it:
+        # the ranking scores just as well on the pristine board wherever the
+        # perturber's own unit_rank picks the block the ranking would have
+        # picked anyway. The delta is what damage did.
+        delta = [round(c['lift_diagnosis'] - c['lift_undamaged'], 4)
+                 for c in cells
+                 if c['lift_diagnosis'] is not None
+                 and c['lift_undamaged'] is not None]
+        ceil_frac = [c['lift_diagnosis'] / c['lift_ceiling']
+                     for c in cells if c.get('lift_ceiling')]
         out['arms'][kind] = {
             'is_evidence': kind in EVIDENCE_ARMS,
             'boards': len(cells),
@@ -301,6 +402,11 @@ def summarise(rows):
             # never a pooled mean standing in for one.
             'diagnosis_above_chance': sum(1 for v in lift_d if v > 1.0),
             'diagnosis_below_chance': sum(1 for v in lift_d if v < 1.0),
+            'delta_positive': sum(1 for v in delta if v > 0),
+            'delta_negative': sum(1 for v in delta if v < 0),
+            'delta_zero': sum(1 for v in delta if v == 0),
+            'median_delta': _median(delta),
+            'cells_at_ceiling': sum(1 for f in ceil_frac if f >= 0.999),
             'beats_low_pin': sum(1 for c in cells
                                  if (c['lift_diagnosis'] or 0)
                                  > (c['lift_low_pin'] or 0)),
@@ -324,12 +430,18 @@ def format_summary(s):
          f"boards: {', '.join(s['boards'])}", '']
     L.append('LIFT = (share of the SELECTION that is damaged) / (share of the '
              'BOARD that is damaged).')
-    L.append('1.0 is chance. Direction is counted PER BOARD, never pooled '
-             'into one mean.')
+    L.append('DELTA = that lift MINUS the same ranking on the UNDAMAGED board. '
+             'Delta is the evidence;')
+    L.append('raw lift is not: a ranking that always picks that block scores '
+             'the same either way.')
+    L.append('CEIL counts cells at the metric ceiling (movable/n), where the '
+             'lift says only how')
+    L.append('big the selection was. Direction is counted PER BOARD, never '
+             'pooled into one mean.')
     L.append('')
-    L.append(f"{'arm':<12}{'n':>3} {'above':>6} {'below':>6} {'med.D':>7}"
-             f" {'med.L':>7} {'D>L':>4} {'D<L':>4} {'base':>6} {'|sel|':>6}"
-             f"  role")
+    L.append(f"{'arm':<12}{'n':>3} {'d+':>3} {'d-':>3} {'med.delta':>10}"
+             f" {'med.lift':>9} {'med.L':>7} {'ceil':>5} {'base':>6}"
+             f" {'|sel|':>6}  role")
     for kind in ARMS:
         a = s['arms'].get(kind)
         if not a:
@@ -339,33 +451,43 @@ def format_summary(s):
                 'negative control for displacement')
         md = a['median_lift_diagnosis']
         ml = a['median_lift_low_pin']
-        L.append(f"{kind:<12}{a['boards']:>3} {a['diagnosis_above_chance']:>6}"
-                 f" {a['diagnosis_below_chance']:>6}"
-                 f" {(f'{md:.2f}' if md is not None else '-'):>7}"
+        dl = a['median_delta']
+        L.append(f"{kind:<12}{a['boards']:>3} {a['delta_positive']:>3}"
+                 f" {a['delta_negative']:>3}"
+                 f" {(f'{dl:+.3f}' if dl is not None else '-'):>10}"
+                 f" {(f'{md:.2f}' if md is not None else '-'):>9}"
                  f" {(f'{ml:.2f}' if ml is not None else '-'):>7}"
-                 f" {a['beats_low_pin']:>4} {a['loses_to_low_pin']:>4}"
+                 f" {a['cells_at_ceiling']:>5}"
                  f" {a['mean_base_rate']:>6.3f} {a['mean_selected']:>6.1f}"
                  f"  {role}")
         L.append(f"{'':<12}    boards: {', '.join(a['board_names'])}")
     if 'scatter' in s['arms']:
         sc = s['arms']['scatter']
-        L += ['', f"scatter is the control that makes the first row mean "
-                  f"something: per-part jitter leaves the block centroid where "
-                  f"it was, so the selector SHOULD sit at chance here. Median "
-                  f"lift {sc['median_lift_diagnosis']}, "
-                  f"{sc['diagnosis_above_chance']} board(s) above and "
-                  f"{sc['diagnosis_below_chance']} below. The damaged block "
-                  f"still CARRIES a displacement row in "
-                  f"{sc['displacement_ranked_truth']} of {sc['boards']} cells "
-                  f"-- being ranked at all is not the same as leading, and "
-                  f"only the lift says which."]
+        L += ['', f"scatter kept {sc['boards']} of its cells: on the rest "
+                  f"`portfolio.perturb_jitter` moved NOTHING, because it skips "
+                  f"a part whose incumbent pose is not fully legal, which on a "
+                  f"dense board is every part. A control that did not perturb "
+                  f"is not a control, which is why those cells are excluded by "
+                  f"name rather than counted."]
     for note in s['skipped']:
         L.append(f'  EXCLUDED {note}')
-    L += ['', 'translate is arithmetic: perturb.block_direction calls the very '
-              'metric this arm scores, so passing it proves the wiring, not '
-              'the signal.',
+    ev = [s['arms'][k] for k in EVIDENCE_ARMS if k in s['arms']]
+    strong = any((a.get('median_delta') or 0) > 0.5 for a in ev)
+    L += ['',
+          'VERDICT: ' + ('' if strong else 'NO EVIDENCE. ')
+          + "the evidence arms' median deltas are "
+          + ', '.join(f"{k} {s['arms'][k]['median_delta']:+.3f} "
+                      f"({s['arms'][k]['delta_positive']}+/"
+                      f"{s['arms'][k]['delta_negative']}-)"
+                      for k in EVIDENCE_ARMS if k in s['arms']) + '.',
+          'DELTA is lift on the damaged board minus lift on the UNDAMAGED one. '
+          'A ranking that always',
+          'picks that block scores the same on both, which is why the raw '
+          'lift column is not evidence.',
+          'translate is arithmetic: perturb.block_direction calls the very '
+          'metric this arm scores.',
           'No paired routed A/B of pins vs diagnosis exists. Recall is not '
-          'efficacy.']
+          'efficacy, and this recall is not a finding.']
     return '\n'.join(L)
 
 

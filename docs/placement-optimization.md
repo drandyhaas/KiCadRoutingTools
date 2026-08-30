@@ -574,12 +574,16 @@ own failure diagnostics* to decide what to move. Each round:
    would assert the three are equally informative, which is measured-false.
    The three rank independently and are swept round-robin.
 
-   **No measurement shows `diagnosis` routes better than `pins`.** What has
-   been measured is recall of known damage, in
-   `tests/stress/diagnosis_recall.py`: on 4 boards the ranking concentrates on
-   a block the perturber displaced (median lift 2.32 over chance, 4/4 boards
-   in direction) while its negative control sits at chance. That is not a
-   routing result and the flag ships default-off. The signal
+   **No measurement shows `diagnosis` routes better than `pins`, and the one
+   study that was built to support it came back NULL.**
+   `tests/stress/diagnosis_recall.py` displaces a known block and asks whether
+   the ranking concentrates on it, paired against the SAME ranking on the
+   UNDAMAGED board. Evidence arms: `swap` median delta **+0.135** (4 cells up,
+   2 down), `wrong_side` **+0.000** (2 up, 3 down). The pairing is the point --
+   the ranking scores just as well on the pristine board wherever the
+   perturber picks the block the ranking would have picked anyway. The flag
+   ships default-off on that basis, and the study is kept as a recorded
+   negative rather than deleted. The signal
    `foreign_crossings`, which #553 also named, is **not** included; the three
    reasons are in `py_placer/placement/diagnosis.py`, and none of them is
    "#703 measured it and it failed" — #703 measured `crossings`, a different

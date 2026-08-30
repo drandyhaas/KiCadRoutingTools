@@ -101,13 +101,18 @@ python py_placer/place_route_loop.py input.kicad_pcb repaired.kicad_pcb \
     --target-select diagnosis --group-by auto,decap --diagnosis-top-k 3
 ```
 
-**No measurement shows this routes better than `pins`.** It ships default-off,
-the run verdict carries that sentence in `target_select_efficacy`, and
+**No measurement shows this routes better than `pins`, and the study built to
+support it came back NULL.** `tests/stress/diagnosis_recall.py` displaces a
+known block and asks whether the ranking concentrates on it, paired against the
+same ranking on the UNDAMAGED board: evidence-arm median deltas **+0.135**
+(4 cells up, 2 down) and **+0.000** (2 up, 3 down). The study, its rows and its
+baseline are committed as a recorded negative rather than deleted; its
+docstring explains the three ways an earlier reading of the same data looked
+like a finding. The flag ships default-off, the run verdict carries the
+disclaimer in `target_select_efficacy`, and
 `target_select_rounds_diagnosis` beside `target_select_rounds_fallback` says
-how often the flag actually steered anything. What HAS been measured is recall
-of known damage (`tests/stress/diagnosis_recall.py`, baseline in
-`tests/553_diagnosis_recall_baseline.json`). See `diagnosis.py`'s own docstring
-for what backs each signal — which is not the same for the three — and for why
+how often it steered anything at all. See `diagnosis.py`'s own docstring for
+what backs each signal — which is not the same for the three — and for why
 `foreign_crossings` is absent.
 
 A run in this mode prints a group-source census before round 0, because

@@ -306,27 +306,40 @@ boundaries, recorded before anyone reads the flag's output as a result:
    corridor-pierce count — a different quantity — and it has never been measured
    against anything. Recording the omission as "#703 measured it and it failed"
    would be false in a way that survives.
-3. **Recall is not efficacy.** `tests/stress/diagnosis_recall.py` measures
-   whether the ranking concentrates on a block the perturber displaced, with no
-   routing at all. Its evidence arm is above chance on 4 of 4 boards (median
-   lift 2.32) while its negative control sits at chance (0.83), and its
-   `translate` arm is arithmetic and labelled so. None of that is a routing
-   outcome.
+3. **Recall is not efficacy — and the recall study came back NULL.**
+   `tests/stress/diagnosis_recall.py` displaces a known block and asks whether
+   the ranking concentrates on it. Nothing routes. Its evidence arms' median
+   DELTAS — lift on the damaged board minus the lift the SAME ranking scores
+   on the UNDAMAGED one — are `swap` **+0.135** (4 cells up, 2 down) and
+   `wrong_side` **+0.000** (2 up, 3 down). That is not a finding. The study is
+   kept, and kept committed, as a recorded negative rather than deleted.
 
-   Four limits of that study, so nobody has to find them. It is **4 boards of
-   9 attempted**, and the five exclusions are named in the run's own output:
-   on four the 20 mm dose landed 0.3–4.4 mm so no damage was applied, and
-   sonde_u has one derivable block. Its dose cutoff,
-   `MIN_DOSE_FRACTION = 0.25`, is not comfortably clear of the data — rp2350
-   lands at 21.9% and is excluded, splitflap at 34.6% and is included, so a
-   3-point margin decides whether it is 4 boards or 5. Its `swap` arm is not
-   size-matched to the others (`perturb` re-picks a PAIR of units for it, so
-   its base rate is roughly double), which the lift normalises away but which
-   means the arms are not one experiment on one block. And it runs the ranking
-   **unbudgeted** while the loop budgets every round — which the module's own
-   `SIGNAL_ORDER` note says can change the selected set outright. Closing that
-   last one needs a routed board to supply the pin count, which is exactly
-   what the study exists to avoid.
+   An earlier reading of the same data said "above chance on 4 of 4 boards,
+   median lift 2.32, negative control at chance". It was wrong in three ways,
+   all found by re-measuring rather than by re-reading, and all three are worth
+   carrying because each is a trap the next study of this shape will meet:
+
+   - **No undamaged control.** `perturb.pick_block` ranks units by source and
+     size, and so, largely, does this ranking — so on tigard the damaged block
+     is already ranked #1 by displacement on the PRISTINE board. The raw lift
+     could not tell "found the damage" from "always ranks that block first".
+   - **Lift saturates.** Its ceiling is `movable / n`, reached whenever the
+     selection contains the whole truth, and most cells sat exactly ON it
+     (7 of 8 `wrong_side` cells) — where the number reports how big the
+     selection was and nothing else.
+   - **The negative control mostly did not perturb.**
+     `portfolio.perturb_jitter` skips a part whose incumbent pose is not fully
+     legal, which on a dense board is every part, so three `scatter` cells
+     produced a board byte-identical to the control. The published 0.83 was an
+     interpolated median of `{0, 0, 1.66, 5.06}` — no cell was near 1.0.
+
+   Two limits survive even in the corrected form. `base_rate` is the exact null
+   for a uniform random pick of n PARTS, but this selector picks whole BLOCKS
+   and the truth is a block from the same derivation; the block-structured null
+   runs 0.69–3.12 depending on the board, and under it no cell reaches the 95th
+   percentile. And the study runs the ranking **unbudgeted** while the loop
+   budgets every round — which the module's own `SIGNAL_ORDER` note says can
+   change the selected set outright.
 
 ### Pre-registered rule 5 — what would settle it, and why it has not been run
 
@@ -341,8 +354,12 @@ records a median 217 s per route and a maximum of 2012 s over its 87 rows (on
 `tigard:perturb-wrong_side`), plus a single `tigard:perturb-pile` row at
 9877 s — so three boards × five rounds × two arms is hours to overnight
 serially. There is a harder problem than cost, and it is recorded here so the
-next person does not rediscover it: **the tracked corpus has no board that
-fails to route at its authored placement.** Manufacturing failures means
+next person does not rediscover it: **the tracked corpus has almost no board
+that fails to route at its authored placement.** The one that does is
+kit-dev-coldfire — `py_placer/placement/README.md` records the loop taking its
+hand placement from 3 failed nets to 0, and this document's own table shows no
+zero among its observed `blocking` values — so an A/B would rest on ONE board
+where N ≥ 3 is the acceptance rule. Manufacturing failures elsewhere means
 perturbing, which re-introduces the damage-family caveat the recall study
 already carries.
 
