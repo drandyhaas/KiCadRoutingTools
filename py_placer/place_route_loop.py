@@ -176,6 +176,30 @@ def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str,
                                 keep_blocker_cells=keep_blocker_cells)
 
 
+def _copy_blocker_report(jb):
+    """Detach `summary['blockers']` from the caller's dict without reshaping it.
+
+    Two levels deep, which is how deep the structure goes: the per-failed-net
+    entry and its `blocked_by` items. An entry that carries no `blocked_by`
+    key does NOT gain an empty one -- adding it would be normalisation, and a
+    consumer must be able to tell "attributed nothing" from "did not say".
+    """
+    if jb is None:
+        return None
+    out = []
+    for e in jb:
+        if not isinstance(e, dict):
+            out.append(e)
+            continue
+        c = dict(e)
+        bb = c.get('blocked_by')
+        if isinstance(bb, list):
+            c['blocked_by'] = [dict(b) if isinstance(b, dict) else b
+                               for b in bb]
+        out.append(c)
+    return out
+
+
 def metrics_from_summary(summary: dict, log: str = '',
                          extra_targets=None, *,
                          keep_blocker_cells: bool = False) -> dict:
@@ -186,28 +210,36 @@ def metrics_from_summary(summary: dict, log: str = '',
     implementation that drifts. Pure: no subprocess, no file IO. `log` is only
     the pre-#409 blocker fallback.
 
-    `keep_blocker_cells` (#553) adds two keys and changes nothing else. The
-    seven-key form is what `write_round_sidecar` serialises verbatim into
-    `loop_round{N}.json` (:272), so an unconditional key would change the
-    sidecar bytes of every run that does not want it. Off by default; the loop
-    passes it only in `--target-select diagnosis`.
+    `keep_blocker_cells` (#553) adds ONE key, `blocker_report`, and changes
+    nothing else. The seven-key form is what `write_round_sidecar` serialises
+    verbatim into `loop_round{N}.json`, so an unconditional key would change
+    the sidecar bytes of every run that never asked for #553. Off by default;
+    `--target-select diagnosis` is what turns it on.
 
-      blocker_report            the raw `summary['blockers']` list, or None on
-                                the pre-#409 regex path. None and [] are
-                                DIFFERENT: [] means "structured emitter, nothing
-                                left to attribute" (see below), None means "no
-                                structured evidence exists at all". A consumer
-                                that conflates them imputes evidence.
-      blockers_without_counts   attributions naming a net with no cell counts:
-                                every entry of route.py's `stage='preexisting'`
-                                variant (route.py:3756-3760 emits {'net': n,
-                                'preexisting': True} and nothing else), plus
-                                every name on the regex path. Counted, never
-                                imputed a count of 1.
+    `blocker_report` is a COPY of `summary['blockers']`, or **None** when that
+    key was absent. It is deliberately raw: this function does no arithmetic on
+    it, because `placement.diagnosis.blocker_evidence` already folds it and a
+    second fold here is the drift #431 split this function out to prevent. Do
+    not add a count alongside it -- ask `blocker_evidence`.
+
+    WHAT `None` ACTUALLY MEANS, which is not what it looks like. `route.py`
+    writes the key only `if blockers_report:`, so it is OMITTED both on a
+    pre-#409 log AND on a modern run that attributed nothing. So `None` reads
+    "no structured attribution reached us" -- and it is exactly then that
+    `blockers` above comes from the whole-log regex, which scrapes TRANSIENT
+    blocker lines for nets that later routed. `None` is therefore the signal
+    that those names are not evidence, which is why the diagnosis skips the
+    signal outright rather than ranking them. `[]` is a narrower case
+    (`route_summary.merge_summaries` after reconciliation cleared every
+    failure) and stays distinguishable.
+
+    A COPY, not the caller's list: `write_round_sidecar` serialises this dict,
+    and a consumer that sorted or annotated the report in place would write
+    through into the summary the loop is still holding.
 
     Why carry it rather than re-read `work/loop_round{N}_route.json`: run_route
-    only adds `--json-out` when the operator did not put their own in
-    `--route-args` (:139-140), so on a legal invocation that file is never
+    adds `--json-out` only when the operator did not put their own in
+    `--route-args`, so on a perfectly legal invocation that file is never
     written. The merged summary is in hand here.
     """
     failed_nets = list(summary.get('failed_single', []))
@@ -266,17 +298,11 @@ def metrics_from_summary(summary: dict, log: str = '',
         'pad_pairs_total': summary.get('pad_pairs_total', 0),
     }
     if keep_blocker_cells:
-        # The cell counts the seven-key form discards above. No coordinates
-        # exist anywhere in this JSON (blocking_analysis.blocking_info_to_dict
-        # serialises counts only), and none is invented here.
-        if jb is None:
-            out['blocker_report'] = None
-            out['blockers_without_counts'] = len(blockers)
-        else:
-            out['blocker_report'] = jb
-            out['blockers_without_counts'] = sum(
-                1 for e in jb for b in e.get('blocked_by', [])
-                if 'blocked_count' not in b)
+        # The cell counts the seven-key form discards above, carried raw. No
+        # coordinates exist anywhere in this JSON
+        # (blocking_analysis.blocking_info_to_dict serialises counts only), and
+        # none is invented here.
+        out['blocker_report'] = _copy_blocker_report(jb)
     return out
 
 
