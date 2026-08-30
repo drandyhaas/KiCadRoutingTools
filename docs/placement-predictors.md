@@ -27,12 +27,20 @@ and each graded by `board_score`.
 >
 > **What that costs, said plainly: no number in this document has an automated
 > change detector any more** — not the rho table, not the per-board tables, not
-> the shuffle-control rates — **and re-deriving them is an 8.8-hour job** (the sum of `provenance.total_seconds`
-> over the 87 rows; median 217 s, max 2012 s on `tigard:perturb-wrong_side`;
-> about 2.5 h wall clock at `-j 4`). It is the recorded finding.
+> the shuffle-control rates — **and re-deriving them is a 60-hour job** (the sum of `provenance.total_seconds`
+> over the 119 rows that carry one; median 343 s, max 12058 s on
+> `kit-dev-coldfire-xilinx_5213:portfolio-5` — 3.3 h in one row, a floor no
+> amount of parallelism beats). The `-j 4` wall clock has not been measured; a
+> naive divide puts it near 15 h. It is the recorded finding.
+>
+> An earlier revision of this box said 8.8 h over 87 rows, median 217 s, max
+> 2012 s on `tigard:perturb-wrong_side`. Those are the FOUR-board run's numbers,
+> carried forward unchanged when the table grew to six — the 87 shortest rows do
+> sum to 5.9 h, and `tigard:perturb-wrong_side` really is 2012.2 s, but neither
+> describes the study this document reports.
 >
 > ```bash
-> # rebuild the rows (8.8 h serial, ~2.5 h at -j 4)
+> # rebuild the rows (60 h serial; ~15 h at -j 4, and one row alone is 3.3 h)
 > python3 -X utf8 tests/stress/predictor_study.py --out wk/703 -j 4
 > # then every statistic, free, from the rows it wrote
 > python3 -X utf8 tests/stress/predictor_study.py --from-rows wk/703/rows.jsonl
@@ -274,14 +282,14 @@ discharging, not a number chosen afterwards.*
 
 ## What this does not claim
 
-- Not that the passing predictors *cause* anything. They rank an outcome on four
+- Not that the passing predictors *cause* anything. They rank an outcome on six
   boards.
 - Not that `crossings` or `hpwl` are useless. Both are measured against
   distance-to-truth, both retain the roles that measurement supports, and the
   drivers' existing prohibition on gating `crossings` is untouched.
 - Not that the legality family is ten findings. Six of them share a median to
   three decimals; they are one quantity seen through six counters.
-- Not a corpus-wide result. Four boards, one machine, one router build. Each
+- Not a corpus-wide result. Six boards, one machine, one router build. Each
   row records `provenance.measured_git` (`v0.21.3-199-g3b8edc19`), from which
   the router version follows; there is no explicit router-version or machine
   field on a row, and this document previously claimed there was.
