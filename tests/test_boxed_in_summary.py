@@ -213,6 +213,24 @@ def case_rip_victim_reroute():
     ROUTED on its first pass (it is not in the failed set until after B ripped
     it), so the only place A can have acquired a boxed-in verdict is its
     reroute.
+
+    RE-RECORDED 2026-08-30: which net ends up broken FLIPPED at `31004f43`
+    (#622, victim-priority restore ON by default), and the flip is the feature
+    working. A rip is a trade; when the victim's reroute fails and its restore
+    is short-refused because the ripper now holds the channel, that trade has
+    silently failed. The restore gives A its channel back and REQUEUES B -- "a
+    re-run of the exchange, not a reversal" -- so B's reroute is the one that
+    now fails. Bisected to that commit, and `KICAD_VICTIM_RESTORE=0` reproduces
+    the old expectation exactly (routed=[B] failed=[A] boxed_in=[A]), which is
+    what identifies the cause rather than merely dating it.
+
+    The causal pin SURVIVES the flip, which is why re-recording is honest here
+    rather than a rebaseline: B also had a SUCCESSFUL result before its verdict
+    (`RETRY SUCCESS` right after it ripped A), so B's boxed-in verdict can only
+    have come from its later `[REROUTE 4/4]` -- still the reroute_loop call
+    this fixture exists to reach, still not the first-pass one. Both nets in
+    fact record a reroute verdict here; A's is absent from the summary because
+    A ends up ROUTED, which is the restore doing its job.
     """
     from route import batch_route
     buf = io.StringIO()
@@ -236,28 +254,63 @@ def case_rip_victim_reroute():
           'path, not the first-pass loop)',
           0 <= i_rip < i_rer < i_box,
           f'rip@{i_rip} reroute@{i_rer} boxed@{i_box}')
-    check('B routed through the gap, A failed',
-          summary.get('failed_single') == ['A']
+    check('the victim A was restored and the ripper B requeued, so B is the '
+          'net left broken (#622 victim-priority restore, default since '
+          '31004f43)',
+          summary.get('routed_single') == ['A']
+          and summary.get('open_single') == ['B']
+          and summary.get('failed_single') == []
           and summary.get('successful') == 1,
-          f"{summary.get('failed_single')} successful="
-          f"{summary.get('successful')}")
+          f"routed={summary.get('routed_single')} "
+          f"failed={summary.get('failed_single')} "
+          f"open={summary.get('open_single')} "
+          f"successful={summary.get('successful')}")
     boxed = summary.get('boxed_in')
-    check("summary carries 'boxed_in' for the rip victim",
-          isinstance(boxed, list) and [e.get('net') for e in boxed] == ['A'],
+    check("summary carries 'boxed_in' for the requeued ripper",
+          isinstance(boxed, list) and [e.get('net') for e in boxed] == ['B'],
           f'{boxed!r}; hint printed: '
           + str('boxed in by static obstacles' in out))
     if isinstance(boxed, list) and boxed:
         e = boxed[0]
-        check("rip victim's verdict is 'boxed_in_static' with an iteration "
+        check("the requeued net's verdict is 'boxed_in_static' with an iteration "
               "count below the static threshold",
               e.get('verdict') == 'boxed_in_static'
               and isinstance(e.get('iterations'), int)
               and e['iterations'] < 20000, str(e))
-    check("and `blockers` is empty for it -- the classifier row "
-          "\"`blockers` empty AND `boxed_in` names the net\"",
+    # SCHEMA invariant -- the one the file exists for, and it still holds:
+    # the two keys never bleed into each other's shape.
+    _boxed_nets = [e.get('net') for e in (boxed or [])]
+    check('no `blockers` entry carries a boxed-in verdict (rip victim)',
           not [b for b in (summary.get('blockers') or [])
-               if b.get('net') == 'A'],
-          str(summary.get('blockers')))
+               if 'verdict' in b], str(summary.get('blockers')))
+    check('and no `boxed_in` entry carries blocker attribution (rip victim)',
+          not [e for e in (boxed or []) if 'blocked_by' in e], str(boxed))
+
+    # OPEN FINDING, asserted so it cannot go quiet. Under the pre-31004f43
+    # default the boxed net (A) had never ripped anything, so it appeared in
+    # `boxed_in` ONLY and the skill's classifier row -- "`blockers` empty; the
+    # log says boxed in by static obstacles -> parameters, placement is not the
+    # lever" (plan-pcb-routing SKILL.md:2486) -- discriminated cleanly.
+    #
+    # Since victim-priority restore, the net left broken is the REQUEUED RIPPER,
+    # which carries a blockers entry from the first attempt it ripped on AND a
+    # boxed_in verdict from its later reroute. Both are true histories, but the
+    # row's `blockers`-empty precondition now fails for a net the router itself
+    # declared statically boxed in -- so an operator following the table is sent
+    # to a congestion/placement remedy instead of the parameters one.
+    #
+    # This is NOT asserted as desirable. It is pinned so that whichever way it
+    # is resolved -- prune `blockers` for a net whose FINAL verdict is boxed_in,
+    # or re-word the classifier row -- this arm fires and gets updated with it.
+    _both = sorted(set(_boxed_nets)
+                   & {b.get('net') for b in (summary.get('blockers') or [])})
+    check('KNOWN (#622 flip): the requeued ripper is in BOTH `blockers` and '
+          '`boxed_in`, which defeats the skill\'s "blockers empty AND '
+          'boxed_in names the net" row -- see the comment above',
+          _both == ['B'],
+          f'nets in both keys: {_both!r} (expected [\'B\']); if this is now '
+          f'empty the ambiguity was FIXED -- delete this arm and restore the '
+          f'plain "blockers is empty for it" check')
     check('results_data carries the same boxed_in (GUI parity, rip victim)',
           results_data.get('boxed_in') == summary.get('boxed_in'),
           f'{results_data.get("boxed_in")!r} vs {summary.get("boxed_in")!r}')

@@ -64,13 +64,34 @@ sys.path.insert(0, os.path.join(ROOT, 'tests', 'stress'))
 #: and no statistic is computed from them; they are a change detector.
 #:
 #: MEASURED, from the run recorded in the pull request. Never predicted.
+#:
+#: RE-RECORDED 2026-08-30. `truth.quality` moved on all four rows; both causes
+#: were BISECTED before re-recording, because a baseline re-recorded without a
+#: named cause hides whatever moved it:
+#:
+#:   * vias / copper_mm -- `99196134` (#805, "commit the #189 unblock via to
+#:     pcb_data when it is kept"). The unblock barrel was never appended to
+#:     pcb_data, so for the whole window before its deferred multipoint result
+#:     committed it blocked nobody; committing it makes it block, which changes
+#:     what routes. esp_prog:authored 30 vias / 342.83 mm -> 28 / 320.71, i.e.
+#:     FEWER vias and LESS copper -- better on this repo's own tie-break.
+#:   * segments -- `661c88b3` (#811, the collinear merge). It is exactly
+#:     copper-preserving in a single route call (measured bit-identical on two
+#:     boards), so on its own it moves ONLY this column.
+#:
+#: One second-order effect is worth recording rather than rounding away: the
+#: merge changes how copper is SEGMENTED, which changes rip/restore granularity
+#: for later steps of a multi-step chain, so end-to-end copper can shift a
+#: hair. Isolated on esp_prog:authored with only KICAD_MERGE_COLLINEAR toggled:
+#: 320.69 -> 320.71 mm (+0.006%), segments 241 -> 229, vias unchanged. That is
+#: why the copper column moved on rows where the merge is the only new input.
 EXPECTED = {
     'esp_prog:authored': dict(
         poses_sha256='439485f758347d1929cde06f8ab34ce7c6e6e2174df5d85be98d48afbde51783',
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=8.2,
         truth={'headline': 0,
-               'quality': {'vias': 30, 'copper_mm': 342.83, 'segments': 247}},
+               'quality': {'vias': 28, 'copper_mm': 320.71, 'segments': 229}},
         predictors={
             'crossings': 53, 'hpwl': 253.98092000000003,
             'halo': 125.4377644075392, 'overlap_area': 1.1400451712000104,
@@ -83,7 +104,7 @@ EXPECTED = {
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=11.2,
         truth={'headline': 0,
-               'quality': {'vias': 36, 'copper_mm': 340.87, 'segments': 282}},
+               'quality': {'vias': 34, 'copper_mm': 340.13, 'segments': 274}},
         predictors={
             'crossings': 56, 'hpwl': 253.13733999999994,
             'halo': 132.15233459554824, 'overlap_area': 1.1400451712000104,
@@ -100,7 +121,7 @@ EXPECTED = {
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=23.8,
         truth={'headline': 3,
-               'quality': {'vias': 30, 'copper_mm': 303.26, 'segments': 270}},
+               'quality': {'vias': 30, 'copper_mm': 303.26, 'segments': 252}},
         predictors={
             'crossings': 23, 'hpwl': 236.74883999999992,
             'halo': 113.8065780241933, 'overlap_area': 1.0,
@@ -117,7 +138,7 @@ EXPECTED = {
         seconds=32.6,
         truth={'headline': 0,
                'quality': {'vias': 168, 'copper_mm': 2915.15,
-                           'segments': 1437}},
+                           'segments': 1422}},
         predictors={
             'crossings': 300, 'hpwl': 2504.4400000000014,
             'halo': 297.4273114820511, 'overlap_area': 1.7621459846850488e-13,

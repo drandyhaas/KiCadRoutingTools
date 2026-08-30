@@ -844,10 +844,17 @@ class TestEveryExistingNudgerRigIsUnmoved(unittest.TestCase):
 class TestInertOnTheTrackedCorpus(unittest.TestCase):
     """The row's self-expiring bound. #756 is inert on the tracked corpus at
     file poses for THREE independent reasons, and a "0 diffs" run proves
-    nothing unless all three are stated: 20 of 22 boards carry no project at
-    all, the 2 that do never reach the via-nudge, and none declares above 0.45.
+    nothing unless all three are stated: 19 of 22 boards carry no project at
+    all, the 3 that do never reach the via-nudge, and none declares above 0.45.
 
-    So this asserts the REASONS, not just the outcome."""
+    So this asserts the REASONS, not just the outcome.
+
+    RE-RECORDED 2026-08-30: `d00032d8` (#805's obstacle ref-count release gate)
+    added a sibling `.kicad_pro` for glasgow_revC, so 20 of 22 became 19 of 22
+    and the declaring set grew by one. Only reason ONE is a recorded list;
+    reasons TWO and THREE are re-measured over the whole corpus by their own
+    arms below, and both still PASS with glasgow_revC in it -- so the third
+    declaring board changes the membership, not the finding."""
 
     def setUp(self):
         self.boards = run_utils.corpus_boards()
@@ -859,12 +866,13 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
                                 'nothing below is a bound'
                                 % len(self.boards))
 
-    def test_only_two_tracked_boards_can_declare_anything(self):
+    def test_only_three_tracked_boards_can_declare_anything(self):
         withpro = [os.path.basename(b) for b in self.boards
                    if os.path.exists(os.path.splitext(b)[0] + '.kicad_pro')]
         self.assertEqual(
             sorted(withpro),
-            ['flat_hierarchy.kicad_pcb', 'routed_output.kicad_pcb'],
+            ['flat_hierarchy.kicad_pcb', 'glasgow_revC.kicad_pcb',
+             'routed_output.kicad_pcb'],
             'the set of tracked boards carrying a sibling project has '
             'CHANGED: %r. The "inert on the corpus" claim in the #756 PR has '
             'EXPIRED -- re-run the before/after sweep and record the new '

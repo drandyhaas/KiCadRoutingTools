@@ -268,9 +268,18 @@ class TestTheBoardFloorReachesTheKeepOut(unittest.TestCase):
                            PartPads(fp, 0.05, None, True, lowered
                                     ).hole_keepouts(0, 0, 0)])
 
-    def test_flat_hierarchy_is_the_ONE_witness_on_the_corpus(self):
+    def test_the_declaring_boards_on_the_corpus(self):
         """Selected the way the engine selects -- `resolve_hole_clearance` per
-        board, never a name grep -- so it expires if another board declares."""
+        board, never a name grep -- so it expires if another board declares.
+
+        It DID expire, as designed: `d00032d8` (#805's obstacle ref-count
+        release gate) added a sibling `.kicad_pro` for glasgow_revC declaring
+        the same 0.25, so #761's "flat_hierarchy is the single witness" became
+        two witnesses on 2026-08-30. Re-measured, not adjusted: glasgow_revC is
+        a witness in exactly the SAME sense -- it declares 0.25 above the 0.2
+        fab floor and its own NPTH pads declare nothing (local_clearance 0.0),
+        so the board floor is again the term that moves them. The clause below
+        checks that of BOTH boards rather than of a named one."""
         boards = run_utils.corpus_boards()
         if not boards:
             print('SKIP: git cannot identify the tracked corpus')
@@ -281,24 +290,32 @@ class TestTheBoardFloorReachesTheKeepOut(unittest.TestCase):
             floor = resolve_npth_floor(pcb)
             if floor > NPTH_FLOOR + 1e-9:
                 declaring[os.path.basename(b)] = round(floor, 4)
-        self.assertEqual(declaring, {'flat_hierarchy.kicad_pcb': 0.25},
+        self.assertEqual(declaring, {'flat_hierarchy.kicad_pcb': 0.25,
+                                     'glasgow_revC.kicad_pcb': 0.25},
                          'the set of tracked boards declaring above the fab '
-                         'floor has CHANGED: %r -- the #761 PR says '
-                         'flat_hierarchy is the single witness, and that claim '
-                         'has EXPIRED' % declaring)
-        # ...and it is a witness only because its own holes declare nothing,
-        # so the floor is the term that moves them.
-        pcb = parse_kicad_pcb(FLAT_HIER)
-        lcs = {round(getattr(p, 'local_clearance', 0.0) or 0.0, 4)
-               for f in pcb.footprints.values() for p in f.pads
-               if (getattr(p, 'drill', 0) or 0) > 0 and _pad_has_no_copper(p)}
-        self.assertEqual(lcs, {0.0})
+                         'floor has CHANGED: %r -- #761 recorded '
+                         'flat_hierarchy and glasgow_revC as the witnesses, '
+                         'and that claim has EXPIRED' % declaring)
+        # ...and each is a witness only because its OWN holes declare nothing,
+        # so the floor is the term that moves them. Checked per declaring
+        # board, so a new witness that declares per-pad instead cannot inherit
+        # flat_hierarchy's alibi.
+        for name in declaring:
+            with self.subTest(board=name):
+                pcb = parse_kicad_pcb(os.path.join(_ROOT, 'kicad_files', name))
+                lcs = {round(getattr(p, 'local_clearance', 0.0) or 0.0, 4)
+                       for f in pcb.footprints.values() for p in f.pads
+                       if (getattr(p, 'drill', 0) or 0) > 0
+                       and _pad_has_no_copper(p)}
+                self.assertEqual(lcs, {0.0})
 
     def test_the_two_HOLE_consumers_pass_it_and_the_others_do_not(self):
         """A source guard, by LINE, and it exists because behaviour cannot
-        reach it: the one tracked board that declares above the fab floor
-        clears its nearest copper by 3.69mm, so dropping the term from the
-        census changes no ANSWER on any board we have. Measured -- the
+        reach it: both tracked boards that declare above the fab floor clear
+        their nearest copper with room to spare (flat_hierarchy by 3.69mm,
+        glasgow_revC by 0.57mm -- re-measured 2026-08-30 when the second
+        witness appeared), so dropping the term from the census changes no
+        ANSWER on any board we have. Measured -- the
         mutation row `the-census-passes-no-board-floor` SURVIVED every
         behavioural arm in this file.
 
