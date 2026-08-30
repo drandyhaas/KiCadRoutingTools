@@ -34,6 +34,8 @@ python3 probe_req.py FO_BOARD K                             # lanes whose rules 
 python3 probe_map.py FO_BOARD K NET --box x0,y0,x1,y1 [--no-virtual] [--drop NET]   # ASCII obstacle+band map of one lane
 python3 probe_trace.py FO_BOARD K [--nets ..] [--box s0,s1,o0,o1]    # routed copper in (s, o) against the plan
 python3 blocked_cells.py PROBE_OUTPUT [n] [x0 x1]           # a CONNECT_DEBUG failure's frontier, in mm
+python3 ends_of.py FO_BOARD K                               # every net's two free ends + corridor grouping (diff two fanouts)
+python3 dup_ends.py BOARD [REF]                             # stub ends two nets share at one point
 python3 probe_cluster.py FO_BOARD K                         # the corridor grouping's decisions
 python3 test_connect.py ch6_fo_k15.kicad_pcb SDQ0           # connect() unit test
 ```
@@ -125,6 +127,43 @@ Input: the bench with the source fanned out and the destination bare.
    braid's spend still disagree; the mechanism is in, the objective is
    not yet trustworthy. Note the channel engine ignores
    `escape_line_hints` (only the underpad/dogbone engine reads them).
+   **That objective is used ONLY under `--source`** (`plan_ends(...,
+   objective='spend')`; the default is `'floor'`, the plan's original):
+   run for a chain that never applies the source moves, it still
+   re-shaped the DESTINATION choice through the launch points it fed
+   back, and the strict lane test it needs (`select_moves._conflict`
+   `strict=True`: lanes matched within 0.16 mm, a dogbone's via site
+   blocking its gap) was applied to the destination too — the fanout
+   takes only a direction from the destination plan, so the strict test
+   only removed moves it was free to use. Measured after the fact: the
+   restricted K19 plan went from floor 12 to 20, SDQ0 moved from the
+   south face to the west, the braid saw two corridors and left 5 open;
+   K21 floor 14 → 18, 3 open. **The ladder never saw it because it ran
+   on fanout boards recorded before the change — run the CHAIN.**
+7. **The dogbone lane-run escape** (`KICAD_FANOUT_LANE_ESCAPE=1`, opt-in,
+   ported from bus622-take2 into `bga_fanout/underpad.py`): pad, 45° jog
+   into the adjacent gap lane, straight down the lane to the boundary,
+   exact-checked against the registries with the raster's flanking-pad
+   exemption; tried on the PLANNED side before the side-restricted raster
+   A* (which accepts any point of the face and, when the raster closes the
+   straight lane, "succeeds" with a 4–6 mm snake down a column gap),
+   then on any side after the unrestricted A* fails; a planned line
+   (`escape_line_hints`) restricts it to that gap. `KICAD_FANOUT_LANE_DEBUG=
+   NET,NET` prints every candidate and what rejected it. Measured on the
+   free-plan arm, K21, obedience: auto 17/21; plain dogbone 15/21;
+   dogbone + lane run 16/21 (after the A*) / 14/21 (before it); with
+   line hints on, auto 17/21 = dogbone + lane run 17/21 (3 vias instead
+   of 7). **The same four balls take another face in every arm** (SDQ15,
+   SDQ10, SDQ13, SDQM1 at K21; SDQ14, SDQM1 at K19): each planned lane is
+   already taken by an earlier ball's escape (the trace names it — SDQ8's
+   jog on SDQ15's row gap, SDQ15's own snake on SDQ10's), so this is the
+   plan over-assigning the west face's two row gaps, not the escape
+   primitive. It is not the lever for the free-plan arm; it stays as an
+   opt-in primitive (straight escapes, fewer vias in dogbone mode).
+   `dup_ends.py BOARD [REF]` lists stub free ends two nets share at one
+   point (the fanout artefact behind K21 SRAS/SCKE1); `ends_of.py BOARD K`
+   prints every net's two free ends and the corridor grouping, to diff two
+   fanout boards of the same K.
 
 The plan's move menus are array-grid based (`escape_moves.grid_of` measures
 rows and columns in board axes), so a rotated array has no plan;
@@ -367,9 +406,13 @@ All in track/clearance/via units; none is a board fact.
   (SRAS/SCKE1) plus a B window that closed a B-born tooth (SCAS). Six
   distinct mechanisms, one lane each; every one a rule of the plan that
   contradicted itself or the router's clearances, none of them the router.
-- the free-plan arm: side exits on BOTH sides of the schedule region and a
-  head-on lane refused at its tooth (SDQM0 at K15, both with the plan and
-  with the band alone; the previous braid refused it too). Not looked into.
+- the free-plan arm (floor objective, `--no-plane-drop`): K15 4 open,
+  K19 1, K21 5. Its fanout obeys 10/15, 17/19, 17/21 of the plan's
+  directions and the braid's refusals are those balls: the plan assigns
+  more "left" escapes to DU1's west face (rows 7–8, two row gaps past
+  column A) than the fanout can lay, whatever escape primitive is used
+  (Stage 1, item 7). The lever is the plan's side-capacity model, not the
+  fanout.
 - the 45° bench: 9 of 11 lanes (SDQ14, SDQ15); the side-exit block sits
   3 mm from its stubs (it is placed beyond every head-on lane of the
   schedule region, which have left by then) and the schedule needs 24

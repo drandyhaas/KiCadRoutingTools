@@ -471,30 +471,45 @@ def _site_blocks(site: Optional[Pt], key: Tuple, a: float, b: float,
     return abs(across - coord) <= tol and a - tol <= along <= b + tol
 
 
-def _conflict(m: Move, om: Move, tol: float = 0.16) -> bool:
-    """Two moves that cannot both be laid: a shared lane stretch, a
-    shared site, or one's site in the other's lane. Lanes match within
-    `tol` (half a fine-pitch gap): a stub already on the board wanders
-    a few tens of microns off its gap's centreline, and an exact key
-    let a new escape be planned on top of it."""
+def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True) -> bool:
+    """Two moves that cannot both be laid: a shared lane stretch or a
+    shared site -- and, `strict`, a lane matched within `tol` (half a
+    fine-pitch gap) or one's via site in the other's lane. The strict
+    form is the SOURCE refinement's: it re-fans real moves against stubs
+    already on the board, which wander a few tens of microns off their
+    gap's centreline, and a dogbone's via is on every layer (K15
+    SDQM0/SDQ15: an F surface escape planned through a B dogbone's gap,
+    9 grazes). The DESTINATION choice is not strict: the fanout takes
+    only the plan's DIRECTION from it, never its move geometry, so the
+    strict test only removes moves the plan was free to use -- applied
+    there it took the restricted K19 plan from floor 12 to 20, moved
+    SDQ0 from the south face to the west, split the corridor in two and
+    left 5 lanes open (2026-08-30, measured after the fact: the ladder
+    had been run on fanout boards recorded before the change)."""
     key, a, b = _lane_span(m)
     ok, oa, ob = _lane_span(om)
-    if ok[0] == key[0] and ok[2] == key[2] and abs(ok[1] - key[1]) < tol \
-            and a < ob and oa < b:
+    if strict:
+        same_lane = (ok[0] == key[0] and ok[2] == key[2]
+                     and abs(ok[1] - key[1]) < tol)
+    else:
+        same_lane = ok == key
+    if same_lane and a < ob and oa < b:
         return True
     if m.site is not None and _site_key(om) == _site_key(m):
         return True
-    if _site_blocks(om.site, key, a, b, tol) or _site_blocks(m.site, ok, oa, ob, tol):
+    if strict and (_site_blocks(om.site, key, a, b, tol)
+                   or _site_blocks(m.site, ok, oa, ob, tol)):
         return True
     return False
 
 
-def lanes_free(m: Move, sel: Dict[str, Move], me: str) -> bool:
+def lanes_free(m: Move, sel: Dict[str, Move], me: str,
+               strict: bool = True) -> bool:
     """Is this move's channel and via site free, ignoring the net's own
     current claim? The same check select() applies inside its greedy
-    pass, exposed so a later refinement cannot quietly propose a move
-    that two nets would have to share."""
-    return not any(_conflict(m, om) for other, om in sel.items()
+    pass (non-strict there), exposed so a later refinement cannot
+    quietly propose a move that two nets would have to share."""
+    return not any(_conflict(m, om, strict=strict) for other, om in sel.items()
                    if other != me)
 
 
@@ -708,7 +723,7 @@ def select(menu: Dict[str, List[Move]],
     taken: List[Move] = []          # the moves laid so far this pass
 
     def lane_free(m: Move) -> bool:
-        return not any(_conflict(m, om) for om in taken)
+        return not any(_conflict(m, om, strict=False) for om in taken)
 
     choice: Dict[str, Move] = {}
     unplaced: List[str] = []
@@ -740,7 +755,7 @@ def select(menu: Dict[str, List[Move]],
         claim? The LIS pass swaps one net at a time -- without
         excluding `me`, a net is blocked from changing gap by the gap
         it is already sitting in."""
-        return lanes_free(m, sel, me)
+        return lanes_free(m, sel, me, strict=False)
 
     # From here on the grouping is the CORRIDOR -- every net leaving on
     # one side -- not the taut-path cluster. The cluster chose the side

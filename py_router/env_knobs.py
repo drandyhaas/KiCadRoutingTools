@@ -244,6 +244,13 @@ def refresh() -> None:
     g['FANOUT_LANE_WALK'] = _s('KICAD_FANOUT_LANE_WALK', '1') != '0'
     g['FANOUT_LANE_WALK_MAX'] = _i('KICAD_FANOUT_LANE_WALK_MAX', 3)
     g['FANOUT_PAIR_DIVE'] = _s('KICAD_FANOUT_PAIR_DIVE', '1') != '0'
+    # #622 lane-run surface escape (ported from bus622-take2): a ball the
+    # surface A* cannot serve on its planned side -- the raster's inflated
+    # pad stamps close a fine-pitch lane the exact check proves legal --
+    # tries pad, 45-degree jog, straight down the gap lane to the boundary,
+    # on that side first. OPT-IN: take2 shipped it default ON in dog-bone
+    # mode; here it is measured on the #622 chain before any default.
+    g['FANOUT_LANE_ESCAPE'] = _opt_in('KICAD_FANOUT_LANE_ESCAPE')
     g['STOP_CLEANUP'] = _opt_in('KICAD_STOP_CLEANUP')
     g['TAP_RELOCATION'] = _opt_in('KICAD_TAP_RELOCATION')  # phase-3 tap pocket moves
     # #536 octolinear route smoothing (cleanup_pipeline pass 9b): collapse

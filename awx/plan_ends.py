@@ -45,7 +45,8 @@ def refine_source(src_choice: Dict[str, Move],
                   dst_choice: Dict[str, Move],
                   dst_box, launch0: Dict[str, Pt],
                   rounds: int = 5, cache=None, log=None,
-                  tooth_layer: Optional[Dict[str, str]] = None):
+                  tooth_layer: Optional[Dict[str, str]] = None,
+                  objective: str = 'floor'):
     """Move source exits to cut the WHOLE-PLAN cost, one net at a time.
 
     select() at the source end optimises select()'s cost -- reach,
@@ -87,8 +88,21 @@ def refine_source(src_choice: Dict[str, Move],
             pad = ms[0].legs[0][0]
             side0[n] = _snap_dir((launch0[n][0] - pad[0], launch0[n][1] - pad[1]))
 
+    # Two objectives. 'floor' is the plan's original: the crossing floor
+    # of the destination choice against the moved launch points, every
+    # source move on the table, lanes matched exactly. 'spend' is the
+    # SOURCE=1 arm's (what the braid spends, teeth kept on their side,
+    # strict lane checks), and it is used ONLY when the source moves
+    # will actually be applied: run for a chain that leaves the source
+    # alone, it still re-shaped the destination choice through the
+    # launch points it fed back (K21 restricted: floor 14 -> 18, three
+    # lanes open where the floor plan routes clean).
+    spend = objective == 'spend'
+
     def cost(launch_c, tooth_c, src_c):
         geo = sm.Corridor(dst_box, launch_c, cache=cache)
+        if not spend:
+            return sm.plan_floor(dst_choice, geo)
         tv = sm.true_vias(dst_choice, sm.corridors(dst_choice), geo, tooth_c)
         return tv + sum(m.vias - seed_vias.get(n, 0) for n, m in src_c.items())
     cur = cost(launch, tooth, src_choice)
@@ -99,11 +113,12 @@ def refine_source(src_choice: Dict[str, Move],
             if n not in dst_choice:
                 continue
             for m in src_menu[n]:
-                if m.exit_pt == launch.get(n) and m.layer == tooth.get(n):
+                if m.exit_pt == launch.get(n) and (
+                        not spend or m.layer == tooth.get(n)):
                     continue
-                if n in side0 and m.direction != side0[n]:
+                if spend and n in side0 and m.direction != side0[n]:
                     continue
-                if not sm.lanes_free(m, src_choice, n):
+                if not sm.lanes_free(m, src_choice, n, strict=spend):
                     continue
                 cand = dict(launch)
                 cand[n] = m.exit_pt
@@ -132,8 +147,8 @@ def refine_source(src_choice: Dict[str, Move],
                     # breaking here found 0 improvements at K21 where
                     # walking on finds the floor halved.
         if log:
-            log(f'    source refine round {r}: true vias {cur} '
-                f'(best {best[0]})')
+            log(f'    source refine round {r}: '
+                f'{"true vias" if spend else "floor"} {cur} (best {best[0]})')
         if not moved:
             break
     return best[2], best[1], best[0]
@@ -147,8 +162,12 @@ def plan_ends(src_menu: Dict[str, List[Move]],
               tooth_layer0: Optional[Dict[str, str]] = None,
               rounds: int = 4,
               log=None,
-              src_seed: Optional[Dict[str, Move]] = None):
-    """Returns (src_choice, dst_choice, launch, report).
+              src_seed: Optional[Dict[str, Move]] = None,
+              objective: str = 'floor'):
+    """Returns (src_choice, dst_choice, launch, report). `objective`:
+    'floor' (the crossing floor, the plan's original) or 'spend' (what
+    the braid spends, for a chain that APPLIES the source moves --
+    SOURCE=1); see refine_source.
 
     `launch0` is where the source stubs end today -- the seed, and the
     fallback for any net whose source pad is boxed in. A net with no
@@ -166,11 +185,15 @@ def plan_ends(src_menu: Dict[str, List[Move]],
     report: List[str] = []
     src_choice: Dict[str, Move] = {}
 
+    spend = objective == 'spend'
+
     def total(dst_c, launch_c, tooth_c, src_c):
-        """What the braid spends: true vias for the destination choice
-        given the teeth's layers, plus the source escapes' own vias.
-        Both ends are judged on this one number."""
+        """What the plan is judged on at both ends. 'spend': true vias
+        for the destination choice given the teeth's layers, plus the
+        source escapes' own vias. 'floor': the crossing floor."""
         geo = sm.Corridor(dst_box, launch_c, cache=cache)
+        if not spend:
+            return sm.plan_floor(dst_c, geo)
         return (sm.true_vias(dst_c, sm.corridors(dst_c), geo, tooth_c)
                 + sum(m.vias for m in src_c.values()))
     for r in range(rounds):
@@ -181,8 +204,9 @@ def plan_ends(src_menu: Dict[str, List[Move]],
         geo = sm.Corridor(dst_box, launch, cache=cache)
         fl = sm.plan_floor(dst_choice, geo)
         f = total(dst_choice, launch, tooth, src_choice)
-        line = (f'  round {r}: true vias {f} (floor {fl}), '
-                f'{len(dst_choice)} placed'
+        line = (f'  round {r}: '
+                + (f'true vias {f} (floor {fl})' if spend else f'floor {f}')
+                + f', {len(dst_choice)} placed'
                 + (f', {len(un)} unplaced' if un else ''))
         if best is None or f < best[0]:
             best = (f, dict(src_choice), dict(dst_choice), dict(launch),
@@ -215,10 +239,10 @@ def plan_ends(src_menu: Dict[str, List[Move]],
         # An empty start means launch == launch0 exactly, so the search
         # begins at the board's own floor and can only leave it for
         # something measured better.
-        src_choice, nxt, sf = refine_source(dict(src_seed or {}), sub,
-                                            dst_choice, dst_box, launch0,
-                                            cache=cache, log=log,
-                                            tooth_layer=tooth_layer0)
+        src_choice, nxt, sf = refine_source(
+            dict(src_seed or {}) if spend else {}, sub,
+            dst_choice, dst_box, launch0, cache=cache, log=log,
+            tooth_layer=tooth_layer0, objective=objective)
         # Record the REFINED pair, not just the state the round opened
         # with. The source refinement optimises against this round's
         # destination choice, and re-selecting the destination next
@@ -231,8 +255,8 @@ def plan_ends(src_menu: Dict[str, List[Move]],
         if sf < best[0]:
             best = (sf, dict(src_choice), dict(dst_choice), dict(nxt),
                     dict(tooth_r))
-            report.append(f'  round {r}: source refine -> true vias {sf}'
-                          f'   <- best')
+            report.append(f'  round {r}: source refine -> '
+                          f'{"true vias" if spend else "floor"} {sf}   <- best')
             if log:
                 log(report[-1])
         tooth = tooth_r
@@ -243,5 +267,6 @@ def plan_ends(src_menu: Dict[str, List[Move]],
         return {}, {}, launch, report
     f, sc, dc, lp, tl = best
     geo = sm.Corridor(dst_box, lp, cache=cache)
-    report.append(f'  kept true vias {f} (floor {sm.plan_floor(dc, geo)})')
+    report.append(f'  kept true vias {f} (floor {sm.plan_floor(dc, geo)})'
+                  if spend else f'  kept floor {f}')
     return sc, dc, lp, report

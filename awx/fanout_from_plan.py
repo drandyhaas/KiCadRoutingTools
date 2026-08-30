@@ -199,7 +199,9 @@ if ONLY:
               + ','.join(_empty[:8]))
 schoice, choice, lp, report = pe.plan_ends(
     smenu, dmenu, launch, sgrid.bbox, dgrid.bbox, buses=buses,
-    tooth_layer0=tooth0, src_seed=src_seed)
+    tooth_layer0=tooth0, src_seed=src_seed,
+    # the 'spend' objective only when the source moves will be APPLIED
+    objective='spend' if SOURCE else 'floor')
 # only the nets the plan actually MOVED are re-fanned: a move of the
 # same kind, side, layer and gap as the stub already on the board IS
 # that stub (the menu's exit x differs from the tooth's by the array

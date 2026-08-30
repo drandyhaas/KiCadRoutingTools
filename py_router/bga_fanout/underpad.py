@@ -1841,6 +1841,155 @@ def generate_underpad_escape(footprint: Footprint,
     # under-package barrels measured directly as completion on ottercast
     # (via-in-pad 14 -> 11 final issues with only ~20 barrels).
     # (Paired balls are handled coupled below.)
+    def _pt_seg_d(px_, py_, x1, y1, x2, y2):
+        dx, dy = x2 - x1, y2 - y1
+        L2 = dx * dx + dy * dy
+        t = 0.0 if L2 <= 0 else max(0.0, min(1.0, ((px_ - x1) * dx + (py_ - y1) * dy) / L2))
+        return math.hypot(px_ - (x1 + t * dx), py_ - (y1 + t * dy))
+
+    def _seg_conflict_item(net_id, gx, gy, vx, vy, ctx):
+        """The first registered item one stub segment on the BGA's own
+        layer would violate, or None (the occupancy exemption around the
+        pad/site would hide foreign copper there, #393 -- so the stub
+        proves itself against the registries)."""
+        hw = track_width / 2.0
+        for (x1, y1, x2, y2, half_w, snid) in ctx['segs']:
+            if snid == net_id:
+                continue
+            # conservative: stub endpoint-to-seg / seg-to-stub sampling
+            if (_pt_seg_d(x1, y1, gx, gy, vx, vy) < hw + half_w + clearance - 1e-6
+                    or _pt_seg_d(x2, y2, gx, gy, vx, vy) < hw + half_w + clearance - 1e-6
+                    or _pt_seg_d(gx, gy, x1, y1, x2, y2) < hw + half_w + clearance - 1e-6
+                    or _pt_seg_d(vx, vy, x1, y1, x2, y2) < hw + half_w + clearance - 1e-6):
+                return ('seg', snid, (x1, y1, x2, y2, half_w))
+        for (ox, oy, orr, odr, onid) in ctx['vias'] + ctx['resv']:
+            if onid == net_id:
+                continue
+            if _pt_seg_d(ox, oy, gx, gy, vx, vy) < hw + orr + clearance - 1e-6:
+                return ('via', onid, (ox, oy, orr))
+        for (px_, py_, half, pdr, pnid, has_cu) in ctx['pads']:
+            if not has_cu or pnid == net_id:
+                continue
+            if _pt_seg_d(px_, py_, gx, gy, vx, vy) < hw + half + clearance - 1e-6:
+                return ('pad', pnid, (px_, py_, half))
+        return None
+
+    def _seg_conflict(net_id, gx, gy, vx, vy, ctx):
+        return _seg_conflict_item(net_id, gx, gy, vx, vy, ctx) is not None
+
+    def _lane_pad_exempt(x1, y1, x2, y2):
+        # The inter-row lane clears the flanking ball pads by only a few um
+        # past the floor (0.25 - pad_half - track/2 vs clearance) -- legal by
+        # the EXACT check, but the raster's inflated pad stamps can eat the
+        # whole lane cell. Exempt the flanking OWN-FOOTPRINT pads' disks;
+        # _seg_conflict has them exactly (registry-complete).
+        cells = set()
+        for p2 in footprint.pads:
+            if _pt_seg_d(p2.global_x, p2.global_y, x1, y1, x2, y2) \
+                    < max(grid.pitch_x, grid.pitch_y) * 0.55:
+                cells |= set(occ._disk(p2.global_x, p2.global_y, pad_keep))
+        return cells
+
+    _lane_dirs = {'right': (1.0, 0.0), 'left': (-1.0, 0.0),
+                  'down': (0.0, 1.0), 'up': (0.0, -1.0)}
+
+    def _lane_run_escape(p, only_side=None, line=None):
+        """Exact-checked surface LANE-RUN escape (#622, ported from
+        bus622-take2): pad, 45-degree jog into an adjacent inter-row /
+        inter-column gap lane, straight down the lane's midline and out
+        the boundary. The human's dominant escape for near-edge balls
+        that the raster A* cannot serve: its inflated pad stamps close a
+        fine-pitch lane the exact check proves legal (take2's evidence:
+        allwinner U1.R19/SDQ4 shipped an 8 mm wrong-way snake where the
+        human exits due east through exactly this lane). Exact machinery
+        only -- the same registry checks as the #652 lane walk; the raster
+        is consulted with the flanking-pad exemption. Sides nearest-
+        boundary first, a planned side (escape_dir_hints) promoted to the
+        front -- or the ONLY side tried, with `only_side` -- capped at 4
+        rings (deeper balls are dog-bone territory). The run ends at the
+        array boundary like every other escape here. Returns the polyline
+        or None."""
+        gx, gy = p.global_x, p.global_y
+        hx, hy = grid.pitch_x / 2.0, grid.pitch_y / 2.0
+        d_e, d_w = grid.max_x - gx, gx - grid.min_x
+        d_s, d_n = grid.max_y - gy, gy - grid.min_y
+        sides = sorted(((d_e, (1.0, 0.0)), (d_w, (-1.0, 0.0)),
+                        (d_s, (0.0, 1.0)), (d_n, (0.0, -1.0))),
+                       key=lambda t: t[0])
+        if only_side is not None:
+            sides = [t for t in sides if t[1] == _lane_dirs.get(only_side)]
+        else:
+            _pd = (escape_dir_hints or {}).get((round(gx, 3), round(gy, 3)))
+            if _pd in _lane_dirs:
+                sides.sort(key=lambda t: t[1] != _lane_dirs[_pd])
+        # Ring-parity stagger like _choose_dogbone_site: successive rings
+        # prefer opposite lanes, spreading same-direction runs across both.
+        alt = 1.0 if int(round(depth(p) / max(pitch, 1e-9))) % 2 == 0 else -1.0
+        pad_ex = set(occ._disk(gx, gy, max(pad_keep, via_keep)))
+        _dbg = os.environ.get('KICAD_FANOUT_LANE_DEBUG', '')
+        _dbg = bool(_dbg) and any((p.net_name or '').endswith(s)
+                                  for s in _dbg.split(',') if s)
+
+        def _why(msg):
+            if _dbg:
+                print(f"    lane-run {p.net_name}: {msg}")
+        for dist, (sx_, sy_) in sides:
+            if dist > 4.0 * pitch:
+                _why(f"side ({sx_:+.0f},{sy_:+.0f}) at {dist:.2f} mm is past 4 rings")
+                continue
+            ctx = _via_ctx(p.net_id, gx, gy, extra=dist + pitch)
+            if sx_:
+                end_x = grid.max_x if sx_ > 0 else grid.min_x
+                cands = [((gx + sx_ * hx, gy + s * hy), (end_x, gy + s * hy))
+                         for s in (alt, -alt)]
+            else:
+                end_y = grid.max_y if sy_ > 0 else grid.min_y
+                cands = [((gx + s * hx, gy + sy_ * hy), (gx + s * hx, end_y))
+                         for s in (alt, -alt)]
+            if line is not None and only_side is not None:
+                # the plan named the GAP (escape_line_hints): on the
+                # planned side only that lane is the plan, so the other
+                # is not tried here -- a lane the plan gave to a
+                # neighbour is what the fallback searches may still
+                # take, but not this one
+                _tol = 0.3 * (grid.pitch_y if sx_ else grid.pitch_x)
+                cands = [c for c in cands
+                         if abs((c[0][1] if sx_ else c[0][0]) - line) <= _tol]
+            for (ex_, ey_), (tx_, ty_) in cands:
+                tag = (f"side ({sx_:+.0f},{sy_:+.0f}) jog ({ex_:.2f},{ey_:.2f}) "
+                       f"run to ({tx_:.2f},{ty_:.2f})")
+                hit = _seg_conflict_item(p.net_id, gx, gy, ex_, ey_, ctx)
+                if hit is not None:
+                    _why(tag + f": jog hits registered {hit}")
+                    continue
+                hit = _seg_conflict_item(p.net_id, ex_, ey_, tx_, ty_, ctx)
+                if hit is not None:
+                    _why(tag + f": run hits registered {hit}")
+                    continue
+                if not occ.seg_clear(top_idx, (gx, gy), (ex_, ey_),
+                                     exempt=pad_ex):
+                    _why(tag + ": jog blocked on the raster")
+                    continue
+                lane_ex = _lane_pad_exempt(ex_, ey_, tx_, ty_)
+                if not occ.seg_clear(top_idx, (ex_, ey_), (tx_, ty_),
+                                     exempt=pad_ex | lane_ex):
+                    _why(tag + ": run blocked on the raster")
+                    continue
+                _why(tag + ": TAKEN")
+                return [(gx, gy), (ex_, ey_), (tx_, ty_)]
+        return None
+
+    def _commit_lane_run(p, pts):
+        # Stamp + register like commit()'s track half: the run must be
+        # visible to the raster AND (via `tracks` -> _via_ctx) to every
+        # later exact check, or the pairs' dive sites land on it.
+        for a, b in zip(pts, pts[1:]):
+            occ.block_segment(top_idx, a, b, trk_keep)
+            tracks.append({'start': a, 'end': b, 'width': track_width,
+                           'layer': layers[top_idx], 'net_id': p.net_id})
+
+    _lane_on = env_knobs.FANOUT_LANE_ESCAPE
+    n_lane_run = 0
     inner_pads = list(single_pads)
     if nl > 1:
         inner_pads = []
@@ -1851,7 +2000,15 @@ def generate_underpad_escape(footprint: Footprint,
                 # attempted, so they must not reach the failure ledger either.
                 break
             if depth(p) > outer_depth:
-                inner_pads.append(p)
+                # deeper than the rim phase tries -- but a straight lane
+                # run may still reach the boundary (the human's escape for
+                # such balls), and it keeps the gap sites free for vias
+                pts = _lane_run_escape(p) if _lane_on else None
+                if pts is not None:
+                    _commit_lane_run(p, pts)
+                    n_lane_run += 1
+                else:
+                    inner_pads.append(p)
                 continue
             _prog(_si + 1, len(_order), f"top-layer escape {p.net_name}")
             sx, sy = occ.cell(p.global_x, p.global_y)
@@ -1875,19 +2032,44 @@ def generate_underpad_escape(footprint: Footprint,
                              line=_line)
                 if path is None:
                     _line_missed.append(p.net_name)
-            if path is None and _side:
+            # The lane run on the PLANNED side comes before the side-
+            # restricted raster A*, not after it: that A* accepts ANY
+            # point of the planned face, so when the raster's inflated
+            # pad stamps close the straight lane (which the exact check
+            # proves legal) it "succeeds" with a snake down a column gap
+            # to the far corner of the face -- K21 free plan: SDQ15 4.4 mm
+            # and SDQ10 6 mm of snake to exit west at the bottom, eating
+            # both column gaps beside column C, after which the deeper
+            # balls there (SDQ14, SDQM1) had no lane at all and left by
+            # another face. Straight and short first; the raster search
+            # is the fallback.
+            lane = None
+            if path is None and _side and _lane_on:
+                _lv = (escape_line_hints or {}).get(
+                    (round(p.global_x, 3), round(p.global_y, 3)))
+                lane = _lane_run_escape(p, only_side=_side, line=_lv)
+            if path is None and lane is None and _side:
                 path = astar(sx, sy, home, {top_idx}, allow_via=False,
                              net_id=p.net_id, carve=carve, side=_side)
-                if path is None:
-                    _hint_missed.append(p.net_name)
-            if path is None:
+            if path is None and lane is None and _side:
+                _hint_missed.append(p.net_name)
+            if path is None and lane is None:
                 path = astar(sx, sy, home, {top_idx}, allow_via=False,
                              net_id=p.net_id, carve=carve)
-            if path is not None:
+            if path is None and lane is None and _lane_on:
+                lane = _lane_run_escape(p)
+            if lane is not None:
+                _commit_lane_run(p, lane)
+                n_lane_run += 1
+            elif path is not None:
                 commit(p, path, carve)
                 n_fcu += 1
             else:
                 inner_pads.append(p)
+        if n_lane_run:
+            print(f"  Surface: {n_lane_run} lane-run escape(s) -- pad, 45-degree "
+                  f"jog, straight down a gap lane to the boundary "
+                  f"(KICAD_FANOUT_LANE_ESCAPE)")
 
     # Phase B: reserve EVERY via-in-pad keepout BEFORE routing any inner track -
     # the inner single balls AND both balls of every pair that still needs an
@@ -1904,38 +2086,8 @@ def generate_underpad_escape(footprint: Footprint,
         carve_disks.append((p.global_x, p.global_y, vk, None, p.net_id))
 
     # Dog-bone site selection (#128) ------------------------------------------
-    def _pt_seg_d(px_, py_, x1, y1, x2, y2):
-        dx, dy = x2 - x1, y2 - y1
-        L2 = dx * dx + dy * dy
-        t = 0.0 if L2 <= 0 else max(0.0, min(1.0, ((px_ - x1) * dx + (py_ - y1) * dy) / L2))
-        return math.hypot(px_ - (x1 + t * dx), py_ - (y1 + t * dy))
-
-    def _seg_conflict(net_id, gx, gy, vx, vy, ctx):
-        """Exact-geometry check of one stub segment on the BGA's own layer
-        (the occupancy exemption around the pad/site would hide foreign copper
-        there, #393 -- so the stub proves itself against the registries)."""
-        hw = track_width / 2.0
-        for (x1, y1, x2, y2, half_w, snid) in ctx['segs']:
-            if snid == net_id:
-                continue
-            # conservative: stub endpoint-to-seg / seg-to-stub sampling
-            if (_pt_seg_d(x1, y1, gx, gy, vx, vy) < hw + half_w + clearance - 1e-6
-                    or _pt_seg_d(x2, y2, gx, gy, vx, vy) < hw + half_w + clearance - 1e-6
-                    or _pt_seg_d(gx, gy, x1, y1, x2, y2) < hw + half_w + clearance - 1e-6
-                    or _pt_seg_d(vx, vy, x1, y1, x2, y2) < hw + half_w + clearance - 1e-6):
-                return True
-        for (ox, oy, orr, odr, onid) in ctx['vias'] + ctx['resv']:
-            if onid == net_id:
-                continue
-            if _pt_seg_d(ox, oy, gx, gy, vx, vy) < hw + orr + clearance - 1e-6:
-                return True
-        for (px_, py_, half, pdr, pnid, has_cu) in ctx['pads']:
-            if not has_cu or pnid == net_id:
-                continue
-            if _pt_seg_d(px_, py_, gx, gy, vx, vy) < hw + half + clearance - 1e-6:
-                return True
-        return False
-
+    # (_pt_seg_d and _seg_conflict are defined above the surface phase, which
+    # the lane-run escape shares them with.)
     def _stub_conflict(p, vx, vy, ctx):
         return _seg_conflict(p.net_id, p.global_x, p.global_y, vx, vy, ctx)
 
