@@ -26,6 +26,32 @@ mechanism #554 rests on is that 7.67x, computed by hand before any board was
 measured. A test that only asserted `reach >= frozen` would be asserting a theorem
 (pinning only removes variables), which is why the exact values are pinned instead.
 
+DOES THIS FILE BITE? MEASURED, NOT ASSUMED
+-------------------------------------------
+`tests/mutate_554.py` rewrites `placement/relocate.py` one edit at a time and
+grades the result with this file and `test_554_relocate_solve.py`. From the run,
+never predicted and never edited afterwards to match:
+
+    30 rows: 26 killed, 4 survived (4 of them expected), 0 broken
+
+The four survivors are recorded there with their reasons rather than deleted,
+because an inert row that is kept is a finding and an inert row that is deleted
+is a hole:
+
+  * `intra-unit-fast-path` and `intra-unit-late-guard` -- the same-unit pair is
+    dropped TWICE, once on refs and once on units, so neither guard can be
+    killed alone. The finding is that there are two; the `intra-unit-edge` row
+    removes both and dies.
+  * `relax-into-fixed` -- every edge weight is `-slack` and `identity_violations`
+    guarantees `slack <= 0`, so all weights are non-negative and a source pinned
+    at 0 can never be relaxed below it. The guard becomes load-bearing exactly
+    when the gap clamp breaks, which `identity_violations` refuses first.
+  * `unsorted-adjacency` -- CPython dicts preserve insertion order and
+    `order_graph` already emits sorted edges, so dropping the adjacency sort
+    changes nothing this battery can observe. Closing it needs a fixture with two
+    genuinely equal-cost predecessors; until one exists the row is the
+    disclosure, not a green tick.
+
 Run: python3 -X utf8 tests/test_554_order_graph.py
 """
 import math
