@@ -285,7 +285,17 @@ def t_anti_pooling_is_a_type_contract():
         takes_rows.append(name)
         if name == 'per_board':
             continue          # per_board's whole job is to split the pile
-        args = [pile] + (['x', 'headline'] if name == 'board_rho' else [])
+        # Fill any OTHER required positional parameter from the fixture's own
+        # column names, derived from the signature rather than from a list of
+        # function names. Naming them is the same mistake this check was
+        # rewritten to remove: `board_tau` arrived needing two, and a
+        # name-keyed `if` would have called it wrong and reported a TypeError
+        # as a missing refusal.
+        need = [p for p in ps.values()
+                if p.name != 'rows'
+                and p.default is inspect.Parameter.empty
+                and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+        args = [pile] + ['x', 'headline'][:len(need)]
         try:
             fn(*args)
         except rs.StatsRefusal:
@@ -293,10 +303,11 @@ def t_anti_pooling_is_a_type_contract():
         except Exception as e:                                  # noqa: BLE001
             check(False, f'{name}(pile) raised {type(e).__name__}, not '
                          f'StatsRefusal: {e}')
-    check(takes_rows == ['board_rho', 'classify_board', 'per_board'],
+    check(takes_rows == ['board_rho', 'board_tau', 'classify_board',
+                         'per_board'],
           f'the set of functions taking `rows` is what this check thinks it '
           f'is: {takes_rows}')
-    check(sorted(refused) == ['board_rho', 'classify_board'],
+    check(sorted(refused) == ['board_rho', 'board_tau', 'classify_board'],
           f'every rows-taking fn but per_board REFUSES a 6-board pile '
           f'(refused: {sorted(refused)})')
     # The specific regression, named: this exact call used to return +0.339.
