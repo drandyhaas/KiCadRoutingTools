@@ -623,6 +623,23 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
                 break
         if ok and _seg_foreign_via_dist(pcb_data, net_id, x, y, x, y, layers[0] if layers else 'F.Cu') < need:
             ok = False
+        # #671: _seg_foreign_via_dist is FOREIGN-only, and copper clearance
+        # should be -- two same-net barrels may touch. The DRILL hole-to-hole
+        # minimum may not: it is a mechanical fab rule that applies to every
+        # pair of holes regardless of net (_via_drill_exclusion_radius:
+        # "same-net vias may touch copper but not drills"). Without this a
+        # shrunk via-in-pad could be approved inside hole-to-hole of its own
+        # net's via -- the class #671 reports.
+        if ok:
+            _h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
+            if _h2h > 0:
+                for _v in (pcb_data.vias or ()):
+                    if _v.net_id != net_id:
+                        continue          # foreign handled above, at clearance
+                    if math.hypot(_v.x - x, _v.y - y) < \
+                            dr / 2.0 + (_v.drill or 0.0) / 2.0 + _h2h:
+                        ok = False
+                        break
         if ok:
             return (vs, dr)
     return None

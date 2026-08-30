@@ -139,22 +139,30 @@ def _via_site_clear(pcb_data: PCBData, x: float, y: float, config,
     clr = config.clearance
     h2h = getattr(config, 'hole_to_hole_clearance', 0.2) or 0.2
     for v in pcb_data.vias:
-        if v.net_id == net_id:
-            continue
         d = math.hypot(x - v.x, y - v.y)
-        if d < vr + v.size / 2.0 + clr:
-            return False
-        if d < vd + v.drill / 2.0 + h2h:
+        if v.net_id != net_id:
+            if d < vr + v.size / 2.0 + clr:
+                return False
+        # #671: the DRILL check is NOT net-aware. Copper clearance is exempt
+        # between same-net items -- two barrels of one net may touch -- but a
+        # hole-to-hole minimum is a mechanical fab rule and applies to every
+        # pair of drills on the board. _via_drill_exclusion_radius states the
+        # same rule in single_ended_routing: "same-net vias may touch copper but
+        # not drills". Skipping same-net vias here let a rescue via land inside
+        # hole-to-hole of its OWN net's barrel, which KiCad flags.
+        if d < vd + (v.drill or 0.0) / 2.0 + h2h:
             return False
     for fp in pcb_data.footprints.values():
         for p in fp.pads:
-            if p.net_id == net_id:
-                continue
+            # Drill hole-to-hole first: same rule as the vias above, so an
+            # own-net THT pad's hole constrains this via too (#671).
             if p.drill and p.drill > 0:
                 hx = p.hole_x if p.hole_x is not None else p.global_x
                 hy = p.hole_y if p.hole_y is not None else p.global_y
                 if math.hypot(x - hx, y - hy) < vd + p.drill / 2.0 + h2h:
                     return False
+            if p.net_id == net_id:
+                continue
             if p.pad_type == 'np_thru_hole':
                 continue
             dx = max(abs(x - p.global_x) - p.size_x / 2.0, 0.0)
