@@ -467,7 +467,7 @@ def score_floorplan(root: str, board: str, intent: str, tmp: str) -> dict:
     `count` is the ERROR-severity violations only, because it is summed into
     `blocking` and `blocking` is what `converge` requires to reach 0. Counting
     every violation made this instrument CONTRADICT the one it reads: measured
-    on splitflap_driver with one warn-demoted `block_unresolved`, check_floorplan
+    on a corpus board with one warn-demoted `block_unresolved`, check_floorplan
     reported `errors 0, warnings 1, pass true` and exited 0, while this function
     returned count 1 and drove `blocking` to 84 and exit 4. A warn was therefore
     a permanent blocker with no way to clear it -- the intent schema has no
