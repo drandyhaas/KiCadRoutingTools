@@ -6,7 +6,7 @@ file is what makes them a change detector rather than prose.
 
 TWO artefacts are committed, and neither is the full sweep:
 
-  * `tests/799_feasibility_summary.json` -- the whole run's counters (685 bytes).
+  * `tests/799_feasibility_summary.json` -- the whole run's counters.
   * `tests/799_feasibility_rows.jsonl` -- a DECLARED SUBSET of 142 of the 33696
     rows, chosen by rule BEFORE the answers were read: the lowest coverage
     fraction that refuses and the highest that stays silent, per (board, family,
@@ -22,11 +22,18 @@ rows file so the pipeline itself stays checkable.
 WHAT THESE NUMBERS ARE, AND ARE NOT. The corpus arm measures INERTNESS:
 `emit_intent` writes `keepouts: []` and no CLI creates one, so every intent this
 repo can generate is structurally unreachable by the check. The agreement arm is
-the real evidence, and it is ASYMMETRIC on purpose -- `seeder.pose_ok` is
-STRICTLY STRONGER than the check's question (it also demands board containment
-and neighbour clearance), so a pose it finds is a pose that exists and a refusal
-against it is a hard bug, while a census of 0 is NOT proof of infeasibility and
-is reported separately as a soft suspected miss.
+the real evidence, and it is ASYMMETRIC on purpose. For a NON-ANCHOR zone
+`seeder.pose_ok` is stronger than the check's question (it also demands board
+containment and neighbour clearance), so a pose it finds is a pose that exists
+and a refusal against it is a hard bug; a census of 0 is NOT proof of
+infeasibility and is reported separately as a soft suspected miss.
+
+THE NON-ANCHOR QUALIFIER IS LOAD-BEARING, and the sweep cannot drop it: in
+ANCHOR mode `zone_gate` constrains the footprint ORIGIN while this check grades
+the courtyard CENTRE, so the two disagree by construction. Every zone in the
+sweep is a member's own courtyard bbox inflated by a margin >= 0, which always
+satisfies `zone_fits_courtyard` -- so the sweep never reaches anchor mode, and
+`hard_false_positives == 0` is evidence about the non-anchor branch ALONE.
 """
 import json
 import os
@@ -54,7 +61,12 @@ PUBLISHED = {
     'hard_false_positives': 0,
     'soft_misses': 990,
     'refusals_with_no_binding_keepout': 0,
-    'exempted_cases': 16812,
+    # Cases that DECLARE a keep-out and whose member the resolver still
+    # exempted. An earlier version counted every `bound == 0` row, which
+    # swept in the 4212 rows at coverage fraction 0 where no keep-out
+    # exists at all -- inflating the exemption evidence by a third.
+    'exempted_cases': 12600,
+    'no_keepout_declared_cases': 4212,
 }
 SUBSET_ROWS = 142
 

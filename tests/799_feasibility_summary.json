@@ -55,9 +55,17 @@
    "8 footprints < 20"
   ]
  ],
- "exempted_cases": 16812,
+ "exempted_cases": 12600,
  "hard_false_positives": 0,
  "members": 39,
+ "no_keepout_declared_cases": 4212,
+ "offcentre": {
+  "off_centre": 234,
+  "parts": 1316,
+  "worst_board": "kit-dev-coldfire-xilinx_5213.kicad_pcb",
+  "worst_offset_mm": 36.825,
+  "worst_ref": "MCU_PORT201"
+ },
  "old_total_coverage": 804,
  "oracle_consulted": 11558,
  "refusals_with_no_binding_keepout": 0,

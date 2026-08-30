@@ -27,10 +27,18 @@ ARM C -- AGREEMENT against `seeder.count_legal_poses`, an INDEPENDENT answer to
 ASYMMETRIC, and stating it symmetrically would publish a number in the feature's
 favour:
 
-  * `pose_ok` is STRICTLY STRONGER than this check's question -- it also demands
-    board containment and neighbour clearance. So a pose it finds is a pose that
-    exists, and a refusal against `oracle >= 1` is a HARD FALSE POSITIVE: a bug
-    in the check, full stop. Target 0, pre-registered before the run.
+  * for a NON-ANCHOR zone, `pose_ok` is stronger than this check's question --
+    it also demands board containment and neighbour clearance -- so a pose it
+    finds is a pose that exists, and a refusal against `oracle >= 1` is a HARD
+    FALSE POSITIVE. Target 0, pre-registered before the run.
+    THE QUALIFIER IS LOAD-BEARING. In ANCHOR mode the two disagree by
+    construction: `seeder.zone_gate` constrains the footprint ORIGIN and this
+    check grades the courtyard CENTRE, and the branch documents that they can be
+    disjoint -- so there a census hit is not evidence of a bug. And this sweep
+    NEVER REACHES anchor mode: every zone here is the member's own courtyard
+    bbox inflated by a margin >= 0, which always satisfies
+    `zone_fits_courtyard`. So `hard_false_positives == 0` is evidence about the
+    NON-ANCHOR branch only, and says nothing about the anchor one.
   * a census of 0 is NOT decisive. `zone_census_offsets` samples a lattice, and
     seeder.py records its own divergences ("4 of 65 movable parts census 0 while
     `_try_place` seats them"). So "check silent while oracle 0" is a SOFT
@@ -92,6 +100,44 @@ def corpus_boards():
             for b in boards]
 
 
+def arm_offcentre():
+    """How many corpus parts have an OFF-CENTRE courtyard, and by how much.
+
+    This is the number the anchor design turns on: `zone_escape(anchor=True)`
+    grades the courtyard CENTRE while `seeder.zone_gate` constrains the
+    footprint ORIGIN, and they differ by exactly this offset. An earlier draft
+    of the check intersected the two conventions, which is empty wherever the
+    offset exceeds the zone extent.
+
+    It lives here because it was first quoted from a one-off probe and the
+    figure was WRONG -- 419 of 1507, from a directory glob over generated
+    boards. Re-derived over the git-tracked corpus it is 234 of 1316. A
+    measured number needs a committed measurement.
+    """
+    tot = off = 0
+    worst = (0.0, '', '')
+    for p in corpus_boards():
+        pcb = parse_kicad_pcb(p)
+        for ref, lb in legality.part_local_bounds(pcb, p).items():
+            if lb.synthetic:
+                continue
+            tot += 1
+            cx = (lb.local[0] + lb.local[2]) / 2.0
+            cy = (lb.local[1] + lb.local[3]) / 2.0
+            d = max(abs(cx), abs(cy))
+            if d > 1e-9:
+                off += 1
+            if d > worst[0]:
+                worst = (d, os.path.basename(p), ref)
+    print(f"OFF-CENTRE COURTYARDS: {off} of {tot} non-synthetic parts over "
+          f"{len(corpus_boards())} git-tracked boards "
+          f"({100.0 * off / max(1, tot):.0f}%)")
+    print(f"  worst offset {worst[0]:.3f} mm -- {worst[1]} {worst[2]}")
+    return {'parts': tot, 'off_centre': off,
+            'worst_offset_mm': round(worst[0], 3),
+            'worst_board': worst[1], 'worst_ref': worst[2]}
+
+
 def _ko(name, rect=None, circle=None, allow=(), sides=('F', 'B')):
     e = {'name': name, 'allow': tuple(allow), 'sides': tuple(sides)}
     if rect is not None:
@@ -151,6 +197,19 @@ def arm_a(dump):
             out[name] = {'error': f"{type(e).__name__}: {e}"}
     with open(dump, 'w', encoding='utf-8') as f:
         json.dump(out, f, indent=1, sort_keys=True)
+    # POSITIVE CONTROL on the comparator, so "identical on all N" is not
+    # trivially satisfied by a comparison that compares nothing. This used to
+    # be claimed in prose and run by hand; now it runs here and prints.
+    probe = json.loads(json.dumps(out))
+    first = sorted(k for k, v in probe.items() if 'error' not in v)
+    if first:
+        probe[first[0]]['grade'] = list(probe[first[0]]['grade']) + [
+            'injected|X||error|control record']
+        detected = [k for k in out if out.get(k) != probe.get(k)]
+        print(f"  comparator positive control: injected 1 record into "
+              f"{first[0]} -> {len(detected)} board(s) reported differing "
+              f"{'(OK)' if detected == [first[0]] else '(BLIND -- the '
+               'comparison proves nothing)'}")
     ok = [v for v in out.values() if 'error' not in v]
     print(f"ARM A: {len(out)} board(s), {len(ok)} graded, "
           f"{sum(v['keepouts_declared'] for v in ok)} keep-out(s) declared "
@@ -347,19 +406,26 @@ def report(rows, dropped):
     unbound = [r for r in refused if not r['bound']]
     print(f"  refusals with NO binding keep-out: {len(unbound)}   "
           f"{'OK -- every refusal names a keep-out that binds it' if not unbound else 'BUG'}")
+    # `bound == 0` has TWO causes and only one of them is an exemption: at
+    # `frac == 0` no keep-out is declared at all. Counting them together
+    # inflated the exemption evidence by 1404 rows per filter.
     for filt in ('allow', 'sides'):
         f_rows = [r for r in rows if r['filter'] == filt]
-        exempt = [r for r in f_rows if not r['bound']]
+        declared = [r for r in f_rows if r['frac'] > 0.0]
+        exempt = [r for r in declared if not r['bound']]
         ref_ex = [r for r in exempt if not r['feasible']]
-        print(f"  `{filt}`: {len(exempt)} of {len(f_rows)} case(s) exempted by "
-              f"the resolver, {len(ref_ex)} of them refused   "
-              f"{'OK' if not ref_ex else 'BUG'}"
+        print(f"  `{filt}`: of {len(declared)} case(s) that DECLARE a keep-out, "
+              f"{len(exempt)} were exempted by the resolver and {len(ref_ex)} "
+              f"of those refused   {'OK' if not ref_ex else 'BUG'}"
               + ('' if exempt else
                  "   VACUOUS -- the exemption was never exercised"))
     return {'cases': n, 'refused': len(refused), 'old_total_coverage':
             len(old_hit), 'H': len(H), 'M': len(M),
             'refusals_with_no_binding_keepout': len(unbound),
-            'exempted_cases': sum(1 for r in rows if not r['bound']),
+            'exempted_cases': sum(1 for r in rows
+                                  if r['frac'] > 0.0 and not r['bound']),
+            'no_keepout_declared_cases': sum(1 for r in rows
+                                             if r['frac'] <= 0.0),
             'oracle_consulted': len(with_oracle),
             'hard_false_positives': len(hard_fp), 'soft_misses': len(soft),
             'boards': sorted({r['board'] for r in rows}),
@@ -379,8 +445,17 @@ def main():
                     help='re-derive the summary from committed rows, running '
                          'nothing -- the change detector for the published '
                          'numbers')
+    ap.add_argument('--offcentre', action='store_true',
+                    help='ARM: the off-centre courtyard census the anchor '
+                         'design turns on')
     ap.add_argument('-v', '--verbose', action='store_true')
     a = ap.parse_args()
+    if a.offcentre:
+        d = arm_offcentre()
+        if a.summary:
+            with open(a.summary, 'w', encoding='utf-8') as f:
+                json.dump(d, f, indent=1, sort_keys=True)
+        return 0
     if a.from_rows:
         with open(a.from_rows, encoding='utf-8') as f:
             rows = [json.loads(line) for line in f if line.strip()]

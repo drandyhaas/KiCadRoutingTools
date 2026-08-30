@@ -1291,8 +1291,8 @@ def _anchor_origin_box(zone_rect, bounds, tol: float):
 
     An earlier draft of #799 intersected the two conventions, on the theory
     that a refusal should be true under both. Measured, that is a false-ERROR
-    machine: 419 of 1507 corpus parts have an off-centre courtyard (worst
-    36.8mm, kit-dev MCU_PORT201), and where the offset exceeds the zone extent
+    machine: 234 of 1316 corpus parts have an off-centre courtyard (worst
+    36.825mm, kit-dev MCU_PORT201), and where the offset exceeds the zone extent
     the two boxes are DISJOINT -- so the intersection is empty and ANY keep-out
     anywhere on the board refuses the intent. This finding is a contradiction
     between two GRADED claims, `zone_containment` and `keepout`, and both are
@@ -1384,18 +1384,48 @@ def zone_pose_feasibility(zone_rect, tolerance: float, part,
     vector, so the rule admits all of them; what the member can never do is get
     OUT.
 
+    THE INVARIANT: compute a SUPERSET of the poses satisfying (zone AND binding
+    keep-outs) and refuse only when that superset is empty -- so a refusal is
+    sound, up to the one bounded exception recorded below.
+
     THE ALGEBRA ONLY PROPOSES. Candidate origins come from coordinate
     compression over the admissible box and the keep-outs' forbidden rects, and
     every candidate is then judged by `zone_escape` and `keepout_hit` -- the
-    same two functions `rule_zone_containment`, `rule_keepout` and
-    `seeder.pose_ok` judge with. So the verdict cannot drift from the grade,
+    same two functions `rule_zone_containment` and `rule_keepout` grade with.
+    (Not `seeder.pose_ok`: it applies no zone predicate at all, and its
+    caller's `zone_gate` uses `_rect_inside` and a bare origin-in-zone test
+    rather than `zone_escape`. The kernel matches the GRADE, which is whose
+    contradiction this is.) So the verdict cannot drift from the grade,
     and two float-scale traps disappear on their own: a keep-out a candidate
     overlaps by less than `EPS` of AREA is not a hit and the candidate stands,
     and a degenerate keep-out forbids nothing because it can hit nothing.
 
+    ONE KNOWN EXCEPTION TO "A FALSE ERROR IS IMPOSSIBLE", stated because it is
+    real. `keepout_hit` fires on overlap AREA above `EPS`, so the true
+    satisfying set is slightly LARGER than the open-rect complement the
+    candidates are drawn from -- and a free window can therefore fall strictly
+    between two sampled coordinates. Derived analytically and then run: zone
+    (0,0,10,2) tol 0, a 2x2 courtyard, keep-outs (-99,0.5,4,1) and
+    (5.9999978,-10,99,10) are refused, while (4.99999815, 1.0, 0) has
+    `zone_escape` 0.0 and `keepout_hit` 0.0 against both (raw areas 9.25e-7 and
+    7.0e-7, under EPS). For any two binding keep-outs with part-overlap lengths
+    L1 <= L2 on the free axis the window exists when the gap d satisfies
+    max(EPS/L1, 2*EPS/L2) < d <= EPS/L1 + EPS/L2.
+
+    It is bounded rather than open-ended: a missed pose must graze EVERY
+    binding keep-out by under one square micrometre, i.e. far below the 0.05mm
+    floor of any lattice the seat search sweeps, so no authored intent reaches
+    it. It is NOT modelled, because widening the candidate set to cover the
+    slack would invent tolerance the grade does not have -- and the grade would
+    then flag the pose this function admitted. `tests/test_799_*` carries the
+    counterexample as a recorded limitation so it is a change detector rather
+    than a surprise.
+
     The zone side is slack by `EPS` and the keep-out side is not, and that
     asymmetry is measured rather than chosen. `(z0 - tol - b0) + b0 < z0 - tol`
-    on 6.3% of random triples, so at `tolerance_mm: 0` a candidate sitting on a
+    on a few percent of random triples (6.3% and 7.4% in two independent
+    probes; the sampling distribution is not pinned, so treat it as the order
+    of magnitude rather than a figure), so at `tolerance_mm: 0` a candidate sitting on a
     zone-derived edge is rejected by its own construction; on the keep-out side
     the worst boundary overlap over 200000 trials was 8.5e-12 mm2, six orders
     below `EPS`, so no slack is needed and adding it would invent tolerance the
@@ -1517,8 +1547,14 @@ def zone_pose_feasibility(zone_rect, tolerance: float, part,
         out['feasible'] = True
         out['reason'] = 'zone_too_small'
         return out
-    freeing = tuple(str(k.get('name') or '<unnamed>') for k in rects
-                    if _search(tuple(e for e in rects if e is not k)) is not None)
+    # Over ALL bound entries, not just the rects. Computing it over `rects`
+    # made "lifting any one of them would give it a pose" FALSE whenever a disc
+    # also bound the member: lifting the named rect left the disc still
+    # refusing. Measured -- A=[-50,-50,4,50], B=[5.999,-50,50,50],
+    # D=circle(7,5,4): the message named A and B, and lifting B alone left the
+    # part with no pose at all.
+    freeing = tuple(str(k.get('name') or '<unnamed>') for k in bound
+                    if _search(tuple(e for e in bound if e is not k)) is not None)
     out['feasible'] = False
     if freeing:
         # `keepouts_freeing` carries the seeder's meaning: lifting this entry
@@ -1528,6 +1564,12 @@ def zone_pose_feasibility(zone_rect, tolerance: float, part,
         # them. Measured on two keep-outs covering half a zone each: both lifts
         # free a pose, so the honest report is "lifting any one would".
         out['reason'] = 'keepout_alone' if len(freeing) == 1 else 'keepout_any_of'
+        # NOTE the exact claim `freeing` supports: "lifting this entry leaves a
+        # pose". It does NOT support "this entry is the sole cause" -- two
+        # OVERLAPPING keep-outs each mask the other, so neither appears here
+        # while together they are the reason. Measured: two identical keep-outs
+        # plus a third made the message name only the third, which alone left
+        # 8mm2 free. The wording below says the thing that was computed.
         out['keepouts_freeing'] = freeing
     else:
         out['reason'] = 'keepout_joint'
@@ -1663,7 +1705,8 @@ def intent_zone_keepout_problems(intent, blocks, pcb_data,
                     + ("which refuse it JOINTLY: no single one of them "
                        "leaves it a pose, and dropping all of them does"
                        if joint else
-                       "which alone leaves it none"
+                       "which is what refuses it: lifting it would leave a "
+                       "pose"
                        if len(names) == 1 else
                        "which together leave it none -- lifting any one of "
                        "them would give it a pose") +

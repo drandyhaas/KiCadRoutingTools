@@ -886,9 +886,14 @@ class LocalBounds(NamedTuple):
     # drew, so it must never gate.
     synthetic: bool
     # False when the courtyard was missing and `local` is the PAD bbox, which
-    # carries no courtyard margin. A part modelled smaller is more permissive,
-    # so a consumer that refuses on this geometry under-fires rather than
-    # over-fires -- the safe direction, but one worth disclosing.
+    # carries no courtyard margin. NOT a safe direction, contrary to an earlier
+    # comment here: a smaller part is more permissive only WITHIN a fixed
+    # anchor mode, and shrinking can flip `zone_is_anchor` True->False, whose
+    # non-anchor branch has a strictly smaller admissible origin box. Measured:
+    # zone [0,0,5,2] tol 0, keep-out [0,0.9,2,1.1] -- a 6x3 courtyard is
+    # `seated` and its 4x1 pad bbox is REFUSED. So a consumer refusing on this
+    # geometry may differ in EITHER direction, which is why it is recorded
+    # per part rather than assumed away.
     from_courtyard: bool
 
 

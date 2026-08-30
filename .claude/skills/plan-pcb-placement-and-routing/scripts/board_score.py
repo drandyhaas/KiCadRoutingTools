@@ -471,7 +471,9 @@ def score_floorplan(root: str, board: str, intent: str, tmp: str) -> dict:
     reported `errors 0, warnings 1, pass true` and exited 0, while this function
     returned count 1 and drove `blocking` to 84 and exit 4. A warn was therefore
     a permanent blocker with no way to clear it -- the intent schema has no
-    `off` severity, and `--exit-zero` disables every rule at once -- so
+    `off` severity, and `--exit-zero` would not have helped either -- it
+    suppresses check_floorplan's EXIT CODE and disables no rule, while this
+    function reads the JSON violation list rather than the exit code -- so
     `severity: warn` did not mean what floorplan.py:57 says it means ("reported
     and does not fail the run").
 

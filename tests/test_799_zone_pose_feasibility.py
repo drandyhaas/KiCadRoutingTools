@@ -17,8 +17,8 @@ passed. Four of them WERE wrong in the first implementation and are fixed here:
     `rect_overlap_area` can never report a positive area for it;
   * an ANCHOR-mode zone with an off-centre courtyard was refused by any keep-out
     anywhere, because an earlier draft intersected the seeder's origin
-    convention with the grade's centre convention -- and on 419 of 1507 corpus
-    parts those boxes are disjoint (worst 36.8mm);
+    convention with the grade's centre convention -- and on 234 of 1316 corpus
+    parts those boxes are disjoint (worst 36.825mm);
   * a corner overlap under `keepout_hit`'s EPS-of-AREA threshold is not a hit,
     but the open-rect algebra excluded it;
   * one decorative circle anywhere switched the whole check off for a part.
@@ -32,8 +32,9 @@ never predicted and never edited afterwards to match:
 
     20 rows: 16 killed, 4 survived, 0 broken, 0 disagreeing with expectation
 
-The first run was 14 killed, 6 survived, 4 WRONG, and all four were defects in
-THIS file or dead code in the engine rather than bad rows:
+The first run was 14 killed, 6 survived, 4 WRONG. TWO were defects -- one in
+this file, one dead line in the engine -- and two were rows whose EXPECTATION
+was wrong, now recorded as survivors with their reasons:
 
   * `total-coverage-no-longer-runs-first` measured nothing -- its anchor was a
     `continue` that was already the last statement of its loop body. The dead
@@ -51,8 +52,9 @@ The four SURVIVORS are recorded with their reasons, not deleted:
     candidate with `keepout_hit`. The guards are belt-and-braces; the rows are
     the change detector for the day verification stops backing the generator.
   * `the-zone-side-eps-slack-is-dropped` -- the EPS slack on the zone side
-    guards a float-scale case (measured elsewhere: `(z0-tol-b0)+b0 < z0-tol` on
-    6.3% of random triples) that no arm here constructs. The row exists so the
+    guards a float-scale case (`(z0-tol-b0)+b0 < z0-tol` on a few percent of
+    random triples -- 6.3% and 7.4% in two independent probes, sampling
+    distribution unpinned) that no arm here constructs. The row exists so the
     guard is already written the day one does.
   * `synthetic-parts-are-graded-too` -- no fixture here carries a footprint with
     neither courtyard nor pads.
@@ -165,7 +167,7 @@ def arm_false_error_guards():
     check("an ANCHOR zone is not refused by a far-away keep-out",
           F((50.0, 30.0, 50.4, 30.4), 0.5, P(tig, rot=90),
             [ko('far', [0, 0, 1, 1])])['feasible'],
-          "419 of 1507 corpus parts have an off-centre courtyard")
+          "234 of 1316 corpus parts have an off-centre courtyard")
     check("CONTROL: an anchor zone IS refused by a keep-out over it",
           not F((50.0, 30.0, 50.4, 30.4), 0.5, P(tig, rot=90),
                 [ko('on', [30, 20, 70, 45])])['feasible'],
@@ -190,6 +192,27 @@ def arm_false_error_guards():
           rc['feasible'] and rc['reason'] == 'circle_undecided'
           and rc['undecided_circles'] == ('hole',),
           f"reason={rc['reason']} -- no disc/rect free-area kernel exists")
+
+    # THE MIDDLE CASE, and the one both arms above miss: rects that are
+    # satisfiable ON THEIR OWN, plus a disc that closes the last of the room.
+    # The two arms above cover only "no rects at all" and "the rects already
+    # refuse". Weakening the guard to `if discs and not rects` leaves both of
+    # them passing and turns this case into an ERROR that blames the RECT for a
+    # refusal the CIRCLE caused -- exactly the thing the docstring says cannot
+    # happen.
+    mid = F((0, 0, 10, 10), 0.0, P((-1, -1, 1, 1)),
+            [ko('a', [0, 0, 8, 10]), ko('disc', circle=(9.0, 5.0, 10.0))])
+    only_rect = F((0, 0, 10, 10), 0.0, P((-1, -1, 1, 1)),
+                  [ko('a', [0, 0, 8, 10])])
+    check("a disc closing the room left by a SATISFIABLE rect abstains",
+          mid['feasible'] and mid['reason'] == 'circle_undecided'
+          and mid['undecided_circles'] == ('disc',),
+          f"reason={mid['reason']} freeing={mid['keepouts_freeing']} "
+          f"-- refusing here would blame the rect for the disc's refusal")
+    check("CONTROL: that rect alone really is satisfiable",
+          only_rect['feasible'] and only_rect['reason'] == 'seated',
+          f"reason={only_rect['reason']} witness={only_rect['witness']} "
+          f"-- so the arm above is the disc, not an already-doomed zone")
 
 
 def arm_boundary_and_rotation():
@@ -240,11 +263,15 @@ def arm_boundary_and_rotation():
     zone = (0, 0, 18.8, 3.6)
     with_t = F(zone, 0.0, P(b, tht=t), [ko('east', [19, -10, 30, 10])])
     without = F(zone, 0.0, P(b), [ko('east', [19, -10, 30, 10])])
+    # The detail is built with `.get`-safe accessors: an eager
+    # `with_t['witness'][2]` raises when the assertion is False BECAUSE the
+    # witness is None, and the file then dies mid-run -- turning a genuine FAIL
+    # into a broken test, which is the same signal.
+    wt = with_t['witness']
+    wo = without['witness']
     check("the THROUGH-HOLE rect is priced, and moves the witness rotation",
-          with_t['feasible'] and without['feasible']
-          and with_t['witness'][2] != without['witness'][2],
-          f"with tht -> rot {with_t['witness'][2]}, "
-          f"courtyard only -> rot {without['witness'][2]}")
+          bool(wt) and bool(wo) and wt[2] != wo[2],
+          f"with tht -> {wt}, courtyard only -> {wo}")
 
 
 def _part(ref, x, y, half=1.0, thru=False):
@@ -290,6 +317,101 @@ def load(doc, wd, tag):
     return floorplan.load_intent(p)
 
 
+def arm_the_eps_limitation():
+    """The ONE case where this check refuses a pose the grade would accept.
+
+    Recorded, not fixed. `keepout_hit` fires on overlap AREA above EPS, so the
+    true satisfying set is slightly LARGER than the open-rect complement the
+    candidates are drawn from, and a free window can fall strictly between two
+    sampled coordinates. Found by an adversarial review, derived analytically
+    (the sweep's 33696 cases and ~7200 fuzz cases both missed it -- the window
+    here is 3e-7mm wide).
+
+    It is bounded: a missed pose must graze EVERY binding keep-out by under one
+    square micrometre, i.e. far below the 0.05mm floor of any lattice the seat
+    search sweeps, so no authored intent reaches it. It is deliberately NOT
+    modelled -- widening the candidate set to cover the slack would invent
+    tolerance the grade does not have.
+
+    The arm asserts the CURRENT (wrong) answer on purpose, so this is a change
+    detector: if someone closes the gap, this arm fails and says so.
+    """
+    print("--- the recorded EPS-of-area limitation (asserts the WRONG answer)")
+    zone = (0.0, 0.0, 10.0, 2.0)
+    part = P((-1.0, -1.0, 1.0, 1.0))
+    kos = [ko('left', [-99.0, 0.5, 4.0, 1.0]),
+           ko('right', [5.9999978, -10.0, 99.0, 10.0])]
+    v = F(zone, 0.0, part, kos)
+    x, y, rot = 4.99999815, 1.0, 0.0
+    r = part.rect(x, y, rot)
+    esc = floorplan.zone_escape(zone, r, False)[0]
+    hits = [floorplan.keepout_hit(k, (r, None)) for k in kos]
+    check("the missed pose satisfies BOTH graded predicates",
+          esc == 0.0 and hits == [0.0, 0.0],
+          f"zone_escape={esc} keepout_hit={hits} at ({x}, {y}, {rot})")
+    check("...and the check refuses it anyway -- KNOWN, bounded, unfixed",
+          not v['feasible'],
+          f"reason={v['reason']} -- the free window is ~3e-7mm wide and every "
+          f"pose in it grazes both keep-outs by under 1e-6 mm2")
+
+
+def arm_feasible_means_seated():
+    """`feasible=True` is also what every ABSTENTION returns.
+
+    Five reasons yield it -- `seated`, `no_keepout_binds`, `zone_too_small`,
+    `circle_undecided`, `too_many_keepouts` -- and only `seated` means "there
+    is room". So a bare `['feasible']` assertion passes when the search found
+    NOTHING, which is the opposite of what such an arm claims. Measured: with
+    `_search` stubbed to always return None, 13 of 39 checks in this file still
+    passed, including every arm in `arm_false_error_guards`. Two of them are
+    precisely the regressions their siblings exist to catch: the 90-degree arm
+    reads True under `only-one-rotation-is-tried`, and the anchor arm reads True
+    under the origin/centre intersection bug.
+
+    This arm pins the REASON for every positive fixture in the file at once,
+    which closes that hole without weakening the refusal arms (`feasible=False`
+    has only ever meant a real refusal).
+    """
+    print("--- a positive verdict must be `seated`, never an abstention")
+    tig = (-1.8, -1.8, 1.8, 22.1)
+    cases = [
+        ("50% partial overlap", (10, 10, 20, 20), 0.0, P((-1, -1, 1, 1)),
+         [ko('half', [10, 10, 15, 20])]),
+        ("degenerate keep-out", (10, 10, 20, 20), 0.0, P((-5, -5, 5, 5)),
+         [ko('k', [15, 10, 15, 20])]),
+        ("anchor zone, far keep-out", (50.0, 30.0, 50.4, 30.4), 0.5,
+         P(tig, rot=90), [ko('far', [0, 0, 1, 1])]),
+        ("corner nick under EPS", (0, 0, 10, 10), 0.0, P((-1, -1, 1, 1)),
+         [ko('nw', [1.999, 1.999, 100, 100])]),
+        ("gap exactly the courtyard", (0, 0, 10, 10), 0.0, P((-1, -1, 1, 1)),
+         [ko('a', [0, 0, 4, 10]), ko('b', [6, 0, 10, 10])]),
+        ("fits only at 90", (0, 0, 3, 9), 0.0, P((-4, -1, 4, 1)),
+         [ko('x', [100, 100, 101, 101])]),
+        ("tolerance band", (10, 10, 14, 14), 2.0, P((-0.5, -0.5, 0.5, 0.5)),
+         [ko('k', [10, 10, 14, 14])]),
+    ]
+    bad = []
+    for name, z, tol, part, kos in cases:
+        v = F(z, tol, part, kos)
+        if not (v['feasible'] and v['reason'] == 'seated'
+                and v['witness'] is not None):
+            bad.append(f"{name}: feasible={v['feasible']} "
+                       f"reason={v['reason']} witness={v['witness']}")
+    check("every positive fixture reports `seated` with a real witness",
+          not bad, f"{len(cases)} fixture(s) checked" if not bad
+          else '; '.join(bad))
+
+    # And the discriminating half: the 90-degree fixture must be seated AT 90,
+    # or the arm is satisfied by a part that fits at 0 too and proves nothing
+    # about the rotation loop.
+    v90 = F((0, 0, 3, 9), 0.0, P((-4, -1, 4, 1)),
+            [ko('x', [100, 100, 101, 101])])
+    check("... and the 90-degree fixture is seated AT 90",
+          v90['witness'] is not None and v90['witness'][2] == 90.0,
+          f"witness={v90['witness']} -- an 8x2 courtyard cannot fit a 3x9 zone "
+          f"at rot 0, so this is what makes the SQUARE control's point true")
+
+
 def arm_reporting(wd):
     print("--- how it is reported, and where")
     b = board(os.path.join(wd, 'r.kicad_pcb'),
@@ -319,23 +441,25 @@ def arm_reporting(wd):
           f"grade={len(gr)} gate={len(pr)}, messages "
           f"{'identical' if pr and pr[0].message == gr[0].message else 'DIFFER'}")
     check("check_floorplan can now see it: it is an ERROR, so `passed` is False",
-          not g.passed and gr[0].severity == floorplan.ERROR,
-          f"passed={g.passed} severity={gr[0].severity}")
+          bool(gr) and not g.passed and gr[0].severity == floorplan.ERROR,
+          f"passed={g.passed} severity="
+          f"{gr[0].severity if gr else 'no finding raised'}")
 
     # The wording was measured in #702 and must not drift: 6 of 8 probed
     # alternative poses inside a swallowed zone were ADMITTED, so the member is
     # CONFINED, not frozen.
-    m = gr[0].message
+    m = gr[0].message if gr else ''
     check("the message says the member cannot LEAVE its zone",
-          'never LEAVE its zone' in m, m[:80])
+          'never LEAVE its zone' in m, m[:80] or 'no finding raised')
     check("... and does not claim it cannot move",
-          'cannot move' not in m.lower(),
+          bool(m) and 'cannot move' not in m.lower(),
           "confined, not frozen -- every pose in the zone scores identically")
+    meas = gr[0].measured if gr else {}
     check("the measured payload names the keep-out and the rotations",
-          gr[0].measured.get('keepouts_freeing') == ['wall']
-          and len(gr[0].measured.get('rotations') or []) == 4,
-          f"freeing={gr[0].measured.get('keepouts_freeing')} "
-          f"rotations={gr[0].measured.get('rotations')}")
+          meas.get('keepouts_freeing') == ['wall']
+          and len(meas.get('rotations') or []) == 4,
+          f"freeing={meas.get('keepouts_freeing')} "
+          f"rotations={meas.get('rotations')}")
 
     # CONTROLS: the two filters #702 was fixed to honour, and total coverage.
     for tag, extra in (('allow', {"allow": ["U1", "U2"]}),
@@ -434,6 +558,8 @@ def main():
     with tempfile.TemporaryDirectory() as wd:
         arm_the_issues_own_cases()
         arm_false_error_guards()
+        arm_feasible_means_seated()
+        arm_the_eps_limitation()
         arm_boundary_and_rotation()
         arm_reporting(wd)
         arm_identity()
