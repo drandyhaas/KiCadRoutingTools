@@ -30,7 +30,7 @@ sys.path.insert(0, HERE)
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 from kicad_writer import add_tracks_and_vias_to_pcb  # noqa: E402
 from bga_fanout import generate_bga_fanout  # noqa: E402
-import topo_emit as te  # noqa: E402
+import braid as te  # noqa: E402
 import escape_moves as em  # noqa: E402
 import select_moves as sm  # noqa: E402
 import detect_buses as db  # noqa: E402

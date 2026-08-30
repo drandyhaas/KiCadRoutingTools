@@ -28,7 +28,7 @@ from kicad_parser import parse_kicad_pcb, Segment  # noqa: E402
 from kicad_writer import add_tracks_and_vias_to_pcb  # noqa: E402
 from connectivity import find_connected_groups  # noqa: E402
 import connect as cn  # noqa: E402
-import topo_emit as te  # noqa: E402
+import braid as te  # noqa: E402
 
 PY = sys.executable
 

@@ -12,7 +12,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 sys.path.insert(0, HERE)
 from kicad_parser import parse_kicad_pcb  # noqa: E402
-import topo_emit as te  # noqa: E402
+import braid as te  # noqa: E402
 import escape_moves as em  # noqa: E402
 import select_moves as sm  # noqa: E402
 
@@ -78,7 +78,7 @@ if unplaced:
 # The corridor has to realise launch-order -> exit-order. Report that
 # permutation for the chosen moves, against what the old westward-only
 # assignment produced, since it is the corridor's actual workload.
-import topo_emit as _te
+import braid as _te
 lefts = [n for n in names if choice.get(n) and choice[n].direction == 'left']
 def perm_stats(group, keyfn):
     if len(group) < 2:

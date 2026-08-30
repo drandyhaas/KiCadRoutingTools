@@ -38,7 +38,7 @@ if '--raw' not in sys.argv:
         # no free stub end, so endpoints() rejects it. Run the real
         # test rather than a proxy for it.
         sys.path.insert(0, _here)
-        import topo_emit as _te
+        import braid as _te
         _bn = {n.name.split('/')[-1]: (i, n)
                for i, n in _pcb.nets.items()}
         _ok = []

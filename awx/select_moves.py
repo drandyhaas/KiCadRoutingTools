@@ -349,7 +349,7 @@ class Corridor:
         """The nets that can travel the corridor without diving: the
         proposal from the transverse order, pruned until no two of them
         actually cross."""
-        import topo_emit as _te
+        import braid as _te
         if len(grp) < 2:
             return list(grp)
         t = self.axis(grp, sel)

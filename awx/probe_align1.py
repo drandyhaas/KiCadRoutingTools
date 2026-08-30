@@ -12,7 +12,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 sys.path.insert(0, HERE)
 from kicad_parser import parse_kicad_pcb  # noqa: E402
-import topo_emit as te  # noqa: E402
+import braid as te  # noqa: E402
 import escape_moves as em  # noqa: E402
 import select_moves as sm  # noqa: E402
 import detect_buses as db  # noqa: E402

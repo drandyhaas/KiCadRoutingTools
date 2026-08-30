@@ -17,5 +17,5 @@ grep -E "kept floor|^plan:|dropped|^wrote|obeyed|differed|failed nets" \
 python3 ../py_router/check_drc.py "$OUT.kicad_pcb" --clearance 0.1 \
   --clearance-margin 0.1 2>&1 | grep -E "FOUND|<->" | sort | uniq -c \
   | sort -rn | head -8
-python3 probe_chain_geom.py "$OUT.kicad_pcb" "$K" --dest-stubs DU1 \
+python3 probe_chain_geom.py "$OUT.kicad_pcb" "$K" --dest DU1 \
   | tail -n +6

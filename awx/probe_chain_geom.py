@@ -3,13 +3,13 @@
 
 The K15 chain printed `column pitch -0.030`: a NEGATIVE corridor width.
 x1 is derived from the destination's ball field (fx0 - 0.8*pitch), but
-in --dest-stubs mode the braid delivers to the STUB ENDS, which the
+in --dest mode the braid delivers to the STUB ENDS, which the
 fanout laid west of the field -- so the field-derived x1 can sit west
 of the source teeth's x0. Print every quantity the trunk geometry is
 built from, in the flow frame, so the fix is aimed at a measured gap
 and not a guessed one.
 
-usage: probe_chain_geom.py BOARD K [--dest-stubs REF]
+usage: probe_chain_geom.py BOARD K [--dest REF]
 """
 import argparse
 import os
@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 sys.path.insert(0, HERE)
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 import flow_frame as ff  # noqa: E402
-import topo_emit as te  # noqa: E402
+import braid as te  # noqa: E402
 import subprocess  # noqa: E402
 
 
@@ -28,7 +28,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('board')
     ap.add_argument('k', type=int)
-    ap.add_argument('--dest-stubs', default=None)
+    ap.add_argument('--dest', default=None)
     ap.add_argument('--pitch', type=float, default=0.8)
     a = ap.parse_args()
     nets = subprocess.run([sys.executable,
@@ -38,14 +38,14 @@ def main():
     names = [n for n in nets.split(',') if n]
     pcb = parse_kicad_pcb(a.board)
     byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
-    probe = te.endpoints(pcb, names, byname, dest_ref=a.dest_stubs)
+    probe = te.endpoints(pcb, names, byname, dest_ref=a.dest)
     theta = ff.flow_angle([probe[n][0] for n in probe],
                           [probe[n][1] for n in probe])
     cx = sum(probe[n][1][0] for n in probe) / len(probe)
     cy = sum(probe[n][1][1] for n in probe) / len(probe)
     pcb, back = ff.rotate_pcb(pcb, theta, cx, cy)
     byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
-    ends = te.endpoints(pcb, names, byname, dest_ref=a.dest_stubs)
+    ends = te.endpoints(pcb, names, byname, dest_ref=a.dest)
     print(f'flow frame theta={theta:.0f}')
     comps = {ends[nm][2] for nm in names}
     for c in sorted(comps):

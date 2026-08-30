@@ -11,9 +11,11 @@
 #      (production bga_fanout, via escape_dir_hints), and grade THAT
 #      board alone -- a berth that ships stub-vs-stub contact is
 #      broken before the braid starts;
-#   3. braid from the source teeth to the destination's STUB ENDS
-#      (--dest-stubs), so the braid never has to enter the ball field
-#      at all -- which is the thing that breaks it at K32 and above.
+#   3. braid (braid.py) from the source teeth to the destination's STUB
+#      ENDS: the trunk decides order and layers, and every join to a
+#      stub -- and both ends of the flank corridor -- is a connection
+#      made by the real router (connect.py). No hand tails, no
+#      fallbacks: a refused connection is reported, not patched.
 #
 # Graded exactly like the plain braid ladder: check_connected scoped to
 # the run's nets, whole-board check_drc at the routed floor. Extra
@@ -48,8 +50,8 @@ for K in "${KS[@]}"; do
   echo -n "  fanout board: "
   python3 ../py_router/check_drc.py "${TAG}_fo_k${K}.kicad_pcb" \
     --clearance 0.1 --clearance-margin 0.1 2>&1 | grep -E "FOUND|NO DRC"
-  python3 -u topo_emit.py --board "${TAG}_fo_k${K}.kicad_pcb" \
-    --dest-stubs "$DEST" --nets "$NETS" --out "${TAG}_k${K}" \
+  python3 -u braid.py --board "${TAG}_fo_k${K}.kicad_pcb" \
+    --dest "$DEST" --nets "$NETS" --out "${TAG}_k${K}" \
     > "${TAG}_k${K}.log" 2>&1
   if [ -f "${TAG}_k${K}.kicad_pcb" ]; then
     grep -E "WARNING|violations$" "${TAG}_k${K}.log" | sed 's/^/  /'

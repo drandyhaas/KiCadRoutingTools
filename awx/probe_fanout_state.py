@@ -18,7 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 sys.path.insert(0, HERE)
 from kicad_parser import parse_kicad_pcb  # noqa: E402
-import topo_emit as te  # noqa: E402
+import braid as te  # noqa: E402
 
 K = sys.argv[1] if len(sys.argv) > 1 else '51'
 names = subprocess.run([sys.executable,

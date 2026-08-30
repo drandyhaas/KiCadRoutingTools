@@ -10,7 +10,7 @@ FO=$1
 OUT=$2
 K=$3
 NETS=$(python3 coherent_nets.py "$K")
-python3 -u topo_emit.py --board "$FO" --dest-stubs DU1 --nets "$NETS" \
+python3 -u braid.py --board "$FO" --dest "${DEST:-DU1}" --nets "$NETS" \
   --out "$OUT" > "$OUT.log" 2>&1
 if [ -f "$OUT.kicad_pcb" ]; then
   grep -E "south river|launch order|entry order|divers|swaps in|WARNING|octilinearized|violations|CLEAN|wrote" "$OUT.log" | cut -c1-200
