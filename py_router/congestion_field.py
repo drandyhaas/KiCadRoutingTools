@@ -168,7 +168,7 @@ def congestion2_knobs():
 
 
 def congestion_bins(pcb_data, net_ids, num_layers, bin_mm,
-                    extra_demand_points=None):
+                    extra_demand_points=None, include_bins=None):
     """THE demand/capacity census: {(bx,by): (free_area_mm2, owners)} plus
     per-net terminal coords, and the BIN IT ACTUALLY USED.
 
@@ -188,6 +188,23 @@ def congestion_bins(pcb_data, net_ids, num_layers, bin_mm,
     each net's terminal set -- the net then claims demand along its whole
     predicted path instead of only at its endpoints, and its own exemption
     disks follow the corridor (owner-exempt by construction).
+
+    include_bins (#709): optional iterable of (bx, by) keys to report EVEN
+    WHEN NOTHING DEMANDS THEM. The result was keyed off `owners`, which only
+    gains a key where some net has a terminal -- so a window with nothing in
+    it never entered the dict and `check_pockets` could not represent an
+    empty region at all (esp_prog: 44 of 128 in-outline windows at 2mm).
+    Such a bin comes back with `owners` empty and its REAL free area, which
+    is what separates "empty" from "full of another net's copper".
+
+    THE A* CONSUMER NEVER PASSES THIS. `build_congestion2` omits it, so the
+    key sequence is `owners`' own iteration order, byte for byte as before --
+    and the order is load-bearing, not incidental: `congestion2_rows`
+    iterates `bins.items()` and appends into the list that becomes the
+    np.array handed to `merge_track_proximity_costs`. Hence the extra keys
+    are APPENDED to `list(owners)` rather than unioned through a set.
+    (Defensively, a demand-0 bin scores ratio 0 <= thresh and is skipped
+    there anyway.)
     """
     bin_mm = max(0.25, bin_mm)
     num_layers = max(1, num_layers)
@@ -226,7 +243,10 @@ def congestion_bins(pcb_data, net_ids, num_layers, bin_mm,
             copper[b] = copper.get(b, 0.0) + p.size_x * p.size_y
     bin_area_total = bin_mm * bin_mm * num_layers
     bins = {}
-    for b, own in owners.items():
+    keys = owners.keys() if not include_bins else (
+        list(owners) + [b for b in include_bins if b not in owners])
+    for b in keys:
+        own = owners.get(b, frozenset())
         used = copper.get(b, 0.0)
         free = max(bin_area_total * 0.05, bin_area_total - used)
         bins[b] = (free, frozenset(own))
