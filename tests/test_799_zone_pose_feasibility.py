@@ -316,6 +316,27 @@ def arm_reporting(wd):
               not [v for v in px if v.rule == RULE],
               "the same resolver the seat and the grade use")
 
+    # A MIXED block: the keep-out would refuse both members, and only one is
+    # exempt. The two whole-block controls above cannot catch a per-member loop
+    # that ignores the resolver, because when EVERY member is exempt the loop
+    # is never entered at all -- measured: bypassing `keepouts_for_ref` inside
+    # the loop survived both of them.
+    wide = [{"name": "wide", "rect": [10.0, 10.0, 19.5, 20.0],
+             "allow": ["U1"]}]
+    itm = load(intent_doc(blocks, wide), wd, 'r_mixed')
+    _bm, pm = floorplan.resolve_intent_gate(itm, pcb, ())
+    mixed = [v for v in pm if v.rule == RULE]
+    check("an exempt member is skipped while its block-mate is reported",
+          len(mixed) == 1 and mixed[0].ref == 'U2',
+          f"{len(mixed)} finding(s), refs={[v.ref for v in mixed]} "
+          f"-- the keep-out refuses both; only U1 is in `allow`")
+    itm2 = load(intent_doc(blocks, [dict(wide[0], allow=[])]), wd, 'r_mixed2')
+    _bm2, pm2 = floorplan.resolve_intent_gate(itm2, pcb, ())
+    check("CONTROL: without the exemption BOTH members are reported",
+          {v.ref for v in pm2 if v.rule == RULE} == {'U1', 'U2'},
+          f"refs={sorted(v.ref for v in pm2 if v.rule == RULE)} "
+          f"-- so the arm above is the exemption, not an unreachable member")
+
     itc = load(intent_doc(blocks, [{"name": "all", "rect": [0, 0, 40, 30]}]),
                wd, 'r_cover')
     _bc, pc = floorplan.resolve_intent_gate(itc, pcb, ())

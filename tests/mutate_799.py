@@ -53,12 +53,18 @@ TBS = os.path.join(_TESTS, 'test_board_score_floorplan_severity.py')
 
 ROWS = [
     # ---- #799: the four false-ERROR guards --------------------------------
+    # SURVIVES, and the reason is the design rather than a hole: candidates are
+    # VERIFIED with `keepout_hit`, which returns 0 for a degenerate rect, so the
+    # admissible-box corner is accepted whether or not the generator skipped the
+    # hole. The guard is belt-and-braces, not load-bearing. Recorded rather than
+    # deleted, so it starts failing the day verification stops backing the
+    # generator.
     ('the-degenerate-keepout-still-forbids', 'fp',
      "    if not (k[2] - k[0] > 0.0 and k[3] - k[1] > 0.0):\n"
      "        return None\n",
      "    if False:\n"
      "        return None\n",
-     (T799,), 'KILLED'),
+     (T799,), 'SURVIVED'),
 
     ('the-anchor-box-uses-the-seeders-origin-convention', 'fp',
      "    cx, cy = (b0x + b2x) / 2.0, (b0y + b2y) / 2.0\n",
@@ -88,10 +94,16 @@ ROWS = [
      "    return [(a + b) / 2.0 for a, b in zip(out, out[1:])]\n",
      (T799,), 'KILLED'),
 
-    ('the-through-hole-rect-is-forgotten', 'fp',
+    # SURVIVES for the same reason, and the name says which half: this anchor
+    # drops the through-hole rect from candidate GENERATION only, while the
+    # verification still prices it through `keepout_hit(k, (r, th))`. The tht
+    # rect IS graded -- the ulx3s LCD1 arm proves it by the witness ROTATION
+    # moving -- so what this row measures is that the generator's copy is
+    # redundant, not that the rect is ignored.
+    ('the-through-hole-rect-is-forgotten-by-the-GENERATOR', 'fp',
      "                for lb in ((b, t) if t is not None else (b,)):\n",
      "                for lb in (b,):\n",
-     (T799,), 'KILLED'),
+     (T799,), 'SURVIVED'),
 
     ('the-tolerance-is-ignored', 'fp',
      "    anchor = zone_is_anchor(zone_rect, part, tolerance)\n",
@@ -105,11 +117,15 @@ ROWS = [
      "            if True:\n                continue\n",
      (T799,), 'KILLED'),
 
-    ('total-coverage-no-longer-runs-first', 'fp',
-     "                expected={'overlap': 'partial or none'}))\n"
+    # Retargeted after the first run. The original anchor was a `continue` that
+    # was the LAST statement of its loop body -- already dead, so the row
+    # measured nothing and reported SURVIVED. (The dead line is gone now.) The
+    # real block-level dedupe is `named`, below.
+    ('total-coverage-is-reported-twice', 'fp',
+     "        if z.name in named:          # already reported as total coverage\n"
      "            continue\n",
-     "                expected={'overlap': 'partial or none'}))\n"
-     "            pass\n",
+     "        if False:\n"
+     "            continue\n",
      (T799,), 'KILLED'),
 
     ('the-message-says-the-member-cannot-move', 'fp',

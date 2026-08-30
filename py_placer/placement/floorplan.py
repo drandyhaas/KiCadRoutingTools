@@ -1621,7 +1621,6 @@ def intent_zone_keepout_problems(intent, blocks, pcb_data,
                          f"leaving it"),
                 measured={'zone': list(z.rect), 'keepout': hit},
                 expected={'overlap': 'partial or none'}))
-            continue
 
     # Geometry only once the cheap tests are past, and only if some zoned
     # member is actually bound by a keep-out. On every board that declares no
