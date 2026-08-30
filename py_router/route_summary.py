@@ -165,6 +165,55 @@ def merge_summaries(summaries: List[Dict], aborted: bool = False) -> Optional[Di
                 and 'finalize_excluded_nets' not in merged):
             merged['finalize_excluded_nets'] = first['finalize_excluded_nets']
 
+    # DISTURBED-BUT-UNOWNED NETS ARE STICKY (#622 yw1: SA1 shipped with ZERO
+    # copper, SA2/SA6 open, and the merged MIN said failed:2 deficit:0). A
+    # middle pass's coverage_gate_nets / ripped_open_uncounted name rip
+    # victims OUTSIDE that pass's --nets scope, verified broken against real
+    # copper at emission time -- and a later, narrower sub-run's summary
+    # carries neither key, so last-wins erased the only record of them.
+    # Union them across all passes, dropping any net a LATER summary
+    # CLASSIFIED (routed_single = recovered; failed/open/multipoint = that
+    # pass took ownership and already counts it), so nothing double-counts.
+    # terminal_restores merges the same way (per-net) so summary_min's
+    # terminal_restores_broken survives the merge -- and a restore mark can
+    # be superseded WITHIN its own pass: the reroute loop re-routes the
+    # victim after the stub restore, and the pass-end routed_single
+    # (re-derived from the final-board union-find) is the truth (yt1:
+    # SDQ7/SDQ6/SA4 marked stub, same-pass routed, board grades clean; yv3:
+    # single-summary form of the same). So a mark survives only while its
+    # net is in neither its own pass's routed_single nor any later pass's
+    # classification. This applies to SINGLE-summary logs too. When aborted,
+    # only pass 1 (what is on disk) participates.
+    _use = summaries[:1] if aborted else summaries
+
+    def _classified_names(s):
+        names = set(s.get('routed_single') or [])
+        names |= set(s.get('failed_single') or [])
+        names |= set(s.get('open_single') or [])
+        names |= {d.get('net_name') if isinstance(d, dict) else d
+                  for d in (s.get('failed_multipoint') or [])}
+        return names
+
+    _gate_all: List[str] = []
+    _tr_merged: Dict = {}
+    for _i, _s in enumerate(_use):
+        _later: set = set()
+        for _t in _use[_i + 1:]:
+            _later |= _classified_names(_t)
+        for _n in (list(_s.get('coverage_gate_nets') or [])
+                   + list(_s.get('ripped_open_uncounted') or [])):
+            if _n not in _later and _n not in _gate_all:
+                _gate_all.append(_n)
+        _own_routed = set(_s.get('routed_single') or [])
+        for _n, _v in (_s.get('terminal_restores') or {}).items():
+            if _v == 'full' or (_n not in _later
+                                and _n not in _own_routed):
+                _tr_merged[_n] = _v
+    if _gate_all or 'coverage_gate_nets' in merged:
+        merged['coverage_gate_nets'] = _gate_all
+    if _tr_merged or 'terminal_restores' in merged:
+        merged['terminal_restores'] = _tr_merged
+
     # Coverage-gate nets have NO routed result, so their pads never reach
     # multipoint_pads_total and a caller's
     # failures = len(failed_single) + pad-deficit weighs them ZERO, though they
