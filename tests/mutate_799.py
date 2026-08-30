@@ -81,6 +81,23 @@ ROWS = [
      "                    if zone_escape(zone_rect, r, anchor)[0] > tolerance:\n",
      (T799,), 'SURVIVED'),
 
+    # Found by an adversarial review: the guard has TWO halves and only one was
+    # covered. Weakening it to `not rects` leaves every arm passing and turns a
+    # disc closing the last room into an ERROR that blames the RECT for it.
+    ('the-circle-abstention-is-only-half-scoped', 'fp',
+     "    if discs and (not rects or _search(rects) is not None):\n",
+     "    if discs and (not rects):\n",
+     (T799,), 'KILLED'),
+
+    # Same review: computing the blame over the RECTS made "lifting any one of
+    # them would give it a pose" false whenever a disc also bound the member.
+    ('the-freeing-search-drops-the-discs', 'fp',
+     "    freeing = tuple(str(k.get('name') or '<unnamed>') for k in bound\n"
+     "                    if _search(tuple(e for e in bound if e is not k)) is not None)\n",
+     "    freeing = tuple(str(k.get('name') or '<unnamed>') for k in rects\n"
+     "                    if _search(tuple(e for e in rects if e is not k)) is not None)\n",
+     (T799,), 'KILLED'),
+
     # ---- #799: the search itself ------------------------------------------
     ('only-one-rotation-is-tried', 'fp',
      "    rots = tuple((rot0 + d) % 360 for d in (0.0, 90.0, 180.0, 270.0))\n",
