@@ -863,15 +863,47 @@ def body_overlap_pairs(parts: Sequence[GradedPart]) -> List[BodyOverlapPair]:
     return out
 
 
-def graded_parts_from_file(pcb_data, pcb_file: Optional[str] = None
-                           ) -> List[GradedPart]:
-    """`GradedPart` records at the FILE's own poses.
+class LocalBounds(NamedTuple):
+    """One part's UNROTATED local geometry, before any pose is applied.
+
+    The half of `graded_parts_from_file` that does not depend on where the part
+    currently sits: which box the courtyard is, whether it is the pad-bbox
+    fallback or the zero-pad fiction, and the drilled-pad box. Split out because
+    a consumer asking "could this part fit HERE, at any rotation" needs the
+    local box at a rotation the file does not carry, and re-deriving that chain
+    is exactly the second implementation #456 exists to prevent.
+
+    `local` / `tht_local` are in the footprint's own frame; rotate them with
+    `rotate_local_bounds` and offset by the pose to get board coordinates.
+    """
+    ref: str
+    side: str
+    local: Tuple[float, float, float, float]
+    tht_local: Optional[Tuple[float, float, float, float]]
+    has_tht: bool
+    # True when `local` is the +/-0.5mm FICTION for a footprint with no
+    # courtyard AND no pads. See `GradedPart.synthetic`: not geometry anyone
+    # drew, so it must never gate.
+    synthetic: bool
+    # False when the courtyard was missing and `local` is the PAD bbox, which
+    # carries no courtyard margin. A part modelled smaller is more permissive,
+    # so a consumer that refuses on this geometry under-fires rather than
+    # over-fires -- the safe direction, but one worth disclosing.
+    from_courtyard: bool
+
+
+def part_local_bounds(pcb_data, pcb_file: Optional[str] = None
+                      ) -> Dict[str, LocalBounds]:
+    """THE local-bounds chain, once: `{ref: LocalBounds}`.
 
     Same geometry rules as the quench state (#456: one definition of legal):
     courtyard for the part's own side via the text parser, pad-bbox fallback
     when the footprint draws none, drilled-pad box on the far side. Needs the
     board FILE for courtyards (the text parser reads it); falls back to
     `pcb_data.source_path`, then to pad bboxes everywhere.
+
+    A ref is ABSENT when even the pad fallback raised -- the same parts
+    `graded_parts_from_file` skips, so both consumers see one universe.
     """
     from placement.parser import courtyard_for_side, extract_courtyard_sides
     from placement.quench import _through_pad_bounds_local
@@ -884,13 +916,15 @@ def graded_parts_from_file(pcb_data, pcb_file: Optional[str] = None
             sides = extract_courtyard_sides(path)
         except Exception:
             sides = {}
-    out: List[GradedPart] = []
+    out: Dict[str, LocalBounds] = {}
     for ref, fp in sorted((pcb_data.footprints or {}).items()):
         own = footprint_side(fp)
         local = None
         synthetic = False
+        from_courtyard = False
         if sides.get(ref):
             local = courtyard_for_side(sides[ref], own)
+            from_courtyard = local is not None
         if local is None:
             try:
                 local = compute_footprint_bbox_local(fp)
@@ -900,19 +934,39 @@ def graded_parts_from_file(pcb_data, pcb_file: Optional[str] = None
                 local = None
         if local is None:
             continue
-        rot = fp.rotation or 0.0
-        lx0, ly0, lx1, ly1 = rotate_local_bounds(*local, rot)
-        rect = (fp.x + lx0, fp.y + ly0, fp.x + lx1, fp.y + ly1)
-        tht = None
+        tht_local = None
         has_tht = footprint_has_through_pads(fp)
         if has_tht:
-            tlb = _through_pad_bounds_local(fp)
-            if tlb is not None:
-                tx0, ty0, tx1, ty1 = rotate_local_bounds(*tlb, rot)
-                tht = (fp.x + tx0, fp.y + ty0, fp.x + tx1, fp.y + ty1)
-        out.append(GradedPart(ref=ref, side=own, rect=rect,
-                              tht_rect=tht, has_tht=has_tht,
-                              synthetic=synthetic))
+            tht_local = _through_pad_bounds_local(fp)
+        out[ref] = LocalBounds(ref=ref, side=own, local=tuple(local),
+                               tht_local=(tuple(tht_local)
+                                          if tht_local is not None else None),
+                               has_tht=has_tht, synthetic=synthetic,
+                               from_courtyard=from_courtyard)
+    return out
+
+
+def graded_parts_from_file(pcb_data, pcb_file: Optional[str] = None
+                           ) -> List[GradedPart]:
+    """`GradedPart` records at the FILE's own poses.
+
+    The pose half of `part_local_bounds`: rotate each part's local box by its
+    own rotation and offset it. The chain itself lives there, so a consumer
+    that needs the box at ANOTHER rotation does not grow a second copy of it.
+    """
+    out: List[GradedPart] = []
+    for ref, lb in part_local_bounds(pcb_data, pcb_file).items():
+        fp = pcb_data.footprints[ref]
+        rot = fp.rotation or 0.0
+        lx0, ly0, lx1, ly1 = rotate_local_bounds(*lb.local, rot)
+        rect = (fp.x + lx0, fp.y + ly0, fp.x + lx1, fp.y + ly1)
+        tht = None
+        if lb.has_tht and lb.tht_local is not None:
+            tx0, ty0, tx1, ty1 = rotate_local_bounds(*lb.tht_local, rot)
+            tht = (fp.x + tx0, fp.y + ty0, fp.x + tx1, fp.y + ty1)
+        out.append(GradedPart(ref=ref, side=lb.side, rect=rect,
+                              tht_rect=tht, has_tht=lb.has_tht,
+                              synthetic=lb.synthetic))
     return out
 
 

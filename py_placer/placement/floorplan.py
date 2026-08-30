@@ -1166,6 +1166,51 @@ def zone_escape(zone_rect, part_rect, anchor: bool) -> Tuple[float, str]:
     return _rect_escape(zone_rect, part_rect)
 
 
+def zone_is_anchor(zone_rect, part, tol: float) -> bool:
+    """Is this zone a spec-COORDINATE rather than a region? (#799)
+
+    ONE definition, for the three consumers that must agree: `seeder.zone_gate`
+    picks its containment branch with it, `rule_zone_containment` grades on it,
+    and the intent contradiction check asks it before deciding where a member
+    may sit. It used to live inline in `zone_gate`, which meant a load-time
+    check asking the same question had to re-derive it -- and a re-derivation
+    that disagreed would move the anchor boundary for one consumer only.
+
+    Pose-INVARIANT: `zone_fits_courtyard` reads only w/h and tests both orders,
+    so `part.rot` and `part.rot + 90` settle it for the whole 90-degree
+    lattice.
+    """
+    return not any(
+        zone_fits_courtyard(zone_rect, part.rect(0.0, 0.0, r), tol)
+        for r in (part.rot % 360, (part.rot + 90) % 360))
+
+
+def zone_origin_box(zone_rect, bounds, tol: float):
+    """Where a part with LOCAL box `bounds` may put its ORIGIN, at ONE rotation.
+
+    `zone_escape(zone_rect, part_rect, anchor=False) <= tol`, solved for the
+    origin. Containment at this rotation is `zone[0]-tol <= x + b[0]` and
+    `x + b[2] <= zone[2]+tol`, so `x` in `[zone[0]-tol-b[0], zone[2]+tol-b[2]]`.
+
+    Returns a possibly-INVERTED box: `hi < lo` on an axis means this rotation
+    admits nothing. That is `seeder._feasible_centre_box`'s own convention
+    (`zone_census_offsets` detects the inversion), and it is kept rather than
+    returning None so the two callers branch the same way.
+
+    THE COURTYARD IS NOT CENTRED ON THE FOOTPRINT ORIGIN, so this is the
+    algebra and never a half-extent -- `_feasible_centre_box`'s docstring
+    records two earlier forms that were wrong here in opposite directions, and
+    the offset reaches 10.15mm on tigard J3.
+
+    Lives here, beside `zone_escape` whose inverse it is, because the intent
+    contradiction check (#799) needs it PER ROTATION while the seeder needs
+    the union over rotations. One algebra, two shapes.
+    """
+    x0, y0, x1, y1 = (float(v) for v in zone_rect)
+    b0x, b0y, b2x, b2y = bounds
+    return (x0 - tol - b0x, y0 - tol - b0y, x1 + tol - b2x, y1 + tol - b2y)
+
+
 def rule_zone_containment(ctx) -> Iterator[Violation]:
     for z in ctx.intent.blocks:
         if z.rect is None:
