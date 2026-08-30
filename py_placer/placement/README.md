@@ -976,7 +976,20 @@ is followed by a settle beat, so the moves only play once the camera has arrived
 | `fanout_clearance.py` | Post-fanout decoupling-cap clearance repair (#130) |
 | `groups.py` | Placement blocks: which parts move as one rigid body (#459) |
 | `diagnosis.py` | Which parts to offer the quench, from routing evidence rather than pin count (#553). Ranks; never combines |
+| `relocate.py` | Bounded block relocation as a constraint solve (#554): the relative-order graph, and how far a block travels when its neighbours yield |
 | `routability.py` | Block displacement, corridors, escape lanes, net affinity — the geometry behind `floorplan.grade`'s health block |
+| `reconstruct.py` | The structural ("puzzle") solver: tier classification, pattern fit, rigid vectors, the assignment ILP, and the minimal-move legalize sweep |
+| `reseat.py` | Hungarian re-assignment of a proximity-tethered cluster onto rings around its anchor. NOT `seeder.reseat_scope`, which is a different mechanism for a different problem |
+| `reachability.py` | Whether a pose is reachable at all, for the repair ladders |
+| `labels.py` | Reference-designator silkscreen geometry (`beautify_labels`, #481) |
+| `perturb.py` | Manufactures known-bad seeds by displacing a block (#411). Damage, never repair |
+| `recovery.py` | Grades a repaired placement against the original it was damaged from (#411) |
+| `floorplan.py` | Floorplan intent: declare where things are supposed to go, then grade it (#549). A checker; it authors no geometry |
+| `escape.py` | Per-face escape-lane ledger: can the nets on this part's face get OUT? |
+| `pair_order.py` | Pin-order inversions between connected part pairs. A LOWER BOUND, not a proxy |
+| `part_class.py` | What determines a part's position — a pose-INDEPENDENT class |
+| `options.py` | When a board cannot hold its parts, say so WITH THE NUMBER and the options |
+| `provenance.py` | Was every pose in this board produced by a registered engine lever? |
 | `lock_advisor.py` | Which parts should not be moved, and why (#431). Advice only |
 | `placement_state.py` | Board-state gates: unplaced, and already-routed (#431) |
 | `cli_gates.py` | argparse shared by both placement CLIs so they cannot drift |

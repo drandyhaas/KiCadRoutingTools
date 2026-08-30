@@ -559,11 +559,463 @@ def reach(state, units: Units, edges, unit: str,
         if not math.isfinite(bound):
             continue
         caps.append(bound / comp)
-    r.reach_mm = max(0.0, round(min(caps), 4)) if caps else math.inf
+    if not caps:
+        # Nothing bounds this unit on either axis -- no wall, no neighbour it
+        # shares a side with. Returning `inf` would be true and useless: it
+        # serialises as the literal `Infinity`, which is not valid JSON, so it
+        # would poison any baseline that recorded it. Name it instead.
+        r.refusal = ('unbounded: no wall and no interacting neighbour limits '
+                     'this unit, so "how far can it go" has no answer')
+        return r
+    r.reach_mm = max(0.0, round(min(caps), 4))
     return r
 
 
+# ---------------------------------------------------------------------------
+# minimum perturbation
+# ---------------------------------------------------------------------------
+
+def _axis_rows(edges, axis, fixed_values):
+    """(free unit names, rows) for one axis. A row is (coeffs, rhs) for >= rhs.
+
+    A FIXED node contributes a constant, moved to the right-hand side, rather
+    than a column. That is what pins the block at its dose and the walls at zero
+    in the same mechanism, with no special case for either.
+    """
+    free = sorted({u for e in edges if e.axis == axis
+                   for u in (e.lo, e.hi) if u not in fixed_values})
+    idx = {u: i for i, u in enumerate(free)}
+    rows = []
+    for e in edges:
+        if e.axis != axis:
+            continue
+        coeffs = {}
+        rhs = e.slack
+        for u, sign in ((e.hi, 1.0), (e.lo, -1.0)):
+            if u in fixed_values:
+                rhs -= sign * fixed_values[u]
+            else:
+                coeffs[idx[u]] = coeffs.get(idx[u], 0.0) + sign
+        if not coeffs:
+            # Both ends fixed: nothing to solve, but it still has to HOLD, or
+            # the dose is simply not admissible.
+            if rhs > 1e-9:
+                return free, None
+            continue
+        rows.append((coeffs, rhs))
+    return free, rows
+
+
+def _lp_min_perturbation(free, rows, lo, hi, names):
+    """Minimise sum |s| subject to the rows. `None` when scipy is absent."""
+    try:
+        import numpy as np
+        from scipy.optimize import milp, LinearConstraint, Bounds
+        from scipy.sparse import lil_matrix
+    except ImportError:
+        return None
+    n = len(free)
+    if n == 0:
+        return {}
+    # s = p - q, both >= 0; minimising p + q minimises |s| exactly.
+    A = lil_matrix((len(rows), 2 * n))
+    lb = np.empty(len(rows))
+    ub = np.full(len(rows), np.inf)
+    for i, (coeffs, rhs) in enumerate(rows):
+        for j, c in coeffs.items():
+            A[i, j] = c
+            A[i, n + j] = -c
+        lb[i] = rhs
+    ubs = np.empty(2 * n)
+    lbs = np.zeros(2 * n)
+    for j, u in enumerate(free):
+        ubs[j] = max(0.0, hi.get(u, math.inf))
+        ubs[n + j] = max(0.0, -lo.get(u, -math.inf))
+    ubs = np.where(np.isfinite(ubs), ubs, np.inf)
+    res = milp(c=np.ones(2 * n),
+               constraints=LinearConstraint(A.tocsr(), lb, ub),
+               integrality=np.zeros(2 * n), bounds=Bounds(lbs, ubs))
+    if res.status != 0 or res.x is None:
+        return False        # infeasible, as distinct from "no solver"
+    return {u: round(res.x[j] - res.x[n + j], ROUND_MM)
+            for j, u in enumerate(free)}
+
+
+def _sweep_min_perturbation(free, rows, lo, hi, names, max_passes=200):
+    """Raise-to-satisfy fallback. A HEURISTIC: feasible, not minimal.
+
+    Starts every unit at 0 -- the value it would keep if nothing forced it -- and
+    repeatedly raises whichever side of an unsatisfied row is cheapest to raise,
+    which terminates because values only increase and are capped by `hi`. It can
+    move more parts, and further, than the LP would; it can never return an
+    infeasible assignment, because it checks before it returns. Reported as
+    `solver: 'sweep'` so a reader can tell "the heuristic found less room" from
+    "there is less room".
+    """
+    s = [0.0] * len(free)
+    cap = [hi.get(u, math.inf) for u in free]
+    for _ in range(max_passes):
+        moved = False
+        for coeffs, rhs in rows:
+            val = sum(c * s[j] for j, c in coeffs.items())
+            if val >= rhs - 1e-9:
+                continue
+            need = rhs - val
+            # Raise the positive-coefficient column with the most headroom.
+            best, best_room = None, 0.0
+            for j, c in coeffs.items():
+                if c <= 0:
+                    continue
+                room = cap[j] - s[j]
+                if room > best_room:
+                    best, best_room = j, room
+            if best is None or best_room < need / max(
+                    coeffs.get(best, 1.0), 1e-9) - 1e-9:
+                return False
+            s[best] += need / coeffs[best]
+            moved = True
+        if not moved:
+            break
+    for coeffs, rhs in rows:
+        if sum(c * s[j] for j, c in coeffs.items()) < rhs - 1e-6:
+            return False
+    return {u: round(s[j], ROUND_MM) for j, u in enumerate(free)}
+
+
+def min_perturbation(state, units: Units, edges, block: str,
+                     shift: Tuple[float, float], pinned=()
+                     ) -> Tuple[Optional[Dict[str, Tuple[float, float]]], str]:
+    """Smallest total neighbour displacement that lets `block` take `shift`.
+
+    Returns `({unit: (dx, dy)}, solver)`, or `(None, reason)`. The corridor is an
+    OUTPUT: `{u for u, d in result.items() if d != (0, 0)}` is the set of parts
+    that had to yield, and it is minimal in millimetres -- there is no radius
+    knob and no scope glob, because a second definition of the same thing is a
+    second thing to get wrong.
+    """
+    hi, lo, _b, refusal = envelope(state, units, edges)
+    if refusal:
+        return None, refusal
+    fixed_extra = {u: 0.0 for u in pinned}
+    out: Dict[str, Dict[str, float]] = {}
+    solver = 'milp'
+    for axis, comp in zip(AXES, shift):
+        fixed = {WALL_LO: 0.0, WALL_HI: 0.0, block: comp}
+        fixed.update({u: 0.0 for u in units.pinned})
+        fixed.update(fixed_extra)
+        free, rows = _axis_rows(edges, axis, fixed)
+        if rows is None:
+            return None, ('no_room_at_any_dose: two fixed parts alone refuse '
+                          'the %s shift' % axis)
+        got = _lp_min_perturbation(free, rows, lo[axis], hi[axis], free)
+        if got is None:
+            solver = 'sweep'
+            got = _sweep_min_perturbation(free, rows, lo[axis], hi[axis], free)
+        if got is False:
+            return None, ('no_room_at_any_dose: the %s system is infeasible at '
+                          'this dose' % axis)
+        for u, v in got.items():
+            out.setdefault(u, {})[axis] = v
+    moves = {u: (round(d.get('x', 0.0), ROUND_MM), round(d.get('y', 0.0), ROUND_MM))
+             for u, d in out.items()}
+    moves[block] = (round(shift[0], ROUND_MM), round(shift[1], ROUND_MM))
+    for u in pinned:
+        moves[u] = (0.0, 0.0)
+    return moves, solver
+
+
+# ---------------------------------------------------------------------------
+# the exact re-check
+# ---------------------------------------------------------------------------
+
+def exact_refusal(state, units: Units, moves, tol: float = 1e-6) -> str:
+    """'' when every shifted part is acceptable at its new pose, else a NAMED reason.
+
+    The LP is not a uniform relaxation of the gate and both directions matter:
+
+    * **Stricter** on the courtyard conjunct -- it measures per-axis edge
+      separation while the gate measures the Euclidean `rect_gap`, so a pair
+      offset diagonally by (0.2, 0.2) at clearance 0.25 fails every axis test
+      while its true gap is 0.283 and legal. The solve therefore refuses some
+      legal shifts. That costs reach and can never ship an illegal board.
+    * **Looser** on four conjuncts it has no representation of: the real
+      Edge.Cuts rings and cutouts, pad/hole pairs, FAB body containment, and
+      declared intent. Those are why nothing may be applied on the LP's word.
+
+    **The geometry conjunct is BASELINE-RELATIVE, and that is not a softening.**
+    `candidate_valid` asks "is this pose fully legal", and measured on this
+    corpus it answers NO at the INCUMBENT pose for 35% of esp_prog's parts, 61%
+    of tigard's, 49% of splitflap's and 99% of watchy's -- human placements sit
+    below the 0.25 mm courtyard clearance the optimizer asks for. Gated on it,
+    this pass refuses every shift on every real board, for a reason that has
+    nothing to do with the shift; that is exactly the artefact that made the
+    first version of `tests/stress/relocation_reach.py` report a phantom null.
+    So the rule is the one the order graph is already built on and the one
+    `pads_ok` already applies: **no worse than the board we were handed.**
+
+    The conjuncts that are NOT relaxed, because they are declarations rather
+    than incumbent geometry: keep-outs and declared intent zones. A re-seat
+    withholds those (arming them would make it refuse its own target); a
+    relocation moves a COMPLIANT block, so a declared zone is exactly what
+    should stop it.
+
+    Every moved part is `exclude`d from its own check, because `state.parts`
+    still holds the OLD poses: testing a new pose against stale neighbours tests
+    a board that will never exist -- and the baseline is measured with the same
+    exclusion, so the two sides are like for like. Moved-vs-moved pairs are then
+    checked separately at both new poses, through `gap_to`.
+    """
+    moved = {r: (state.parts[r].x + d[0], state.parts[r].y + d[1])
+             for u, d in moves.items() if d != (0.0, 0.0)
+             for r in units.members.get(u, ())}
+    if not moved:
+        return ''
+    ex = set(moved)
+    ctx = getattr(state, 'legality_ctx', None)
+    for ref in sorted(moved, key=lambda r: (-abs(moved[r][0] - state.parts[r].x)
+                                            - abs(moved[r][1] - state.parts[r].y),
+                                            r)):
+        nx, ny = moved[ref]
+        part = state.parts[ref]
+        before = sum(state.violation_parts(ref, part.x, part.y, part.rot,
+                                           exclude=ex))
+        after = sum(state.violation_parts(ref, nx, ny, part.rot, exclude=ex))
+        if after > before + tol:
+            return 'geometry_worsened:%s' % ref
+        rects = part.rects(nx, ny, part.rot)
+        keepout_clear = getattr(state, 'keepout_clear', None)
+        if keepout_clear is not None and not keepout_clear(ref, rects):
+            # MONOTONE, matching the declared-intent gate's own rule: it
+            # prevents a part being walked INTO a keep-out, it does not freeze
+            # one that is already in it. The absolute form looks stricter and is
+            # worse: a single neighbour sitting inside a declared zone would
+            # then be unable to yield at all, and one declaration would freeze
+            # the whole corridor -- measured on a fixture where the keep-out
+            # overlapped the very neighbour the block needed to push.
+            if keepout_clear(ref, part.rects(part.x, part.y, part.rot)):
+                blockers = getattr(state, 'keepout_blockers', None)
+                named = ','.join(blockers(ref, rects)) if blockers else ''
+                return 'declared_keepout_refused_a_shift:%s:%s' % (ref, named)
+        intent_ok = getattr(state, 'intent_ok', None)
+        if intent_ok is not None and not intent_ok(ref, nx, ny, part.rot):
+            return 'declared_claim_refused_a_shift:%s' % ref
+        if ctx is not None:
+            pads_ok = getattr(ctx, 'pads_ok', None)
+            nbrs = [r for r in state.parts if r != ref and r not in ex]
+            if pads_ok is not None and not pads_ok(ref, nx, ny, part.rot, nbrs):
+                return 'pad_gate_refused_a_shift:%s' % ref
+    order = sorted(moved)
+    for i, a in enumerate(order):
+        pa = state.parts[a]
+        ra = pa.rects(moved[a][0], moved[a][1], pa.rot)
+        for b in order[i + 1:]:
+            if units.of_ref[a] == units.of_ref[b]:
+                continue        # rigid: their geometry did not change
+            pb = state.parts[b]
+            gap = pa.gap_to(pb, ra, pb.rects(moved[b][0], moved[b][1], pb.rot))
+            if gap is None:
+                continue
+            was = pa.gap_to(pb)
+            if gap < min(state.clearance, was if was is not None else 0.0) - 1e-6:
+                return 'moved_pair_worsened:%s:%s' % (a, b)
+    return ''
+
+
+# ---------------------------------------------------------------------------
+# the pass
+# ---------------------------------------------------------------------------
+
+#: Fractions of the reach-clamped target, largest first, first survivor wins.
+#: Four solves, not the 80,380 candidate offsets a grid at `--step 0.5` would
+#: enumerate for the same travel.
+DOSE_LADDER = (1.0, 0.75, 0.5, 0.25)
+
+#: How many times a refusing unit may be pinned and the system re-solved.
+MAX_CUTS = 3
+
+
+@dataclass
+class Relocation:
+    """One proposal: where the block goes, who yielded, and what stopped it."""
+    block: str = ''
+    members: Tuple[str, ...] = ()
+    direction: Tuple[float, float] = (0.0, 0.0)
+    want_mm: float = 0.0
+    reach_mm: float = 0.0
+    frozen_reach_mm: float = 0.0
+    dose_mm: float = 0.0
+    shift: Tuple[float, float] = (0.0, 0.0)
+    corridor: Tuple[str, ...] = ()
+    corridor_mm: float = 0.0
+    binding_path: Tuple = ()
+    pinned: Tuple[str, ...] = ()
+    cuts: int = 0
+    solver: str = ''
+    moves: Tuple = ()          # writer-shaped, ready for write_placed_output
+    applied: bool = False
+    refusal: str = ''
+    disclosures: Tuple[str, ...] = ()
+
+    def to_dict(self):
+        return {'schema': SCHEMA, 'block': self.block,
+                'members': list(self.members),
+                'direction': [round(v, 4) for v in self.direction],
+                'want_mm': round(self.want_mm, 4),
+                'reach_mm': round(self.reach_mm, 4),
+                'frozen_reach_mm': round(self.frozen_reach_mm, 4),
+                'dose_mm': round(self.dose_mm, 4),
+                'shift': [round(v, 4) for v in self.shift],
+                'corridor': list(self.corridor),
+                'corridor_mm': round(self.corridor_mm, 4),
+                'binding_path': [list(r) for r in self.binding_path],
+                'pinned': list(self.pinned), 'cuts': self.cuts,
+                'solver': self.solver, 'moves': [dict(m) for m in self.moves],
+                'applied': self.applied, 'refusal': self.refusal,
+                'disclosures': list(self.disclosures)}
+
+
+def relocate_block(state, blocks, block: str, direction: Tuple[float, float], *,
+                   want_mm: Optional[float] = None,
+                   doses: Sequence[float] = DOSE_LADDER,
+                   max_cuts: int = MAX_CUTS,
+                   max_corridor_mm: Optional[float] = None,
+                   clearance: Optional[float] = None) -> Relocation:
+    """Propose a bounded relocation of `block` toward `direction`. Never writes.
+
+    Nothing here judges routability, and that is the point: the objective is
+    millimetres and the router is the judge (#459). A proposal that shortens
+    displacement and worsens the route is SUPPOSED to be reverted upstream.
+    """
+    from placement.diagnosis import NO_EFFICACY_CLAIM
+    rel = Relocation(block=block, direction=tuple(direction),
+                     disclosures=(NO_EFFICACY_CLAIM,))
+    assert_relocatable_state(state)
+    units = rigid_units(state, blocks)
+    if block not in units.members:
+        rel.refusal = 'no_diagnosed_block: %r is not a derived unit' % block
+        return rel
+    rel.members = units.members[block]
+    edges = order_graph(state, units, clearance=clearance)
+    bad = identity_violations(edges)
+    if bad:
+        rel.refusal = ('order_graph_infeasible: %d edge(s) refuse the incumbent '
+                       'board' % len(bad))
+        return rel
+
+    ry = reach(state, units, edges, block, direction)
+    if ry.refusal:
+        rel.refusal = ry.refusal
+        return rel
+    rf = reach(state, pin_all_but(units, block), edges, block, direction)
+    rel.reach_mm = ry.reach_mm
+    rel.frozen_reach_mm = 0.0 if rf.refusal else rf.reach_mm
+    rel.binding_path = ry.binding.get('x', ()) + ry.binding.get('y', ())
+    norm = math.hypot(*direction) or 1.0
+    u = (direction[0] / norm, direction[1] / norm)
+    rel.want_mm = float(want_mm if want_mm is not None else norm)
+    ceiling = min(rel.reach_mm, rel.want_mm)
+    if ceiling <= 0:
+        rel.refusal = ('no_room_at_any_dose: the block cannot travel toward its '
+                       'target at all, even with the neighbours yielding')
+        return rel
+
+    last_why = ''
+    pinned: List[str] = []
+    for frac in doses:
+        dose = round(ceiling * frac, ROUND_MM)
+        if dose <= 0:
+            continue
+        # Pins are per RUNG, not carried down the ladder. A unit pinned because
+        # it could not yield enough for a long dose has no reason to be frozen
+        # at a short one -- carrying them forward made the second rung
+        # infeasible for the first rung's reason, so every rung after the first
+        # reported "two fixed parts alone refuse the shift" and the ladder was a
+        # ladder in name only. Termination is already guaranteed by `max_cuts`.
+        pinned = []
+        for _cut in range(max_cuts + 1):
+            moves, solver = min_perturbation(
+                state, units, edges, block, (u[0] * dose, u[1] * dose),
+                pinned=tuple(pinned))
+            if moves is None:
+                # `solver` carries the reason on this path.
+                last_why = solver
+                break
+            why = exact_refusal(state, units, moves)
+            if not why:
+                rel.dose_mm = dose
+                rel.shift = (round(u[0] * dose, 4), round(u[1] * dose, 4))
+                rel.solver = solver
+                rel.pinned = tuple(sorted(pinned))
+                rel.cuts = len(pinned)
+                rel.corridor = tuple(sorted(
+                    x for x, d in moves.items()
+                    if x != block and d != (0.0, 0.0)))
+                rel.corridor_mm = round(sum(
+                    math.hypot(*moves[x]) for x in rel.corridor), 4)
+                if (max_corridor_mm is not None
+                        and rel.corridor_mm > max_corridor_mm + 1e-9):
+                    # Legal, minimal for this dose, and still too disturbing.
+                    # #554 is "move only diagnosed blocks"; a solve that buys
+                    # travel by walking 17 neighbours is the loop, which already
+                    # exists. Refuse this rung and try a shorter one.
+                    last_why = ('corridor_over_budget: %.2f mm of neighbour '
+                                'travel over the %.2f mm allowed, at dose '
+                                '%.2f mm' % (rel.corridor_mm, max_corridor_mm,
+                                             dose))
+                    rel.corridor, rel.corridor_mm = (), 0.0
+                    rel.dose_mm, rel.shift, rel.solver = 0.0, (0.0, 0.0), ''
+                    break
+                rel.moves = tuple(
+                    {'reference': r,
+                     'new_x': round(state.parts[r].x + moves[uu][0], 4),
+                     'new_y': round(state.parts[r].y + moves[uu][1], 4),
+                     'new_rotation': state.parts[r].rot}
+                    for uu, d in sorted(moves.items()) if d != (0.0, 0.0)
+                    for r in units.members[uu])
+                return rel
+            # Pin the unit the exact check refused and re-solve around it. A
+            # WALK-BACK -- retrying that unit at successively smaller shifts --
+            # would find more room and is deliberately not implemented; pinning
+            # is conservative, terminates, and every dose it costs is reported
+            # rather than hidden.
+            last_why = why
+            ref = why.split(':')[1] if ':' in why else ''
+            unit = units.of_ref.get(ref)
+            if unit is None or unit == block or unit in pinned:
+                # Nothing left to pin at this dose. Fall to the NEXT rung rather
+                # than giving up -- the ladder exists precisely because a shorter
+                # move can clear a gate a longer one cannot, and returning here
+                # is a bug this pass shipped once: `reach` read 11.02 mm on
+                # splitflap while every dose reported "no room", because the
+                # first refusal ended the search before the 0.75 rung ran.
+                break
+            pinned.append(unit)
+    rel.refusal = ('no_room_at_any_dose: every rung of the dose ladder was '
+                   'refused (reach %.2f mm, %d unit(s) pinned by the exact '
+                   'check%s)'
+                   % (rel.reach_mm, len(pinned),
+                      '; last: ' + last_why if last_why else ''))
+    return rel
+
+
+def format_text(rel: Relocation) -> str:
+    """One human-readable block. The binding chain is NAMED, never a number."""
+    if rel.refusal:
+        return 'relocate %s: %s' % (rel.block, rel.refusal)
+    chain = ' -> '.join('%s (%.2f %s)' % (r, g, s)
+                        for r, g, s in rel.binding_path[:6]) or '(unbound)'
+    return ('relocate %s (%d parts): %.2f mm of %.2f wanted; reach %.2f with '
+            'neighbours yielding vs %.2f frozen.\n'
+            '  %d part(s) yielded, %.2f mm total. Bound by: %s\n'
+            '  solver=%s cuts=%d'
+            % (rel.block, len(rel.members), rel.dose_mm, rel.want_mm,
+               rel.reach_mm, rel.frozen_reach_mm, len(rel.corridor),
+               rel.corridor_mm, chain, rel.solver, rel.cuts))
+
+
 __all__ = ['SCHEMA', 'AXES', 'SOURCE', 'WALL_LO', 'WALL_HI', 'RelocateError',
-           'OrderEdge', 'Units', 'Reach', 'assert_relocatable_state',
-           'rigid_units', 'pin_all_but', 'order_graph', 'identity_violations',
-           'envelope', 'reach']
+           'DOSE_LADDER', 'MAX_CUTS', 'OrderEdge', 'Units', 'Reach',
+           'Relocation', 'assert_relocatable_state', 'rigid_units',
+           'pin_all_but', 'order_graph', 'identity_violations', 'envelope',
+           'reach', 'min_perturbation', 'exact_refusal', 'relocate_block',
+           'format_text']
