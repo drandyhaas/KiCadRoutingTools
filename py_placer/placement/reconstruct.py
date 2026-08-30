@@ -959,7 +959,8 @@ def prune_assignment(state, old: Dict[str, Tuple[float, float, float]],
                      notes: Optional[List[str]] = None,
                      edge_bands: Optional[Dict[str, float]] = None,
                      exempt: Optional[Set[str]] = None,
-                     evidenced: Optional[Set[str]] = None) -> List[str]:
+                     evidenced: Optional[Set[str]] = None,
+                     intent_probe=None) -> List[str]:
     """Per-part revert sweep after an ACCEPTED assignment (run-4 F3b).
 
     The stage gate is one board-wide lexicographic tuple, so an assignment
@@ -985,9 +986,38 @@ def prune_assignment(state, old: Dict[str, Tuple[float, float, float]],
     displaced hole coming home is gate-neutral by construction for the same
     reason, so requiring strict improvement there would reject the homecoming
     the whole fit exists to produce.
+
+    `intent_probe(ref) -> tuple` (#698) is the DECLARED-CLAIM conjunct on the
+    revert: a callable returning `ref`'s intent term vector at its CURRENT
+    pose, sampled either side of the tentative restore. A revert that would
+    make any term WORSE is refused -- termwise and never summed, matching
+    `quench.QuenchState.intent_ok`.
+
+    It is needed because the tuple this sweep compares has **no intent term at
+    all**, so a part that escaped a declared keep-out looks like a pure
+    hpwl loss and is reverted before the pass gate ever runs. Measured on
+    #698's fixture: `prune: reverted 1 per-part mis-move(s) ... U1`, on 20 of
+    20 seeds, undoing a seat that had cleared the keep-out.
+
+    It is a CONJUNCT rather than an `exempt` entry deliberately. `exempt` skips
+    the part entirely, so a ref that escaped a 0.1mm2 keep-out kiss would also
+    become immune to prune reverting a 30mm mis-move. With the probe the sweep
+    still reverts everything the tuple wants reverted, unless doing so would
+    re-break a declaration -- so it stays monotone by construction, now on
+    `(tuple, intent vector)` jointly, which is the property the paragraph above
+    claims.
+
+    Sampling `ref`'s vector mid-sweep is safe while OTHER parts are moving, and
+    `_incumbent_intent`'s docstring is why: the intent terms are
+    part-vs-DECLARED-GEOMETRY, never part-vs-part.
+
+    With `intent_probe=None` both vectors are `()`, `zip` is empty, `any(())`
+    is False, and the expression is character-for-character the original -- so
+    every existing caller is inert.
     """
     evidenced = evidenced or set()
     pruned: List[str] = []
+    held: List[str] = []
 
     def moved_dist(item):
         ref, (x, y, _r) = item
@@ -1004,16 +1034,35 @@ def prune_assignment(state, old: Dict[str, Tuple[float, float, float]],
         if math.hypot(p.x - x, p.y - y) < 1e-9 and abs(p.rot - rot) < 1e-9:
             continue
         base = measure(state, edge_bands)
+        base_intent = intent_probe(ref) if intent_probe is not None else ()
         cur = (p.x, p.y, p.rot)
         state.apply_move(ref, x, y, rot)
         after = measure(state, edge_bands)
-        if after < base or (after == base and ref not in evidenced):
+        after_intent = intent_probe(ref) if intent_probe is not None else ()
+        # `legality.EPS`, the same tolerance `quench.IntentProbe.licence` uses
+        # for the same question -- "did a declared term RISE". One pass must
+        # not answer it two ways.
+        undoes_intent = any(a > b + legality.EPS
+                            for a, b in zip(after_intent, base_intent))
+        wanted = (after < base or (after == base and ref not in evidenced))
+        if not undoes_intent and wanted:
             pruned.append(ref)
         else:
+            # `and wanted`: without it this credits the probe for every revert
+            # the TUPLE refused on its own, so a part the sweep was never going
+            # to touch is reported as "a declared claim justifies it". A note
+            # that overstates what the new conjunct did is how the conjunct
+            # comes to look load-bearing when it is inert.
+            if undoes_intent and wanted:
+                held.append(ref)
             state.apply_move(ref, *cur)
     if notes is not None and pruned:
         notes.append(f"prune: reverted {len(pruned)} per-part mis-move(s) "
                      f"the global gate could not see: {', '.join(pruned)}")
+    if notes is not None and held:
+        notes.append(f"prune: KEPT {len(held)} move(s) that a declared claim "
+                     f"justifies and the gate tuple cannot rank: "
+                     f"{', '.join(held)}")
     return pruned
 
 

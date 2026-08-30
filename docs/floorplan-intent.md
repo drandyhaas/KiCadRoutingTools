@@ -265,6 +265,18 @@ A constraint the search cannot see can only ever produce a failing grade. This
 is the whole table, and the "no" column is the part worth reading — each of
 them is a decision, not an omission.
 
+There is a **third** consumer beside the two columns below, added by
+[#698](https://github.com/drandyhaas/KiCadRoutingTools/issues/698):
+`place_seed --reseat REF` measures the same three enforced rules *before and
+after* the pass, through the same `zone_escape` / `keepout_hit` /
+`rect_overlap_area` the grade calls, and uses them two ways — the per-term
+**vector** as a licence (no declared claim may get worse, termwise) and the
+breach **count** as one of the terms an explicit re-seat may be accepted *on*.
+It is a measurement, not a per-pose gate: arming the monotone zone gate on that
+path would make the re-seat refuse its own target, which is why
+`pose_score.make_state` hands it keep-outs and withholds zones. `reseat_scope`
+reports the whole picture in `accept_basis`.
+
 | rule | graded | seat search (#701) | quench gate (#702) | if not, why not |
 |---|---|---|---|---|
 | `zone_containment` | yes | via `zone_gate` | **yes** | — |

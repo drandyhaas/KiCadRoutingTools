@@ -100,6 +100,222 @@ class _IntentTerm(NamedTuple):
     anchor: bool              # zone_containment: grade the courtyard CENTRE
     entry: Optional[Dict]     # keepout: the raw entry `keepout_hit` reads
 
+
+# --------------------------------------------------------------------------
+# The declared-claim measurement, as three free functions (#698)
+#
+# `QuenchState` is not the only consumer any more. `seeder.reseat_scope` has to
+# ask "is this part further outside its declared claims than it was" WITHOUT
+# arming the per-pose seat gate -- `pose_score.make_state` passes that state
+# `keepouts` and deliberately withholds `intent_zones`, because the re-seat's
+# whole job is to move a part that is ALREADY violating and a monotone gate
+# would make it refuse its own target. So the measurement is separable from the
+# state that enforces it, and there is still exactly ONE of it.
+# --------------------------------------------------------------------------
+
+def build_zone_spec(zones, parts, refs=None
+                    ) -> Dict[str, Tuple[_IntentTerm, ...]]:
+    """The pose-INVARIANT zone terms binding each ref: `{ref: (term, ...)}`.
+
+    Everything that does not depend on a pose is settled here so the per-pose
+    cost is the geometry and nothing else: block membership, the
+    exclusive-zone side filter, the tolerance, and the `zone_fits_courtyard`
+    anchor decision (which reads only w/h and tests both orders, so no rotation
+    in this engine's lattice can flip it).
+
+    `refs` limits the walk to a subset -- the re-seat measures its scope, not
+    the board. `None` means every part, which is what a `QuenchState` wants.
+
+    The KEEP-OUT half is deliberately NOT here: it is resolved live, per call,
+    by `intent_spec` -- see that function for why freezing it breaks #701's
+    census.
+    """
+    spec: Dict[str, Tuple[_IntentTerm, ...]] = {}
+    if not zones:
+        return spec
+    from . import floorplan as _fp
+    items = (parts.items() if refs is None
+             else ((r, parts[r]) for r in refs if r in parts))
+    for _ref, _p in items:
+        _terms: List[_IntentTerm] = []
+        for _z in zones:
+            _tol = float(_z['tolerance_mm'])
+            if _ref in _z['refs']:
+                # At the ORIGIN: `zone_fits_courtyard` reads only w/h, so
+                # position is irrelevant and passing 0,0 says so. Both
+                # rotations, matching `seeder.zone_gate`'s own form, so the two
+                # cannot disagree about which branch a part is on.
+                _anchor = not any(
+                    _fp.zone_fits_courtyard(
+                        _z['rect'], _p.rect(0.0, 0.0, _r), _tol)
+                    for _r in (_p.rot % 360, (_p.rot + 90) % 360))
+                _terms.append(_IntentTerm(
+                    'zone_containment', _z['name'], tuple(_z['rect']),
+                    _tol, _anchor, None))
+            elif _z['exclusive'] and (not _z['side']
+                                      or _p.side == _z['side']):
+                # `elif`, not `if`: `rule_zone_exclusive` skips members of the
+                # block that owns the zone. Membership and the side filter are
+                # both pose-invariant, so the set of rects a stranger must
+                # avoid is resolved here.
+                _terms.append(_IntentTerm(
+                    'zone_exclusive', _z['name'], tuple(_z['rect']),
+                    legality.EPS, False, None))
+        if _terms:
+            spec[_ref] = tuple(_terms)
+    return spec
+
+
+def intent_spec(zone_spec, keepouts_for, ref) -> Tuple[_IntentTerm, ...]:
+    """The claims binding `ref` right now: frozen zone terms, plus keep-out
+    terms derived LIVE from `keepouts_for`.
+
+    The keep-out slice is deliberately not frozen. `seeder.count_legal_poses`
+    answers "how many seats would lifting keep-out X free" by temporarily
+    removing X from `state.keepouts_for[ref]` and recounting -- and a frozen
+    copy defeats that lift silently, because `pose_ok` reaches this gate
+    through `candidate_valid`. Measured when it WAS frozen: the #701 census
+    went `lifted=49` to `lifted=0` on arm Q's fixture, and a stranded part's
+    verdict degraded from `keepout_blocks` to `no_movable_neighbour`, whose
+    prose -- "NOTHING seated is near enough to be in the way" -- is verbatim
+    the misleading answer that disclosure exists to replace.
+
+    Still pose-INVARIANT and still resolved once: `keepouts_for` is the cached
+    resolution, and this only reads it.
+    """
+    zones = zone_spec.get(ref, ())
+    kos = keepouts_for.get(ref, ())
+    if not kos:
+        return zones
+    return zones + tuple(
+        _IntentTerm('keepout', str(k.get('name') or '<unnamed>'),
+                    None, 0.0, False, k)
+        for k in kos)
+
+
+def intent_term_values(spec: Tuple[_IntentTerm, ...], rects
+                       ) -> Tuple[float, ...]:
+    """This pose measured against every term in `spec`, in the spec's order.
+
+    A VECTOR, never a scalar -- see `_IntentTerm`.
+    """
+    from . import floorplan as _fp   # lazy: see seeder.pose_ok's reason
+    out = []
+    for t in spec:
+        if t.rule == 'keepout':
+            # BOTH rects, because `rule_keepout` grades both: a THT part's
+            # leads pierce a keep-out from the far side.
+            out.append(_fp.keepout_hit(t.entry, rects))
+        elif t.rule == 'zone_exclusive':
+            # COURTYARD ONLY -- `rule_zone_exclusive` reads `part.rect` and
+            # never `tht_rect`. Matching the grade includes matching what it
+            # declines to measure.
+            out.append(rect_overlap_area(rects[0], t.rect))
+        else:
+            out.append(_fp.zone_escape(t.rect, rects[0], t.anchor)[0])
+    return tuple(out)
+
+
+class IntentProbe:
+    """MEASUREMENT-ONLY declared-claim vectors for a state whose GATE has none.
+
+    `pose_score.make_state` hands the re-seat `keepouts` and deliberately
+    WITHHOLDS `intent_zones` (pose_score.py:84-90): the re-seat's job is to move
+    a part that is ALREADY violating, and a monotone per-pose zone gate would
+    make the repair refuse its own target. That argument is about the SEAT
+    PREDICATE. It says nothing against measuring the same claims once before and
+    once after the pass, which is what this does. It assigns to neither
+    `state._intent_spec` nor `state._intent_active`, so `candidate_valid` sees
+    exactly what it saw before -- and a source guard in
+    `tests/test_698_reseat_acceptance.py` pins that, because the tempting
+    "simplification" is to pass `intent_zones=` to `make_state` and re-open the
+    bug `pose_score.py` describes.
+
+    The spec is FROZEN here, unlike `intent_spec_for` -- which is deliberately
+    live so `seeder.count_legal_poses` can lift a keep-out and recount
+    (see `intent_spec`). Different consumer, opposite requirement: a
+    before/after comparison of two vectors of DIFFERENT LENGTH is not a
+    comparison at all, and a lift landing between the two snapshots would
+    produce one silently.
+    """
+
+    def __init__(self, state, zones: Sequence[Dict] = (), refs=None) -> None:
+        self.state = state
+        rs = (sorted(state.parts) if refs is None
+              else sorted(r for r in refs if r in state.parts))
+        zone_spec = build_zone_spec(zones, state.parts, refs=rs)
+        self.spec: Dict[str, Tuple[_IntentTerm, ...]] = {}
+        for r in rs:
+            s = intent_spec(zone_spec, state.keepouts_for, r)
+            if s:
+                self.spec[r] = s
+        self.refs: Tuple[str, ...] = tuple(rs)
+
+    @property
+    def active(self) -> bool:
+        return bool(self.spec)
+
+    def terms(self, ref) -> Tuple[float, ...]:
+        """`ref`'s claim vector at its CURRENT pose.
+
+        Safe to call in the middle of a sweep that is moving OTHER parts, and
+        `_incumbent_intent`'s docstring is why: the intent terms are
+        part-vs-DECLARED-GEOMETRY, never part-vs-part, so nothing another part
+        does can change them. That is what makes this legal to hand to
+        `reconstruct.prune_assignment` as a per-ref callable.
+        """
+        s = self.spec.get(ref)
+        if not s:
+            return ()
+        return intent_term_values(s, self.state.parts[ref].rects())
+
+    def snapshot(self) -> Dict:
+        """Every bound ref's vector, plus the BREACH COUNT and its by-rule split.
+
+        A term is breached when its value is above its own `threshold` -- the
+        comparison `intent_clear` makes, and the same event `floorplan.grade`
+        raises a `Violation` for, so the count is in the GRADE's currency while
+        every underlying compare stays in the TERM's.
+
+        The count is only ever a TRIGGER, never a guard. On its own it carries
+        the aggregation trap `_IntentTerm` names: a part hopping from keep-out A
+        into keep-out B reads `1 -> 1`, which a monotone rule would admit. The
+        guard is `licence()` below, on the VECTORS.
+        """
+        vecs = {r: self.terms(r) for r in sorted(self.spec)}
+        count = 0
+        by_rule: Dict[str, int] = {}
+        for r, vals in vecs.items():
+            for v, t in zip(vals, self.spec[r]):
+                if v > t.threshold:
+                    count += 1
+                    by_rule[t.rule] = by_rule.get(t.rule, 0) + 1
+        return {'count': count, 'by_rule': by_rule, 'terms': vecs}
+
+    def licence(self, before: Dict, after: Dict) -> Tuple[bool, List[Tuple]]:
+        """(ok, risen) -- no declared term binding a probed ref may RISE.
+
+        TERMWISE and never summed (`_IntentTerm`), which is what makes
+        `snapshot()['count']` safe to use as the acceptance trigger: the A -> B
+        keep-out hop that the count cannot see is a term that ROSE, and this
+        refuses it. `risen` names each one `(ref, rule, name, before, after)` --
+        the #701 doctrine that a claim which refuses is a NAMED verdict.
+        """
+        risen: List[Tuple] = []
+        b_terms, a_terms = before.get('terms', {}), after.get('terms', {})
+        for ref in sorted(self.spec):
+            bv, av = b_terms.get(ref, ()), a_terms.get(ref, ())
+            if len(bv) != len(av):
+                # Cannot happen with a frozen spec; if it ever does, refusing is
+                # the only honest answer -- see the class docstring.
+                risen.append((ref, 'spec', 'length-changed', len(bv), len(av)))
+                continue
+            for t, b, a in zip(self.spec[ref], bv, av):
+                if a > b + legality.EPS:
+                    risen.append((ref, t.rule, t.name, b, a))
+        return (not risen), risen
+
+
 # Both helpers now live in placement/legality.py, the single home shared with
 # fanout_clearance (which carried byte-identical copies). Kept as module-level
 # aliases: they are part of this module's de-facto surface (tests import them).
@@ -561,51 +777,19 @@ class QuenchState:
                     self.keepouts_for[_ref] = _binding
 
         # --- #702 declared claims, resolved ONCE per state ------------------
-        # Everything pose-invariant is settled here so the per-pose cost is the
-        # geometry and nothing else: block membership, the exclusive-zone side
-        # filter, the tolerance, and the `zone_fits_courtyard` anchor decision
-        # (which reads only w/h and tests both orders, so no rotation in this
-        # engine's lattice can flip it).
+        # The zone half is built by the free `build_zone_spec` (#698), which is
+        # the SAME construction `seeder.reseat_scope` uses for its acceptance
+        # measurement -- a second copy here is how the two would come to
+        # disagree about which parts a block binds.
         #
         # `_intent_active` is False on every board that declares nothing --
         # which is every board in the corpus today -- and `candidate_valid`
         # guards on it before any arithmetic, so the whole channel costs one
         # bool load and one branch and the objective is bit-identical.
         self.intent_zones = tuple(intent_zones or ())
-        self._intent_spec: Dict[str, Tuple[_IntentTerm, ...]] = {}
-        self._intent_active = False
-        if self.intent_zones or self.keepouts_for:
-            from . import floorplan as _fp
-            for _ref, _p in self.parts.items():
-                _terms: List[_IntentTerm] = []
-                for _z in self.intent_zones:
-                    _tol = float(_z['tolerance_mm'])
-                    if _ref in _z['refs']:
-                        # At the ORIGIN: `zone_fits_courtyard` reads only w/h,
-                        # so position is irrelevant and passing 0,0 says so.
-                        # Both rotations, matching `seeder.zone_gate`'s own
-                        # form, so the two cannot disagree about which branch
-                        # a part is on.
-                        _anchor = not any(
-                            _fp.zone_fits_courtyard(
-                                _z['rect'], _p.rect(0.0, 0.0, _r), _tol)
-                            for _r in (_p.rot % 360, (_p.rot + 90) % 360))
-                        _terms.append(_IntentTerm(
-                            'zone_containment', _z['name'], tuple(_z['rect']),
-                            _tol, _anchor, None))
-                    elif _z['exclusive'] and (not _z['side']
-                                              or _p.side == _z['side']):
-                        # `elif`, not `if`: `rule_zone_exclusive` skips members
-                        # of the block that owns the zone. Membership and the
-                        # side filter are both pose-invariant, so the set of
-                        # rects a stranger must avoid is resolved here.
-                        _terms.append(_IntentTerm(
-                            'zone_exclusive', _z['name'], tuple(_z['rect']),
-                            legality.EPS, False, None))
-                if _terms:
-                    self._intent_spec[_ref] = tuple(_terms)
-            self._intent_active = bool(self._intent_spec
-                                       or self.keepouts_for)
+        self._intent_spec: Dict[str, Tuple[_IntentTerm, ...]] = build_zone_spec(
+            self.intent_zones, self.parts)
+        self._intent_active = bool(self._intent_spec or self.keepouts_for)
         # ref -> the incumbent pose's term vector. Cleared beside
         # `_inc_violation` on every move, for the same reason. Never computed
         # on a compliant board: `intent_ok` returns on its absolute branch.
@@ -1196,14 +1380,7 @@ class QuenchState:
         Still pose-INVARIANT and still resolved once: `keepouts_for` is the
         cached resolution, and this only reads it.
         """
-        zones = self._intent_spec.get(ref, ())
-        kos = self.keepouts_for.get(ref, ())
-        if not kos:
-            return zones
-        return zones + tuple(
-            _IntentTerm('keepout', str(k.get('name') or '<unnamed>'),
-                        None, 0.0, False, k)
-            for k in kos)
+        return intent_spec(self._intent_spec, self.keepouts_for, ref)
 
     def intent_terms(self, ref, rects) -> Tuple[float, ...]:
         """This pose measured against every declared claim binding `ref`, in
@@ -1211,21 +1388,7 @@ class QuenchState:
 
         A VECTOR, never a scalar -- see `_IntentTerm`.
         """
-        from . import floorplan as _fp   # lazy: see seeder.pose_ok's reason
-        out = []
-        for t in self.intent_spec_for(ref):
-            if t.rule == 'keepout':
-                # BOTH rects, because `rule_keepout` grades both: a THT part's
-                # leads pierce a keep-out from the far side.
-                out.append(_fp.keepout_hit(t.entry, rects))
-            elif t.rule == 'zone_exclusive':
-                # COURTYARD ONLY -- `rule_zone_exclusive` reads `part.rect` and
-                # never `tht_rect`. Matching the grade includes matching what
-                # it declines to measure.
-                out.append(rect_overlap_area(rects[0], t.rect))
-            else:
-                out.append(_fp.zone_escape(t.rect, rects[0], t.anchor)[0])
-        return tuple(out)
+        return intent_term_values(self.intent_spec_for(ref), rects)
 
     def intent_clear(self, ref, rects) -> bool:
         """ABSOLUTE: every term at or below its own threshold.
@@ -1839,10 +2002,18 @@ class QuenchState:
                 'halo': halo, 'edge': edge, 'hpwl': self.hpwl(),
                 'align': align, 'orient': orient, 'corridor_cut': cut}
 
-    def hpwl(self):
+    def hpwl(self, nets=None):
         """Half-perimeter wirelength: sum over nets of the pad bbox's width plus
         height (mm). The classic placement-quality proxy, and one of the columns
         a placement scorecard wants (#411).
+
+        `nets` restricts the sum to a net-id subset -- what
+        `seeder.reseat_scope` needs to price the wirelength of the nets ITS
+        scope touches (#698). `None`, the default, is every net and is the
+        loop this method has always run, so `legality_metrics` and therefore
+        `reconstruct.measure`'s `hpwl` term are bit-identical. One optional
+        argument rather than a second HPWL in `seeder.py`: two implementations
+        of one number is how they come to disagree.
 
         Its value here is that it is airwire-ORDER-INVARIANT by construction: it
         reads only the extremes of each net's pad positions, so unlike the MST
@@ -1854,7 +2025,10 @@ class QuenchState:
         ever reappears.)
         """
         total = 0.0
-        for net_id, refs in self.net_refs.items():
+        items = (self.net_refs.items() if nets is None else
+                 [(n, self.net_refs[n]) for n in sorted(nets)
+                  if n in self.net_refs])
+        for net_id, refs in items:
             xs, ys = [], []
             for ref in refs:
                 for gx, gy, n in self.parts[ref].pad_globals():
