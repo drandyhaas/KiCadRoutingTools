@@ -167,7 +167,8 @@ Three limits worth knowing before reaching for it: it never fires on a board
 that already routes (the loop stops at `failures == 0`, and `--target-nets` does
 not lift that stop); `--group-by auto` derives no block on most tracked boards;
 and the one board where every precondition holds, kit-dev-coldfire, is already
-taken from 3 failed nets to 0 by 3 mm nudges. See `relocate.py`'s docstring for
+taken from 3 failed nets to 0 by the shipped loop (at a cap widened to 6.75 mm
+by round 4). See `relocate.py`'s docstring for
 why the constraint graph is *not* a conservative model of legality, and why the
 exact re-check rather than the graph is what makes the pass safe.
 

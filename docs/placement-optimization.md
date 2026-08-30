@@ -611,13 +611,19 @@ own failure diagnostics* to decide what to move. Each round:
    | `--relocate-refs GLOB…` | relocate an explicit ref set, bypassing derivation. This is what separates "the relocation worked" from "the diagnosis picked right" |
    | `--relocate-max-corridor MM` | refuse a dose whose neighbours must travel more than this in total, and try a shorter one |
 
-   **What is measured, and what is not.** The mechanism holds: over 24 blocks on
-   10 boards, letting neighbours yield bought ≥ 1 mm more travel than freezing
-   them on 11, spanning 6 boards, max 16.66 mm (`relocation_reach.py`, and its
-   `frozen` arm is the *same solve* with everything else pinned, so the two
-   differ in exactly one thing). **No measurement shows a relocated board ROUTES
-   better** — `relocate_efficacy` says so in the run's own verdict, and reach is
-   not routability.
+   **What is measured, and what is not.** The mechanism holds: over the 24
+   measurable blocks on the 9 boards that have one, letting neighbours yield
+   bought ≥ 1 mm more travel than freezing them on 11, spanning 6 of those
+   boards, max 16.66 mm (`relocation_reach.py`, and its `frozen` arm is the
+   *same solve* with everything else pinned, so the two differ in exactly one
+   thing). The scale is worth reading beside it: the MEDIAN cell reaches
+   1.03 mm against a median want of 10.36 mm.
+
+   **The routed A/B has now run, and it does not support the feature**
+   (`block_relocation_study.py`): 3 of 3 evidence cells recovered damage,
+   median delta +0.57 — but over 2 boards where the acceptance rule counts 3,
+   and `loop@allon` reached a strictly better routed result on 2 of those 3.
+   `relocate_efficacy` carries that verdict; reach is not routability.
 
    Three limits that decide whether it can help you at all:
 
@@ -628,7 +634,8 @@ own failure diagnostics* to decide what to move. Each round:
      grades placement on.** Use `auto,netprefix,decap`, or name the refs.
    - **The one tracked board where every precondition holds** —
      kit-dev-coldfire, the only one that fails at its authored placement — is
-     *already* taken from 3 failed nets to 0 by 3 mm nudges.
+     *already* taken from 3 failed nets to 0 by the shipped loop (at a cap
+     widened to 6.75 mm by round 4 — see the table above).
 
    And one property that is easy to assume and false: the constraint graph is
    **not** a conservative model of legality. A gap is Euclidean while a
