@@ -19,17 +19,20 @@ at a time to prove these checks are not vacuous.
 
 MEASURED, from the run -- never predicted and never edited afterwards to match:
 
-    15 rows: 12 killed, 3 survived (3 of them expected), 0 broken
+    21 rows: 18 killed, 3 survived (3 of them expected), 0 broken
 
-    identity-rank                       KILLED     sign-flip            KILLED
-    omit-becomes-zero                   KILLED     preexisting-counts-one KILLED
-    high-fanout-cut-removed             KILLED     every-owner-gets-the-cells KILLED
-    concat-not-round-robin              KILLED     no-spread-ranks-anyway KILLED
-    internal-pair-counts-twice          KILLED     budget-ignored       KILLED
-    selected-by-claims-the-whole-pool   KILLED     efficacy-claim-emptied KILLED
-    unrounded-compare                   SURVIVED, expected -- see below
-    a-comment-restates-the-unit         SURVIVED, expected (inert probe)
-    top-k-widens                        SURVIVED, expected (inert probe)
+    identity-rank                     KILLED   sign-flip                  KILLED
+    omit-becomes-zero                 KILLED   preexisting-counts-one     KILLED
+    high-fanout-cut-removed           KILLED   every-owner-gets-the-cells KILLED
+    concat-not-round-robin            KILLED   no-spread-ranks-anyway     KILLED
+    internal-pair-counts-twice        KILLED   budget-ignored             KILLED
+    selected-by-claims-the-whole-pool KILLED   efficacy-claim-emptied     KILLED
+    clearance-always-the-constant     KILLED   clearance-source-not-disclosed KILLED
+    top-k-slice-removed               KILLED   unknown-net-charged-to-the-rail KILLED
+    refusal-borrows-a-signal-excuse   KILLED   collision-overwrites-the-block KILLED
+    unrounded-compare                 SURVIVED, expected -- see below
+    a-comment-restates-the-unit       SURVIVED, expected (inert probe)
+    top-k-widens                      SURVIVED, expected (inert probe)
 
 `unrounded-compare` is the one real gap, and it is recorded rather than
 papered over: every value in this fixture differs by far more than 1e-4, so
@@ -38,9 +41,19 @@ guarantee it protects -- two processes must not order two near-equal
 candidates differently -- is therefore UNATTACKED. Closing it needs a fixture
 whose values differ below RANK_DECIMALS.
 
-`identity-rank` did not always pass. Its first run SURVIVED, because the blocks
-were called sheet:A and sheet:B and alphabetical order reproduced the value
-order; that is why they are now named so the strongest sorts last.
+Three of these rows exist because the battery, or a review of it, caught this
+file lying:
+
+  * `identity-rank` -- ranking by NAME -- first ran SURVIVED, because the
+    blocks were called sheet:A and sheet:B and alphabetical order reproduced
+    the value order. They are now named so the strongest sorts LAST.
+  * The last six rows are surfaces a refutation pass mutated while this file
+    stayed green: the clearance chain and its disclosure, the `top_k` bound,
+    the unknown-net reason, the refusal wording, the collision guard.
+  * `top-k-widens` and `identity-rank` are both size-preserving edits, and an
+    earlier run of the battery left a `.pyc` compiled from the MUTATED source
+    that every later import accepted. Both batteries now drop the target's
+    cached bytecode; see `mutate_553._uncache`.
 
 No board and no router: the ranking reads `state.parts`, `state.net_refs` and
 `Part.pad_globals()`, so a handful of fakes exercises it exactly. That also
