@@ -196,7 +196,8 @@ def _score_board_mismatch(board, payload):
 
 # The hpwl gain below which the congestion READ is worth pointing at. It decides
 # whether to print a warning beside the numbers -- it does NOT decide anything.
-# It used to gate, and the calibration withdrew that (wk/calibration/RESULT.md):
+# It used to gate, and the calibration withdrew that
+# (docs/placement-calibration.md):
 # the premise "damage raises hpwl, so a repair lowers it" INVERTS on 1 of 3
 # corpus boards, where a perfect repair scores a negative gain and the gate
 # refused the correct answer.
@@ -287,14 +288,21 @@ def _guard_congestion(a):
     # human original's crossings while sitting 18.7 mm out of position). A gate
     # on crossings is pressure toward a worse board. hpwl's minimum is at the
     # truth, so it is the one that can carry a gate.
+    #
+    # NOT universally, and the exception is why the threshold below was
+    # withdrawn: on piantor the DAMAGED board scores LOWER hpwl than the truth
+    # (1965.07 against 2263.61), because `swap` shortens nets on a regular
+    # matrix. hpwl's direction has to be checked per board, not assumed.
+    # See docs/placement-calibration.md.
     b, n = float(m_base['hpwl']), float(m_now['hpwl'])
     if b <= 0:
         return True, None
     gain = (b - n) / b
     # REPORT, do not refuse. The threshold that used to live here was withdrawn
-    # on measurement (wk/calibration/RESULT.md): the same premise -- damage
-    # raises hpwl, so a repair lowers it -- INVERTS on 1 of 3 corpus boards,
-    # where a perfect repair scores a negative gain. A gate that refuses the
+    # on measurement (docs/placement-calibration.md): the same premise --
+    # damage raises hpwl, so a repair lowers it -- INVERTS on 1 of 3 corpus
+    # boards, where a perfect repair scores a negative gain. A gate that
+    # refuses the
     # correct answer must not refuse. What survives is the requirement above:
     # you must LOOK at global congestion before calling a failure
     # `parameter`-shaped, because every per-net test can pass on a board no
@@ -336,8 +344,8 @@ def _guard_congestion(a):
         f'corpus board a\n'
         f'PERFECT repair scores worse than the damage it repaired, because '
         f'`swap` shortens nets\n'
-        f'on a regular matrix (wk/calibration/RESULT.md). What is missing is a '
-        f'DECISION.\n\n'
+        f'on a regular matrix (docs/placement-calibration.md). What is missing '
+        f'is a DECISION.\n\n'
         f'Either re-enter at PLACEMENT -- --shape placement, which is the '
         f'cheaper direction --\n'
         f'or say why parameter is right anyway:\n'
@@ -2144,8 +2152,9 @@ def _args(argv=None):
                          'congestion read says the failure may be '
                          'placement-shaped. Needs a REASON: the numbers are not '
                          'judged (they cannot be -- see '
-                         'wk/calibration/RESULT.md), so what is being recorded '
-                         'is that somebody decided, not that the board passed. '
+                         'docs/placement-calibration.md), so what is being '
+                         'recorded is that somebody decided, not that the '
+                         'board passed. '
                          'Deliberately NOT part of --accept-residue: that flag '
                          'speaks the L2 placement gate\'s vocabulary, and a '
                          'waiver that covers two gates at once waives the one '
@@ -2513,11 +2522,11 @@ def _self_test():
         # It REPORTS the congestion read and does NOT refuse on it. The
         # threshold was withdrawn on measurement: the premise (damage raises
         # hpwl) inverts on 1 of 3 corpus boards, where a perfect repair scores
-        # a negative gain -- wk/calibration/RESULT.md.
+        # a negative gain -- docs/placement-calibration.md.
         # A poor read binds on a DISPOSITION, not on the numbers: `parameter`
         # must not be spent unacknowledged, but the driver never claims the
         # placement is wrong -- it cannot, since a perfect repair scores like
-        # this on piantor (wk/calibration/RESULT.md).
+        # this on piantor (docs/placement-calibration.md).
         out = STAGES['L4'](_args(base + ['--shape', 'parameter',
                                          '--congestion-json', _cbad,
                                          '--congestion-baseline', _cbase]))

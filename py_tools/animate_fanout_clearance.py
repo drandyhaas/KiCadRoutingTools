@@ -248,7 +248,11 @@ def main():
     p.add_argument("--max-displacement-cap", type=float, default=3.0)
     p.add_argument("--displacement-growth", type=float, default=1.5)
     p.add_argument("--no-rotate", action="store_true")
-    p.add_argument("--cap-prefix", default="C,R")
+    # 'C,R,FB' -- #252 added ferrite beads, and this front kept 'C,R'. Unlike
+    # the fanout tab's unreachable fallback (#742), THIS one is live: the
+    # animator was visualising a run that moves no ferrite beads while the CLI
+    # run it depicts moves them.
+    p.add_argument("--cap-prefix", default="C,R,FB")
     p.add_argument("--lock", nargs="+", default=None, metavar="REF")
     p.add_argument("--max-passes", type=int, default=30)
     # animation controls

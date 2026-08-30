@@ -30,12 +30,117 @@ import shutil
 # skills, which never need write access to the board. Callers that drive a
 # board-mutating skill headless (the Placement tab) pass their own
 # write-capable allowlist via build_cmd(allowed_tools=...).
-CLAUDE_ALLOWED_TOOLS = "Read,Glob,Grep,Bash,WebSearch"
+#
+# The subagent-dispatch tool is here (#552) so an analysis skill can buy a
+# SECOND OPINION: a verifier that re-measures on its own channel, rather than
+# the same model re-reading its own work inline.
+#
+# BOTH spellings, deliberately. Claude Code renamed the tool: on 2.1.251 the
+# dispatch event carries `"name":"Agent"` and `Task` is the older token, which
+# is what this repo has shipped since #633. A permission rule matches the
+# canonical name only, so listing one name risks granting nothing on the CLI
+# the user happens to have. Listing both costs nothing on either.
+#
+# WHAT THIS LIST IS, AND IS NOT. `--allowedTools` AUTO-APPROVES the tools it
+# names; it does not remove the others. Measured on 2.1.251 with exactly the
+# argv build_cmd emits: the run's `system/init` event reports
+# `permissionMode: auto` (from the USER's settings, which this module neither
+# sets nor overrides) and lists `Write`/`Edit` among its tools regardless of
+# what is written here. So this is a statement of INTENT, not a sandbox.
+# Anyone reasoning about what a run can do to the board should note that
+# `Bash` is on this list, and `Bash` writes files.
+CLAUDE_ALLOWED_TOOLS = "Read,Glob,Grep,Bash,Agent,Task,WebSearch"
+
+# The behavioural half of the contract. Stated once here because it was
+# hand-copied into eight prompts across four GUI modules, which is exactly how
+# a contract drifts -- one site gets edited and the other seven quietly mean
+# something else.
+#
+# NEITHER HALF IS ENFORCED, and an earlier draft of this comment claimed
+# otherwise. `--allowedTools` auto-approves rather than restricts (see above),
+# and this is prompt text. What follows is the contract the run is ASKED to
+# honour.
+#
+# WHY PROMPT TEXT, given that enforceable levers exist. They do: `claude
+# --help` on 2.1.251 offers `--agents <json>` (which can define a subagent and
+# its tools outright), `--append-system-prompt`, `--permission-mode` and
+# `--settings`. `--agents` is the enforceable form of #552 item 2 and is the
+# right eventual answer. It is not this change: it means designing the child
+# agents themselves, and it applies to Claude Code only, while this sentence
+# has to reach opencode too. What ships here is the repo's EXISTING convention
+# for bounding a child -- `<subagent_prompt>` blocks quoted verbatim (see
+# .claude/skills/plan-pcb-placement/SKILL.md) -- stated once instead of eight
+# times. Treat the enforced version as owed, not done.
+#
+# VERDICT= rather than RESULT= for the child's answer, because
+# extract_result_line() below takes the LAST `RESULT=` line of the parent's
+# final message as that run's result. A child whose text the parent echoes
+# would land on the parent's contract.
+#
+# "analysis and planning only" rather than "analysis only": that was the plan
+# button's wording and it is the widest of the eight, so unifying on it loosens
+# nothing that matters. The clause after the colon is identical to what all
+# eight said before.
+ANALYSIS_CONSTRAINT = (
+    "analysis and planning only: do not execute any routing commands and do "
+    "not modify any files. If you dispatch a subagent, copy this sentence into "
+    "its prompt verbatim and give it no tool this run does not have; have it "
+    "answer with a line beginning VERDICT= (never RESULT=, which this GUI "
+    "reads as the run's own result line)."
+)
 
 # opencode has no per-run tool allowlist flag; the repo's opencode.json
 # defines this agent (edit denied, bash/webfetch allowed) as the equivalent
 # of the Claude allowlist above.
 OPENCODE_ANALYSIS_AGENT = "pcb-analysis"
+
+# Claude-Code tool names whose intent the pinned pcb-analysis agent cannot
+# serve. opencode.json's `permission` block denies exactly one thing --
+# `"edit": "deny"` -- so only `edit` is that file's own word; the rest is this
+# module mapping Claude's write-tool names onto it, and an earlier draft of
+# this comment wrongly called the whole set fact.
+#
+# OpencodeBackend.build_cmd REFUSES an allowed_tools naming any of these rather
+# than silently dropping the argument (#552 item 4): a caller that believes it
+# has Write and does not is worse off than one that will not start.
+#
+# THIS IS A GUARD, NOT A SANDBOX, and the difference is measurable: it matches
+# tool NAMES, so `Write(/tmp/x)` (a specifier form `claude --help` documents),
+# `MultiEdit`, an `mcp__*` write tool, and plain `Bash` all pass it. It catches
+# the mistake a caller is actually likely to make -- handing over a
+# write-capable allowlist wholesale, as PLACEMENT_ALLOWED_TOOLS would -- and
+# claims nothing beyond that.
+#
+# `--add-dir` has no opencode flag either, but the agent grants
+# `external_directory`, so dropping it costs the run nothing; it is not
+# refused.
+OPENCODE_DENIED_TOOLS = frozenset({"write", "edit", "notebookedit", "multiedit"})
+
+
+def _denied_opencode_tools(allowed_tools):
+    """The names in `allowed_tools` the pcb-analysis agent cannot serve.
+
+    Accepts what `--allowedTools` itself accepts and what callers actually
+    pass: a comma string, a SPACE-separated string (the CLI takes both), a
+    list/tuple, or None. It also strips a `Tool(specifier)` suffix -- the form
+    `claude --help` documents as `"Bash(git *) Edit"` -- because `Write(/tmp/x)`
+    is a write request however it is spelled.
+
+    Returns clean, stripped names so the refusal message cannot echo a raw tab
+    or newline back at the operator.
+    """
+    if not allowed_tools:
+        return set()
+    if isinstance(allowed_tools, str):
+        items = allowed_tools.replace(",", " ").split()
+    else:
+        items = [str(t) for t in allowed_tools]
+    out = set()
+    for raw in items:
+        name = raw.strip().split("(", 1)[0].strip()
+        if name.lower() in OPENCODE_DENIED_TOOLS:
+            out.add(name)
+    return out
 
 
 class AIBackend:
@@ -83,8 +188,10 @@ class AIBackend:
         """The headless argv streaming one JSON event per stdout line.
 
         allowed_tools/add_dirs are honored by Claude Code (per-run tool
-        allowlist and extra writable directories); opencode ignores them
-        (its agent config in opencode.json is the equivalent).
+        allowlist and extra directories). opencode has no per-run allowlist
+        flag -- its agent config in opencode.json is the equivalent -- so it
+        ignores add_dirs and REFUSES an allowed_tools its pinned agent cannot
+        serve rather than dropping it silently (#552).
         """
         raise NotImplementedError
 
@@ -351,8 +458,22 @@ class OpencodeBackend(AIBackend):
 
     def build_cmd(self, cli_path, prompt, model=None, effort=None,
                   allowed_tools=None, add_dirs=()):
-        # allowed_tools/add_dirs are Claude-specific (accepted for signature
-        # parity; the Placement tab pins the Claude backend anyway).
+        # opencode has no per-run allowlist flag: the agent pinned below IS the
+        # allowlist. So a request this agent cannot grant is REFUSED, not
+        # dropped (#552 item 4). Before this, the two kwargs were bound and
+        # never read, and `PLACEMENT_SUPPORTED_BACKENDS = ("claude",)` was the
+        # only thing standing between a write-capable caller and a run that
+        # would fail deep inside the skill instead of at launch.
+        #
+        # add_dirs is deliberately NOT refused: opencode grants the agent
+        # `external_directory`, so having no --add-dir costs the run nothing.
+        denied = sorted(_denied_opencode_tools(allowed_tools))
+        if denied:
+            raise ValueError(
+                "the opencode backend cannot grant " + ", ".join(denied)
+                + f": it runs the read-only '{OPENCODE_ANALYSIS_AGENT}' agent, "
+                "whose opencode.json permissions deny edits. Use the Claude "
+                "backend for a skill that writes.")
         cmd = [
             cli_path, "run",
             "--format", "json",       # one JSON event per line

@@ -82,6 +82,35 @@ check("analysis agent denies edits",
 check("analysis agent allows bash (skills run checkers)",
       agent_cfg and agent_cfg.get("permission", {}).get("bash") == "allow")
 
+# #552: the agent's description used to RESTATE the Claude allowlist as a
+# literal ("Read,Glob,Grep,Bash,WebSearch"). Adding Task to the constant made
+# that sentence false with nothing to notice, so the literal is banned outright
+# -- a description that names the constant cannot go stale.
+_desc = (agent_cfg or {}).get("description", "")
+#: Two or more allowlist names comma-joined -- the shape of a restated list.
+#: Matching a single `Tool,` would fail on ordinary prose ("run checkers with
+#: Bash, and fetch datasheets"), which is a gate that cries wolf.
+_names = ai_backend.CLAUDE_ALLOWED_TOOLS.split(",")
+_restated = [f"{a},{b}" for a in _names for b in _names
+             if a != b and f"{a},{b}" in _desc]
+check("opencode.json does not restate the allowlist as a literal",
+      not _restated,
+      f"{_restated} appear as a comma-joined list in the description")
+check("opencode.json names the constant instead",
+      "CLAUDE_ALLOWED_TOOLS" in _desc, _desc)
+
+# #552 item 4: refuse rather than silently drop. The read-only ask still builds.
+try:
+    oc.build_cmd("opencode", "P", allowed_tools="Read,Write")
+    _oc_refused = ""
+except ValueError as _e:
+    _oc_refused = str(_e)
+check("opencode refuses an allowlist its agent cannot grant",
+      "Write" in _oc_refused, _oc_refused or "no ValueError raised")
+check("opencode still accepts the read-only default",
+      "--agent" in oc.build_cmd("opencode", "P",
+                                allowed_tools=ai_backend.CLAUDE_ALLOWED_TOOLS))
+
 # -------------------------------------------------------------- skill prompt
 
 p = claude.skill_prompt("plan-pcb-routing", "/tmp/b.kicad_pcb", "analysis only")
@@ -175,6 +204,16 @@ check("summarize unknown tool dumps json",
       "x" in summarize_tool_use("mystery", {"x": 1}))
 check("summarize truncates",
       len(summarize_tool_use("bash", {"command": "y" * 500})) < 140)
+# #552 item 3: a subagent dispatch must render as its DESCRIPTION, or the live
+# transcript goes quiet through the longest part of a run -- the fan-out. The
+# case has existed since #633 and nothing asserted it. Both spellings, because
+# Claude sends "Task" and opencode sends "task".
+check("summarize names a Task by its description",
+      summarize_tool_use("Task", {"description": "verify the placement",
+                                  "prompt": "a very long prompt"})
+      == "Task: verify the placement")
+check("summarize names a lowercase task too",
+      summarize_tool_use("task", {"description": "verify"}) == "task: verify")
 
 # ------------------------------------------- extract_narrative dual schemas
 
