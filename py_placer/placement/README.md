@@ -522,6 +522,11 @@ python3 tests/test_456_courtyard_parser.py   # courtyard shapes + silk bleed (#4
 python3 tests/test_456_side_and_outline.py   # board side, real outline, graders (#456)
 python3 tests/test_459_groups.py             # block sources + parsing (#459)
 python3 tests/test_459_group_moves.py        # rigid block translation (#459)
+python3 tests/test_554_order_graph.py        # the relocation constraint graph (#554)
+python3 tests/test_554_relocate_solve.py     # min-perturbation + the exact re-check (#554)
+python3 tests/test_554_loop_relocate.py      # --relocate wiring, mocked router (#554)
+python3 tests/test_554_reach_regen.py        # the reach measurement, re-derived in full
+python3 tests/mutate_554.py                  # does the #554 suite bite? (rewrites relocate.py)
 python3 tests/test_portfolio_strategies.py   # perturbation strategy invariants
 python3 tests/test_portfolio_determinism.py  # portfolio seed/replay contract (slow)
 python3 tests/test_portfolio.py              # portfolio smoke + identity anchor (slow)
