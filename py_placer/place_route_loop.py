@@ -48,6 +48,7 @@ from placement.writer import write_placed_output
 from placement.diagnosis import (TOP_K as DIAGNOSIS_TOP_K,
                                  format_text as diagnosis_format,
                                  to_json as diagnosis_to_json)
+from placement.relocate import format_text as relocate_format
 
 # The loop shells out to the route.py sitting NEXT TO THIS FILE. A bare
 # relative 'route.py' only resolved when the caller's cwd happened to be the
@@ -312,7 +313,7 @@ def metrics_from_summary(summary: dict, log: str = '',
 def write_round_sidecar(work: str, rnd: int, *, board: str, routed: str,
                         parent: str, accepted: bool, screened: bool = False,
                         targets=None, groups=None, moved=None, metrics=None,
-                        diagnosis=None) -> str:
+                        diagnosis=None, relocation=None) -> str:
     """Record one round as `loop_round{N}.json` next to its board (#431).
 
     The boards alone are NOT a chain: a REJECTED loop_round2.kicad_pcb sits
@@ -340,6 +341,9 @@ def write_round_sidecar(work: str, rnd: int, *, board: str, routed: str,
         'moved': moved or [],
         'metrics': metrics or {},
     }
+    # #554: same rule -- a run without --relocate keeps the key set it had.
+    if relocation is not None:
+        doc['relocation'] = relocation
     # #553: added CONDITIONALLY, never as a None placeholder -- a `pins` run's
     # sidecar keeps the eleven keys it has always had, byte for byte.
     if diagnosis is not None:
@@ -351,6 +355,67 @@ def write_round_sidecar(work: str, rnd: int, *, board: str, routed: str,
         print(f"  (round sidecar not written: {e})")
         return ''
     return path
+
+
+def relocate_round(pcb_data, pcb_file, blocks, *, block=None, refs=None,
+                   ignore_nets=None, max_corridor_mm=None, clearance=None):
+    """Propose ONE bounded block relocation on this round's board (#554).
+
+    Returns a `relocate.Relocation`, always -- a refusal is a result and carries
+    its own named reason, never a count.
+
+    Two things this has to get right, and both are invisible if it does not:
+
+    * The state is built with **`move_refs=None`**. `QuenchState.__init__` locks
+      every ref OUTSIDE `move_refs`, and this loop passes its target selection as
+      `move_refs` a few lines later. Handed such a state the solve would have no
+      free neighbours, would answer `no_room_at_any_dose` on every board, and
+      would look exactly like a correct negative result.
+    * `build_neighbor_lists` is never called, so the travel budget stays infinite
+      and the outline gate's cached reach stays conservative -- which is why the
+      pruning caveat in `quench._group_offsets` does not apply here, and why
+      #554's three named invariants are not engaged rather than "unlocked".
+    """
+    import fnmatch
+    import pose_score
+    from placement import diagnosis as _diag, relocate as _rel
+    from placement import routability as _routab
+
+    pcb = pcb_data
+    state = pose_score.make_state(pcb, pcb_file, clearance=clearance or 0.25)
+    ids = _diag.ignore_net_ids(pcb, ignore_nets or [])
+    units_src = dict(blocks or {})
+    if refs:
+        named = sorted({r for pat in refs
+                        for r in fnmatch.filter(sorted(pcb.footprints), pat)})
+        if len(named) < 2:
+            return _rel.Relocation(
+                refusal='no_diagnosed_block: --relocate-refs matched %d part(s)'
+                        % len(named))
+        units_src = {'refs:%s' % ','.join(refs): named}
+        block = list(units_src)[0]
+    if block is None:
+        ranked = sorted(_routab.block_displacements(state, units_src,
+                                                    ignore_net_ids=ids),
+                        key=lambda d: (-d.distance_mm, d.block))
+        if not ranked:
+            return _rel.Relocation(
+                refusal='block_has_no_target: no derived block has a foreign-pad '
+                        'centroid to move toward')
+        block = ranked[0].block
+    disp = {d.block: d for d in _routab.block_displacements(
+        state, units_src, ignore_net_ids=ids)}.get(block)
+    if disp is None:
+        return _rel.Relocation(
+            block=block,
+            refusal='block_has_no_target: %s connects to nothing outside itself, '
+                    'so it has no direction to move in' % block)
+    direction = (disp.net_centroid[0] - disp.centroid[0],
+                 disp.net_centroid[1] - disp.centroid[1])
+    return _rel.relocate_block(state, units_src, block, direction,
+                               want_mm=disp.distance_mm,
+                               max_corridor_mm=max_corridor_mm,
+                               clearance=clearance)
 
 
 def moves_from_placements(parent_pcb, placements) -> list:
@@ -578,6 +643,43 @@ def main():
                              "in its whole block, so a block is no longer "
                              "half-frozen because its IC exceeds "
                              "--max-target-pins")
+    parser.add_argument("--relocate", action="store_true",
+                        help="Before each round's quench, propose ONE bounded "
+                             "block relocation (#554): move the diagnosed block "
+                             "toward the centroid of what it connects to, "
+                             "letting neighbours yield while their relative "
+                             "order is held as a hard constraint, minimising "
+                             "total displacement. DEFAULT OFF. NO MEASUREMENT "
+                             "SHOWS THAT A RELOCATED BOARD ROUTES BETTER. What "
+                             "IS measured is the mechanism: over 24 blocks on "
+                             "10 corpus boards, letting neighbours yield bought "
+                             ">= 1mm more travel than freezing them on 11 of "
+                             "them, spanning 6 boards, max 16.66mm -- see "
+                             "tests/stress/relocation_reach.py. The round's own "
+                             "re-route is the judge, and a rejected round "
+                             "reverts byte for byte")
+    parser.add_argument("--relocate-block", default=None, metavar="NAME",
+                        help="Relocate this derived block by name instead of "
+                             "the most displaced one. Names come from "
+                             "--list-groups / the group-source census")
+    parser.add_argument("--relocate-refs", nargs="+", default=None,
+                        metavar="GLOB",
+                        help="Relocate an EXPLICIT set of refs as one rigid "
+                             "body, bypassing block derivation entirely. This "
+                             "is what separates 'the relocation worked' from "
+                             "'the diagnosis picked right' in a study, since "
+                             "--target-select diagnosis is itself a measured "
+                             "null (#553)")
+    parser.add_argument("--relocate-max-corridor", type=float, default=None,
+                        metavar="MM",
+                        help="Refuse a relocation whose neighbours must travel "
+                             "more than this in total, and try a shorter dose. "
+                             "Unset = no budget, and the corridor is reported "
+                             "rather than bounded. Worth setting: measured on "
+                             "sonde_u, relocating a 3-part block 8.96mm moved "
+                             "17 neighbours a combined 53.92mm -- legal, "
+                             "minimal for that dose, and a bigger disturbance "
+                             "than #554's 'move only diagnosed blocks' asks for")
     parser.add_argument("--accept-cmd", default=None, metavar="CMD",
                         help="External accept test, run after each round's route as "
                              "CMD <placed> <routed> <route.json>; print one line "
@@ -700,6 +802,28 @@ def main():
             "nothing is a warning printed before round 0, not this refusal.)")
     if args.diagnosis_top_k < 1:
         parser.error("--diagnosis-top-k must be >= 1")
+
+    # #554. Refused BEFORE round 0's route, so a bad invocation costs no routing.
+    if args.relocate and not group_sources and not args.relocate_refs \
+            and not args.suggest_locks:
+        parser.error(
+            "--relocate moves a derived BLOCK, and --group-by none derives "
+            "none. Pass a source list -- 'auto,netprefix,decap' derives "
+            "something on most tracked boards, while bare 'auto' (kicad,sheet) "
+            "derives NOTHING on five of the six this repo grades placement on "
+            "-- or name the parts yourself with --relocate-refs.")
+    for _flag, _val in (('--relocate-block', args.relocate_block),
+                        ('--relocate-refs', args.relocate_refs),
+                        ('--relocate-max-corridor',
+                         args.relocate_max_corridor)):
+        if _val is not None and not args.relocate:
+            parser.error("%s only applies with --relocate" % _flag)
+    if args.relocate_block and args.relocate_refs:
+        parser.error("--relocate-block names a DERIVED block and "
+                     "--relocate-refs bypasses derivation; pass one or neither")
+    if args.relocate_max_corridor is not None and args.relocate_max_corridor < 0:
+        parser.error("--relocate-max-corridor is a total travel in mm; "
+                     "negative is not a smaller budget")
 
     if not args.suggest_locks:
         try:
@@ -832,6 +956,13 @@ def main():
     # the run cannot report what it started from, which is half of any delta.
     baseline = dict(best)
     accepted_rounds = 0
+    # #554. `relocate_applied == 0` beside a non-zero `relocate_refused` is the
+    # machine-readable statement that the flag did nothing this run -- the same
+    # anti-degeneration device --target-select carries.
+    relocate_applied = 0
+    relocate_refused = 0
+    relocate_reasons: list = []
+    relocate_records: list = []
     rounds_run = 0
 
     max_disp = args.max_displacement
@@ -924,6 +1055,41 @@ def main():
             blocks = {n: r for n, r in blocks.items()
                       if any(m in targets for m in r)}
 
+        # #554: ONE bounded block relocation, before the quench, on its own
+        # board. It has to be its own board rather than a merge into the
+        # quench's placements: `_candidate_positions` generates around each
+        # part's SEED, so a block relocated inside one QuenchState would be
+        # frozen out of every local refinement that follows it. Re-seeding from
+        # the written board is what lets the quench polish the new pose.
+        # A rejected round still reverts to `cur_file` byte for byte, because
+        # `cur_file` is not reassigned unless the round is accepted.
+        quench_base = cur_file
+        reloc = None
+        if args.relocate:
+            reloc = relocate_round(
+                pcb_data, cur_file, blocks or frozen_blocks or {},
+                block=args.relocate_block, refs=args.relocate_refs,
+                ignore_nets=args.ignore_nets,
+                max_corridor_mm=args.relocate_max_corridor,
+                clearance=args.clearance)
+            print('  ' + relocate_format(reloc).replace('\n', '\n  '))
+            if reloc.refusal:
+                relocate_refused += 1
+                relocate_reasons.append('round %d: %s' % (rnd, reloc.refusal))
+            else:
+                relocate_applied += 1
+                relocate_records.append(dict(reloc.to_dict(), round=rnd))
+                quench_base = os.path.join(work,
+                                           f'loop_round{rnd}_relocated.kicad_pcb')
+                write_placed_output(cur_file, quench_base,
+                                    [dict(m) for m in reloc.moves])
+                copy_siblings(cur_file, quench_base)
+                pcb_data = parse_kicad_pcb(quench_base)
+                # The block moved, so every part it may now pull in moved with
+                # it; the targets were resolved against the OLD poses and stay
+                # valid as a REF SET, which is all `move_refs` consumes.
+                targets |= set(reloc.members)
+
         name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
         net_weights = {name_to_id[n]: args.failed_net_weight
                        for n in best['failed_nets'] if n in name_to_id}
@@ -937,7 +1103,7 @@ def main():
 
         ratsnest = {}
         placements = quench(
-            pcb_data, pcb_file=cur_file,
+            pcb_data, pcb_file=quench_base,
             max_displacement=max_disp,
             swap_max_displacement=swap_cap,
             step=args.step,
@@ -962,7 +1128,7 @@ def main():
             intent_gate=intent_gate,
         )
 
-        if not placements:
+        if not placements and (reloc is None or reloc.refusal):
             # #702: name the declared gate when it is what refused, or
             # widening the radius reads as "try harder" while every
             # extra pose it offers is one the gate also refuses.
@@ -982,7 +1148,12 @@ def main():
         # the board for courtyards and locked refs) and no round-0 bootstrap.
         rn_before = ratsnest.get('before', {})
         rn_after = ratsnest.get('after', {})
-        skip, why = _ratsnest_screen(rn_before, rn_after, args.ratsnest_screen)
+        # A relocation-only round has no quench delta to screen on, and the
+        # screen exists to skip a ROUTE that the ratsnest says cannot help. With
+        # no `before`/`after` it would compare two empty dicts and skip the one
+        # round the relocation was made for.
+        skip, why = ((False, '') if not placements else
+                     _ratsnest_screen(rn_before, rn_after, args.ratsnest_screen))
         if why:
             print(f"  ratsnest: {why}")
         if skip:
@@ -1001,12 +1172,14 @@ def main():
                                 # diagnosis chose -- the one round that cannot
                                 # afford to lose it.
                                 diagnosis=(diagnosis_to_json(diag)
-                                           if diag is not None else None))
+                                           if diag is not None else None),
+                                relocation=(reloc.to_dict()
+                                            if reloc is not None else None))
             max_disp *= 1.5
             continue
 
         cand_file = os.path.join(work, f'loop_round{rnd}.kicad_pcb')
-        write_placed_output(cur_file, cand_file, placements)
+        write_placed_output(quench_base, cand_file, placements)
 
         metrics = run_route(
             cand_file, os.path.join(work, f'loop_round{rnd}_routed.kicad_pcb'),
@@ -1047,7 +1220,9 @@ def main():
                             moved=moves_from_placements(pcb_data, placements),
                             metrics=metrics,
                             diagnosis=(diagnosis_to_json(diag)
-                                       if diag is not None else None))
+                                       if diag is not None else None),
+                            relocation=(reloc.to_dict()
+                                        if reloc is not None else None))
         if _accepted:
             print(f"  ACCEPTED (was failures={best['failures']},"
                   f" iterations={best['iterations']:,})")
@@ -1098,9 +1273,24 @@ def main():
         # `rounds_diagnosis == 0` beside a non-zero `rounds_fallback` is the
         # machine-readable statement that the flag did nothing this run.
         'target_select': args.target_select,
+        'relocate': bool(args.relocate),
         'work_dir': work,
         'output': args.output_file,
     }
+    if args.relocate:
+        from placement.relocate import NO_EFFICACY_CLAIM as _NEC
+        summary.update({
+            'relocate_rounds_applied': relocate_applied,
+            'relocate_rounds_refused': relocate_refused,
+            'relocate_refusals': relocate_reasons,
+            'relocate_proposals': relocate_records,
+            'relocate_max_corridor_mm': args.relocate_max_corridor,
+            # A relocation of a block the diagnosis picked inherits the
+            # diagnosis's own measured null, and the presence of a solver does
+            # not launder it. A machine consumer cannot read the numbers above
+            # without also reading this.
+            'relocate_efficacy': _NEC,
+        })
     if args.target_select == 'diagnosis':
         from placement.diagnosis import NO_EFFICACY_CLAIM
         summary.update({

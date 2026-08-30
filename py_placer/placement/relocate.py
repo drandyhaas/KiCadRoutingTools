@@ -29,15 +29,49 @@ One variable per **rigid unit** per axis, holding a SHIFT from the incumbent pos
   nothing to do with room.
 * **Non-overlap becomes a frozen order.** Each interacting pair contributes ONE
   difference constraint, in the axis where it is currently more separated:
-  `s_hi - s_lo >= gap - current_separation`. Freezing the disjunction from the
-  incumbent board is a RESTRICTION of the true feasible set, never a relaxation --
-  it can refuse a legal answer, never admit an illegal one. What it costs is a
-  board whose only room requires a part to slide around a corner; that answer is
+  `s_hi - s_lo >= gap - current_separation`. Freezing the disjunction costs a
+  board whose only room needs a part to slide around a corner; that answer is
   `no_room_at_any_dose`, which is a correct answer to the question #554 asked.
 
 The whole system is difference constraints, so its solutions form a lattice: the
 componentwise maximum is itself feasible, which is why `reach` is exactly the
-block's own upper envelope and not an optimistic bound.
+block's own upper envelope over THIS SYSTEM.
+
+THE GRAPH IS NOT A CONSERVATIVE MODEL OF LEGALITY. THE EXACT CHECK IS.
+----------------------------------------------------------------------
+An earlier revision of this docstring claimed the frozen disjunction made the
+system "a RESTRICTION of the true feasible set, never a relaxation -- it can
+refuse a legal answer, never admit an illegal one". **That is false, and it was
+falsified by measurement rather than by reading.** Two mechanisms, both
+demonstrated on shipped corpus boards at the lattice minimum:
+
+1. **A gap is Euclidean; a constraint is per-axis.** `rect_gap` is
+   `hypot(sep_x, sep_y)` when both separations are positive, and the graph
+   constrains only the larger axis, leaving the other free to shrink. A pair at
+   separations (0.24, 0.24) has a true gap of 0.339 -- legal at 0.25 clearance --
+   and an assignment violating NONE of the graph's edges can drive it to 0.240.
+   Measured live: watchy `AE1/C7` 0.2388 -> 0.2250, glasgow_revC `R23/U7`
+   0.1769 -> 0.1300, ulx3s `R56/U10` 0.2420 -> 0.2300.
+2. **Admission geometry is not pricing geometry.** A pair is admitted through
+   `gap_to` -> `pair_min_gap`, which measures over the sides the two parts SHARE
+   and includes a THT part's far-side lead field; the edge is then priced from
+   the two COURTYARD rects. For a front part against a back-side THT part the
+   courtyards overlap freely, so the requirement is vacuous: tigard `JP1/SW1` has
+   a real `pair_min_gap` of +1.05 mm and a graph floor of -1.25 mm.
+
+Censused over 54,841 inter-unit pairs on ten boards: **73 exposed**, of which 51
+are currently clear and could be driven sub-clearance; worst exposure 2.97 mm.
+
+`identity_violations` cannot see any of this: it checks that `s = 0` satisfies
+the GRAPH, not that the graph implies the GEOMETRY. It is a change detector for a
+broken gap clamp -- which is what it was added for, and what it catches -- and
+nothing more.
+
+What makes the shipped pass safe is therefore **not** the graph but
+`exact_refusal`, which re-measures every moved part with the real gate and
+refuses the dose outright if any pair worsened. Nothing is ever applied on the
+LP's word. The consequence for callers: a `Relocation` is trustworthy, and a bare
+`reach()` is an upper bound on the SYSTEM, not a promise about the board.
 
 `binding_path` is the shortest-path predecessor chain that produced that envelope --
 a NAMED chain of refs and gaps ending at the wall or the locked part that stopped
@@ -73,8 +107,11 @@ WHAT IS NOT HERE, AND WHY
   and a diagnosed block IS such an island by construction. A relocation that
   shortens displacement and worsens routing is *supposed* to be rejected -- by the
   router, downstream, and by nothing in this module.
-* **Choosing the block.** `placement.diagnosis` does, and its `NO_EFFICACY_CLAIM`
-  travels with every relocation proposed here, verbatim.
+* **Choosing the block.** `placement.diagnosis` does. Every proposal therefore
+  carries TWO disclosures: this module's `NO_EFFICACY_CLAIM` (nothing shows a
+  relocated board routes better) and the diagnosis's own (nothing shows its
+  selection routes better than a pin count). They are different gaps and neither
+  substitutes for the other.
 * **Block rotation.** `perturb` refuses it as a damage arm for a measured reason: on
   any non-square block the result is dominated by courtyard damage rather than
   displacement. The same geometry refuses it as a repair, and a rotating rectangle
@@ -103,6 +140,22 @@ SCHEMA = 1
 #: Coordinates are rounded here before any comparison or dict key, so a result
 #: cannot reorder between processes on floating-point noise.
 ROUND_MM = 6
+
+#: What has and has not been measured about this pass. Carried on every
+#: `Relocation` and stamped into the loop's verdict as `relocate_efficacy`, so a
+#: machine consumer cannot read the numbers without the sentence.
+#:
+#: It is DELIBERATELY not `diagnosis.NO_EFFICACY_CLAIM` reused verbatim. That
+#: sentence is about a selector -- "no paired routed A/B of pins vs diagnosis
+#: exists" -- and pasting it here would name the wrong comparison while looking
+#: like a disclosure. The two are both carried, because a relocation of a block
+#: the diagnosis chose inherits BOTH gaps.
+NO_EFFICACY_CLAIM = (
+    'NOT MEASURED: no paired routed A/B of relocate-on vs relocate-off exists, '
+    'so nothing shows a relocated board ROUTES better. What IS measured is the '
+    'mechanism -- letting neighbours yield in preserved order buys a block more '
+    'travel than freezing them, on 11 of 24 blocks over 6 of 10 corpus boards '
+    '(tests/stress/relocation_reach.py). Reach is not routability.')
 
 #: The two pinned wall nodes per axis, and the super-source. Names chosen so they
 #: can never collide with a KiCad reference (which cannot contain a space).
@@ -166,7 +219,19 @@ class Reach:
     hi: Dict[str, float] = field(default_factory=dict)   # axis -> max shift
     binding: Dict[str, Tuple] = field(default_factory=dict)  # axis -> path rows
     reach_mm: float = 0.0        # along the requested direction
+    #: WHICH axis produced `reach_mm`. Reporting the x chain unconditionally
+    #: names the wrong parts whenever y is the binding one -- measured on 6 of
+    #: 24 corpus cells, including the headline kit-dev-coldfire/net:JTAG, where
+    #: the printed chain was `FB101 -> C114 -> C119` and the chain that actually
+    #: stopped it was `Y101 -> R207 -> <wall hi>`. An explanation that names the
+    #: wrong parts is worse than none.
+    binding_axis: str = ''
     refusal: str = ''
+
+    @property
+    def binding_chain(self) -> Tuple:
+        """The chain on the axis that actually bound, nearest-first."""
+        return self.binding.get(self.binding_axis, ())
 
     def to_dict(self):
         return {'unit': self.unit,
@@ -174,6 +239,7 @@ class Reach:
                 'hi': {a: round(v, 4) for a, v in sorted(self.hi.items())},
                 'binding': {a: [list(r) for r in p]
                             for a, p in sorted(self.binding.items())},
+                'binding_axis': self.binding_axis,
                 'reach_mm': round(self.reach_mm, 4),
                 'refusal': self.refusal}
 
@@ -533,6 +599,21 @@ def reach(state, units: Units, edges, unit: str,
     This is the number the whole feature rests on. Its control is
     `tests/stress/relocation_reach.py`'s `frozen_mm`, the same question asked with
     every non-member frozen.
+
+    TWO THINGS IT IS NOT, both measured rather than argued:
+
+    * **It is board-frame TRAVEL, not closure on the target.** The direction comes
+      from `net_centroid`, which is computed from pads on parts OUTSIDE the block
+      -- and those parts move too. So a block travelling `reach_mm` does not
+      close `reach_mm` of the gap to what it connects to; the target drifts with
+      the corridor. Bounded on the corpus, the true closure is smaller on most
+      cells and LARGER on a few (a neighbour yielding can carry the target
+      toward the block): kit-dev-coldfire `net:JTAG` travels 16.78 mm and closes
+      at most 13.05 mm, while splitflap `decap:U10` travels 0.00 and could close
+      5.72. The aggregate mechanism verdict survives the substitution; no
+      individual cell's number is the closure.
+    * **It is not a legality guarantee.** See the graph-is-not-conservative
+      section in the module docstring. Only `exact_refusal` gates a board.
     """
     r = Reach(unit=unit)
     if unit in units.pinned:
@@ -567,7 +648,17 @@ def reach(state, units: Units, edges, unit: str,
         r.refusal = ('unbounded: no wall and no interacting neighbour limits '
                      'this unit, so "how far can it go" has no answer')
         return r
-    r.reach_mm = max(0.0, round(min(caps), 4))
+    # FLOOR, not round-to-nearest. `reach_mm` is fed straight back in as a dose
+    # ceiling, and rounding UP puts it past the envelope it came from: measured,
+    # 7 of 24 corpus cells reported a value 3e-6..4e-5 mm above the exact bound,
+    # and HiGHS answered `Infeasible` for splitflap_driver/decap:U3 at its own
+    # published reach of 11.0236 (exact 11.023577). A reported reach must always
+    # be achievable.
+    r.reach_mm = max(0.0, math.floor(min(caps) * 10000) / 10000)
+    r.binding_axis = min(
+        (('x', ux), ('y', uy)),
+        key=lambda ac: (((r.hi[ac[0]] if ac[1] > 0 else r.lo[ac[0]]) / ac[1])
+                        if abs(ac[1]) >= 1e-12 else math.inf))[0]
     return r
 
 
@@ -886,9 +977,11 @@ def relocate_block(state, blocks, block: str, direction: Tuple[float, float], *,
     millimetres and the router is the judge (#459). A proposal that shortens
     displacement and worsens the route is SUPPOSED to be reverted upstream.
     """
-    from placement.diagnosis import NO_EFFICACY_CLAIM
+    from placement.diagnosis import NO_EFFICACY_CLAIM as DIAG_NO_EFFICACY
+    # BOTH: this pass's own gap, and the selector's, because a relocation of a
+    # block the diagnosis chose inherits the diagnosis's measured null too.
     rel = Relocation(block=block, direction=tuple(direction),
-                     disclosures=(NO_EFFICACY_CLAIM,))
+                     disclosures=(NO_EFFICACY_CLAIM, DIAG_NO_EFFICACY))
     assert_relocatable_state(state)
     units = rigid_units(state, blocks)
     if block not in units.members:
@@ -909,7 +1002,7 @@ def relocate_block(state, blocks, block: str, direction: Tuple[float, float], *,
     rf = reach(state, pin_all_but(units, block), edges, block, direction)
     rel.reach_mm = ry.reach_mm
     rel.frozen_reach_mm = 0.0 if rf.refusal else rf.reach_mm
-    rel.binding_path = ry.binding.get('x', ()) + ry.binding.get('y', ())
+    rel.binding_path = ry.binding_chain
     norm = math.hypot(*direction) or 1.0
     u = (direction[0] / norm, direction[1] / norm)
     rel.want_mm = float(want_mm if want_mm is not None else norm)
@@ -1013,7 +1106,7 @@ def format_text(rel: Relocation) -> str:
                rel.corridor_mm, chain, rel.solver, rel.cuts))
 
 
-__all__ = ['SCHEMA', 'AXES', 'SOURCE', 'WALL_LO', 'WALL_HI', 'RelocateError',
+__all__ = ['SCHEMA', 'AXES', 'NO_EFFICACY_CLAIM', 'SOURCE', 'WALL_LO', 'WALL_HI', 'RelocateError',
            'DOSE_LADDER', 'MAX_CUTS', 'OrderEdge', 'Units', 'Reach',
            'Relocation', 'assert_relocatable_state', 'rigid_units',
            'pin_all_but', 'order_graph', 'identity_violations', 'envelope',

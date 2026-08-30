@@ -2,351 +2,1411 @@
   "cells": {
     "esp_prog/decap:U1": {
       "base_violation": 0.0,
+      "binding": [
+        [
+          "Y1",
+          0.25,
+          "clearance"
+        ],
+        [
+          "<wall hi>",
+          0.0,
+          "wall"
+        ]
+      ],
+      "binding_axis": "y",
+      "block": "decap:U1",
+      "board": "esp_prog",
       "control_ok": true,
+      "foreign_pads": 15,
       "frozen_mm": 1.1025,
       "identity_violations": 0,
+      "members": [
+        "C3",
+        "U1"
+      ],
       "n": 2,
-      "reach_mm": 2.2601,
-      "reach_over_frozen": 2.05,
+      "nets": 15,
+      "nets_ignored": 2,
+      "reach_mm": 2.26,
+      "reach_over_frozen": 2.0499,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 1.0336,
       "slide_frozen_mm": 1.0336,
       "want_mm": 6.8908
     },
     "esp_prog/decap:Y1": {
       "base_violation": 0.0,
+      "binding": [
+        [
+          "<wall hi>",
+          0.0,
+          "wall"
+        ]
+      ],
+      "binding_axis": "y",
+      "block": "decap:Y1",
+      "board": "esp_prog",
       "control_ok": true,
-      "frozen_mm": 1.0886,
+      "foreign_pads": 2,
+      "frozen_mm": 1.0885,
       "identity_violations": 0,
+      "members": [
+        "C2",
+        "C4",
+        "Y1"
+      ],
       "n": 3,
-      "reach_mm": 3.4082,
-      "reach_over_frozen": 3.1308,
+      "nets": 2,
+      "nets_ignored": 4,
+      "reach_mm": 3.4081,
+      "reach_over_frozen": 3.131,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.9943,
       "slide_frozen_mm": 0.9943,
       "want_mm": 4.4193
     },
     "glasgow_revC/decap:U2": {
       "base_violation": 0.28,
+      "binding": [],
+      "binding_axis": "",
+      "block": "decap:U2",
+      "board": "glasgow_revC",
       "control_ok": false,
+      "foreign_pads": 24,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C17",
+        "U2"
+      ],
       "n": 2,
+      "nets": 5,
+      "nets_ignored": 5,
       "reach_mm": 0.0,
       "reach_over_frozen": null,
       "refusal": "block_member_locked: the unit contains a locked part",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.5,
       "want_mm": 24.1438
     },
     "glasgow_revC/decap:U3": {
       "base_violation": 1.83,
+      "binding": [],
+      "binding_axis": "",
+      "block": "decap:U3",
+      "board": "glasgow_revC",
       "control_ok": false,
+      "foreign_pads": 25,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C15",
+        "U3"
+      ],
       "n": 2,
+      "nets": 5,
+      "nets_ignored": 5,
       "reach_mm": 0.0,
       "reach_over_frozen": null,
       "refusal": "block_member_locked: the unit contains a locked part",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.2,
       "want_mm": 26.2703
     },
     "glasgow_revC/sheet:00000000-0000-0000-0000-00005c7b59b0/00000000-0000-0000-0000-00005c9e337e": {
       "base_violation": 1.92,
+      "binding": [],
+      "binding_axis": "",
+      "block": "sheet:00000000-0000-0000-0000-00005c7b59b0/00000000-0000-0000-0000-00005c9e337e",
+      "board": "glasgow_revC",
       "control_ok": false,
+      "foreign_pads": 44,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C34",
+        "C35",
+        "C36",
+        "C37",
+        "C38",
+        "C39",
+        "C40",
+        "C41",
+        "C42",
+        "C43",
+        "C47",
+        "C48",
+        "C49",
+        "C50",
+        "C51",
+        "C52",
+        "C54",
+        "C55",
+        "C56",
+        "C57",
+        "C58",
+        "C59",
+        "C82",
+        "C83",
+        "C84",
+        "C91",
+        "D15",
+        "D17",
+        "D19",
+        "D22",
+        "D23",
+        "J2",
+        "J8",
+        "J9",
+        "R30",
+        "R33",
+        "R34",
+        "R35",
+        "R37",
+        "R42",
+        "R47",
+        "R49",
+        "R51",
+        "R54",
+        "R55",
+        "R56",
+        "R58",
+        "R60",
+        "R8",
+        "RN10",
+        "RN11",
+        "RN12",
+        "RN7",
+        "RN8",
+        "RN9",
+        "TP19",
+        "U10",
+        "U11",
+        "U16",
+        "U17",
+        "U18",
+        "U19",
+        "U20",
+        "U21",
+        "U31",
+        "U4",
+        "U6",
+        "U9"
+      ],
       "n": 68,
+      "nets": 71,
+      "nets_ignored": 115,
       "reach_mm": 0.0,
       "reach_over_frozen": null,
       "refusal": "block_member_locked: the unit contains a locked part",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.1,
       "want_mm": 23.2539
     },
     "kit-dev-coldfire-xilinx_5213/decap:U102": {
       "base_violation": 0.258,
+      "binding": [
+        [
+          "C119",
+          0.25,
+          "clearance"
+        ],
+        [
+          "PULUPEN201",
+          0.25,
+          "clearance"
+        ],
+        [
+          "P302",
+          0.25,
+          "clearance"
+        ],
+        [
+          "<wall hi>",
+          0.0,
+          "wall"
+        ]
+      ],
+      "binding_axis": "x",
+      "block": "decap:U102",
+      "board": "kit-dev-coldfire-xilinx_5213",
       "control_ok": false,
+      "foreign_pads": 8,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C102",
+        "C103",
+        "C109",
+        "C110",
+        "C111",
+        "C112",
+        "C113",
+        "C114",
+        "C115",
+        "C116",
+        "C117",
+        "C118"
+      ],
       "n": 12,
-      "reach_mm": 1.6819,
+      "nets": 2,
+      "nets_ignored": 21,
+      "reach_mm": 1.6818,
       "reach_over_frozen": "inf",
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.0,
       "want_mm": 10.341
     },
     "kit-dev-coldfire-xilinx_5213/net:JTAG": {
       "base_violation": 0.0,
+      "binding": [
+        [
+          "Y101",
+          0.25,
+          "clearance"
+        ],
+        [
+          "R207",
+          0.25,
+          "clearance"
+        ],
+        [
+          "<wall hi>",
+          0.0,
+          "wall"
+        ]
+      ],
+      "binding_axis": "y",
+      "block": "net:JTAG",
+      "board": "kit-dev-coldfire-xilinx_5213",
       "control_ok": true,
+      "foreign_pads": 138,
       "frozen_mm": 0.1265,
       "identity_violations": 0,
+      "members": [
+        "JP101",
+        "R111",
+        "U102"
+      ],
       "n": 3,
+      "nets": 73,
+      "nets_ignored": 30,
       "reach_mm": 16.7829,
       "reach_over_frozen": 132.6711,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.1,
       "slide_frozen_mm": 0.1,
       "want_mm": 19.7074
     },
     "kit-dev-coldfire-xilinx_5213/sheet:00000000-0000-0000-0000-000047d80204": {
       "base_violation": 0.0,
+      "binding": [
+        [
+          "<wall hi>",
+          0.0,
+          "wall"
+        ]
+      ],
+      "binding_axis": "x",
+      "block": "sheet:00000000-0000-0000-0000-000047d80204",
+      "board": "kit-dev-coldfire-xilinx_5213",
       "control_ok": true,
+      "foreign_pads": 30,
       "frozen_mm": 1.977,
       "identity_violations": 0,
+      "members": [
+        "C301",
+        "C302",
+        "C303",
+        "C304",
+        "C305",
+        "C306",
+        "C307",
+        "C308",
+        "C309",
+        "C310",
+        "C311",
+        "D301",
+        "D302",
+        "P301",
+        "P302",
+        "P303",
+        "R301",
+        "R302",
+        "R303",
+        "R304",
+        "U301"
+      ],
       "n": 21,
+      "nets": 120,
+      "nets_ignored": 57,
       "reach_mm": 1.977,
       "reach_over_frozen": 1.0,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 2.5723,
       "slide_frozen_mm": 2.5723,
       "want_mm": 54.8938
     },
     "orangecrab_ext_pll/sheet:00000000-0000-0000-0000-00005abd38f2": {
       "base_violation": 0.502,
+      "binding": [
+        [
+          "U8",
+          -0.05,
+          "baseline"
+        ],
+        [
+          "R32",
+          -0.4333,
+          "baseline"
+        ],
+        [
+          "H3",
+          0.03,
+          "baseline"
+        ],
+        [
+          "<wall hi>",
+          -0.2623,
+          "wall"
+        ]
+      ],
+      "binding_axis": "x",
+      "block": "sheet:00000000-0000-0000-0000-00005abd38f2",
+      "board": "orangecrab_ext_pll",
       "control_ok": false,
+      "foreign_pads": 93,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C21",
+        "C22",
+        "C23",
+        "C24",
+        "C27",
+        "C30",
+        "C31",
+        "C32",
+        "C33",
+        "C34",
+        "C35",
+        "C36",
+        "C37",
+        "C38",
+        "C39",
+        "C40",
+        "C41",
+        "C42",
+        "C43",
+        "C44",
+        "C45",
+        "FB2",
+        "FB3",
+        "R19",
+        "RN1",
+        "RN2",
+        "RN3",
+        "RN4",
+        "RN5",
+        "RN6",
+        "RN8",
+        "U4"
+      ],
       "n": 32,
+      "nets": 58,
+      "nets_ignored": 41,
       "reach_mm": 0.0,
       "reach_over_frozen": null,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.0,
       "want_mm": 10.3732
     },
     "orangecrab_ext_pll/sheet:00000000-0000-0000-0000-00005ac0a2a0": {
       "base_violation": 0.285,
+      "binding": [
+        [
+          "RN9",
+          0.2,
+          "baseline"
+        ],
+        [
+          "H3",
+          0.03,
+          "baseline"
+        ],
+        [
+          "<wall hi>",
+          -0.2623,
+          "wall"
+        ]
+      ],
+      "binding_axis": "x",
+      "block": "sheet:00000000-0000-0000-0000-00005ac0a2a0",
+      "board": "orangecrab_ext_pll",
       "control_ok": false,
+      "foreign_pads": 7,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C29",
+        "C70",
+        "FB1",
+        "J4",
+        "R28",
+        "RN7"
+      ],
       "n": 6,
+      "nets": 8,
+      "nets_ignored": 14,
       "reach_mm": 0.0,
       "reach_over_frozen": null,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.0,
       "want_mm": 17.675
     },
     "orangecrab_ext_pll/sheet:00000000-0000-0000-0000-00005d1738db": {
       "base_violation": 8.074797,
+      "binding": [
+        [
+          "R32",
+          -0.4333,
+          "baseline"
+        ],
+        [
+          "H3",
+          0.03,
+          "baseline"
+        ],
+        [
+          "<wall hi>",
+          -0.2623,
+          "wall"
+        ]
+      ],
+      "binding_axis": "x",
+      "block": "sheet:00000000-0000-0000-0000-00005d1738db",
+      "board": "orangecrab_ext_pll",
       "control_ok": false,
+      "foreign_pads": 109,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C10",
+        "C11",
+        "C12",
+        "C13",
+        "C14",
+        "C15",
+        "C16",
+        "C17",
+        "C18",
+        "C2",
+        "C3",
+        "C46",
+        "C47",
+        "C5",
+        "C6",
+        "C7",
+        "C77",
+        "C8",
+        "C9",
+        "D2",
+        "J5",
+        "L1",
+        "L2",
+        "L3",
+        "R1",
+        "R10",
+        "R11",
+        "R12",
+        "R13",
+        "R14",
+        "R15",
+        "R16",
+        "R17",
+        "R18",
+        "R2",
+        "R25",
+        "R26",
+        "R5",
+        "R7",
+        "R8",
+        "R9",
+        "U1",
+        "U10",
+        "U2",
+        "U5",
+        "U7",
+        "U8"
+      ],
       "n": 47,
+      "nets": 28,
+      "nets_ignored": 75,
       "reach_mm": 0.0,
       "reach_over_frozen": null,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.0,
       "want_mm": 16.2144
     },
     "rp2350_fpga_eensy_prePlane/sheet:8a92d15c-7a61-4021-a7df-8c7cdae0c467": {
       "base_violation": 0.786836,
+      "binding": [
+        [
+          "U8",
+          -7.575,
+          "baseline"
+        ]
+      ],
+      "binding_axis": "x",
+      "block": "sheet:8a92d15c-7a61-4021-a7df-8c7cdae0c467",
+      "board": "rp2350_fpga_eensy_prePlane",
       "control_ok": false,
+      "foreign_pads": 43,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C16",
+        "C17",
+        "C18",
+        "C19",
+        "C20",
+        "C21",
+        "C22",
+        "C23",
+        "C24",
+        "C25",
+        "D1",
+        "R6",
+        "R7",
+        "R8",
+        "R9",
+        "RN1",
+        "RN2",
+        "SW1",
+        "U2",
+        "Y2"
+      ],
       "n": 20,
+      "nets": 39,
+      "nets_ignored": 48,
       "reach_mm": 0.0,
       "reach_over_frozen": null,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.0,
       "want_mm": 8.4287
     },
     "rp2350_fpga_eensy_prePlane/sheet:b62df5e1-5101-429a-8140-80e1558c3023": {
       "base_violation": 16.387752,
+      "binding": [
+        [
+          "U8",
+          -5.4,
+          "baseline"
+        ]
+      ],
+      "binding_axis": "x",
+      "block": "sheet:b62df5e1-5101-429a-8140-80e1558c3023",
+      "board": "rp2350_fpga_eensy_prePlane",
       "control_ok": false,
+      "foreign_pads": 4,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C1",
+        "C26",
+        "C27",
+        "C3",
+        "D2",
+        "J1",
+        "L2",
+        "R1",
+        "R11",
+        "R12",
+        "R13",
+        "R2",
+        "U3",
+        "U4",
+        "U5",
+        "U7"
+      ],
       "n": 16,
+      "nets": 17,
+      "nets_ignored": 30,
       "reach_mm": 0.0,
       "reach_over_frozen": null,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.6596,
       "want_mm": 4.3974
     },
     "rp2350_fpga_eensy_prePlane/sheet:f2f6ffb3-0bda-4fed-842c-a4c662014e9c": {
       "base_violation": 15.334588,
+      "binding": [
+        [
+          "U8",
+          -6.15,
+          "baseline"
+        ]
+      ],
+      "binding_axis": "x",
+      "block": "sheet:f2f6ffb3-0bda-4fed-842c-a4c662014e9c",
+      "board": "rp2350_fpga_eensy_prePlane",
       "control_ok": false,
+      "foreign_pads": 29,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C10",
+        "C11",
+        "C12",
+        "C13",
+        "C14",
+        "C15",
+        "C2",
+        "C28",
+        "C29",
+        "C30",
+        "C5",
+        "C6",
+        "C7",
+        "C8",
+        "C9",
+        "J2",
+        "J3",
+        "L1",
+        "R3",
+        "R4",
+        "R5",
+        "U1",
+        "U6",
+        "Y1"
+      ],
       "n": 24,
+      "nets": 49,
+      "nets_ignored": 56,
       "reach_mm": 0.0,
       "reach_over_frozen": null,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.8428,
       "want_mm": 4.952
     },
     "sonde_u/net:TCK": {
       "base_violation": 14.65,
+      "binding": [
+        [
+          "C4",
+          0.25,
+          "clearance"
+        ],
+        [
+          "<wall hi>",
+          0.0,
+          "wall"
+        ]
+      ],
+      "binding_axis": "y",
+      "block": "net:TCK",
+      "board": "sonde_u",
       "control_ok": false,
+      "foreign_pads": 6,
       "frozen_mm": 1.0575,
       "identity_violations": 0,
+      "members": [
+        "J2",
+        "P1",
+        "R12"
+      ],
       "n": 3,
+      "nets": 6,
+      "nets_ignored": 5,
       "reach_mm": 8.9591,
       "reach_over_frozen": 8.472,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 1.0272,
       "slide_frozen_mm": 6.5901,
       "want_mm": 18.5431
     },
     "splitflap_driver/decap:U10": {
       "base_violation": 0.008,
+      "binding": [
+        [
+          "R12",
+          0.25,
+          "clearance"
+        ],
+        [
+          "J15",
+          0.01,
+          "baseline"
+        ],
+        [
+          "D6",
+          0.25,
+          "clearance"
+        ],
+        [
+          "<wall hi>",
+          0.0,
+          "wall"
+        ]
+      ],
+      "binding_axis": "y",
+      "block": "decap:U10",
+      "board": "splitflap_driver",
       "control_ok": false,
+      "foreign_pads": 27,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C12",
+        "U10"
+      ],
       "n": 2,
+      "nets": 13,
+      "nets_ignored": 3,
       "reach_mm": 0.0,
       "reach_over_frozen": null,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.0,
       "want_mm": 45.3111
     },
     "splitflap_driver/decap:U2": {
       "base_violation": 0.0,
+      "binding": [
+        [
+          "R6",
+          0.25,
+          "clearance"
+        ],
+        [
+          "J8",
+          0.01,
+          "baseline"
+        ],
+        [
+          "D1",
+          0.25,
+          "clearance"
+        ],
+        [
+          "<wall hi>",
+          0.0,
+          "wall"
+        ]
+      ],
+      "binding_axis": "y",
+      "block": "decap:U2",
+      "board": "splitflap_driver",
       "control_ok": true,
-      "frozen_mm": 0.171,
+      "foreign_pads": 27,
+      "frozen_mm": 0.1709,
       "identity_violations": 0,
+      "members": [
+        "C1",
+        "U2"
+      ],
       "n": 2,
-      "reach_mm": 4.7224,
-      "reach_over_frozen": 27.6164,
+      "nets": 13,
+      "nets_ignored": 3,
+      "reach_mm": 4.7223,
+      "reach_over_frozen": 27.6319,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.1,
       "slide_frozen_mm": 0.1,
       "want_mm": 44.2648
     },
     "splitflap_driver/decap:U3": {
       "base_violation": 0.02,
+      "binding": [
+        [
+          "U10",
+          0.25,
+          "clearance"
+        ],
+        [
+          "U7",
+          0.25,
+          "clearance"
+        ],
+        [
+          "U8",
+          0.25,
+          "clearance"
+        ],
+        [
+          "U9",
+          0.25,
+          "clearance"
+        ],
+        [
+          "J16",
+          0.25,
+          "clearance"
+        ],
+        [
+          "J17",
+          -0.0,
+          "baseline"
+        ]
+      ],
+      "binding_axis": "x",
+      "block": "decap:U3",
+      "board": "splitflap_driver",
       "control_ok": false,
+      "foreign_pads": 16,
       "frozen_mm": 2.2807,
       "identity_violations": 0,
+      "members": [
+        "C4",
+        "U3"
+      ],
       "n": 2,
-      "reach_mm": 11.0236,
+      "nets": 6,
+      "nets_ignored": 9,
+      "reach_mm": 11.0235,
       "reach_over_frozen": 4.8334,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 2.2299,
       "slide_frozen_mm": 2.2299,
       "want_mm": 69.1975
     },
     "tigard/decap:U3": {
       "base_violation": 1.76,
+      "binding": [
+        [
+          "R22",
+          0.06,
+          "baseline"
+        ],
+        [
+          "RN6",
+          0.25,
+          "clearance"
+        ],
+        [
+          "U6",
+          0.25,
+          "clearance"
+        ],
+        [
+          "J5",
+          0.25,
+          "clearance"
+        ],
+        [
+          "<wall hi>",
+          -0.6324,
+          "wall"
+        ]
+      ],
+      "binding_axis": "x",
+      "block": "decap:U3",
+      "board": "tigard",
       "control_ok": false,
+      "foreign_pads": 48,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C10",
+        "C11",
+        "C12",
+        "C13",
+        "C14",
+        "C17",
+        "C5",
+        "C6",
+        "C7",
+        "C8",
+        "C9",
+        "U3"
+      ],
       "n": 12,
-      "reach_mm": 2.553,
+      "nets": 30,
+      "nets_ignored": 46,
+      "reach_mm": 2.5529,
       "reach_over_frozen": "inf",
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.0,
       "want_mm": 6.2407
     },
     "tigard/decap:U5": {
       "base_violation": 0.0,
+      "binding": [
+        [
+          "RN3",
+          0.25,
+          "clearance"
+        ],
+        [
+          "J2",
+          0.25,
+          "clearance"
+        ],
+        [
+          "<wall hi>",
+          0.0,
+          "wall"
+        ]
+      ],
+      "binding_axis": "x",
+      "block": "decap:U5",
+      "board": "tigard",
       "control_ok": true,
-      "frozen_mm": 0.2693,
+      "foreign_pads": 46,
+      "frozen_mm": 0.2692,
       "identity_violations": 0,
+      "members": [
+        "C15",
+        "C20",
+        "C22",
+        "U5"
+      ],
       "n": 4,
+      "nets": 19,
+      "nets_ignored": 9,
       "reach_mm": 1.4415,
-      "reach_over_frozen": 5.3528,
+      "reach_over_frozen": 5.3548,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.2384,
       "slide_frozen_mm": 0.2384,
       "want_mm": 5.5368
     },
     "tigard/decap:Y1": {
       "base_violation": 0.1,
+      "binding": [
+        [
+          "U3",
+          0.25,
+          "clearance"
+        ],
+        [
+          "J6",
+          0.25,
+          "clearance"
+        ],
+        [
+          "<wall hi>",
+          0.0,
+          "wall"
+        ]
+      ],
+      "binding_axis": "y",
+      "block": "decap:Y1",
+      "board": "tigard",
       "control_ok": false,
+      "foreign_pads": 2,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C23",
+        "C24",
+        "Y1"
+      ],
       "n": 3,
+      "nets": 2,
+      "nets_ignored": 4,
       "reach_mm": 1.4772,
       "reach_over_frozen": "inf",
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.0,
       "want_mm": 5.5642
     },
     "ulx3s/sheet:00000000-0000-0000-0000-000058d51cad": {
       "base_violation": 10.397,
+      "binding": [
+        [
+          "D30",
+          0.066,
+          "baseline"
+        ],
+        [
+          "D51",
+          0.05,
+          "baseline"
+        ],
+        [
+          "<wall hi>",
+          -9.89,
+          "wall"
+        ]
+      ],
+      "binding_axis": "x",
+      "block": "sheet:00000000-0000-0000-0000-000058d51cad",
+      "board": "ulx3s",
       "control_ok": false,
+      "foreign_pads": 35,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "B0",
+        "BAT1",
+        "C1",
+        "C10",
+        "C11",
+        "C12",
+        "C13",
+        "C14",
+        "C17",
+        "C19",
+        "C2",
+        "C20",
+        "C22",
+        "C23",
+        "C24",
+        "C25",
+        "C26",
+        "C27",
+        "C28",
+        "C29",
+        "C3",
+        "C30",
+        "C31",
+        "C32",
+        "C4",
+        "C47",
+        "C48",
+        "C49",
+        "C5",
+        "C50",
+        "C51",
+        "C53",
+        "C54",
+        "C55",
+        "C56",
+        "C57",
+        "C6",
+        "C60",
+        "C7",
+        "C8",
+        "C9",
+        "D10",
+        "D11",
+        "D12",
+        "D13",
+        "D14",
+        "D15",
+        "D16",
+        "D17",
+        "D27",
+        "J5",
+        "L1",
+        "L2",
+        "L3",
+        "Q1",
+        "Q2",
+        "R1",
+        "R10",
+        "R13",
+        "R2",
+        "R3",
+        "R4",
+        "R5",
+        "R6",
+        "R65",
+        "R66",
+        "R8",
+        "RA1",
+        "RA2",
+        "RA3",
+        "RB1",
+        "RB2",
+        "RB3",
+        "RP1",
+        "RP2",
+        "RP3",
+        "RV2",
+        "RV3",
+        "U3",
+        "U4",
+        "U5",
+        "U7",
+        "Y2"
+      ],
       "n": 83,
+      "nets": 34,
+      "nets_ignored": 75,
       "reach_mm": 0.0,
       "reach_over_frozen": null,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.0,
       "want_mm": 21.2739
     },
     "ulx3s/sheet:00000000-0000-0000-0000-000058d6d507": {
       "base_violation": 0.942,
+      "binding": [
+        [
+          "R31",
+          -0.117,
+          "baseline"
+        ],
+        [
+          "L1",
+          -0.424,
+          "baseline"
+        ],
+        [
+          "<wall hi>",
+          -0.95,
+          "wall"
+        ]
+      ],
+      "binding_axis": "y",
+      "block": "sheet:00000000-0000-0000-0000-000058d6d507",
+      "board": "ulx3s",
       "control_ok": false,
+      "foreign_pads": 39,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C16",
+        "C33",
+        "C34",
+        "C35",
+        "C52",
+        "U2"
+      ],
       "n": 6,
+      "nets": 39,
+      "nets_ignored": 24,
       "reach_mm": 0.0,
       "reach_over_frozen": null,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.1,
       "want_mm": 20.8813
     },
     "ulx3s/sheet:00000000-0000-0000-0000-000058d913ec": {
       "base_violation": 1.874019,
+      "binding": [
+        [
+          "AUDIO1",
+          -0.662,
+          "baseline"
+        ],
+        [
+          "U1",
+          0.058,
+          "baseline"
+        ],
+        [
+          "<wall hi>",
+          -9.89,
+          "wall"
+        ]
+      ],
+      "binding_axis": "x",
+      "block": "sheet:00000000-0000-0000-0000-000058d913ec",
+      "board": "ulx3s",
       "control_ok": false,
+      "foreign_pads": 16,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "D28",
+        "D29",
+        "R11",
+        "R12",
+        "R27",
+        "R28",
+        "R29",
+        "R30",
+        "R31",
+        "R32",
+        "R33",
+        "U10"
+      ],
       "n": 12,
+      "nets": 11,
+      "nets_ignored": 11,
       "reach_mm": 0.0,
       "reach_over_frozen": null,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.0,
       "want_mm": 17.0654
     },
     "watchy/decap:J3": {
       "base_violation": 1.76,
+      "binding": [
+        [
+          "R17",
+          0.0,
+          "baseline"
+        ],
+        [
+          "R16",
+          0.0,
+          "baseline"
+        ],
+        [
+          "C10",
+          0.0,
+          "baseline"
+        ],
+        [
+          "J2",
+          0.0,
+          "baseline"
+        ],
+        [
+          "<wall hi>",
+          -2.0124,
+          "wall"
+        ]
+      ],
+      "binding_axis": "x",
+      "block": "decap:J3",
+      "board": "watchy",
       "control_ok": false,
+      "foreign_pads": 13,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C22",
+        "C23",
+        "C24",
+        "C25",
+        "C26",
+        "C27",
+        "C28",
+        "C29",
+        "J3"
+      ],
       "n": 9,
+      "nets": 20,
+      "nets_ignored": 13,
       "reach_mm": 0.0,
       "reach_over_frozen": null,
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.0,
       "want_mm": 3.3873
     },
     "watchy/decap:U1": {
       "base_violation": 1.7,
+      "binding": [
+        [
+          "R18",
+          0.25,
+          "clearance"
+        ],
+        [
+          "U6",
+          0.0,
+          "baseline"
+        ],
+        [
+          "U4",
+          0.25,
+          "clearance"
+        ],
+        [
+          "J2",
+          0.0025,
+          "baseline"
+        ],
+        [
+          "<wall hi>",
+          -2.0124,
+          "wall"
+        ]
+      ],
+      "binding_axis": "x",
+      "block": "decap:U1",
+      "board": "watchy",
       "control_ok": false,
+      "foreign_pads": 15,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C14",
+        "U1"
+      ],
       "n": 2,
+      "nets": 5,
+      "nets_ignored": 3,
       "reach_mm": 0.6104,
       "reach_over_frozen": "inf",
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 1.4538,
       "want_mm": 6.0169
     },
     "watchy/decap:Y2": {
       "base_violation": 1.27,
+      "binding": [
+        [
+          "U5",
+          0.25,
+          "clearance"
+        ],
+        [
+          "J2",
+          0.0025,
+          "baseline"
+        ],
+        [
+          "<wall hi>",
+          -2.0124,
+          "wall"
+        ]
+      ],
+      "binding_axis": "x",
+      "block": "decap:Y2",
+      "board": "watchy",
       "control_ok": false,
+      "foreign_pads": 2,
       "frozen_mm": 0.0,
       "identity_violations": 0,
+      "members": [
+        "C16",
+        "C19",
+        "Y2"
+      ],
       "n": 3,
-      "reach_mm": 2.7608,
+      "nets": 2,
+      "nets_ignored": 4,
+      "reach_mm": 2.7607,
       "reach_over_frozen": "inf",
       "refusal": "",
+      "schema": 1,
       "slide_frozen_abs_mm": 0.0,
       "slide_frozen_mm": 0.0,
       "want_mm": 5.9854
@@ -389,7 +1449,7 @@
     "gain_mm_max": 16.6564,
     "gain_mm_median": 0.3052,
     "identity_violations": 0,
-    "ratio_median_where_frozen_moves": 5.0931,
+    "ratio_median_where_frozen_moves": 5.0941,
     "reach_mm_median": 1.0259,
     "refused": [
       {
@@ -414,7 +1474,9 @@
       {
         "blocks_derived": 1,
         "board": "sonde_u",
-        "reason": "1 ranked block(s): a sweep over fewer than 2 candidates compares nothing"
+        "counted": true,
+        "kind": "note",
+        "reason": "1 ranked block(s). Its rows ARE measured and counted -- this note exists because a board with one block cannot support a SELECTION claim, not because its reach is unmeasurable"
       }
     ],
     "slide_frozen_abs_mm_median": 0.0,

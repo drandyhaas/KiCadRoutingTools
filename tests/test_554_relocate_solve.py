@@ -280,6 +280,57 @@ def t_the_pad_gate_still_refuses():
           'the pad/hole gate was not consulted: %r' % why)
 
 
+def t_two_parts_that_both_move_are_checked_against_each_other():
+    """The per-part check EXCLUDES every moved ref, so this pair is invisible to it.
+
+    That exclusion is necessary -- `state.parts` still holds the old poses, so
+    testing a new pose against stale neighbours tests a board that will never
+    exist -- and it leaves exactly one hole: two parts that both move onto the
+    same spot. The LP should never propose it; the check is the belt.
+    """
+    st = _State([_Part('A', 0, 0, 1, 1), _Part('C', 4, 0, 5, 1)])
+    units = RL.rigid_units(st, None)
+    solo = RL.exact_refusal(st, units, {'A': (2.0, 0.0)})
+    check(solo == '', 'moving A alone into empty space was refused: %r' % solo)
+    both = RL.exact_refusal(st, units, {'A': (2.0, 0.0), 'C': (-2.0, 0.0)})
+    check(both.startswith('moved_pair_worsened:'),
+          'two parts moved onto the same spot were not caught: %r' % both)
+
+
+def t_the_exact_check_catches_what_the_GRAPH_permits():
+    """The load-bearing safety claim, on the case that falsified the old one.
+
+    The graph constrains ONE axis per pair, while a real gap is Euclidean. A pair
+    separated (0.24, 0.24) has a true gap of 0.339 -- legal at 0.25 -- so the
+    x-axis edge only requires 0.24, and shrinking y to 0 satisfies every edge
+    while driving the pair to 0.240 and into violation. Measured live on watchy,
+    glasgow_revC and ulx3s before this test existed.
+
+    So the module's guarantee is NOT "the graph cannot propose an illegal board".
+    It is "nothing is applied on the graph's word". This asserts the second.
+    """
+    st = _State([_Part('A', 0.0, 0.0, 1.0, 1.0),
+                 _Part('B', 1.24, 1.24, 2.24, 2.24)])
+    units = RL.rigid_units(st, None)
+    edges = [e for e in RL.order_graph(st, units) if e.source != 'wall']
+    check(len(edges) == 1, 'expected one pair edge, got %d' % len(edges))
+    if edges:
+        e = edges[0]
+        # The graph asks only for the axis separation it already has ...
+        check(close(e.gap_mm, 0.24, tol=1e-3),
+              'the pair edge requires %.4f; the diagonal case needs it to be the '
+              '0.24 axis separation, not the 0.339 true gap' % e.gap_mm)
+    # ... and this shift satisfies it while destroying the true gap.
+    ok_by_graph = RL.min_perturbation(st, units, edges, 'B', (0.0, -1.24))[0]
+    check(ok_by_graph is not None,
+          'the graph refused a shift it is supposed to permit, so this test no '
+          'longer exercises the hole it was written for')
+    why = RL.exact_refusal(st, units, {'B': (0.0, -1.24)})
+    check(why.startswith('geometry_worsened:'),
+          'THE SAFETY CLAIM FAILED: a shift the graph permits drove a legal pair '
+          'sub-clearance and the exact check let it through: %r' % why)
+
+
 def t_moving_nothing_is_never_a_refusal():
     st = row()
     check(RL.exact_refusal(st, RL.rigid_units(st, None), {'B': (0.0, 0.0)}) == '',

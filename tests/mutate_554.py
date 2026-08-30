@@ -51,6 +51,7 @@ RELOC = os.path.join(_ROOT, 'py_placer', 'placement', 'relocate.py')
 TARGETS = {'r': RELOC}
 
 T554 = os.path.join(_TESTS, 'test_554_order_graph.py')
+T554S = os.path.join(_TESTS, 'test_554_relocate_solve.py')
 
 _WALL_LO = (
     "            sep = lo_edge - usable[i]\n"
@@ -189,6 +190,87 @@ ROWS = [
      "    out = []\n    seen = set()\n    cur = node\n",
      "    return ()\n    out = []\n    seen = set()\n    cur = node\n",
      (T554,), 'KILLED'),
+
+    # ---- the exact re-check, and the rule it shipped wrong ------------------
+    # THE SECOND DEFECT THIS BRANCH SHIPPED, as a row. Gating geometry
+    # ABSOLUTELY refuses every shift on a board whose incumbent already
+    # violates -- 35% of esp_prog's parts, 61% of tigard's, 99% of watchy's.
+    ('exact-check-absolute', 'r',
+     "        if after > before + tol:\n",
+     "        if after > tol:\n",
+     (T554, T554S), 'KILLED'),
+
+    # The keep-out made absolute again: a neighbour already inside a declared
+    # zone can never yield, so one declaration freezes the whole corridor.
+    ('keepout-absolute', 'r',
+     "            if keepout_clear(ref, part.rects(part.x, part.y, part.rot)):\n",
+     "            if True:\n",
+     (T554, T554S), 'KILLED'),
+
+    # Declared claims stop being consulted at all. The relaxation leaking into
+    # the half that must stay hard is the way this design fails quietly.
+    ('intent-not-consulted', 'r',
+     "        if intent_ok is not None and not intent_ok(ref, nx, ny, part.rot):\n",
+     "        if False:\n",
+     (T554, T554S), 'KILLED'),
+
+    ('pad-gate-not-consulted', 'r',
+     "            if pads_ok is not None and not pads_ok(ref, nx, ny, part.rot, nbrs):\n",
+     "            if False:\n",
+     (T554, T554S), 'KILLED'),
+
+    # Two parts that BOTH move are checked only here -- the per-part pass
+    # excludes every moved ref, which is necessary and leaves exactly this hole.
+    ('moved-pair-unchecked', 'r',
+     "    for i, a in enumerate(order):\n",
+     "    for i, a in enumerate([]):\n",
+     (T554, T554S), 'KILLED'),
+
+    # ---- the ladder --------------------------------------------------------
+    # THE THIRD DEFECT, as a row: give up at the first refusal instead of
+    # trying a shorter dose. A ladder that stops at rung one is not a ladder.
+    ('ladder-stops-at-first-rung', 'r',
+     "            last_why = why\n            ref = why.split(':')[1] if ':' in why else ''\n",
+     "            last_why = why\n            return rel\n"
+     "            ref = why.split(':')[1] if ':' in why else ''\n",
+     (T554, T554S), 'KILLED'),
+
+    # THE FOURTH: pins carried across rungs, so every rung after the first
+    # failed for the first rung's reason.
+    ('pins-carry-across-rungs', 'r',
+     "        pinned = []\n        for _cut in range(max_cuts + 1):\n",
+     "        for _cut in range(max_cuts + 1):\n",
+     (T554, T554S), 'KILLED'),
+
+    # ---- the solve ---------------------------------------------------------
+    # A feasible point instead of the MINIMUM one. Still legal, still returns a
+    # corridor -- just not the smallest, which is the whole objective #554 names.
+    ('not-minimal-perturbation', 'r',
+     "    res = milp(c=np.ones(2 * n),\n",
+     "    res = milp(c=np.zeros(2 * n),\n",
+     (T554, T554S), 'KILLED'),
+
+    # A caller's pins ignored, so the cut loop cannot converge and a unit the
+    # exact check refused is asked to yield again.
+    ('pins-ignored-by-solver', 'r',
+     "    fixed_extra = {u: 0.0 for u in pinned}\n",
+     "    fixed_extra = {}\n",
+     (T554, T554S), 'KILLED'),
+
+    # The corridor budget silently not applied.
+    ('corridor-budget-ignored', 'r',
+     "                if (max_corridor_mm is not None\n",
+     "                if (max_corridor_mm is None and max_corridor_mm is not None\n",
+     (T554, T554S), 'KILLED'),
+
+    # ---- the inherited disclosure ------------------------------------------
+    # #553's selector is a measured NULL, and a relocation of a block it picked
+    # inherits that. Dropping the sentence is how a null gets laundered by the
+    # presence of a solver.
+    ('drop-no-efficacy-claim', 'r',
+     "                     disclosures=(NO_EFFICACY_CLAIM,))\n",
+     "                     disclosures=())\n",
+     (T554, T554S), 'KILLED'),
 
     # ---- an expected survivor, recorded rather than deleted -----------------
     # Dropping the deterministic sort on the adjacency lists. CPython dicts

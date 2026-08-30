@@ -27,6 +27,29 @@ material -- which is why `reach_over_frozen` is reported per row, why cells that
 move nothing in either arm are counted separately as `both_zero`, and why the
 summary leads with `cells_material` rather than with a win rate.
 
+WHAT `reach_mm` IS NOT: CLOSURE ON THE TARGET
+----------------------------------------------
+The direction comes from `net_centroid`, the centroid of pads on parts OUTSIDE
+the block -- and the yielding arm MOVES those parts. So a block that travels
+`reach_mm` does not close `reach_mm` of the gap to what it connects to: the
+target drifts with the corridor. These are board-frame travel numbers, and the
+distinction is not academic. Bounded by LP over the same envelope, the true
+closure is smaller on most cells and LARGER on a few (a neighbour yielding can
+carry the target toward the block):
+
+    kit-dev-coldfire net:JTAG    travels 16.78   closes at most 13.05
+    esp_prog decap:Y1            travels  3.41   closes at most  1.18
+    splitflap decap:U10          travels  0.00   closes at most  5.72
+    watchy decap:J3              travels  0.00   closes at most  4.65
+
+Substituting closure for travel leaves the aggregate verdict standing (11 of 23
+material either way), which is why MECHANISM HOLDS is not withdrawn -- but no
+single cell's number here is the closure, and two of the `both_zero` cells,
+which this file calls "the honest limit of the feature", do have room to close.
+Reported rather than repaired: computing closure needs a second LP per cell, and
+the mechanism question -- can neighbours yielding buy travel a frozen board
+cannot -- is answered by travel.
+
 `slide_frozen_mm` is a THIRD number and a different question, kept because it is
 what the rigid translate actually does: slide-until-contact under the block's TOTAL
 violation being no worse. It is a LOOSER rule than the order graph's per-pair one
@@ -216,11 +239,23 @@ def board_rows(name, *, ignore_nets=IGNORE_NETS, sources=GROUP_SOURCES,
     # "connects to nothing outside itself" and "sits exactly on its partners" are
     # different facts.
     ranked = sorted(disps, key=lambda d: (-d.distance_mm, d.block))
+    # A NOTE, not a skip. An earlier version printed "SKIP <board>" here and
+    # then measured and COUNTED the board's rows anyway -- and on sonde_u that
+    # silently-kept row supplied the 11th material cell and the 6th material
+    # board, which are exactly the floors the regen test pins. A run that says
+    # it skipped a board and counts it is worse than either choice.
+    #
+    # The row is kept, because it is a valid measurement: this study asks how
+    # far ONE block travels, which is well defined on a board with one block.
+    # The <2-candidate gate belongs to a SELECTION study (#553's recall), where
+    # a ranking over one candidate made no choice. Different question.
     skipped = None
     if len(ranked) < MIN_CANDIDATES:
-        skipped = {'board': name,
-                   'reason': f'{len(ranked)} ranked block(s): a sweep over fewer '
-                             f'than {MIN_CANDIDATES} candidates compares nothing',
+        skipped = {'board': name, 'kind': 'note', 'counted': True,
+                   'reason': f'{len(ranked)} ranked block(s). Its rows ARE '
+                             f'measured and counted -- this note exists because '
+                             f'a board with one block cannot support a SELECTION '
+                             f'claim, not because its reach is unmeasurable',
                    'blocks_derived': len(blocks)}
     if top_k:
         ranked = ranked[:top_k]
@@ -285,7 +320,10 @@ def board_rows(name, *, ignore_nets=IGNORE_NETS, sources=GROUP_SOURCES,
             'reach_mm': round(r_yield.reach_mm, 4),
             'reach_over_frozen': (None if ratio is None else
                                   ('inf' if ratio == math.inf else ratio)),
-            'binding': [list(x) for x in r_yield.binding.get('x', ())][:6],
+            'binding_axis': r_yield.binding_axis,
+            # The chain on the axis that actually BOUND. Recording the x
+            # chain unconditionally named the wrong parts on 6 of 24 cells.
+            'binding': [list(x) for x in r_yield.binding_chain][:6],
             'refusal': r_yield.refusal or r_frozen.refusal,
             # Must always be 0. A non-zero count means the incumbent board does
             # not satisfy its own constraints, and every number above is void.
@@ -451,13 +489,35 @@ def self_test():
     # 3. `make_state` must not be handed move_refs. THE trap: every ref outside
     #    move_refs becomes locked, which would freeze the board this sweep is
     #    measuring room in -- silently, and in the direction that confirms the
-    #    null. Asserted on the source, because the symptom is invisible.
+    #    null.
+    #
+    #    Asserted on the parsed SHAPE of the call, not on a substring. The first
+    #    version grepped the function body for the literal `move_refs=`, and
+    #    `move_refs = _mr` (spaces) or `**{'move' + '_refs': ...}` both walked
+    #    straight past it -- including versions that lock half the board. An
+    #    absence guard has to anticipate every spelling; a shape guard does not.
+    import ast
     src = open(os.path.abspath(__file__), encoding='utf-8').read()
-    body = src.split('def board_rows', 1)[1].split('\ndef ', 1)[0]
-    if 'move_refs' in body and 'move_refs=' in body.replace(
-            'move_refs is deliberately NOT passed', ''):
-        fails.append('board_rows passes move_refs to make_state: every non-member '
-                     'becomes locked and the sweep measures the frozen case')
+    fn = next((n for n in ast.walk(ast.parse(src))
+               if isinstance(n, ast.FunctionDef) and n.name == 'board_rows'),
+              None)
+    if fn is None:
+        fails.append('board_rows not found: this check cannot be evaluated')
+    else:
+        calls = [c for c in ast.walk(fn) if isinstance(c, ast.Call)
+                 and getattr(c.func, 'attr', None) == 'make_state']
+        if not calls:
+            fails.append('board_rows makes no make_state call, so the sweep is '
+                         'not building the state this check is about')
+        for c in calls:
+            names = [k.arg for k in c.keywords]
+            if 'move_refs' in names:
+                fails.append('board_rows passes move_refs to make_state: every '
+                             'non-member becomes locked and the sweep measures '
+                             'the frozen case while claiming to measure room')
+            if any(k.arg is None for k in c.keywords):
+                fails.append('board_rows splats **kwargs into make_state, so this '
+                             'check can no longer see whether move_refs is passed')
 
     # 4. The verdict must key on MAGNITUDE, not on a win rate. `reach >= frozen`
     #    is a theorem (pinning only removes variables), so a summary that called
@@ -543,7 +603,7 @@ def main(argv=None):
         rows.extend(r)
         if sk:
             skipped.append(sk)
-            print('SKIP %s: %s' % (sk['board'], sk['reason']))
+            print('NOTE %s: %s' % (sk['board'], sk['reason']))
     print()
     print(format_table(rows))
     summary = summarise(rows, skipped)

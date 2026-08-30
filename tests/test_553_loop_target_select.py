@@ -261,10 +261,15 @@ def t_the_default_verdict_gains_exactly_one_key():
     # The whole key set, not just the absence of `target_select_*`. The
     # earlier version of this check was named for a claim it did not make:
     # any unrelated new key passed it.
+    # `relocate` joined the set in #554, deliberately and by the same argument
+    # that put `target_select` here: it is an always-present echo of the mode,
+    # so a machine consumer cannot read the verdict without learning which one
+    # ran. Updating this list is the intended way to admit such a key -- the
+    # guard exists to make the addition a decision rather than an accident.
     check(sorted(s) == [
         'failed_nets_after', 'failed_nets_before', 'failures_after',
         'failures_before', 'group_by', 'iterations_after', 'iterations_before',
-        'max_displacement', 'max_target_pins', 'output', 'rounds',
+        'max_displacement', 'max_target_pins', 'output', 'relocate', 'rounds',
         'rounds_accepted', 'rounds_run', 'rounds_screened', 'target_select',
         'vias_after', 'vias_before', 'work_dir'],
         f'and the verdict is the OLD key set plus exactly target_select '
