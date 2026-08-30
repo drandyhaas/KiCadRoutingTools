@@ -57,34 +57,58 @@ def make_config(pcb: PCBData, track: float, clearance: float,
                            grid_step=grid_step, layers=layers, **kw)
 
 
-def _band_cells(coord: GridCoord, window: PCBData, band: Band,
-                num_layers: int, slack: float) -> np.ndarray:
-    """Every window cell outside [lo(x) - slack, hi(x) + slack], on every
-    layer, as an (N, 3) int32 array for add_blocked_cells_batch."""
-    lo_fn, hi_fn = band
+def _band_cells(coord: GridCoord, window: PCBData, band,
+                layers: List[str], slack: float) -> np.ndarray:
+    """Every window cell outside the band, as an (N, 3) int32 array for
+    add_blocked_cells_batch.
+
+    `band` is either (lo(x), hi(x)) applied to every layer, or a dict
+    {layer_name: fn(x) -> (lo, hi)} -- a per-layer corridor, where
+    lo > hi means the layer is closed at that x. That is how a caller
+    REQUIRES a layer: close the other one. A layer absent from the
+    dict is closed everywhere."""
     x0, y0, x1, y1 = window.board_info.board_bounds
     gx0, gy0 = coord.to_grid(x0, y0)
     gx1, gy1 = coord.to_grid(x1, y1)
     rows = []
+    per_layer = isinstance(band, dict)
     for gx in range(gx0, gx1 + 1):
         x = coord.to_float(gx, 0)[0]
-        lo = lo_fn(x) - slack if lo_fn is not None else -1e9
-        hi = hi_fn(x) + slack if hi_fn is not None else 1e9
-        glo = coord.to_grid(0.0, lo)[1]
-        ghi = coord.to_grid(0.0, hi)[1]
-        for gy in range(gy0, gy1 + 1):
-            if gy < glo or gy > ghi:
-                for L in range(num_layers):
+        for L, lname in enumerate(layers):
+            if per_layer:
+                fn = band.get(lname)
+                if fn is None:
+                    lo, hi = 1e9, -1e9
+                else:
+                    lo, hi = fn(x)
+            else:
+                lo_fn, hi_fn = band
+                lo = lo_fn(x) if lo_fn is not None else -1e9
+                hi = hi_fn(x) if hi_fn is not None else 1e9
+            lo, hi = lo - slack, hi + slack
+            if lo > hi:
+                for gy in range(gy0, gy1 + 1):
+                    rows.append((gx, gy, L))
+                continue
+            glo = coord.to_grid(0.0, lo)[1]
+            ghi = coord.to_grid(0.0, hi)[1]
+            for gy in range(gy0, gy1 + 1):
+                if gy < glo or gy > ghi:
                     rows.append((gx, gy, L))
     if not rows:
         return np.zeros((0, 3), dtype=np.int32)
     return np.asarray(rows, dtype=np.int32)
 
 
+VIRTUAL_NET = 10 ** 7      # foreign net id for virtual copper (no such net)
+
+
 def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
             b: Point, b_layer: str, cfg: GridRouteConfig,
-            band: Optional[Band] = None, margin: float = 1.0,
+            band=None, margin: float = 1.0,
             band_slack: float = 0.0, net_clearances: Optional[dict] = None,
+            virtual: Optional[List[Tuple[Point, Point, str]]] = None,
+            track_width: Optional[float] = None,
             verbose: bool = False
             ) -> Optional[Tuple[List[Segment], List[Via]]]:
     """Route `net_id` from the copper end at `a` (on `a_layer`) to the
@@ -97,8 +121,13 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     the window (the caller decides what a refusal means).
 
     `band`: (lo(x), hi(x)) in board mm, the y interval the connection may
-    occupy; either side may be None. `margin`: how far the search window
-    extends past the two points' bounding box.
+    occupy (either side None), or {layer: fn(x) -> (lo, hi)} per layer
+    with lo > hi closing that layer at that x -- which is how a caller
+    REQUIRES a layer somewhere. `virtual`: copper that does not exist
+    yet but will -- (p, q, layer) centrelines of lanes not routed yet --
+    stamped as foreign obstacles so a via is never placed where a later
+    lane must pass. `margin`: how far the search window extends past
+    the two points' bounding box.
     """
     coord = GridCoord(cfg.grid_step)
     layer_map = build_layer_map(cfg.layers)
@@ -110,6 +139,11 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     window = make_local_window(pcb, cx, cy, half)
     if not window.board_info.board_bounds:
         return None
+    if virtual:
+        w = track_width if track_width is not None else cfg.track_width
+        window.segments = list(window.segments) + [
+            Segment(p[0], p[1], q[0], q[1], w, layer, VIRTUAL_NET)
+            for (p, q, layer) in virtual if layer in layer_map]
 
     obstacles = build_base_obstacle_map(window, cfg, [net_id],
                                         net_clearances=net_clearances)
@@ -122,8 +156,10 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     keep = same_net_pad_via_keepout_cells(pcb, net_id, cfg)
     if len(keep):
         obstacles.add_blocked_vias_batch(keep)
-    if band is not None and (band[0] is not None or band[1] is not None):
-        cells = _band_cells(coord, window, band, len(cfg.layers), band_slack)
+    if band is not None and (isinstance(band, dict)
+                             or band[0] is not None or band[1] is not None):
+        cells = _band_cells(coord, window, band, list(cfg.layers),
+                            band_slack)
         if len(cells):
             obstacles.add_blocked_cells_batch(cells)
 
