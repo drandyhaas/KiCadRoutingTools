@@ -114,14 +114,26 @@ ROWS = [
      "            if False:\n                continue\n",
      (T554,), 'SURVIVED'),
 
-    # The guard that actually carries it. A rigid translate leaves intra-block
-    # geometry invariant, and on a real board members sit sub-clearance already,
-    # so constraining those pairs makes a block veto its own every candidate --
-    # the exact reason `quench.group_move_valid` excludes them.
-    ('intra-unit-edge-kept', 'r',
+    # ... and the mirror image, also an EXPECTED SURVIVOR: the `lo == hi` guard
+    # is unreachable while the fast path stands. The two are each other's
+    # redundancy, which is why NEITHER can be killed alone and the finding is
+    # that there are two. The row below removes both.
+    ('intra-unit-late-guard', 'r',
      "            if lo == hi:\n                continue\n",
      "            if False:\n                continue\n",
-     (T554,), 'KILLED'),
+     (T554,), 'SURVIVED'),
+
+    # BOTH removed -- the only edit that lets an intra-block pair reach the graph.
+    # A rigid translate leaves that geometry invariant, and on a real board
+    # members sit sub-clearance already, so constraining those pairs makes a
+    # block veto its own every candidate: the exact reason
+    # `quench.group_move_valid` excludes them.
+    ('intra-unit-edge', 'r',
+     [("            if ua == ub:\n                continue\n",
+       "            if False:\n                continue\n"),
+      ("            if lo == hi:\n                continue\n",
+       "            if False:\n                continue\n")],
+     None, (T554,), 'KILLED'),
 
     # A block containing a locked member stops being pinned, so the solve
     # cheerfully proposes moving a part the user nailed down.
