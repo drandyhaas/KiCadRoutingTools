@@ -293,10 +293,21 @@ def t_it_refuses_rather_than_inventing_when_there_is_no_span():
     # guard only the caller protects is a guard that disappears the moment
     # someone adds a second caller.
     from placement import legality as leg
-    report('arrangement_census refuses bounds=None on its own',
-           CP.arrangement_census(pcb, [], set(), {}, 2.0, None, leg) is None)
+    # With REAL parts, so the refusal cannot be masked by the empty-sides
+    # path: a version that invents (0,0,1,1) instead of refusing returns a
+    # populated document here, and this row goes red.
+    live = parse_kicad_pcb(p)
+    parts = [g for g in leg.graded_parts_from_file(live, p) if not g.synthetic]
+    report('the fixture has parts, so the refusal is not vacuous',
+           len(parts) >= 3, str(len(parts)))
+    report('arrangement_census refuses bounds=None on its own, WITH parts',
+           CP.arrangement_census(live, parts, set(), {}, 2.0, None, leg)
+           is None)
+    report('  ...and still answers when bounds ARE given (the control)',
+           CP.arrangement_census(live, parts, set(), {}, 2.0,
+                                 live.board_info.board_bounds, leg) is not None)
     report('  ...and refuses an EMPTY part set rather than dividing by zero',
-           CP.arrangement_census(pcb, [], set(), {}, 2.0,
+           CP.arrangement_census(live, [], set(), {}, 2.0,
                                  (0.0, 0.0, 10.0, 10.0), leg) is None)
 
 

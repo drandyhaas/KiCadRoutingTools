@@ -193,18 +193,32 @@ def congestion_bins(pcb_data, net_ids, num_layers, bin_mm,
     WHEN NOTHING DEMANDS THEM. The result was keyed off `owners`, which only
     gains a key where some net has a terminal -- so a window with nothing in
     it never entered the dict and `check_pockets` could not represent an
-    empty region at all (esp_prog: 44 of 128 in-outline windows at 2mm).
-    Such a bin comes back with `owners` empty and its REAL free area, which
-    is what separates "empty" from "full of another net's copper".
+    empty region at all (esp_prog: 44 of 128 windows over the bbox at 2mm).
+    Such a bin comes back with `owners` empty and its free area computed the
+    same way as everyone else's, which is what separates "empty" from "full
+    of another net's copper".
+
+    That free area is FLOORED AT 5% of the bin, here as everywhere, and the
+    floor is not decoration at small bins: a segment is charged wholly to its
+    midpoint bin, so `used` overshoots as the bin shrinks. Measured share of
+    no-demand windows returning the floor rather than a real remainder --
+    esp_prog 0% at 2mm, 16.9% at 1mm, 100% at 0.25mm; glasgow_revC 1.1% /
+    1.3% / 78.0%. At the 0.25mm census floor the empty-vs-occupied
+    distinction is therefore saturated away on most windows; ask it at the
+    2mm default, which is what `check_pockets` uses.
 
     THE A* CONSUMER NEVER PASSES THIS. `build_congestion2` omits it, so the
-    key sequence is `owners`' own iteration order, byte for byte as before --
-    and the order is load-bearing, not incidental: `congestion2_rows`
-    iterates `bins.items()` and appends into the list that becomes the
-    np.array handed to `merge_track_proximity_costs`. Hence the extra keys
-    are APPENDED to `list(owners)` rather than unioned through a set.
-    (Defensively, a demand-0 bin scores ratio 0 <= thresh and is skipped
-    there anyway.)
+    key sequence is `owners`' own iteration order, byte for byte as before,
+    and the extra keys are APPENDED to `list(owners)` rather than unioned
+    through a set. To be accurate about why: the np.array `congestion2_rows`
+    builds from `bins.items()` reaches consumers that are order-INSENSITIVE
+    (the Rust `set_layer_proximity_batch` max-inserts per cell; the SUM
+    branch goes through np.unique/bincount), so a permutation would not
+    change what the router prices cells with. What insertion order does
+    decide is the tie-break in `check_pockets`' stable `sort(key=-ratio)`.
+    Preserving it is cheap and keeps the function's contract exact either
+    way. (Defensively, a demand-0 bin scores ratio 0 <= thresh and is skipped
+    in `congestion2_rows` anyway, at any non-negative threshold.)
     """
     bin_mm = max(0.25, bin_mm)
     num_layers = max(1, num_layers)
@@ -243,8 +257,24 @@ def congestion_bins(pcb_data, net_ids, num_layers, bin_mm,
             copper[b] = copper.get(b, 0.0) + p.size_x * p.size_y
     bin_area_total = bin_mm * bin_mm * num_layers
     bins = {}
-    keys = owners.keys() if not include_bins else (
-        list(owners) + [b for b in include_bins if b not in owners])
+    if include_bins is None:
+        extra = []
+    else:
+        # Materialise before the emptiness test: `not <numpy array>` raises,
+        # and an iterator would be consumed by it.
+        extra = list(include_bins)
+        bad = next((b for b in extra
+                    if not (isinstance(b, tuple) and len(b) == 2)), None)
+        if bad is not None:
+            # A bare (bx, by) instead of a LIST of them used to insert an int
+            # key, which then failed three frames away in a consumer's
+            # `for (bx, by), ... in bins.items()`. Fail where the mistake is.
+            raise TypeError(
+                'congestion_bins: include_bins takes an iterable of (bx, by) '
+                'bin keys; got %r. A single key must be wrapped in a list.'
+                % (bad,))
+    keys = owners.keys() if not extra else (
+        list(owners) + [b for b in extra if b not in owners])
     for b in keys:
         own = owners.get(b, frozenset())
         used = copper.get(b, 0.0)

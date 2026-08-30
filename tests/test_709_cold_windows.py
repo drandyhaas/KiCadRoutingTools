@@ -16,7 +16,10 @@ import math
 import os
 import sys
 
-RUN_ALL_FAST_OK = True          # imports the census, routes nothing
+# Imports the census and routes nothing. Comment ABOVE the marker: a
+# trailing one voids run_all's `...True\s*$` anchor (see the sibling
+# test_709_congestion_bins_include.py, where it really did).
+RUN_ALL_FAST_OK = True
 RUN_ALL_TIMEOUT = 300
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
