@@ -970,6 +970,8 @@ class Corridor:
             placed.append((s_l, min(o_l, o_e), max(o_l, o_e)))
         self.leg_layer = {}
         crossings = {}                       # crossed lane -> [leg s]
+        cross_by = {}                        # crossed lane -> [(s, owner)]
+        leg_cross = {}                       # leg owner -> [crossed lanes]
         for sg in (-1, 1):
             xs = [nm for nm in self.exit_block if self.exit_side.get(nm) == sg]
             if not xs:
@@ -990,19 +992,76 @@ class Corridor:
                         o_m, s_end = self.target_o[om], self.se[om][0]
                     if s_end > s_l + 0.05 and lo_ < o_m < hi_:
                         crossings.setdefault(om, []).append(s_l)
+                        cross_by.setdefault(om, []).append((s_l, nm))
+                        leg_cross.setdefault(nm, []).append(om)
         self.crossings = crossings
-        for om, legs_s in crossings.items():
-            leg_L = self.leg_layer.get(om) or next(iter(self.leg_layer.values()))
-            other = 'B.Cu' if leg_L == 'F.Cu' else 'F.Cu'
-            a = min(legs_s) - LEG_REQ
-            b = max(legs_s) + LEG_REQ
-            if om in self.exit_block:
-                # ...but never past its own corner: the via goes there
-                b = min(b, self.exit_leg_s[om] - 0.03)
-            else:
-                b = min(b, self.se[om][0] - 0.03)
-            if b > a:
-                req[om].append((a, b, other))
+        leg_req_min = {}
+        if two:
+            # TWO-PAGE LEG ECONOMICS. A leg crossing a lane on the
+            # OTHER layer is free -- the block-wide layer rule priced
+            # every crossing as a forced dive (2 vias per crossed
+            # lane), which is exactly the SA7-class 4-via overspend
+            # (t7 K28: the human pays 2). Each leg picks the layer
+            # that minimises what is actually paid: 2 per crossed
+            # PAGE lane on its own layer, 1 if it differs from its
+            # lane's page (the corner via), 1 if it differs from the
+            # stub's layer. A crossed page lane dives only under a
+            # SAME-layer leg; a swimmer adapts per leg. Overlapping
+            # opposite-layer intervals from adjacent disagreeing legs
+            # are dropped in pairs (the K19 lesson: both layers
+            # closed refuses the lane before the router sees it); the
+            # obstacle map adjudicates there.
+            for nm in self.exit_block:
+                own = sched.page.get(nm) if sched else None
+                pgs = [sched.page.get(om) if sched else None
+                       for om in leg_cross.get(nm, ())]
+                cost = {}
+                for L in ('F.Cu', 'B.Cu'):
+                    c = 2 * sum(1 for p in pgs if p == L)
+                    if own is not None and own != L:
+                        c += 1
+                    if self.ctx.dest_layer[nm] != L:
+                        c += 1
+                    cost[L] = c
+                self.leg_layer[nm] = min(('F.Cu', 'B.Cu'),
+                                         key=lambda L: cost[L])
+            ivs = {}
+            for om, hits in cross_by.items():
+                own_p = sched.page.get(om) if sched else None
+                for (s_l, owner) in hits:
+                    Lg = self.leg_layer[owner]
+                    if own_p is not None and own_p != Lg:
+                        continue             # different layers: free
+                    other = 'B.Cu' if Lg == 'F.Cu' else 'F.Cu'
+                    a = s_l - LEG_REQ
+                    b = s_l + LEG_REQ
+                    if om in self.exit_block:
+                        b = min(b, self.exit_leg_s[om] - 0.03)
+                    else:
+                        b = min(b, self.se[om][0] - 0.03)
+                    if b > a:
+                        ivs.setdefault(om, []).append((a, b, other))
+            for om, vv in ivs.items():
+                kept_iv = [iv for iv in vv
+                           if not any(o[2] != iv[2] and iv[0] < o[1]
+                                      and o[0] < iv[1]
+                                      for o in vv if o is not iv)]
+                if kept_iv:
+                    leg_req_min[om] = min(a for (a, _b, _L) in kept_iv)
+                    req[om].extend(kept_iv)
+        else:
+            for om, legs_s in crossings.items():
+                leg_L = self.leg_layer.get(om) or next(iter(self.leg_layer.values()))
+                other = 'B.Cu' if leg_L == 'F.Cu' else 'F.Cu'
+                a = min(legs_s) - LEG_REQ
+                b = max(legs_s) + LEG_REQ
+                if om in self.exit_block:
+                    # ...but never past its own corner: the via goes there
+                    b = min(b, self.exit_leg_s[om] - 0.03)
+                else:
+                    b = min(b, self.se[om][0] - 0.03)
+                if b > a:
+                    req[om].append((a, b, other))
         if two:
             # RIBBON page rules. A page lane is required on its page
             # over the whole schedule region -- from just past its
@@ -1056,8 +1115,11 @@ class Corridor:
                     b = max(b, min(self.s1 - 0.02, max(xs_) + HW_COL))
                 if nm in self.exit_block:
                     b = min(b, self.exit_leg_s[nm] - 0.35)
-                if nm in crossings:
-                    b = min(b, min(crossings[nm]) - LEG_REQ - 0.03)
+                if nm in leg_req_min:
+                    # the page req stops only at a CONFLICTING leg's
+                    # dive stretch -- a free (other-layer) crossing no
+                    # longer cuts it short
+                    b = min(b, leg_req_min[nm] - 0.03)
                 if b > a:
                     req[nm].append((a, b, pg))
             # SWIMMER x SWIMMER needs no assigned crossing: swimmers
