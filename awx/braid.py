@@ -652,6 +652,15 @@ class Corridor:
         # SWE, refused against SWE's virtual copper every attempt).
         self.join_block = {}
         self.join_leg_s = {}
+        # (DIRECT join slots -- each joiner at its own tooth offset
+        # instead of a block beyond the whole field -- were tried for
+        # the two-page ribbon and measured WORSE: the reshuffled launch
+        # permutation wrecks the pages (K19: F13/B5/sw1 -> F8/B6/sw5,
+        # opens 2 -> 5). The block's excursion realises a joiner's
+        # crossings in copper-free space, which is what keeps the
+        # launch order page-friendly; the price it charges -- the
+        # outermost joiner refused at the search budget -- is paid by
+        # the x4 refusal retry in run() instead.)
         for sg in (-1, 1):
             js = [nm for nm in self.joiners if self.join_side[nm] == sg]
             if not js:
@@ -1708,6 +1717,27 @@ class Corridor:
                 unrouted = [om for om in M if om != nm and om not in routed]
                 res = self.route_lane(nm, self.virtual_of(unrouted),
                                       self.virtual_vias_of(unrouted))
+                if res is None and sched.two_page:
+                    # BUDGET ESCALATION (two-page only). A refused lane
+                    # whose plan is feasible usually died at the SEARCH
+                    # budget, not at a wall: K19 SODT1's band flood
+                    # reaches its stub through open corridor, its own
+                    # class routes at 42..49k full iterations, and its
+                    # forward frontier dies at 12.7k. Retry once with
+                    # the budget quadrupled -- only on refusal, so the
+                    # fast path pays nothing.
+                    import copy as _copy
+                    cfg0 = ctx.cfg
+                    big = _copy.copy(cfg0)
+                    big.max_iterations = 4 * max(cfg0.max_iterations, 50_000)
+                    ctx.cfg = big
+                    try:
+                        res = self.route_lane(nm, self.virtual_of(unrouted),
+                                              self.virtual_vias_of(unrouted))
+                    finally:
+                        ctx.cfg = cfg0
+                    if res is not None:
+                        log(f'    rescued at x4 budget: {nm}')
                 if res is None:
                     self.refused.append(nm)
                     log(f'    refused: {nm}')
