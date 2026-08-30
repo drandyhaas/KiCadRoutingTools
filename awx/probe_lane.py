@@ -42,7 +42,9 @@ def main():
     c.offsets(0.35)
     c.reserve_intervals()
     sched = Schedule(c.launch, c.target, ctx.tooth_layer, log=print)
-    cols = sched.columns({d: 1 for d in sched.divers}, {d: 0 for d in sched.divers})
+    cols, gate = c.plan_columns(sched, {d: 1 for d in sched.divers},
+                                {d: 0 for d in sched.divers})
+    print(f'  {len(cols)} columns, gate {gate}')
     c.lay_lanes(cols)
     nm = a.net
     c.debug_lane(nm)

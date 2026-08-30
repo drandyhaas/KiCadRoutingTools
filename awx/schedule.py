@@ -13,6 +13,7 @@ corridor's business, not this module's.
 """
 from __future__ import annotations
 
+import os
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 
@@ -132,7 +133,8 @@ class Schedule:
         return ((self.lidx[anm] < self.lidx[bnm])
                 != (self.trank[anm] < self.trank[bnm]))
 
-    def columns(self, gaps: Dict[str, int], lead: Dict[str, int]
+    def columns(self, gaps: Dict[str, int], lead: Dict[str, int],
+                gate: Optional[str] = None
                 ) -> List[List[Tuple[str, str]]]:
         """The schedule as columns of concurrent adjacent swaps: a
         transposition sort. Each column swaps a maximal set of disjoint
@@ -153,7 +155,20 @@ class Schedule:
         serial pass over the sequence, which mis-placed a diver whose
         launch slot already was its target slot -- K32's, and the merged
         corridor's, "phantom swap". Sorting by adjacent inversions has no
-        such state.)"""
+        such state.)
+
+        `gate`: the take-off rule. 'strict' holds a take-off while ANY
+        diver in flight still has to cross the candidate. 'last' lets it
+        go when the flying diver's only crossing left IS the candidate:
+        that crossing is the flyer's landing whichever layer it happens
+        on, so nothing is saved by waiting -- and the flyer cannot land
+        until the candidate reaches it, which the hold forbids, so the
+        strict rule deadlocked until the empty-column override (K28:
+        SDQ0's seven-column chain serialised sixteen columns behind
+        SDQ15's for a crossing that cost no via). 'off' never gates:
+        columns for vias, when the corridor is out of columns."""
+        gate = gate or os.environ.get('SCHED_GATE', 'last')
+        assert gate in ('strict', 'last', 'off'), gate
         trank, divers = self.trank, self.divers
         seq = list(self.launch)
         cols: List[List[Tuple[str, str]]] = []
@@ -199,8 +214,9 @@ class Schedule:
                     # to cross this one (it would be crossed mid-flight
                     # and pay two vias) -- unless waiting stalls the
                     # whole schedule, when the flight goes anyway
-                    if not override and any(e in on_b for e in todo[m]
-                                            if e in divers):
+                    if not override and gate != 'off' and any(
+                            e in on_b and (gate == 'strict' or len(todo[e]) > 1)
+                            for e in todo[m] if e in divers):
                         gate_block = True
                         i += 1
                         continue

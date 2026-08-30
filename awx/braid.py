@@ -108,6 +108,14 @@ LEG_O = 0.2                    # ...and beyond its two ends in o: a leg
 TOL_S = 0.5                    # "at the same s" for head-on classification
 DIST_O = 0.2                   # distinct offsets for head-on classification
 CROSS_TUBE = 1.0               # a lane's freedom through a crossing region
+W_GATE = 0.33                  # narrowest swap column the gated schedule
+                               # gets: every clean gated K on the bench
+                               # had W >= 0.343 (K21, W=0.322, needed
+                               # its third attempt); below it a lane
+                               # passed in one column and diving in the
+                               # next has no cell for its via, so the
+                               # gate yields and columns are spent on
+                               # vias instead (see Corridor.run)
 
 
 def build_obstacles(pcb, nid, kids, layer):
@@ -940,14 +948,64 @@ class Corridor:
     def in_cross(self, s):
         return any(a <= s <= b for (a, b) in self.cross_iv)
 
+    def _band_samples(self, nm, s_lo, s_hi, step=0.002, eps=1e-7):
+        """The s values the lane's band edges are evaluated at (see
+        band_of): a fine grid over [s_lo, s_hi], every lane's polyline
+        vertices, and each STEP of the structure -- a lane's ends, a
+        layer rule's bounds, and every s where another lane crosses
+        this one -- as a pair of samples a hair either side, so the
+        interpolation between samples never straddles a step."""
+        pts = {float(v) for v in np.arange(s_lo, s_hi + step, step)}
+        ms = np.array([p[0] for p in self.mid[nm]])
+        mo = np.array([p[1] for p in self.mid[nm]])
+        for om in self.members:
+            brk = [p[0] for p in self.mid[om]]
+            brk += [v for (xa, xb, _L) in self.req.get(om, ()) for v in (xa, xb)]
+            brk += [v for (lo, hi) in self.bwin.get(om, ()) for v in (lo, hi)
+                    if abs(v) < 1e8]
+            if om != nm:
+                # where the two lanes cross: d(s) = o_m(s) - o_nm(s) is
+                # piecewise linear between the union of both vertex
+                # sets, so a sign change locates each root exactly
+                os_ = np.array([p[0] for p in self.mid[om]])
+                oo_ = np.array([p[1] for p in self.mid[om]])
+                a, b = max(ms[0], os_[0]), min(ms[-1], os_[-1])
+                if b > a:
+                    v = np.array(sorted({a, b} | {float(x) for x in ms if a < x < b}
+                                        | {float(x) for x in os_ if a < x < b}))
+                    d = np.interp(v, os_, oo_) - np.interp(v, ms, mo)
+                    for i in range(len(v) - 1):
+                        if d[i] == 0.0:
+                            brk.append(float(v[i]))
+                        elif d[i] * d[i + 1] < 0:
+                            t = d[i] / (d[i] - d[i + 1])
+                            brk.append(float(v[i] + t * (v[i + 1] - v[i])))
+                    if d[-1] == 0.0:
+                        brk.append(float(v[-1]))
+            for v in brk:
+                v = float(v)
+                if s_lo - 1.0 <= v <= s_hi + 1.0:
+                    pts.update((v - eps, v, v + eps))
+        return np.array(sorted(pts))
+
     def band_of(self, nm):
         """The lane's corridor as a cell mask: between the neighbouring
         lanes present on that layer (never narrower than a grid cell),
         closed where the schedule requires the other layer; the join
         and exit legs as rectangles in (s, o); a loose tube through a
-        crossing region."""
+        crossing region.
+
+        The neighbour search is a function of s alone, so it runs on a
+        1-D sample of s (_band_samples) and the band edges lo(s), hi(s)
+        are interpolated onto the window's cells -- exact wherever they
+        are linear between samples, which the sample set arranges: a
+        2 um grid plus every vertex and every step, the steps doubled.
+        Evaluated per cell instead (K21 profile), the 20 neighbours'
+        interpolations over a 700k-cell window were 7.6 s of a 28 s
+        braid, the router's own search 0.2 s."""
         sp = self.spine
         cache = {}
+        BIG = 1e6
 
         def band(xs, ys, L):
             key = (float(xs[0]), float(xs[-1]), float(ys[0]), float(ys[-1]),
@@ -955,34 +1013,43 @@ class Corridor:
             if key not in cache:
                 X, Y = np.meshgrid(xs, ys, indexing='ij')
                 cache.clear()
-                cache[key] = sp.project(X, Y)
-            S, O = cache[key]
+                S, O = sp.project(X, Y)
+                cache[key] = (S, O, self._band_samples(nm, float(S.min()),
+                                                       float(S.max())))
+            S, O, sg = cache[key]
             ms = np.array([p[0] for p in self.mid[nm]])
             mo = np.array([p[1] for p in self.mid[nm]])
             present = (S >= ms[0] - 1e-9) & (S <= ms[-1] + 1e-9)
             o_nm = np.interp(S, ms, mo)
             okL = self.allowed_vec(nm, S, L)
-            prev = np.full(S.shape, -np.inf)
-            nxt = np.full(S.shape, np.inf)
+            o_nm1 = np.interp(sg, ms, mo)
+            prev = np.full(sg.shape, -BIG)
+            nxt = np.full(sg.shape, BIG)
             for om in self.members:
                 if om == nm:
                     continue
                 os_ = np.array([p[0] for p in self.mid[om]])
                 oo_ = np.array([p[1] for p in self.mid[om]])
-                pres = (S >= os_[0] - 1e-9) & (S <= os_[-1] + 1e-9)
+                pres = (sg >= os_[0] - 1e-9) & (sg <= os_[-1] + 1e-9)
                 if not pres.any():
                     continue
-                o_m = np.interp(S, os_, oo_)
-                m = pres & self.allowed_vec(om, S, L)
-                prev = np.where(m & (o_m < o_nm), np.maximum(prev, o_m), prev)
-                nxt = np.where(m & (o_m > o_nm), np.minimum(nxt, o_m), nxt)
-            lo = np.where(np.isfinite(prev), (prev + o_nm) / 2 + HALF_SEP, -np.inf)
-            hi = np.where(np.isfinite(nxt), (nxt + o_nm) / 2 - HALF_SEP, np.inf)
+                o_m = np.interp(sg, os_, oo_)
+                m = pres & self.allowed_vec(om, sg, L)
+                prev = np.where(m & (o_m < o_nm1), np.maximum(prev, o_m), prev)
+                nxt = np.where(m & (o_m > o_nm1), np.minimum(nxt, o_m), nxt)
+            lo1 = np.where(prev > -BIG / 2, (prev + o_nm1) / 2 + HALF_SEP, -BIG)
+            hi1 = np.where(nxt < BIG / 2, (nxt + o_nm1) / 2 - HALF_SEP, BIG)
+            lo = np.interp(S, sg, lo1)
+            hi = np.interp(S, sg, hi1)
             # never narrower than a grid cell: at the stub ends the
             # lanes are 0.25 apart and the corridor formula gives
             # 0.0115 -- a band that on an unlucky grid alignment holds
             # no cell at all. Clearance to the neighbours' copper is
-            # the obstacle map's job.
+            # the obstacle map's job. (A floor growing with the lane's
+            # slope was tried for K28 SDQ7 -- slope 6 where two movers
+            # pass it -- and measured inert: band_conn.py shows the
+            # 0.03 band connected end to end there; what refuses that
+            # lane is C5 inside the corridor, see Known walls.)
             lo = np.minimum(lo, o_nm - 0.03)
             hi = np.maximum(hi, o_nm + 0.03)
             ok = present & okL & (O >= lo) & (O <= hi)
@@ -1017,6 +1084,8 @@ class Corridor:
                            for v in (xa, xb)}
                           | {v for (lo, hi) in self.bwin.get(om, ())
                              for v in (lo, hi) if abs(v) < 1e8})
+            s_end = self.mid[om][-1][0]
+            s_start = self.mid[om][0][0]
             for a_, b_ in zip(self.mid[om], self.mid[om][1:]):
                 sa, sb = a_[0], b_[0]
                 inner = [v for v in cuts if sa + 1e-6 < v < sb - 1e-6]
@@ -1030,8 +1099,25 @@ class Corridor:
                     o_a = a_[1] + t_a * (b_[1] - a_[1])
                     o_b = a_[1] + t_b * (b_[1] - a_[1])
                     xy = sp.lane_xy([(s_a, o_a), (s_b, o_b)])
+                    # the tail -- the piece that ends AT the stub --
+                    # is stamped on the stub's layer only, like an
+                    # exit jog: two nets' stubs end at one point on
+                    # the two layers (the fanout gives a gap to one net
+                    # per layer), and a tail on both layers walled the
+                    # other net's end (K28 SWE on B, under SDQ14's
+                    # tail). A lane that reaches its tail on the other
+                    # layer still owns the stub's layer to land on.
+                    # The head -- the piece that starts AT the tooth --
+                    # likewise on the tooth's layer only (K28 SA4's F
+                    # tooth under SA1's B tooth at the same point).
+                    tail = abs(s_b - s_end) < 1e-6 and om not in self.exit_block
+                    head = abs(s_a - s_start) < 1e-6 and om not in self.join_block
                     for p_, q_ in zip(xy, xy[1:]):
                         for L in ('F.Cu', 'B.Cu'):
+                            if tail and L != self.ctx.dest_layer[om]:
+                                continue
+                            if head and L != self.ctx.tooth_layer[om]:
+                                continue
                             if self.allowed(om, s_mid, L):
                                 segs.append((p_, q_, L))
             for i, (s_l, oa, ob) in enumerate(self.legs[om]):
@@ -1123,6 +1209,30 @@ class Corridor:
             vias_all.extend(vias_o)
         return segs_all, vias_all
 
+    def plan_columns(self, sched, gaps, lead):
+        """The schedule's columns under the braid's gate policy; returns
+        (columns, gate). The take-off gate spends columns to save vias
+        (a diver crossed mid-flight surfaces and dives again: two
+        vias), and columns are what this bench's corridor is short of:
+        the swap region between the two escape fields is the same
+        4.5 mm at every K, and a column narrower than W_GATE has no
+        room for a via between two passes. Gated while the columns fit,
+        ungated when they do not (K28: 31 columns at W=0.147 and 9/26
+        lanes gated, 16 at 0.277 and 20/26 ungated; K21 goes from 14
+        columns and attempt 3 to 11 and attempt 0 at the same 28 vias;
+        K4..K19 stay gated, where ungated cost +2..+6 vias). The gated
+        form is 'last' (the strict gate deadlocked on a mutual crossing
+        until the empty-column override: K4..K19 identical, K21 one
+        attempt sooner, K28 31 -> 23 columns). SCHED_GATE pins a
+        policy. The probe tools go through here too, so they diagnose
+        the schedule the braid actually laid."""
+        gate = os.environ.get('SCHED_GATE')
+        if gate is None:
+            cols = sched.columns(gaps, lead, gate='last')
+            gate = 'last' if (self.L_free - 0.3) / (len(cols) + 1) \
+                >= W_GATE else 'off'
+        return sched.columns(gaps, lead, gate=gate), gate
+
     def run(self):
         ctx, log = self.ctx, self.log
         M = self.members
@@ -1157,11 +1267,12 @@ class Corridor:
         for attempt in range(6):
             self.offsets(ly_floor)
             sched = Schedule(self.launch, self.target, ctx.tooth_layer)
-            cols = sched.columns(gaps, lead)
+            cols, gate = self.plan_columns(sched, gaps, lead)
             self.lay_lanes(cols)
             swaps = [sw for col in cols for sw in col]
             log(f'  attempt {attempt}: {len(swaps)} swaps in {len(cols)} columns, '
                 f'W={self.W:.3f}, launch pitch >= {ly_floor:.2f}'
+                + (f', gate {gate}' if gate != 'last' else '')
                 + (f', {len(self.crossings)} lane(s) crossed by exit legs'
                    if self.crossings else '')
                 + (f', gaps {dict((d, g) for d, g in gaps.items() if g > 1)}'
@@ -1427,7 +1538,8 @@ def setup(board, names, dest, log, cluster=6.0):
         {nm: ends[nm][1] for nm in names}, pad_obs.seg_clear, D=cluster,
         log=log, spine_fn=lambda core: spine_of(core, relax=False),
         dest_ref={nm: ends[nm][2] for nm in names},
-        centres={nm: centre_of(ends[nm][2]) for nm in names})
+        centres={nm: centre_of(ends[nm][2]) for nm in names},
+        src_centres={nm: centre_of(ctx.src_ref[nm]) for nm in names})
     log(f'{len(groups)} corridor(s): ' + '  '.join(
         f'[{len(g)}] {",".join(g)}' for g in groups))
     # 0.025 grid: the fanout packs stub ends at 0.25, which is the legal

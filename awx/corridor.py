@@ -141,8 +141,8 @@ def furthest_members(names: Sequence[str], paths, stubs,
 
 def cluster_corridors(names: Sequence[str], paths, teeth, stubs,
                       pad_clear, D: float = 4.0, log=None,
-                      spine_fn=None, dest_ref=None, centres=None
-                      ) -> List[List[str]]:
+                      spine_fn=None, dest_ref=None, centres=None,
+                      src_centres=None) -> List[List[str]]:
     """Group nets into corridors.
 
     Two nets share a corridor when their stub ends are on the same
@@ -151,12 +151,20 @@ def cluster_corridors(names: Sequence[str], paths, teeth, stubs,
     stubs chains up whatever its length. A group is then
     checked against the spine it would get: a member whose stub lies
     past that spine's end, or whose tooth lies behind its start, is
-    kept only if its OWN lane -- at its own offset -- can run that
-    stretch without crossing a pad field (a stub along the next face
-    of the chip can: the lane runs past the corner outside the array;
-    a stub on the far face cannot). The others are split off and
-    regroup among themselves. Nothing here names a face: the test is
-    whether one spine can serve every member."""
+    kept only if its OWN lane can run that stretch without crossing a
+    pad field (a stub along the next face of the chip can: the lane
+    runs past the corner outside the array; a stub on the far face
+    cannot). The run is tried at the end's own offset and then stepped
+    OUTWARD from its array (`centres` / `src_centres`, the arrays'
+    centres per net) by a lane pitch at a time, up to a block's width:
+    a flank end never runs at its own offset -- the braid jogs it out
+    into a join or exit block first -- and at its own offset a flank
+    tooth one row further in grazes the array's outer pads (K28 SODT1,
+    0.06 mm from U1's outer row, split into a corridor of its own that
+    then collided with the main one; at K21 the same tooth passed
+    because the spine leaned 2 degrees the other way). The others are
+    split off and regroup among themselves. Nothing here names a face:
+    the test is whether one spine can serve every member."""
     idx = {n: i for i, n in enumerate(names)}
     parent = list(range(len(names)))
 
@@ -212,22 +220,50 @@ def cluster_corridors(names: Sequence[str], paths, teeth, stubs,
         keep, split = [], []
         P0, d0 = sp.P[0], sp.d[0]
         Pn, dn = sp.P[-1], sp.d[-1]
+
+        def run_clear(end, far, d, centre):
+            """Can a lane run from `end` to `far` (the stretch along
+            the spine direction `d`) -- at the end's own offset, or
+            jogged outward from the array centred at `centre` by up
+            to a block's width, the jog itself clear too."""
+            if pad_clear(end, far):
+                return True
+            if centre is None:
+                return False
+            nx, ny = end[0] - centre[0], end[1] - centre[1]
+            # the outward component across the spine direction
+            along = nx * d[0] + ny * d[1]
+            nx, ny = nx - along * d[0], ny - along * d[1]
+            h = math.hypot(nx, ny)
+            if h < 1e-9:
+                return False
+            nx, ny = nx / h, ny / h
+            for k in range(1, 4):
+                off = 0.35 * k
+                e2 = (end[0] + off * nx, end[1] + off * ny)
+                f2 = (far[0] + off * nx, far[1] + off * ny)
+                if pad_clear(end, e2) and pad_clear(e2, f2):
+                    return True
+            return False
+
         for nm in grp:
             # how far past the spine's end the stub lies, and how far
             # behind its start the tooth lies, along the spine; a member
-            # is reachable when its OWN lane -- at its own offset -- can
-            # run that stretch without crossing a pad field (a stub one
-            # face round the corner reads as "past the end, through the
-            # chip"; a flank tooth reads as "behind the start, clear")
+            # is reachable when its OWN lane can run that stretch
+            # without crossing a pad field (a stub one face round the
+            # corner reads as "past the end, through the chip"; a flank
+            # tooth reads as "behind the start, clear")
             t_e = ((stubs[nm][0] - Pn[0]) * dn[0] + (stubs[nm][1] - Pn[1]) * dn[1])
             t_0 = ((teeth[nm][0] - P0[0]) * d0[0] + (teeth[nm][1] - P0[1]) * d0[1])
             ok = True
             if t_e > 1.0:
                 back_pt = (stubs[nm][0] - t_e * dn[0], stubs[nm][1] - t_e * dn[1])
-                ok = pad_clear(stubs[nm], back_pt)
+                ok = run_clear(stubs[nm], back_pt, dn,
+                               (centres or {}).get(nm))
             if ok and t_0 < -1.0:
                 fwd_pt = (teeth[nm][0] - t_0 * d0[0], teeth[nm][1] - t_0 * d0[1])
-                ok = pad_clear(teeth[nm], fwd_pt)
+                ok = run_clear(teeth[nm], fwd_pt, d0,
+                               (src_centres or {}).get(nm))
             (keep if ok else split).append(nm)
         if split and keep:
             if log:
@@ -237,7 +273,7 @@ def cluster_corridors(names: Sequence[str], paths, teeth, stubs,
             # the split-off nets regroup among themselves by proximity
             sub = cluster_corridors(split, paths, teeth, stubs, pad_clear, D,
                                     spine_fn=spine_fn, dest_ref=dest_ref,
-                                    centres=centres)
+                                    centres=centres, src_centres=src_centres)
             todo = sorted(todo + sub, key=len, reverse=True)
         else:
             out.append(grp)

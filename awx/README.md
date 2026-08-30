@@ -37,6 +37,10 @@ python3 blocked_cells.py PROBE_OUTPUT [n] [x0 x1]           # a CONNECT_DEBUG fa
 python3 ends_of.py FO_BOARD K                               # every net's two free ends + corridor grouping (diff two fanouts)
 python3 dup_ends.py BOARD [REF]                             # stub ends two nets share at one point
 python3 probe_cluster.py FO_BOARD K                         # the corridor grouping's decisions
+python3 probe_reach.py FO_BOARD K NET                       # replay the corridor reach test for a split-off net
+python3 band_conn.py FO_BOARD K NET [--copper]              # flood one lane's band tooth->stub (and minus the router's copper): where it pinches
+python3 band_check.py FO_BOARD K                            # band_of against its per-cell reference: differing cells + time
+bash prof_k.sh FO_BOARD K OUTSTEM                           # cProfile of one braid run (prof_top.py prints the top)
 python3 test_connect.py ch6_fo_k15.kicad_pcb SDQ0           # connect() unit test
 ```
 
@@ -57,6 +61,8 @@ via/segment census from the parsed board. Never a program's own tally.
 | 15 | **16 vias**, 0 / 0 | 18, 0 / 0 | 22 |
 | 19 | **23 vias**, 0 / 0 | 26, 0 / 0 | 30 |
 | 21 | **28 vias**, 0 / 0 | 30, 0 / 0 | 38 |
+| 28 | 75 vias, **1 open** / 0 (`kh_fo_k28`, gate off) | — | — |
+| 32 | 10 open / 7 (`kh_fo_k32`; the 7 are the fanout's, SA12 through R1) | — | — |
 
 (braid vias; open / DRC.) Both arms on identical inputs (`fanout_ladder.sh`,
 `--no-plane-drop`), graded the same way. The whole ladder is clean, at fewer
@@ -65,6 +71,25 @@ same code refused 4 lanes at K19 and 7 at K21 — all flank joiners — and
 spent 20 at K15; what was wrong and what changed is under "Launch and exit"
 and "Known walls". The 45° bench (`d45_fo_k11`, plain fanout) routes 9 of
 11 lanes at 20 vias, DRC-clean (SDQ14, SDQ15 open; was 5 of 11).
+
+**K28 and K32 (2026-08-30 pm)** are a COLUMNS wall, not a speed one. The
+schedule region between the two escape fields is the same 4.5 mm at every
+K (`s0` 7.9 → `s1` 12.9); K4..K21 needed 6/13/13/13/13 columns of it at
+W ≥ 0.34, K28 asked for 31 (W 0.147, where no via fits between two
+passes) and routed 9/26. Three things took it from 17 open to 1: the
+schedule's take-off gate (`last`, and OFF when the columns do not fit —
+`W_GATE`, see "Schedule"), 17 → 7; the corridor reach test stepping a
+flank end outward as the join block does (SODT1 had been split into its
+own corridor and collided with the main one), plus the virtual copper's
+head and tail pieces on their end's own layer only (two ends at one point
+on two layers, K28 SWE/SDQ14 and SA4/SA1), 7 → 1. The last lane, SDQ7, is
+C5 — a decoupling capacitor sitting INSIDE the corridor's cross-section
+on F, exactly where the schedule requires SDQ7 on F (`band_conn.py
+--copper` shows the pinch; without copper the band is connected end to
+end). K32's 10 open are 5 balls the fanout could not escape on the
+plan's face (they went up/right — the plan's side-capacity model again,
+Known walls) and so formed a second corridor that collides with the
+first, plus 5 refused in the 27-lane corridor at 22 columns (W 0.204).
 
 The free-plan arm (`chain_k.sh` without `DIRS`, plane-drop on, so its fanout
 boards carry the plane-drop's cap collisions): K15 2 open (SDQ10, SDQM0),
@@ -280,8 +305,20 @@ inversion and every pair is swapped once (the earlier wave schedule derived
 passes from a serial pass and mis-placed a diver whose launch slot was its
 target slot — K32's, and the merged corridor's, "phantom swap"). The mover
 is the diver; of two divers the one in flight (a flying diver passed by a
-grounded one would have to surface); a diver takes off only when no diver
-in flight still has to cross it, unless that stalls the schedule. Gaps and
+grounded one would have to surface). The take-off GATE: a diver takes off
+only when no diver in flight still has to cross it — unless that flyer's
+only crossing left IS this diver (the crossing is its landing on either
+layer, and it cannot land until this one reaches it: the strict form
+deadlocked until the empty-column override, K28 SDQ0 serialised 16
+columns behind SDQ15 for nothing) — policy `last`, `Schedule.columns(...,
+gate=)`. The gate spends columns to save vias, and the corridor's columns
+are finite: `Corridor.plan_columns` drops it (`off`) when the gated
+schedule's column width falls under `W_GATE` 0.33 — measured: K4..K19
+identical either way at `last`, ungated cost them +2..+6 vias; K21 11
+columns / attempt 0 / same 28 vias ungated vs 13 / attempt 1 gated; K28
+31 columns and 9/26 strict, 23 and 12/26 `last`, 16 and 20/26 off.
+`SCHED_GATE=strict|last|off` pins it; every probe tool goes through
+`plan_columns` so it diagnoses the schedule the braid laid. Gaps and
 leads (a layer change is a column of its own) are raised by the router's
 refusals: a pass within two columns of one of a diver's own moves → a
 spacer; nothing passing it before its first swap → a lead. Reserved
@@ -389,8 +426,30 @@ All in track/clearance/via units; none is a board fact.
 | leg layer rule / band rect | ±0.25 / ±0.5, ±0.2 | the crossing itself / the leg's freedom |
 | band inset | (track + 0.1) / 2 | two lanes at their band edges still clear |
 | corridor reserve | 0.3 | room after the last column |
+| gate column floor `W_GATE` | 0.33 | the narrowest column a gated schedule gets; every clean gated K had W ≥ 0.343 |
 | big part | ≥ 10 pads | what a spine avoids and a topology rung respects |
 | routing grid | 0.025 | see "Copper" |
+
+## Speed (cProfile, K21 braid on `re_fo_k21`, 2026-08-30)
+
+`bash prof_k.sh re_fo_k21.kicad_pcb 21 OUT`. The router's own search
+is 0.2 s of a 28 s run; everything else is Python around it:
+
+| where | before | after | what |
+|---|---|---|---|
+| `setup` → `detect_buses.taut_paths` | 10.5 s | 10.5 s | `topo_strings.relax`, pure-Python geometry, 0.5 s per net (486k `point_violation`, 21M `hypot`); the plan step computes the same paths again |
+| `route_lane` → `connect` | 14.2 s (84 calls) | 5.0 s (42) | per call 0.17 → 0.12 s; K21 now routes at attempt 1, not 3 |
+| — `band_of` | 7.6 s | 1.0 s | the neighbour search is a function of `s` alone: done on a 1-D sample (2 µm grid + every vertex, every step doubled, every crossing root) and interpolated onto the cells. `band_check.py`: 0 of 16 M cells differ at K21, 0 of 22 M at K28 |
+| — `build_base_obstacle_map` | 4.2 s | 2.5 s | rebuilt per connect over a SQUARE window of the lane's extent (a 25 mm joiner lane = 1 M cells) |
+| `write_out` → `smooth_octolinear_chains` (#536) | 3.2 s | 7.1 s | `_seg_foreign_seg_dist`, pure Python, grows with the segment count |
+| whole run | 28.4 s | 24.3 s | |
+
+At K28/K32 the time is REFUSALS: a refused lane is an exhausted search
+(tens of thousands of iterations), six attempts each — K32's braid took
+5.5 min for 15 open lanes. Cutting refusals cuts time; the gate policy
+did both. Next in line: `taut_paths` (vectorise `point_violation`, or
+share the plan step's paths), the square window (a rectangle of the
+lane's bbox), and skipping an attempt whose schedule is unchanged.
 
 ## Known walls
 
@@ -412,7 +471,30 @@ All in track/clearance/via units; none is a board fact.
   more "left" escapes to DU1's west face (rows 7–8, two row gaps past
   column A) than the fanout can lay, whatever escape primitive is used
   (Stage 1, item 7). The lever is the plan's side-capacity model, not the
-  fanout.
+  fanout. **The restricted arm hits the same wall at K32**: 5 of 32 balls
+  (SBA1, SA15, SA4, SA6, SA11) had no route out the planned face and
+  escaped up/right, became a corridor of their own, and that corridor is
+  refused whole against the first one's copper (crossings between
+  corridors are v1).
+- **K28 SDQ7: a part inside the corridor.** C5 (0402, F.Cu, pads at
+  (131.29, 67.55)/(131.29, 68.51)) sits in the bundle's cross-section
+  at `s` ≈ 10.5–11.2, `o` ≈ 1.0–2.2. The spine avoids big parts; the
+  lanes spread ±6 mm about it and a lane whose band crosses C5 where the
+  schedule REQUIRES it on F (SDQ7, passed by SDQ12 and SCAS there) is
+  dead — `band_conn.py kh_fo_k28.kicad_pcb 28 SDQ7 --copper`: the flood
+  stops at `s` 10.93, `o` 1.10, the band's next cells at `o` 2.0 are
+  under C5. Every other lane happens to cross C5's shadow on B or beside
+  it. The general form is a per-lane layer rule from static copper
+  inside the corridor (an F-only obstacle = B required over its
+  `s`-stretch for the lanes whose `o` crosses it), fed to the schedule
+  as a column-free reserved stretch; not built.
+- **K28 columns.** With the gate off K28 needs 16 columns in 4.2 mm
+  (W 0.277, below `W_GATE`); the plan sent two flank JOINERS (SWE, SCAS)
+  to DU1's down face, 12- and 10-lane chains that are 22 of its 71
+  swaps, because the left face's 14 slots were full. The plan prices
+  divers (2 vias each), not the lanes a diver passes; a column-depth
+  term, or knowing that the join block puts a joiner outermost, is the
+  plan-side lever.
 - the 45° bench: 9 of 11 lanes (SDQ14, SDQ15); the side-exit block sits
   3 mm from its stubs (it is placed beyond every head-on lane of the
   schedule region, which have left by then) and the schedule needs 24

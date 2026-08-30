@@ -59,7 +59,8 @@ def main():
     c.offsets(0.35)
     c.reserve_intervals()
     sched = Schedule(c.launch, c.target, ctx.tooth_layer)
-    cols = sched.columns({d: 1 for d in sched.divers}, {d: 0 for d in sched.divers})
+    cols, _gate = c.plan_columns(sched, {d: 1 for d in sched.divers},
+                                 {d: 0 for d in sched.divers})
     c.lay_lanes(cols)
     order = list(sched.priority) + [x for x in c.target if x not in sched.divers]
     routed = set()
