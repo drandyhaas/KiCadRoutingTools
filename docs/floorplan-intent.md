@@ -141,15 +141,18 @@ source, suspect, suspect_reason
 | `legality_budget` | `overlap_area`, `oob_count`, `oob_amount` (`oob_area` refused — see below) |
 | `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids` |
 | `health.bus_corridors[]` | `name`, `nets`, `width_mm` |
-| `severity` | any of the 13 rule names below |
+| `severity` | any of the 14 rule names below |
 | `overlap_waivers[]` | `pair`, `reason`, `context` |
 | `must_lock` | a list of reference globs (no nested keys) |
 
 `severity` keys are checked too. The settable names are the nine rules —
 `envelope`, `zone_containment`, `zone_side`, `zone_exclusive`, `keepout`,
-`edge_connector`, `decap_distance`, `must_lock`, `legality` — plus the four
+`edge_connector`, `decap_distance`, `must_lock`, `legality` — plus the five
 findings raised outside the rule loop: `intent_zone_outside_envelope`,
-`intent_zone_overlap`, `block_unresolved`, `intent_zone_in_keepout`.
+`intent_zone_overlap`, `block_unresolved`, `intent_zone_in_keepout`,
+`keepout_allow_unresolved`. All but the last default to **error**;
+`keepout_allow_unresolved` defaults to **warn** and is upgraded by writing
+`{"keepout_allow_unresolved": "error"}`.
 `{"decap_distanc": "warn"}` is a
 demotion that never happens, so it is refused rather than accepted.
 
@@ -224,6 +227,35 @@ an empty set, and the board grades clean while nothing was checked. That is the
 exact failure this tool exists to prevent, so it is reported as
 `block_unresolved` at error severity.
 
+### An `allow` that exempts nothing is a warning
+
+`allow` is a glob tuple, matched with `fnmatch` against every reference. Nothing
+used to check that a pattern matched anything, so this
+
+```jsonc
+{ "name": "mount-NW", "rect": [0, 0, 6, 6], "allow": ["MH01"] }
+```
+
+on a board whose mounting hole is `MH1` exempted **nothing**. Since
+[#701](https://github.com/drandyhaas/KiCadRoutingTools/issues/701) the seat
+search consults the same resolver, so the typo does not merely fail to excuse
+the part — it **strands the part the keep-out was drawn around**.
+
+Measured on `splitflap_driver`, before the finding existed, in the two states an
+intent is read in:
+
+| the keep-out covers | what the author saw |
+|---|---|
+| the part it names | `[ERROR] keepout: H1 (F) is inside keep-out 'mount-NW'` — about the part, never the exemption. The failing pattern reached the JSON in `expected.allow` and the printed text never |
+| empty space (the state a board is in *before* placement, which is when an intent is authored) | `violations 0, errors 0, pass true`, exit 0 — nothing at all |
+
+Reported at **warn**, not error: a spec written before a refdes renumber is a
+real case, and it should be loud without being fatal. Per **pattern**, not per
+entry, so `allow: ["MH1", "MH01"]` still reports the typo. "Resolved" means the
+pattern matches *some* reference — deliberately not "the exemption changes an
+outcome", because a pattern naming a real part the keep-out would not have bound
+anyway (wrong side) is not a typo.
+
 ### `rules_run` and `rules_skipped`
 
 Both are in the `JSON_SUMMARY`. **"0 violations" and "0 rules ran" must not look
@@ -251,6 +283,8 @@ for it, and the reason is printed:
 | `must_lock` | a declared-critical part is not locked in the file | `parser.extract_locked_refs` |
 | `legality` | overlap or off-board parts exceed a budget | `QuenchState.legality_metrics` |
 | `block_unresolved` | a block matched no footprint | — |
+| `intent_zone_in_keepout` | a declared zone is contradicted by a keep-out that binds its members | `zone_covered_by_keepout` |
+| `keepout_allow_unresolved` | a keep-out's `allow` pattern matches no footprint (**warn** by default) | `allow_pattern_matches`, the resolver's own matcher |
 | `intent_zone_overlap`, `intent_zone_outside_envelope` | the intent contradicts itself (no board needed) | — |
 
 Every one of them measures with the geometry the **optimizer itself gates on**.

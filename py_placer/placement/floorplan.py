@@ -712,12 +712,93 @@ def keepouts_for_ref(keepouts, ref: str, sides) -> Tuple[Dict, ...]:
     """
     out = []
     for k in keepouts:
-        if any(fnmatch.fnmatch(ref, pat) for pat in (k.get('allow') or ())):
+        if any(allow_pattern_matches(pat, ref) for pat in (k.get('allow') or ())):
             continue
         if not (set(sides) & set(k.get('sides') or ('F', 'B'))):
             continue
         out.append(k)
     return tuple(out)
+
+
+def allow_pattern_matches(pattern: str, ref: str) -> bool:
+    """Does ONE `allow` glob exempt ONE reference? (#793)
+
+    THE match, split out of `keepouts_for_ref` so the audit that asks "did this
+    pattern exempt ANYTHING" cannot answer it with a different matcher than the
+    exemption itself uses. A warning that disagrees with the resolver is worse
+    than no warning: it would send an author to fix a pattern that works, or
+    stay quiet about one that does not.
+
+    `fnmatch.fnmatch`, deliberately, not `fnmatchcase`: it applies
+    `os.path.normcase`, so matching is case-insensitive on Windows and
+    case-sensitive elsewhere. That platform split is PRE-EXISTING and is not
+    fixed here -- the point of this function is that both callers inherit
+    exactly the same behaviour, whatever it is.
+    """
+    return fnmatch.fnmatch(ref, pattern)
+
+
+def unresolved_keepout_allows(intent, pcb_data) -> List['Violation']:
+    """`allow` globs that match no reference on this board (#793).
+
+    The same failure class as `block_unresolved`, one construct over: a pattern
+    the author believes grants an exemption, that `keepouts_for_ref` never
+    matches. The consequence is worse than a no-op, because since #701 the seat
+    search consults the same resolver -- so a typo does not merely fail to
+    exempt the part, it STRANDS the part the keep-out was drawn around.
+
+    What the author saw before this, measured on splitflap_driver with a
+    keep-out over H1 carrying `allow: ["H01"]`:
+
+      * with H1 inside it, `rule_keepout` fires -- but its message is
+        "H1 (F) is inside keep-out 'mount-NW'", which describes the part and
+        never the exemption. The failing pattern reaches the JSON in
+        `expected.allow` and reaches the TEXT nowhere, and nothing anywhere
+        says it matched nothing;
+      * with the keep-out over empty space -- the state a board is in BEFORE
+        placement, which is when an intent is authored -- `violations 0,
+        errors 0, pass true`, exit 0. Silent, exactly as #793 says.
+
+    WARN by default, and settable. Not the forced-WARN of
+    `rule_edge_connector`'s `connector_affinity` branch: an author who wants a
+    stale glob to fail CI writes `{"keepout_allow_unresolved": "error"}`, and
+    `severity_of` gives that for free. Note `severity_of` DEFAULTS TO ERROR, so
+    the `default=WARN` here is load-bearing rather than decorative.
+
+    PER PATTERN, not per entry. `allow: ["H1", "H01"]` must still report the
+    typo -- an `any()` over the tuple sees one match and says nothing, which is
+    the bug this function exists to be.
+
+    Resolved means "matches SOME reference on the board", deliberately not
+    "the exemption changes an outcome". A pattern naming a real part that the
+    keep-out would not have bound anyway (wrong side) is not a typo, and
+    reporting it would put a finding on a correct spec.
+    """
+    refs = sorted((pcb_data.footprints or {}))
+    out: List[Violation] = []
+    for k in intent.keepouts:
+        dead = [p for p in (k.get('allow') or ())
+                if not any(allow_pattern_matches(p, r) for r in refs)]
+        if not dead:
+            continue
+        name = str(k.get('name') or '<unnamed>')
+        shown = ', '.join(refs[:6]) + (', ...' if len(refs) > 6 else '')
+        out.append(Violation(
+            rule='keepout_allow_unresolved',
+            severity=intent.severity_of('keepout_allow_unresolved',
+                                        default=WARN),
+            message=(f"keep-out {name!r}: allow pattern(s) "
+                     f"{', '.join(repr(p) for p in dead)} match no footprint "
+                     f"on this board ({shown}). They exempt NOTHING, and since "
+                     f"#701 the seat search refuses that part's pose too -- so "
+                     f"a stale pattern strands the very part the keep-out was "
+                     f"drawn around, rather than merely failing to excuse it"),
+            measured={'keepout': name, 'unmatched': list(dead),
+                      'matched': [p for p in (k.get('allow') or ())
+                                  if p not in dead],
+                      'available': refs[:12]},
+            expected={'allow': list(k.get('allow') or ())}))
+    return out
 
 
 def keepout_hit(entry, rects) -> float:
@@ -1046,6 +1127,12 @@ def resolve_intent_gate(intent: Intent, pcb_data,
                          f"leaving it"),
                 measured={'zone': list(z.rect), 'keepout': hit},
                 expected={'overlap': 'partial or none'}))
+
+    # #793, raised HERE as well as in `grade`: the gate is what the four
+    # quenching CLIs run, and it is where a stale `allow` is actively stranding
+    # the part right now. One raiser, two reach points -- `block_unresolved`'s
+    # own shape, and for the same reason.
+    problems.extend(unresolved_keepout_allows(intent, pcb_data))
 
     lock: set = set()
     for pat in intent.must_lock:
@@ -1504,7 +1591,7 @@ RULES = (
 #: next reader can see which names are the exception and why.
 _NON_RULE_SEVERITIES = frozenset({
     'intent_zone_outside_envelope', 'intent_zone_overlap', 'block_unresolved',
-    'intent_zone_in_keepout'})
+    'intent_zone_in_keepout', 'keepout_allow_unresolved'})
 
 #: Every rule name an intent may set a severity for. Derived from `RULES`, so a
 #: new rule is settable the moment it is registered -- a hand-listed set would
@@ -1661,7 +1748,8 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
     blocks, block_problems = resolve_blocks(intent, pcb_data, group_sources)
     ctx = _Ctx(intent, pcb_data, pcb_file, state, blocks, locked, outline)
 
-    violations = list(validate_intent(intent)) + list(block_problems)
+    violations = (list(validate_intent(intent)) + list(block_problems)
+                  + list(unresolved_keepout_allows(intent, pcb_data)))
     ran: List[str] = []
     skipped: Dict[str, str] = {}
     # Budget keys the emitter withheld and that are therefore NOT graded.
