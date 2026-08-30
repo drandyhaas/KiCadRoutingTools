@@ -529,8 +529,8 @@ def p_close(a):
                 f'--json wk/intent_result.json')
     # The routability read. It REFUSES only when the evidence is missing, never
     # on the numbers themselves -- see _guard_congestion and
-    # wk/calibration/RESULT.md for why the threshold that used to live here was
-    # withdrawn.
+    # docs/placement-calibration.md for why the threshold that used to live
+    # here was withdrawn.
     _cok, _cwhy = _guard_congestion(a)
     if not _cok:
         return err(_cwhy)
@@ -800,7 +800,7 @@ def _guard_congestion(a):
     all per-net and cannot see global capacity.
 
     WHY IT IS NOT A REFUSAL, and this is measured, not a preference
-    (wk/calibration/RESULT.md, three boards, three populations each):
+    (docs/placement-calibration.md, three boards, three populations each):
 
       * At the shipped ratio of 0.25 the gate refused neo6502's FULL repair --
         the one that took blocking 18 -> 0. It refused every outcome the corpus
@@ -1021,8 +1021,8 @@ def _guard_congestion(a):
             '',
             'This is NOT a claim that your placement is wrong. The numbers are '
             'not judged -- they',
-            'cannot be, and wk/calibration/RESULT.md says why: on one corpus '
-            'board a PERFECT repair',
+            'cannot be, and docs/placement-calibration.md says why: on one '
+            'corpus board a PERFECT repair',
             'scores worse than the damage it repaired, because `swap` shortens '
             'nets on a regular',
             'matrix. What is required is that somebody decided.',
@@ -1107,9 +1107,10 @@ def _args(argv=None):
                          'Omitted, the move count still prints and nothing '
                          'refuses.')
     # --congestion-ratio is GONE. It set a threshold P-close refused on, and the
-    # calibration withdrew that refusal (wk/calibration/RESULT.md): the premise
-    # inverts on 1 of 3 corpus boards, where a perfect repair scores a negative
-    # hpwl gain and the gate refused the correct answer. A flag that no longer
+    # calibration withdrew that refusal (docs/placement-calibration.md): the
+    # premise inverts on 1 of 3 corpus boards, where a perfect repair scores a
+    # negative hpwl gain and the gate refused the correct answer. A flag that
+    # no longer
     # reaches a decision is the same lie as render_placement's --metrics was --
     # it reads as a knob somebody thought about. The routability numbers are
     # REPORTED at P-close now, and 0.25 is baked nowhere.
@@ -1323,7 +1324,8 @@ def _self_test():
         # neo6502's successful repair (blocking 18 -> 0), and on piantor -- where
         # `swap` LOWERS hpwl, because swapping parts on a regular matrix
         # shortens nets -- it would have refused a PERFECT repair, one that
-        # restored the pristine board exactly. See wk/calibration/RESULT.md.
+        # restored the pristine board exactly.
+        # See docs/placement-calibration.md.
         out = _close(_r15, _dmg)
         # It binds on a DISPOSITION, not on the numbers: run 15's shape must not
         # close out unacknowledged, but the driver never says the placement is
