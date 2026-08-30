@@ -966,14 +966,6 @@ def main():
                     f'  (via (at {vx:.4f} {vy:.4f}) (size {VIA_SIZE}) '
                     f'(drill {VIA_DRILL}) (layers "F.Cu" "B.Cu") '
                     f'(net {nid}))\n')
-            for s in final_segs[nm]:
-                (ax, ay), (bx_, by_) = back_xy(s.start_x, s.start_y), \
-                    back_xy(s.end_x, s.end_y)
-                add.append(
-                    f'  (gr_line (start {ax:.4f} {ay:.4f}) '
-                    f'(end {bx_:.4f} {by_:.4f}) '
-                    f'(stroke (width 0.05) (type solid)) '
-                    f'(layer "Eco2.User"))\n')
     else:
         for nm in names:
             nid, _ = byname[nm]
@@ -989,13 +981,65 @@ def main():
                     f'  (via (at {vx:.4f} {vy:.4f}) (size {VIA_SIZE}) '
                     f'(drill {VIA_DRILL}) (layers "F.Cu" "B.Cu") '
                     f'(net {nid}))\n')
-            for (p, q, _l) in out_segs[nm]:
-                (ax, ay), (bx_, by_) = back_xy(*p), back_xy(*q)
-                add.append(
-                    f'  (gr_line (start {ax:.4f} {ay:.4f}) '
-                    f'(end {bx_:.4f} {by_:.4f}) '
-                    f'(stroke (width 0.05) (type solid)) '
-                    f'(layer "Eco2.User"))\n')
+
+    # ---- Eco overlay: the PLAN, drawn where the copper is, so a render
+    # (render_eco.py) shows plan against copper.
+    #   Eco1.User (white)   every lane's planned centreline -- tooth,
+    #                       column midpoints, splice, stub -- and the
+    #                       flank corridor's runs;
+    #   Cmts.User (orange)  where the schedule REQUIRES the back layer:
+    #                       the planned under-passes, on the centreline;
+    #   Eco2.User (yellow)  the connection ends as crosses -- source
+    #                       teeth, stub ends, port leave points, run ends.
+    def gl(p, q, layer, w=0.05):
+        (ax, ay), (bx_, by_) = back_xy(*p), back_xy(*q)
+        return (f'  (gr_line (start {ax:.4f} {ay:.4f}) '
+                f'(end {bx_:.4f} {by_:.4f}) '
+                f'(stroke (width {w}) (type solid)) (layer "{layer}"))\n')
+
+    def cross(p, layer='Eco2.User', r=0.12):
+        return gl((p[0] - r, p[1] - r), (p[0] + r, p[1] + r), layer) + \
+            gl((p[0] - r, p[1] + r), (p[0] + r, p[1] - r), layer)
+
+    def sub_line(nm, xa, xb):
+        """The centreline's polyline between x = xa and xb."""
+        pts = line_pts(nm)
+        ya, yb = line_y(nm, xa), line_y(nm, xb)
+        out = []
+        if ya is not None:
+            out.append((xa, ya))
+        out += [p_ for p_ in pts if xa < p_[0] < xb]
+        if yb is not None:
+            out.append((xb, yb))
+        return out
+
+    n_eco = 0
+    for nm in west:
+        pts = line_pts(nm)
+        for p_, q_ in zip(pts, pts[1:]):
+            add.append(gl(p_, q_, 'Eco1.User'))
+            n_eco += 1
+        for (xa, xb, L) in req[nm]:
+            if L != 'B.Cu':
+                continue
+            sl = sub_line(nm, xa, xb)
+            for p_, q_ in zip(sl, sl[1:]):
+                add.append(gl(p_, q_, 'Cmts.User', 0.08))
+        add.append(cross(ends[nm][0]))
+        add.append(cross(ends[nm][1]))
+        if nm in leave:
+            yl = line_y(nm, leave[nm])
+            if yl is not None:
+                add.append(cross((leave[nm], yl)))
+    for nm in river:
+        a_, b_ = run_of[nm]
+        add.append(gl(a_, b_, 'Eco1.User'))
+        n_eco += 1
+        for p_ in (ends[nm][0], ends[nm][1], a_, b_):
+            add.append(cross(p_))
+    print(f'eco overlay: {n_eco} planned centreline segments, '
+          f'{sum(len([r for r in req[nm] if r[2] == "B.Cu"]) for nm in west)} '
+          f'planned under-passes, {2 * len(west) + 4 * len(river)} ends')
     k = txt.rstrip().rfind(')')
     out_board = a.out + '.kicad_pcb'
     with open(out_board, 'w') as f:

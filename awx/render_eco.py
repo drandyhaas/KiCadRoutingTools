@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Eco-overlay render for plan-vs-actual debugging.
+"""Eco-overlay render for plan-vs-copper debugging.
 
 Layers drawn (bottom to top): mm grid + rulers, board outline (Edge.Cuts),
 pads (yellow; routed-set pads brighter), bench copper (faint by layer),
-ROUTED-set copper (saturated by layer), vias, Eco2 attraction targets
-(yellow), Eco1 corridor centerlines (white).
+ROUTED-set copper (saturated by layer), vias, then the braid's plan
+overlay (braid.py writes it): Eco2 connection ENDS as yellow crosses
+(source teeth, stub ends, port leave points, flank-run ends), Cmts the
+planned UNDER-PASSES in orange (where the schedule requires the back
+layer), Eco1 the planned lane CENTRELINES in white. Copper that leaves
+its white line is the router disagreeing with the plan; a via outside
+an orange stretch is one the schedule did not ask for.
 
 usage: render_eco.py BOARD OUT.png [--nets N1,N2,...] [--view x0,y0,x1,y1]
 """
@@ -136,6 +141,6 @@ for (x1, y1, x2, y2) in eco1:
     dr.line([px(x1, y1), px(x2, y2)], fill=(255, 255, 255, 220), width=4)
 
 img.save(a.out)
-print(f"render_eco: {a.out} eco1(corridor)={len(eco1)} "
-      f"eco2(target)={len(eco2)} underpass={len(cmts)} edge={len(edge)} "
-      f"highlighted nets={sorted(hi_names) or 'none'}")
+print(f"render_eco: {a.out} eco1(lanes)={len(eco1)} "
+      f"eco2(ends)={len(eco2) // 2} cmts(underpass)={len(cmts)} "
+      f"edge={len(edge)} highlighted nets={sorted(hi_names) or 'none'}")
