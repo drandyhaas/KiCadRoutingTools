@@ -235,11 +235,25 @@ def build_slate(board_key, board_file, out_dir, seed=0, timeout=14400,
     b_pad = zero.metrics.get('pad_conflict_pairs', 0)
     b_hole = zero.metrics.get('hole_shortfall', 0.0)
 
+    # BOARD-FIRST, like `place_portfolio` does it, rather than a constant.
+    # `viable` IS the tau's K and the disclosed cause of two boards reporting
+    # K=4, so deciding it at a fixed 0.25 would be deciding the denominator at
+    # a number the board never asked for -- `board_floor_knobs`' own docstring
+    # warns a constant manufactures phantom violations. Measured: all six
+    # boards resolve to exactly 0.25 / 0.55, so this changes no published
+    # number; it stops a seventh board from silently diverging from the
+    # selector this study is measuring.
+    try:
+        from list_nets import board_floor_knobs
+        _clr, _edge = board_floor_knobs(abs_board, None, None)[:2]
+    except Exception:                                       # noqa: BLE001
+        _clr, _edge = 0.25, 0.55
+
     def _score(c):
         PF.score_candidate(
             c, free=free, baseline_overlap=b_overlap, baseline_oob=b_oob,
             baseline_pad_pairs=b_pad, baseline_hole_shortfall=b_hole,
-            clearance=0.25, board_edge_clearance=0.55, grid_step=0.1,
+            clearance=_clr, board_edge_clearance=_edge, grid_step=0.1,
             ignore_nets=None)
 
     _score(zero)
@@ -278,6 +292,7 @@ def build_slate(board_key, board_file, out_dir, seed=0, timeout=14400,
     # #703's `measured_git` would otherwise make this a comparison between two
     # different quenches wearing one name.
     checks = 1 if reduced else REGEN_CHECKS
+    ran_regen = 0
     for i in list(GRAFT_INDICES)[:checks]:
         row = rows_703.get(f'portfolio-{i}')
         if row is None:
@@ -291,7 +306,17 @@ def build_slate(board_key, board_file, out_dir, seed=0, timeout=14400,
         if got != want:
             return [], (f'VOID:candidate {i} regenerates to a different '
                         f'placement ({got[:12]} vs {want[:12]})'), notes
+        ran_regen += 1
         notes.append(f'regeneration control: candidate {i} reproduces')
+
+    # A guard that checked NOTHING is not a guard. If the declared candidates
+    # had no recorded row the loop above would `continue` past every one of
+    # them, append no note, and let the board proceed with the graft unproven.
+    # Found by an adversarial review; it was not live (all six boards record
+    # portfolio-1..10) and it is now impossible rather than merely unobserved.
+    if ran_regen < checks:
+        return [], (f'VOID:regeneration control ran {ran_regen} of {checks} '
+                    f'declared checks'), notes
 
     # Candidate 0 is routed and graded HERE -- the one route this study buys.
     blk0, detail0 = route_and_score(zero.board, os.path.join(work, 'route'),
@@ -323,12 +348,14 @@ def build_slate(board_key, board_file, out_dir, seed=0, timeout=14400,
         notes.append(f're-route control: candidate {pick.index} reproduces '
                      f'blocking {again_blk}')
 
-    rows = [_row(board_key, board_file, c, zero, sig, seed, reduced)
+    rows = [_row(board_key, board_file, c, zero, sig, seed, reduced,
+                 ran_regen)
             for c in cands]
     return rows, 'ok', notes
 
 
-def _row(board_key, board_file, c, zero, argv_sha, seed, reduced):
+def _row(board_key, board_file, c, zero, argv_sha, seed, reduced,
+         regen_checks=0):
     """One slate row. `rule1_would_bar` is recorded per CLAUSE, not as a bool:
     a candidate barred on hpwl as well stays barred after the crossings clause
     is withdrawn, so it is not a candidate the withdrawal changes."""
@@ -353,6 +380,7 @@ def _row(board_key, board_file, c, zero, argv_sha, seed, reduced):
         'provenance': {'input_board': board_file, 'argv_sha': argv_sha,
                        'seed': seed, 'measured_git': PS.git_describe(ROOT),
                        'reduced_guards': reduced,
+                       'regen_checks_run': regen_checks,
                        'quench_kw': 'library defaults (quench_kw=None)'},
     }
 
@@ -386,7 +414,14 @@ def qbar(rows):
     b0 = zero['truth'].get('blocking')
     if b0 is None:
         return {'verdict': 'void', 'reason': 'candidate 0 has no blocking'}
-    others = [r for r in rows if r['index'] != 0]
+    # VIABLE only. `select_best` walks `rank_static`, which ranks viable
+    # candidates alone, so a gate-rejected candidate was never excluded BY the
+    # crossings bar and cannot be evidence about it. Counting them inflated
+    # `n_barred_on_crossings` (watchy reported 2, one of them gate-rejected)
+    # and could in principle have let one FIRE. Measured before the change:
+    # every firing candidate on both discharging boards was viable, so the
+    # discharge is unaffected -- but the count was wrong.
+    others = [r for r in rows if r['index'] != 0 and r['viable']]
     barred_x = [r for r in others if r['rule1_would_bar_on_crossings']]
     graded = [r for r in barred_x if r['truth'].get('blocking') is not None]
     fire = [r for r in graded
@@ -412,7 +447,7 @@ def qbar(rows):
     return out
 
 
-def qbar_null(rows, n=200, seed=7789):
+def qbar_null(rows, n=200, seed=7789, verdict=None):
     """P(at least one FIRE by chance), permuting `blocking` WITHIN the board.
 
     Pre-registered, and printed beside the verdict whatever it says. It is
@@ -423,6 +458,11 @@ def qbar_null(rows, n=200, seed=7789):
     the rule is an existence claim and it was pre-registered -- but it is
     evidence of very little, and the number says how little.
     """
+    # A board that CANNOT fire has no null rate to report: the criterion is
+    # inapplicable there, not hard. Printing 0% beside `cannot_fire` read as
+    # "a demanding criterion on this board", which is the opposite of true.
+    if verdict == 'cannot_fire':
+        return None
     import random
     rng = random.Random(seed)
     zero = next((r for r in rows if r['index'] == 0), None)
@@ -565,13 +605,29 @@ def delta(rows):
                               ('worst_probe', worst)):
             n = PF.select_best(primary, static, now)
             a = PF.select_best(primary, static, after)
-            arms[name] = {
-                'pick_now': n, 'pick_after': a,
-                'blocking_now': blk.get(n), 'blocking_after': blk.get(a),
-                'verdict': ('unchanged' if n == a else
-                            'better' if blk.get(a) < blk.get(n) else
-                            'worse' if blk.get(a) > blk.get(n) else
-                            'same blocking')}
+            bn, ba = blk.get(n), blk.get(a)
+            # `select_best` returns None when every ranked index is a violator
+            # AND index 0 is absent from the ranking -- which happens when
+            # candidate 0 itself is not viable (`score_candidate` fails a
+            # candidate against its own metrics on a pile-degenerate board).
+            # Because the withdrawn violator set is a SUBSET, the two arms can
+            # disagree about that, and comparing an int with None was a
+            # TypeError that took the whole report down, `--from-rows`
+            # included. Found by an adversarial review, not by a run.
+            if n == a:
+                verdict = 'unchanged'
+            elif bn is None or ba is None:
+                verdict = ('no pick before' if bn is None
+                           else 'no pick after')
+            elif ba < bn:
+                verdict = 'better'
+            elif ba > bn:
+                verdict = 'worse'
+            else:
+                verdict = 'same blocking'
+            arms[name] = {'pick_now': n, 'pick_after': a,
+                          'blocking_now': bn, 'blocking_after': ba,
+                          'verdict': verdict}
         out[b] = arms
     return out
 
@@ -581,20 +637,32 @@ def aggregate(rows):
     by_board = rs.per_board(rows)
     per = {}
     for b, rr in sorted(by_board.items()):
-        per[b] = {'qbar': qbar(rr), 'qorder': qorder(rr),
-                  'qbar_null': qbar_null(rr)}
+        _q = qbar(rr)
+        per[b] = {'qbar': _q, 'qorder': qorder(rr),
+                  'qbar_null': qbar_null(rr, verdict=_q.get('verdict'))}
     fired = [b for b, d in per.items() if d['qbar'].get('verdict') == 'fires']
     able = [b for b, d in per.items()
             if d['qbar'].get('verdict') in ('fires', 'does_not_fire')]
-    taus = {b: d['qorder'] for b, d in per.items()
-            if d['qorder'].get('verdict') == 'measured'}
-    pos = [b for b, d in taus.items() if d['tau'] > 0]
-    neg = [b for b, d in taus.items() if d['tau'] < 0]
-    n = len(taus)
     # Rule 5's shape is rule 3's, and it introduces NO magnitude threshold: any
     # tau cut-off would be a number chosen after seeing tau's scale. The
-    # threshold IS the sign rule, and its null is exactly binomial.
-    agrees = (n >= rs.MIN_SIGN_BOARDS and len(pos) >= max(1, n - 1) and not neg)
+    # threshold IS the sign rule.
+    #
+    # It is DELEGATED to `rank_stats.sign_test` rather than re-derived here.
+    # An adversarial review caught the hand-rolled version dropping both of
+    # that function's corrections: it divided by every board with a defined
+    # tau (zeros included) instead of by the boards with a DIRECTION, and it
+    # never clamped -- so a 2-positive / 2-negative split printed
+    # `two-sided p=1.375`, which is not a probability. The shipped run landed
+    # on exactly 1.000 by luck. `rank_stats` is this repo's only sanctioned
+    # aggregation and its own docstring warns about a p-value labelled with
+    # the wrong denominator; re-deriving it was the mistake.
+    taus = {b: d['qorder'] for b, d in per.items()
+            if d['qorder'].get('verdict') == 'measured'}
+    st = rs.sign_test({b: rs.BoardRho(d['tau'], d['n'])
+                       for b, d in taus.items()})
+    pos, neg = st['positive'], st['negative']
+    n = st['boards_defined']
+    agrees = st['passes_sign_rule'] and not neg
     disagrees = (n >= rs.MIN_SIGN_BOARDS and len(neg) >= max(1, n - 1)
                  and not pos)
     return {
@@ -610,9 +678,10 @@ def aggregate(rows):
         },
         'rule5': {
             'n_boards_with_a_defined_tau': n,
+            'zero': st['zero'],
             'positive': sorted(pos), 'negative': sorted(neg),
-            'p_two_sided': (2.0 * rs._binom_tail(n, max(len(pos), len(neg)))
-                            if n else None),
+            'p_two_sided': st['p_two_sided'],
+            'p_denominator': st['p_denominator'],
             'verdict': ('AGREES' if agrees
                         else 'DISAGREES (open a reorder issue, do not reorder)'
                         if disagrees

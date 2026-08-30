@@ -114,6 +114,16 @@ def slate(board, spec, base_crossings, base_hpwl, base_blocking):
         r = row(board, i, cx, hp, blk)
         r['rule1_would_bar_on_crossings'] = cx > base_crossings
         r['rule1_would_bar_on_hpwl'] = hp > base_hpwl + 1e-9
+        # `rule1_clauses` is what `delta()` reads for the OLD violator set,
+        # while `qbar` reads the two booleans. The first version of this helper
+        # set only the booleans, so every `delta` fixture had an empty "before"
+        # set and both arms trivially agreed -- the arms looked green and
+        # measured nothing. Caught by the non-viable-candidate-0 arm below.
+        r['rule1_clauses'] = (
+            (['crossings %s > baseline %s' % (cx, base_crossings)]
+             if r['rule1_would_bar_on_crossings'] else [])
+            + (['hpwl %.1f > baseline %.1f' % (hp, base_hpwl)]
+               if r['rule1_would_bar_on_hpwl'] else []))
         rows.append(r)
     return rows
 
@@ -183,13 +193,21 @@ def t_the_tau_is_not_measuring_its_own_tiebreak():
     check(q['tau'] < -0.99,
           f'a slate whose routed order is the REVERSE of the static order '
           f'gives tau -1, not +1: {q.get("tau")}')
-    # The circular computation, written out, to show what it would have said.
-    order = sorted(rows, key=lambda r: tuple(r['rank_key']))
-    circular = rs.kendall_tau([i for i, _ in enumerate(order)],
-                              [i for i, _ in enumerate(order)])
-    check(circular > 0.99 and q['tau'] < -0.99,
-          'the circular version returns +1 on the same slate, so the two are '
-          'distinguishable by this fixture')
+    # The circular computation, written out on THIS fixture's own data, to
+    # show what the study would have printed had it keyed the routed side on
+    # `ranking_routed`'s static tiebreak. An earlier version correlated
+    # `range(n)` with itself, which is +1 for any input and touches neither
+    # `blocking` nor `slate_study` -- decorative, not evidence.
+    order = sorted((r for r in rows if r['viable']),
+                   key=lambda r: tuple(r['rank_key']))
+    pos = {r['row_id']: i for i, r in enumerate(order)}
+    xs = [pos[r['row_id']] for r in order]
+    circular = rs.kendall_tau(xs, [pos[r['row_id']] for r in order])
+    honest = rs.kendall_tau(xs, [r['truth']['blocking'] for r in order])
+    check(circular > 0.99 and honest < -0.99,
+          f'on the SAME slate the circular version says {circular:+.3f} and '
+          f'the honest one says {honest:+.3f} -- the fixture distinguishes '
+          f'them')
 
 
 def t_tau_agrees_when_the_key_agrees():
@@ -271,8 +289,82 @@ def t_the_null_rate_is_reported_and_can_be_high():
           'and the report PRINTS it, so a discharge cannot be read without it')
 
 
+def t_the_p_value_is_the_sanctioned_one():
+    """Rule 5's p-value is `rank_stats.sign_test`'s, not a re-derivation.
+
+    An adversarial review caught a hand-rolled copy that dropped both of that
+    function's corrections -- it divided by every board with a defined tau
+    instead of by the boards with a DIRECTION, and never clamped. A 2-positive
+    / 2-negative split printed `two-sided p=1.375`, which is not a probability.
+    The shipped run landed on exactly 1.000 by luck.
+    """
+    def agree(b):
+        return slate(b, [(11, 100.0, 2), (12, 100.0, 3), (13, 100.0, 4)],
+                     10, 100.0, 1)
+
+    def dis(b):
+        return slate(b, [(11, 100.0, 4), (12, 100.0, 3), (13, 100.0, 2)],
+                     10, 100.0, 5)
+    r5 = SS.aggregate(agree('a') + agree('b') + dis('c') + dis('d'))['rule5']
+    check(r5['p_two_sided'] <= 1.0,
+          f"an even split is a probability, not {r5['p_two_sided']}")
+    check(r5.get('p_denominator') == 4,
+          f"and it is labelled with the DIRECTIONAL denominator "
+          f"({r5.get('p_denominator')})")
+
+
+def t_delta_survives_a_non_viable_candidate_zero():
+    """`select_best` returns None when nothing ranked passes AND index 0 is
+    not in the ranking -- which happens when candidate 0 itself is gated out.
+    The two arms can disagree about that, and comparing an int with None used
+    to be a TypeError that took the whole report down, `--from-rows` included.
+    """
+    rows = slate('b', [(30, 100.0, 3), (31, 100.0, 3), (32, 100.0, 3)],
+                 20, 200.0, 4)
+    rows[0]['viable'] = False
+    try:
+        d = SS.delta(rows)
+    except TypeError as exc:
+        check(False, f'delta crashed on a non-viable candidate 0: {exc}')
+        return
+    check('b' in d and d['b']['static_only']['verdict'].startswith('no pick'),
+          f"it reports the missing pick instead of crashing: "
+          f"{d.get('b', {}).get('static_only', {}).get('verdict')}")
+    check(SS.aggregate(rows).get('delta') is not None,
+          'and aggregate() still returns a report')
+
+
+def t_a_board_that_cannot_fire_has_no_null_rate():
+    """0% beside `cannot_fire` reads as "a demanding criterion here". The
+    criterion is inapplicable there, not hard."""
+    rows = slate('b', [(30, 100.0, 5)], 20, 200.0, 0)
+    agg = SS.aggregate(rows)
+    check(agg['per_board']['b']['qbar']['verdict'] == 'cannot_fire',
+          'the fixture cannot fire')
+    check(agg['per_board']['b']['qbar_null'] is None,
+          f"...so its null rate is n/a, not 0% "
+          f"({agg['per_board']['b']['qbar_null']})")
+
+
+def t_qbar_counts_only_candidates_the_selector_can_reach():
+    """`rank_static` ranks viable candidates alone, so a gate-rejected one was
+    never excluded BY the crossings bar and is not evidence about it."""
+    rows = slate('b', [(30, 100.0, 1), (31, 100.0, 1)], 20, 200.0, 4)
+    rows[2]['viable'] = False
+    q = SS.qbar(rows)
+    check(q['n_candidates'] == 1 and q['n_barred_on_crossings'] == 1,
+          f"the gate-rejected candidate is out of both counts "
+          f"({q['n_candidates']}, {q['n_barred_on_crossings']})")
+    check(q['fire'] == ['slate:b:1'],
+          f'and cannot fire the rule: {q["fire"]}')
+
+
 def main():
-    for fn in (t_qbar_fires_only_on_a_crossings_only_violator,
+    for fn in (t_the_p_value_is_the_sanctioned_one,
+               t_delta_survives_a_non_viable_candidate_zero,
+               t_a_board_that_cannot_fire_has_no_null_rate,
+               t_qbar_counts_only_candidates_the_selector_can_reach,
+               t_qbar_fires_only_on_a_crossings_only_violator,
                t_a_board_that_cannot_fire_is_classified_not_counted,
                t_a_missing_blocking_is_never_a_zero,
                t_the_tau_is_not_measuring_its_own_tiebreak,

@@ -536,14 +536,18 @@ re-verified.
 
 ### Rule 2: DISCHARGED, and the criterion that discharged it is weak
 
+The "barred" column counts VIABLE candidates only: `rank_static` ranks
+gate-passing candidates alone, so one the legality gates rejected was never
+excluded *by* the crossings bar and is not evidence about it.
+
 | board | verdict | baseline `blocking` | barred on crossings | fired | null rate |
 |---|---|---|---|---|---|
 | esp_prog | **fires** | 4 | 4 | 3 | 100% |
 | kit-dev-coldfire | **fires** | 5 | 4 | 1 | 99% |
 | tigard | does not fire | 2 | 1 | 0 | 0% |
-| watchy | does not fire | 3 | 2 | 0 | 21% |
-| sonde_u | cannot fire (baseline clean) | 0 | 0 | — | — |
-| splitflap_driver | cannot fire (baseline clean) | 0 | 5 | — | — |
+| watchy | does not fire | 3 | 1 | 0 | ~21% |
+| sonde_u | cannot fire (baseline clean) | 0 | 0 | — | n/a |
+| splitflap_driver | cannot fire (baseline clean) | 0 | 5 | — | n/a |
 
 esp_prog's three firing candidates are barred on crossings **alone** — their
 hpwl is below the baseline's — and routed to `blocking` 3, 3 and 2 against the
