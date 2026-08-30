@@ -355,6 +355,18 @@ def refresh() -> None:
     # main's corpus has measured it yet. Arm it for the A/B; flip the default
     # only once a sets 1-5 run says it earns it.
     g['VICTIM_RESTORE'] = _opt_in('KICAD_VICTIM_RESTORE')
+    # #622 pocket-stuck rip targeting (ported from bus622-take2 947698d6): when
+    # one A* direction exhausts at <=20% of the other side's iterations, the rip
+    # ladder re-analyzes THAT direction's blocked cells alone. The union let the
+    # wide frontier's cell counts swamp the pocket's wall -- SDQ11 sat frozen at
+    # 44 backward iterations across 6 rips with its two wallers named at attempt
+    # 0 and never ripped.
+    #
+    # OPT-IN here, though the source shipped it default ON -- its own commit
+    # message says "Corpus screen owed before any main merge (default-ON search
+    # change)", and that screen has not run on main's corpus. KICAD_POCKET_RIP=1
+    # arms it for the A/B.
+    g['POCKET_RIP'] = _opt_in('KICAD_POCKET_RIP')
     g['BUS_CORRIDOR_PROBE_VIA_MULT'] = _f('KICAD_BUS_CORRIDOR_PROBE_VIA_MULT', 20.0)
     g['BUS_MAX_CORRIDOR_LAYER_CHANGES'] = _i('KICAD_BUS_MAX_CORRIDOR_LAYER_CHANGES', 1)
     g['TAP_RELOCATION_MAX'] = _i('KICAD_TAP_RELOCATION_MAX', 2)

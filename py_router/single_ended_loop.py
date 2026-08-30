@@ -1467,7 +1467,37 @@ def route_single_ended_nets(
                             if retry_result:
                                 retry_fwd_cells = retry_result.pop('blocked_cells_forward', [])
                                 retry_bwd_cells = retry_result.pop('blocked_cells_backward', [])
-                                last_retry_blocked_cells = list(set(retry_fwd_cells + retry_bwd_cells))
+                                # #622 POCKET RIP (KICAD_POCKET_RIP=1, opt-in):
+                                # when one A* direction dies in a tiny enclosed
+                                # pocket, its blocked cells name the pocket's
+                                # wall -- but the UNION with the other,
+                                # wide-open direction lets that side's cell
+                                # counts swamp them, so the rip ladder never
+                                # rips the wall. Measured on the branch (SDQ11):
+                                # backward frozen at 44 iterations across 6
+                                # rips, its two wallers named at attempt 0 and
+                                # never ripped. Re-analyze the stuck direction's
+                                # cells ALONE so the ladder rips what actually
+                                # encloses it.
+                                _fi = retry_result.get('iterations_forward', 0)
+                                _bi = retry_result.get('iterations_backward', 0)
+                                _stuck = None
+                                if env_knobs.POCKET_RIP and _fi > 0 and _bi > 0:
+                                    if _fi <= _bi * 0.2 and retry_fwd_cells:
+                                        _stuck = ('forward', _fi, _bi,
+                                                  retry_fwd_cells)
+                                    elif _bi <= _fi * 0.2 and retry_bwd_cells:
+                                        _stuck = ('backward', _bi, _fi,
+                                                  retry_bwd_cells)
+                                if _stuck is not None:
+                                    last_retry_blocked_cells = list(set(_stuck[3]))
+                                    print(f"    Retry {_stuck[0]} pocket-stuck at "
+                                          f"{_stuck[1]} iters (other side "
+                                          f"{_stuck[2]}): re-analyzing its "
+                                          f"{len(last_retry_blocked_cells)} "
+                                          f"blocked cells only")
+                                else:
+                                    last_retry_blocked_cells = list(set(retry_fwd_cells + retry_bwd_cells))
                                 del retry_fwd_cells, retry_bwd_cells  # Free memory immediately
                                 if last_retry_blocked_cells:
                                     print(f"    Retry had {len(last_retry_blocked_cells)} blocked cells")
