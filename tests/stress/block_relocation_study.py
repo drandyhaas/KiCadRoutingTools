@@ -408,26 +408,53 @@ def summarise(rows):
 
 
 def _verdict(s, ev):
+    """The acceptance rule counts BOARDS, not cells, and names the incumbent.
+
+    Two cells on one board are not two boards. `docs/placement-predictors.md`'s
+    own rule is "right on >= N-1 BOARDS and wrong on none, with N >= 3", and the
+    per-board spread on this corpus is +-2..3 nets. Counting cells would have let
+    3 cells over 2 boards read as SUPPORTED -- which is exactly how a two-board
+    result becomes a default change, and this repo already records that trap.
+
+    And a positive delta is not sufficient on its own: #554 is only interesting
+    if it beats `place_route_loop` with the pin gate lifted, which already
+    exists. A run where the incumbent wins is reported as such however good the
+    delta looks.
+    """
     n = s['evidence_cells']
+    nb = len(s['boards'])
     if n == 0:
         return ('NOT MEASURED: no evidence cell survived the admission gates, so '
                 'this run says nothing about whether a relocation restores a '
                 'damaged board. The skipped list says why each one went.')
-    if n < 3:
-        return ('UNDERPOWERED: %d evidence cell(s). This repo\'s own acceptance '
-                'rule wants N >= 3 with the right direction on N-1 and wrong on '
-                'none; %d cannot satisfy it. Reported, not aggregated.' % (n, n))
+    loop_note = ''
+    if s.get('cells_with_a_loop_number'):
+        loop_note = (' INCUMBENT: place_route_loop with the pin gate lifted '
+                     'reached a strictly better routed result on %d of the %d '
+                     'cell(s) where both ran.'
+                     % (s['cells_where_loop_beats_relocation'],
+                        s['cells_with_a_loop_number']))
+    if nb < 3:
+        return ('UNDERPOWERED: %d evidence cell(s) over %d board(s). The '
+                'acceptance rule counts BOARDS -- >= 3, right on N-1 and wrong '
+                'on none -- because per-board spread here is +-2..3 nets and two '
+                'cells on one board are not two boards. The direction (%d up, '
+                '%d down, median %s) is reported, not aggregated into a claim.%s'
+                % (n, nb, s['cells_up'], s['cells_down'],
+                   s['median_route_recovery_delta'], loop_note))
     if s['cells_down'] == 0 and s['cells_up'] >= n - 1:
         return ('SUPPORTED: route_recovery_delta positive on %d of %d evidence '
-                'cell(s) and negative on none, median %s. The delta is the '
-                'evidence -- the raw recovery is not, because the same solve on '
-                'the UNDAMAGED board is the other half of every row.'
-                % (s['cells_up'], n, s['median_route_recovery_delta']))
+                'cell(s) over %d board(s) and negative on none, median %s. The '
+                'delta is the evidence -- the raw recovery is not, because the '
+                'same solve on the UNDAMAGED board is the other half of every '
+                'row.%s'
+                % (s['cells_up'], n, nb, s['median_route_recovery_delta'],
+                   loop_note))
     return ('NOT SUPPORTED: %d of %d evidence cell(s) improved and %d got worse, '
             'median delta %s. A relocation that does not beat its own undamaged '
-            'pairing has not restored anything.'
+            'pairing has not restored anything.%s'
             % (s['cells_up'], n, s['cells_down'],
-               s['median_route_recovery_delta']))
+               s['median_route_recovery_delta'], loop_note))
 
 
 def self_test():
@@ -454,9 +481,16 @@ def self_test():
              'is_evidence': True, 'route_recovery_delta': 1.0}]
     if 'UNDERPOWERED' not in summarise(rows)['verdict']:
         fails.append('one positive cell was reported as a finding')
+    # THREE cells on TWO boards is still two boards.
+    two = [dict(rows[0]), dict(rows[0], kind='wrong_side'),
+           dict(rows[0], board='c')]
+    if 'UNDERPOWERED' not in summarise(two)['verdict']:
+        fails.append('3 positive cells over 2 boards was not reported as '
+                     'underpowered; the acceptance rule counts BOARDS')
     # ... and a mixed result is NOT SUPPORTED, not "mostly works".
     rows = [dict(rows[0]), dict(rows[0], board='c'),
-            dict(rows[0], board='d', route_recovery_delta=-1.0)]
+            dict(rows[0], board='d', route_recovery_delta=-1.0),
+            dict(rows[0], board='e')]
     if 'NOT SUPPORTED' not in summarise(rows)['verdict']:
         fails.append('a cell that got WORSE did not block the claim')
     # The undamaged arm repairs the CONTROL, so it must be normalised against

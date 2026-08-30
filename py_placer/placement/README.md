@@ -144,13 +144,24 @@ never a count: `no_room_at_any_dose`, `block_member_locked:<ref>`,
 `geometry_worsened:<ref>`, `declared_keepout_refused_a_shift:<ref>`,
 `corridor_over_budget`, and the rest are enumerated in `relocate.py`.
 
-**What is measured is the MECHANISM, not the routing.** Letting neighbours yield
-bought ≥ 1 mm more travel than freezing them on 11 of 24 blocks over 6 boards,
-max 16.66 mm (`tests/stress/relocation_reach.py`; its frozen arm is the same
-solve with everything else pinned, so the arms differ in exactly one thing —
-and `reach >= frozen` is a theorem, so the evidence is the magnitude, never a
-win rate). **No measurement shows a relocated board routes better**, and the run
-verdict carries that sentence as `relocate_efficacy`.
+**The mechanism holds; the routed result does not support the feature.**
+Letting neighbours yield bought ≥ 1 mm more travel than freezing them on 11 of
+the 24 measurable blocks over 6 of the 9 boards that have one, max 16.66 mm
+(`tests/stress/relocation_reach.py`; its frozen arm is the same solve with
+everything else pinned, so the arms differ in exactly one thing — and
+`reach >= frozen` is a theorem, so the evidence is the magnitude, never a win
+rate).
+
+The routed A/B (`tests/stress/block_relocation_study.py`) has been run, and it
+is **UNDERPOWERED and lost to the incumbent**: the relocation recovered damage
+on 3 of 3 evidence cells, median delta **+0.57** — but over only **2 boards**,
+where the acceptance rule counts ≥ 3, and `place_route_loop` with the pin gate
+lifted reached a **strictly better** routed result on **2 of those 3** cells
+(esp_prog/swap 0.83 vs 0.33; splitflap/swap 0.71 vs 0.57; they tie at 1.0 on
+esp_prog/wrong_side). So the flag stays default-off, and the run verdict carries
+that whole sentence as `relocate_efficacy`. Under pre-registered rule 12 this is
+not yet a withdrawal — the study has not met its own N — but it is the
+opposite of support, and the next run of it decides.
 
 Three limits worth knowing before reaching for it: it never fires on a board
 that already routes (the loop stops at `failures == 0`, and `--target-nets` does

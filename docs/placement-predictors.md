@@ -470,3 +470,41 @@ the loop — and **#554's constraint framing is withdrawn rather than the tool**
 - Not that the constraint graph is a conservative model of legality. It is not —
   a Euclidean gap against a per-axis constraint leaves 73 of 54,841 corpus pairs
   exposed. The exact re-check, not the graph, is what makes the pass safe.
+
+### What the routed study actually returned (#554)
+
+`tests/stress/block_relocation_study.py` ran on 2026-08-30. Rows and summary are
+committed at `tests/554_block_relocation_baseline.json`;
+`tests/test_554_relocation_regen.py` re-derives the whole summary from those rows
+through the study's own `summarise()` (it does **not** re-run the routes — hours
+— and says so rather than sampling and implying otherwise).
+
+| board / kind | blocking C → D | R | R0 | L (`loop@allon`) | delta |
+|---|---|---|---|---|---|
+| esp_prog / swap | 0 → 6 | 4 (**0.33**) | 0 | 1 (**0.83**) | +0.333 |
+| esp_prog / wrong_side | 0 → 3 | 0 (**1.00**) | 0 | 0 (**1.00**) | +1.000 |
+| splitflap_driver / swap | 0 → 7 | 3 (**0.57**) | 0 | 2 (**0.71**) | +0.571 |
+| esp_prog / translate | 0 → 3 | 0 | — | 0 | instrument only |
+| splitflap / wrong_side, translate | 0 → 0 | — | — | — | `not_placement_limited` |
+
+**Verdict: UNDERPOWERED, and the incumbent won.** The direction is right — 3 of 3
+evidence cells positive against their own undamaged pairing, median **+0.571**,
+none negative — but on **2 boards**, and rule 8 counts boards, because per-board
+spread here is ±2–3 nets. And `place_route_loop` with the pin gate lifted reached
+a **strictly better** routed result on **2 of the 3** cells, tying on the third.
+
+Three things this establishes, none of which is "it works":
+
+1. **The pipeline fires end to end and the arithmetic is sound.** The paired
+   `R0` arm reads 0 on every cell — the relocation does not disturb an undamaged
+   board — so the deltas are not the artefact that voided #553's first reading.
+2. **Two of six cells were `not_placement_limited`**: on splitflap the damage did
+   not make the board route worse at all, so there was nothing to restore. Those
+   are reported with both routed numbers, because the RUNBOOK's definition of a
+   subject is exactly that the dose must threaten routability.
+3. **The feature does not currently beat the tool that exists.** That is the
+   comparison rule 8 pre-registered, and it came back against #554.
+
+What would settle it: the same study over ≥ 3 boards that fail at their authored
+placement or under a dose that threatens routing. On this corpus that means
+adding tigard and kit-dev-coldfire, at roughly 15–40 minutes per cell.

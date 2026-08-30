@@ -1,0 +1,395 @@
+{
+  "recorded_verdict": "UNDERPOWERED: 3 evidence cell(s) over 2 board(s). The acceptance rule counts BOARDS -- >= 3, right on N-1 and wrong on none -- because per-board spread here is +-2..3 nets and two cells on one board are not two boards. The direction (3 up, 0 down, median 0.5714) is reported, not aggregated into a claim. INCUMBENT: place_route_loop with the pin gate lifted reached a strictly better routed result on 2 of the 3 cell(s) where both ran.",
+  "rows": [
+    {
+      "applied_mm": 8.3672,
+      "block": "decap:Y1",
+      "board": "esp_prog",
+      "contract": {
+        "block_members": 7,
+        "collateral_parts": 2,
+        "parts_moved_by_R": 9
+      },
+      "counted_in_primary": true,
+      "is_evidence": true,
+      "kind": "swap",
+      "loop_route_recovery": 0.8333,
+      "members": [
+        "C1",
+        "C2",
+        "C4",
+        "CON2",
+        "R4",
+        "U2",
+        "Y1"
+      ],
+      "members_moved": 7,
+      "route_effect_on_control": 0.0,
+      "route_recovery": 0.3333,
+      "route_recovery_delta": 0.3333,
+      "routed": {
+        "C": {
+          "blocking": 0,
+          "deficit": 0,
+          "failed": 0,
+          "open": 0,
+          "routed": 17
+        },
+        "D": {
+          "blocking": 6,
+          "deficit": 2,
+          "failed": 4,
+          "open": 0,
+          "routed": 0
+        },
+        "L": {
+          "blocking": 1,
+          "deficit": 0,
+          "failed": 1,
+          "max_move_mm": 5.3852,
+          "open": 0,
+          "parts_moved": 8,
+          "route_recovery": 0.8333,
+          "routed": 0
+        },
+        "R": {
+          "blocking": 4,
+          "deficit": 1,
+          "failed": 3,
+          "max_move_mm": 2.9155,
+          "open": 0,
+          "parts_moved": 9,
+          "route_recovery": 0.3333,
+          "routed": 0
+        },
+        "R0": {
+          "blocking": 0,
+          "deficit": 0,
+          "failed": 0,
+          "max_move_mm": 0.0,
+          "open": 0,
+          "parts_moved": 0,
+          "route_effect_on_control": 0.0,
+          "routed": 17
+        }
+      },
+      "schema": 1
+    },
+    {
+      "applied_mm": 13.4629,
+      "block": "decap:Y1",
+      "board": "esp_prog",
+      "contract": {
+        "block_members": 3,
+        "collateral_parts": 8,
+        "parts_moved_by_R": 11
+      },
+      "counted_in_primary": true,
+      "is_evidence": true,
+      "kind": "wrong_side",
+      "loop_route_recovery": 1.0,
+      "members": [
+        "C2",
+        "C4",
+        "Y1"
+      ],
+      "members_moved": 3,
+      "route_effect_on_control": 0.0,
+      "route_recovery": 1.0,
+      "route_recovery_delta": 1.0,
+      "routed": {
+        "C": {
+          "blocking": 0,
+          "deficit": 0,
+          "failed": 0,
+          "open": 0,
+          "routed": 17
+        },
+        "D": {
+          "blocking": 3,
+          "deficit": 1,
+          "failed": 2,
+          "open": 0,
+          "routed": 0
+        },
+        "L": {
+          "blocking": 0,
+          "deficit": 0,
+          "failed": 0,
+          "max_move_mm": 6.0,
+          "open": 0,
+          "parts_moved": 12,
+          "route_recovery": 1.0,
+          "routed": 17
+        },
+        "R": {
+          "blocking": 0,
+          "deficit": 0,
+          "failed": 0,
+          "max_move_mm": 3.04,
+          "open": 0,
+          "parts_moved": 11,
+          "route_recovery": 1.0,
+          "routed": 17
+        },
+        "R0": {
+          "blocking": 0,
+          "deficit": 0,
+          "failed": 0,
+          "max_move_mm": 0.0,
+          "open": 0,
+          "parts_moved": 0,
+          "route_effect_on_control": 0.0,
+          "routed": 17
+        }
+      },
+      "schema": 1
+    },
+    {
+      "applied_mm": 8.01,
+      "block": "decap:Y1",
+      "board": "esp_prog",
+      "contract": {
+        "block_members": 3,
+        "collateral_parts": 14,
+        "parts_moved_by_R": 17
+      },
+      "counted_in_primary": false,
+      "is_evidence": false,
+      "kind": "translate",
+      "loop_route_recovery": 1.0,
+      "members": [
+        "C2",
+        "C4",
+        "Y1"
+      ],
+      "members_moved": 3,
+      "route_effect_on_control": null,
+      "route_recovery": 1.0,
+      "route_recovery_delta": null,
+      "routed": {
+        "C": {
+          "blocking": 0,
+          "deficit": 0,
+          "failed": 0,
+          "open": 0,
+          "routed": 17
+        },
+        "D": {
+          "blocking": 3,
+          "deficit": 1,
+          "failed": 2,
+          "open": 0,
+          "routed": 0
+        },
+        "L": {
+          "blocking": 0,
+          "deficit": 0,
+          "failed": 0,
+          "max_move_mm": 5.3852,
+          "open": 0,
+          "parts_moved": 9,
+          "route_recovery": 1.0,
+          "routed": 17
+        },
+        "R": {
+          "blocking": 0,
+          "deficit": 0,
+          "failed": 0,
+          "max_move_mm": 10.6042,
+          "open": 0,
+          "parts_moved": 17,
+          "route_recovery": 1.0,
+          "routed": 17
+        },
+        "R0": {
+          "blocking": null,
+          "reason": "arm produced no board",
+          "route_effect_on_control": null
+        }
+      },
+      "schema": 1
+    },
+    {
+      "applied_mm": 73.8968,
+      "block": "decap:U9",
+      "board": "splitflap_driver",
+      "contract": {
+        "block_members": 19,
+        "collateral_parts": 35,
+        "parts_moved_by_R": 54
+      },
+      "counted_in_primary": true,
+      "is_evidence": true,
+      "kind": "swap",
+      "loop_route_recovery": 0.7143,
+      "members": [
+        "C2",
+        "C6",
+        "C8",
+        "D1",
+        "D2",
+        "D3",
+        "H4",
+        "H7",
+        "J10",
+        "J8",
+        "J9",
+        "R2",
+        "R3",
+        "R4",
+        "R6",
+        "R7",
+        "R8",
+        "U4",
+        "U9"
+      ],
+      "members_moved": 19,
+      "route_effect_on_control": 0.0,
+      "route_recovery": 0.5714,
+      "route_recovery_delta": 0.5714,
+      "routed": {
+        "C": {
+          "blocking": 0,
+          "deficit": 0,
+          "failed": 0,
+          "open": 0,
+          "routed": 83
+        },
+        "D": {
+          "blocking": 7,
+          "deficit": 1,
+          "failed": 6,
+          "open": 0,
+          "routed": 0
+        },
+        "L": {
+          "blocking": 2,
+          "deficit": 1,
+          "failed": 1,
+          "max_move_mm": 6.0301,
+          "open": 0,
+          "parts_moved": 35,
+          "route_recovery": 0.7143,
+          "routed": 0
+        },
+        "R": {
+          "blocking": 3,
+          "deficit": 1,
+          "failed": 2,
+          "max_move_mm": 3.1951,
+          "open": 0,
+          "parts_moved": 54,
+          "route_recovery": 0.5714,
+          "routed": 0
+        },
+        "R0": {
+          "blocking": 0,
+          "deficit": 0,
+          "failed": 0,
+          "max_move_mm": 0.0,
+          "open": 0,
+          "parts_moved": 0,
+          "route_effect_on_control": 0.0,
+          "routed": 83
+        }
+      },
+      "schema": 1
+    },
+    {
+      "applied_mm": 42.9331,
+      "block": "decap:U9",
+      "board": "splitflap_driver",
+      "counted_in_primary": true,
+      "is_evidence": true,
+      "kind": "wrong_side",
+      "members": [
+        "C6",
+        "C8",
+        "U9"
+      ],
+      "members_moved": 3,
+      "routed": {
+        "C": {
+          "blocking": 0,
+          "deficit": 0,
+          "failed": 0,
+          "open": 0,
+          "routed": 83
+        },
+        "D": {
+          "blocking": 0,
+          "deficit": 0,
+          "failed": 0,
+          "open": 0,
+          "routed": 83
+        }
+      },
+      "schema": 1,
+      "skipped": "not_placement_limited: damaged blocking 0 is not worse than the control 0, so there is nothing for a placement repair to restore"
+    },
+    {
+      "applied_mm": 6.926,
+      "block": "decap:U9",
+      "board": "splitflap_driver",
+      "counted_in_primary": false,
+      "is_evidence": false,
+      "kind": "translate",
+      "members": [
+        "C6",
+        "C8",
+        "U9"
+      ],
+      "members_moved": 3,
+      "routed": {
+        "C": {
+          "blocking": 0,
+          "deficit": 0,
+          "failed": 0,
+          "open": 0,
+          "routed": 83
+        },
+        "D": {
+          "blocking": 0,
+          "deficit": 0,
+          "failed": 0,
+          "open": 0,
+          "routed": 83
+        }
+      },
+      "schema": 1,
+      "skipped": "not_placement_limited: damaged blocking 0 is not worse than the control 0, so there is nothing for a placement repair to restore"
+    }
+  ],
+  "schema": 1,
+  "summary": {
+    "boards": [
+      "esp_prog",
+      "splitflap_driver"
+    ],
+    "cells": 4,
+    "cells_down": 0,
+    "cells_up": 3,
+    "cells_where_loop_beats_relocation": 2,
+    "cells_with_a_loop_number": 3,
+    "evidence_cells": 3,
+    "instrument_cells": [
+      "esp_prog/translate"
+    ],
+    "median_route_recovery_delta": 0.5714,
+    "schema": 1,
+    "skipped": [
+      {
+        "board": "splitflap_driver",
+        "kind": "wrong_side",
+        "reason": "not_placement_limited: damaged blocking 0 is not worse than the control 0, so there is nothing for a placement repair to restore"
+      },
+      {
+        "board": "splitflap_driver",
+        "kind": "translate",
+        "reason": "not_placement_limited: damaged blocking 0 is not worse than the control 0, so there is nothing for a placement repair to restore"
+      }
+    ],
+    "verdict": "UNDERPOWERED: 3 evidence cell(s) over 2 board(s). The acceptance rule counts BOARDS -- >= 3, right on N-1 and wrong on none -- because per-board spread here is +-2..3 nets and two cells on one board are not two boards. The direction (3 up, 0 down, median 0.5714) is reported, not aggregated into a claim. INCUMBENT: place_route_loop with the pin gate lifted reached a strictly better routed result on 2 of the 3 cell(s) where both ran."
+  }
+}

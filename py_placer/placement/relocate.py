@@ -153,11 +153,16 @@ ROUND_MM = 6
 #: like a disclosure. The two are both carried, because a relocation of a block
 #: the diagnosis chose inherits BOTH gaps.
 NO_EFFICACY_CLAIM = (
-    'NOT MEASURED: no paired routed A/B of relocate-on vs relocate-off exists, '
-    'so nothing shows a relocated board ROUTES better. What IS measured is the '
-    'mechanism -- letting neighbours yield in preserved order buys a block more '
-    'travel than freezing them, on 11 of the 24 measurable blocks, spanning 6 '
-    'of the 9 boards that have one '
+    'UNDERPOWERED, AND THE INCUMBENT WON. The paired routed A/B of relocate-on '
+    'vs relocate-off HAS now been run (tests/stress/block_relocation_study.py): '
+    'the relocation recovered damage on 3 of 3 evidence cells, median delta '
+    '+0.57 -- but over only 2 boards, where this repo\'s acceptance rule counts '
+    '>= 3, and place_route_loop with the pin gate lifted reached a STRICTLY '
+    'BETTER routed result on 2 of those 3 cells. So nothing shows a relocated '
+    'board ROUTES better than what already exists, and one thing suggests the '
+    'opposite. What IS measured is the mechanism: letting neighbours yield in '
+    'preserved order buys a block more travel than freezing them, on 11 of the '
+    '24 measurable blocks over 6 of the 9 boards that have one '
     '(tests/stress/relocation_reach.py). Reach is not routability.')
 
 #: The two pinned wall nodes per axis, and the super-source. Names chosen so they
