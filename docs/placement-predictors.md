@@ -283,3 +283,55 @@ discharging, not a number chosen afterwards.*
   row records `provenance.measured_git` (`v0.21.3-199-g3b8edc19`), from which
   the router version follows; there is no explicit router-version or machine
   field on a row, and this document previously claimed there was.
+
+## What this study does NOT license for #553
+
+`--target-select diagnosis` (`py_placer/placement/diagnosis.py`) ranks movers on
+three signals, one of which is the legality family measured above. Three
+boundaries, recorded before anyone reads the flag's output as a result:
+
+1. **The extrapolation is untested.** This study measured the legality counts as
+   BOARD-LEVEL scalars ranking a BOARD-LEVEL outcome across many placements.
+   #553 uses them as PER-CANDIDATE counts ranking candidates WITHIN one board.
+   Nobody has measured that, and the module docstring says so where a reader of
+   the code will see it.
+2. **`foreign_crossings` was NOT rejected by this study.** It is absent from
+   #553 for three reasons: no caller has the declared corridor it needs;
+   auto-deriving one manufactures the number (`CORRIDOR_MIN_COVER` exists
+   because a cluster fit returns a confident rectangle for a bus that is not
+   there); and its nearest measured relative, `crossings`, fails the sign test
+   here. That third reason is family-level doubt. `foreign_crossings` is a
+   corridor-pierce count — a different quantity — and it has never been measured
+   against anything. Recording the omission as "#703 measured it and it failed"
+   would be false in a way that survives.
+3. **Recall is not efficacy.** `tests/stress/diagnosis_recall.py` measures
+   whether the ranking concentrates on a block the perturber displaced, with no
+   routing at all. Its evidence arm is above chance on 4 of 4 boards (median
+   lift 2.32) while its negative control sits at chance (0.83), and its
+   `translate` arm is arithmetic and labelled so. None of that is a routing
+   outcome.
+
+### Pre-registered rule 5 — what would settle it, and why it has not been run
+
+The claim `--target-select diagnosis` does NOT make is that it routes better.
+Settling that needs a paired routed A/B, `pins` against `diagnosis`, on ≥ 3
+boards with the same round budget, graded on `failures` then routed `blocking`,
+by the same accept rule this document uses elsewhere: right direction on ≥ N−1
+boards, wrong on none.
+
+It has not been run, and the cost is the reason: this study's own provenance
+records a median 217 s per route and a maximum of 2012 s, with tigard's hard
+rows at 9877 s, so three boards × five rounds × two arms is hours to overnight
+serially. There is a harder problem than cost, and it is recorded here so the
+next person does not rediscover it: **the tracked corpus has no board that
+fails to route at its authored placement.** Manufacturing failures means
+perturbing, which re-introduces the damage-family caveat the recall study
+already carries.
+
+### Pre-registered rule 6 — the withdrawal
+
+If that A/B runs and `diagnosis` does not win by rule 5's criterion, the flag is
+withdrawn from the default-available set — and the row keeps its measured
+direction, in the `rejected` style `test_placement_ab.py` uses. A rejected
+finding that is deleted becomes folklore; a rejected finding that keeps its row
+stays a change detector.

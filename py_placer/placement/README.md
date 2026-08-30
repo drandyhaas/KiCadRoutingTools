@@ -68,6 +68,38 @@ On the kit-dev-coldfire demo board this repaired the hand placement from
 3 failed nets to 0 with 4.8× less router effort, moving only
 resistors/caps/jumpers.
 
+### Choosing the movers: `--target-select` (#553)
+
+`--target-select pins` (the DEFAULT, unchanged) is the rule above: pad owners
+of the failed and blocker nets, minus anything over `--max-target-pins`.
+
+`--target-select diagnosis` ranks blocks and loose parts on three signals —
+connectivity-centroid displacement, blocked cells owned, and legality defect
+pairs — and takes the round-robin union of their top-k. It requires
+`--group-by` (only the displacement signal needs blocks; the other two rank
+loose parts, which is why the flag still does something on a board that
+derives none). Each round is budgeted at the number of parts the pin filter
+would have offered, so the two selectors are the same size by construction.
+
+```bash
+python py_placer/place_route_loop.py input.kicad_pcb repaired.kicad_pcb \
+    --route-args '--nets "/*" --track-width 0.2' \
+    --target-select diagnosis --group-by auto,decap --diagnosis-top-k 3
+```
+
+**No measurement shows this routes better than `pins`.** It ships default-off,
+the run verdict carries that sentence in `target_select_efficacy`, and
+`target_select_rounds_diagnosis` beside `target_select_rounds_fallback` says
+how often the flag actually steered anything. What HAS been measured is recall
+of known damage (`tests/stress/diagnosis_recall.py`, baseline in
+`tests/553_diagnosis_recall_baseline.json`). See `diagnosis.py`'s own docstring
+for what backs each signal — which is not the same for the three — and for why
+`foreign_crossings` is absent.
+
+A run in this mode prints a group-source census before round 0, because
+`--group-by auto` derives NO BLOCK on five of the six boards this repo grades
+placement on.
+
 ## place_portfolio.py — K diverse candidates from one placement
 
 The quench is deterministic by design (#457), so re-running it never produces
@@ -924,6 +956,8 @@ is followed by a settle beat, so the moves only play once the camera has arrived
 | `../group_routing.py` | Block → net scoping, and the undo, for `route.py` (#459) |
 | `fanout_clearance.py` | Post-fanout decoupling-cap clearance repair (#130) |
 | `groups.py` | Placement blocks: which parts move as one rigid body (#459) |
+| `diagnosis.py` | Which parts to offer the quench, from routing evidence rather than pin count (#553). Ranks; never combines |
+| `routability.py` | Block displacement, corridors, escape lanes, net affinity — the geometry behind `floorplan.grade`'s health block |
 | `lock_advisor.py` | Which parts should not be moved, and why (#431). Advice only |
 | `placement_state.py` | Board-state gates: unplaced, and already-routed (#431) |
 | `cli_gates.py` | argparse shared by both placement CLIs so they cannot drift |
