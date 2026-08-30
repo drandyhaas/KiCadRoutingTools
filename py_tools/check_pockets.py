@@ -463,11 +463,32 @@ def pocket_census(pcb, board_path, *, nets=('*',), bin_mm=2.0, top=8,
     real = [g for g in graded if not g.synthetic]
     board_area = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])
     containers = _containers(real, pcb.footprints, board_area, leg, opts)
+    #: `placement_state` records an objection to courtyard-area metrics --
+    #: they "break on the boards with no courtyards at all". They do not: a
+    #: footprint that draws none falls back to its PAD bbox, which is real
+    #: copper, and only a footprint with neither is the +/-0.5mm fiction. But
+    #: a reader still needs to know which of the two they are looking at, so
+    #: the provenance is counted rather than assumed.
+    from_courtyard = 0
+    try:
+        from placement.parser import (courtyard_for_side,
+                                      extract_courtyard_sides)
+        _sides = extract_courtyard_sides(board_path)
+        for gp in real:
+            box = _sides.get(gp.ref)
+            if box and courtyard_for_side(box, gp.side) is not None:
+                from_courtyard += 1
+    except Exception:                                           # noqa: BLE001
+        from_courtyard = None
     doc['parts'] = {
         'graded': len(graded),
+        'weighed': len([g for g in real if g.ref not in containers]),
         'synthetic_excluded': len(graded) - len(real),
         'container_excluded': len(containers),
         'containers': sorted(containers),
+        'from_courtyard': from_courtyard,
+        'from_pads': (None if from_courtyard is None
+                      else len(real) - from_courtyard),
         'container_guard': 'options.hosts_the_design' if opts is not None
                            else 'unavailable',
     }
@@ -493,11 +514,18 @@ def pocket_census(pcb, board_path, *, nets=('*',), bin_mm=2.0, top=8,
                     slot[s] = slot.get(s, 0.0) + a
 
     # --- cold classification ------------------------------------------------
+    # Four buckets that PARTITION the in-outline windows, because the two
+    # distinctions this tool exists to draw are exactly the ones that vanish
+    # if a window is silently dropped: a window under a part is not a pocket,
+    # and a part-free window full of another net's copper is not empty.
     cold_keys = []
     warm_unowned = 0
+    under_parts = 0
+    demand_in = 0
     for b, f in frac.items():
         free, owners = bins.get(b, (bin_area_total, frozenset()))
         if owners:
+            demand_in += 1
             continue
         # Part-free is not empty: on a routed board a window with no part
         # still carries copper, and `free` is the only thing that knows.
@@ -508,10 +536,16 @@ def pocket_census(pcb, board_path, *, nets=('*',), bin_mm=2.0, top=8,
         c = cover.get(b, {})
         # max over sides, not sum: "a clear empty pocket" means empty on BOTH.
         if max(c.get('F', 0.0), c.get('B', 0.0)) > cold_cover * area_here + 1e-9:
+            under_parts += 1
             continue
         cold_keys.append(b)
     doc['cold_windows'] = len(cold_keys)
     doc['warm_unowned_windows'] = warm_unowned
+    doc['under_part_windows'] = under_parts
+    #: The old census reported `len(bins)` as its window count, which mixed
+    #: demand bins lying OFF the board in with the rest. This is the in-outline
+    #: half, and it is the one the partition is over.
+    doc['windows_demand_in_outline'] = demand_in
     doc['cold_cover'] = cold_cover
 
     regions = []
@@ -663,10 +697,12 @@ def format_report(doc, hot, top):
         src = (doc.get('outline') or {}).get('source', '?')
         lines.append(f"COLD regions (in-outline, no demand net, no copper, no "
                      f"part courtyard): {len(regions)} region(s), "
-                     f"{doc['cold_windows']} window(s); outline from {src}"
-                     + (f", {doc['warm_unowned_windows']} part-free window(s) "
-                        f"carry copper" if doc.get('warm_unowned_windows')
-                        else ""))
+                     f"{doc['cold_windows']} window(s); outline from {src}")
+        lines.append(f"  of {doc['windows_in_outline']} in-outline window(s): "
+                     f"{doc['windows_demand_in_outline']} carry demand, "
+                     f"{doc['under_part_windows']} sit under a part, "
+                     f"{doc['warm_unowned_windows']} are part-free but carry "
+                     f"copper, {doc['cold_windows']} are cold")
         for r in regions[:top]:
             b, br = r['bbox'], r['band_rect']
             lines.append(f"  #{r['rank']:<3} {r['area_mm2']:>8.1f} mm2  "
@@ -696,7 +732,10 @@ def format_report(doc, hot, top):
             f"(part COUNT would say {100 * (cx or 0):.1f}% / "
             f"{100 * (cy or 0):.1f}% -- a control, never the answer)")
         p = doc.get('parts') or {}
-        lines.append(f"  parts weighed: {p.get('graded', 0)} graded, "
+        lines.append(f"  parts weighed: {p.get('weighed', 0)} of "
+                     f"{p.get('graded', 0)} graded "
+                     f"({p.get('from_courtyard')} from a drawn courtyard, "
+                     f"{p.get('from_pads')} from pad copper); "
                      f"{p.get('synthetic_excluded', 0)} synthetic excluded, "
                      f"{p.get('container_excluded', 0)} container excluded "
                      f"({p.get('container_guard')})")
