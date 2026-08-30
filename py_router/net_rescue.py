@@ -49,6 +49,15 @@ from terminal_colors import RED, GREEN, YELLOW, RESET
 
 
 # ---------------------------------------------------------------------------
+# NOTE: the PCBData annotations below are STRINGS on purpose. net_rescue does
+# not import PCBData at module level (it imports Segment/Via lazily INSIDE a
+# function to avoid an import cycle), and Python evaluates annotations at `def`
+# time before 3.14. So a bare `pcb_data: PCBData` here raises NameError the
+# moment this module is imported under KiCad's bundled python -- 3.9.13, where
+# annotations are eager -- while passing silently on the CLI's 3.14, where
+# PEP 649 makes them lazy. That asymmetry took GUI signal routing to ZERO copper
+# while the CLI stayed perfect (#805 parity regression, f2100875).
+#
 # #666 would-short guard helpers, ported verbatim from bus622-take2's
 # bus_terminal.py (c3725b31). That module does not exist on main, and the guard
 # below is the portable half of that commit -- its other half (an unyield
@@ -85,7 +94,7 @@ def _seg_seg_d(x1, y1, x2, y2, u1, v1, u2, v2):
                _pt_seg_d(x2, y2, u1, v1, u2, v2))
 
 
-def _leg_clear(pcb_data: PCBData, pts: List[Tuple[float, float]],
+def _leg_clear(pcb_data: "PCBData", pts: List[Tuple[float, float]],
                layer: str, width: float, clearance: float,
                net_id: int) -> bool:
     """Exact clearance check of the leg polyline against real geometry --
@@ -127,7 +136,7 @@ def _leg_clear(pcb_data: PCBData, pts: List[Tuple[float, float]],
     return True
 
 
-def _via_site_clear(pcb_data: PCBData, x: float, y: float, config,
+def _via_site_clear(pcb_data: "PCBData", x: float, y: float, config,
                     net_id: int) -> bool:
     """Exact via-landing check for a planned dive pocket: the via's
     copper pad must clear foreign copper on BOTH outer layers, and its
