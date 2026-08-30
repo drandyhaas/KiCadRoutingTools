@@ -12,7 +12,7 @@ K=$2
 shift 2
 NETS=$(python3 coherent_nets.py "$K")
 python3 fanout_from_plan.py "$OUT.kicad_pcb" "$K" "$@" > "$OUT.log" 2>&1
-grep -E "kept floor|^plan:|dropped|^wrote|obeyed|differed|failed nets" \
+grep -E "kept |^plan:|dropped|^wrote|obeyed|differed|failed nets" \
   "$OUT.log"
 python3 ../py_router/check_drc.py "$OUT.kicad_pcb" --clearance 0.1 \
   --clearance-margin 0.1 2>&1 | grep -E "FOUND|<->" | sort | uniq -c \

@@ -10,7 +10,7 @@ for K in "$@"; do
   python3 fanout_from_plan.py "$OUTDIR/free_fo_k${K}.kicad_pcb" "$K" \
     --no-lines --no-plane-drop > "$OUTDIR/free_fo_k${K}.log" 2>&1
   echo "=== K$K"
-  grep -E "kept floor|^plan:|obeyed|failed nets|unplaced" \
+  grep -E "kept |^plan:|obeyed|failed nets|unplaced" \
     "$OUTDIR/free_fo_k${K}.log"
 done
 echo "=== free plans done"

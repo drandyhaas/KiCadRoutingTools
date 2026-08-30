@@ -241,10 +241,15 @@ def strip_net_segments(txt, net_ids, net_names=()):
     """Remove every (segment ...) block whose net ref matches, in
     EITHER dialect: numeric (net N) or quoted name (#749 lore: boards
     carry both). Paren-balanced."""
+    return strip_net_items(txt, 'segment', net_ids, net_names)
+
+
+def strip_net_items(txt, token, net_ids, net_names=()):
+    """strip_net_segments for any top-level item: 'segment' or 'via'."""
     out = []
     i = 0
     while True:
-        j = txt.find('(segment', i)
+        j = txt.find('(' + token, i)
         if j < 0:
             out.append(txt[i:])
             break
@@ -1306,7 +1311,12 @@ def write_out(a, ctx, corridors, names, log):
         log(f'\nREFUSED nets (left open): {refused}')
 
     # ---- repo octolinear smoothing (#536): collapse the distributed 45
-    # nudges into single elbows, clearance-validated against ALL copper
+    # nudges into single elbows, clearance-validated against ALL copper.
+    # Only the BRAID's copper is a candidate (keep_input_copper): the
+    # fanout's stubs are the braid's input and stay as they came, so the
+    # tooth a lane was routed from stays on copper -- the smoother once
+    # re-cut a stub's corner into a diagonal and left the tooth mark
+    # (and the join the plan drew) hanging in free space.
     smoothed = False
     final_segs = {}
     if not a.no_smooth:
@@ -1314,7 +1324,8 @@ def write_out(a, ctx, corridors, names, log):
         pre_len = {nm: sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
                            for s in out_segs[nm]) for nm in names}
         _n, _nets, _rm, _addl, stt = smooth_octolinear_chains(
-            [], pcb, kids, clearance=0.1)
+            [{'new_segments': list(out_segs[nm])} for nm in names],
+            pcb, kids, clearance=0.1, keep_input_copper=True)
         for nm in names:
             nid, _ = byname[nm]
             final_segs[nm] = [s for s in pcb.segments if s.net_id == nid]

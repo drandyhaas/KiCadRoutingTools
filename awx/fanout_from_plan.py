@@ -32,7 +32,6 @@ from kicad_writer import add_tracks_and_vias_to_pcb  # noqa: E402
 from bga_fanout import generate_bga_fanout  # noqa: E402
 import braid as te  # noqa: E402
 import escape_moves as em  # noqa: E402
-import select_moves as sm  # noqa: E402
 import detect_buses as db  # noqa: E402
 import plan_ends as pe  # noqa: E402
 import flow_frame as ff  # noqa: E402
@@ -83,6 +82,15 @@ NO_DROP = '--no-plane-drop' in sys.argv
 # Negative control for the exit-line hint specifically: directions
 # still applied, gaps left to the fanout.
 NO_LINES = '--no-lines' in sys.argv
+# Apply the plan's SOURCE choices too: the bench's source array comes
+# fanned out, and the plan's source refinement (plan_ends.refine_source)
+# only ever chose better teeth on paper. With --source the chosen nets'
+# source copper is stripped and re-fanned in the planned direction and
+# KIND (surface -> channel escape on the pad's layer, dogbone -> dogbone,
+# via-in-pad -> underpad), so a tooth arrives on the layer the corridor
+# delivers on -- a B tooth the corridor must bring back to F costs the
+# braid a via the plan already knew it did not want (K15 SRAS).
+SOURCE = '--source' in sys.argv
 base = next((a.split('=', 1)[1] for a in sys.argv
              if a.startswith('--board=')),
             os.path.join(HERE, 'fb_t2q_base.kicad_pcb'))
@@ -156,6 +164,24 @@ for nm in names:
               or abs(s.end_x - tp[0]) + abs(s.end_y - tp[1]) < 0.005)),
         'F.Cu')
 
+# the source stubs already on the board, as MOVES: the plan's lane
+# checks must see the gap and via site of every net it leaves alone
+src_seed = {}
+for nm in smenu:
+    p = src_pad[nm]
+    nid = byname[nm][0]
+    tooth = launch[nm]
+    near_vias = [v for v in pcb.vias if v.net_id == nid
+                 and math.hypot(v.x - p.global_x, v.y - p.global_y) < 2.5]
+    d = (tooth[0] - p.global_x, tooth[1] - p.global_y)
+    direction = min(_DIRV, key=lambda k: (_DIRV[k][0] * math.hypot(*d) - d[0]) ** 2
+                    + (_DIRV[k][1] * math.hypot(*d) - d[1]) ** 2)
+    site = (near_vias[0].x, near_vias[0].y) if near_vias else None
+    src_seed[nm] = em.Move(nm, 'dogbone' if site else 'surface', direction,
+                           tooth0[nm], tooth, len(near_vias),
+                           [((p.global_x, p.global_y), tooth, tooth0[nm])],
+                           site=site)
+
 print('planning...')
 if ONLY:
     _theta = ff.flow_angle([ends[n][0] for n in names],
@@ -173,7 +199,29 @@ if ONLY:
               + ','.join(_empty[:8]))
 schoice, choice, lp, report = pe.plan_ends(
     smenu, dmenu, launch, sgrid.bbox, dgrid.bbox, buses=buses,
-    tooth_layer0=tooth0)
+    tooth_layer0=tooth0, src_seed=src_seed)
+# only the nets the plan actually MOVED are re-fanned: a move of the
+# same kind, side, layer and gap as the stub already on the board IS
+# that stub (the menu's exit x differs from the tooth's by the array
+# margin, and identity let every such net be re-fanned for nothing)
+
+
+def _same_as_seed(nm, m):
+    s = src_seed.get(nm)
+    if s is None or m is s:
+        return m is s
+    if (m.kind, m.direction, m.layer) != (s.kind, s.direction, s.layer):
+        return False
+    ax = 1 if m.direction in ('left', 'right') else 0
+    if abs(m.exit_pt[ax] - s.exit_pt[ax]) > 0.16:
+        return False
+    if m.site is not None and s.site is not None and \
+            math.hypot(m.site[0] - s.site[0], m.site[1] - s.site[1]) > 0.16:
+        return False
+    return True
+
+
+schoice = {nm: m for nm, m in schoice.items() if not _same_as_seed(nm, m)}
 for line in report:
     print(line)
 
@@ -191,6 +239,125 @@ for nm, m in choice.items():
 print(f'\nplan: {len(hints)} berth escape directions '
       + ', '.join(f'{d}:{sum(1 for v in hints.values() if v == d)}'
                   for d in sorted(set(hints.values()))))
+
+DIRS = {'right': (1, 0), 'left': (-1, 0), 'up': (0, -1), 'down': (0, 1)}
+
+
+def obeyed(tracks, chosen, pads, label):
+    """Did the fanout OBEY? Measure the direction of the copper that
+    actually leaves each ball, rather than trusting that the hint
+    landed: pad centre to the far end of the emitted copper, snapped to
+    the axis it mostly runs along."""
+    by_net = {}
+    for t in tracks:
+        by_net.setdefault(t['net_id'], []).append(t)
+    agree = disagree = absent = 0
+    bad = []
+    for nm, m in chosen.items():
+        p = pads[nm]
+        ts = by_net.get(byname[nm][0], [])
+        if not ts:
+            absent += 1
+            continue
+        far = max((pt for t in ts for pt in (t['start'], t['end'])),
+                  key=lambda q: (q[0] - p.global_x) ** 2
+                  + (q[1] - p.global_y) ** 2)
+        dx, dy = far[0] - p.global_x, far[1] - p.global_y
+        h = math.hypot(dx, dy) or 1
+        got = min(DIRS, key=lambda k: (DIRS[k][0] - dx / h) ** 2
+                  + (DIRS[k][1] - dy / h) ** 2)
+        if got == m.direction:
+            agree += 1
+        else:
+            disagree += 1
+            bad.append(f'{nm}({m.direction}->{got})')
+    print(f'{label} plan obeyed: {agree}/{agree + disagree + absent} balls '
+          f'escaped in the planned direction, {disagree} took another, '
+          f'{absent} no copper')
+    if bad:
+        print('  differed: ' + ', '.join(bad[:12])
+              + (f' (+{len(bad) - 12} more)' if len(bad) > 12 else ''))
+
+
+def pad_key(p):
+    return (round(p.global_x, 3), round(p.global_y, 3))
+
+
+def copy_pro(src_board, dst_board):
+    import shutil
+    pro = os.path.splitext(src_board)[0] + '.kicad_pro'
+    if os.path.exists(pro):
+        shutil.copy(pro, os.path.splitext(dst_board)[0] + '.kicad_pro')
+
+
+board = base
+if SOURCE and schoice:
+    import statistics
+    from collections import Counter
+    src_nets = [nm for nm in schoice if nm in src_pad and src_pad[nm] is not None]
+    src_ids = {byname[nm][0] for nm in src_nets}
+    src_names_full = {byname[nm][1].name for nm in src_nets}
+    # the re-fanout uses the bench's OWN source fanout geometry
+    widths = [s.width for s in pcb.segments if s.net_id in src_ids]
+    vsz = [(v.size, v.drill) for v in pcb.vias if v.net_id in src_ids]
+    tw = statistics.median(widths) if widths else 0.1
+    vs, vd = Counter(vsz).most_common(1)[0][0] if vsz else (0.25, 0.15)
+    txt = open(base, encoding='utf-8').read()
+    txt = te.strip_net_items(txt, 'segment', src_ids, src_names_full)
+    txt = te.strip_net_items(txt, 'via', src_ids, src_names_full)
+    stem = os.path.splitext(out_path)[0]
+    board = stem + '_src0.kicad_pcb'
+    with open(board, 'w', encoding='utf-8') as f:
+        f.write(txt)
+    copy_pro(base, board)
+    kinds = Counter(schoice[nm].kind for nm in src_nets)
+    print(f'\nsource: re-fanning {len(src_nets)} of {sref}\'s nets per the '
+          f'plan ({", ".join(f"{k}:{v}" for k, v in sorted(kinds.items()))}), '
+          f'track {tw} via {vs}/{vd}')
+    for nm in src_nets:
+        print(f'    {nm}: {src_seed[nm]} -> {schoice[nm]}')
+    src_tracks = []
+    # dogbones and via-in-pads FIRST: their stubs are short and sit
+    # against the pad, and the dogbone engine does not keep its 45-degree
+    # stub clear of an earlier pass's surface escape running through the
+    # same row gap (K15: 9 grazes SDQM0/SDQ15). The channel escapes go
+    # last and route round whatever copper is there.
+    for kind, method in (('via_in_pad', 'underpad'), ('dogbone', 'dogbone'),
+                         ('surface', 'channel')):
+        nets_k = [nm for nm in src_nets if schoice[nm].kind == kind]
+        if not nets_k:
+            continue
+        pcb_k = parse_kicad_pcb(board)
+        fp_k = pcb_k.footprints[sref]
+        hints_k = {pad_key(src_pad[nm]): schoice[nm].direction for nm in nets_k}
+        # the plan's exit LINE too: it checked that exact gap against
+        # the static copper (a foreign via in the next gap grazed the
+        # engine's own pick of gap -- K15 SDQ8 vs SDQS1N)
+        lines_k = {pad_key(src_pad[nm]): (schoice[nm].exit_pt[1]
+                                          if schoice[nm].direction in ('left', 'right')
+                                          else schoice[nm].exit_pt[0])
+                   for nm in nets_k}
+        tr, va, vr, fl = generate_bga_fanout(
+            fp_k, pcb_k, net_filter=nets_k, layers=['F.Cu', 'B.Cu'],
+            track_width=tw, clearance=0.1, via_size=vs, via_drill=vd,
+            exit_margin=0.5, escape_method=method, plane_drop='off',
+            escape_dir_hints=hints_k, escape_line_hints=lines_k)
+        nxt = f'{stem}_src_{kind}.kicad_pcb'
+        if tr:
+            add_tracks_and_vias_to_pcb(
+                board, nxt, tr, va, vr,
+                net_id_to_name={i: n.name for i, n in pcb_k.nets.items()})
+        else:
+            import shutil
+            shutil.copy(board, nxt)
+        copy_pro(board, nxt)
+        print(f'  {kind} -> {method}: {len(nets_k)} net(s), {len(tr)} tracks, '
+              f'{len(va)} vias, {len(fl)} failed'
+              + (f' ({", ".join(sorted(fl)[:6])})' if fl else ''))
+        src_tracks.extend(tr)
+        board = nxt
+    obeyed(src_tracks, {nm: schoice[nm] for nm in src_nets}, src_pad, 'source')
+    pcb = parse_kicad_pcb(board)
 
 fp = pcb.footprints[dref]
 print(f'\nfanning out {dref} ({len(fp.pads)} pads), method {METHOD}'
@@ -211,54 +378,15 @@ tracks, vias_add, vias_rm, failed = generate_bga_fanout(
 
 net_names = {nid: n.name for nid, n in pcb.nets.items()}
 if tracks:
-    add_tracks_and_vias_to_pcb(base, out_path, tracks, vias_add, vias_rm,
+    add_tracks_and_vias_to_pcb(board, out_path, tracks, vias_add, vias_rm,
                                net_id_to_name=net_names)
 else:
     import shutil
-    shutil.copy(base, out_path)
-pro = os.path.splitext(base)[0] + '.kicad_pro'
-if os.path.exists(pro):
-    import shutil
-    shutil.copy(pro, os.path.splitext(out_path)[0] + '.kicad_pro')
-
-# --- did the fanout OBEY? measure the direction of the copper that
-# actually leaves each ball, rather than trusting that the hint landed.
-id2name = {byname[n][0]: n for n in names}
-by_net = {}
-for t in tracks:
-    by_net.setdefault(t['net_id'], []).append(t)
-DIRS = {'right': (1, 0), 'left': (-1, 0), 'up': (0, -1), 'down': (0, 1)}
-agree = disagree = absent = 0
-bad = []
-for nm in names:
-    m = choice.get(nm)
-    if m is None:
-        continue
-    p = dst_pad[nm]
-    ts = by_net.get(byname[nm][0], [])
-    if not ts:
-        absent += 1
-        continue
-    # the escape's overall direction: pad centre to the far end of the
-    # emitted copper, snapped to the axis it mostly runs along
-    far = max((pt for t in ts for pt in (t['start'], t['end'])),
-              key=lambda q: (q[0] - p.global_x) ** 2
-              + (q[1] - p.global_y) ** 2)
-    dx, dy = far[0] - p.global_x, far[1] - p.global_y
-    got = min(DIRS, key=lambda k: (DIRS[k][0] - dx / (math.hypot(dx, dy) or 1))
-              ** 2 + (DIRS[k][1] - dy / (math.hypot(dx, dy) or 1)) ** 2)
-    if got == m.direction:
-        agree += 1
-    else:
-        disagree += 1
-        bad.append(f'{nm}({m.direction}->{got})')
+    shutil.copy(board, out_path)
+copy_pro(board, out_path)
 
 print(f'\nwrote {out_path}: {len(tracks)} tracks, {len(vias_add)} vias, '
       f'{len(failed)} failed nets')
-print(f'plan obeyed: {agree}/{agree + disagree + absent} balls escaped in '
-      f'the planned direction, {disagree} took another, {absent} no copper')
-if bad:
-    print('  differed: ' + ', '.join(bad[:12])
-          + (f' (+{len(bad) - 12} more)' if len(bad) > 12 else ''))
+obeyed(tracks, choice, dst_pad, 'berth')
 if failed:
     print(f'  failed nets: {", ".join(sorted(failed)[:10])}')

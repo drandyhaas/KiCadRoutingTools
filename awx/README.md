@@ -93,6 +93,26 @@ Input: the bench with the source fanned out and the destination bare.
 5. `fanout_k.sh` / `chain_k.sh` grade the fanout board on its own before
    the braid runs — a berth that ships stub-vs-stub contact is broken
    before the braid starts.
+6. **The source end** (`SOURCE=1` / `--source`, off by default). The plan
+   refines the source teeth too (`plan_ends.refine_source`), now against
+   what the braid SPENDS — `true_vias` with the source escape's own vias,
+   so a tooth the fanout put on B that the corridor delivers on F is
+   priced (K15 SRAS) — with each tooth kept on the side it already
+   escapes on (optimising the crossing floor alone sent four E-face
+   teeth out the north flank, which the braid paid for as joiners of a
+   second corridor). The stubs already on the board are seeded as moves
+   so the lane checks see every net the plan leaves alone (a new escape
+   was planned through the gap an unmoved neighbour's stub occupied),
+   and a dogbone's via site blocks its gap on every layer. With
+   `--source` the moved nets' source copper is stripped and re-fanned by
+   kind (via-in-pad → underpad, dogbone → dogbone, surface → channel,
+   in that order) with the plan's directions and lines. Measured at K15:
+   the plan's own cost 18 → 14, the re-fanned board DRC-clean and 9/9
+   obeyed — and the braid then refuses 5 lanes (14 vias on 10) where
+   the untouched teeth route 15/15 at 20. The plan's cost and the
+   braid's spend still disagree; the mechanism is in, the objective is
+   not yet trustworthy. Note the channel engine ignores
+   `escape_line_hints` (only the underpad/dogbone engine reads them).
 
 The plan's move menus are array-grid based (`escape_moves.grid_of` measures
 rows and columns in board axes), so a rotated array has no plan;
@@ -224,8 +244,12 @@ is v1; the global allocation (which corridor yields, corridors pushed
 outward to leave the middle for a wide one — what the human does around
 DU1's back) is the next thing to build.
 
-**Finish.** `smooth_octolinear_chains` (#536, clearance-validated), then the
-board is written with the Eco overlay (below).
+**Finish.** `smooth_octolinear_chains` (#536, clearance-validated) over the
+BRAID's copper only (`keep_input_copper`): the fanout's stubs are the
+braid's input and stay as they came, so the tooth a lane was routed from
+stays on copper — the smoother once re-cut a stub's corner into a
+diagonal and left the tooth mark, and the join the plan drew, hanging in
+free space. Then the board is written with the Eco overlay (below).
 
 ## Stage 3 — `connect()` (`connect.py`)
 

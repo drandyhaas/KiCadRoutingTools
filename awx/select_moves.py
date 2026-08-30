@@ -457,21 +457,45 @@ def score(choice: Dict[str, Move], groups, geo: 'Corridor',
     return tv, fl, mm
 
 
+def _site_blocks(site: Optional[Pt], key: Tuple, a: float, b: float,
+                 tol: float = 0.05) -> bool:
+    """Does a via SITE sit in the stretch [a, b] of the lane `key`? A
+    via is on every layer, so a surface escape running through a row
+    gap cannot pass a dogbone's site in that gap whatever layer either
+    is on -- the plan let a B dogbone and an F surface escape share a
+    0.65 mm gap (K15 SDQM0/SDQ15: 9 grazes on the re-fanned source)."""
+    if site is None:
+        return False
+    axis, coord, _L = key
+    along, across = (site[0], site[1]) if axis == 'row' else (site[1], site[0])
+    return abs(across - coord) <= tol and a - tol <= along <= b + tol
+
+
+def _conflict(m: Move, om: Move, tol: float = 0.16) -> bool:
+    """Two moves that cannot both be laid: a shared lane stretch, a
+    shared site, or one's site in the other's lane. Lanes match within
+    `tol` (half a fine-pitch gap): a stub already on the board wanders
+    a few tens of microns off its gap's centreline, and an exact key
+    let a new escape be planned on top of it."""
+    key, a, b = _lane_span(m)
+    ok, oa, ob = _lane_span(om)
+    if ok[0] == key[0] and ok[2] == key[2] and abs(ok[1] - key[1]) < tol \
+            and a < ob and oa < b:
+        return True
+    if m.site is not None and _site_key(om) == _site_key(m):
+        return True
+    if _site_blocks(om.site, key, a, b, tol) or _site_blocks(m.site, ok, oa, ob, tol):
+        return True
+    return False
+
+
 def lanes_free(m: Move, sel: Dict[str, Move], me: str) -> bool:
     """Is this move's channel and via site free, ignoring the net's own
     current claim? The same check select() applies inside its greedy
     pass, exposed so a later refinement cannot quietly propose a move
     that two nets would have to share."""
-    key, a, b = _lane_span(m)
-    for other, om in sel.items():
-        if other == me:
-            continue
-        ok, oa, ob = _lane_span(om)
-        if ok == key and a < ob and oa < b:
-            return False
-        if m.site is not None and _site_key(om) == _site_key(m):
-            return False
-    return True
+    return not any(_conflict(m, om) for other, om in sel.items()
+                   if other != me)
 
 
 def plan_floor(sel: Dict[str, Move], geo: 'Corridor') -> int:
@@ -681,15 +705,10 @@ def select(menu: Dict[str, List[Move]],
                                     if geo.paths_cross(leg, o))
         return c
 
-    taken_lane: Dict[Tuple, List[Tuple[float, float]]] = {}
-    taken_site = set()
+    taken: List[Move] = []          # the moves laid so far this pass
 
     def lane_free(m: Move) -> bool:
-        key, a, b = _lane_span(m)
-        for (u, v) in taken_lane.get(key, ()):
-            if a < v and u < b:            # intervals overlap
-                return False
-        return True
+        return not any(_conflict(m, om) for om in taken)
 
     choice: Dict[str, Move] = {}
     unplaced: List[str] = []
@@ -699,10 +718,7 @@ def select(menu: Dict[str, List[Move]],
     for n in order:
         best = None
         for m in sorted(cand[n], key=lambda m: total(n, m)):
-            sk = _site_key(m)
             if not lane_free(m):
-                continue
-            if sk is not None and sk in taken_site:
                 continue
             best = m
             break
@@ -715,11 +731,7 @@ def select(menu: Dict[str, List[Move]],
         choice[n] = best
         if geo is not None:
             placed_legs.append(geo.leg(n, best))
-        _k, _a, _b = _lane_span(best)
-        taken_lane.setdefault(_k, []).append((_a, _b))
-        sk = _site_key(best)
-        if sk is not None:
-            taken_site.add(sk)
+        taken.append(best)
         if log:
             log(f'  {n}: {best}  (of {len(cand[n])} candidates)')
 
@@ -728,16 +740,7 @@ def select(menu: Dict[str, List[Move]],
         claim? The LIS pass swaps one net at a time -- without
         excluding `me`, a net is blocked from changing gap by the gap
         it is already sitting in."""
-        key, a, b = _lane_span(m)
-        for other, om in sel.items():
-            if other == me:
-                continue
-            ok, oa, ob = _lane_span(om)
-            if ok == key and a < ob and oa < b:
-                return False
-            if m.site is not None and _site_key(om) == _site_key(m):
-                return False
-        return True
+        return lanes_free(m, sel, me)
 
     # From here on the grouping is the CORRIDOR -- every net leaving on
     # one side -- not the taut-path cluster. The cluster chose the side
@@ -760,17 +763,13 @@ def select(menu: Dict[str, List[Move]],
             want_layer.clear()
             want_layer.update(delivered_layers(choice, corridors(choice),
                                                geo, tooth_layer))
-            taken_lane.clear()
-            taken_site.clear()
+            taken.clear()
             placed_legs.clear()
             trial: Dict[str, Move] = {}
             for n in order:
                 pick = None
                 for m in sorted(cand[n], key=lambda m: total(n, m)):
                     if not lane_free(m):
-                        continue
-                    sk = _site_key(m)
-                    if sk is not None and sk in taken_site:
                         continue
                     pick = m
                     break
@@ -779,11 +778,7 @@ def select(menu: Dict[str, List[Move]],
                 trial[n] = pick
                 if geo is not None:
                     placed_legs.append(geo.leg(n, pick))
-                _k, _a, _b = _lane_span(pick)
-                taken_lane.setdefault(_k, []).append((_a, _b))
-                sk = _site_key(pick)
-                if sk is not None:
-                    taken_site.add(sk)
+                taken.append(pick)
             if len(trial) < len(choice):
                 break                      # lost a net: reject the round
             refine_lis(trial, corridors(trial), menu, geo, _free,

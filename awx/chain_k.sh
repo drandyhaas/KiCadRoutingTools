@@ -24,7 +24,7 @@
 # which isolates the braid's own DRC from the plane-drop pass's known
 # cap collisions).
 #
-# usage: [DIRS=left,down] chain_k.sh TAG K [K...] [-- fanout options]
+# usage: [DIRS=left,down] [SOURCE=1] chain_k.sh TAG K [K...] [-- fanout options]
 cd "$(dirname "$0")"
 TAG=${1:-chain}
 shift
@@ -34,6 +34,9 @@ shift
 BASE=${BASE:-fb_t2q_base.kicad_pcb}
 DEST=${DEST:-DU1}
 DIRS_OPT=${DIRS:+--dirs=$DIRS}
+# SOURCE=1: apply the plan's source choices too (re-fan the chosen
+# nets of the source array in the planned direction and kind)
+SRC_OPT=${SOURCE:+--source}
 KS=()
 while [ $# -gt 0 ] && [ "$1" != "--" ]; do KS+=("$1"); shift; done
 [ "$1" = "--" ] && shift
@@ -42,10 +45,10 @@ for K in "${KS[@]}"; do
   echo "=== K$K  $(date +%H:%M:%S)"
   NETS=$(python3 coherent_nets.py "$K")
   python3 fanout_from_plan.py "${TAG}_fo_k${K}.kicad_pcb" "$K" \
-    --board="$BASE" $DIRS_OPT --no-lines "${FO_OPTS[@]}" \
+    --board="$BASE" $DIRS_OPT $SRC_OPT --no-lines "${FO_OPTS[@]}" \
     > "${TAG}_fo_k${K}.log" 2>&1
-  grep -E "kept floor|^plan:|obeyed|failed nets" "${TAG}_fo_k${K}.log" \
-    | sed 's/^/  /'
+  grep -E "kept |^plan:|obeyed|failed|^source:|^  [a-z_]+ -> " \
+    "${TAG}_fo_k${K}.log" | sed 's/^/  /'
   if [ ! -f "${TAG}_fo_k${K}.kicad_pcb" ]; then
     echo "  NO FANOUT BOARD"; continue
   fi
