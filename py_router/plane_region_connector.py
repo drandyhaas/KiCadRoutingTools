@@ -295,13 +295,26 @@ def _net_has_pourable_anchor(pcb_data, net_id: int, plane_layer: str) -> bool:
     An anchor inside a copperpour keep-out anchors NOTHING: no copper is poured
     there to touch it.
     """
+    # #803: this answer is COPPER-DEPENDENT -- it tallies pcb_data.vias and
+    # pcb_data.segments below -- and the comment further down says so outright
+    # ("the ordinary mid-chain state of an inner plane BEFORE its stitching vias
+    # exist"). It was cached with NO invalidation at all, so the first answer,
+    # computed before that copper existed, was frozen for the rest of the run.
+    # Token it on copper content, exactly like _tap_spatial_index and
+    # _net_conn_graph: counts alone are not enough because the stub-debris trim
+    # and rip/restore both REMOVE copper, so a count can return to a cached
+    # value with different content.
+    segs, vias = pcb_data.segments, pcb_data.vias
+    token = (len(segs), len(vias), id(segs), id(vias),
+             sum(map(id, segs)), sum(map(id, vias)))
     cache = getattr(pcb_data, '_pourable_anchor_cache', None)
-    if cache is None:
-        cache = {}
+    if cache is None or cache[0] != token:
+        cache = (token, {})
         try:
             pcb_data._pourable_anchor_cache = cache
         except Exception:
             pass
+    cache = cache[1]
     key = (net_id, plane_layer)
     if key in cache:
         return cache[key]

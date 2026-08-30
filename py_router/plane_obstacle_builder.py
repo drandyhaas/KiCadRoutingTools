@@ -127,18 +127,44 @@ class _NetConnGraph:
     __slots__ = ("seg_adj", "via_at", "pad_at", "via_arrays", "seg_ends_by_layer")
 
 
-# Cache of _NetConnGraph keyed by (id(pcb_data), net_id). _smd_pad_reaches_layer
-# was rebuilding this whole same-net graph on EVERY call (794x / 22s on daisho);
-# it depends only on (net_id, copper), so build it once and reuse across every
-# pad of the net. Invalidated when the board's segment/via count or tolerance
-# changes (copper only grows during routing, so a count change is a real change).
-_NET_GRAPH_CACHE: Dict[Tuple, Tuple] = {}
+# Cache of _NetConnGraph per net. _smd_pad_reaches_layer was rebuilding this
+# whole same-net graph on EVERY call (794x / 22s on daisho); it depends only on
+# (net_id, copper), so build it once and reuse across every pad of the net.
+#
+# #803: this had BOTH cache-invalidation bugs at once.
+#
+#   1. The token was COUNT-ONLY, justified by "copper only grows during routing,
+#      so a count change is a real change". That is no longer true -- the
+#      in-loop stub-debris trim REMOVES committed copper, and rip_up_net /
+#      restore_net cycles do too. Remove k items and add k others and the token
+#      is unchanged while the copper is completely different, so this returned a
+#      graph describing copper that no longer exists. The same false assumption
+#      in plane_pad_tap._tap_spatial_index put a rescue via through a foreign
+#      track on glasgow_revC.
+#   2. It was a MODULE-level dict keyed on id(pcb_data). CPython reuses ids
+#      after GC, and make_local_window mints a short-lived PCBData per tap/
+#      rescue, so a freed window's id is very likely to be handed to the next
+#      one -- which then inherits its predecessor's graph. net_cost._cache_for
+#      documents this exact hazard and the fix: hang the cache off the board,
+#      so its lifetime is tied to the data it describes.
+#
+# Both are fixed below: the cache lives on the board, and the token is
+# content-sensitive (summing element ids costs O(n), the same order as the
+# rebuild it guards, and only replaces a hit that was silently wrong).
 
 
 def _net_conn_graph(net_id: int, pcb_data: PCBData, inv_tol: float) -> "_NetConnGraph":
-    key = (id(pcb_data), net_id)
-    token = (len(pcb_data.segments), len(pcb_data.vias), inv_tol)
-    hit = _NET_GRAPH_CACHE.get(key)
+    segs, vias = pcb_data.segments, pcb_data.vias
+    token = (len(segs), len(vias), inv_tol,
+             id(segs), id(vias), sum(map(id, segs)), sum(map(id, vias)))
+    store = getattr(pcb_data, '_net_graph_cache', None)
+    if store is None:
+        store = {}
+        try:
+            pcb_data._net_graph_cache = store
+        except AttributeError:
+            store = None          # slotted/exotic board: degrade to uncached
+    hit = store.get(net_id) if store is not None else None
     if hit is not None and hit[0] == token:
         return hit[1]
 
@@ -201,7 +227,8 @@ def _net_conn_graph(net_id: int, pcb_data: PCBData, inv_tol: float) -> "_NetConn
         L: (np.asarray(xs, dtype=float), np.asarray(ys, dtype=float), ks)
         for L, (xs, ys, ks) in seg_ends_tmp.items()
     }
-    _NET_GRAPH_CACHE[key] = (token, g)
+    if store is not None:
+        store[net_id] = (token, g)
     return g
 
 
