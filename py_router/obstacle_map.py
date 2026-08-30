@@ -306,6 +306,8 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # Add pads as obstacles (excluding nets we'll route - their pads added per-net)
     # Priced per obstacle: max(routing-side clearance, the pad net's own class clearance)
     _n_pad_nets = len(pcb_data.pads_by_net)
+    _pad_cell_sink: Dict[int, list] = {}
+    _pad_via_sink: list = []
     for _pn_i, (net_id, pads) in enumerate(pcb_data.pads_by_net.items()):
         if (_pn_i & 63) == 0:
             _report("pads", _pn_i, _n_pad_nets)
@@ -320,7 +322,14 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                     _tie_recorded.append(('pad', id(pad), _rec.merged_cells()))
                 continue
             _add_pad_obstacle(obstacles, pad, coord, layer_map, config, extra_clearance,
-                              clearance_override=_obstacle_clearance(net_id))
+                              clearance_override=_obstacle_clearance(net_id),
+                              cell_sink=_pad_cell_sink, via_sink=_pad_via_sink)
+    # One Rust call per layer for every pad's track keep-out, one for the via
+    # keep-outs -- the segment loop above has done this since 2026-08-14; the
+    # pad loop was calling the batch API once PER PAD (measured on glasgow:
+    # 1,593 batch entries for 1,136 pads, per base build, 629 builds/route).
+    _flush_cell_sink(obstacles, _pad_cell_sink)
+    _flush_via_sink(obstacles, _pad_via_sink)
 
     # Intersect each tied net's corridor with the recorded tie-copper stamps:
     # the per-net lift arrays are EXACT subsets of what the base build added
@@ -2675,25 +2684,59 @@ def get_same_net_through_hole_positions(pcb_data: PCBData, net_id: int,
 
 
 def _batch_cells_one_layer(obstacles, cells_xy: "np.ndarray", layer_idx: int,
-                           blocked_cells=None):
-    """Block an (N, 2) array of cells on one layer via the batch API."""
+                           blocked_cells=None, sink=None):
+    """Block an (N, 2) array of cells on one layer via the batch API.
+
+    ``sink`` (a {layer_idx: [arrays]} dict) DEFERS the Rust call: the caller
+    accumulates every pad's cells and stamps once per layer at the end. Same
+    row multiset per layer, so the refcounts land identically whether the rows
+    arrive split or joined -- the argument the 2026-08-14 FFI batching pass
+    already made for the segment and via loops. Pads were the loop it missed.
+    """
     if len(cells_xy) == 0:
         return
-    rows = np.empty((len(cells_xy), 3), dtype=np.int32)
-    rows[:, :2] = cells_xy
-    rows[:, 2] = layer_idx
-    obstacles.add_blocked_cells_batch(np.ascontiguousarray(rows))
+    if sink is not None:
+        sink.setdefault(layer_idx, []).append(cells_xy)
+    else:
+        rows = np.empty((len(cells_xy), 3), dtype=np.int32)
+        rows[:, :2] = cells_xy
+        rows[:, 2] = layer_idx
+        obstacles.add_blocked_cells_batch(np.ascontiguousarray(rows))
     if blocked_cells is not None:
         blocked_cells[layer_idx].update(map(tuple, cells_xy.tolist()))
 
 
-def _batch_vias(obstacles, vias_xy: "np.ndarray", blocked_vias=None):
-    """Block an (N, 2) array of via positions via the batch API."""
+def _flush_cell_sink(obstacles, sink):
+    """Stamp everything a ``sink`` accumulated: one Rust call per layer."""
+    for layer_idx, arrs in sorted(sink.items()):
+        cells = np.concatenate(arrs) if len(arrs) > 1 else arrs[0]
+        rows = np.empty((len(cells), 3), dtype=np.int32)
+        rows[:, :2] = cells
+        rows[:, 2] = layer_idx
+        obstacles.add_blocked_cells_batch(np.ascontiguousarray(rows))
+    sink.clear()
+
+
+def _batch_vias(obstacles, vias_xy: "np.ndarray", blocked_vias=None, sink=None):
+    """Block an (N, 2) array of via positions via the batch API.
+
+    ``sink`` (a list) defers the Rust call -- see _batch_cells_one_layer."""
     if len(vias_xy) == 0:
         return
-    obstacles.add_blocked_vias_batch(np.ascontiguousarray(vias_xy.astype(np.int32)))
+    if sink is not None:
+        sink.append(vias_xy)
+    else:
+        obstacles.add_blocked_vias_batch(np.ascontiguousarray(vias_xy.astype(np.int32)))
     if blocked_vias is not None:
         blocked_vias.update(map(tuple, vias_xy.tolist()))
+
+
+def _flush_via_sink(obstacles, sink):
+    """Stamp everything a via ``sink`` accumulated: one Rust call."""
+    if sink:
+        allv = np.concatenate(sink) if len(sink) > 1 else sink[0]
+        obstacles.add_blocked_vias_batch(np.ascontiguousarray(allv.astype(np.int32)))
+        del sink[:]
 
 
 
@@ -3129,7 +3172,8 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
                       blocked_cells: List[Set[Tuple[int, int]]] = None,
                       blocked_vias: Set[Tuple[int, int]] = None,
                       clearance_override: float = None,
-                      skip_cell=None):
+                      skip_cell=None,
+                      cell_sink=None, via_sink=None):
     """Add a pad as obstacle to the map.
 
     Uses rectangular-with-rounded-corners pattern matching other pad blocking functions.
@@ -3261,7 +3305,8 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
                                dtype=bool, count=len(cells))
             cells = cells[keep]
         for layer_idx in g_idxs:
-            _batch_cells_one_layer(obstacles, cells, layer_idx, blocked_cells)
+            _batch_cells_one_layer(obstacles, cells, layer_idx, blocked_cells,
+                                   sink=cell_sink)
 
     # Via blocking near pads - block vias if pad is on any copper layer
     if any(layer.endswith('.Cu') for layer in expanded_layers):
@@ -3273,7 +3318,7 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
             keep = np.fromiter((not skip_cell(int(cx), int(cy)) for cx, cy in via_cells),
                                dtype=bool, count=len(via_cells))
             via_cells = via_cells[keep]
-        _batch_vias(obstacles, via_cells, blocked_vias)
+        _batch_vias(obstacles, via_cells, blocked_vias, sink=via_sink)
 
 
 def _pad_via_keepout_cells(pad, coord: GridCoord, config: GridRouteConfig,

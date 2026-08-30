@@ -1126,6 +1126,16 @@ def build_routing_obstacle_map(
     # Skip this entirely for plane connections where we're more lenient
     t0 = time.time()
     pad_count = 0
+    # FFI batching, same pattern the SEGMENT loop below already uses (and the
+    # via loop above it): accumulate the per-pad cell arrays and stamp once,
+    # instead of one Rust call per pad. The 2026-08-14 batching pass fixed the
+    # segment and via loops here and missed this one -- measured on glasgow,
+    # add_blocked_cells_batch was entered 1,483,841 times per route, ~299 per
+    # build_routing_obstacle_map call, i.e. once per pad. Bit-identical:
+    # concatenation preserves the exact row multiset, and the batch insert
+    # refcounts a given cell the same number of times whether the rows arrive
+    # split or joined.
+    _pad_cell_arrs = []
     if not skip_pad_blocking:
         for net_id, pads in pcb_data.pads_by_net.items():
             if net_id == exclude_net_id:
@@ -1175,9 +1185,15 @@ def build_routing_obstacle_map(
                                                     off_y=pad.global_y - gy * coord.grid_step,
                                                     rotation_deg=pad.rect_rotation)
                     if len(cells):
-                        layer_col = np.full((cells.shape[0], 1), layer_idx, dtype=np.int32)
-                        obstacles.add_blocked_cells_batch(np.hstack([cells, layer_col]))
+                        _pad_cell_arrs.append(cells)
                     pad_count += 1
+    if _pad_cell_arrs:
+        _pall = (np.concatenate(_pad_cell_arrs) if len(_pad_cell_arrs) > 1
+                 else _pad_cell_arrs[0])
+        _rows = np.empty((len(_pall), 3), dtype=np.int32)
+        _rows[:, :2] = _pall
+        _rows[:, 2] = layer_idx
+        obstacles.add_blocked_cells_batch(np.ascontiguousarray(_rows))
     if verbose:
         print(f"  Pads: {pad_count} pads in {time.time() - t0:.2f}s")
 
