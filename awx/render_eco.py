@@ -4,9 +4,10 @@
 Layers drawn (bottom to top): mm grid + rulers, board outline (Edge.Cuts),
 pads (yellow; routed-set pads brighter), bench copper (faint by layer),
 ROUTED-set copper (saturated by layer), vias, then the braid's plan
-overlay (braid.py writes it): Eco2 connection ENDS in yellow -- the
+overlay (braid.py writes it): each corridor's SPINE as a wide pale-blue
+line (a thick Eco1 line), Eco2 connection ENDS in yellow -- the
 fanout's free ends (source teeth, stub ends) as an "x", the braid's own
-exit points (port leave points, flank-run ends) as a "+" -- Cmts the
+points (join / exit leg ends, spine corners) as a "+" -- Cmts the
 planned UNDER-PASSES in orange (where the schedule requires the back
 layer), Eco1 the planned lane CENTRELINES in white. Copper that leaves
 its white line is the router disagreeing with the plan; a via outside
@@ -68,18 +69,24 @@ for mm in range(int(Y0), int(Y1) + 1):
 
 # board outline + eco lines from the file text, parsed PER gr_line block
 txt = open(a.board, encoding='utf-8', errors='replace').read()
-eco1, eco2, cmts, edge = [], [], [], []
+eco1, eco2, cmts, edge, spine = [], [], [], [], []
 for chunk in txt.split('(gr_line')[1:]:
     chunk = chunk[:400]
     ms = re.search(r'\(start ([\-\d.]+) ([\-\d.]+)\)', chunk)
     me = re.search(r'\(end ([\-\d.]+) ([\-\d.]+)\)', chunk)
     ml = re.search(r'\(layer "([^"]+)"\)', chunk)
+    mw = re.search(r'\(stroke \(width ([\d.]+)\)', chunk)
     if not (ms and me and ml):
         continue
     rec = (float(ms.group(1)), float(ms.group(2)),
            float(me.group(1)), float(me.group(2)))
     if ml.group(1) == 'Eco1.User':
-        eco1.append(rec)
+        # a thick Eco1 line is a corridor's SPINE (braid.py draws it at
+        # 0.2), a thin one a lane's centreline
+        if mw and float(mw.group(1)) >= 0.15:
+            spine.append(rec)
+        else:
+            eco1.append(rec)
     elif ml.group(1) == 'Eco2.User':
         eco2.append(rec)
     elif ml.group(1) == 'Cmts.User':
@@ -132,8 +139,11 @@ for v in pcb.vias:
                else (200, 200, 200, 120),
                width=2 if bright else 1)
 
-# targets (yellow) under, planned UNDER-PASS windows (orange, the
-# other-layer stretches) above them, corridor centerlines (white) on top
+# spines (pale blue, wide, under everything of the plan), targets
+# (yellow), planned UNDER-PASS windows (orange, the other-layer
+# stretches) above them, lane centerlines (white) on top
+for (x1, y1, x2, y2) in spine:
+    dr.line([px(x1, y1), px(x2, y2)], fill=(150, 170, 255, 110), width=9)
 for (x1, y1, x2, y2) in eco2:
     dr.line([px(x1, y1), px(x2, y2)], fill=(255, 210, 40, 235), width=2)
 for (x1, y1, x2, y2) in cmts:
@@ -142,6 +152,6 @@ for (x1, y1, x2, y2) in eco1:
     dr.line([px(x1, y1), px(x2, y2)], fill=(255, 255, 255, 220), width=4)
 
 img.save(a.out)
-print(f"render_eco: {a.out} eco1(lanes)={len(eco1)} "
+print(f"render_eco: {a.out} spine={len(spine)} eco1(lanes)={len(eco1)} "
       f"eco2(ends)={len(eco2) // 2} cmts(underpass)={len(cmts)} "
       f"edge={len(edge)} highlighted nets={sorted(hi_names) or 'none'}")

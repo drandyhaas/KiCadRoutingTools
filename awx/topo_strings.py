@@ -95,6 +95,16 @@ class Obstacles:
                 for gy in range(int((y - r - 0.3) / self.cell),
                                 int((y + r + 0.3) / self.cell) + 1):
                     self._grid.setdefault((gx, gy), []).append(i)
+        # capsules hashed by their bounding box too: a point query used
+        # to walk EVERY capsule (thousands of foreign fanout stubs on a
+        # BGA board), which made the spine relaxation cost minutes
+        self._cgrid = {}
+        for i, (a, b, r, _n) in enumerate(self.caps):
+            x0, x1 = min(a[0], b[0]) - r - 0.3, max(a[0], b[0]) + r + 0.3
+            y0, y1 = min(a[1], b[1]) - r - 0.3, max(a[1], b[1]) + r + 0.3
+            for gx in range(int(x0 / self.cell), int(x1 / self.cell) + 1):
+                for gy in range(int(y0 / self.cell), int(y1 / self.cell) + 1):
+                    self._cgrid.setdefault((gx, gy), []).append(i)
 
     def near_discs(self, p):
         key = (int(p[0] / self.cell), int(p[1] / self.cell))
@@ -102,6 +112,17 @@ class Obstacles:
         for dx_ in (-1, 0, 1):
             for dy_ in (-1, 0, 1):
                 out.extend(self._grid.get((key[0] + dx_, key[1] + dy_), ()))
+        return out
+
+    def near_caps(self, p):
+        cg = getattr(self, '_cgrid', None)
+        if cg is None:
+            return range(len(self.caps))
+        key = (int(p[0] / self.cell), int(p[1] / self.cell))
+        out = set()
+        for dx_ in (-1, 0, 1):
+            for dy_ in (-1, 0, 1):
+                out.update(cg.get((key[0] + dx_, key[1] + dy_), ()))
         return out
 
     def point_violation(self, p, pad=0.0):
@@ -121,7 +142,8 @@ class Obstacles:
                     else:
                         dirv = ((p[0] - x) / d, (p[1] - y) / d)
                     worst = (depth, dirv)
-        for (a, b, r, _n) in self.caps:
+        for ci in self.near_caps(p):
+            a, b, r, _n = self.caps[ci]
             r += pad
             d = seg_pt_dist(a, b, p)
             if d < r:
@@ -163,7 +185,13 @@ class Obstacles:
                 return False
         xlo, xhi = min(a[0], b[0]), max(a[0], b[0])
         ylo, yhi = min(a[1], b[1]), max(a[1], b[1])
-        for (c, e, r, _n) in self.caps:
+        ccand = set()
+        for k in range(nsteps + 1):
+            t = k / nsteps
+            ccand.update(self.near_caps((a[0] + t * (b[0] - a[0]),
+                                         a[1] + t * (b[1] - a[1]))))
+        for ci in ccand:
+            c, e, r, _n = self.caps[ci]
             if min(c[0], e[0]) - r > xhi or max(c[0], e[0]) + r < xlo \
                     or min(c[1], e[1]) - r > yhi \
                     or max(c[1], e[1]) + r < ylo:
@@ -179,7 +207,8 @@ class Obstacles:
                 x, y, r, n = self.discs[i]
                 if math.hypot(p[0] - x, p[1] - y) < r + slack:
                     names.add(n)
-            for (a, b, r, n) in self.caps:
+            for ci in self.near_caps(p):
+                a, b, r, n = self.caps[ci]
                 if seg_pt_dist(a, b, p) < r + slack:
                     names.add(n)
         return names

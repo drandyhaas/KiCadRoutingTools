@@ -57,19 +57,67 @@ def make_config(pcb: PCBData, track: float, clearance: float,
                            grid_step=grid_step, layers=layers, **kw)
 
 
+def tube_mask(xs: np.ndarray, ys: np.ndarray, pieces, layer: str
+              ) -> np.ndarray:
+    """The cells within a tube around a polyline: `pieces` is a list of
+    (p, q, half_width, layers) segments, and the mask is True at
+    (xs[i], ys[j]) -- shape (len(xs), len(ys)) -- where some piece
+    whose `layers` contains `layer` passes within `half_width`. This is
+    the general corridor shape: a lane that turns a corner, peels off
+    to a face, or goes round the far side of an array is a polyline,
+    not a function of x, and its corridor is the tube around it."""
+    X = xs[:, None]
+    Y = ys[None, :]
+    m = np.zeros((len(xs), len(ys)), dtype=bool)
+    for (p, q, half, layers) in pieces:
+        if layer not in layers:
+            continue
+        dx, dy = q[0] - p[0], q[1] - p[1]
+        L2 = dx * dx + dy * dy
+        if L2 < 1e-12:
+            d2 = (X - p[0]) ** 2 + (Y - p[1]) ** 2
+        else:
+            t = ((X - p[0]) * dx + (Y - p[1]) * dy) / L2
+            t = np.clip(t, 0.0, 1.0)
+            d2 = (X - (p[0] + t * dx)) ** 2 + (Y - (p[1] + t * dy)) ** 2
+        m |= d2 <= half * half
+    return m
+
+
 def _band_cells(coord: GridCoord, window: PCBData, band,
                 layers: List[str], slack: float) -> np.ndarray:
     """Every window cell outside the band, as an (N, 3) int32 array for
     add_blocked_cells_batch.
 
-    `band` is either (lo(x), hi(x)) applied to every layer, or a dict
-    {layer_name: fn(x) -> (lo, hi)} -- a per-layer corridor, where
-    lo > hi means the layer is closed at that x. That is how a caller
-    REQUIRES a layer: close the other one. A layer absent from the
-    dict is closed everywhere."""
+    `band` is one of:
+      * (lo(x), hi(x)) applied to every layer;
+      * {layer_name: fn(x) -> (lo, hi)} -- a per-layer corridor, where
+        lo > hi means the layer is closed at that x. That is how a
+        caller REQUIRES a layer: close the other one. A layer absent
+        from the dict is closed everywhere;
+      * a callable band(xs, ys, layer_name) -> bool mask of shape
+        (len(xs), len(ys)), True where the lane may go -- the general
+        form, for a corridor that is not a function of x (a lane with
+        a corner, a peel leg, a way round an array). `slack` is the
+        callable's own business."""
     x0, y0, x1, y1 = window.board_info.board_bounds
     gx0, gy0 = coord.to_grid(x0, y0)
     gx1, gy1 = coord.to_grid(x1, y1)
+    if callable(band) and not isinstance(band, (tuple, dict)):
+        gxs = np.arange(gx0, gx1 + 1)
+        gys = np.arange(gy0, gy1 + 1)
+        xs = np.array([coord.to_float(int(g), 0)[0] for g in gxs])
+        ys = np.array([coord.to_float(0, int(g))[1] for g in gys])
+        parts = []
+        for L, lname in enumerate(layers):
+            ok = np.asarray(band(xs, ys, lname), dtype=bool)
+            bi, bj = np.nonzero(~ok)
+            if len(bi):
+                parts.append(np.stack([gxs[bi], gys[bj],
+                                       np.full(len(bi), L)], axis=1))
+        if not parts:
+            return np.zeros((0, 3), dtype=np.int32)
+        return np.concatenate(parts).astype(np.int32)
     rows = []
     per_layer = isinstance(band, dict)
     for gx in range(gx0, gx1 + 1):
@@ -109,7 +157,8 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
             band_slack: float = 0.0, net_clearances: Optional[dict] = None,
             virtual: Optional[List[Tuple[Point, Point, str]]] = None,
             track_width: Optional[float] = None,
-            verbose: bool = False
+            verbose: bool = False,
+            window_pts: Optional[List[Point]] = None
             ) -> Optional[Tuple[List[Segment], List[Via]]]:
     """Route `net_id` from the copper end at `a` (on `a_layer`) to the
     copper end at `b` (on `b_layer`).
@@ -127,15 +176,20 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     yet but will -- (p, q, layer) centrelines of lanes not routed yet --
     stamped as foreign obstacles so a via is never placed where a later
     lane must pass. `margin`: how far the search window extends past
-    the two points' bounding box.
+    the bounding box of the two points -- and of `window_pts`, the
+    planned path, when the lane goes somewhere the two points' box
+    does not cover (round the far side of an array).
     """
     coord = GridCoord(cfg.grid_step)
     layer_map = build_layer_map(cfg.layers)
     if a_layer not in layer_map or b_layer not in layer_map:
         raise ValueError(f'layer not routable: {a_layer} / {b_layer}')
 
-    cx, cy = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
-    half = max(abs(a[0] - b[0]), abs(a[1] - b[1])) / 2 + margin
+    pts = [a, b] + list(window_pts or [])
+    bx0, bx1 = min(p[0] for p in pts), max(p[0] for p in pts)
+    by0, by1 = min(p[1] for p in pts), max(p[1] for p in pts)
+    cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+    half = max(bx1 - bx0, by1 - by0) / 2 + margin
     window = make_local_window(pcb, cx, cy, half)
     if not window.board_info.board_bounds:
         return None
@@ -156,7 +210,7 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     keep = same_net_pad_via_keepout_cells(pcb, net_id, cfg)
     if len(keep):
         obstacles.add_blocked_vias_batch(keep)
-    if band is not None and (isinstance(band, dict)
+    if band is not None and (isinstance(band, dict) or callable(band)
                              or band[0] is not None or band[1] is not None):
         cells = _band_cells(coord, window, band, list(cfg.layers),
                             band_slack)
@@ -179,9 +233,23 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
                                       bounds=bounds,
                                       sources_override=sources,
                                       targets_override=targets)
+    debug = verbose or os.environ.get('CONNECT_DEBUG')
     if not result or result.get('failed'):
+        if debug and result:
+            info = {k: v for k, v in result.items()
+                    if k not in ('new_segments', 'new_vias', 'segments',
+                                 'vias', 'path')}
+            print(f'  connect net {net_id}: router failed: {info}')
         return None
     if _result_escapes_window(result, window, cfg):
+        if debug:
+            segs = result.get('new_segments') or []
+            xs = [v for s in segs for v in (s.start_x, s.end_x)]
+            ys = [v for s in segs for v in (s.start_y, s.end_y)]
+            print(f'  connect net {net_id}: route escaped the window '
+                  f'[{x0:.2f},{y0:.2f}]-[{x1:.2f},{y1:.2f}]: copper spans '
+                  f'x [{min(xs):.2f},{max(xs):.2f}] y [{min(ys):.2f},{max(ys):.2f}]'
+                  if segs else '  (no segments)')
         return None
     return list(result.get('new_segments') or []), \
         list(result.get('new_vias') or [])

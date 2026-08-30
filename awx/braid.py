@@ -1,36 +1,58 @@
 #!/usr/bin/env python3
-"""braid.py -- the general braid emitter for a fanned-out bus corridor.
+"""braid.py -- the general braid emitter for fanned-out buses.
 
 Inputs: a board whose SOURCE and DESTINATION arrays are both fanned out,
 the nets to route, and the destination's reference. Everything else is
-read off the board's geometry in the FLOW FRAME (source due west).
+read off the board's geometry. Nothing here reads a face, an axis, a
+frame or a chip's orientation.
 
-The braid decides ORDER and LAYERS: the launch order is the source's
-tooth order, the target order is the stub-end order at the destination,
-the divers are the complement of the longest increasing subsequence of
-that permutation, and the wave schedule turns the inversions into
-adjacent swaps -- at each crossing the mover is on the back layer and
-the passed net on the front. That part is pure combinatorics, and it
-implies the lane geometry: a corridor per net, morphing from the launch
-order to the target order.
+CORRIDORS. Each net's taut path (tooth -> stub end, around the static
+copper) is computed and the nets are clustered by how much of their
+length runs together (detect_buses): a corridor is a group of nets
+that flow together, whatever shape that flow has. Corridors are laid
+down largest first. Each gets a SPINE (corridor.py): the mean of its
+members' taut paths, relaxed as a string against the static copper and
+the corridors already laid, with the obstacles inflated by the bundle's
+half-width -- so a corridor that turns a chip's corner turns it with
+room for its inner lane, and every lane bends with the spine. From
+there on the corridor is described in the spine's own frame: s along
+it, o across it.
 
-The COPPER is all the real router's (connect.py). Every lane is routed
-from its tooth to its stub end inside its corridor, with the other
-layer closed wherever the schedule requires one and the lanes not yet
-routed stamped as virtual copper -- so the router places the dive and
-surface vias where they actually fit and never where a later lane
-must pass. A refused lane feeds back to the schedule: that diver waits
-one more spacer column after being passed, the launch pitch widens a
-step, and the schedule reruns. The flank corridor (the "river") is
-nested back-layer runs with both ends routed the same way. There are
-no hand tails, no via formulas and no fallbacks: a refused route is
-reported as such and the net left open.
+ORDER. A tooth is BORN IN PLACE when its own offset is free of every
+tooth downstream of it (the head-on launch of a face perpendicular to
+the flow); otherwise it JOINS from the side, and the first joiner takes
+the lane farthest from the teeth so no join leg crosses a lane already
+present. The exits mirror this: a stub receives its lane head-on when
+its offset is free of every stub upstream; otherwise the lane peels
+off to it, first exiter innermost. Launch order and target order are
+the lanes' offsets at the two ends of the schedule region; the divers
+are the complement of the longest increasing subsequence of that
+permutation, and the wave schedule (schedule.py) turns the inversions
+into columns of adjacent swaps -- at each crossing the mover on the
+back layer, the passed net on the front. A corridor whose joins and
+exits are all side legs (the flank "river" of earlier takes) is not a
+second kind of thing: nearly all of it dives, and a diver that passes
+everyone stays on the back layer for the whole run, which is the
+constant-layer river that emerged as a hand mechanism before.
 
-Two declared capability limits, not board facts: the trunk delivers to
-the destination face that faces the source, and the flank corridor is
-the SOUTH one in the flow frame (a plan that sends a net out the north
-or east face has no corridor here). The corridor-per-face-pair
-refactor lifts both.
+COPPER. All of it is the real router's (connect.py). Every lane is
+routed from its tooth to its stub end inside its band -- the corridor
+between the neighbouring lanes present on that layer, in (s, o), with
+the other layer closed wherever the schedule requires one -- and the
+lanes not yet routed are stamped as virtual copper on the layers they
+may occupy, so the router places the dive and surface vias where they
+fit and never where a later lane must pass. A refused lane feeds back
+to the schedule (launch pitch, lead and spacer columns) and the
+corridor reruns; what is still refused is reported and left open.
+
+WHERE CORRIDORS MEET. Two corridors never overlap along their length
+(the later spine is relaxed against the earlier corridor's tube). Where
+one must cross the other -- its exits sit among the other's stubs --
+the crossing stretch is reserved (no swap column there) and the later
+corridor's lanes route through it on either layer against the earlier
+corridor's real copper. That is the v1 of inter-corridor crossings; the
+global allocation (which corridor yields, pushing corridors outward to
+leave the middle for a wide one) is the next thing to build.
 """
 import argparse
 import math
@@ -40,26 +62,49 @@ import shutil
 import sys
 from collections import Counter
 
+import numpy as np
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 import topo_strings as ts  # noqa: E402
-import flow_frame as ff  # noqa: E402
 import connect as cn  # noqa: E402
+import corridor as cr  # noqa: E402
+import detect_buses as db  # noqa: E402
+from schedule import Schedule, lis_keep, lis_keep_weighted  # noqa: E402,F401
 
 TRACK = 0.127
 CLEAR = 0.105            # 0.1 spec + 5um so hugs don't sit exactly at 0.1
 VIA_SIZE = 0.25
 VIA_DRILL = 0.15
 
+MINP = 0.38                    # lane pitch floor at the exits
+LPITCH = 0.35                  # pitch of a side-join / side-exit block
+BLOCK_GAP = 0.45               # a block starts this far beyond what it clears
+HALF_SEP = (TRACK + 0.1) / 2   # two lanes at their band edges clear
+LEG_W = 0.5                    # half-width in s of a join / exit leg's band
+LEG_REQ = 0.25                 # half-width in s of a leg's LAYER rule: the
+                               # crossing itself (a track plus clearance),
+                               # so two exits 0.8 apart do not close both
+                               # layers on each other
+LEG_O = 0.2                    # ...and beyond its two ends in o: a leg
+                               # runs through the densest static copper
+                               # (the flank's foreign stubs, both layers)
+                               # and its via needs room; the obstacle map
+                               # and the other lanes' virtual copper are
+                               # the law there, the band only a guide
+TOL_S = 0.5                    # "at the same s" for head-on classification
+DIST_O = 0.2                   # distinct offsets for head-on classification
+CROSS_TUBE = 1.0               # a lane's freedom through a crossing region
+
 
 def build_obstacles(pcb, nid, kids, layer):
     """A static-copper model for one net on one layer: every foreign
     pad as a disc, every foreign segment as a capsule, every foreign
     via as a disc, all inflated by clearance + half a track. The PLAN
-    prices its candidate moves against it (fanout_from_plan, the
-    probes); the braid's copper is routed against the router's own
-    model and never consults this one."""
+    prices its candidate moves against it, the taut paths and the
+    spines are relaxed against it; the braid's copper is routed against
+    the router's own model and never consults this one."""
     obs = ts.Obstacles()
     m = CLEAR + TRACK / 2
     for ref, fp in pcb.footprints.items():
@@ -88,6 +133,28 @@ def build_obstacles(pcb, nid, kids, layer):
         if v.net_id == nid:
             continue
         obs.add_disc(v.x, v.y, v.size / 2 + m, f'via:{v.net_id}')
+    obs.build()
+    return obs
+
+
+def array_pad_obstacles(pcb, end_refs, min_pads=10):
+    """The pads that decide a corridor's TOPOLOGY: those of the arrays
+    the nets start and end on, and of any part large enough to be a
+    barrier a bundle must go round rather than an obstacle a lane
+    steps around (min_pads is the size threshold; a decoupling cap
+    under an array's corner is not a barrier -- K11: it blocked the
+    rung between two faces of the same array). Bare pad radii, no
+    routing margin."""
+    obs = ts.Obstacles()
+    for ref, fp in pcb.footprints.items():
+        if ref not in end_refs and len(fp.pads) < min_pads:
+            continue
+        for p in fp.pads:
+            if p.pad_type == 'np_thru_hole':
+                continue
+            r0 = (max(p.size_x, p.size_y) / 2 if p.shape in ('circle', 'oval')
+                  else math.hypot(p.size_x, p.size_y) / 2)
+            obs.add_disc(p.global_x, p.global_y, r0, f'{ref}.{p.pad_number}')
     obs.build()
     return obs
 
@@ -170,48 +237,6 @@ def endpoints(pcb, names, byname, dest_ref=None):
     return ends
 
 
-def lis_keep(ranks):
-    n = len(ranks)
-    best = [1] * n
-    prev = [-1] * n
-    for i in range(n):
-        for j in range(i):
-            if ranks[j] < ranks[i] and best[j] + 1 > best[i]:
-                best[i] = best[j] + 1
-                prev[i] = j
-    i = max(range(n), key=lambda k: best[k])
-    keep = set()
-    while i >= 0:
-        keep.add(i)
-        i = prev[i]
-    return keep
-
-
-def lis_keep_weighted(ranks, weight):
-    """A maximum-length increasing subsequence, choosing among the
-    equally-long ones the one of greatest total weight (the plan uses
-    it to prefer keepers whose escape starts on the tooth layer)."""
-    n = len(ranks)
-    if n == 0:
-        return set()
-    W = [1.0 + 0.5 * float(weight[i]) for i in range(n)]
-    best = [(1, W[i]) for i in range(n)]
-    prev = [-1] * n
-    for i in range(n):
-        for j in range(i):
-            if ranks[j] < ranks[i]:
-                cand = (best[j][0] + 1, best[j][1] + W[i])
-                if cand > best[i]:
-                    best[i] = cand
-                    prev[i] = j
-    i = max(range(n), key=lambda k: best[k])
-    keep = set()
-    while i >= 0:
-        keep.add(i)
-        i = prev[i]
-    return keep
-
-
 def strip_net_segments(txt, net_ids, net_names=()):
     """Remove every (segment ...) block whose net ref matches, in
     EITHER dialect: numeric (net N) or quoted name (#749 lore: boards
@@ -257,6 +282,902 @@ def _layer_at(pcb, nid, pt, default):
         default)
 
 
+def _end_dir(pcb, nid, pt, pads):
+    """The direction the net's stub ESCAPES in at its free end `pt`:
+    walk the copper from the free end to the pad it reaches, and take
+    the longest segment of that stub, pointed toward the free end. The
+    stub's last segment is the wrong thing to read (the fanout ends
+    many escapes with a 45-degree jog), and pad-to-end is too (the
+    escape runs half a pitch off its pad's row); the run is the escape
+    itself, at whatever angle the array sits."""
+    def key(x, y):
+        return (round(x, 3), round(y, 3))
+    segs = [s for s in pcb.segments if s.net_id == nid]
+    adj = {}
+    for s in segs:
+        a, b = key(s.start_x, s.start_y), key(s.end_x, s.end_y)
+        adj.setdefault(a, []).append((b, s))
+        adj.setdefault(b, []).append((a, s))
+    start = key(*pt)
+    seen = {start}
+    order = []          # (segment, node nearer the free end, far node)
+    frontier = [start]
+    while frontier:
+        nxt = []
+        for u in frontier:
+            inside = any(abs(u[0] - p.global_x) <= p.size_x / 2 + 0.02
+                         and abs(u[1] - p.global_y) <= p.size_y / 2 + 0.02
+                         for p in pads)
+            if inside and u != start:
+                continue
+            for v, s in adj.get(u, ()):
+                if v in seen:
+                    continue
+                seen.add(v)
+                order.append((s, u, v))
+                nxt.append(v)
+        frontier = nxt
+    if not order:
+        return (1.0, 0.0)
+    s, near, far = max(order, key=lambda t: math.hypot(
+        t[0].end_x - t[0].start_x, t[0].end_y - t[0].start_y))
+    v = (near[0] - far[0], near[1] - far[1])
+    h = math.hypot(*v)
+    return (v[0] / h, v[1] / h) if h > 1e-6 else (1.0, 0.0)
+
+
+def _relax_pitch(vals, floor, pinned=()):
+    """Push a sorted list of offsets apart to at least `floor`,
+    symmetrically, never moving a pinned index."""
+    py = list(vals)
+    for _ in range(60):
+        moved = False
+        for i in range(len(py) - 1):
+            g_ = py[i + 1] - py[i]
+            if g_ < floor - 1e-9:
+                push = (floor - g_) / 2
+                if i not in pinned:
+                    py[i] -= push if i + 1 not in pinned else 2 * push
+                if i + 1 not in pinned:
+                    py[i + 1] += push if i not in pinned else 2 * push
+                moved = True
+        if not moved:
+            break
+    return py
+
+
+def _intervals_union(ivs):
+    ivs = sorted((a, b) for a, b in ivs if b > a)
+    out = []
+    for a, b in ivs:
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+class Corridor:
+    """One corridor: its members, spine, lanes, schedule and copper."""
+
+    def __init__(self, idx, members, ctx, log):
+        self.idx = idx
+        self.members = list(members)
+        self.ctx = ctx
+        self.log = log
+        self.refused = []
+        self.out_segs = {}
+        self.out_vias = {}
+        self.lane_xy = {}          # nm -> planned board polyline (Eco)
+        self.req_xy = {}           # nm -> list of B-required polylines
+        self.marks = []            # '+' marks (leg ends, corners)
+
+    # ------------------------------------------------------------ geometry
+    def build_spine(self):
+        ctx = self.ctx
+        n_m = len(self.members)
+        self.H = LPITCH * (n_m - 1) / 2 + LPITCH
+        extra = [(p, q, LPITCH) for poly in ctx.laid
+                 for p, q in zip(poly, poly[1:])]
+        teeth = {nm: ctx.ends[nm][0] for nm in self.members}
+        stubs = {nm: ctx.ends[nm][1] for nm in self.members}
+        # what a SPINE avoids is BIG PARTS: the pads of every array-
+        # scale footprint but the corridor's own end arrays (its lanes
+        # join and leave there; inflating them by the bundle's half-
+        # width in a gap not much wider than that bowed a straight
+        # channel into wiggles), plus the corridors already laid.
+        # Tracks, vias and small parts are not barriers to a bundle --
+        # a foreign track 0.9 mm off the K15 chord, then a decoupling
+        # cap 2 mm off it, each inflated by the half-width, wiggled the
+        # spine round them and reserved the schedule region for the
+        # wiggles' corners -- they are the lanes' business, and the
+        # lanes route round them (or a lane is refused, and says so).
+        own = {ctx.src_ref[nm] for nm in self.members} | \
+            {ctx.ends[nm][2] for nm in self.members}
+        big = {ref for ref, fp in ctx.pcb.footprints.items()
+               if len(fp.pads) >= 10 and ref not in own}
+        obs = ts.Obstacles()
+        for (x, y, r, name) in ctx.spine_obs.discs:
+            if name.split('.')[0] in big:
+                obs.add_disc(x, y, r, name)
+        obs.build()
+        spine = ctx.spine_of(self.members, extra=extra, log=self.log,
+                             H=self.H, base_obs=obs)
+        # extend so every free end projects strictly inside the spine
+        P0, d0 = spine.P[0], spine.d[0]
+        Pn, dn = spine.P[-1], spine.d[-1]
+        back = max([0.3] + [-((t[0] - P0[0]) * d0[0] + (t[1] - P0[1]) * d0[1])
+                            + 0.3 for t in teeth.values()])
+        fwd = max([0.3] + [((t[0] - Pn[0]) * dn[0] + (t[1] - Pn[1]) * dn[1])
+                           + 0.3 for t in stubs.values()])
+        self.spine = spine.extend(back, fwd)
+        self.teeth, self.stubs = teeth, stubs
+        self.st = {nm: self.spine.project_pt(teeth[nm]) for nm in self.members}
+        self.se = {nm: self.spine.project_pt(stubs[nm]) for nm in self.members}
+
+    def classify(self):
+        """Head-on vs side legs at both ends, the join / exit blocks,
+        the launch and target offsets, s0 and s1."""
+        ctx, sp = self.ctx, self.spine
+        M = self.members
+        st, se = self.st, self.se
+        self.s0 = max(s for s, _o in st.values()) + 0.3
+
+        # A tooth is BORN IN PLACE unless another member's tooth sits
+        # clearly DOWNSTREAM of it at (nearly) its own offset -- its lane
+        # would run into that tooth -- or its run to the schedule region
+        # hits foreign copper. Teeth at the same s are no obstacle to
+        # each other however close: their lanes fan out from the teeth
+        # to the pitch-floored launch slots, which is what the launch
+        # pitch floor is for (a spine tilted against the face brings
+        # neighbouring teeth's parallel runs closer than their pitch).
+        def head_launch(nm):
+            s_i, o_i = st[nm]
+            for om in M:
+                if om == nm:
+                    continue
+                s_j, o_j = st[om]
+                if s_j > s_i + TOL_S and abs(o_j - o_i) < DIST_O:
+                    return False
+            run_end = sp.xy(self.s0, o_i)
+            return ctx.obs_but(nm, self.members, ctx.tooth_layer[nm]).seg_clear(
+                self.teeth[nm], run_end)
+
+        def head_exit(nm):
+            s_i, o_i = se[nm]
+            for om in M:
+                if om == nm:
+                    continue
+                s_j, o_j = se[om]
+                if s_j < s_i - TOL_S and abs(o_j - o_i) < DIST_O:
+                    return False
+            return True
+
+        self.heads_l = [nm for nm in M if head_launch(nm)]
+        self.joiners = [nm for nm in M if nm not in self.heads_l]
+        self.heads_e = [nm for nm in M if head_exit(nm)]
+        self.siders = [nm for nm in M if nm not in self.heads_e]
+        s1 = []
+        if self.heads_e:
+            s1.append(min(se[nm][0] for nm in self.heads_e) - 0.6)
+        if self.siders:
+            s1.append(min(se[nm][0] for nm in self.siders) - 0.3)
+        self.s1 = min(s1)
+
+        # sides: a joiner's block lies on the side of the spine AWAY
+        # from its own array; an exit block likewise, seen from the stub
+        def side_of(o_pt, ref):
+            ps = ctx.pcb.footprints[ref].pads
+            c = (sum(p.global_x for p in ps) / len(ps),
+                 sum(p.global_y for p in ps) / len(ps))
+            _sc, oc = sp.project_pt(c)
+            return 1 if o_pt >= oc else -1
+
+        self.join_side = {nm: side_of(st[nm][1], ctx.src_ref[nm])
+                          for nm in self.joiners}
+        self.exit_side = {nm: side_of(se[nm][1], ctx.ends[nm][2])
+                          for nm in self.siders}
+
+    def _clear_block(self, base, sg, s_from, s_to, nm, step=0.1, tries=15):
+        """Push a block's innermost lane outward until its run along
+        the spine from s_from to s_to is clear of the static copper on
+        both layers: a block is placed beyond the corridor's OWN teeth
+        or stubs, but the same flank carries every other net's teeth
+        too (K15: the first joiner lane ran 0.08 mm from a foreign stub
+        end, and the router refused it)."""
+        sp, ctx = self.spine, self.ctx
+        base0 = base
+        for k in range(tries):
+            a, b = sp.xy(s_from, base), sp.xy(s_to, base)
+            ok = {L: ctx.obs_but(nm, self.members, L).seg_clear(a, b)
+                  for L in ('F.Cu', 'B.Cu')}
+            if k == 0 and os.environ.get('BLOCK_DEBUG'):
+                self.log(f'    block probe {nm}: o={base:.3f} '
+                         f'({a[0]:.2f},{a[1]:.2f})->({b[0]:.2f},{b[1]:.2f}) {ok}')
+            if all(ok.values()):
+                break
+            base += sg * step
+        if abs(base - base0) > 1e-9:
+            self.log(f'  block on side {"+" if sg > 0 else "-"} pushed '
+                     f'{abs(base - base0):.2f} mm clear of static copper '
+                     f'(s {s_from:.1f}..{s_to:.1f})')
+        return base
+
+    def offsets(self, ly_floor):
+        """Launch and target offsets for the current pitch floor."""
+        st, se = self.st, self.se
+        # head-on launches: tooth offsets at the launch pitch floor
+        # (pushed one way only, as the trunk always did)
+        hl = sorted(self.heads_l, key=lambda nm: st[nm][1])
+        Ly = []
+        for nm in hl:
+            v = st[nm][1]
+            Ly.append(v if not Ly else max(v, Ly[-1] + ly_floor))
+        launch_o = {nm: Ly[i] for i, nm in enumerate(hl)}
+        # joiner blocks, per side
+        self.join_block = {}
+        for sg in (-1, 1):
+            js = sorted((nm for nm in self.joiners if self.join_side[nm] == sg),
+                        key=lambda nm: st[nm][0])
+            if not js:
+                continue
+            ext = max([sg * v for v in Ly] + [sg * st[nm][1] for nm in js])
+            base = sg * max(ext + BLOCK_GAP, -LPITCH * (len(js) - 1) / 2)
+            base = self._clear_block(base, sg, min(st[nm][0] for nm in js),
+                                     self.s0, js[0])
+            for k, nm in enumerate(js):
+                launch_o[nm] = base + sg * LPITCH * (len(js) - 1 - k)
+                self.join_block[nm] = launch_o[nm]
+        # head-on exits: stub offsets at the exit pitch floor
+        he = sorted(self.heads_e, key=lambda nm: se[nm][1])
+        py = _relax_pitch([se[nm][1] for nm in he], MINP)
+        target_o = {nm: py[i] for i, nm in enumerate(he)}
+        # exit blocks, per side. Head-on-launched side exits (ports)
+        # take the block's inner positions in exit order (first exiter
+        # innermost: no leg crosses a lane still present). Side exits
+        # that JOINED from the side keep their join order -- a join
+        # block's order is fixed by the join rule and its exit order
+        # usually is its reverse; sorting that inside the shared region
+        # cost every column a quarter of its width (K15), and sorting it
+        # on the joiners' run-in had no room for the vias. Their exit
+        # legs cross the lanes still between them and their stubs BY
+        # LAYER instead (lay_lanes requires the crossed lanes on the
+        # other layer there) -- the constant-layer "river" of the
+        # earlier takes, as a rule of the exits rather than a mechanism.
+        self.exit_block = {}
+        for sg in (-1, 1):
+            xs = [nm for nm in self.siders if self.exit_side[nm] == sg]
+            if not xs:
+                continue
+            ports = sorted((nm for nm in xs if nm not in self.join_block),
+                           key=lambda nm: se[nm][0])
+            joined = sorted((nm for nm in xs if nm in self.join_block),
+                            key=lambda nm: -st[nm][0])
+            order = ports + joined
+            ext = max([sg * v for v in py] + [sg * se[nm][1] for nm in xs])
+            base = sg * max(ext + BLOCK_GAP, -LPITCH * (len(xs) - 1) / 2)
+            base = self._clear_block(base, sg, self.s1,
+                                     max(se[nm][0] for nm in xs), order[0])
+            for k, nm in enumerate(order):
+                target_o[nm] = base + sg * LPITCH * k
+                self.exit_block[nm] = target_o[nm]
+        self.launch_o, self.target_o = launch_o, target_o
+        self.target = sorted(self.members, key=lambda nm: target_o[nm])
+        self.launch = sorted(self.members, key=lambda nm: launch_o[nm])
+        self.Ly = [launch_o[nm] for nm in self.launch]
+        self.py = [target_o[nm] for nm in self.target]
+
+    def reserve_intervals(self):
+        """s-intervals that hold no swap column: corner wedges, and the
+        stretches where this corridor runs through one laid earlier."""
+        sp, ctx = self.spine, self.ctx
+        # a lane at offset o has its corner displaced by o*tan(turn/2)
+        # along the spine: that is the wedge, plus a margin -- not the
+        # whole half-width, which for a shallow bend reserved everything
+        omax = max([abs(v) for v in self.Ly + self.py] + [0.0])
+        ivs = []
+        for (_i, s_c, turn) in sp.corners():
+            half = omax * math.tan(math.radians(min(abs(turn), 170.0) / 2)) + 0.3
+            ivs.append((s_c - half, s_c + half))
+        cross = []
+        if ctx.laid:
+            within = self.H + LPITCH
+            ss = np.arange(self.s0, self.s1, 0.1)
+            marks = []
+            for s in ss:
+                p = sp.xy(float(s), 0.0)
+                near = any(ts.seg_pt_dist(a, b, p) <= within
+                           for poly in ctx.laid
+                           for a, b in zip(poly, poly[1:]))
+                marks.append(near)
+            a = None
+            for s, m in zip(ss, marks):
+                if m and a is None:
+                    a = s
+                if not m and a is not None:
+                    cross.append((a - 0.3, s + 0.3))
+                    a = None
+            if a is not None:
+                cross.append((a - 0.3, self.s1 + 0.3))
+        self.cross_iv = _intervals_union(cross)
+        self.reserved = _intervals_union(ivs + cross)
+        # u(s): arc-length with the reserved stretches collapsed
+        S_pts, U_pts = [self.s0], [0.0]
+        for (a, b) in self.reserved:
+            a, b = max(a, self.s0), min(b, self.s1)
+            if b <= a:
+                continue
+            ua = U_pts[-1] + (a - S_pts[-1])
+            S_pts += [a, b]
+            U_pts += [ua, ua]
+        U_pts.append(U_pts[-1] + (self.s1 - S_pts[-1]))
+        S_pts.append(self.s1)
+        self.S_pts, self.U_pts = np.array(S_pts), np.array(U_pts)
+        self.L_free = float(U_pts[-1])
+
+    def u_of(self, s):
+        return np.interp(s, self.S_pts, self.U_pts)
+
+    def s_of_u(self, u):
+        # the inverse: U_pts is non-decreasing; take the LAST s of a flat
+        U, S = self.U_pts, self.S_pts
+        u = float(u)
+        k = int(np.searchsorted(U, u, side='right')) - 1
+        k = max(0, min(len(U) - 2, k))
+        if U[k + 1] > U[k]:
+            return float(S[k] + (u - U[k]) * (S[k + 1] - S[k]) / (U[k + 1] - U[k]))
+        return float(S[k + 1])
+
+    # ------------------------------------------------------------ lanes
+    def lay_lanes(self, cols):
+        """From a schedule: column positions, required-layer intervals,
+        the diver windows, and every lane's (s, o) polyline."""
+        sp = self.spine
+        M = self.members
+        n = len(cols)
+        reserve = 0.3
+        W = (self.L_free - reserve) / (n + 1)
+        self.W, self.cols = W, cols
+        self.all_cols = list(cols)
+        s_m = [self.s_of_u((k + 0.5) * W) for k in range(n + 1)]
+        self.invol, self.first, self.last = {}, {}, {}
+        for k, col in enumerate(cols):
+            for (d, p) in col:
+                self.invol.setdefault(d, []).append(k)
+                self.invol.setdefault(p, []).append(k)
+                self.first.setdefault(d, k)
+                self.last[d] = k
+        # REQUIRED layers: at the crossing of column k the mover is on
+        # B and the passed net on F, over the part of the column where
+        # the two lanes are too close for one layer -- and NOT the whole
+        # column: a net passed at k and moving at k+2 must change layer
+        # between the two, and a requirement that spans each whole
+        # column leaves it no cell to put the via in.
+        req = {nm: [] for nm in M}
+        hw = 0.4 * W + 0.05
+        for k, col in enumerate(cols):
+            ua = (k + 1) * W
+            a, b = self.s_of_u(ua - hw), self.s_of_u(ua + hw)
+            for (d, p) in col:
+                req[d].append((a, b, 'B.Cu'))
+                req[p].append((a, b, 'F.Cu'))
+        # EXIT LEGS THAT CROSS LANES: a side exit whose lane is not the
+        # innermost of the lanes still present at its stub's s crosses
+        # them with its leg -- on the other layer. The leg's owner is
+        # required on one layer over the leg's s, every crossed lane on
+        # the other; the layer is chosen so that lanes born on B cross
+        # on B (a B-born crossed lane pays nothing) and the leg's owner
+        # pays the via it needs anyway at a front-layer stub.
+        self.leg_layer = {}
+        for nm in self.exit_block:
+            s_e, o_e = self.se[nm]
+            o_l = self.exit_block[nm]
+            lo_, hi_ = min(o_l, o_e), max(o_l, o_e)
+            crossed = [om for om in M if om != nm and om in self.exit_block
+                       and self.se[om][0] > s_e + LEG_REQ
+                       and lo_ < self.exit_block[om] < hi_]
+            crossed += [om for om in M if om != nm and om not in self.exit_block
+                        and self.se[om][0] > s_e + LEG_REQ
+                        and lo_ < self.target_o[om] < hi_]
+            if not crossed:
+                continue
+            b_born = sum(1 for om in crossed
+                         if self.ctx.tooth_layer[om] == 'B.Cu')
+            leg_L = 'F.Cu' if 2 * b_born >= len(crossed) else 'B.Cu'
+            other = 'B.Cu' if leg_L == 'F.Cu' else 'F.Cu'
+            self.leg_layer[nm] = leg_L
+            req[nm].append((s_e - LEG_REQ, s_e + LEG_REQ, leg_L))
+            for om in crossed:
+                req[om].append((s_e - LEG_REQ, s_e + LEG_REQ, other))
+        # POSSIBLE back-layer intervals: a diver may be on B only from
+        # after the last foreign pass before its first own swap until
+        # before the first foreign crossing after its last -- it must be
+        # on F while passed -- derived from the SAME required intervals,
+        # so the two can never disagree. A non-diver is on F in the
+        # corridor (B only in the tail, for a stub the fanout left on
+        # B); one born on B may stay there until it is first passed.
+        bwin = {}
+        for nm in M:
+            wins = [(self.s1 - 0.1, 1e9)]
+            b_iv = sorted((xa, xb) for (xa, xb, L) in req[nm] if L == 'B.Cu')
+            f_iv = sorted((xa, xb) for (xa, xb, L) in req[nm] if L == 'F.Cu')
+            if b_iv:
+                b0, b1 = b_iv[0][0], b_iv[-1][1]
+                lo = max((xb for (xa, xb) in f_iv if xb <= b0), default=-1e9)
+                hi = min((xa for (xa, xb) in f_iv if xa >= b1), default=1e9)
+                wins.append((lo, hi))
+            elif self.ctx.tooth_layer[nm] == 'B.Cu':
+                hi = min((xa for (xa, xb) in f_iv), default=1e9)
+                wins.append((-1e9, hi))
+            bwin[nm] = wins
+        self.req, self.bwin = req, bwin
+
+        # lane centrelines in (s, o): tooth (or its join leg's end), the
+        # column midpoints in the order the schedule gives, the target
+        # slot at s1, then the tail (head-on) or the run to the exit leg
+        orders = [list(self.launch)]
+        for col in cols:
+            o = list(orders[-1])
+            for (d, p) in col:
+                i, j = o.index(d), o.index(p)
+                o[i], o[j] = o[j], o[i]
+            orders.append(o)
+        Ly, py = self.Ly, self.py
+        u_first = W
+
+        def morph_t(s):
+            return max(0.0, (self.u_of(s) - u_first) / max(self.L_free - u_first, 1e-9))
+
+        def slot(t, i):
+            return (1 - t) * Ly[i] + t * py[i]
+        trank = {nm: i for i, nm in enumerate(self.target)}
+        self.mid, self.legs, self.jogs = {}, {}, {}
+        ends_so = [(self.st[om][0], self.st[om][1]) for om in M] + \
+            [(self.se[om][0], self.se[om][1]) for om in M]
+
+        def leg_s(s_l, oa, ob, own):
+            """A leg drops straight in (s, o) -- unless another member's
+            free end sits in its way (two flank teeth in one column,
+            0.28 mm apart: K19's SRAS over SWE), when it first jogs
+            half a pitch along the spine to the clearer side."""
+            lo_, hi_ = min(oa, ob), max(oa, ob)
+            in_way = [p for p in ends_so if p != own
+                      and abs(p[0] - s_l) < LPITCH and lo_ - 0.05 < p[1] < hi_ + 0.05]
+            if not in_way:
+                return s_l
+            best = None
+            for cand in (s_l + LPITCH, s_l - LPITCH, s_l + 2 * LPITCH,
+                         s_l - 2 * LPITCH):
+                clash = [p for p in ends_so if p != own
+                         and abs(p[0] - cand) < LPITCH
+                         and lo_ - 0.05 < p[1] < hi_ + 0.05]
+                if not clash:
+                    return cand
+                if best is None or len(clash) < best[0]:
+                    best = (len(clash), cand)
+            return best[1]
+        for nm in M:
+            s_t, o_t = self.st[nm]
+            s_e, o_e = self.se[nm]
+            legs = []
+            jogs = []
+            if nm in self.join_block:
+                s_l = leg_s(s_t, o_t, self.join_block[nm], (s_t, o_t))
+                if abs(s_l - s_t) > 1e-9:
+                    jogs.append(((s_t, o_t), (s_l, o_t)))
+                legs.append((s_l, o_t, self.join_block[nm]))
+                pts = [(s_l, self.join_block[nm])]
+            else:
+                pts = [(s_t, o_t)]
+            for k in range(n + 1):
+                pts.append((s_m[k], slot(morph_t(s_m[k]), orders[k].index(nm))))
+            pts.append((self.s1, py[trank[nm]]))
+            if nm in self.exit_block:
+                s_l = leg_s(s_e, py[trank[nm]], o_e, (s_e, o_e))
+                pts.append((min(s_l, s_e) if s_l < s_e else s_e, py[trank[nm]]))
+                if s_l > s_e + 1e-9:
+                    pts.append((s_l, py[trank[nm]]))
+                legs.append((s_l, py[trank[nm]], o_e))
+                if abs(s_l - s_e) > 1e-9:
+                    jogs.append(((s_l, o_e), (s_e, o_e)))
+            else:
+                pts.append((s_e, o_e))
+            # keep s strictly non-decreasing (a joiner far behind s0 is
+            # fine; a head-on tooth sits before the first midpoint)
+            clean = [pts[0]]
+            for p in pts[1:]:
+                if p[0] >= clean[-1][0] - 1e-9:
+                    clean.append((max(p[0], clean[-1][0]), p[1]))
+            self.mid[nm] = clean
+            self.legs[nm] = legs
+            self.jogs[nm] = jogs
+        # board polylines of the plan (Eco, virtual copper, windows)
+        self.lane_xy = {}
+        self.mid_xy = {}
+        for nm in M:
+            pieces = []
+            for a_, b_ in zip(self.mid[nm], self.mid[nm][1:]):
+                xy = sp.lane_xy([a_, b_])
+                pieces.append(((a_[0] + b_[0]) / 2, xy))
+            self.mid_xy[nm] = pieces
+            poly = [self.teeth[nm]]
+            if nm in self.join_block:
+                s_l, oa, ob = self.legs[nm][0]
+                poly.append(sp.xy(s_l, oa))        # the jog, if any
+                poly.append(sp.xy(s_l, ob))
+            for _sm, xy in pieces:
+                for p in xy:
+                    if math.hypot(p[0] - poly[-1][0], p[1] - poly[-1][1]) > 1e-6:
+                        poly.append(p)
+            if nm in self.exit_block:
+                s_l, oa, ob = self.legs[nm][-1]
+                poly.append(sp.xy(s_l, oa))
+                poly.append(sp.xy(s_l, ob))        # ...and back along the jog
+            poly.append(self.stubs[nm])
+            self.lane_xy[nm] = [p for i, p in enumerate(poly)
+                                if i == 0 or math.hypot(p[0] - poly[i - 1][0],
+                                                        p[1] - poly[i - 1][1]) > 1e-6]
+
+    def allowed(self, nm, s, L):
+        if any(xa <= s <= xb and RL != L for (xa, xb, RL) in self.req.get(nm, ())):
+            return False
+        if L == 'B.Cu':
+            return any(lo <= s <= hi for (lo, hi) in self.bwin[nm])
+        return True
+
+    def allowed_vec(self, nm, S, L):
+        ok = np.ones(S.shape, dtype=bool)
+        for (xa, xb, RL) in self.req.get(nm, ()):
+            if RL != L:
+                ok &= ~((S >= xa) & (S <= xb))
+        if L == 'B.Cu':
+            inb = np.zeros(S.shape, dtype=bool)
+            for (lo, hi) in self.bwin[nm]:
+                inb |= (S >= lo) & (S <= hi)
+            ok &= inb
+        return ok
+
+    def in_cross(self, s):
+        return any(a <= s <= b for (a, b) in self.cross_iv)
+
+    def band_of(self, nm):
+        """The lane's corridor as a cell mask: between the neighbouring
+        lanes present on that layer (never narrower than a grid cell),
+        closed where the schedule requires the other layer; the join
+        and exit legs as rectangles in (s, o); a loose tube through a
+        crossing region."""
+        sp = self.spine
+        cache = {}
+
+        def band(xs, ys, L):
+            key = (float(xs[0]), float(xs[-1]), float(ys[0]), float(ys[-1]),
+                   len(xs), len(ys))
+            if key not in cache:
+                X, Y = np.meshgrid(xs, ys, indexing='ij')
+                cache.clear()
+                cache[key] = sp.project(X, Y)
+            S, O = cache[key]
+            ms = np.array([p[0] for p in self.mid[nm]])
+            mo = np.array([p[1] for p in self.mid[nm]])
+            present = (S >= ms[0] - 1e-9) & (S <= ms[-1] + 1e-9)
+            o_nm = np.interp(S, ms, mo)
+            okL = self.allowed_vec(nm, S, L)
+            prev = np.full(S.shape, -np.inf)
+            nxt = np.full(S.shape, np.inf)
+            for om in self.members:
+                if om == nm:
+                    continue
+                os_ = np.array([p[0] for p in self.mid[om]])
+                oo_ = np.array([p[1] for p in self.mid[om]])
+                pres = (S >= os_[0] - 1e-9) & (S <= os_[-1] + 1e-9)
+                if not pres.any():
+                    continue
+                o_m = np.interp(S, os_, oo_)
+                m = pres & self.allowed_vec(om, S, L)
+                prev = np.where(m & (o_m < o_nm), np.maximum(prev, o_m), prev)
+                nxt = np.where(m & (o_m > o_nm), np.minimum(nxt, o_m), nxt)
+            lo = np.where(np.isfinite(prev), (prev + o_nm) / 2 + HALF_SEP, -np.inf)
+            hi = np.where(np.isfinite(nxt), (nxt + o_nm) / 2 - HALF_SEP, np.inf)
+            # never narrower than a grid cell: at the stub ends the
+            # lanes are 0.25 apart and the corridor formula gives
+            # 0.0115 -- a band that on an unlucky grid alignment holds
+            # no cell at all. Clearance to the neighbours' copper is
+            # the obstacle map's job.
+            lo = np.minimum(lo, o_nm - 0.03)
+            hi = np.maximum(hi, o_nm + 0.03)
+            ok = present & okL & (O >= lo) & (O <= hi)
+            for (s_l, oa, ob) in self.legs[nm]:
+                rect = ((np.abs(S - s_l) <= LEG_W)
+                        & (O >= min(oa, ob) - LEG_O) & (O <= max(oa, ob) + LEG_O))
+                ok |= rect & okL
+            for ((sa, oa), (sb, ob)) in self.jogs.get(nm, ()):
+                rect = ((S >= min(sa, sb) - LEG_O) & (S <= max(sa, sb) + LEG_O)
+                        & (np.abs(O - oa) <= LEG_O))
+                ok |= rect & okL
+            for (a, b) in self.cross_iv:
+                ok |= ((S >= a) & (S <= b) & present
+                       & (np.abs(O - o_nm) <= CROSS_TUBE))
+            return ok
+        return band
+
+    def virtual_of(self, unrouted):
+        """Centrelines of lanes not routed yet, on every layer the
+        schedule lets them occupy, as copper the router must clear --
+        except through a crossing region, where the plan is not a
+        promise."""
+        sp = self.spine
+        segs = []
+        for om in unrouted:
+            # the layers a lane may occupy change at every required-
+            # interval boundary, so a polyline piece is split there and
+            # each part stamped on its own layers -- deciding per whole
+            # piece put an 8 mm exit run on BOTH layers through the one
+            # millimetre where another lane's leg crosses it (K15)
+            cuts = sorted({v for (xa, xb, _L) in self.req.get(om, ())
+                           for v in (xa, xb)}
+                          | {v for (lo, hi) in self.bwin.get(om, ())
+                             for v in (lo, hi) if abs(v) < 1e8})
+            for a_, b_ in zip(self.mid[om], self.mid[om][1:]):
+                sa, sb = a_[0], b_[0]
+                inner = [v for v in cuts if sa + 1e-6 < v < sb - 1e-6]
+                bounds = [sa] + inner + [sb]
+                for s_a, s_b in zip(bounds, bounds[1:]):
+                    s_mid = (s_a + s_b) / 2
+                    if self.in_cross(s_mid):
+                        continue
+                    t_a = (s_a - sa) / max(sb - sa, 1e-9)
+                    t_b = (s_b - sa) / max(sb - sa, 1e-9)
+                    o_a = a_[1] + t_a * (b_[1] - a_[1])
+                    o_b = a_[1] + t_b * (b_[1] - a_[1])
+                    xy = sp.lane_xy([(s_a, o_a), (s_b, o_b)])
+                    for p_, q_ in zip(xy, xy[1:]):
+                        for L in ('F.Cu', 'B.Cu'):
+                            if self.allowed(om, s_mid, L):
+                                segs.append((p_, q_, L))
+            for (s_l, oa, ob) in self.legs[om]:
+                a_, b_ = sp.xy(s_l, oa), sp.xy(s_l, ob)
+                for L in ('F.Cu', 'B.Cu'):
+                    if self.allowed(om, s_l, L):
+                        segs.append((a_, b_, L))
+            for ((sa, oa), (sb, ob)) in self.jogs.get(om, ()):
+                a_, b_ = sp.xy(sa, oa), sp.xy(sb, ob)
+                for L in ('F.Cu', 'B.Cu'):
+                    if self.allowed(om, (sa + sb) / 2, L):
+                        segs.append((a_, b_, L))
+        return segs
+
+    # ------------------------------------------------------------ routing
+    def route_lane(self, nm, virt):
+        """Route one lane tooth -> stub: ONE connect() search inside its
+        band by default. LANE_PIECES=1 routes it as a chain of searches
+        between its planned waypoints instead (the end of its join leg,
+        the start of its exit leg), each short and local -- measured on
+        the K ladder it routed nothing the single search did not and
+        lost K15's SRAS, so it stays an experiment. The layer at a
+        waypoint is the one the schedule allows there. Returns
+        (segments, vias) or None; partial copper is discarded."""
+        ctx, sp = self.ctx, self.spine
+        nid, _ = ctx.byname[nm]
+        pieces = os.environ.get('LANE_PIECES') == '1'
+        way = [(self.teeth[nm], ctx.tooth_layer[nm])]
+        if pieces and nm in self.join_block:
+            s_l, oa, ob = self.legs[nm][0]
+            L = 'B.Cu' if (ctx.tooth_layer[nm] == 'B.Cu'
+                           and self.allowed(nm, s_l + 0.05, 'B.Cu')) else 'F.Cu'
+            if not self.allowed(nm, s_l + 0.05, L):
+                L = 'B.Cu' if L == 'F.Cu' else 'F.Cu'
+            way.append((sp.xy(s_l, ob), L))
+        if pieces and nm in self.exit_block:
+            s_l, oa, ob = self.legs[nm][-1]
+            L = self.leg_layer.get(nm, ctx.dest_layer[nm])
+            if not self.allowed(nm, s_l - 0.05, L):
+                L = 'B.Cu' if L == 'F.Cu' else 'F.Cu'
+            way.append((sp.xy(s_l, oa), L))
+        way.append((self.stubs[nm], ctx.dest_layer[nm]))
+        band = self.band_of(nm)
+        segs_all, vias_all = [], []
+        added = 0
+        for (a, aL), (b, bL) in zip(way, way[1:]):
+            res = cn.connect(ctx.pcb, nid, a, aL, b, bL, ctx.cfg, band=band,
+                             virtual=virt, margin=0.6,
+                             window_pts=self.lane_xy[nm])
+            if res is None:
+                # discard the partial copper
+                if added:
+                    del ctx.pcb.segments[-added:]
+                    ctx.pcb.vias = ctx.pcb.vias[:len(ctx.pcb.vias) - len(vias_all)]
+                return None
+            segs_o, vias_o = res
+            ctx.pcb.segments.extend(segs_o)
+            ctx.pcb.vias.extend(vias_o)
+            added += len(segs_o)
+            segs_all.extend(segs_o)
+            vias_all.extend(vias_o)
+        return segs_all, vias_all
+
+    def run(self):
+        ctx, log = self.ctx, self.log
+        M = self.members
+        log(f'\ncorridor {self.idx} ({len(M)}): {M}')
+        self.build_spine()
+        self.classify()
+        log(f'  s0={self.s0:.2f} s1={self.s1:.2f} (spine {self.spine.L:.2f} mm)'
+            f'  head-on launches {len(self.heads_l)}, joiners {len(self.joiners)}'
+            f'; head-on exits {len(self.heads_e)}, side exits {len(self.siders)}')
+        if self.joiners:
+            log('  joiners: ' + ', '.join(
+                f'{nm}@s{self.st[nm][0]:.1f}{"+" if self.join_side[nm] > 0 else "-"}'
+                for nm in sorted(self.joiners, key=lambda n: self.st[n][0])))
+        if self.siders:
+            log('  side exits: ' + ', '.join(
+                f'{nm}@s{self.se[nm][0]:.1f}{"+" if self.exit_side[nm] > 0 else "-"}'
+                for nm in sorted(self.siders, key=lambda n: self.se[n][0])))
+        if self.s1 - self.s0 < 0.5:
+            log(f'  SHORT corridor ({self.s1 - self.s0:.2f} mm): routed as '
+                f'tubes, no schedule')
+            return self.run_short()
+        ly_floor = 0.35
+        self.offsets(ly_floor)
+        self.reserve_intervals()
+        if self.reserved:
+            log('  reserved: ' + ', '.join(f'[{a:.2f},{b:.2f}]' for a, b in self.reserved)
+                + f'  (free {self.L_free:.2f} of {self.s1 - self.s0:.2f} mm)')
+        sched = Schedule(self.launch, self.target, ctx.tooth_layer, log=log)
+        gaps = {d: 1 for d in sched.divers}
+        lead = {d: 0 for d in sched.divers}
+        for attempt in range(6):
+            self.offsets(ly_floor)
+            sched = Schedule(self.launch, self.target, ctx.tooth_layer)
+            cols = sched.columns(gaps, lead)
+            self.lay_lanes(cols)
+            swaps = [sw for col in cols for sw in col]
+            log(f'  attempt {attempt}: {len(swaps)} swaps in {len(cols)} columns, '
+                f'W={self.W:.3f}, launch pitch >= {ly_floor:.2f}'
+                + (f', {len(self.leg_layer)} exit leg(s) cross by layer'
+                   if self.leg_layer else '')
+                + (f', gaps {dict((d, g) for d, g in gaps.items() if g > 1)}'
+                   if any(g > 1 for g in gaps.values()) else '')
+                + (f', lead {dict((d, g) for d, g in lead.items() if g)}'
+                   if any(lead.values()) else ''))
+            if attempt == 0:
+                log(f'    {cols}')
+            ctx.pcb.segments = list(ctx.base_segments)
+            ctx.pcb.vias = list(ctx.base_vias)
+            self.out_segs, self.out_vias = {}, {}
+            divers = set(sched.divers)
+            order = list(sched.priority) + \
+                [nm for nm in self.target if nm not in divers]
+            routed = set()
+            self.refused = []
+            for nm in order:
+                virt = self.virtual_of([om for om in M
+                                        if om != nm and om not in routed])
+                res = self.route_lane(nm, virt)
+                if res is None:
+                    self.refused.append(nm)
+                    log(f'    refused: {nm}')
+                    if os.environ.get('LANE_DEBUG') == nm:
+                        self.debug_lane(nm)
+                    continue
+                routed.add(nm)
+                segs_o, vias_o = res
+                self.out_segs[nm] = segs_o
+                self.out_vias[nm] = vias_o
+            nv = sum(len(v) for v in self.out_vias.values())
+            log(f'    lanes: {len(routed)}/{len(M)} routed, {nv} via(s)')
+            if not self.refused:
+                break
+            # FEEDBACK. Room across first -- the launch pitch is the
+            # cheap dimension, every lane gets it, and a via beside a
+            # neighbour is what usually fails. Then room along for a
+            # refused diver's dive via: before its first swap if nobody
+            # passes it first (a lead column), else after the pass (a
+            # spacer column).
+            if ly_floor < 0.40 - 1e-9:
+                ly_floor = min(0.40, ly_floor + 0.03)
+                continue
+            for nm in self.refused:
+                if nm in divers:
+                    # a pass within two columns of one of its own moves
+                    # (either side) leaves no room for the layer change:
+                    # a spacer. Else, nothing passing it before its
+                    # first swap: its dive via must sit on the launch
+                    # leg -- a lead column.
+                    moves = [k for k, col in enumerate(self.all_cols)
+                             if any(m == nm for (m, _p) in col)]
+                    passes = [k for k, col in enumerate(self.all_cols)
+                              if any(p == nm for (_m, p) in col)]
+                    tight = any(abs(k - j) <= 2 for k in moves for j in passes)
+                    if tight or (passes and moves and min(passes) < min(moves)):
+                        gaps[nm] += 1
+                    else:
+                        lead[nm] += 1
+        self.sched = sched
+        self.finish()
+
+    def run_short(self):
+        """A corridor too short for a schedule: every lane a straight
+        (s, o) line inside its own tube."""
+        ctx, sp = self.ctx, self.spine
+        self.req, self.bwin = {}, {nm: [(-1e9, 1e9)] for nm in self.members}
+        self.cross_iv, self.legs = [], {nm: [] for nm in self.members}
+        self.jogs = {nm: [] for nm in self.members}
+        self.mid = {nm: [self.st[nm], self.se[nm]] for nm in self.members}
+        self.mid_xy = {nm: [((self.st[nm][0] + self.se[nm][0]) / 2,
+                             sp.lane_xy(self.mid[nm]))] for nm in self.members}
+        self.lane_xy = {nm: [self.teeth[nm]] + self.mid_xy[nm][0][1]
+                        + [self.stubs[nm]] for nm in self.members}
+        self.sched = None
+        routed = set()
+        for nm in sorted(self.members, key=lambda n: self.st[n][1]):
+            nid, _ = ctx.byname[nm]
+            virt = self.virtual_of([om for om in self.members
+                                    if om != nm and om not in routed])
+            res = cn.connect(ctx.pcb, nid, self.teeth[nm], ctx.tooth_layer[nm],
+                             self.stubs[nm], ctx.dest_layer[nm], ctx.cfg,
+                             virtual=virt, margin=0.6,
+                             window_pts=self.lane_xy[nm])
+            if res is None:
+                self.refused.append(nm)
+                self.log(f'    refused: {nm}')
+                continue
+            routed.add(nm)
+            self.out_segs[nm], self.out_vias[nm] = res
+            ctx.pcb.segments.extend(res[0])
+            ctx.pcb.vias.extend(res[1])
+        self.finish()
+
+    def finish(self):
+        ctx = self.ctx
+        for nm in self.refused:
+            self.out_segs[nm] = []
+            self.out_vias[nm] = []
+        if self.refused:
+            self.log(f'  REFUSED lanes (left open): {sorted(self.refused)}')
+        # the corridor's copper is the base for the next one
+        ctx.base_segments = list(ctx.pcb.segments)
+        ctx.base_vias = list(ctx.pcb.vias)
+        ctx.laid.extend(self.lane_xy[nm] for nm in self.members)
+        # Eco: required-B stretches on the centreline, '+' marks
+        sp = self.spine
+        for nm in self.members:
+            self.req_xy[nm] = []
+            for (a, b, L) in self.req.get(nm, ()):
+                if L != 'B.Cu':
+                    continue
+                ms = [p[0] for p in self.mid[nm]]
+                mo = [p[1] for p in self.mid[nm]]
+                sub = [(a, float(np.interp(a, ms, mo)))]
+                sub += [p for p in self.mid[nm] if a < p[0] < b]
+                sub.append((b, float(np.interp(b, ms, mo))))
+                self.req_xy[nm].append(sp.lane_xy(sub))
+            for (s_l, oa, ob) in self.legs.get(nm, ()):
+                self.marks.append(sp.xy(s_l, ob))
+            for (p_, q_) in self.jogs.get(nm, ()):
+                self.marks.append(sp.xy(*q_))
+        for (_i, s_c, _t) in sp.corners():
+            self.marks.append(sp.xy(s_c, 0.0))
+
+    def debug_lane(self, nm):
+        log = self.log
+        log(f'    tooth {self.teeth[nm]} (s,o)=({self.st[nm][0]:.2f},'
+            f'{self.st[nm][1]:.2f}) {self.ctx.tooth_layer[nm]}  stub '
+            f'{self.stubs[nm]} (s,o)=({self.se[nm][0]:.2f},{self.se[nm][1]:.2f}) '
+            f'{self.ctx.dest_layer[nm]}  s0={self.s0:.2f} s1={self.s1:.2f}')
+        log(f'    mid: {[(round(s, 2), round(o, 3)) for s, o in self.mid[nm]]}')
+        log(f'    legs: {self.legs[nm]}')
+        log(f'    req: {[(round(a, 2), round(b, 2), L) for a, b, L in self.req[nm]]}')
+        log(f'    bwin: {self.bwin[nm]}   cross: {self.cross_iv}')
+        log(f'    launch o {self.launch_o[nm]:.3f} target o {self.target_o[nm]:.3f}'
+            f'  neighbours at launch: '
+            + str([(om, round(self.launch_o[om], 2)) for om in self.launch
+                   if abs(self.launch_o[om] - self.launch_o[nm]) < 0.8 and om != nm]))
+
+
+class Ctx:
+    pass
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--board', required=True,
@@ -268,633 +1189,121 @@ def main():
                          'the targets)')
     ap.add_argument('--no-smooth', action='store_true',
                     help='skip the repo #536 octolinear smoothing pass')
+    ap.add_argument('--cluster', type=float, default=6.0,
+                    help='stub-end linkage distance (mm) for corridor '
+                         'detection (the reach check does the real work)')
     a = ap.parse_args()
     names = [n.strip() for n in a.nets.split(',') if n.strip()]
 
-    pcb = parse_kicad_pcb(a.board)
-    byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
-    # FLOW FRAME: everything below assumes the source is due west of the
-    # destination. Rotate the board so that it is, then map the emitted
-    # copper back at write time. KICAD_FLOW_FRAME=0 is the negative
-    # control that proves the frame is needed.
-    _probe = endpoints(pcb, names, byname, dest_ref=a.dest)
-    _theta = ff.flow_angle([_probe[n][0] for n in _probe],
-                           [_probe[n][1] for n in _probe])
-    if os.environ.get('KICAD_FLOW_FRAME') == '0':
-        _theta = 0.0
-    _cx = sum(_probe[n][1][0] for n in _probe) / max(len(_probe), 1)
-    _cy = sum(_probe[n][1][1] for n in _probe) / max(len(_probe), 1)
-    pcb, back_xy = ff.rotate_pcb(pcb, _theta, _cx, _cy)
-    if _theta:
-        print(f'flow frame: source is not due west -- rotating the '
-              f'problem by {_theta:.0f} deg about ({_cx:.2f},{_cy:.2f})')
-        byname = {n.name.split('/')[-1]: (i, n)
-                  for i, n in pcb.nets.items()}
-    kids = {byname[nm][0] for nm in names}
-    ends = endpoints(pcb, names, byname, dest_ref=a.dest)
+    def log(msg=''):
+        print(msg)
+    ctx, groups = setup(a.board, names, a.dest, log, cluster=a.cluster)
+    corridors = []
+    for ci, members in enumerate(groups):
+        c = Corridor(ci, members, ctx, log)
+        c.run()
+        corridors.append(c)
+    return write_out(a, ctx, corridors, names, log)
 
-    # the two arrays, from the endpoints
-    dest_pads = pcb.footprints[a.dest].pads
-    fy1 = max(p.global_y for p in dest_pads)          # destination's south row
-    src_refs = set()
+
+def setup(board, names, dest, log, cluster=6.0):
+    """Everything the corridors are built from: the board, the ends,
+    the static obstacles, the flow directions, the corridor groups."""
+    pcb = parse_kicad_pcb(board)
+    byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
+    kids = {byname[nm][0] for nm in names}
+    ends = endpoints(pcb, names, byname, dest_ref=dest)
+    ctx = Ctx()
+    ctx.pcb, ctx.byname, ctx.ends, ctx.kids = pcb, byname, ends, kids
+    ctx.names = list(names)
+    ctx.tooth_layer = {nm: _layer_at(pcb, byname[nm][0], ends[nm][0], 'F.Cu')
+                       for nm in names}
+    ctx.dest_layer = {nm: _layer_at(pcb, byname[nm][0], ends[nm][1], 'F.Cu')
+                      for nm in names}
+    ctx.src_ref = {}
     for nm in names:
         nid, net = byname[nm]
-        src_refs.add(min(net.pads, key=lambda p: ts.d2(
-            (p.global_x, p.global_y), ends[nm][0])).component_ref)
-    src_y_max = max(p.global_y for r in src_refs
-                    for p in pcb.footprints[r].pads)
-    tooth_layer = {nm: _layer_at(pcb, byname[nm][0], ends[nm][0], 'F.Cu')
-                   for nm in names}
-    dest_layer = {nm: _layer_at(pcb, byname[nm][0], ends[nm][1], 'F.Cu')
-                  for nm in names}
+        ctx.src_ref[nm] = min(net.pads, key=lambda p: ts.d2(
+            (p.global_x, p.global_y), ends[nm][0])).component_ref
 
-    # FLANK CORRIDOR (the river): a tooth south of the source's own pad
-    # field is on its flank, not on the launch line, and rides the
-    # flank corridor -- a B.Cu run under everything, both ends made by
-    # connections.
-    river = [nm for nm in names if ends[nm][0][1] > src_y_max + 0.1]
-    west = [nm for nm in names if nm not in river]
-    if river:
-        print(f'flank corridor ({len(river)}): {river}')
-    assert west, 'no net on the launch line'
+    _cache = {}
 
-    # the trunk: from the launch line to the splice line, 0.6 mm west
-    # of the nearest stub end so the tails have room for a 45 jog
-    x0 = max(ends[nm][0][0] for nm in west) + 0.3
-    x1 = min(ends[nm][1][0] for nm in west) - 0.6
-    assert x1 - x0 > 1.0, ('no corridor between the teeth and the stubs',
-                           x0, x1)
-    launch = sorted(west, key=lambda nm: ends[nm][0][1])
-    print(f'launch order: {launch}')
+    def obs_for(nm, layer):
+        k = (nm, layer, 'kids')
+        if k not in _cache:
+            _cache[k] = build_obstacles(pcb, byname[nm][0], kids, layer)
+        return _cache[k]
 
-    # ---- entries: a west-face stub pins its lane at its own y; a
-    # stub the plan sent out the SOUTH face is a PORT net, whose lane is
-    # a port line below the field, nearest stub uppermost, so no port
-    # run crosses an earlier net's turn-up.
-    south = sorted((nm for nm in west if ends[nm][1][1] > fy1 + 0.2),
-                   key=lambda nm: ends[nm][1][0])
-    lane_y = {}
-    is_port = set()
-    for nm in west:
-        if nm in south:
-            is_port.add(nm)
-            lane_y[nm] = fy1 + 0.55 + 0.35 * south.index(nm)
-        else:
-            lane_y[nm] = ends[nm][1][1]
-    if south:
-        print(f'south port ({len(south)}): '
-              + ', '.join(f'{nm}@{ends[nm][1][0]:.2f}' for nm in south))
-    target = sorted(west, key=lambda nm: lane_y[nm])
-    trank = {nm: i for i, nm in enumerate(target)}
-    ranks = [trank[nm] for nm in launch]
-    keep = lis_keep(ranks)
-    divers = {launch[i] for i in range(len(launch)) if i not in keep}
-    print(f'entry order (lane y): {target}  ranks: {ranks}')
-    print(f'divers ({len(divers)}): '
-          f'{sorted(divers, key=lambda n: trank[n])}')
+    def obs_but(nm, members, layer):
+        """Static copper on `layer` excluding this corridor's members'
+        own copper (their teeth fan out from each other; every other
+        net's stub is in the way)."""
+        k = (nm, layer, tuple(sorted(members)))
+        if k not in _cache:
+            _cache[k] = build_obstacles(pcb, byname[nm][0],
+                                        {byname[m][0] for m in members},
+                                        layer)
+        return _cache[k]
+    ctx.obs_for, ctx.obs_but = obs_for, obs_but
+    # the direction each free end ESCAPES in, read from the stub's own
+    # copper (its run), whatever angle the array sits at
+    ctx.tooth_dir = {nm: _end_dir(pcb, byname[nm][0], ends[nm][0],
+                                  byname[nm][1].pads) for nm in names}
+    ctx.stub_dir = {nm: _end_dir(pcb, byname[nm][0], ends[nm][1],
+                                 byname[nm][1].pads) for nm in names}
 
-    # ---- swap schedule (wave-pipelined): divers that are pairwise
-    # NON-inverted form a wave and bubble concurrently; every diver-
-    # diver crossing has exactly one side on B.
-    lidx = {nm: i for i, nm in enumerate(launch)}
+    # ---- corridors: taut paths, grouped by where they arrive and
+    # whether one spine can reach them all
+    log('taut paths...')
+    ctx.paths = db.taut_paths(names, ends, lambda nm: obs_for(nm, 'F.Cu'))
+    pad_obs = array_pad_obstacles(pcb, set(ctx.src_ref.values())
+                                  | {ends[nm][2] for nm in names})
+    ctx.spine_obs = build_obstacles(pcb, -1, kids, 'F.Cu')
 
-    def inverted(anm, bnm):
-        return (lidx[anm] < lidx[bnm]) != (trank[anm] < trank[bnm])
-
-    ups = sorted((d for d in divers if trank[d] < lidx[d]),
-                 key=lambda nm: trank[nm])
-    downs = sorted((d for d in divers if trank[d] >= lidx[d]),
-                   key=lambda nm: -trank[nm])
-    dirs = {d: (-1 if trank[d] < lidx[d] else 1) for d in divers}
-    # a diver whose tooth already sits on B.Cu is BORN diving: it needs
-    # no dive via if it reaches its first own crossing on B, and the
-    # router surfaces it (and dives it again) wherever the schedule
-    # requires F. It takes no special place in the priority: moving
-    # B-born divers to the front made the serial pass place them
-    # relative to divers not yet moved (K32: the pass did not reach
-    # the target), and the old rule that two B-born divers may not be
-    # mutually inverted is gone with it.
-    birth_b = {d for d in divers if tooth_layer[d] == 'B.Cu'}
-    if birth_b:
-        print(f'B-birth divers: {sorted(birth_b)}')
-    priority = ups + downs
-
-    # serial pass fixes WHO passes WHOM -- and in which DIRECTION. The
-    # target-vs-launch index says where a diver ends up overall, but
-    # the other divers' passes shift it on the way: rot90 K15's SDQ12
-    # ends 3 slots below its launch (a "down" diver) yet must pass
-    # SDQ11 going UP, once the up-divers have carried SDQ11 below it.
-    # The serial pass sees the sequence as it stands when the diver
-    # moves, so its direction is the one the wave must use; the global
-    # one deadlocked the wave (mover facing away from its partner).
-    mover_set = {d: [] for d in priority}
-    sseq = list(launch)
-    placed = set(nm for nm in launch if nm not in divers)
-    for d in priority:
-        i = sseq.index(d)
-        rest = sseq[:i] + sseq[i + 1:]
-        # the slot: after the last PLACED element (a keeper, or a diver
-        # already moved) of smaller rank. A diver not yet moved is no
-        # anchor -- K32: SCKE1 was placed after SDQ7, an unmoved diver
-        # then sitting to the right of SA0, and so never passed SA0.
-        want = 0
-        for j, e in enumerate(rest):
-            if e in placed and trank[e] < trank[d]:
-                want = j + 1
-        passed_ser = rest[want:i] if want <= i else rest[i:want]
-        mover_set[d] = list(passed_ser)
-        if want != i:
-            dirs[d] = -1 if want < i else 1
-        sseq = rest[:want] + [d] + rest[want:]
-        placed.add(d)
-    assert sseq == target, (sseq, target)
-
-    def schedule(gaps, lead):
-        """The gated wave schedule. `gaps[d]` = spacer columns diver d
-        waits after being passed before its own first swap; `lead[d]`
-        = columns it waits from the launch before its first swap (room
-        for its dive via when nobody passes it first). The router's
-        refusals raise them."""
-        done_moves = {d: set() for d in priority}
-        passed = set()
-        last_passed_round = {}
-        last_move_round = {}
-        seq = list(launch)
-        cols = []
-        guard = 0
-
-        def finished(p):
-            return len(done_moves[p]) == len(mover_set[p])
-
-        while seq != target:
-            used = set()
-            col = []
-            delay_stall = False
-            for d in priority:
-                if d in used or finished(d):
-                    continue
-                gated = False
-                for p in priority[:priority.index(d)]:
-                    if not inverted(p, d):
-                        continue
-                    if d in mover_set[p]:
-                        if (p, d) not in passed:
-                            gated = True
-                            break
-                    elif not finished(p):
-                        gated = True
-                        break
-                if gated:
-                    continue
-                # a layer change needs a column of its own: after being
-                # passed (F) a diver waits gaps[d] columns before it
-                # moves (B) -- whenever, not only before its first move
-                if d in last_passed_round and \
-                        len(cols) <= last_passed_round[d] + gaps[d]:
-                    delay_stall = True
-                    continue
-                if not done_moves[d] and len(cols) < lead[d]:
-                    delay_stall = True
-                    continue
-                i = seq.index(d)
-                j = i + dirs[d]
-                if not (0 <= j < len(seq)):
-                    continue
-                p = seq[j]
-                if p in used or p not in mover_set[d] or \
-                        p in done_moves[d]:
-                    continue
-                # ...and the other way: a diver that just moved (B)
-                # must surface before it can be passed (F)
-                if p in dirs and p in last_move_round and \
-                        len(cols) <= last_move_round[p] + gaps[p]:
-                    delay_stall = True
-                    continue
-                seq[i], seq[j] = seq[j], seq[i]
-                col.append((d, p))
-                used.add(d)
-                used.add(p)
-                done_moves[d].add(p)
-                last_move_round[d] = len(cols)
-                if p in dirs:
-                    passed.add((d, p))
-                    last_passed_round[p] = len(cols)
-            if not col and delay_stall:
-                cols.append([])
-                guard += 1
-                continue
-            assert col, ('wave schedule deadlocked', seq, target)
-            cols.append(col)
-            guard += 1
-            assert guard < 20 * len(west) + 20, 'wave schedule runaway'
-        return cols
-
-    # ---- ROUTE THE TRUNK. The schedule says, per crossing, which net
-    # is on B and which on F; the lane geometry says where each net's
-    # corridor runs. Every lane is then ROUTED by the real router, from
-    # its tooth to its stub end, inside its corridor: the other layer is
-    # closed wherever the schedule requires one, and the lanes not yet
-    # routed are stamped as virtual copper -- so the router places the
-    # dive and surface vias where they actually fit, and never where a
-    # later lane must pass. A refused lane feeds back: that diver waits
-    # one more spacer column after being passed, the launch pitch widens
-    # a step, and the schedule reruns.
-    reserve = 0.3
-    MINP = 0.38                    # lane pitch floor at the splice
-    HALF_SEP = (TRACK + 0.1) / 2   # two lanes at their band edges clear
-    gaps = {d: 1 for d in divers}
-    lead = {d: 0 for d in divers}
-    # the launch pitch floor: a lane must be able to carry a via next
-    # to its neighbours ANYWHERE, so the floor is the via's need
-    # (0.2885 to a neighbour's centreline) plus a routing-grid step
-    ly_floor = 0.35
-    base_segments = list(pcb.segments)
-    base_vias = list(pcb.vias)
+    def spine_of(members, extra=None, log=None, H=None, relax=True,
+                 base_obs=None):
+        if H is None:
+            H = LPITCH * (len(members) - 1) / 2 + LPITCH
+        return cr.build_spine(
+            [ctx.paths[nm] for nm in members],
+            ctx.spine_obs if base_obs is None else base_obs, H, extra=extra,
+            log=log, teeth=[ends[nm][0] for nm in members],
+            stubs=[ends[nm][1] for nm in members],
+            tooth_dirs=[ctx.tooth_dir[nm] for nm in members],
+            stub_dirs=[ctx.stub_dir[nm] for nm in members], relax=relax)
+    ctx.spine_of = spine_of
+    def centre_of(ref):
+        ps = pcb.footprints[ref].pads
+        return (sum(p.global_x for p in ps) / len(ps),
+                sum(p.global_y for p in ps) / len(ps))
+    groups = cr.cluster_corridors(
+        names, ctx.paths, {nm: ends[nm][0] for nm in names},
+        {nm: ends[nm][1] for nm in names}, pad_obs.seg_clear, D=cluster,
+        log=log, spine_fn=lambda core: spine_of(core, relax=False),
+        dest_ref={nm: ends[nm][2] for nm in names},
+        centres={nm: centre_of(ends[nm][2]) for nm in names})
+    log(f'{len(groups)} corridor(s): ' + '  '.join(
+        f'[{len(g)}] {",".join(g)}' for g in groups))
     # 0.025 grid: the fanout packs stub ends at 0.25, which is the legal
     # minimum (track + clearance = 0.227) plus 23 um. On a 0.05 grid the
     # cell nearest a lane's centreline can sit 25 um off it -- outside
-    # the 23 um that clear the neighbours -- and the approach to a stub
-    # end has no cell at all (rot180 K19: SDQ14 refused, backward
-    # search boxed at its stub). At 0.025 the nearest cell is within
-    # 12.5 um, always inside.
-    cfg_c = cn.make_config(pcb, TRACK, CLEAR, VIA_SIZE, VIA_DRILL,
-                           grid_step=0.025)
-    out_segs, out_vias = {}, {}
-    refused = []
-    for attempt in range(6):
-        cols = schedule(gaps, lead)
-        swaps = [sw for col in cols for sw in col]
-        seen_pairs = set()
-        for (d, e) in swaps:
-            pair = frozenset((d, e))
-            assert pair not in seen_pairs, f'pair {d}/{e} swapped twice'
-            seen_pairs.add(pair)
-            assert inverted(d, e), f'phantom swap {d}/{e}'
-        n = len(cols)
-        W = (x1 - x0 - reserve) / (n + 1)
-        print(f'attempt {attempt}: {len(swaps)} swaps in {n} columns, '
-              f'W={W:.3f}, launch pitch >= {ly_floor:.2f}'
-              + (f', gaps {dict((d, g) for d, g in gaps.items() if g > 1)}'
-                 if any(g > 1 for g in gaps.values()) else '')
-              + (f', lead {dict((d, g) for d, g in lead.items() if g)}'
-                 if any(lead.values()) else ''))
-        if attempt == 0:
-            print(f'  {cols}')
-        invol, first, last = {}, {}, {}
-        for s, col in enumerate(cols):
-            for (d, p) in col:
-                invol.setdefault(d, []).append(s)
-                invol.setdefault(p, []).append(s)
-                first.setdefault(d, s)
-                last[d] = s
+    # the 23 um that clear the neighbours.
+    ctx.cfg = cn.make_config(pcb, TRACK, CLEAR, VIA_SIZE, VIA_DRILL,
+                             grid_step=0.025)
+    ctx.base_segments = list(pcb.segments)
+    ctx.base_vias = list(pcb.vias)
+    ctx.laid = []
+    return ctx, groups
 
-        # REQUIRED layers: at the crossing of column s (between the
-        # midpoints of s and s+1) the mover is on B and the passed net
-        # on F, over the part of the column where the two lanes are too
-        # close for one layer -- and NOT the whole column: a net passed
-        # at s and moving at s+2 must change layer between the two, and
-        # a requirement that spans each whole column leaves it no cell
-        # to put the via in (K19: SDQ9 refused at every pitch).
-        req = {nm: [] for nm in west}
-        hw = 0.4 * W + 0.05
-        for s, col in enumerate(cols):
-            xc = x0 + (s + 1) * W
-            for (d, p) in col:
-                req[d].append((xc - hw, xc + hw, 'B.Cu'))
-                req[p].append((xc - hw, xc + hw, 'F.Cu'))
 
-        # POSSIBLE back-layer intervals: a diver may be on B only from
-        # after the last foreign pass before its first own swap until
-        # before the first foreign crossing after its last -- it must
-        # be on F while passed -- and the router picks the via spots
-        # inside that. A non-diver is on F in the trunk (B only in the
-        # tail, for a stub the fanout left on B); one born on B may
-        # stay there until it is first passed. Everything else on B is
-        # closed, so the virtual copper of a lane that will never be
-        # on B there does not box in a neighbour's via.
-        # ...derived from the SAME required intervals, so the two can
-        # never disagree (the old window formula ended a diver's B 0.17
-        # mm before its own last crossing's requirement ended: both
-        # layers closed, rot90 K19's SDQ15 refused at every pitch)
-        bwin = {}
-        for nm in west:
-            wins = [(x1 - 0.1, 1e9)]
-            b_iv = sorted((xa, xb) for (xa, xb, L) in req[nm] if L == 'B.Cu')
-            f_iv = sorted((xa, xb) for (xa, xb, L) in req[nm] if L == 'F.Cu')
-            if b_iv:
-                b0, b1 = b_iv[0][0], b_iv[-1][1]
-                lo = max((xb for (xa, xb) in f_iv if xb <= b0),
-                         default=-1e9)
-                hi = min((xa for (xa, xb) in f_iv if xa >= b1),
-                         default=1e9)
-                wins.append((lo, hi))
-            elif tooth_layer[nm] == 'B.Cu':
-                hi = min((xa for (xa, xb) in f_iv), default=1e9)
-                wins.append((-1e9, hi))
-            bwin[nm] = wins
-
-        def allowed(nm, x, L):
-            if any(xa <= x <= xb and RL != L
-                   for (xa, xb, RL) in req.get(nm, ())):
-                return False
-            if L == 'B.Cu':
-                return any(lo <= x <= hi for (lo, hi) in bwin[nm])
-            return True
-
-        # lane centrelines: launch slots (tooth ys at a pitch floor),
-        # splice lanes (stub ys at the pitch floor, ports pinned), the
-        # morph between, in the order the schedule gives per column
-        py = [lane_y[nm] for nm in target]
-        pinned = {i for i, nm in enumerate(target) if nm in is_port}
-        for _ in range(40):
-            moved = False
-            for i in range(len(py) - 1):
-                g_ = py[i + 1] - py[i]
-                if g_ < MINP - 1e-9:
-                    push = (MINP - g_) / 2
-                    if i not in pinned:
-                        py[i] -= push if i + 1 not in pinned else 2 * push
-                    if i + 1 not in pinned:
-                        py[i + 1] += push if i not in pinned else 2 * push
-                    moved = True
-            if not moved:
-                break
-        Ly = sorted(ends[nm][0][1] for nm in west)
-        _ly2 = []
-        for _v in Ly:
-            _ly2.append(_v if not _ly2 else max(_v, _ly2[-1] + ly_floor))
-        Ly = _ly2
-
-        def slot(t, i):
-            return (1 - t) * Ly[i] + t * py[i]
-
-        def morph_t(xm):
-            xms = x0 + W
-            return max(0.0, (xm - xms) / (x1 - xms))
-
-        orders = [list(launch)]
-        for col in cols:
-            o = list(orders[-1])
-            for (d, p) in col:
-                i, j = o.index(d), o.index(p)
-                o[i], o[j] = o[j], o[i]
-            orders.append(o)
-
-        leave = {}
-        for nm in west:
-            if nm in is_port:
-                smax = max(invol.get(nm, [-1]))
-                leave[nm] = x0 + W if smax < 0 else x0 + (smax + 1.5) * W
-
-        _line_cache = {}
-
-        def line_pts(nm):
-            """The net's centreline: tooth, column midpoints, splice,
-            and the straight tail to the stub end -- or, for a port net,
-            nothing past where it leaves the trunk."""
-            if nm not in _line_cache:
-                pts = [ends[nm][0]]
-                for s in range(n + 1):
-                    xm = x0 + (s + 0.5) * W
-                    pts.append((xm, slot(morph_t(xm), orders[s].index(nm))))
-                if nm in is_port:
-                    xs_ = leave[nm]
-                    pts = [p_ for p_ in pts if p_[0] < xs_ - 1e-6]
-                    # the slot y at the leave point
-                    ys_ = None
-                    full = [ends[nm][0]] + [
-                        (x0 + (s + 0.5) * W,
-                         slot(morph_t(x0 + (s + 0.5) * W),
-                              orders[s].index(nm))) for s in range(n + 1)]
-                    for a_, b_ in zip(full, full[1:]):
-                        if a_[0] <= xs_ <= b_[0]:
-                            tt = (xs_ - a_[0]) / max(b_[0] - a_[0], 1e-9)
-                            ys_ = a_[1] + tt * (b_[1] - a_[1])
-                    if ys_ is None:
-                        ys_ = full[-1][1]
-                    pts.append((xs_, ys_))
-                else:
-                    pts.append((x1, py[trank[nm]]))
-                    pts.append(ends[nm][1])
-                _line_cache[nm] = pts
-            return _line_cache[nm]
-
-        def line_y(nm, x):
-            pts = line_pts(nm)
-            if x < pts[0][0] - 1e-9 or x > pts[-1][0] + 1e-9:
-                return None
-            for a_, b_ in zip(pts, pts[1:]):
-                if a_[0] - 1e-9 <= x <= b_[0] + 1e-9:
-                    tt = (x - a_[0]) / max(b_[0] - a_[0], 1e-9)
-                    return a_[1] + tt * (b_[1] - a_[1])
-            return pts[-1][1]
-
-        def band_of(nm):
-            """Per-layer corridor: between the centrelines of the
-            neighbouring lanes present on that layer at x (a lane is
-            present wherever the schedule does not require it on the
-            other layer), pulled in by half the track spacing so two
-            lanes at their band edges still clear. Closed where the
-            schedule requires the other layer. A port net past its
-            leave point rides the port band: below every trunk lane
-            that ends above it, above every one below."""
-            def fn_for(L):
-                def fn(x):
-                    if not allowed(nm, x, L):
-                        return (1e9, -1e9)
-                    ym = line_y(nm, x)
-                    if ym is None:
-                        # port region
-                        if nm in is_port and x >= leave[nm] - 1e-9:
-                            above = [line_y(om, x) for om in west
-                                     if trank[om] < trank[nm] and x <= x1]
-                            below = [line_y(om, x) for om in west
-                                     if trank[om] > trank[nm] and x <= x1]
-                            above = [v for v in above if v is not None]
-                            below = [v for v in below if v is not None]
-                            lo = max(above) + 0.26 if above else -1e9
-                            hi = min(below) - 0.26 if below else 1e9
-                            return (lo, hi)
-                        return (-1e9, 1e9)
-                    ys = []
-                    for om in west:
-                        if om == nm or not allowed(om, x, L):
-                            continue
-                        v = line_y(om, x)
-                        if v is not None:
-                            ys.append(v)
-                    prev = max((v for v in ys if v < ym), default=None)
-                    nxt = min((v for v in ys if v > ym), default=None)
-                    lo = (prev + ym) / 2 + HALF_SEP if prev is not None \
-                        else -1e9
-                    hi = (nxt + ym) / 2 - HALF_SEP if nxt is not None \
-                        else 1e9
-                    # never narrower than a grid cell: at the stub ends
-                    # the lanes are 0.25 apart and the corridor formula
-                    # gives 0.0115 -- a band that, on an unlucky grid
-                    # alignment, holds no cell at all (rot180 K19:
-                    # SDQ14's stub end unreachable). Clearance to the
-                    # neighbours' copper is the obstacle map's job.
-                    lo = min(lo, ym - 0.03)
-                    hi = max(hi, ym + 0.03)
-                    return (lo, hi)
-                return fn
-            return {L: fn_for(L) for L in ('F.Cu', 'B.Cu')}
-
-        def virtual_of(unrouted):
-            """Centrelines of lanes not routed yet, on every layer the
-            schedule lets them occupy, as copper the router must clear."""
-            segs = []
-            for om in unrouted:
-                pts = line_pts(om)
-                for a_, b_ in zip(pts, pts[1:]):
-                    if a_ == b_:
-                        continue
-                    xm = (a_[0] + b_[0]) / 2
-                    for L in ('F.Cu', 'B.Cu'):
-                        if allowed(om, xm, L):
-                            segs.append((a_, b_, L))
-            return segs
-
-        # route: divers first (they carry the vias), then the rest in
-        # target order; each result is copper for the next
-        pcb.segments = list(base_segments)
-        pcb.vias = list(base_vias)
-        out_segs, out_vias = {}, {}
-        order = list(priority) + [nm for nm in target if nm not in divers]
-        routed = set()
-        refused = []
-        for nm in order:
-            nid, _ = byname[nm]
-            virt = virtual_of([om for om in west
-                               if om != nm and om not in routed])
-            res = cn.connect(pcb, nid, ends[nm][0], tooth_layer[nm],
-                             ends[nm][1], dest_layer[nm], cfg_c,
-                             band=band_of(nm), virtual=virt, margin=0.6)
-            if res is None:
-                refused.append(nm)
-                print(f'  refused: {nm}')
-                if os.environ.get('LANE_DEBUG') == nm:
-                    bnd = band_of(nm)
-                    tx0 = ends[nm][0][0]
-                    print(f'    tooth {ends[nm][0]} {tooth_layer[nm]}  '
-                          f'stub {ends[nm][1]} {dest_layer[nm]}  x0={x0:.2f}')
-                    print(f'    req: {req[nm]}')
-                    print(f'    bwin: {bwin[nm]}')
-                    for k in range(0, 16):
-                        x = tx0 + 0.1 * k
-                        ym = line_y(nm, x)
-                        fb = bnd['F.Cu'](x)
-                        bb = bnd['B.Cu'](x)
-                        near = [(om, round(line_y(om, x), 2)) for om in west
-                                if om != nm and line_y(om, x) is not None
-                                and ym is not None
-                                and abs(line_y(om, x) - ym) < 0.6]
-                        print(f'    x={x:.2f} y={ym if ym is None else round(ym, 3)} '
-                              f'F=({fb[0]:.2f},{fb[1]:.2f}) '
-                              f'B=({bb[0]:.2f},{bb[1]:.2f}) near={near}')
-                    vs = [(p_, q_, L) for (p_, q_, L) in virt
-                          if min(p_[0], q_[0]) < tx0 + 1.6]
-                    print(f'    virtual near start: {len(vs)}')
-                    for (p_, q_, L) in vs[:12]:
-                        print(f'      {L} ({p_[0]:.2f},{p_[1]:.2f})->'
-                              f'({q_[0]:.2f},{q_[1]:.2f})')
-                continue
-            routed.add(nm)
-            segs_o, vias_o = res
-            out_segs[nm] = [((s.start_x, s.start_y), (s.end_x, s.end_y),
-                             s.layer) for s in segs_o]
-            out_vias[nm] = [(v.x, v.y) for v in vias_o]
-            pcb.segments.extend(segs_o)
-            pcb.vias.extend(vias_o)
-        nv = sum(len(v) for v in out_vias.values())
-        print(f'  lanes: {len(routed)}/{len(west)} routed, {nv} via(s)')
-        if not refused:
-            break
-        # FEEDBACK. Room in y first -- the launch pitch is the cheap
-        # dimension, every lane gets it, and a via beside a neighbour
-        # is what usually fails. Then room in x for a refused diver's
-        # dive via: before its first swap if nobody passes it first (a
-        # lead column -- rot90 K19's SDQ15 swaps in column 0, so its
-        # via had to sit on the launch leg), else after the pass (a
-        # spacer column). Spacer columns shrink W for every lane, so
-        # they come last.
-        if ly_floor < 0.40 - 1e-9:
-            ly_floor = min(0.40, ly_floor + 0.03)
-            continue
-        for nm in refused:
-            if nm in divers:
-                s1 = first.get(nm)
-                fw = max((s for s in invol.get(nm, []) if s1 is None
-                          or s < s1), default=None)
-                if fw is None:
-                    lead[nm] += 1
-                else:
-                    gaps[nm] += 1
-    for nm in refused:
-        out_segs[nm] = []
-        out_vias[nm] = []
+def write_out(a, ctx, corridors, names, log):
+    """Smooth, write the board with the Eco overlay, report."""
+    pcb, byname, ends, kids = ctx.pcb, ctx.byname, ctx.ends, ctx.kids
+    out_segs = {nm: c.out_segs[nm] for c in corridors for nm in c.members}
+    out_vias = {nm: c.out_vias[nm] for c in corridors for nm in c.members}
+    refused = sorted(nm for c in corridors for nm in c.refused)
     if refused:
-        print(f'REFUSED lanes (left open): {sorted(refused)}')
-
-    # ---- the flank corridor: nested B.Cu runs under everything
-    # (deepest = west-most descent, so descents never cross a run),
-    # each net's run from its descent x to under its stub. Both ends
-    # are connections. Run pitch 0.35 on the routing grid, the base
-    # too, so every run end is a representable via site.
-    from kicad_parser import Segment
-    run_of = {}
-    if river:
-        base = max(ends[nm][0][1] for nm in river) + 0.80
-        base = math.ceil(base / 0.05) * 0.05
-        rpitch = 0.35
-        desc_x = {}
-        for nm in sorted(river, key=lambda n: (tooth_layer[n] != 'B.Cu',
-                                               ends[n][0][0])):
-            dx0 = ends[nm][0][0]
-            while any(abs(dx0 - v) < 0.28 for v in desc_x.values()):
-                dx0 += 0.30
-            desc_x[nm] = dx0
-        r2 = sorted(river, key=lambda nm: desc_x[nm])
-        for i, nm in enumerate(r2):
-            run_y = base + (len(r2) - 1 - i) * rpitch
-            bx = ends[nm][1][0]
-            run_of[nm] = ((desc_x[nm], run_y), (bx, run_y))
-            out_segs[nm] = [((desc_x[nm], run_y), (bx, run_y), 'B.Cu')]
-            out_vias[nm] = []
-            nid, _ = byname[nm]
-            pcb.segments.append(Segment(desc_x[nm], run_y, bx, run_y,
-                                        TRACK, 'B.Cu', nid))
-        jobs = []
-        for nm in sorted(river, key=lambda n: ends[n][0][0]):
-            jobs.append((nm, ends[nm][0], tooth_layer[nm], run_of[nm][0],
-                         'B.Cu'))
-        for nm in sorted(river, key=lambda n: ends[n][1][0]):
-            jobs.append((nm, run_of[nm][1], 'B.Cu', ends[nm][1],
-                         dest_layer[nm]))
-        n_ok = 0
-        c_vias = 0
-        for (nm, ex, exl, tgt, tl) in jobs:
-            nid, _ = byname[nm]
-            res = cn.connect(pcb, nid, ex, exl, tgt, tl, cfg_c, margin=1.0)
-            if res is None:
-                refused.append(nm)
-                print(f'REFUSED: {nm}: no route ({ex[0]:.2f},{ex[1]:.2f}) '
-                      f'{exl} -> ({tgt[0]:.2f},{tgt[1]:.2f}) {tl}')
-                continue
-            n_ok += 1
-            segs_o, vias_o = res
-            out_segs[nm].extend(((s.start_x, s.start_y),
-                                 (s.end_x, s.end_y), s.layer)
-                                for s in segs_o)
-            out_vias[nm].extend((v.x, v.y) for v in vias_o)
-            pcb.segments.extend(segs_o)
-            pcb.vias.extend(vias_o)
-            c_vias += len(vias_o)
-        print(f'flank corridor: {n_ok}/{len(jobs)} connections routed, '
-              f'{c_vias} via(s)')
-    if refused:
-        print(f'  REFUSED nets (left open): {sorted(set(refused))}')
+        log(f'\nREFUSED nets (left open): {refused}')
 
     # ---- repo octolinear smoothing (#536): collapse the distributed 45
     # nudges into single elbows, clearance-validated against ALL copper
@@ -902,9 +1311,9 @@ def main():
     final_segs = {}
     if not a.no_smooth:
         from pcb_modification import smooth_octolinear_chains
-        pre_len = {nm: sum(math.hypot(q[0] - p[0], q[1] - p[1])
-                           for (p, q, _l) in out_segs[nm]) for nm in names}
-        _n, _nets, _rm, _addl, st = smooth_octolinear_chains(
+        pre_len = {nm: sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                           for s in out_segs[nm]) for nm in names}
+        _n, _nets, _rm, _addl, stt = smooth_octolinear_chains(
             [], pcb, kids, clearance=0.1)
         for nm in names:
             nid, _ = byname[nm]
@@ -912,13 +1321,13 @@ def main():
         post_len = {nm: sum(math.hypot(s.end_x - s.start_x,
                                        s.end_y - s.start_y)
                             for s in final_segs[nm]) for nm in names}
-        print(f'\nsmooth_octolinear_chains (#536): '
-              f'{st.get("spans", 0)} spans on {_nets} nets, '
-              f'-{st.get("saved_mm", 0):.2f} mm; segments '
-              f'{sum(len(s) for s in out_segs.values())} -> '
-              f'{sum(len(s) for s in final_segs.values())}; length '
-              f'{sum(pre_len.values()):.2f} -> '
-              f'{sum(post_len.values()):.2f} mm')
+        log(f'\nsmooth_octolinear_chains (#536): '
+            f'{stt.get("spans", 0)} spans on {_nets} nets, '
+            f'-{stt.get("saved_mm", 0):.2f} mm; segments '
+            f'{sum(len(s) for s in out_segs.values())} -> '
+            f'{sum(len(s) for s in final_segs.values())}; length '
+            f'{sum(pre_len.values()):.2f} -> '
+            f'{sum(post_len.values()):.2f} mm')
         smoothed = True
 
     # ---- write board
@@ -927,15 +1336,12 @@ def main():
     if smoothed:
         kid_names = {pcb.nets[i].name for i in kids if i in pcb.nets}
         txt = strip_net_segments(txt, kids, kid_names)
-        # the passes leave a few DEGENERATE (< 1 um) and DUPLICATE
-        # segments; drop them (the neighbours already overlap)
         n_deg = n_dup = 0
         for nm in names:
             keep_ = []
             seen = set()
             for s in final_segs[nm]:
-                if math.hypot(s.end_x - s.start_x,
-                              s.end_y - s.start_y) < 0.001:
+                if math.hypot(s.end_x - s.start_x, s.end_y - s.start_y) < 0.001:
                     n_deg += 1
                     continue
                 k = (round(s.start_x, 4), round(s.start_y, 4),
@@ -948,55 +1354,37 @@ def main():
                 keep_.append(s)
             final_segs[nm] = keep_
         if n_deg or n_dup:
-            print(f'dropped {n_deg} degenerate (< 1 um) and {n_dup} '
-                  f'duplicate segment(s)')
-        for nm in names:
-            nid, _ = byname[nm]
-            for s in final_segs[nm]:
-                (ax, ay), (bx_, by_) = back_xy(s.start_x, s.start_y), \
-                    back_xy(s.end_x, s.end_y)
-                add.append(
-                    f'  (segment (start {ax:.4f} {ay:.4f}) '
-                    f'(end {bx_:.4f} {by_:.4f}) '
-                    f'(width {s.width}) '
-                    f'(layer "{s.layer}") (net {nid}))\n')
-            for (vx, vy) in out_vias[nm]:
-                vx, vy = back_xy(vx, vy)
-                add.append(
-                    f'  (via (at {vx:.4f} {vy:.4f}) (size {VIA_SIZE}) '
-                    f'(drill {VIA_DRILL}) (layers "F.Cu" "B.Cu") '
-                    f'(net {nid}))\n')
+            log(f'dropped {n_deg} degenerate (< 1 um) and {n_dup} '
+                f'duplicate segment(s)')
+        emit = {nm: [((s.start_x, s.start_y), (s.end_x, s.end_y), s.layer,
+                      s.width) for s in final_segs[nm]] for nm in names}
     else:
-        for nm in names:
-            nid, _ = byname[nm]
-            for (p, q, layer) in out_segs[nm]:
-                (ax, ay), (bx_, by_) = back_xy(*p), back_xy(*q)
-                add.append(
-                    f'  (segment (start {ax:.4f} {ay:.4f}) '
-                    f'(end {bx_:.4f} {by_:.4f}) (width {TRACK}) '
-                    f'(layer "{layer}") (net {nid}))\n')
-            for (vx, vy) in out_vias[nm]:
-                vx, vy = back_xy(vx, vy)
-                add.append(
-                    f'  (via (at {vx:.4f} {vy:.4f}) (size {VIA_SIZE}) '
-                    f'(drill {VIA_DRILL}) (layers "F.Cu" "B.Cu") '
-                    f'(net {nid}))\n')
+        emit = {nm: [((s.start_x, s.start_y), (s.end_x, s.end_y), s.layer,
+                      s.width) for s in out_segs[nm]] for nm in names}
+    for nm in names:
+        nid, _ = byname[nm]
+        for (p, q, layer, w) in emit[nm]:
+            add.append(f'  (segment (start {p[0]:.4f} {p[1]:.4f}) '
+                       f'(end {q[0]:.4f} {q[1]:.4f}) (width {w}) '
+                       f'(layer "{layer}") (net {nid}))\n')
+        for v in out_vias[nm]:
+            add.append(f'  (via (at {v.x:.4f} {v.y:.4f}) (size {VIA_SIZE}) '
+                       f'(drill {VIA_DRILL}) (layers "F.Cu" "B.Cu") '
+                       f'(net {nid}))\n')
 
     # ---- Eco overlay: the PLAN, drawn where the copper is, so a render
     # (render_eco.py) shows plan against copper.
-    #   Eco1.User (white)   every lane's planned centreline -- tooth,
-    #                       column midpoints, splice, stub -- and the
-    #                       flank corridor's runs;
+    #   Eco1.User (white)   every lane's planned centreline; the spine
+    #                       of each corridor as a thick line;
     #   Cmts.User (orange)  where the schedule REQUIRES the back layer:
     #                       the planned under-passes, on the centreline;
     #   Eco2.User (yellow)  the connection ends: the FANOUT's free ends
     #                       (source teeth, stub ends) as an "x", the
-    #                       braid's own exit points (a port net's leave
-    #                       point, a flank run's two ends) as a "+".
+    #                       braid's own points (join / exit leg ends,
+    #                       spine corners) as a "+".
     def gl(p, q, layer, w=0.05):
-        (ax, ay), (bx_, by_) = back_xy(*p), back_xy(*q)
-        return (f'  (gr_line (start {ax:.4f} {ay:.4f}) '
-                f'(end {bx_:.4f} {by_:.4f}) '
+        return (f'  (gr_line (start {p[0]:.4f} {p[1]:.4f}) '
+                f'(end {q[0]:.4f} {q[1]:.4f}) '
                 f'(stroke (width {w}) (type solid)) (layer "{layer}"))\n')
 
     def cross(p, layer='Eco2.User', r=0.12):
@@ -1007,48 +1395,27 @@ def main():
         return gl((p[0] - r, p[1]), (p[0] + r, p[1]), layer) + \
             gl((p[0], p[1] - r), (p[0], p[1] + r), layer)
 
-    def sub_line(nm, xa, xb):
-        """The centreline's polyline between x = xa and xb."""
-        pts = line_pts(nm)
-        ya, yb = line_y(nm, xa), line_y(nm, xb)
-        out = []
-        if ya is not None:
-            out.append((xa, ya))
-        out += [p_ for p_ in pts if xa < p_[0] < xb]
-        if yb is not None:
-            out.append((xb, yb))
-        return out
-
-    n_eco = 0
-    for nm in west:
-        pts = line_pts(nm)
-        for p_, q_ in zip(pts, pts[1:]):
-            add.append(gl(p_, q_, 'Eco1.User'))
-            n_eco += 1
-        for (xa, xb, L) in req[nm]:
-            if L != 'B.Cu':
-                continue
-            sl = sub_line(nm, xa, xb)
-            for p_, q_ in zip(sl, sl[1:]):
-                add.append(gl(p_, q_, 'Cmts.User', 0.08))
-        add.append(cross(ends[nm][0]))
-        add.append(cross(ends[nm][1]))
-        if nm in leave:
-            yl = line_y(nm, leave[nm])
-            if yl is not None:
-                add.append(plus((leave[nm], yl)))
-    for nm in river:
-        a_, b_ = run_of[nm]
-        add.append(gl(a_, b_, 'Eco1.User'))
-        n_eco += 1
-        add.append(cross(ends[nm][0]))
-        add.append(cross(ends[nm][1]))
-        add.append(plus(a_))
-        add.append(plus(b_))
-    print(f'eco overlay: {n_eco} planned centreline segments, '
-          f'{sum(len([r for r in req[nm] if r[2] == "B.Cu"]) for nm in west)} '
-          f'planned under-passes, {2 * len(names)} fanout ends (x), '
-          f'{len(leave) + 2 * len(river)} braid exits (+)')
+    n_eco = n_req = n_plus = 0
+    for c in corridors:
+        for p_, q_ in zip(c.spine.pts, c.spine.pts[1:]):
+            add.append(gl(p_, q_, 'Eco1.User', 0.2))
+        for nm in c.members:
+            pts = c.lane_xy[nm]
+            for p_, q_ in zip(pts, pts[1:]):
+                add.append(gl(p_, q_, 'Eco1.User'))
+                n_eco += 1
+            for sub in c.req_xy.get(nm, ()):
+                for p_, q_ in zip(sub, sub[1:]):
+                    add.append(gl(p_, q_, 'Cmts.User', 0.08))
+                n_req += 1
+            add.append(cross(ends[nm][0]))
+            add.append(cross(ends[nm][1]))
+        for p_ in c.marks:
+            add.append(plus(p_))
+            n_plus += 1
+    log(f'eco overlay: {len(corridors)} spines, {n_eco} planned centreline '
+        f'segments, {n_req} planned under-passes, {2 * len(names)} fanout '
+        f'ends (x), {n_plus} braid points (+)')
     k = txt.rstrip().rfind(')')
     out_board = a.out + '.kicad_pcb'
     with open(out_board, 'w') as f:
@@ -1057,10 +1424,9 @@ def main():
     if os.path.exists(pro):
         shutil.copy(pro, a.out + '.kicad_pro')
     nv = sum(len(v) for v in out_vias.values())
-    nseg = sum(len(final_segs[nm]) for nm in names) if smoothed else \
-        sum(len(s) for s in out_segs.values())
-    print(f'\nwrote {out_board}: {nseg} segments, {nv} vias'
-          + (f' -- {len(refused)} net(s) REFUSED' if refused else ''))
+    nseg = sum(len(emit[nm]) for nm in names)
+    log(f'\nwrote {out_board}: {nseg} segments, {nv} vias'
+        + (f' -- {len(refused)} net(s) REFUSED' if refused else ''))
     return 1 if refused else 0
 
 
