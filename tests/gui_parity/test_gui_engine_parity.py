@@ -286,19 +286,19 @@ def compare_copper(cli_pcb, gui_pcb):
     set equality is the strongest meaningful identity bar."""
     from kicad_parser import parse_kicad_pcb
 
-    def canon(path):
+    def canon(path, dp=3):
         pcb = parse_kicad_pcb(path)
         names = {nid: net.name for nid, net in pcb.nets.items()}
         segs = set()
         for s in pcb.segments:
-            a = (round(s.start_x, 3), round(s.start_y, 3))
-            b = (round(s.end_x, 3), round(s.end_y, 3))
+            a = (round(s.start_x, dp), round(s.start_y, dp))
+            b = (round(s.end_x, dp), round(s.end_y, dp))
             segs.add((names.get(s.net_id, s.net_id), s.layer,
-                      min(a, b), max(a, b), round(s.width, 3)))
+                      min(a, b), max(a, b), round(s.width, dp)))
         vias = set()
         for v in pcb.vias:
-            vias.add((names.get(v.net_id, v.net_id), round(v.x, 3),
-                      round(v.y, 3), round(v.size, 3), round(v.drill, 3)))
+            vias.add((names.get(v.net_id, v.net_id), round(v.x, dp),
+                      round(v.y, dp), round(v.size, dp), round(v.drill, dp)))
         return segs, vias
 
     s1, v1 = canon(cli_pcb)
@@ -308,6 +308,31 @@ def compare_copper(cli_pcb, gui_pcb):
           f"cli-only={len(s1 - s2)} gui-only={len(s2 - s1)}")
     print(f"  vias:     CLI={len(v1)} GUI={len(v2)} common={len(v1 & v2)} "
           f"cli-only={len(v1 - v2)} gui-only={len(v2 - v1)}")
+    # SUB-MICRON CHECK. The sets above canonicalize at 3 dp = 1 um, so a
+    # QUANTISATION fork -- both fronts routing the same path but writing the
+    # coordinate differently -- is 1000x below this gate's resolution and reads
+    # as IDENTICAL. That is not hypothetical: the IPC adapter built every
+    # coordinate with kipy's `Vector2.from_xy_mm`, whose `from_mm` is a bare
+    # `int(mm * 1_000_000)`, so 66.1mm landed at 66099999 nm. On THIS board that
+    # moved 15 segments, and this gate reported "copper sets identical: True"
+    # both before and after the fix -- measured, by re-running it with the bug
+    # restored. Report the 1 nm view too, so the next such fork is visible here
+    # rather than only in replay_plan_vs_run (which canonicalizes at 6 dp).
+    #
+    # Reported, not failed: this file reports divergence by design, and a
+    # sub-micron delta breaks no DRC or fab rule. It is still a real fork, and
+    # A* tie-breaks are where sub-micron differences stop being invisible.
+    n1, w1 = canon(cli_pcb, dp=6)
+    n2, w2 = canon(gui_pcb, dp=6)
+    if (n1 - n2) or (n2 - n1) or (w1 - w2) or (w2 - w1):
+        print(f"  SUB-MICRON FORK: identical at 1um but NOT at 1nm -- "
+              f"segments cli-only={len(n1 - n2)} gui-only={len(n2 - n1)}, "
+              f"vias cli-only={len(w1 - w2)} gui-only={len(w2 - w1)}")
+        print(f"    a coordinate CONVERSION difference, not different routing; "
+              f"check the mm->nm rounding on both fronts "
+              f"(see kicad_ipc_adapter.vec_mm)")
+    else:
+        print("  ...and still identical at 1nm (no sub-micron fork)")
     for tag, diff in (('cli-only seg', sorted(s1 - s2)[:3]),
                       ('gui-only seg', sorted(s2 - s1)[:3])):
         for d in diff:
