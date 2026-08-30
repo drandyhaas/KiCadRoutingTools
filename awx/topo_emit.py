@@ -37,6 +37,7 @@ from kicad_parser import parse_kicad_pcb  # noqa: E402
 import topo_strings as ts  # noqa: E402
 import flow_frame as ff  # noqa: E402
 import escape_moves as em  # noqa: E402
+import connect as cn  # noqa: E402
 
 TRACK = 0.127
 CLEAR = 0.105            # 0.1 spec + 5um so hugs don't sit exactly at 0.1
@@ -872,6 +873,18 @@ def main():
     # as the MOVER (it can never be F while passed), so B-birth divers
     # go to the FRONT of priority; mutually-inverted B-birth pairs are
     # illegal (the plan/refanout must not create them).
+    # the layer each net's DESTINATION end sits on (dest-stubs: the stub
+    # end's layer -- the fanout chooses it, a via-in-pad escape leaves it
+    # on B.Cu; the connection has to meet it there)
+    dest_layer = {}
+    for nm in all_names:
+        nid2 = byname[nm][0]
+        tp = ends[nm][1]
+        dest_layer[nm] = next(
+            (s.layer for s in pcb.segments if s.net_id == nid2
+             and (abs(s.start_x - tp[0]) + abs(s.start_y - tp[1]) < 0.005
+                  or abs(s.end_x - tp[0]) + abs(s.end_y - tp[1])
+                  < 0.005)), 'F.Cu')
     wtooth_layer = {}
     for nm in names:
         nid2 = byname[nm][0]
@@ -1037,6 +1050,7 @@ def main():
     # F there, so the window is clamped away from those stages.
     window = {}
     wa_lo_map = {}
+    fe_map = {}           # d -> first foreign crossing east of its band
     # B-birth divers: window opens at the tooth (their stub IS the B
     # copper); assert nobody passes them west of their own swaps
     
@@ -1076,6 +1090,7 @@ def main():
             s1, sk = first[d], last[d]
             fw = max((s for s in invol[d] if s < s1), default=None)
             fe = min((s for s in invol[d] if s > sk), default=None)
+            fe_map[d] = fe
             wa_lo = x0 + (fw + 1.5) * W + 0.10 if fw is not None \
                 else x0 - 0.05
             wa_lo_map[d] = wa_lo
@@ -1191,6 +1206,8 @@ def main():
         orders.append(o)
 
     port_path = {}        # nm -> exact drawn pts, replaces the morph
+    port_leave = {}       # nm -> where the port net leaves the trunk
+    port_band = {}        # nm -> (lo(x), hi(x)) its connection may use
 
     def _pts_of(nm):
         if nm in port_path:
@@ -1263,6 +1280,8 @@ def main():
             print(f'WARNING: {nm}: no clear port approach -- linear morph')
             placed_f.extend(port_placed.get(nm, ()))
             continue
+        port_leave[nm] = (xs_, ys_)
+        port_band[nm] = (_bound, _hi)
         port_path[nm] = [p_ for p_ in _pts_of(nm) if p_[0] < xs_ - 1e-6] \
             + pts_
         placed_f.extend(zip(pts_, pts_[1:]))
@@ -1380,14 +1399,29 @@ def main():
             wb_max = min(wb_max, wb_hi_map.get(d, wb_max))
             while not via_clear(d, x_) and x_ < wb_max:
                 x_ += 0.10
-            placed_wv.append((x_, y_at(d, x_)))
-            wb = x_
+            if a.dest_stubs and fe_map.get(d) is None and \
+                    not via_clear(d, x_, force_margin=0.30):
+                # no clear surface spot left in the trunk (rot180 K15:
+                # the sweep ran out at 0.287 from SDQ9's lane and the
+                # via went down on it, 431 DRC). Nothing east needs this
+                # diver on F, so it stays on B to the splice and the
+                # CONNECTION places the via, where the lanes are 0.38
+                # apart and the router sees every obstacle.
+                print(f'{d}: no clear surface-via spot in the trunk -- '
+                      f'B to the splice, the connection places the via')
+                wb = None
+            else:
+                placed_wv.append((x_, y_at(d, x_)))
+                wb = x_
         window[d] = (wa, wb) if x_ad is None else (wa, wb, x_ad)
         print(f'{d}: window {tuple(round(v, 2) for v in window[d] if v is not None)}'
               f'{" +dogbone" if entry[d][0] == "B" else ""}')
 
     # per-net geometry + layered segments + vias
     out_segs, out_vias = {}, {}
+    exits, exit_layer = {}, {}     # dest-stubs: where each net leaves the trunk
+    fallback_tail = {}             # dest-stubs: the hand tail, if connect() refuses
+    fallback_river = {}            # dest-stubs: (segs, vias) the old river climb
     for nm in names:
         mode, v = entry[nm]
         trunk = [ends[nm][0]]
@@ -1396,21 +1430,32 @@ def main():
             trunk.append((xm, slot(morph_t(xm), orders[s].index(nm))))
         bx, by = ends[nm][1][0], ends[nm][1][1]
         if mode == 'F' and a.dest_stubs:
-            # trunk lane (pitch-floored) to the splice, 45 degree jog
-            # onto the stub end
+            # trunk lane (pitch-floored) to the splice; the rest is a
+            # CONNECTION (connect(), the real router). The hand tail --
+            # a 45 degree jog onto the stub end -- stays as the fallback
+            # for a connection the router refuses.
             ly_ = py[trank[nm]]
             jog_ = abs(ly_ - by)
-            path = trunk + [(x1, ly_)] + \
-                ([(bx - jog_, ly_)] if jog_ > 1e-6 else []) + [(bx, by)]
+            path = trunk + [(x1, ly_)]
+            exits[nm] = (x1, ly_)
+            fallback_tail[nm] = ([(bx - jog_, ly_)] if jog_ > 1e-6
+                                 else []) + [(bx, by)]
         elif mode == 'F':
             sy = v
             path = trunk + [(x1, sy), (bx, sy), (bx, by)]
         elif mode == 'P':
             ly_, _bx = v
-            if nm in port_path:
-                path = list(port_path[nm])
+            if nm in port_path and nm in port_leave:
+                # trunk up to the leave point; the A* plan past it only
+                # informed the via placement -- the copper is connect()'s
+                k_ = port_path[nm].index(port_leave[nm])
+                path = port_path[nm][:k_ + 1]
+                exits[nm] = port_leave[nm]
+                fallback_tail[nm] = port_path[nm][k_ + 1:]
             else:
-                path = trunk + [(x1, ly_), (bx, ly_), (bx, by)]
+                path = trunk + [(x1, ly_)]
+                exits[nm] = (x1, ly_)
+                fallback_tail[nm] = [(bx, ly_), (bx, by)]
         elif mode in ('N', 'S'):
             sx, ry, ly, dx_ = v
             path = [p_ for p_ in trunk if p_[0] < dx_ - 0.05] + \
@@ -1426,6 +1471,7 @@ def main():
         if nm not in window:
             out_segs[nm] = [(p, q, 'F.Cu') for p, q in zip(path, path[1:])]
             out_vias[nm] = []
+            exit_layer[nm] = 'F.Cu'
             continue
         win = window[nm]
         wa, wb = win[0], win[1]
@@ -1451,6 +1497,10 @@ def main():
             else:
                 on_b = wa < mx < wb
             segs.append((p, q, 'B.Cu' if on_b else 'F.Cu'))
+        # dest-stubs: the layer the net is on where it leaves the trunk.
+        # A diver with no trunk room to surface arrives on B.Cu and the
+        # connection places the via -- which is where it belongs.
+        exit_layer[nm] = segs[-1][2] if segs else 'F.Cu'
         if mode == 'B':
             vias.append((v[0], v[1]))    # surface via (dogbone or VIP)
             if (v[0], v[1]) != (bx, by):
@@ -1572,7 +1622,16 @@ def main():
                       abs(s.end_x - tp[0]) + abs(s.end_y - tp[1])
                       < 0.005)), 'B.Cu')
         base = max(ends[nm][0][1] for nm in river2) + 0.80
-        _deep = base + (len(river2) - 1) * 0.3
+        # run pitch: 0.30 on the bench (pinned). dest-stubs: the run END
+        # is a connection's exit and the turn via goes there -- 0.30
+        # leaves 11 um over the via's 0.2885, which snapping the exit to
+        # the router's 0.05 grid eats (K19/K21: SCAS refused, boxed in
+        # by the runs above and below on B). 0.35, and the base on the
+        # grid, so every run end is a representable via site.
+        rpitch = 0.35 if a.dest_stubs else 0.3
+        if a.dest_stubs:
+            base = math.ceil(base / 0.05) * 0.05
+        _deep = base + (len(river2) - 1) * rpitch
 
         def _desc_ok(nm, dx0):
             """dest-stubs: an F tooth's jog, tooth via and B descent
@@ -1634,14 +1693,15 @@ def main():
             return all(abs(y_ - ry) > 0.25 or hi < rl or lo > rh
                        for (ry, rl, rh) in street_runs)
 
-        deep = base + (len(r2) - 1) * 0.3
+        deep = base + (len(r2) - 1) * rpitch
         for nm in sorted(r2, key=lambda n: ends[n][1][0]):
             bx, by = ends[nm][1][0], ends[nm][1][1]
-            cands = [(bx - half, None), (bx + half, None)]
             if a.dest_stubs:
-                # the target is a stub end already OUTSIDE the field
-                # (south face): climb straight up its own column
-                cands.insert(0, (bx, None))
+                # the run ends under the stub; from there it is a
+                # CONNECTION (connect() places the turn via and climbs)
+                turns[nm] = (bx, None)
+                continue
+            cands = [(bx - half, None), (bx + half, None)]
             for off in (1.5 * a.pitch, 2.5 * a.pitch):
                 for side in (by + half, by - half):
                     cands.append((bx - off, side))
@@ -1679,7 +1739,7 @@ def main():
                 break
             assert nm in turns, f'no south street for {nm}'
         for i, nm in enumerate(r2):
-            run_y = base + (len(r2) - 1 - i) * 0.3
+            run_y = base + (len(r2) - 1 - i) * rpitch
             tooth2 = ends[nm][0]
             bx, by = ends[nm][1][0], ends[nm][1][1]
             tx_, ry_ = turns[nm]
@@ -1702,18 +1762,27 @@ def main():
             if stub_layer[nm] == 'B.Cu' and ry_ is None and tx_ == bx:
                 vp2 = (bx, by + 0.30)
                 pts_f = [(tx_, run_y), vp2]
-                vias2.append(vp2)
+                tail_vias = [vp2, (tx_, run_y)]
                 tail_b = [(vp2, (bx, by))]
             elif ry_ is None:
                 pts_f = [(tx_, run_y), (tx_, by), (bx, by)]
+                tail_vias = [(tx_, run_y)]
             else:
                 pts_f = [(tx_, run_y), (tx_, ry_), (bx, ry_), (bx, by)]
-            vias2.append((tx_, run_y))
+                tail_vias = [(tx_, run_y)]
             segs2 += [(p_, q_, 'B.Cu')
                       for p_, q_ in zip(pts_b, pts_b[1:]) if p_ != q_]
-            segs2 += [(p_, q_, 'F.Cu')
-                      for p_, q_ in zip(pts_f, pts_f[1:]) if p_ != q_]
-            segs2 += [(p_, q_, 'B.Cu') for p_, q_ in tail_b]
+            tail_segs = [(p_, q_, 'F.Cu')
+                         for p_, q_ in zip(pts_f, pts_f[1:]) if p_ != q_] \
+                + [(p_, q_, 'B.Cu') for p_, q_ in tail_b]
+            if a.dest_stubs:
+                # the B run is the trunk; the climb is a CONNECTION
+                exits[nm] = (tx_, run_y)
+                exit_layer[nm] = 'B.Cu'
+                fallback_river[nm] = (tail_segs, tail_vias)
+            else:
+                vias2 += tail_vias
+                segs2 += tail_segs
             out_segs[nm] = segs2
             out_vias[nm] = vias2
         names = all_names
@@ -1750,6 +1819,77 @@ def main():
     bad, _off = run_verify()
     print(f'  {"CLEAN" if not bad else str(bad) + " violations"}')
 
+    # ---- CONNECTIONS (dest-stubs): from where each net leaves the trunk
+    # to its stub end, routed by the real router against every piece of
+    # copper placed so far (connect.py). Trunk copper first, then the
+    # connections in target order (west lanes and ports), then the river
+    # by stub x, each result becoming an obstacle for the next.
+    copper_in_pcb = False
+    if a.dest_stubs:
+        from kicad_parser import Segment, Via
+        for nm in names:
+            nid, _ = byname[nm]
+            for (p, q, layer) in out_segs[nm]:
+                pcb.segments.append(Segment(p[0], p[1], q[0], q[1],
+                                            TRACK, layer, nid))
+            for (vx, vy) in out_vias[nm]:
+                pcb.vias.append(Via(vx, vy, VIA_SIZE, VIA_DRILL,
+                                    ['F.Cu', 'B.Cu'], nid))
+        copper_in_pcb = True
+        cfg_c = cn.make_config(pcb, TRACK, CLEAR, VIA_SIZE, VIA_DRILL)
+        order = list(target) + sorted(river2, key=lambda n: ends[n][1][0])
+        n_ok = n_fb = 0
+        c_len = 0.0
+        c_vias = 0
+        for nm in order:
+            if nm not in exits:
+                continue
+            nid, _ = byname[nm]
+            ex, exl = exits[nm], exit_layer.get(nm, 'F.Cu')
+            stub, sl = ends[nm][1], dest_layer.get(nm, 'F.Cu')
+            res = cn.connect(pcb, nid, ex, exl, stub, sl, cfg_c,
+                             band=port_band.get(nm), margin=1.0)
+            if res is None:
+                n_fb += 1
+                print(f'WARNING: {nm}: connect() found no route '
+                      f'({ex[0]:.2f},{ex[1]:.2f}) {exl} -> '
+                      f'({stub[0]:.2f},{stub[1]:.2f}) {sl} -- hand tail')
+                if nm in fallback_river:
+                    segs_t, vias_t = fallback_river[nm]
+                else:
+                    pts_ = [ex] + fallback_tail.get(nm, [stub])
+                    segs_t = [(p_, q_, exl) for p_, q_ in zip(pts_, pts_[1:])
+                              if p_ != q_]
+                    vias_t = [] if exl == sl else [ex]
+            else:
+                n_ok += 1
+                segs_o, vias_o = res
+                segs_t = [((s.start_x, s.start_y), (s.end_x, s.end_y),
+                           s.layer) for s in segs_o]
+                vias_t = [(v.x, v.y) for v in vias_o]
+            out_segs[nm].extend(segs_t)
+            out_vias[nm].extend(vias_t)
+            for (p, q, layer) in segs_t:
+                pcb.segments.append(Segment(p[0], p[1], q[0], q[1],
+                                            TRACK, layer, nid))
+            for (vx, vy) in vias_t:
+                pcb.vias.append(Via(vx, vy, VIA_SIZE, VIA_DRILL,
+                                    ['F.Cu', 'B.Cu'], nid))
+            c_len += sum(math.hypot(q[0] - p[0], q[1] - p[1])
+                         for (p, q, _l) in segs_t)
+            c_vias += len(vias_t)
+        print(f'\nconnections: {n_ok} routed by the router, {n_fb} hand '
+              f'fallback; {c_len:.2f} mm, {c_vias} via(s)')
+        # The braid's own verifier models a rect pad as its circumscribed
+        # DISC, so a router tail that legally clips a pad's corner region
+        # (K15: SDQ0 past C5.1, check_drc clean) reads as a hit here. For
+        # connection copper the router's model is the authority; this
+        # pass is informational.
+        print('verification (with connections; disc model -- check_drc '
+              'is the authority for router copper):')
+        bad, _off = run_verify()
+        print(f'  {"CLEAN" if not bad else str(bad) + " violations"}')
+
     # repo octolinear smoothing (#536): collapse the distributed 45
     # nudges into single elbows and merge our launch legs with the
     # fanout stubs. Every collapse is clearance-validated against ALL
@@ -1762,7 +1902,7 @@ def main():
         from pcb_modification import smooth_octolinear_chains
         pre_len = {nm: sum(math.hypot(q[0] - p[0], q[1] - p[1])
                            for (p, q, _l) in out_segs[nm]) for nm in names}
-        for nm in names:
+        for nm in ([] if copper_in_pcb else names):
             nid, _ = byname[nm]
             for (p, q, layer) in out_segs[nm]:
                 pcb.segments.append(Segment(p[0], p[1], q[0], q[1],

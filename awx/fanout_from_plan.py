@@ -35,6 +35,29 @@ import escape_moves as em  # noqa: E402
 import select_moves as sm  # noqa: E402
 import detect_buses as db  # noqa: E402
 import plan_ends as pe  # noqa: E402
+import flow_frame as ff  # noqa: E402
+
+# Face names are FLOW-FRAME names: 'left' is the face toward the source,
+# 'down' the face on the side of the source's flank teeth, whatever the
+# board's own axes say. They are mapped to board directions through the
+# same flow angle the braid rotates by, so a rotated bench gets the same
+# plan -- which the rotation gate (chain_rot.sh) checks.
+_DIRV = {'right': (1, 0), 'left': (-1, 0), 'up': (0, -1), 'down': (0, 1)}
+
+
+def board_dirs(flow_names, theta):
+    """Flow-frame direction names -> board direction names, for a flow
+    frame that rotates the board by `theta` degrees (flow_frame.rotate_pcb's
+    convention: flow = R(theta) . board, so board = R(-theta) . flow)."""
+    r = math.radians(-theta)
+    c, s = math.cos(r), math.sin(r)
+    out = set()
+    for nm in flow_names:
+        vx, vy = _DIRV[nm]
+        bx, by = c * vx - s * vy, s * vx + c * vy
+        out.add(min(_DIRV, key=lambda k: (_DIRV[k][0] - bx) ** 2
+                    + (_DIRV[k][1] - by) ** 2))
+    return out
 
 out_path = sys.argv[1]
 rest = [a for a in sys.argv[2:] if not a.startswith('-')]
@@ -60,7 +83,9 @@ NO_DROP = '--no-plane-drop' in sys.argv
 # Negative control for the exit-line hint specifically: directions
 # still applied, gaps left to the fanout.
 NO_LINES = '--no-lines' in sys.argv
-base = os.path.join(HERE, 'fb_t2q_base.kicad_pcb')
+base = next((a.split('=', 1)[1] for a in sys.argv
+             if a.startswith('--board=')),
+            os.path.join(HERE, 'fb_t2q_base.kicad_pcb'))
 
 names = subprocess.run([sys.executable,
                         os.path.join(HERE, 'coherent_nets.py'), K],
@@ -133,6 +158,13 @@ for nm in names:
 
 print('planning...')
 if ONLY:
+    _theta = ff.flow_angle([ends[n][0] for n in names],
+                           [ends[n][1] for n in names])
+    _only_board = board_dirs(ONLY, _theta)
+    if _theta:
+        print(f'  flow frame {_theta:.0f} deg: faces {sorted(ONLY)} '
+              f'(flow) -> {sorted(_only_board)} (board)')
+    ONLY = _only_board
     dmenu = {n: [m for m in ms if m.direction in ONLY]
              for n, ms in dmenu.items()}
     _empty = [n for n, ms in dmenu.items() if not ms]
