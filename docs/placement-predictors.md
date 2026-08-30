@@ -27,12 +27,31 @@ and each graded by `board_score`.
 >
 > **What that costs, said plainly: no number in this document has an automated
 > change detector any more** — not the rho table, not the per-board tables, not
-> the shuffle-control rates — **and re-deriving them is an 8.8-hour job** (the sum of `provenance.total_seconds`
-> over the 87 rows; median 217 s, max 2012 s on `tigard:perturb-wrong_side`;
-> about 2.5 h wall clock at `-j 4`). It is the recorded finding.
+> the shuffle-control rates — **and re-deriving them is a 60-hour job** (the sum of `provenance.total_seconds`
+> over the 119 rows that carry one; median 343 s, max 12058 s on
+> `kit-dev-coldfire-xilinx_5213:portfolio-5` — 3.3 h in one row, a floor no
+> amount of parallelism beats). The `-j 4` wall clock has not been measured; a
+> naive divide puts it near 15 h. It is the recorded finding.
+>
+> An earlier revision of this box said 8.8 h over 87 rows, median 217 s, max
+> 2012 s on `tigard:perturb-wrong_side`. Those are the numbers of the rows file
+> this document used to carry, `tests/stress/predictor_rows.json`, dropped in
+> `acad9c0c` and still recoverable:
 >
 > ```bash
-> # rebuild the rows (8.8 h serial, ~2.5 h at -j 4)
+> git show acad9c0c^:tests/stress/predictor_rows.json
+> ```
+>
+> 87 rows over **eight** `board_key`s — four swept at K≈20 (esp_prog 21,
+> tigard 21, splitflap_driver 20, watchy 20) plus four singletons (smartknob 2,
+> neo6502, piantor, urchin) — summing to 8.77 h over the **77** rows that carry
+> a `total_seconds`, with a median of 217 s when the 10 that do not are counted
+> as zero, and a max of 2012.2 s on `tigard:perturb-wrong_side`. Every figure
+> was correct for that file, and all four were carried forward unchanged when
+> the study was re-run at six boards x K=20.
+>
+> ```bash
+> # rebuild the rows (60 h serial; ~15 h at -j 4, and one row alone is 3.3 h)
 > python3 -X utf8 tests/stress/predictor_study.py --out wk/703 -j 4
 > # then every statistic, free, from the rows it wrote
 > python3 -X utf8 tests/stress/predictor_study.py --from-rows wk/703/rows.jsonl
@@ -97,13 +116,29 @@ pooled.
 
 ### Three things this says that the repo did not know
 
-**1. `pad_copper` -- the one pre-route number that already refuses -- is
-validated.** `loop_driver.py`'s L2 gate blocks the first route on
-`checklist.a_off_outline.pad_copper`, and it is the only pre-route quantity in
-this repo that refuses anything. It ranks `blocking` positively on 6 of 6
-boards: +0.481 esp_prog, +0.392 kit-dev-coldfire, +0.649 sonde_u, +0.568
-splitflap, +0.473 tigard, +0.622 watchy. The gate was right, and now it is
-measured rather than assumed.
+**1. The off-outline channel ranks `blocking` on 6 of 6 boards, and the number
+that REFUSES is a different census of it.** `pad_copper` ranks positively on
+every board: +0.481 esp_prog, +0.392 kit-dev-coldfire, +0.649 sonde_u, +0.568
+splitflap, +0.473 tigard, +0.622 watchy. Two sentences this document printed
+beside that finding were wrong, and #788 corrects them:
+
+- **The L2 gate does not read this key.** `loop_driver.py`'s refusal reads
+  `check_assembly.py`'s `oob_pad_count` — a part-level pad AABB against an
+  outline inflated by the grading clearance, so it moves when `--clearance`
+  moves — while `checklist.a_off_outline.pad_copper` is `render_placement.py`'s
+  per-PAD, margin-0 census, which reads no `--intent`. `legality.py`'s own
+  `oob_pad_basis` string has recorded the distinction all along. The skill
+  guidance had the same conflation and is corrected with it.
+- **It is not the only pre-route number here that refuses.** L2 also refuses on
+  `buildable`/`verdict`, on `locked_contacts`
+  and on `blocking` — and `blocking` belongs to the +0.785 family, because
+  `check_assembly`'s `blocking` counts pad-INTERSECTION pairs only, which is
+  this table's `pad_intersection_pairs`. So the strongest member of the family
+  was already gating before anyone measured it; what the +0.524 member adds is
+  a different failure, not a weaker version of the same one.
+
+How close the two censuses actually are, and what the answer depends on, is
+measured below.
 
 **2. `hpwl` -- which the drivers DO gate on -- barely relates to the routed
 outcome.** 4 boards right, 2 wrong, median **+0.059**, two-sided p = 0.69:
@@ -250,6 +285,154 @@ is frozen per board in `ARGV.json`, and each row carries its
   Ten predictors clearing that is evidence, not proof, and the six sharing a
   median of +0.785 are one quantity seen through six counters.
 
+## What #788 asked of these numbers
+
+#788 read the table above and asked why the family that ranks `blocking` best
+is advisory while the weakest passing member is the only one that refuses. Two
+measurements answer it. Both regenerate with
+
+```bash
+python3 -X utf8 tests/measure_788_censuses.py -j 8
+```
+
+and `tests/test_788_marginal_literals.py` is the clean-clone change detector
+for a declared subset of the same rows.
+
+### The two censuses agree, but not unconditionally — the floor decides
+
+The study measured its predictors on the PRE-ROUTE variant board;
+`check_assembly` runs on a placed board. Copper is inert to
+`grade_pad_legality`, which reads footprints, courtyards and the outline, so
+anything that moves between the two arms is the clearance floor and nothing
+else. That is measured, not assumed — `measure_788_censuses.py --inertness`
+grades both boards at a PINNED clearance and requires all five keys to agree:
+**60 variants across esp_prog, watchy and tigard, 0 disagreements**, including
+`perturb-pile` at 109 grazes / 112 courtyard pairs / 88 blocking pairs. (An
+earlier version of this claim rested on three esp_prog variants, two of which
+are all-zero on every key — a sample that cannot tell inertness from
+cleanliness.) And the floor does move, because the study's variant writer
+produced
+no sibling `.kicad_pro` (the #441 hazard, live in this dataset): the pre-route
+boards all grade at the `fixed default` 0.25, the routed boards at each board's
+own netclass, 0.1 to 0.2 mm.
+
+| study predictor vs `check_assembly` key | at each board's own floor | at the 0.25 fallback |
+|---|---|---|
+| `pad_copper` vs `oob_pad_count` | **119/119** sign, 118/119 exact | **112/120** sign, 104/120 exact |
+| `pad_clearance_pairs` vs `pad_conflicts` | 118/119 sign, 109/119 exact | 119/120 sign, 114/120 exact |
+| `hole_conflicts` vs `hole_conflicts` | 118/119 sign, 116/119 exact | 120/120 exact |
+| `courtyard_blocking_pairs` vs `courtyard_blocking` | 119/119 exact | 120/120 exact |
+| `pad_intersection_pairs` vs `blocking` | 119/119 sign, 113/119 exact | 120/120 sign, 113/120 exact |
+
+The off-outline row is the one that moves, and it moves in one direction:
+every one of the 8 sign disagreements is `check_assembly` reporting a breach
+the per-pad measure does not.
+
+**Those 8 rows are 2 distinct placements**, and the difference matters. Seven
+are watchy — `authored` plus six perturbations that did not move it, all
+sharing one `poses_sha256` — and the eighth is `sonde_u:portfolio-2`. The study
+drops such duplicates before computing anything (`9 DUPLICATE placement(s)
+dropped`); the table above counts rows, so it does not. On the 111 distinct
+placements the same measurement reads **108/110**, not 112/120. Neither number
+is wrong and they are not interchangeable, so both are stated.
+
+The watchy placement is worth naming because it is the human shipping board: at
+0.25 the gate's census says four parts carry off-board pad copper (SW1..SW4,
+0.1696 mm each) and the per-pad census says none. That is the
+AABB-vs-inflated-outline basis behaving exactly as `legality.py` documents it.
+
+**So "the two are the same quantity" is not safe as an unconditional claim.**
+The #703 validation of the off-outline channel transfers to the shipped gate at
+the floor a routed board carries, and degrades at a looser one. Neither arm is
+the deployment condition, because a real placed board does carry a project;
+what the study never pinned is the floor, and this table is the size of that
+gap rather than a reason to prefer one number.
+
+### Conditioned on the refusals that already run, the ungated half earns nothing
+
+The question #788 poses for any gate proposal — how many placements would it
+refuse, and how many of those routed worse than the ones it passed — answered
+on the same rows, at each board's own floor:
+
+```
+L2 as it ships (blocking > 0 or oob_pad_count > 0)   refuses 35 of 119
+    the 84 it passes routed to blocking   min 0 / median 1 / max 9
++ (pad_conflicts > 0 or hole_conflicts > 0)          refuses 37
+    the 2 it adds routed to blocking      0 and 2
+```
+
+23 of the 25 rows carrying a clearance graze and 7 of the 7 carrying a hole
+conflict are refused already. There is no tail to catch either: the worst row
+that gets past the four checks routed to 9.
+
+**Be precise about the two it would add, because the first draft of this
+section was not.** They routed to 0 and 2 against a passed distribution of
+`{0: 41, 1: 14, 2: 8, 3: 10, 6: 3, 7: 2, 8: 1, 9: 5}`. One is as good as
+anything the gate passes; the other is worse than 55 of the 84 rows it passes
+and better than 21. So they are not "both false refusals" — that is a claim
+this data does not make. What they are is *inside* the range the gate already
+accepts, and nowhere near what it exists for: every one of the 23 rows
+`blocking` refuses on its own routed to 12 or worse.
+
+**The channel is not weak.** `pad_conflicts` is one of five pair counts tied at
+the top of the table above (+0.785; only `pad_shortfall`, at +0.786, is
+higher). **It is REDUNDANT with what already refuses.** `hole_conflicts` is a
+weaker case again — +0.501 on four boards, and the study's second-worst
+shuffle-control rate — and it contributes no marginal refusal at all.
+
+The same measurement rules out `courtyard_blocking_pairs` as an absolute census
+far more sharply: it would add 21 rows whose routed `blocking` is
+`{0: x6, 1: x12, 2: x3}`, 18 of them at or below the median of the rows the
+gate passes. That is the reason `check_assembly` narrows it to the
+moved-vs-baseline subset.
+
+**Row counts, not board counts.** The study is six boards; 119 is its graded
+placements, of which 110 are distinct. On distinct placements the picture is
+the same where it matters — the same two marginal rows, routing to the same 0
+and 2 — while the passed median falls from 1 to 0 and courtyard's marginal 21
+becomes 15. On the 0.25 arm the absolute counts change again (L2 refuses 43,
+passed median 0) and the marginal result still does not. That invariance across
+all four arms is the finding; the absolute counts are not.
+
+### Two things this measurement says about the gate that already ships
+
+- **The two conjuncts are complementary, not a strong one and a weak one.**
+  `blocking > 0` alone refuses 23, and every one of those routed to `blocking`
+  12 or worse. `oob_pad_count > 0` alone refuses 24; 12 of those are refusals
+  the first conjunct does not make. The worst board in the study
+  (`tigard:perturb-pile`, routed `blocking` 13078) has `oob_pad_count` **0** and
+  `blocking` 2783 — the catastrophe is caught by the pad-intersection conjunct,
+  not the off-outline one, and each conjunct catches boards the other passes.
+- **The off-outline conjunct's own marginal refusals sit where a graze gate's
+  would.** Those 12 routed to `blocking`
+  `[0, 1, 1, 2, 3, 3, 3, 3, 3, 5, 5, 5]`, against a passed median of 1.
+  `check_assembly.py` predicted this in source — the count "moves with
+  `--clearance`, so a clearance-band graze reads as copper in the air". This is
+  an argument against adding a second marginal channel, **not** an argument for
+  removing this one: its rationale is a mechanism (a part whose pads lie off the
+  board carries nets no router can reach, and it produces no blocking pair
+  because there is nothing out there to collide with) and it ranks `blocking`
+  on 6 of 6 boards. Removing a gate is its own decision and would need its own
+  measurement.
+
+### What would reverse the answer
+
+Not "the corpus never exercises per-pair clearance" — it does.
+`pad_clearance_required`, the #697 disclosure of *conflicting* pairs whose
+requirement exceeds the board-wide floor (`legality.py` appends to it only
+inside `if pair_hit:`, so a raised requirement with adequate spacing never
+appears there), is non-empty on 11 of 119 rows at the routed floor and 4 of
+120 at 0.25, from two distinct causes: a 1.016 mm **pad override** on four
+esp_prog rows and an **NPTH hole** requirement at 0.2 on seven watchy / tigard
+/ splitflap rows. And the two marginal refusals a graze gate would add are
+themselves pad-override pairs, not netclass grazes — so the case #697 built
+`PadClearanceModel` for is represented, and the grazes it produced routed to
+`blocking` 0 and 2.
+
+What is NOT represented is a board where such a raised requirement is violated
+on a placement that the four shipped checks pass and that then routes badly.
+One of those, routed, re-opens this on evidence.
+
 ## Pre-registered decision rules
 
 *Recorded 2026-08-28, before the sign test over the declared board set is
@@ -266,22 +449,222 @@ discharging, not a number chosen afterwards.*
    lower `blocking` than the baseline, the `crossings` clause of `rule1_check`
    is withdrawn — and the withdrawal keeps its row, with its measured direction,
    in the `rejected` style `test_placement_ab.py` uses.
+   **DISCHARGED 2026-08-30** by the slate run below, on esp_prog and
+   kit-dev-coldfire — on a criterion whose own null rate is 100% and 99% on
+   exactly those two boards, so the withdrawal rests on the measured
+   consequence rather than on this firing. The clause is withdrawn; the
+   direction survives in `portfolio.rule1_advisory`; the row is
+   `tests/placement_rule1_withdrawal.json` and its detector is
+   `tests/test_789_rule1_withdrawal.py`. `rank_key` slot 1 is untouched — rule
+   2 was about the bar, and the order is rule 5.
 3. A predictor is reported as ranking `blocking` only on ≥ N−1 boards right and
    none wrong, over boards with a *defined* ρ, with N ≥ 3 and the shuffle-control
    rate printed beside it.
 4. Saturated and starved boards are reported with their constant value and
    excluded from the denominator. They are never dropped.
+5. *Recorded 2026-08-30, before any slate run has produced a tau. This is NEW
+   pre-registration, not a discharge of rule 2: rule 2 is about the BAR and
+   says nothing about rank order, and no tau discharges it.*
+
+   `portfolio.rank_key` puts `crossings` in slot 1, which decides which
+   candidates a probe budget is spent on. **A slate run measures Kendall tau-b
+   between the static order and the routed order over the SAME candidate set**,
+   the static side being `sorted(..., key=rank_key(c, 0))` with candidate 0's
+   key COMPUTED rather than pinned first by fiat, and the routed side being
+   `board_score`'s `blocking` VALUE with its ties left as ties. It is never
+   `ranking_routed` as printed, whose final tiebreak is the static position and
+   which would therefore agree with the static order by construction. tau is
+   computed on `(static_position, blocking)`, so a POSITIVE tau means the key
+   AGREES: three candidates at static positions 0, 1, 2 routing to `blocking`
+   1, 2, 3 give three concordant pairs and tau-b +1.0.
+
+   **The rule.** `rank_key`'s order is reported as agreeing only if tau is
+   positive on >= N-1 boards and negative on none, over boards with a *defined*
+   tau, with N >= 3 and the shuffle-control rate printed beside it. That is
+   rule 3's shape, unchanged. **No magnitude threshold is introduced**, because
+   any tau cut-off would be a number chosen after seeing tau's scale; the
+   threshold IS the sign rule and its null is exactly binomial. Clearing it
+   licenses *reporting agreement over the population the rank key actually
+   sees*, and nothing else — not a reorder, and not rule 2. Failing it is
+   reported as NOT SHOWN TO AGREE and licenses nothing. The one asymmetric
+   outcome pre-registered here: tau NEGATIVE on >= N-1 boards and positive on
+   none licenses opening a reorder issue — the issue, not the reorder,
+   following rule 1's precedent that neither arm was licensed.
+
+   **Declared before the run, so that a later denominator cannot be chosen:**
+   the board set is #703's six; K is 11 per board (candidate 0 plus the ten
+   #703 recorded); kit-dev-coldfire-xilinx_5213 runs with REDUCED guards (one
+   regeneration check, no re-route control) because its quench and route cost
+   hours. `splitflap_driver` is expected to come back `baseline_clean` and
+   `sonde_u` probably — their #703 candidates route to `blocking` 0 and
+   {0 x9, 2} — so N is expected to be 3-5 and `MIN_SIGN_BOARDS` is 3. A NO
+   VERDICT at N < 3 is a first-class outcome, committed like any other.
+
+   **Rule 2 is an EXISTENCE claim: it can be discharged, never refuted.** The
+   clause standing is a default, not a finding. And the null rate of rule 2's
+   own criterion is measured and printed beside its verdict — permuting
+   `blocking` within each board and re-evaluating the predicate. It is expected
+   to be HIGH, because roughly half a slate is crossings-barred and `blocking`
+   varies. Saying that after seeing the rate would read as excuse-making;
+   saying it here is the honest form. A discharge at a high null rate is still
+   a discharge, and still evidence of very little.
+
+## The slate run (#789) — what the rank key and the rule-1 bar are worth
+
+Six boards, K=11 each: candidate 0 (the plain quench, which `portfolio.generate`
+refuses to produce under `only=`, so #703 never made one) generated, routed and
+graded here, plus #703's ten recorded portfolio candidates grafted in. **One new
+route per board instead of eleven.** Regenerate with
+
+```bash
+python3 -X utf8 tests/stress/slate_study.py --out wk/789 -j 4
+python3 -X utf8 tests/stress/slate_study.py --from-rows wk/789/slate_rows.jsonl
+```
+
+The graft is guarded rather than asserted. On five of the six boards every
+guard ran: the board's #703 `argv_sha`, the input-board sha, each candidate's
+`variant_board_sha`, a regeneration control (two candidates re-derived and
+required to match their recorded `poses_sha256`) and a re-route control (one
+grafted candidate re-routed to a fresh path and required to return the
+`blocking` its `score.json` recorded). Zero boards voided.
+
+**kit-dev-coldfire ran with REDUCED guards — one regeneration check and no
+re-route control** — declared before the run, because its quench and route cost
+hours each. That matters more than a footnote, because kit-dev is one of the
+two boards that discharged rule 2, and it is the board whose router was never
+re-verified.
+
+### Rule 2: DISCHARGED, and the criterion that discharged it is weak
+
+The "barred" column counts VIABLE candidates only: `rank_static` ranks
+gate-passing candidates alone, so one the legality gates rejected was never
+excluded *by* the crossings bar and is not evidence about it.
+
+| board | verdict | baseline `blocking` | barred on crossings | fired | null rate |
+|---|---|---|---|---|---|
+| esp_prog | **fires** | 4 | 4 | 3 | 100% |
+| kit-dev-coldfire | **fires** | 5 | 4 | 1 | 99% |
+| tigard | does not fire | 2 | 1 | 0 | 0% |
+| watchy | does not fire | 3 | 1 | 0 | ~21% |
+| sonde_u | cannot fire (baseline clean) | 0 | 0 | — | n/a |
+| splitflap_driver | cannot fire (baseline clean) | 0 | 5 | — | n/a |
+
+esp_prog's three firing candidates are barred on crossings **alone** — their
+hpwl is below the baseline's — and routed to `blocking` 3, 3 and 2 against the
+baseline's 4. The one at 2 carries the **highest crossings on the slate**, and
+the best candidate the bar allows through routes to 3.
+
+**The null rate is the number that says how much that is worth**, and it was
+pre-registered as expected-high before the run: permuting `blocking` within a
+board, the criterion still fires 100% of the time on esp_prog and 99% on
+kit-dev, because almost every candidate on those slates routed below their
+baseline. On tigard it is 0%. So the criterion is easy to satisfy exactly where
+it fired, and a discharge on it is evidence of very little.
+
+(These are 200-draw Monte-Carlo estimates at a fixed seed, so a middling one
+carries a standard error near 3 points — watchy's 21% is "about a fifth", not a
+two-digit measurement. The 100% and 0% are not estimates: on esp_prog 9 of 10
+candidates route below the baseline's 4, so every permutation fires, and on
+tigard none can.)
+
+### What the withdrawal actually changes — the consequence, not the criterion
+
+`select_best` takes the first index in `ranking_primary + ranking_static` that
+is 0 or not a violator, so the answer depends on whether a probe ranking exists.
+`--route-top` defaults to 2, so in a shipped run one does. Both arms:
+
+Three arms, all computed by `slate_study.delta()` so they regenerate:
+
+| arm | worse | better | unchanged |
+|---|---|---|---|
+| **static order only** (`--route-top 0`) | **0** | 0 | **6 of 6** |
+| ORACLE probe — ranked by each candidate's *true* routed `blocking` | 0 *(cannot)* | 1 (esp_prog, 3 → 2) | 5 |
+| ADVERSARIAL probe — headed by the crossings-barred candidate that routed worst | **2** (esp_prog 3 → 6, kit-dev 1 → 9) | 0 | 4 |
+
+The static-only result is structural rather than lucky: `rank_key`'s slot 1 *is*
+crossings, so a candidate barred for having more crossings than the baseline
+already sorts below every candidate with fewer, and `select_best` reaches a
+non-violator first. The bar could only ever bite when the head of the static
+order is itself crossings-barred.
+
+**The oracle arm's zero is construction, not evidence.** The withdrawn violator
+set is a strict subset of the old one (verified on all six boards) and the list
+is sorted by the truth, so `select_best` can only move the pick *earlier* —
+`blocking_after ≤ blocking_now` always. An earlier draft of this section counted
+that zero as a second independent arm of safety. An adversarial fact-check of
+this branch caught it, and the adversarial arm above is what replaced it.
+
+**The adversarial arm is the honest other half**: on two boards the bar was, in
+that instance, protecting the pick. A real probe ranks on windowed route
+failures and will sometimes mis-rank, so this is reachable rather than
+hypothetical.
+
+So the evidence supports something narrower than "safe": **the withdrawal
+changes nothing on the static order across all six boards; it can only help
+under a perfect probe; it can hurt under a bad one.** The reason to do it is
+that rule 2 pre-registered the criterion and the criterion fired. The reason not
+to fear it is the static-order row — the one arm that is neither a tautology nor
+an adversarial construction.
+
+### Rule 5: NOT SHOWN TO AGREE
+
+| board | tau-b (static position vs routed `blocking`) | tied pairs | C / D |
+|---|---|---|---|
+| watchy | +0.816 [LOO +0.816..+0.816, K=4] (7 gate-rejected) | 2 of 6 | 4 / 0 |
+| kit-dev-coldfire | +0.250 [LOO +0.094..+0.454, K=11] | 6 of 55 | 31 / 18 |
+| esp_prog | −0.070 [LOO −0.218..+0.183, K=11] | 22 of 55 | 15 / 18 |
+| sonde_u | −0.341 [LOO −0.447..−0.348, K=11] | **45 of 55** | **1 / 9** |
+| tigard | −0.408 [LOO −0.816..+0.000, K=4] (7 gate-rejected) | 2 of 6 | 1 / 3 |
+| splitflap_driver | n/a — saturated, every candidate routes to `blocking` 0 | — | — |
+
+**Read sonde_u's row before reading its coefficient.** Its `blocking` column is
+`0, 2, 0×9`: 45 of 55 pairs are tied and the entire sign comes from the single
+candidate that routed to 2. Its LOO span looks tight only because the one
+deletion that would matter — dropping that candidate — leaves the tau undefined
+and is excluded from the min/max. One of the three negative boards is a single
+data point wearing a coefficient. The verdict below is the conservative one
+either way, but the tie counts are in the table because a coefficient alone does
+not say what it was computed over.
+
+2 positive, 3 negative, N=5, two-sided p = 1.000. Rule 5 requires positive on
+≥ N−1 and negative on none (or the mirror image to license a reorder *issue*).
+Neither holds. **So this licenses nothing**: `rank_key` slot 1 is unchanged and
+the contradiction between it and the drivers' prohibition stays disclosed at
+both code sites, exactly as rule 1 left it.
+
+Two disclosures travel with that table. splitflap_driver is saturated and out
+of the denominator per rule 4. tigard and watchy report K=4 because 7 of their
+11 candidates fail `score_candidate`'s baseline-relative legality gates — which
+is the shipped selector's own behaviour, since `rank_static` ranks only viable
+candidates, but a tau over 4 and a tau over 11 are not the same evidence.
+
+### What this run does not claim
+
+- **It measures `portfolio.generate`'s library-default slate, not the CLI's.**
+  #703 generated its candidates with `quench_kw=None` (max_displacement 10.0,
+  crossing_penalty 10.0, length_weight 1.0, halo_coef 0.25) while
+  `place_portfolio.main` ships 3.0 / 30.0 / 0.3 / 0.15. Candidate 0 is generated
+  the same way, so the comparison inside a board is on equal terms and rule 2 is
+  discharged on its own terms — but the 4× lower crossing penalty is on exactly
+  the axis the question is about, and a replication on the CLI's slate would be
+  a different measurement.
+- The probe arm uses each candidate's **actual routed `blocking`** as the probe
+  order. A real probe ranks on windowed route failures, so that arm bounds the
+  effect rather than predicting a particular run.
+- Six boards is six boards, and the tau side is N=5 with two boards at K=4.
 
 ## What this does not claim
 
-- Not that the passing predictors *cause* anything. They rank an outcome on four
+- Not that the passing predictors *cause* anything. They rank an outcome on six
   boards.
 - Not that `crossings` or `hpwl` are useless. Both are measured against
   distance-to-truth, both retain the roles that measurement supports, and the
-  drivers' existing prohibition on gating `crossings` is untouched.
+  drivers' prohibition on GATING `crossings` is untouched -- and since #789
+  it is no longer contradicted by `rule1_check`, whose crossings clause was
+  withdrawn on this document's own pre-registered criterion.
 - Not that the legality family is ten findings. Six of them share a median to
   three decimals; they are one quantity seen through six counters.
-- Not a corpus-wide result. Four boards, one machine, one router build. Each
+- Not a corpus-wide result. Six boards, one machine, one router build. Each
   row records `provenance.measured_git` (`v0.21.3-199-g3b8edc19`), from which
   the router version follows; there is no explicit router-version or machine
   field on a row, and this document previously claimed there was.

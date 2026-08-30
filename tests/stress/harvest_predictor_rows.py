@@ -106,8 +106,15 @@ METRIC_KEYS = (
 )
 
 #: Checklist-derived predictors: canonical name -> (path, legacy aliases).
-#: `a_off_outline.pad_copper` leads because it is the ONLY pre-route number in
-#: this repo that refuses anything (loop_driver's L2 gate).
+#: `a_off_outline.pad_copper` leads because the off-outline channel is the one
+#: this repo blocks a first route on -- but the gate reads a DIFFERENT census
+#: of it, and this comment used to say otherwise (#788). loop_driver's L2
+#: refuses on check_assembly's `oob_pad_count`, a part-level pad AABB against
+#: an outline inflated by the grading clearance; this key is
+#: render_placement's per-PAD, margin-0 measure. How close the two get, and at
+#: which floor, is measured in docs/placement-predictors.md. L2 also refuses
+#: on `buildable`, `locked_contacts` and `blocking`, so neither is this "the
+#: only pre-route number in this repo that refuses anything".
 CHECKLIST_COUNTS = (
     ('pad_copper', ('a_off_outline', 'pad_copper'), ()),
     ('courtyard_off_outline', ('a_off_outline', 'courtyard'), ()),

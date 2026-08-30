@@ -2631,6 +2631,18 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
             # part reports a breach no pad makes. render_placement's
             # `checklist.a_off_outline.pad_copper` is the per-PAD, margin-0
             # outline measure the docs designate as authoritative.
+            #
+            # HOW FAR APART THEY ACTUALLY LAND, measured over #703's 120
+            # placements (#788, docs/placement-predictors.md): graded at each
+            # board's own netclass floor the two agree in sign on 119 of 119
+            # and exactly on 118; graded at the 0.25 fallback, 112 of 120 and
+            # 104. Every one of the 8 disagreements is THIS count reporting a
+            # breach the per-pad measure does not, and seven of them are watchy
+            # ROWS -- which are one placement, not seven: the human-authored
+            # board plus six perturbations that did not move it, where SW1..SW4
+            # sit 0.1696mm inside the inflated outline and no pad crosses the
+            # real one. The number is not wrong; it is a different question,
+            # and it is the one loop_driver's L2 gate refuses on.
             'oob_pad_basis': ('part pad AABB vs outline inflated by the '
                               'grading clearance (NOT the per-pad outline '
                               'measure; see render_placement '

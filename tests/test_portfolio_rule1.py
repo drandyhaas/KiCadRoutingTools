@@ -38,17 +38,50 @@ def _cand(index, crossings, hpwl, board='b.kicad_pcb'):
     return c
 
 
-def test_rule1_check_measures_against_the_baseline_row():
+def test_rule1_check_measures_hpwl_against_the_baseline_row():
+    """The hpwl clause, unchanged. The crossings clause was WITHDRAWN by #789.
+
+    This function used to assert that a candidate worse on crossings alone was
+    barred, and that one worse on both listed two violations. Both assertions
+    are now inverted, deliberately: `docs/placement-predictors.md` rule 2
+    pre-registered the exit criterion, a six-board slate run satisfied it on
+    two boards, and the clause is gone. The direction survives in
+    `rule1_advisory` -- see `test_rule1_advisory_keeps_the_withdrawn_direction`
+    below, and `tests/test_789_rule1_withdrawal.py` for the recorded evidence.
+    """
     base = _cand(0, 50, 600.0)
     assert rule1_check(_cand(1, 45, 590.0), base) == []
     assert rule1_check(_cand(2, 50, 600.0), base) == [], "equal is no worse"
-    v = rule1_check(_cand(3, 60, 590.0), base)
-    assert len(v) == 1 and 'crossings' in v[0], v
+    assert rule1_check(_cand(3, 60, 590.0), base) == [], \
+        "#789: worse on crossings ALONE no longer bars"
     v = rule1_check(_cand(4, 45, 700.0), base)
     assert len(v) == 1 and 'hpwl' in v[0], v
     v = rule1_check(_cand(5, 60, 700.0), base)
-    assert len(v) == 2, f"worse on both must list both: {v}"
-    print("  PASS: rule1_check prices both proxies against the baseline")
+    assert len(v) == 1 and 'hpwl' in v[0], \
+        f"worse on both is barred by the hpwl clause alone now: {v}"
+    print("  PASS: rule1_check prices hpwl against the baseline; crossings is "
+          "withdrawn (#789)")
+
+
+def test_rule1_advisory_keeps_the_withdrawn_direction():
+    """Rule 2 said the withdrawal keeps its MEASURED DIRECTION.
+
+    A clause that stops measuring is a deleted clause: a later reader could not
+    see what the bar used to say, nor notice the corpus moving under it.
+    """
+    from placement.portfolio import rule1_advisory
+    base = _cand(0, 50, 600.0)
+    adv = rule1_advisory(_cand(3, 60, 590.0), base)
+    assert len(adv) == 1 and 'crossings' in adv[0], adv
+    assert 'WITHDRAWN' in adv[0], \
+        f"the advisory must say it does not bar, or it reads as one: {adv}"
+    assert rule1_advisory(_cand(1, 45, 590.0), base) == [], \
+        "a candidate with FEWER crossings has nothing to report"
+    assert rule1_advisory(_cand(2, 50, 600.0), base) == [], "equal is no worse"
+    # It is ADVISORY, so it must never reach the violator set select_best reads.
+    assert rule1_check(_cand(3, 60, 590.0), base) == []
+    print("  PASS: rule1_advisory reports the withdrawn direction and bars "
+          "nothing")
 
 
 def test_select_best_never_silently_picks_a_violator():

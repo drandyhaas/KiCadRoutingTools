@@ -164,9 +164,19 @@ re-emit if in doubt.
    intent says.
 4. Gate on hpwl, PAD-PAD conflicts and the assembly channel's blocking pairs.
    REPORT `crossings` and aggregate courtyard overlap; never gate on them --
-   both correlate POSITIVELY with **distance-to-truth**. That is the measured
-   dependent variable; neither has been correlated with routed `blocking`
+   both correlate POSITIVELY with **distance-to-truth**, which is the dependent
+   variable that evidence was measured against. Against routed `blocking`,
+   `crossings` HAS now been measured (#703) -- it FAILS its sign rule on the
+   full sample (5 boards right, 1 wrong) and PASSES it (6/0) once
+   optimizer-made placements are excluded, so neither arm is the answer. The
+   prohibition rests on the distance measurement, now with the knowledge that
+   the routed-blocking evidence is arm-dependent
    (`docs/placement-predictors.md`).
+   WHICH pad-pad channel: the pad-INTERSECTION count, which is
+   `check_assembly`'s `blocking` and the routing loop's L2 refusal. The
+   clearance-GRAZE count (`pad_conflicts`) is reported and not gated -- #788
+   measured it as redundant with that refusal, not as unimportant, and the
+   reason is written beside the gate in `loop_driver.py`.
 5. Every proposal is decided by a MEASUREMENT on the board in front of you, not
    by what a pattern suggests. If no instrument confirms it, do not apply it.
 6. Placement invalidates every downstream routed board. Never run it mid-chain.
@@ -1029,7 +1039,19 @@ HARD gates is legality + intent (rule 2); **rule 1 — metrics no worse than
 the baseline — is ANNOTATED, not gated**: violators carry `gates.rule1` /
 `rule1_violators` in portfolio.json and are excluded from the
 JSON_SUMMARY `best` pick (which falls back to the baseline), but they stay
-in the rankings. Verify rule 1 YOURSELF against the baseline row before
+in the rankings.
+**Rule 1 is now the hpwl clause only.** Its crossings half was WITHDRAWN by
+#789 on the exit criterion `docs/placement-predictors.md` pre-registered for
+it: a six-board slate found candidates barred on crossings alone that routed
+to strictly lower `blocking` than the baseline, and removing the bar changed
+no board's pick on the static order. Read the limit with the result: under a
+probe that mis-ranks, the withdrawal CAN pick worse, and the arm that showed
+it picking better ranks by the true routed outcome and so cannot show harm by
+construction. The direction is still
+measured and printed as `RULE1-ADVISORY` / `gates.rule1_advisory`; it simply
+no longer bars. `rank_key` still ORDERS on crossings — that is a separate
+question, and the same run left it unresolved.
+Verify rule 1 YOURSELF against the baseline row before
 adopting ANY index (measured, run 7: a slate's routed-best carried
 crossings 74 vs baseline 67 with hpwl also worse; only the manual
 conjunction check at adoption caught it). The repo-local gates are still

@@ -512,6 +512,67 @@ def _paths(a, starting=False):
     return n, {k: f'{work}/{_cyc_name(k, n)}' for k in _ARTIFACTS}
 
 
+def _never_gated_echo(rep):
+    """L2's advisory legality echo (#788). PRINTED, and it decides nothing.
+
+    Returns TEXT, never a number, and that is load-bearing rather than
+    stylistic: `_never_gated_echo(rep) > 0` is a TypeError, so turning this
+    channel into a threshold means first changing the return type -- which
+    lands in the diff on the function whose name says it must not be one.
+
+    Deliberately NOT `_count()`. That helper returns a refusal for an
+    unmeasured value, and a refusal is the one thing this channel may never
+    produce. It borrows `_count`'s RULE (a str, a bool, a NaN, an inf or a
+    negative was never measured) without borrowing its consequence, and it
+    degrades per FIELD rather than per line: an absent key prints NOT REPORTED
+    and a malformed one prints UNREADABLE, because "your close-out predates
+    this key" and "your close-out is broken" are different operator actions.
+    The line is never suppressed and never conditional on the values -- an
+    advisory that appears only on a bad board IS a threshold, cut at > 0,
+    installed in the reader's head instead of in the code, and > 0 is exactly
+    the cut #788 measured as refusing nothing new.
+    """
+    def txt(key):
+        v = rep.get(key)
+        if v is None:
+            # An ABSENT key and an explicit `null` both land here, and `_count`
+            # cannot tell them apart either. Both mean the same thing to a
+            # reader -- this document does not carry the number -- so they get
+            # the same words rather than a distinction the data cannot support.
+            return 'NOT REPORTED'
+        if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                or v != v or v in (float('inf'), float('-inf')) or v < 0:
+            return f'UNREADABLE ({type(v).__name__} {v!r})'
+        # `{v}`, NOT `{v:g}`, for two reasons found by review. `:g` raises
+        # OverflowError on an int above 2**1024 -- which is not a refusal but a
+        # TRACEBACK: nothing wraps the stage call, so the run dies with no
+        # <error> block, no stage body and no logged invocation, on a document
+        # every gate above accepted. And `:g` renders 1000001 as `1e+06`, so
+        # the advisory and the refusals would print the same number
+        # differently. `_count`'s own text uses `{v}`; this now matches it by
+        # construction rather than by intention.
+        return f'{v}'
+    clr, src = rep.get('clearance'), rep.get('clearance_source')
+    at = (f'graded at {clr}mm [{src}]'
+          if isinstance(clr, (int, float)) and not isinstance(clr, bool)
+          and clr == clr and clr not in (float('inf'), float('-inf'))
+          and clr >= 0 and src
+          else 'graded at an unreported clearance')
+    return (
+        f'\nADVISORY, never gated here (#788): pad_conflicts '
+        f'{txt("pad_conflicts")}, hole_conflicts {txt("hole_conflicts")},'
+        f'\n  {at} -- both counts move with that floor, `blocking` above does'
+        f'\n  not. In the #703 study, conditioned on the refusals this stage'
+        f'\n  already runs, a threshold on either would have refused 2 more of'
+        f'\n  its 119 graded placements, and those two routed to `blocking` 0'
+        f'\n  and 2 -- inside the 0..9 the stage already passes. Redundant'
+        f'\n  there, not weak: the same study ranks pad_conflicts among the'
+        f'\n  strongest pre-route predictors of routed `blocking`. That is a'
+        f'\n  fact about a corpus, not about the board in front of you. A'
+        f'\n  threshold on either number is a NEW measurement'
+        f'\n  (docs/placement-predictors.md).')
+
+
 def _ledger_collision(a, paths):
     """A WARNING block when a path we are about to name as an OUTPUT already
     holds a board THE LEDGER REFERENCES -- else ''.
@@ -982,6 +1043,88 @@ def l2(a):
             f'declare it in the floorplan intent (edge_connectors), which '
             f'exempts it and makes the exemption reviewable, and then re-run '
             f'with --accept-residue oob_pad_count.')
+    # THE CLEARANCE-GRAZE AND HOLE CHANNELS ARE READ BELOW AND NEVER GATE.
+    # WRITTEN DOWN BECAUSE THE ASYMMETRY LOOKS ACCIDENTAL AND IS NOT (#788).
+    #
+    # docs/placement-predictors.md ranks six legality counts at a median rho of
+    # +0.785 against routed `blocking` and pad_copper at +0.524, and the
+    # obvious reading -- "the strong ones are advisory and only the weak one
+    # gates" -- is wrong twice.
+    #
+    # FIRST, THIS STAGE ALREADY REFUSES ON THE STRONGEST MEMBER. `blocking`
+    # above is check_assembly's pad-INTERSECTION pair count, which IS the
+    # study's `pad_intersection_pairs`/`body_overlap_pairs`: over the study's
+    # own 119 graded rows the two censuses agree in sign on 119 of 119. And
+    # `oob_pad_count` is not a weaker sibling of it -- it catches a DISJOINT
+    # failure, a part whose pads lie off the outline, which collides with
+    # nothing and so produces no blocking pair. Measured: `blocking` alone
+    # refuses 23 of 119 and every one of those routed to blocking >= 12;
+    # `oob_pad_count` alone refuses 24, of which 12 are refusals `blocking`
+    # does not make. The worst board in the study (routed blocking 13078) has
+    # oob_pad_count 0. Each conjunct catches boards the other passes, which is
+    # why both are here.
+    #
+    # SECOND, WHAT IS LEFT EARNS NOTHING HERE. The genuine gap is narrower than
+    # the issue's: the clearance GRAZE (`pad_conflicts` -- closer than the
+    # floor that pair grades at, not intersecting) and the hole channel
+    # (`hole_conflicts`). #788's own settlement rule -- how many placements
+    # would a proposal refuse, and how many of those routed worse than the ones
+    # it passed -- answered on the same rows, CONDITIONED on the four checks
+    # above:
+    #
+    #     this stage as it stands           refuses 35, passes 84
+    #     ...and those 84 routed to         blocking 0 / 1 / 9   (min/med/max)
+    #     + pad_conflicts, hole_conflicts   refuses 37
+    #     the 2 it adds routed to           blocking 0 and 2
+    #
+    # 23 of the 25 ROWS carrying a graze and 7 of the 7 carrying a hole
+    # conflict are refused here already. `pad_conflicts` is not weak -- it is
+    # one of five pair counts tied at the top of that table (+0.785; only
+    # `pad_shortfall`, at +0.786, is higher) -- it is REDUNDANT here.
+    #
+    # BE PRECISE ABOUT THE TWO IT WOULD ADD, because the first version of this
+    # comment was not. They routed to 0 and 2 against a PASSED distribution of
+    # {0:41, 1:14, 2:8, 3:10, 6:3, 7:2, 8:1, 9:5}. One is as good as anything
+    # this stage passes; the other is worse than 55 of the 84 and better than
+    # 21. So they are not "both false refusals" -- that would be a claim the
+    # data does not make. What they are is INSIDE the range this stage already
+    # accepts, and nowhere near the failures the gate exists for: every one of
+    # the 23 rows `blocking` refuses on its own routed to 12 or worse.
+    # `hole_conflicts` is a weaker case again -- +0.501 on four boards, the
+    # study's second-worst shuffle-control rate -- and it adds no marginal
+    # refusal at all.
+    #
+    # courtyard_blocking_pairs (+0.684) is worse again, and for the reason
+    # check_assembly already narrows it to the moved-vs-baseline subset: as an
+    # ABSOLUTE census it would add 21 rows here, 18 of them at or below that
+    # median of 1.
+    #
+    # AND THE ROW COUNTS ARE ROWS, NOT BOARDS. The study is six boards; 119 is
+    # its graded placements, of which 110 are DISTINCT (its own analysis drops
+    # 9 duplicates). Deduplicated the picture is the same where it matters --
+    # the same 2 marginal rows, routing to the same 0 and 2 -- while the
+    # passed median falls from 1 to 0 and courtyard's marginal 21 becomes 15.
+    #
+    # WHAT WOULD REVERSE THIS, and it is not "the corpus never exercises
+    # per-pair clearance" -- it does. `pad_clearance_required`, the #697
+    # disclosure of CONFLICTING pairs whose requirement exceeds the board-wide
+    # floor (legality.py appends to it only inside `if pair_hit:`, so a raised
+    # requirement with adequate spacing never appears), is non-empty on 11
+    # of those 119 rows, from a 1.016mm pad override and from NPTH hole
+    # requirements; the two marginal refusals above are themselves pad-override
+    # pairs. What is NOT in the corpus is a board where such a raised
+    # requirement is violated on a placement these four checks PASS and that
+    # then routes badly. Find that board, route it, and this is re-openable ON
+    # EVIDENCE. Until then the counts print below and decide nothing -- the
+    # standing `crossings` already has here under non-negotiable 4.
+    #
+    # AND NOT FOLDED INTO ONE NUMBER. There is no score here to fold into:
+    # board_score.py's is lexicographic, "never a weighted sum".
+    #
+    # `L2_CHECKS` is deliberately NOT extended. It is both the shape test and
+    # --accept-residue's vocabulary, so a name that can never refuse must not
+    # enter it -- and adding a key would refuse every close-out produced by an
+    # older check_assembly.
     # The PLACED board must be in the ledger, the same way L3 checks the routed
     # one. It never was, so a delegated placement half could do the whole thing
     # and record nothing, and the first stage to notice would be L4's staleness
@@ -1014,6 +1157,7 @@ def l2(a):
     # `copy_board placed.kicad_pcb frozen.kicad_pcb` would freeze cycle 1's
     # board into cycle 1's baseline -- twice wrong in one line.
     _clash = _ledger_collision(a, [_frozen, _routed, _close, _score])
+    _echo = _never_gated_echo(rep)
     # The --authored-from baseline is CYCLE 1's frozen board on EVERY cycle,
     # exactly as the cycle note below promises. The emitted command used to
     # pass the current cycle's frozen_cN instead (run-17 audit, D5) -- and the
@@ -1048,7 +1192,7 @@ to restore it from the content-addressed store. The placed board is that half's
 artifact and its ledger binding; leave it alone and hand on the new file.'''
     if delegate:
         return f'''<stage_instructions stage="L2" name="freeze, then route (delegated)" of="5">
-DELEGATING: {why}.{_cycnote}{_clash}
+DELEGATING: {why}.{_cycnote}{_clash}{_echo}
 
 {freeze}
 
@@ -1185,7 +1329,7 @@ Next, on success: --stage L5. On a failure: --stage L3 --score <SCORE_JSON>
          --render-json <a --focus render; L3 will not open without one>
 </stage_instructions>'''
     return f'''<stage_instructions stage="L2" name="freeze, then route" of="5">
-INLINE: {why}.{_cycnote}{_clash}
+INLINE: {why}.{_cycnote}{_clash}{_echo}
 
 {freeze}
 
@@ -2255,11 +2399,19 @@ def main(argv=None):
                                       'result_sha': _shad(_bd)}) + '\n')
             loose = _args(['--board', _bd, '--ledger', _ld,
                            '--score', wrote('s.json', {'blocking': 2}),
+                           # The #788 advisory keys are here on purpose:
+                           # --dump-all is the only auditable rendering of a
+                           # stage body, and a fixture without them would show
+                           # the NOT REPORTED degradation forever.
                            '--placement-report', wrote(
                                'p.json', {'blocking': 0, 'oob_pad_count': 0,
                                           'buildable': True,
                                           'verdict': 'buildable (blocking 0)',
                                           'locked_contacts': 0,
+                                          'pad_conflicts': 0,
+                                          'hole_conflicts': 0,
+                                          'clearance': 0.2,
+                                          'clearance_source': 'board netclass',
                                           'board': _bd}),
                            # `summary_json` is load-bearing, not decoration:
                            # _guard_route_render refuses without it, because a
@@ -2424,6 +2576,113 @@ def _self_test():
                                          '--accept-residue', 'oob_pad_count']))
         want(out.startswith('<stage_instructions'),
              '...and still proceeds when that is explicitly accepted')
+
+        # #788: the advisory channel PRINTS and never refuses. This arm is the
+        # artifact of that decision, not the comment beside the gate -- a
+        # comment is deletable in a diff nobody questions, and only a check
+        # that FEEDS the gate loud counts and demands it open still holds when
+        # someone later "tidies" the read into a threshold.
+        adv = os.path.join(tmp, 'adv.json')
+        json.dump({**_asm, 'blocking': 0, 'pad_conflicts': 99,
+                   'hole_conflicts': 7, 'clearance': 0.2,
+                   'clearance_source': 'board netclass'},
+                  open(adv, 'w', encoding='utf-8'))
+        # BOTH bodies. L2 emits two, and this loop is the only thing that
+        # catches an edit to one f-string and not the other.
+        #
+        # The switch is `--no-delegate`, NOT an attribute called `delegate`:
+        # `_delegation()` decides from `a.no_delegate`, and delegation is the
+        # DEFAULT. The first version of this loop set `_a.delegate`, which is
+        # read by nothing, so both iterations rendered the DELEGATED body and
+        # the loop was decoration. A mutation that removed the echo from the
+        # inline body alone is what exposed it: it should have failed the
+        # delegate=False arms and did not. The identity assert below is the
+        # standing guard -- it fails the day an iteration stops reaching the
+        # body it names, instead of leaving that to be discovered by a
+        # mutation that happens to be run.
+        for _d in (False, True):
+            _a = _args(base + ['--placement-report', adv]
+                       + ([] if _d else ['--no-delegate']))
+            out = STAGES['L2'](_a)
+            want(out.startswith('<stage_instructions'),
+                 f'#788: 99 pad conflicts and 7 hole conflicts do NOT refuse '
+                 f'(delegate={_d})')
+            want(('DELEGATING:' in out) == _d and ('INLINE:' in out) != _d,
+                 f'...and this iteration really rendered the '
+                 f'{"delegated" if _d else "inline"} body')
+            want('pad_conflicts 99' in out and 'hole_conflicts 7' in out,
+                 f'...and both counts are printed (delegate={_d})')
+            want('never gated here' in out and '0.2mm [board netclass]' in out,
+                 f'...under the words saying so, and the floor they move with '
+                 f'(delegate={_d})')
+        # SHAPE, not absence: `'pad_conflicts' not in L2_CHECKS` would pass for
+        # any newly added spelling. This pins the whole tuple, so a name that
+        # can never refuse cannot slip into the waiver vocabulary.
+        want(tuple(L2_CHECKS) == ('buildable', 'verdict', 'locked_contacts',
+                                  'blocking', 'oob_pad_count'),
+             '#788: the advisory counts stayed OUT of the gate vocabulary')
+        old = os.path.join(tmp, 'old.json')
+        json.dump({**_asm, 'blocking': 0}, open(old, 'w', encoding='utf-8'))
+        out = STAGES['L2'](_args(base + ['--placement-report', old]))
+        want('pad_conflicts NOT REPORTED' in out,
+             '#788: a close-out predating the keys reads NOT REPORTED, not 0')
+        # NOT named `bad`: that is the self-test's own failure accumulator,
+        # and shadowing it made `len(bad)` the length of a path string -- a
+        # run in which every check printed PASS reported `FAIL: 52`.
+        # EVERY clause of the borrowed rule, not just the one a str happens to
+        # reach. Review deleted them one at a time and four of five SURVIVED --
+        # and the one that died, died on a TypeError rather than on the
+        # UNREADABLE assert. `_count` has four PIN arms for exactly this shape;
+        # its copy had one. These are the other four, plus the two formatting
+        # traps that review found: an int above 2**1024 used to raise
+        # OverflowError out of `{v:g}` -- a TRACEBACK, not a refusal, on a
+        # document every gate above accepted -- and 1000001 used to render as
+        # `1e+06` while the refusals print it in full.
+        for _label, _val, _want in (
+                ("a string", '40', 'UNREADABLE'),
+                ("a bool", True, 'UNREADABLE'),
+                ("a negative", -1, 'UNREADABLE'),
+                ("a NaN", float('nan'), 'UNREADABLE'),
+                ("an infinity", float('inf'), 'UNREADABLE'),
+                ("a list", [1], 'UNREADABLE'),
+                ("an explicit null", None, 'NOT REPORTED'),
+                ("an int too big for a float", 2 ** 1024, '17976931348623'),
+                ("a count above 1e6", 1000001, '1000001')):
+            _p = os.path.join(tmp, 'adv_shape.json')
+            with open(_p, 'w', encoding='utf-8') as _fh:
+                json.dump({**_asm, 'blocking': 0, 'pad_conflicts': _val}, _fh)
+            out = STAGES['L2'](_args(base + ['--placement-report', _p]))
+            want(out.startswith('<stage_instructions'),
+                 f'#788: {_label} in an advisory count does not refuse')
+            want(_want in out,
+                 f'...and reads as {_want.split()[0]} (delegate default)')
+        # The clearance half of the same rule: a malformed floor must not take
+        # the line down with it, and must not be printed as if it were a floor.
+        for _lbl, _clr in (('a string', '0.2'), ('a bool', True),
+                           ('a NaN', float('nan')), ('an infinity',
+                                                     float('inf')),
+                           ('a negative', -0.2)):
+            _p = os.path.join(tmp, 'adv_clr.json')
+            with open(_p, 'w', encoding='utf-8') as _fh:
+                json.dump({**_asm, 'blocking': 0, 'clearance': _clr,
+                           'clearance_source': 'board netclass'}, _fh)
+            out = STAGES['L2'](_args(base + ['--placement-report', _p]))
+            want(out.startswith('<stage_instructions')
+                 and 'graded at an unreported clearance' in out,
+                 f'#788: {_lbl} clearance is not printed as a floor, and does '
+                 f'not refuse')
+        # A FINITE, non-negative number IS a floor, however absurd -- that is
+        # the borrowed rule, and the reader is better served by an absurd value
+        # printed verbatim than by "unreported". This is the arm that stops the
+        # guard above from quietly widening into "anything I dislike".
+        _p = os.path.join(tmp, 'adv_clr_big.json')
+        with open(_p, 'w', encoding='utf-8') as _fh:
+            json.dump({**_asm, 'blocking': 0, 'clearance': 2 ** 1024,
+                       'clearance_source': 'board netclass'}, _fh)
+        out = STAGES['L2'](_args(base + ['--placement-report', _p]))
+        want(out.startswith('<stage_instructions')
+             and '17976931348623' in out,
+             '#788: an absurd but finite clearance prints verbatim')
 
         # THE COMPOUNDING HAZARD the per-check flag exists to remove: accepting
         # one check must not waive another. This exact pair is what happened --
@@ -3251,8 +3510,14 @@ def _self_test():
             json.dump(doc, open(p, 'w', encoding='utf-8'))
             return p
 
+        # The advisory keys (#788) are here on purpose. --dump-all is the only
+        # auditable rendering of a stage body, so a fixture missing them would
+        # show the NOT REPORTED degradation forever and nobody would ever see
+        # what the line prints on a real close-out.
         _asm = _w({'blocking': 0, 'oob_pad_count': 0, 'locked_contacts': 0,
                    'buildable': True, 'verdict': 'buildable (blocking 0)',
+                   'pad_conflicts': 0, 'hole_conflicts': 0,
+                   'clearance': 0.2, 'clearance_source': 'board netclass',
                    'board': _b}, 'asm.json')
         _s3 = _w({'blocking': 3}, 's3.json')
         _rj = _w({'instrument': {'board': _b, 'summary_json': 'r.log'},

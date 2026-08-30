@@ -58,6 +58,11 @@ ROOT = os.path.dirname(TESTS_DIR)
 #: One direction is not enough -- a stale registration passed the #696
 #: containment guard 28/28 while the thing it named had moved.
 _WK_DEPENDENT = {
+    # #788 Arm B only: it re-grades 14 declared study boards to prove the
+    # committed literals still match the instrument. Arm A -- the claim
+    # those literals support -- runs on a clean clone and is what keeps
+    # this file from being green-while-covering-nothing when wk/ is absent.
+    'test_788_marginal_literals.py': ['wk/703/study'],
     'test_outline_prefilter.py': ['wk/run19/urchin/base.kicad_pcb'],
     'test_part_class.py': ['wk/b2/tigard__swap/d0/perturbed.control.kicad_pcb',
                            'wk/b2/tigard__swap/d0/perturbed.kicad_pcb'],

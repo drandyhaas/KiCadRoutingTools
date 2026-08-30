@@ -219,6 +219,115 @@ def loo_span(a: Sequence[float], b: Sequence[float]) -> Tuple[float, float]:
 
 
 # ---------------------------------------------------------------------------
+# Kendall tau -- added for #789, which asks a different question from rho
+# ---------------------------------------------------------------------------
+#
+# rho asks "does this predictor track the outcome"; #789 asks "does
+# `portfolio.rank_key`'s ORDER agree with the routed order over the same
+# candidates", which is a statement about PAIRS -- for how many pairs does the
+# key put the better-routing candidate first. tau is the coefficient with that
+# reading; rho has no pair-level interpretation.
+#
+# tau-B is the coefficient, and the tie correction is load-bearing rather than
+# pedantic. The routed side of #789 is `board_score`'s `blocking`, and on the
+# recorded corpus a slate's ten candidates routed to `blocking` 0 on
+# splitflap_driver and to {0 x9, 2} on sonde_u. With most of one side tied,
+# tau-a's denominator counts pairs no measurement can order and drags the
+# coefficient toward zero by construction. `tau_a` is returned beside tau-b
+# anyway, because the GAP between them is how much tie the board carries --
+# the same role `tie_count` plays beside rho.
+
+#: Two points are always perfectly ordered, so tau needs the same floor as rho.
+MIN_N_FOR_TAU = MIN_N
+
+
+def tau_counts(a: Sequence[float], b: Sequence[float]) -> Dict[str, int]:
+    """Concordant/discordant pairs and the tie structure both sides carry.
+
+    Computed on ``rank()``'s output, not on the raw values, for two reasons.
+    It reuses ``rank``'s refusal for a None or a NaN in the column -- one
+    validation rule, not two that can drift apart -- and it is exactly
+    equivalent: average ranks are a non-decreasing map that sends equal values
+    to equal ranks, so every pair keeps its sign and every tie group keeps its
+    membership. ``_self_test`` pins that equivalence rather than asserting it
+    here.
+    """
+    ra, rb = rank(a), rank(b)
+    n = len(ra)
+    c = d = ta = tb = tboth = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            da = ra[i] - ra[j]
+            db = rb[i] - rb[j]
+            if da == 0 and db == 0:
+                tboth += 1
+            elif da == 0:
+                ta += 1
+            elif db == 0:
+                tb += 1
+            elif (da > 0) == (db > 0):
+                c += 1
+            else:
+                d += 1
+    return {'concordant': c, 'discordant': d, 'ties_a': ta + tboth,
+            'ties_b': tb + tboth, 'ties_both': tboth, 'n0': n * (n - 1) // 2}
+
+
+def kendall_tau(a: Sequence[float], b: Sequence[float]) -> float:
+    """Kendall tau-b, or NaN when the question is not answerable.
+
+    NaN and NOT 0.0, for the reason ``spearman`` gives: 0.0 reads as "measured,
+    and the orders are unrelated", where the truth is "this cannot be measured
+    here". A constant side and a degenerate denominator both land here.
+    """
+    if len(a) != len(b) or len(a) < MIN_N_FOR_TAU:
+        return NAN
+    k = tau_counts(a, b)
+    da = k['n0'] - k['ties_a']
+    db = k['n0'] - k['ties_b']
+    if da <= 0 or db <= 0:
+        return NAN
+    return (k['concordant'] - k['discordant']) / math.sqrt(da * db)
+
+
+def tau_a(a: Sequence[float], b: Sequence[float]) -> float:
+    """Kendall tau-a: the same numerator over the UNCORRECTED pair count.
+
+    Reported beside tau-b, never instead of it. tau_a == tau_b exactly when
+    neither side carries a tie, so the gap between them is a reading of how
+    tied the board is.
+    """
+    if len(a) != len(b) or len(a) < MIN_N_FOR_TAU:
+        return NAN
+    k = tau_counts(a, b)
+    return (k['concordant'] - k['discordant']) / k['n0'] if k['n0'] else NAN
+
+
+def tau_leave_one_out(a: Sequence[float], b: Sequence[float]) -> List[float]:
+    """tau-b with each sample dropped in turn. Empty when n is too small."""
+    if len(a) != len(b) or len(a) < MIN_N_FOR_LOO:
+        return []
+    out = []
+    for drop in range(len(a)):
+        sa = [v for i, v in enumerate(a) if i != drop]
+        sb = [v for i, v in enumerate(b) if i != drop]
+        out.append(kendall_tau(sa, sb))
+    return out
+
+
+def tau_loo_span(a: Sequence[float], b: Sequence[float]) -> Tuple[float, float]:
+    """(min, max) of the leave-one-out tau-b values, or (NaN, NaN).
+
+    Same reading as ``loo_span``: a span that CROSSES ZERO means one candidate
+    decides the sign of the finding.
+    """
+    vals = [v for v in tau_leave_one_out(a, b) if v == v]
+    if not vals:
+        return (NAN, NAN)
+    return (min(vals), max(vals))
+
+
+# ---------------------------------------------------------------------------
 # formatting -- there is no way to print a naked rho
 # ---------------------------------------------------------------------------
 
@@ -244,6 +353,30 @@ def fmt_rho(rho: float, lo: float = NAN, hi: float = NAN,
             else 'LOO not computed')
     kk = f', K={k}' if k is not None else ''
     return f'rho={rho:+.3f} [{span}{kk}]'
+
+
+def fmt_tau(tau: float, lo: float = NAN, hi: float = NAN,
+            k: Optional[int] = None, ties_a: int = 0, ties_b: int = 0,
+            reason: Optional[str] = None) -> str:
+    """The ONLY sanctioned rendering of a tau. Same contract as ``fmt_rho``.
+
+    It carries the tie counts as well as the span, because tau-b's whole
+    difference from tau-a is the tie correction: a reader who cannot see how
+    tied the board was cannot tell a real +0.3 from a coefficient rescued by
+    its denominator.
+
+    The ``LOO`` token is deliberate -- it is already a recognised scope in
+    ``tests/test_703_predictor_claims.py``, so a tau rendered through this
+    function arrives in a document carrying its own scope rather than needing a
+    prose clause beside it.
+    """
+    if tau != tau:
+        return f'tau=n/a [{reason or "not measurable"}' + (
+            f', K={k}]' if k is not None else ']')
+    span = (f'LOO {fmt(lo, 0)}..{fmt(hi, 0)}' if lo == lo and hi == hi
+            else 'LOO not computed')
+    kk = f', K={k}' if k is not None else ''
+    return (f'tau={tau:+.3f} [{span}{kk}, tied_a={ties_a}, tied_b={ties_b}]')
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +516,93 @@ def board_rho(rows: Sequence[Mapping], predictor: str, dependent: str,
     return BoardRho(spearman(pv, dv), n,
                     (note[2:] if note else None), lo, hi,
                     tie_count(pv), tie_count(dv))
+
+
+class BoardTau:
+    """One board's tau, carrying everything needed to not over-read it.
+
+    Mirrors ``BoardRho`` deliberately, including ``as_dict()['display']``, so a
+    consumer that already knows how to report a rho reports a tau the same way.
+    ``tau_a`` rides along because the gap to ``tau`` is the tie correction's
+    size, which the headline number hides.
+    """
+
+    __slots__ = ('tau', 'tau_a', 'n', 'reason', 'loo_lo', 'loo_hi',
+                 'ties_a', 'ties_b', 'concordant', 'discordant')
+
+    def __init__(self, tau, n, reason=None, loo_lo=NAN, loo_hi=NAN,
+                 ties_a=0, ties_b=0, tau_a_=NAN, concordant=0, discordant=0):
+        self.tau = tau
+        self.tau_a = tau_a_
+        self.n = n
+        self.reason = reason
+        self.loo_lo = loo_lo
+        self.loo_hi = loo_hi
+        self.ties_a = ties_a
+        self.ties_b = ties_b
+        self.concordant = concordant
+        self.discordant = discordant
+
+    def __repr__(self):
+        return fmt_tau(self.tau, self.loo_lo, self.loo_hi, self.n,
+                       self.ties_a, self.ties_b, self.reason)
+
+    def as_dict(self) -> Dict:
+        r = lambda v: None if v != v else round(v, 6)  # noqa: E731
+        return {'tau': r(self.tau), 'tau_a': r(self.tau_a), 'n': self.n,
+                'reason': self.reason, 'loo_lo': r(self.loo_lo),
+                'loo_hi': r(self.loo_hi), 'ties_a': self.ties_a,
+                'ties_b': self.ties_b, 'concordant': self.concordant,
+                'discordant': self.discordant,
+                'display': fmt_tau(self.tau, self.loo_lo, self.loo_hi, self.n,
+                                   self.ties_a, self.ties_b, self.reason)}
+
+
+def board_tau(rows: Sequence[Mapping], predictor: str, dependent: str,
+              *, predictor_group: str = 'predictors',
+              dependent_group: str = 'truth') -> BoardTau:
+    """tau-b for ONE board's rows. Same contract and same refusals as
+    ``board_rho``, including the anti-pooling guard.
+
+    ``_one_board`` is CALLED here, not merely referred to. That guard exists
+    because ``board_rho`` once claimed it and did not execute it, so handing it
+    six recorded runs returned the pooled +0.339 this module's docstring names
+    as the trap. A second correlation function that skipped it would reopen the
+    same hole on its first day.
+    """
+    _one_board(rows, 'board_tau')
+    pv, dv = [], []
+    dropped = dropped_nan = 0
+    for p, d in zip(_column(rows, predictor_group, predictor),
+                    _column(rows, dependent_group, dependent)):
+        if p is None or d is None:
+            dropped += 1
+            continue
+        if (isinstance(p, float) and p != p) or (isinstance(d, float)
+                                                 and d != d):
+            dropped_nan += 1
+            continue
+        pv.append(p)
+        dv.append(d)
+    n = len(pv)
+    _bits = ([f'{dropped} row(s) dropped for a null value'] if dropped else [])
+    _bits += ([f'{dropped_nan} row(s) dropped for a NaN value']
+              if dropped_nan else [])
+    note = (', ' + '; '.join(_bits)) if _bits else ''
+    if n < MIN_N_FOR_TAU:
+        return BoardTau(NAN, n, f'n={n} < {MIN_N_FOR_TAU}{note}')
+    side = constant_side(pv, dv)
+    if side == 'both':
+        return BoardTau(NAN, n, f'predictor AND truth constant{note}')
+    if side == 'predictor':
+        return BoardTau(NAN, n, f'predictor constant (no dynamic range){note}')
+    if side == 'dependent':
+        return BoardTau(NAN, n, f'truth constant (saturated){note}')
+    k = tau_counts(pv, dv)
+    lo, hi = tau_loo_span(pv, dv)
+    return BoardTau(kendall_tau(pv, dv), n, (note[2:] if note else None),
+                    lo, hi, k['ties_a'], k['ties_b'], tau_a(pv, dv),
+                    k['concordant'], k['discordant'])
 
 
 def classify_board(rows: Sequence[Mapping], dependent: str = 'headline',
@@ -814,6 +1034,79 @@ def _self_test(force: bool = False) -> int:
     br = board_rho(rows_nan, 'x', 'headline')
     ok('NaN value' in (br.reason or '') and 'null' not in (br.reason or ''),
        14, f'a NaN value is not reported as a null one: {br.reason!r}')
+
+    # 15. Kendall tau-b (#789). Perfect agreement, reversal, symmetry.
+    a, b = [1, 2, 3, 4], [10, 20, 30, 40]
+    ok(_close(kendall_tau(a, b), 1.0), 15, 'monotone pair is not tau +1')
+    ok(_close(kendall_tau(a, b[::-1]), -1.0), 15, 'reversed pair is not tau -1')
+    ok(_close(kendall_tau(a, b), kendall_tau(b, a)), 15, 'tau is not symmetric')
+    ok(_close(tau_a(a, b), 1.0), 15, 'tau-a on a tie-free pair is not +1')
+
+    # 16. THE FIXTURE THAT SEPARATES THREE COEFFICIENTS. Case 5's pair, ties on
+    #     both sides, hand-computed:
+    #       ranks a = [1, 2.5, 2.5, 4]   ranks b = [1.5, 1.5, 3, 4]
+    #       pairs: (0,1) tied in b; (1,2) tied in a; the other four concordant
+    #       C=4, D=0, n0=6, ties_a=1, ties_b=1
+    #       tau-b = 4/sqrt(5*5) = 0.800   tau-a = 4/6 = 0.6667   rho = 0.8333
+    #     Three different numbers from one fixture, so "tau-a returned where
+    #     tau-b was meant" and "tau was implemented by calling spearman" are
+    #     both caught here rather than in a document.
+    x5, y5 = [1, 2, 2, 3], [1, 1, 2, 3]
+    k5 = tau_counts(x5, y5)
+    ok(k5['concordant'] == 4 and k5['discordant'] == 0 and k5['n0'] == 6
+       and k5['ties_a'] == 1 and k5['ties_b'] == 1, 16, f'tau_counts: {k5}')
+    ok(_close(kendall_tau(x5, y5), 0.8, 1e-12), 16,
+       f'tau-b is {kendall_tau(x5, y5)!r}, hand-computed 0.800')
+    ok(_close(tau_a(x5, y5), 4 / 6, 1e-12), 16,
+       f'tau-a is {tau_a(x5, y5)!r}, hand-computed 0.6667')
+    ok(not _close(kendall_tau(x5, y5), spearman(x5, y5), 1e-6), 16,
+       'tau equals rho on the tie fixture -- one is computing the other')
+    ok(not _close(kendall_tau(x5, y5), tau_a(x5, y5), 1e-6), 16,
+       'tau-b equals tau-a on a pair with ties -- the correction is inert')
+
+    # 17. the equivalence tau_counts relies on: average ranks are a monotone
+    #     map that preserves ties, so tau on raw values == tau on ranks. This
+    #     is asserted, not asserted-in-a-docstring.
+    ok(_close(kendall_tau(x5, y5), kendall_tau(rank(x5), rank(y5)), 1e-12), 17,
+       'tau on values disagrees with tau on ranks')
+
+    # 18. NaN, never 0.0 -- the same rule rho follows, for the same reason.
+    for case, x, y in (('constant a', [1, 1, 1], [1, 2, 3]),
+                       ('constant b', [1, 2, 3], [7, 7, 7]),
+                       ('n<3', [1, 2], [2, 1]),
+                       ('length mismatch', [1, 2, 3], [1, 2])):
+        v = kendall_tau(x, y)
+        ok(v != v, 18, f'tau({case}) returned {v!r}, must be NaN')
+    lo18, hi18 = tau_loo_span([1, 2], [2, 1])
+    ok(lo18 != lo18 and hi18 != hi18, 18,
+       f'tau_loo_span below the floor must be (NaN, NaN), got {lo18},{hi18}')
+
+    # 19. board_tau CALLS the anti-pooling guard, and renders like board_rho
+    try:
+        board_tau([{'board_key': 'a', 'predictors': {'x': 1},
+                    'truth': {'headline': 1}},
+                   {'board_key': 'b', 'predictors': {'x': 2},
+                    'truth': {'headline': 2}}], 'x', 'headline')
+        ok(False, 19, 'board_tau pooled two boards without refusing')
+    except StatsRefusal as exc:
+        ok('2 boards' in str(exc), 19, f'refusal does not name the count: {exc}')
+    bt = board_tau(_rows([0, 1, 2, 3]), 'x', 'headline')
+    ok(bt.n == 4 and bt.tau == bt.tau, 19, f'board_tau on a live board: {bt!r}')
+    ok('tau=' in bt.as_dict()['display'] and 'tied_a=' in repr(bt), 19,
+       f'BoardTau does not render through fmt_tau: {bt!r}')
+    bt = board_tau([{'board_key': 'b', 'predictors': {'x': 1},
+                     'truth': {'headline': i}} for i in range(4)],
+                   'x', 'headline')
+    ok(bt.tau != bt.tau and 'predictor constant' in (bt.reason or ''), 19,
+       f'a constant predictor must be NaN with a reason: {bt.reason!r}')
+
+    # 20. fmt_tau is the only rendering, and an n/a carries its reason
+    s = fmt_tau(NAN, reason='truth constant (saturated)', k=11)
+    ok('tau=n/a' in s and 'saturated' in s and 'K=11' in s, 20, s)
+    s = fmt_tau(0.5, k=4)
+    ok('LOO not computed' in s and 'tau=+0.500' in s, 20, s)
+    s = fmt_tau(0.5, 0.1, 0.9, 4, 2, 3)
+    ok('LOO' in s and 'tied_a=2' in s and 'tied_b=3' in s, 20, s)
 
     _SELF_TESTED[0] = True
     return n

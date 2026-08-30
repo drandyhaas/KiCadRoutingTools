@@ -276,7 +276,11 @@ R3b A part whose pad CENTRES are off the outline is not repairable by a
     classify,fit,vector,assign,exchange,reseat,legalize.
     THE NUMBER TO READ IS `witnesses_after`, NOT `repaired`/`reseated`: the
     first is what predicts routability, the second counts effort. Key it off
-    render_placement's checklist.a_off_outline.pad_copper channel.
+    render_placement's checklist.a_off_outline.pad_copper channel -- but if you
+    are heading for the routing loop, the number that REFUSES there is
+    check_assembly's `oob_pad_count`, which is a different census of the same
+    idea (part pad AABB vs an outline inflated by the grading clearance, so it
+    moves with --clearance). Drive to zero on both (#788).
     Measured, same board: --repair 4m55s and attempted NONE of the 11
     off-board parts; --reseat 13s, 11 of 11, off-outline count to 0.
     Do NOT expect recovery to improve -- it seats by net centroid.
