@@ -262,24 +262,33 @@ def arm_bc(limit_boards, verbose):
                                     frac in (0.5, 0.99) and filt == 'plain')
                                 if not ask:
                                     continue
+                                # ONE state per board, with `keepouts_for`
+                                # swapped per case -- the same mutate-and-
+                                # restore `count_legal_poses`' own keep-out
+                                # LIFT does. Rebuilding a QuenchState per case
+                                # costs 0.15s on a 65-part board and 0.75s on a
+                                # 266-part one, which made this arm hours long
+                                # for a value it recomputes identically.
+                                saved = state.keepouts_for.get(ref)
                                 try:
-                                    st2 = QuenchState(
-                                        pcb, p, 0.25, 0.55, 10.0, 0.5, 0.25,
-                                        2.0, 2.0, 2.0, 0.1, 1.0,
-                                        keepouts=tuple(kos),
-                                        intent_zones=({'name': 'z',
-                                                       'rect': tuple(zone),
-                                                       'tolerance_mm': tol,
-                                                       'refs': (ref,),
-                                                       'side': None,
-                                                       'exclusive': False},))
+                                    if bound:
+                                        state.keepouts_for[ref] = tuple(bound)
+                                    elif ref in state.keepouts_for:
+                                        del state.keepouts_for[ref]
+                                    state._inc_intent.clear()
                                     n = seeder.count_legal_poses(
-                                        st2, ref, fp.x, fp.y, others,
+                                        state, ref, fp.x, fp.y, others,
                                         constraint=tuple(zone), tol=tol,
                                         cap=1)
                                 except Exception as e:   # noqa: BLE001
                                     rows[-1]['oracle'] = f"ERR:{type(e).__name__}"
                                     continue
+                                finally:
+                                    if saved is not None:
+                                        state.keepouts_for[ref] = saved
+                                    elif ref in state.keepouts_for:
+                                        del state.keepouts_for[ref]
+                                    state._inc_intent.clear()
                                 rows[-1]['oracle'] = int(n)
         if limit_boards and len({r['board'] for r in rows}) >= limit_boards:
             break
