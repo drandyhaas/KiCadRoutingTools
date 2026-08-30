@@ -1,7 +1,9 @@
 # What predicts routed `blocking` — the first measurement (#703)
 
-**Status: COMPLETE. The declared table is 6 boards x K=20 = 120 placements, and
-all 120 were routed.** No predictor here is "validated" in a strong sense; the
+**Status: COMPLETE. The declared table is 6 boards x K=20 = 120 placements
+planned, of which 119 produced a routed result** — which is what this file's
+own body says at "119 of 120 variants produced a routed result", and which this
+line used to contradict. No predictor here is "validated" in a strong sense; the
 acceptance rule's own false-positive rate at N=6 is **1.5%-5.5%** (median 2.5%)
 over the 21 predictors defined on all six boards, measured, and that number
 belongs beside every PASSES below.
@@ -311,6 +313,21 @@ boundaries, recorded before anyone reads the flag's output as a result:
    `translate` arm is arithmetic and labelled so. None of that is a routing
    outcome.
 
+   Four limits of that study, so nobody has to find them. It is **4 boards of
+   9 attempted**, and the five exclusions are named in the run's own output:
+   on four the 20 mm dose landed 0.3–4.4 mm so no damage was applied, and
+   sonde_u has one derivable block. Its dose cutoff,
+   `MIN_DOSE_FRACTION = 0.25`, is not comfortably clear of the data — rp2350
+   lands at 21.9% and is excluded, splitflap at 34.6% and is included, so a
+   3-point margin decides whether it is 4 boards or 5. Its `swap` arm is not
+   size-matched to the others (`perturb` re-picks a PAIR of units for it, so
+   its base rate is roughly double), which the lift normalises away but which
+   means the arms are not one experiment on one block. And it runs the ranking
+   **unbudgeted** while the loop budgets every round — which the module's own
+   `SIGNAL_ORDER` note says can change the selected set outright. Closing that
+   last one needs a routed board to supply the pin count, which is exactly
+   what the study exists to avoid.
+
 ### Pre-registered rule 5 — what would settle it, and why it has not been run
 
 The claim `--target-select diagnosis` does NOT make is that it routes better.
@@ -320,8 +337,9 @@ by the same accept rule this document uses elsewhere: right direction on ≥ N�
 boards, wrong on none.
 
 It has not been run, and the cost is the reason: this study's own provenance
-records a median 217 s per route and a maximum of 2012 s, with tigard's hard
-rows at 9877 s, so three boards × five rounds × two arms is hours to overnight
+records a median 217 s per route and a maximum of 2012 s over its 87 rows (on
+`tigard:perturb-wrong_side`), plus a single `tigard:perturb-pile` row at
+9877 s — so three boards × five rounds × two arms is hours to overnight
 serially. There is a harder problem than cost, and it is recorded here so the
 next person does not rediscover it: **the tracked corpus has no board that
 fails to route at its authored placement.** Manufacturing failures means

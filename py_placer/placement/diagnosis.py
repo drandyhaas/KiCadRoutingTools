@@ -554,10 +554,24 @@ def diagnose(state, pcb_data, blocks: Optional[Dict[str, Sequence[str]]] = None,
     details: Dict[str, Dict[str, Dict]] = {s: {} for s in SIGNAL_ORDER}
 
     # ---- signal 1: connectivity-centroid displacement (blocks only)
+    #
+    # The blocks handed to `block_displacements` are the CANDIDATE ones, not
+    # the raw argument. A block whose every member is KiCad-locked has no
+    # candidate entry (locked parts were cut above), and passing it anyway
+    # returns a row for a key nothing else knows about -- which reached the
+    # candidate sort as a KeyError. Measured on glasgow_revC, whose
+    # `decap:U3` is two locked parts, under the very `--group-by auto,decap`
+    # the README prints as its example.
+    ranked_blocks = {n: list(members[n]) for n in blocks
+                     if kinds.get(n) == 'block'}
     if not blocks:
         d.skipped['block_displacement'] = _NO_BLOCKS
+    elif not ranked_blocks:
+        d.skipped['block_displacement'] = (
+            'every derived block is wholly KiCad-locked, so none of them is a '
+            'candidate this ranking could offer')
     else:
-        bd = block_displacements(state, blocks, sorted(ignored),
+        bd = block_displacements(state, ranked_blocks, sorted(ignored),
                                  max_fanout=max_fanout)
         if not bd:
             d.skipped['block_displacement'] = (

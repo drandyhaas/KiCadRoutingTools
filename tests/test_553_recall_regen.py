@@ -95,20 +95,33 @@ def main():
     check(set(got) == set(arms),
           f'both declared arms produced a row ({sorted(got)})')
 
-    # The baseline is per-ARM and aggregated over boards, so the comparison is
-    # against the ROW, which is what a single-board re-run can reproduce.
+    # THE COMPARISON. The first version of this file checked only that keys
+    # were present and that the baseline was shaped like a baseline -- it
+    # compared the baseline to itself, so a lift drifting from 1.90 to 0.1
+    # passed it green. The baseline now carries per-CELL rows, so a one-board
+    # re-run has something to diff against.
+    cells = base.get('cells') or {}
+    check(cells, 'the baseline carries per-cell rows, not only per-arm medians')
     for arm in arms:
+        key = f'{board}/{arm}'
         row = got.get(arm)
+        want = cells.get(key)
         if row is None or row.get('skipped'):
             check(False, f'{arm}: no usable row ({row and row.get("skipped")})')
             continue
-        for key in ('lift_diagnosis', 'lift_low_pin', 'base_rate',
-                    'selected', 'movable', 'truth_movable'):
-            check(key in row, f'{arm}: the row carries {key}')
-        check(row['lift_diagnosis'] is not None,
-              f'{arm}: lift is defined')
+        if want is None:
+            check(False, f'{key} is not in the baseline -- re-record it '
+                         f'(--out) rather than deleting this assertion')
+            continue
+        for k, w in sorted(want.items()):
+            g = row.get(k)
+            if isinstance(w, bool) or not isinstance(w, (int, float)):
+                check(g == w, f'{key}.{k}: {g!r} == baseline {w!r}')
+            else:
+                check(g is not None and abs(g - w) <= TOL,
+                      f'{key}.{k}: {g} == baseline {w} (tol {TOL})')
 
-    # The baseline's own shape, which is what a later reader relies on.
+    # And the baseline's own shape, which is what a later reader relies on.
     check(set(base.get('arms', {})) <= {'swap', 'wrong_side', 'scatter',
                                         'translate'},
           f'the baseline names only known arms ({sorted(base.get("arms", {}))})')

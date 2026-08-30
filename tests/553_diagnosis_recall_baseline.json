@@ -88,6 +88,168 @@
   "ulx3s",
   "watchy"
  ],
+ "cells": {
+  "splitflap_driver/scatter": {
+   "base_rate": 0.046154,
+   "hit_diagnosis": false,
+   "hit_low_pin": false,
+   "lift_diagnosis": 0.0,
+   "lift_low_pin": 0.0,
+   "movable": 65,
+   "selected": 6,
+   "truth_movable": 3
+  },
+  "splitflap_driver/swap": {
+   "base_rate": 0.292308,
+   "hit_diagnosis": true,
+   "hit_low_pin": true,
+   "lift_diagnosis": 1.9006,
+   "lift_low_pin": 0.7602,
+   "movable": 65,
+   "selected": 9,
+   "truth_movable": 19
+  },
+  "splitflap_driver/translate": {
+   "base_rate": 0.046154,
+   "hit_diagnosis": true,
+   "hit_low_pin": false,
+   "lift_diagnosis": 5.4167,
+   "lift_low_pin": 0.0,
+   "movable": 65,
+   "selected": 12,
+   "truth_movable": 3
+  },
+  "splitflap_driver/wrong_side": {
+   "base_rate": 0.046154,
+   "hit_diagnosis": true,
+   "hit_low_pin": false,
+   "lift_diagnosis": 5.4167,
+   "lift_low_pin": 0.0,
+   "movable": 65,
+   "selected": 12,
+   "truth_movable": 3
+  },
+  "tigard/scatter": {
+   "base_rate": 0.131868,
+   "hit_diagnosis": true,
+   "hit_low_pin": true,
+   "lift_diagnosis": 5.0556,
+   "lift_low_pin": 2.5278,
+   "movable": 91,
+   "selected": 18,
+   "truth_movable": 12
+  },
+  "tigard/swap": {
+   "base_rate": 0.175824,
+   "hit_diagnosis": true,
+   "hit_low_pin": true,
+   "lift_diagnosis": 4.0625,
+   "lift_low_pin": 2.1667,
+   "movable": 91,
+   "selected": 21,
+   "truth_movable": 16
+  },
+  "tigard/translate": {
+   "base_rate": 0.131868,
+   "hit_diagnosis": true,
+   "hit_low_pin": true,
+   "lift_diagnosis": 4.55,
+   "lift_low_pin": 2.275,
+   "movable": 91,
+   "selected": 20,
+   "truth_movable": 12
+  },
+  "tigard/wrong_side": {
+   "base_rate": 0.131868,
+   "hit_diagnosis": true,
+   "hit_low_pin": true,
+   "lift_diagnosis": 4.3333,
+   "lift_low_pin": 2.1667,
+   "movable": 91,
+   "selected": 21,
+   "truth_movable": 12
+  },
+  "ulx3s/scatter": {
+   "base_rate": 0.354701,
+   "hit_diagnosis": true,
+   "hit_low_pin": true,
+   "lift_diagnosis": 1.6596,
+   "lift_low_pin": 1.0997,
+   "movable": 234,
+   "selected": 141,
+   "truth_movable": 83
+  },
+  "ulx3s/swap": {
+   "base_rate": 0.5,
+   "hit_diagnosis": true,
+   "hit_low_pin": true,
+   "lift_diagnosis": 1.6364,
+   "lift_low_pin": 0.9371,
+   "movable": 234,
+   "selected": 143,
+   "truth_movable": 117
+  },
+  "ulx3s/translate": {
+   "base_rate": 0.354701,
+   "hit_diagnosis": true,
+   "hit_low_pin": true,
+   "lift_diagnosis": 2.2075,
+   "lift_low_pin": 1.2767,
+   "movable": 234,
+   "selected": 106,
+   "truth_movable": 83
+  },
+  "ulx3s/wrong_side": {
+   "base_rate": 0.354701,
+   "hit_diagnosis": true,
+   "hit_low_pin": true,
+   "lift_diagnosis": 1.4444,
+   "lift_low_pin": 0.992,
+   "movable": 234,
+   "selected": 162,
+   "truth_movable": 83
+  },
+  "watchy/scatter": {
+   "base_rate": 0.130952,
+   "hit_diagnosis": false,
+   "hit_low_pin": true,
+   "lift_diagnosis": 0.0,
+   "lift_low_pin": 0.6364,
+   "movable": 84,
+   "selected": 12,
+   "truth_movable": 11
+  },
+  "watchy/swap": {
+   "base_rate": 0.238095,
+   "hit_diagnosis": true,
+   "hit_low_pin": true,
+   "lift_diagnosis": 2.73,
+   "lift_low_pin": 1.05,
+   "movable": 84,
+   "selected": 20,
+   "truth_movable": 20
+  },
+  "watchy/translate": {
+   "base_rate": 0.130952,
+   "hit_diagnosis": true,
+   "hit_low_pin": true,
+   "lift_diagnosis": 2.1382,
+   "lift_low_pin": 1.8327,
+   "movable": 84,
+   "selected": 25,
+   "truth_movable": 11
+  },
+  "watchy/wrong_side": {
+   "base_rate": 0.130952,
+   "hit_diagnosis": true,
+   "hit_low_pin": true,
+   "lift_diagnosis": 2.1382,
+   "lift_low_pin": 1.8327,
+   "movable": 84,
+   "selected": 25,
+   "truth_movable": 11
+  }
+ },
  "skipped": [
   "esp_prog/swap: the dose that landed was 0.316 mm of 20 mm asked for (1.6%); the damage was never applied, so the recovery half is void",
   "esp_prog/wrong_side: the dose that landed was 0.316 mm of 20 mm asked for (1.6%); the damage was never applied, so the recovery half is void",

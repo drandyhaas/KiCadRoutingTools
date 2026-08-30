@@ -66,8 +66,6 @@ import json
 import os
 import sys
 
-RUN_ALL_TIMEOUT = 60
-
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split

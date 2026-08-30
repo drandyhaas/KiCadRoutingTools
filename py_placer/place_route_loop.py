@@ -565,9 +565,12 @@ def main():
                              f"what bounds the move set: the loop budgets "
                              f"each round at the number of parts the pin "
                              f"filter would have offered, and that budget "
-                             f"is normally the binding constraint -- "
-                             f"measured on glasgow_revC, every k above 3 "
-                             f"selected the same 8 parts")
+                             f"is normally the binding constraint. And a "
+                             f"BLOCK IS ADDED WHOLE, so the budget is a floor "
+                             f"rather than a cap: measured at budget 8, "
+                             f"glasgow_revC selects 67 parts under --group-by "
+                             f"auto, because its one derivable block has 68 "
+                             f"members. The overshoot is reported")
     parser.add_argument("--group-by", default="none",
                         help="Move blocks of parts as one rigid body. Comma "
                              "list of: kicad, sheet, netprefix, decap; 'auto' = "
@@ -663,9 +666,14 @@ def main():
 
     # BEFORE record_invocation, for the reason stated just above for the
     # intent: an exit 2 must touch no file, and a manifest carrying a command
-    # that produced nothing leaves the next step's input made by nothing. That
-    # rule applies to the group spelling and the #553 gates too -- they need
-    # only `args`, so nothing forces them to sit after the recorder.
+    # that produced nothing leaves the next step's input made by nothing.
+    # These two need only `args`, so nothing forced them to sit after it.
+    #
+    # The numeric checks BELOW still do, and that is pre-existing rather than
+    # made worse here: moving them has its own blast radius, because a manifest
+    # replaying a bad --max-displacement gets a recorded line today and would
+    # stop getting one. So the rule as stated is not yet what the whole
+    # function does -- said here rather than left for a reader to notice.
     try:
         group_sources = parse_sources(args.group_by)
     except GroupError as exc:
@@ -683,11 +691,13 @@ def main():
             and not args.suggest_locks):
         parser.error(
             "--target-select diagnosis ranks derived BLOCKS on connectivity "
-            "displacement, and --group-by none derives none. Pass --group-by "
-            "auto (kicad,sheet), or a source list, or drop --target-select. "
-            "(The other two signals -- blocked cells and legality pairs -- do "
-            "rank loose parts, so a source that derives NOTHING on this board "
-            "is a warning, not this refusal.)")
+            "displacement, and --group-by none derives none. Pass a source "
+            "list -- 'auto,netprefix,decap' is the one that derives something "
+            "on most tracked boards; bare 'auto' (kicad,sheet) derives NOTHING "
+            "on five of the six this repo grades placement on -- or drop "
+            "--target-select. (The other two signals, blocked cells and "
+            "legality pairs, do rank loose parts, so a source that derives "
+            "nothing is a warning printed before round 0, not this refusal.)")
     if args.diagnosis_top_k < 1:
         parser.error("--diagnosis-top-k must be >= 1")
 

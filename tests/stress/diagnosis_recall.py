@@ -37,9 +37,19 @@ THE ARMS, AND WHY ONE OF THEM IS NOT EVIDENCE
               block first" is therefore arithmetic. Run it to prove the wiring
               works; never count it.
   swap        THE EVIDENCE ARM. The direction comes from a partner centroid,
-              not from the metric being scored.
+              not from the metric being scored. NOTE it is not size-matched to
+              the others: `perturb` re-picks a PAIR of disjoint units for this
+              arm, so its truth is bigger and its base rate roughly double
+              (0.302 against 0.166 in the committed baseline). The lift
+              normalises by each cell's own base rate, so the comparison holds
+              -- but the arms are not the same experiment on the same block,
+              and reading them as a matched set would be wrong.
   wrong_side  Weak evidence. A reflection through the board centre.
-  scatter     NEGATIVE CONTROL for displacement: per-part jitter leaves the
+  scatter     NEGATIVE CONTROL for displacement HERE. `perturb.py` calls the
+              same arm a POSITIVE control, for its own purpose -- it is the
+              arm a RECOVERY run must undo. Both readings are right for their
+              own question and the collision is named so nobody has to guess:
+              per-part jitter leaves the
               block centroid roughly where it was, so the displacement signal
               SHOULD stay quiet. If it fires here it fires on everything, and
               that is a finding to record, not to hide.
@@ -47,6 +57,17 @@ THE ARMS, AND WHY ONE OF THEM IS NOT EVIDENCE
 
 A board whose damaged block is the only candidate is EXCLUDED and named: recall
 1.0 out of one candidate is not a measurement.
+
+THE CONFIGURATION GAP, DISCLOSED
+--------------------------------
+This study calls `diagnose()` with a `top_k` and NO BUDGET.
+`place_route_loop` passes `budget=len(pins_targets)` on every round. That is
+material and the module says so: unbudgeted, permuting `SIGNAL_ORDER` changes
+only the order of `selected_keys`; under a budget it can change the selected
+SET outright. So these numbers describe the ranking, not the ranking as the
+loop invokes it. Budgeting the study would need a routed board to supply the
+pin count, which is exactly what this script exists to avoid -- so the gap is
+recorded rather than closed.
 
     python3 -X utf8 tests/stress/diagnosis_recall.py --boards esp_prog tigard --out wk/553
     python3 -X utf8 tests/stress/diagnosis_recall.py --from-rows wk/553/rows.jsonl
@@ -252,6 +273,15 @@ def summarise(rows):
     """Per-arm tallies, with the instrument check kept apart from evidence."""
     out = {'arms': {}, 'skipped': [], 'boards': sorted(
         {r['board'] for r in rows})}
+    # Per-CELL numbers, not only the per-arm medians. Without these a
+    # single-board re-run has nothing to diff against, and the change detector
+    # can only check that the baseline is shaped like a baseline -- which is
+    # what the first version of it did.
+    out['cells'] = {f"{r['board']}/{r['kind']}": {
+        k: r[k] for k in ('lift_diagnosis', 'lift_low_pin', 'base_rate',
+                          'selected', 'movable', 'truth_movable',
+                          'hit_diagnosis', 'hit_low_pin')}
+        for r in rows if not r.get('skipped')}
     for r in rows:
         if r.get('skipped'):
             out['skipped'].append(f"{r['board']}/{r['kind']}: {r['skipped']}")

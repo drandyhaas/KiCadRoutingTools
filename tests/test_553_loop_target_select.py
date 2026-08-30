@@ -258,9 +258,17 @@ def t_the_default_verdict_gains_exactly_one_key():
     s = _summary(out)
     check(s.get('target_select') == 'pins',
           'the verdict echoes the selector, like group_by before it')
-    extra = [k for k in s if k.startswith('target_select_')]
-    check(extra == [],
-          f'and carries no diagnosis bookkeeping in pins mode ({extra})')
+    # The whole key set, not just the absence of `target_select_*`. The
+    # earlier version of this check was named for a claim it did not make:
+    # any unrelated new key passed it.
+    check(sorted(s) == [
+        'failed_nets_after', 'failed_nets_before', 'failures_after',
+        'failures_before', 'group_by', 'iterations_after', 'iterations_before',
+        'max_displacement', 'max_target_pins', 'output', 'rounds',
+        'rounds_accepted', 'rounds_run', 'rounds_screened', 'target_select',
+        'vias_after', 'vias_before', 'work_dir'],
+        f'and the verdict is the OLD key set plus exactly target_select '
+        f'({sorted(s)})')
 
 
 def t_the_pins_branch_is_still_the_pins_branch():

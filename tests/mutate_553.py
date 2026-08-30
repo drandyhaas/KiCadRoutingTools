@@ -125,8 +125,8 @@ ROWS = [
      "                continue\n",
      (T553,), 'KILLED'),
 
-    # The rail cut removed. GND owns 96 of ulx3s's 179 parts; without this the
-    # signal is near-constant and the ranking is noise wearing a number.
+    # The rail cut removed. GND owns 96 of ulx3s's 234 footprints; without it
+    # the signal is near-constant and the ranking is noise wearing a number.
     ('high-fanout-cut-removed', 'd',
      _FANOUT_CUT, '',
      (T553,), 'KILLED'),

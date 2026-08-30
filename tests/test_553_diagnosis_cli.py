@@ -22,8 +22,6 @@ import shutil
 import sys
 import tempfile
 
-RUN_ALL_TIMEOUT = 300
-
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'tests'))
@@ -75,7 +73,10 @@ def t_diagnosis_without_blocks_names_the_flag_that_fixes_it():
     r = check(_argv('--target-select', 'diagnosis'), code=2,
               refuse='--group-by none derives none')
     out = (r.stdout or '') + (r.stderr or '')
-    assert '--group-by auto' in out, 'the refusal must name the fix, not just the fault'
+    assert 'auto,netprefix,decap' in out, (
+        'the refusal must name a fix that WORKS. It used to recommend bare '
+        "`--group-by auto`, which this file's last test measures as deriving "
+        'nothing on five of the six boards this repo grades placement on')
     assert 'blocked cells and legality pairs' in out, (
         'and must say the other two signals do rank loose parts, or an '
         'operator reads it as "diagnosis needs blocks", which is false')
@@ -137,9 +138,9 @@ def t_auto_derives_no_block_on_the_boards_this_repo_grades_on():
             flat.append(name)
         # decap is the source that DOES fire on these boards; if that ever
         # stops being true the census line in the loop becomes useless.
-        # sonde_u is the sharp case and is named rather than waived: NO
-        # source derives a block on it, so the displacement signal can never
-        # run there under any --group-by. That is what the census before
+        # sonde_u is the sharp case and is named rather than waived: it has
+        # exactly ONE derivable block, so a ranking over its candidates makes
+        # no choice however it is invoked. That is what the census before
         # round 0 exists to tell the operator.
         if name == 'sonde_u':
             assert not derive_groups(pcb, ('decap',)), (
