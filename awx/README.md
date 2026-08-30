@@ -41,6 +41,8 @@ python3 probe_reach.py FO_BOARD K NET                       # replay the corrido
 python3 band_conn.py FO_BOARD K NET [--copper]              # flood one lane's band tooth->stub (and minus the router's copper): where it pinches
 python3 band_check.py FO_BOARD K                            # band_of against its per-cell reference: differing cells + time
 bash prof_k.sh FO_BOARD K OUTSTEM                           # cProfile of one braid run (prof_top.py prints the top)
+python3 compare_human.py OUR_BOARD K [--top N]              # ours vs 00_human_original on the same nets: vias, copper, per net
+python3 human_at_k.py [K ...]                               # the human's via count per checkpoint
 python3 test_connect.py ch6_fo_k15.kicad_pcb SDQ0           # connect() unit test
 ```
 
@@ -60,11 +62,20 @@ via/segment census from the parsed board. Never a program's own tally.
 | 11 | **10 vias**, 0 / 0 | 10, 0 / 0 | 14 |
 | 15 | **16 vias**, 0 / 0 | 18, 0 / 0 | 22 |
 | 19 | **23 vias**, 0 / 0 | 26, 0 / 0 | 30 |
-| 21 | **28 vias**, 0 / 0 | 30, 0 / 0 | 38 |
-| 28 | 75 vias, **1 open** / 0 (`kh_fo_k28`, gate off) | — | — |
-| 32 | 10 open / 7 (`kh_fo_k32`; the 7 are the fanout's, SA12 through R1) | — | — |
+| 21 | **28 vias**, 0 / 0 | 30, 0 / 0 | 34 |
+| 28 | 75 vias, **1 open** / 0 (`kh_fo_k28`, gate off) | — | 46 |
+| 32 | 56 vias, 10 open / 7 (`kh_fo_k32`; the 7 are the fanout's, SA12 through R1) | — | 52 |
 
-(braid vias; open / DRC.) Both arms on identical inputs (`fanout_ladder.sh`,
+(braid vias; open / DRC; the human column is `human_at_k.py`, the same
+nets on `00_human_original`, and counts EVERY via on them — our
+whole-board totals on the same terms are 4/10/20/28/34 for K4..K21:
+below the human at K11..K19, level at K21.) `compare_human.py OUR_BOARD
+K` puts the two side by side per net: at K28 the human spends 1.64
+vias/net (2 on every corridor net, 0 on three data lanes it keeps on
+one layer end to end) and 733 mm of copper; we spend 2.68 and 596 mm —
+9 nets equal, 3 fewer, 16 more, all of the "more" side exits at 4 and
+6 (SA6, SCKE1): the exit-leg layer rule dives every lane a leg crosses,
+and the ungated schedule surfaces a diver passed mid-flight. Both arms on identical inputs (`fanout_ladder.sh`,
 `--no-plane-drop`), graded the same way. The whole ladder is clean, at fewer
 vias than HEAD from K15 up. Before the exit-block rework of 2026-08-30 the
 same code refused 4 lanes at K19 and 7 at K21 — all flank joiners — and
