@@ -114,7 +114,11 @@ ORDER_MODEL = '--order-model' in sys.argv
 TWO_PAGE_PLAN = '--two-page' in sys.argv
 if TWO_PAGE_PLAN:
     os.environ['TWO_PAGE'] = '1'
-    ORDER_MODEL = True
+    # NOT forcing --order-model any more: the measured verdict (t4..t7)
+    # is that the order model's face refinement moves flank joiners the
+    # braid then refuses, and the plain plan + ribbon braid is the arm
+    # to beat (K28 46/5). Without it the pages come from the plan's own
+    # transverse projection -- the minimal escapes-by-page arm.
 base = next((a.split('=', 1)[1] for a in sys.argv
              if a.startswith('--board=')),
             os.path.join(HERE, 'fb_t2q_base.kicad_pcb'))
@@ -245,6 +249,22 @@ if TWO_PAGE_PLAN and choice:
     from schedule import Schedule
     import select_moves as sm_mod
     import itertools
+
+    def _legs_cross(ma, mb):
+        # PERPENDICULAR same-layer leg crossings: _conflict keys lanes
+        # on shared gaps and sites, so a long re-picked B run across
+        # the array crossing another move's B leg slipped through
+        # (t8 K28: SA0's left exit over SDQM1/SRAS's down legs, 2 DRC)
+        for (a1, b1, L1) in ma.legs:
+            for (a2, b2, L2) in mb.legs:
+                if L1 == L2 and sm_mod._proper_cross(a1, b1, a2, b2):
+                    return True
+        return False
+
+    def _clashes(m, sel, me):
+        return (not sm_mod.lanes_free(m, sel, me, strict=True)
+                or any(_legs_cross(m, om) for o, om in sel.items()
+                       if o != me))
     unresolved = set()
     # ONE round, not a fixed point: iterating re-picks against the
     # re-shifted orders converged to WORSE pages (K28 sw3 -> sw5, K21
@@ -258,10 +278,20 @@ if TWO_PAGE_PLAN and choice:
         for n, m in schoice.items():
             tooth_now[n] = m.layer
             launch_now[n] = m.exit_pt
-        geo_now = (model if launch_now == model.launch
-                   else model.rebased(launch_now))
-        sched = Schedule(geo_now.order(grp, choice),
-                         geo_now.target_order(grp, choice), tooth_now,
+        if model is not None:
+            geo_now = (model if launch_now == model.launch
+                       else model.rebased(launch_now))
+            lo_ = geo_now.order(grp, choice)
+            tgt_ = geo_now.target_order(grp, choice)
+        else:
+            # no order model: both orders from the plan's own
+            # transverse projection (the base Corridor's axis), the
+            # same geometry select() and the floor price with
+            geo_now = pe.sm.Corridor(dgrid.bbox, launch_now, cache=cache)
+            t_ = geo_now.axis(grp, choice)
+            lo_ = sorted(grp, key=lambda n: geo_now.launch_key(n, t_))
+            tgt_ = sorted(grp, key=lambda n: geo_now.exit_key(n, choice[n], t_))
+        sched = Schedule(lo_, tgt_, tooth_now,
                          dest_layer={n: choice[n].layer for n in grp})
         n_f = sum(1 for n in grp if sched.page.get(n) == 'F.Cu')
         print(('\n' if not _round else '')
@@ -280,7 +310,7 @@ if TWO_PAGE_PLAN and choice:
                 # surface move uses (K11 SDQ11 under SDQ14, 6 DRC)
                 cand = [m for m in dmenu.get(n, ())
                         if m.layer == P and m.direction == m0.direction
-                        and sm_mod.lanes_free(m, choice, n, strict=True)]
+                        and not _clashes(m, choice, n)]
                 if cand:
                     # dogbone preferred over via_in_pad: the moves are
                     # laid VERBATIM, and a gap via is a standard
@@ -300,7 +330,7 @@ if TWO_PAGE_PLAN and choice:
                     merged = {**src_seed, **schoice}
                     cand = [m for m in smenu[n]
                             if m.layer == P and m.direction == cur.direction
-                            and sm_mod.lanes_free(m, merged, n, strict=True)]
+                            and not _clashes(m, merged, n)]
                     if cand:
                         schoice[n] = min(cand, key=lambda m: m.vias)
                         re_s += 1
@@ -317,14 +347,15 @@ if TWO_PAGE_PLAN and choice:
             moved_any = False
             for a_, b_ in itertools.combinations(
                     [n for n in names if n in choice], 2):
-                if not sm_mod._conflict(choice[a_], choice[b_], strict=True):
+                if not (sm_mod._conflict(choice[a_], choice[b_], strict=True)
+                        or _legs_cross(choice[a_], choice[b_])):
                     continue
                 done = False
                 for n2 in (b_, a_):
                     m0 = choice[n2]
                     cand = [m for m in dmenu.get(n2, ())
                             if m.layer == m0.layer and m is not m0
-                            and sm_mod.lanes_free(m, choice, n2, strict=True)]
+                            and not _clashes(m, choice, n2)]
                     if cand:
                         choice[n2] = min(cand, key=lambda m: (
                             m.direction != m0.direction,
