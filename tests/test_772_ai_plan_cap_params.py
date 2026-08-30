@@ -31,6 +31,7 @@ RUN_ALL_FAST_OK = True
 import ast
 import io
 import os
+import re
 import sys
 import unittest
 
@@ -39,16 +40,19 @@ _ROOT = os.path.dirname(_TESTS)
 
 AI_PLAN = os.path.join(_ROOT, 'kicad_routing_plugin', 'ai_plan.py')
 FANOUT_GUI = os.path.join(_ROOT, 'kicad_routing_plugin', 'fanout_gui.py')
-SWIG_GUI = os.path.join(_ROOT, 'kicad_routing_plugin', 'swig_gui.py')
+# routing_dialog.py is this branch's swig_gui.py (renamed by the IPC port).
+SWIG_GUI = os.path.join(_ROOT, 'kicad_routing_plugin', 'routing_dialog.py')
 M2P = os.path.join(_ROOT, 'tests', 'stress', 'manifest_to_plan.py')
 
-# The ten knobs, spelled here INDEPENDENTLY of the engine table on purpose: an
-# arm that imports the table it is checking agrees with itself by construction.
+# The eleven knobs, spelled here INDEPENDENTLY of the engine table on purpose:
+# an arm that imports the table it is checking agrees with itself by
+# construction.
 CAP_KNOBS = (
     'cap_capture_radius', 'cap_near_margin', 'cap_step',
     'cap_max_displacement', 'cap_max_displacement_cap',
     'cap_displacement_growth', 'cap_board_edge_clearance',
-    'cap_max_passes', 'cap_prefix', 'cap_allow_rotation',
+    'cap_max_passes', 'cap_prefix', 'cap_default_via_size',
+    'cap_allow_rotation',
 )
 
 
@@ -125,9 +129,13 @@ class TestTheEdgeClearanceIsRehomed(unittest.TestCase):
 
     def test_the_generic_loop_skips_the_legacy_spelling_on_a_cap_step(self):
         src = _src(AI_PLAN)
-        self.assertIn('"optimize_caps": {"board_edge_clearance"},', src,
+        self.assertIn('"optimize_caps": {"board_edge_clearance", "via_size"},',
+                      src,
                       'without the skip the generic loop puts a PLACEMENT '
-                      'margin on the SIGNAL control and ticks its override')
+                      'margin on the SIGNAL control and ticks its override '
+                      '(and, since #742, a cap step\'s via_size on the Basic '
+                      'tab\'s via GEOMETRY, which nothing on the cap path '
+                      'reads any more)')
 
     def test_clearance_is_NOT_skipped(self):
         """#768's GIVEN branch runs through the generic loop: setting Min
@@ -160,7 +168,12 @@ class TestTheEdgeClearanceIsRehomed(unittest.TestCase):
             skip, dict,
             '_GENERIC_SKIP could not be read, so this arm proves nothing')
         self.assertIn('optimize_caps', skip)
-        self.assertEqual(skip['optimize_caps'], {'board_edge_clearance'},
+        # #742 widened this from {'board_edge_clearance'}. Pinned as an
+        # equality on purpose: what matters is not just that `clearance` is
+        # absent but that nothing ELSE quietly joins, since every member is a
+        # param the executor silently stops delivering.
+        self.assertEqual(skip['optimize_caps'],
+                         {'board_edge_clearance', 'via_size'},
                          'the cap skip changed; `clearance` in particular '
                          'must NOT be there, or #768\'s GIVEN branch stops '
                          'running and netclass_ceiling goes None')
@@ -258,6 +271,75 @@ class TestTheRealDialogGateIsRegistered(unittest.TestCase):
         self.assertIn('from placement import fanout_clearance as _fc', src)
         # ...and it must refuse a run where the engine was never reached
         self.assertIn('the engine was not reached', src)
+
+
+class TestEveryCapKnobPersists(unittest.TestCase):
+    """#742: a cap knob must be SAVED and RESTORED, and no gate checked that.
+
+    Measured on the #742 branch: deleting the save entry for
+    `cap_default_via_size`, or deleting only its restore branch, left
+    `test_settings_roundtrip`, `test_manifest_plan_parity`,
+    `test_772_ai_plan_cap_params` and `test_772_cap_params_reach_engine` ALL
+    GREEN -- the user's setting would silently reset on every reopen.
+
+    `test_settings_roundtrip` cannot see it: it compares the dialog against
+    ITSELF (`set(settings) - set(again)`), so a key absent from both halves is
+    invisible. It is a CRASH detector for a control that persistence still
+    names, not a coverage detector. This is the coverage half, and it is
+    wx-free.
+    """
+
+    def _persistence(self):
+        return _src(os.path.join(_ROOT, 'kicad_routing_plugin',
+                                 'settings_persistence.py'))
+
+    def test_every_cap_knob_is_saved_and_restored(self):
+        src = self._persistence()
+        for name in CAP_KNOBS:
+            key = "'fanout_bga_%s'" % name
+            self.assertIn('%s: dialog.fanout_tab.bga_options.%s.' % (key, name),
+                          src,
+                          '%s has no SAVE entry in get_dialog_settings, so the '
+                          'value is lost on dialog close' % name)
+            self.assertIn('if %s in settings:' % key, src,
+                          '%s has no guarded RESTORE branch, so a saved value '
+                          'never comes back' % name)
+
+
+class TestThePanelDefaultMatchesTheCLI(unittest.TestCase):
+    """#742: the panel's fallback is COPIED from bga_fanout.constants.
+
+    fanout_gui deliberately does not import that package -- measured at ~1 s
+    and 62 new top-level modules (numpy, grid_router, obstacle_map) at dialog
+    load, for one float. So the drift detector lives here instead, which is
+    where it belongs: a test may pay an import the plugin's start-up path
+    must not.
+    """
+
+    def test_cap_default_via_size_equals_the_cli_constant(self):
+        sys.path.insert(0, os.path.join(_ROOT, 'py_router'))
+        from bga_fanout.constants import DEFAULT_VIA_SIZE
+        src = _src(FANOUT_GUI)
+        m = re.search(r'^CAP_DEFAULT_VIA_SIZE\s*=\s*([0-9.]+)\s*$',
+                      src, re.M)
+        self.assertIsNotNone(m, 'fanout_gui has no CAP_DEFAULT_VIA_SIZE literal')
+        self.assertEqual(float(m.group(1)), DEFAULT_VIA_SIZE,
+                         'the panel default and the CLI default have drifted; '
+                         'they are two spellings of one number by design')
+
+    def test_the_plugin_does_not_import_the_engine_package(self):
+        """The reason the value is copied at all -- pin it, or it comes back."""
+        src = _src(FANOUT_GUI)
+        head = src.split('\ndef ', 1)[0].split('\nclass ', 1)[0]
+        for line in head.splitlines():
+            stripped = line.strip()
+            self.assertFalse(
+                stripped.startswith(('import bga_fanout',
+                                     'from bga_fanout')),
+                'fanout_gui imports the fanout engine package at module '
+                'level; swig_gui and planes_gui import this module at import '
+                'time, so every routing dialog would pay ~1 s and 62 modules '
+                'for it. Import it inside the function that needs it.')
 
 
 if __name__ == '__main__':

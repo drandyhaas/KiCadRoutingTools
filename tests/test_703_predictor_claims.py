@@ -51,6 +51,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: this pattern requires an `r`-ish prefix rather than matching bare digits, and
 #: `t_no_false_positive_on_completion_points` pins that exclusion.
 #:
+#: `tau` arrived with #789 and had no pattern here, so the first Kendall
+#: coefficient written into a document would have walked past this gate
+#: unscoped. It is added in the same commit as the coefficient itself, which is
+#: this file's own doctrine: a numeral is covered the day it is written, not
+#: the day somebody notices it is not. `rank_stats.fmt_tau` renders a LOO
+#: bracket, and LOO is already a SCOPES entry, so a tau emitted through the
+#: sanctioned renderer carries its scope by construction.
+#:
 #: THE EXPLICIT SIGN IS THE DISCRIMINATOR for the bare `r = ` form. This repo is
 #: full of `r=0.3` and `r = 0.15` -- they are RADII in clearance fixtures, 39
 #: files of them, and a pattern that matched those would demand a
@@ -62,7 +70,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NUMERAL = re.compile(
     r'r\s*\(\s*\w+\s*\)\s*=\s*[+-]?0\.\d+'      # r(crossings) = +0.780
     r'|\br\s*=\s*[+-]0\.\d+'                    # r = +0.78 / r=+0.72
-    r'|\brho\s*=\s*[+-]0\.\d+')                 # rho = +0.339
+    r'|\brho\s*=\s*[+-]0\.\d+'                  # rho = +0.339
+    r'|\btau\s*=\s*[+-]0\.\d+')                 # tau = +0.318
 
 #: What a properly-scoped citation must say within WINDOW characters.
 SCOPES = ('distance-to-truth', 'distance-to-the-correct-placement',

@@ -156,7 +156,7 @@ def _declared_zero_is_unset(dlg):
     CLAUDE.md note that hand-mirrored parity maps silently drift.
     """
     import tempfile
-    from kicad_routing_plugin import swig_gui
+    from kicad_routing_plugin import routing_dialog as swig_gui
     out = []
     # Force the "board declares 0.0" case without needing such a board.
     real = swig_gui._get_board_minimum_constraints

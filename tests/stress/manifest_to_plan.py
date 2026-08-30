@@ -472,14 +472,17 @@ CAP_FLAG_PARAMS = {
     # --grid-step was dropped and the step ran at whatever the previous one
     # left behind.
     '--grid-step': 'grid_step',
+    # #742. It used to be listed below as deliberately unmapped, on the
+    # reasoning that its "only same-named GUI home is the Basic tab's
+    # via_size" -- true, and the reason mapping it THERE would have been a bug
+    # (it would tick the via-size override and feed
+    # PlanExecutor._write_drc_floors). The answer was a distinct control, not
+    # no control: since #732 this value decides which vias the nudge relocates
+    # and the tolerance that draws a connector segment back to a stub, so a
+    # replay that dropped it produced different COPPER.
+    '--default-via-size': 'cap_default_via_size',
 }
 # Deliberately NOT mapped, and why:
-#   --default-via-size  a FALLBACK for vias whose size cannot be read, not
-#       geometry this pass places. Its only same-named GUI home is the Basic
-#       tab's via_size, and landing there would tick the via-size override
-#       (leaking a via floor into the next step) AND feed
-#       PlanExecutor._write_drc_floors, which writes via_size into the
-#       project.
 #   --lock              nargs='+' extra locked refs; the GUI has no control.
 #   --verbose           console verbosity, not a routing parameter.
 CAP_BOOL_FLAGS = {'--no-rotate': ('cap_allow_rotation', False)}  # inverted sense

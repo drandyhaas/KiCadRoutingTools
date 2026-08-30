@@ -65,7 +65,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import routing_defaults as defaults
 
 DIFF_GUI = os.path.join(_ROOT, 'kicad_routing_plugin', 'differential_gui.py')
-SWIG_GUI = os.path.join(_ROOT, 'kicad_routing_plugin', 'swig_gui.py')
+SWIG_GUI = os.path.join(_ROOT, 'kicad_routing_plugin', 'routing_dialog.py')
 
 # key -> the routing_defaults constant a diff-pair run must inherit.
 EXPECTED = {

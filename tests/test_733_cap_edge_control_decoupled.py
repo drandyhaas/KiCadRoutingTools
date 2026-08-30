@@ -64,7 +64,7 @@ def run():
           str(resolve_cap_edge_clearance(BOARD, 0.20)))
 
     fg = open(os.path.join(ROOT, 'kicad_routing_plugin', 'fanout_gui.py')).read()
-    sg = open(os.path.join(ROOT, 'kicad_routing_plugin', 'swig_gui.py')).read()
+    sg = open(os.path.join(ROOT, 'kicad_routing_plugin', 'routing_dialog.py')).read()
     sp = open(os.path.join(ROOT, 'kicad_routing_plugin',
                            'settings_persistence.py')).read()
 

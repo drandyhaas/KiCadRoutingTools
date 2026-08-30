@@ -249,12 +249,40 @@ check("default argv unchanged (read-only allowlist, no add-dir)",
       == ai_backend.CLAUDE_ALLOWED_TOOLS
       and "--add-dir" not in cmd_default, str(cmd_default))
 oc = ai_backend.BACKENDS["opencode"]
-cmd_oc = oc.build_cmd("opencode", "P", allowed_tools="X", add_dirs=("Y",))
-check("opencode accepts+ignores the kwargs",
-      "--add-dir" not in cmd_oc and "X" not in cmd_oc, str(cmd_oc))
+# #552 item 4: opencode has no per-run allowlist flag, so a request it cannot
+# grant is REFUSED rather than dropped. It used to bind both kwargs and read
+# neither, which meant a write-capable caller got a read-only run and found out
+# deep inside the skill. Read-only asks still build, and add_dirs is still
+# ignored on purpose -- the agent is granted `external_directory`, so having no
+# --add-dir costs the run nothing.
+cmd_oc = oc.build_cmd("opencode", "P",
+                      allowed_tools=ai_backend.CLAUDE_ALLOWED_TOOLS,
+                      add_dirs=("Y",))
+check("opencode still builds for a read-only allowlist",
+      "--add-dir" not in cmd_oc and "Y" not in cmd_oc, str(cmd_oc))
+try:
+    oc.build_cmd("opencode", "P", allowed_tools=PLACEMENT_ALLOWED_TOOLS)
+    _refused = ""
+except ValueError as _e:
+    _refused = str(_e)
+check("opencode REFUSES a write-capable allowlist",
+      "Write" in _refused and ai_backend.OPENCODE_ANALYSIS_AGENT in _refused,
+      _refused or "no ValueError raised")
 
 check("placement allowlist can write",
       all(t in PLACEMENT_ALLOWED_TOOLS.split(",") for t in ("Write", "Edit", "Bash")))
+
+# #552: Task is what makes a skill's close-out verification a SECOND agent
+# rather than the same model re-reading its own work. placement_run.py's own
+# comment has claimed it is load-bearing since #633 with nothing asserting it.
+check("placement allowlist carries Task",
+      "Task" in PLACEMENT_ALLOWED_TOOLS.split(","), PLACEMENT_ALLOWED_TOOLS)
+_analysis = ai_backend.CLAUDE_ALLOWED_TOOLS.split(",")
+check("analysis allowlist carries Task", "Task" in _analysis,
+      ai_backend.CLAUDE_ALLOWED_TOOLS)
+check("analysis allowlist stays write-free (the property Task must not cost)",
+      not ({"Write", "Edit", "NotebookEdit"} & set(_analysis)),
+      ai_backend.CLAUDE_ALLOWED_TOOLS)
 
 win_candidates = [c for c in claude.candidates
                   if c.endswith((".exe", ".cmd"))]

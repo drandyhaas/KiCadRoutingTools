@@ -216,7 +216,31 @@ def main():
               f"vacuous, so this is a refusal rather than a skip.")
         return 2
 
-    from kicad_routing_plugin.gui_utils import update_live_drc_floors
+    # This branch (ipc-migration) has no live design-settings writer: kipy
+    # cannot set them, so the floors -- and #782's non-Default clamp -- go to
+    # the sibling .kicad_pro through gui_utils.apply_drc_settings_fix, which
+    # passes clamp_nondefault_netclasses to fix_project_for_output gated on the
+    # Min-Clearance override. Every arm below drives update_live_drc_floors on
+    # a live pcbnew board, so there is nothing here for them to measure.
+    #
+    # Announced rather than left to raise ImportError: a gate that dies before
+    # it checks anything exits non-zero exactly like a gate that caught
+    # something, and that is the one failure mode nobody reads correctly. Kept
+    # whole rather than deleted so it re-arms by itself if the live writer is
+    # ever ported.
+    try:
+        from kicad_routing_plugin.gui_utils import update_live_drc_floors
+    except ImportError:
+        print("\nNOT APPLICABLE on ipc-migration: gui_utils has no "
+              "update_live_drc_floors (kipy cannot write live design "
+              "settings).")
+        print("  #782's clamp lives on the .kicad_pro path here: "
+              "apply_drc_settings_fix -> write_drc_settings_to_project -> "
+              "fix_project_for_output(clamp_nondefault_netclasses=...), gated "
+              "on `clamp_netclasses`.")
+        print("  Covered by tests/gui_parity/test_live_drc_floors_gated.py "
+              "and test_768_cap_clearance_ceiling.py.")
+        return 0
 
     # -- 1. update_live_drc_floors, ceiling GIVEN ---------------------------
     # The delegation, on the real enumeration API.
@@ -268,7 +292,8 @@ def main():
     # cap pass errored". `pcbnew.GetBoard()` is None outside the KiCad process,
     # so the tab is handed the loaded fixture the same way the #768 gate does.
     from kicad_parser import parse_kicad_pcb
-    from kicad_routing_plugin.swig_gui import RoutingDialog
+    # routing_dialog is this branch's swig_gui (renamed by the IPC port).
+    from kicad_routing_plugin.routing_dialog import RoutingDialog
 
     for ticked, label, want in ((True, "override CHECKED", CEILING),
                                 (False, "override unchecked", WIDE_DECLARED)):

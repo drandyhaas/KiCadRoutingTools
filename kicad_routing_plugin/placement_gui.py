@@ -765,9 +765,25 @@ class PlacementTab(wx.Panel):
         self._runner = AISkillRunner(cli, self._on_transcript,
                                      self._on_run_done, backend=self.backend,
                                      on_event=self._on_stream_event)
-        self._runner.run(prompt, model=model, effort=effort,
-                         allowed_tools=PLACEMENT_ALLOWED_TOOLS,
-                         add_dirs=(workdir,))
+        try:
+            self._runner.run(prompt, model=model, effort=effort,
+                             allowed_tools=PLACEMENT_ALLOWED_TOOLS,
+                             add_dirs=(workdir,))
+        except ValueError as e:
+            # #552: a backend can now REFUSE an allowlist it cannot serve
+            # (opencode's pinned agent denies edits, and placement writes).
+            # PLACEMENT_SUPPORTED_BACKENDS keeps that unreachable today, but
+            # placement_run.py invites growing that tuple -- and without this
+            # handler the refusal would escape into the wx event handler with
+            # _set_running_ui(True) already latched: buttons disabled forever,
+            # an orphan workdir, and the carefully worded message never shown.
+            self._runner = None
+            self._set_running_ui(False)
+            self.set_status(f"{label} — refused")
+            self._append_transcript(f"REFUSED: {e}\n")
+            self.append_log(f"Placement: {label} refused -- {e}\n")
+            wx.MessageBox(str(e), "Placement", wx.OK | wx.ICON_WARNING)
+            return
         self._monitor = PlacementRunMonitor(self, workdir, mode)
         self._monitor.start()
 

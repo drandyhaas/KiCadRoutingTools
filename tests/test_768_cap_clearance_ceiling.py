@@ -949,7 +949,7 @@ class TestTheGUICarriesTheSameSwitch(unittest.TestCase):
     could have."""
 
     GUI = os.path.join(_ROOT, 'kicad_routing_plugin', 'fanout_gui.py')
-    SWIG = os.path.join(_ROOT, 'kicad_routing_plugin', 'swig_gui.py')
+    SWIG = os.path.join(_ROOT, 'kicad_routing_plugin', 'routing_dialog.py')
 
     def _src(self, path):
         with open(path, encoding='utf-8') as fh:

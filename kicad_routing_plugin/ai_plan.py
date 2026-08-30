@@ -342,7 +342,7 @@ def _enable_geometry_override(dialog, name):
 # controls a plan step can reach AT ALL.
 #
 # `optimize_caps` had no entry and fell through to [dialog], while every one of
-# the ten "Cap Placement (advanced)" controls lives on fanout_tab.bga_options.
+# the eleven "Cap Placement (advanced)" controls lives on fanout_tab.bga_options.
 # Measured on the real headless dialog before this landed: TEN of the eleven
 # params a converted manifest carries were logged "no control, ignored" and the
 # engine ran at its signature defaults (capture_radius 2.0 for a plan's 5.0,
@@ -437,7 +437,18 @@ def apply_step_params(step, dialog):
         # (#768). Measured on the real dialog, a cap step's
         # `clearance: 0.1` arrives as both clearance=0.1 AND
         # netclass_ceiling=0.1. Skipping it would break that branch.
-        "optimize_caps": {"board_edge_clearance"},
+        #
+        # #742 adds `via_size` for the same shape of reason. On a cap step the
+        # CLI flag is `--default-via-size`, whose GUI home is now the panel's
+        # cap_default_via_size -- NOT the Basic tab's via GEOMETRY, which sets
+        # the diameter of the vias fanout PLACES. Left to the generic loop a
+        # plan naming `via_size` on an optimize_caps step lands on that
+        # control, ticks via_size_check through _GEOMETRY_OVERRIDE_CHECKS, and
+        # is harvested by _write_drc_floors into the project. Before #742 that
+        # at least reached the cap engine (run_cap_optimization forwarded it);
+        # now it reaches nothing, so it would be a pure leak. Same fix as
+        # --board-edge-clearance got, on the same reasoning.
+        "optimize_caps": {"board_edge_clearance", "via_size"},
     }
 
     def _owners():
@@ -1483,12 +1494,12 @@ class PlanExecutor:
             # The rule is CLI parity, and it is exact rather than approximate:
             # the panel's creation defaults ARE place_fanout_clearance.py's
             # argparse defaults, value for value (2.0 / 1.0 / 0.2 / 2.0 / 3.0 /
-            # 1.5 / 30 / 'C,R,FB' / rotate on / edge unset -- checked against
-            # repair_fanout_clearance's signature, 10 of 10). So "reset the cap
-            # panel, then apply this step's params" IS "run the CLI with
+            # 1.5 / 30 / 'C,R,FB' / 0.3 / rotate on / edge unset -- checked
+            # against repair_fanout_clearance's signature, 11 of 11). So "reset
+            # the cap panel, then apply this step's params" IS "run the CLI with
             # exactly the flags this step carries", which is what a replayed
             # manifest is supposed to mean. A recorded `--near-margin 1.5` gives
-            # the other nine flags their argparse defaults; inheriting nine
+            # the other ten flags their argparse defaults; inheriting ten
             # leftovers instead is not that run.
             #
             # A step with NO params is the auto-inserted one

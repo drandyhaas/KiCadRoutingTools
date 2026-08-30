@@ -24,7 +24,13 @@ opencode run --agent pcb-analysis -m anthropic/claude-sonnet-4-5 \
     "Load the 'plan-pcb-routing' skill with your skill tool and follow it for: /absolute/path/to/my_board.kicad_pcb"
 ```
 
-The `pcb-analysis` agent (defined in the repo's `opencode.json`) denies file edits - the opencode equivalent of the read-only tool allowlist the Claude Code runs use. The skills' RESULT/plan output contracts are tuned on Claude models; smaller models may follow them less reliably.
+The `pcb-analysis` agent (defined in the repo's `opencode.json`) denies file edits - the opencode equivalent of the read-only tool allowlist the Claude Code runs use (`CLAUDE_ALLOWED_TOOLS` in `kicad_routing_plugin/ai_backend.py`; the list is deliberately not restated in either place, because it was, and it went stale). Neither list grants a dedicated write tool. **Neither is a sandbox, though**: both grant `Bash`, and `--allowedTools` auto-approves the tools it names rather than removing the others (measured on Claude Code 2.1.251: the run's `init` event reports `permissionMode: auto`, taken from the user's own settings, and lists `Write`/`Edit` regardless). Read the allowlist as a statement of intent.
+
+They are also not identical: the Claude list grants the subagent-dispatch tool, so an analysis skill run through Claude Code can dispatch an independent verifier at close-out (#552), and opencode has no per-run allowlist flag to match that. Because the pinned agent *is* opencode's allowlist, `OpencodeBackend.build_cmd` **refuses** a caller naming `Write`/`Edit` rather than dropping the request - a run that believes it can write and cannot fails deep inside the skill instead of at launch. That check matches tool *names*, so it is a guard against handing over a write-capable allowlist wholesale, not a proof of read-only-ness.
+
+The behavioural half of the contract - *analysis and planning only, and any subagent you dispatch is given this sentence verbatim and answers with `VERDICT=`, never `RESULT=`* - is prompt text, not an enforced flag, and lives once in `ai_backend.ANALYSIS_CONSTRAINT`. Every GUI analysis prompt is built from it; `tests/test_552_analysis_constraint.py` is what keeps that true. The enforceable form exists and is owed rather than done: `claude --agents <json>` can define a subagent and its tools outright, which is what #552 item 2 ultimately wants.
+
+The skills' RESULT/plan output contracts are tuned on Claude models; smaller models may follow them less reliably.
 
 ## Plugin GUI Integration
 

@@ -519,6 +519,10 @@ def main():
             continue
         r1 = portfolio.rule1_check(c, baseline)
         c.gates['rule1'] = r1
+        # The crossings direction, WITHDRAWN as a bar by #789 and still
+        # measured. It never joins `rule1_violators`, so it cannot reach
+        # select_best -- that is the whole difference between the two keys.
+        c.gates['rule1_advisory'] = portfolio.rule1_advisory(c, baseline)
         if r1:
             rule1_violators.add(c.index)
 
@@ -544,6 +548,8 @@ def main():
               f"disp={c.displacement_rms:.2f}mm"
               + (f"  RULE1: {'; '.join(c.gates['rule1'])}"
                  if c.gates.get('rule1') else '')
+              + (f"  RULE1-ADVISORY: {'; '.join(c.gates['rule1_advisory'])}"
+                 if c.gates.get('rule1_advisory') else '')
               + (f"  ({'; '.join(c.gates.get('reasons', []))})"
                  if not c.viable and c.gates.get('reasons') else ''))
     if backfilled:

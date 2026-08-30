@@ -66,7 +66,8 @@ def main():
     app = wx.App(False)  # noqa: F841
     board = os.path.join(REPO, 'kicad_files', 'splitflap_driver.kicad_pcb')
     from kicad_parser import parse_kicad_pcb
-    from kicad_routing_plugin.swig_gui import RoutingDialog
+    # routing_dialog is this branch's swig_gui (renamed by the IPC port).
+    from kicad_routing_plugin.routing_dialog import RoutingDialog
     from placement.fanout_clearance import resolve_cap_edge_clearance
 
     dlg = RoutingDialog(None, parse_kicad_pcb(board), board)

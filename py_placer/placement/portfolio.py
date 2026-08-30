@@ -644,12 +644,23 @@ def rank_key(cand: Candidate, q: int = 0) -> RankKey:
                      this slot is that crossings is near-injective over a real
                      slate, so it decides. #703 measured the missing half:
                      within a board, rho(crossings, blocking) FAILS its sign
-                     rule (3 boards right, 1 wrong) -- and PASSES it once the
-                     quench-produced candidates are excluded, i.e. the answer
-                     depends on whether the sample contains placements made by
-                     an optimizer that minimises crossings. That does not
-                     license a reorder in either direction, so THE ORDER IS
-                     UNCHANGED. See docs/placement-predictors.md.
+                     rule -- 5 boards right, 1 wrong, median rho = +0.515 over
+                     six boards (docs/placement-predictors.md) -- and PASSES it
+                     once the quench-produced candidates are excluded, i.e. the
+                     answer depends on whether the sample contains placements
+                     made by an optimizer that minimises crossings.
+                     #789 then asked the question this slot is actually about:
+                     does the ORDER agree with the routed order over the same
+                     candidates? Kendall tau-b on a six-board slate came back
+                     positive on 2 boards and negative on 3 (N=5, p = 1.000),
+                     which pre-registered rule 5 calls NOT SHOWN TO AGREE and
+                     which licenses nothing in either direction. So THE ORDER IS
+                     UNCHANGED and the contradiction stays disclosed. Note this
+                     is the ORDER: rule1_check's crossings BAR was a separate
+                     question and #789 withdrew it.
+                     (An earlier version of this note said "3 boards right, 1
+                     wrong" -- the four-board era's figure, carried forward
+                     unchanged when the study grew to six.)
       inversions     the forced-crossing floor -- equal-crossings ties break
                      toward the more REMOVABLE set (pair_order is a lower
                      bound a router cannot beat)
@@ -737,28 +748,80 @@ def rule1_check(cand: Candidate, baseline: Candidate) -> List[str]:
     candidate measuring worse on both proxies could top the slate and ship
     through JSON_SUMMARY['best'] unremarked.
 
-    THE CROSSINGS CLAUSE IS UNRESOLVED AND DISCLOSED. It BARS a candidate on
-    crossings while the drivers forbid gating on it (see `rank_key`). #703
-    measured rho(crossings, blocking) WITHIN a board and it fails the sign rule
-    with the quench candidates included and passes with them excluded, so
-    neither side is licensed. `docs/placement-predictors.md` pre-registers the
-    exit criterion: if a run finds >= 1 board where a rule-1 violator routed to
-    strictly LOWER blocking than the baseline, this clause is withdrawn -- and
-    the withdrawal keeps its row with its measured direction. Until then it
-    stands, unchanged. Pure: returns the violation
-    strings; empty means it passes. Violators are still ranked, probed and
-    recorded -- they are only barred from being the silent headline pick
-    (select_best); a probe verdict that argues for one anyway is a decision
-    the operator makes deliberately, reading portfolio.json.
+    THE CROSSINGS CLAUSE IS WITHDRAWN (#789). It used to bar a candidate on
+    crossings while the drivers forbid gating on it (see `rank_key`), and
+    `docs/placement-predictors.md` pre-registered the exit criterion in rule 2:
+    if a run finds >= 1 board where a rule-1 violator routed to strictly LOWER
+    `blocking` than the baseline, the clause is withdrawn. A six-board slate run
+    found it on TWO -- esp_prog and kit-dev-coldfire -- so it is gone, and the
+    measured direction survives in `rule1_advisory` rather than being deleted.
+
+    WHAT THE WITHDRAWAL CHANGED, measured on the same six boards: NOTHING on
+    the static order, on all six. That is structural -- `rank_key`'s slot 1 IS
+    crossings, so a candidate barred for having MORE crossings than the
+    baseline already sorts below every candidate with fewer, and `select_best`
+    reaches a non-violator first.
+
+    AND THE LIMIT OF THAT, because the first version of this docstring
+    overstated it. The other arm ranked a probe by each candidate's TRUE routed
+    `blocking`, and there the withdrawal reaches a candidate at `blocking` 2
+    where the bar forced a fall-through to 3 -- but that arm CANNOT show harm:
+    the new violator set is a subset of the old, and the list is sorted by the
+    truth, so the pick can only move earlier. Under a probe that MIS-ranks it
+    can be worse -- esp_prog's candidate 3 is crossings-barred and routes to
+    `blocking` 6. So the honest statement is: no change on the static order,
+    help only under a perfect probe, harm possible under a bad one. The record
+    is `tests/placement_rule1_withdrawal.json` and its change detector is
+    `tests/test_789_rule1_withdrawal.py`.
+
+    HOW MUCH THAT DISCHARGE IS WORTH, stated because rule 2 pre-registered the
+    question: the criterion's own null rate -- permuting `blocking` within a
+    board -- is 100% on esp_prog and 99% on kit-dev, because almost every
+    candidate on those slates routed below their baseline, so ANY permutation
+    fires. The criterion was weak, it was pre-registered as expected-weak, and
+    the withdrawal rests on the measured consequence above rather than on the
+    criterion alone.
+
+    `rank_key` slot 1 is NOT touched. Rule 2 was about the BAR; the ORDER is
+    rule 5, and the same run left it NOT SHOWN TO AGREE (tau positive on 2
+    boards, negative on 3, N=5), which licenses nothing. That contradiction
+    stays disclosed.
+
+    Pure: returns the violation strings; empty means it passes. Violators are
+    still ranked, probed and recorded -- they are only barred from being the
+    silent headline pick (select_best); a probe verdict that argues for one
+    anyway is a decision the operator makes deliberately, reading
+    portfolio.json.
     """
     out: List[str] = []
     bm, cm = baseline.metrics, cand.metrics
-    bx, cx = bm.get('crossings'), cm.get('crossings')
-    if bx is not None and cx is not None and cx > bx:
-        out.append(f'crossings {cx} > baseline {bx}')
     bh, ch = bm.get('hpwl'), cm.get('hpwl')
     if bh is not None and ch is not None and ch > bh + EPS:
         out.append(f'hpwl {ch:.1f} > baseline {bh:.1f}')
+    return out
+
+
+def rule1_advisory(cand: Candidate, baseline: Candidate) -> List[str]:
+    """The WITHDRAWN crossings clause -- still measured, no longer barring.
+
+    Rule 2 said the withdrawal keeps its row WITH ITS MEASURED DIRECTION. A
+    clause that stops measuring is a deleted clause, and a later reader would
+    have no way to see what the bar used to say or to notice if the corpus
+    changed under it. So the comparison still runs and still reports; it simply
+    decides nothing, which is the standing `crossings` already has in the
+    drivers under non-negotiable 4.
+
+    Deliberately a SECOND function rather than a richer return type from
+    `rule1_check`: that would break `tests/test_portfolio_rule1.py`'s contract,
+    every `c.gates['rule1']` consumer and `portfolio.json`'s shape, for no
+    gain -- `select_best`'s only input is the violator SET.
+    """
+    out: List[str] = []
+    bx = baseline.metrics.get('crossings')
+    cx = cand.metrics.get('crossings')
+    if bx is not None and cx is not None and cx > bx:
+        out.append(f'crossings {cx} > baseline {bx} '
+                   f'(WITHDRAWN #789: reported, does not bar)')
     return out
 
 

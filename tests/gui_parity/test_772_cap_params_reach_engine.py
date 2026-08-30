@@ -97,6 +97,9 @@ PLAN = {
     'cap_board_edge_clearance': 0.85,
     'cap_max_passes': 7,
     'cap_prefix': 'C',
+    # #742: differs from BOTH the panel default (0.3) and the Basic tab's
+    # via_size, so a step that took either instead would show up here.
+    'cap_default_via_size': 0.42,
     'cap_allow_rotation': False,
 }
 # plan param -> the engine kwarg it must arrive as
@@ -110,6 +113,7 @@ TO_ENGINE = {
     'cap_board_edge_clearance': 'board_edge_clearance',
     'cap_max_passes': 'max_passes',
     'cap_prefix': 'cap_prefix',
+    'cap_default_via_size': 'default_via_size',
     'cap_allow_rotation': 'allow_rotations',
 }
 ABSENT = '<<absent>>'
@@ -137,7 +141,8 @@ def main():
     sys.path.insert(0, os.path.dirname(REPO))
 
     from kicad_parser import parse_kicad_pcb
-    from kicad_routing_plugin.swig_gui import RoutingDialog
+    # routing_dialog is this branch's swig_gui (renamed by the IPC port).
+    from kicad_routing_plugin.routing_dialog import RoutingDialog
     from kicad_routing_plugin.fanout_gui import BGAOptionsPanel
     from kicad_routing_plugin import ai_plan
     from placement import fanout_clearance as _fc
@@ -159,15 +164,21 @@ def main():
     def close(a, b):
         return isinstance(a, float) and abs(a - b) < 1e-9
 
-    # pcbnew.GetBoard() is None outside the KiCad process and
-    # run_cap_optimization returns early on None -- the engine would never be
-    # reached, every kwarg would read back absent, and that is a false pass
-    # rather than a check.
-    live = pcbnew.GetBoard() or pcbnew.LoadBoard(board)
+    # get_board() is None outside a running KiCad and run_cap_optimization
+    # returns early on None -- the engine would never be reached, every kwarg
+    # would read back absent, and that is a false pass rather than a check.
+    #
+    # The SWIG harness did `pcbnew.GetBoard = lambda: board`. This branch reaches
+    # a running KiCad over a kipy socket instead, so the standing IPC analogue is
+    # fake_ipc_board.install(), which points kicad_ipc_adapter.get_board() -- and
+    # the PCBData builder above it -- at a file-backed stand-in. Patching
+    # pcbnew.GetBoard here would leave get_board() returning None and the step
+    # returning early, which is exactly the false pass this block exists to stop.
+    from fake_ipc_board import install as _install_fake_board
+    live = _install_fake_board(board)
     if live is None:
-        print('SKIP: pcbnew could not load the fixture board')
+        print('SKIP: could not stand up a fake IPC board for the fixture')
         return 0
-    pcbnew.GetBoard = lambda: live
 
     seen = {}
 

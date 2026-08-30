@@ -1643,8 +1643,11 @@ class _Repair:
         offender list then comes back EMPTY -- the `for v in offenders:` body
         never runs, so not even the "no clear spot" line prints and the cap is
         reported unresolved forever with nothing on screen. Both signs are
-        reachable from the GUI too: its via size is the Basic tab's spin
-        control, not the 0.5 constant (fanout_gui.py:1529 -> swig_gui.py:1739).
+        reachable from the GUI too. Until #742 the GUI fed this the Basic tab's
+        via SIZE -- the diameter of the vias fanout PLACES, a different
+        quantity that happened to reach the same parameter -- so a recorded run
+        replayed there at a different keep-out radius. It now has its own
+        control, `cap_default_via_size`, defaulting to the CLI's 0.3.
 
         NOT the same question as _via_radius_by_id, and deliberately a separate
         mechanism. That map answers "what radius did THIS 4-tuple get", which

@@ -631,6 +631,7 @@ class PlanesTab(wx.Panel):
         """Run find-high-speed-nets headless and fill the GND via distance
         field from its recommendation (issue #39)."""
         from .ai_gui import run_skill_dialog, board_path_for_analysis
+        from .ai_backend import ANALYSIS_CONSTRAINT
 
         board = board_path_for_analysis(self.board_filename)
         if board is None:
@@ -638,7 +639,7 @@ class PlanesTab(wx.Panel):
         value = run_skill_dialog(
             self, "AI: recommend GND via distance",
             "find-high-speed-nets", os.path.abspath(board),
-            "analysis only, do not modify any files. After the report, end "
+            ANALYSIS_CONSTRAINT + " After the report, end "
             "your reply with exactly one line of the form "
             "RESULT=<recommended --gnd-via-distance in mm> "
             "(a bare number), e.g. RESULT=2.5",
@@ -653,6 +654,7 @@ class PlanesTab(wx.Panel):
         """Run recommend-plane-mappings headless and fill the assignment
         list from its recommendation (issue #53)."""
         from .ai_gui import run_skill_dialog, board_path_for_analysis
+        from .ai_backend import ANALYSIS_CONSTRAINT
 
         board = board_path_for_analysis(self.board_filename)
         if board is None:
@@ -660,7 +662,7 @@ class PlanesTab(wx.Panel):
         value = run_skill_dialog(
             self, "AI: recommend plane mappings",
             "recommend-plane-mappings", os.path.abspath(board),
-            "analysis only, do not modify any files. After the report, end "
+            ANALYSIS_CONSTRAINT + " After the report, end "
             "your reply with exactly one line of the form "
             "RESULT=<net>:<layer>;<net>|<net>:<layer> "
             "(groups separated by ';', nets sharing a layer joined by '|', exact "

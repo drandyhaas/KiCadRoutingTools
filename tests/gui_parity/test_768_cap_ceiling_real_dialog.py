@@ -100,7 +100,8 @@ def main():
     # working ceiling from a broken one, because there is nothing to cap.
     board = os.path.join(REPO, 'kicad_files', 'flat_hierarchy.kicad_pcb')
     from kicad_parser import parse_kicad_pcb
-    from kicad_routing_plugin.swig_gui import RoutingDialog
+    # routing_dialog is this branch's swig_gui (renamed by the IPC port).
+    from kicad_routing_plugin.routing_dialog import RoutingDialog
 
     dlg = RoutingDialog(None, parse_kicad_pcb(board), board)
     tab = dlg.fanout_tab
@@ -149,9 +150,14 @@ def main():
     # and hand the tab THAT board. The first run of this file "passed" four
     # checks against an empty dict for exactly this reason, which is the
     # missing-input false pass `run_utils.evidence` exists to refuse.
-    live = _pcbnew.GetBoard() or _pcbnew.LoadBoard(board)
+    # The SWIG harness loaded the fixture with pcbnew and handed the tab THAT
+    # board. This branch's tab builds PCBData over kipy, so the standing IPC
+    # analogue is fake_ipc_board.install() -- a file-backed stand-in that
+    # kicad_ipc_adapter.get_board() and the PCBData builder both see.
+    from fake_ipc_board import install as _install_fake_board
+    live = _install_fake_board(board)
     if live is None:
-        print("SKIP: pcbnew could not load the fixture board")
+        print("SKIP: could not stand up a fake IPC board for the fixture")
         return 0
 
     ABSENT = '<<absent>>'
@@ -279,7 +285,9 @@ def main():
         _fc.repair_fanout_clearance = _spy
         try:
             try:
-                tab._optimize_decoupling_caps(live, _pcbnew, cfg)
+                # (board, cfg) -- this branch's method takes no pcbnew
+                # argument; it reaches the board over the adapter.
+                tab._optimize_decoupling_caps(live, cfg)
             except _Stop:
                 pass
             except Exception as e:                            # noqa: BLE001

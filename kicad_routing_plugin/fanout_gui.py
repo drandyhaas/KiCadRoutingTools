@@ -30,6 +30,23 @@ for _sib in ('py_placer', 'py_tools'):
 import routing_defaults as defaults
 from kicad_parser import mm_to_iu
 
+#: #742: `bga_fanout.constants.DEFAULT_VIA_SIZE`, the value
+#: `place_fanout_clearance.py --default-via-size` defaults to and
+#: `repair_fanout_clearance`'s signature repeats. NOT
+#: `routing_defaults.VIA_SIZE` -- a fallback SIZE for an unreadable via is a
+#: different quantity from the via geometry this tab places.
+#:
+#: COPIED, not imported, and measured: `from bga_fanout.constants import ...`
+#: costs ~1 s and 62 new top-level modules at dialog load -- numpy, the Rust
+#: `grid_router`, `obstacle_map`, `kicad_writer` -- because that package's
+#: `__init__` is the whole fanout engine. swig_gui and planes_gui import this
+#: module at import time, so every routing dialog would pay it for one float.
+#: This file's own idiom is the lazy `import bga_fanout` further down.
+#: `tests/test_772_ai_plan_cap_params.py` pins the two spellings equal, which
+#: is where a drift detector belongs -- in a test, not in the plugin's
+#: start-up path.
+CAP_DEFAULT_VIA_SIZE = 0.3
+
 
 def _get_net_classes_from_board(pcb_data):
     """Read net-class mapping from PCBData (populated from the .kicad_pro).
@@ -814,6 +831,10 @@ class BGAOptionsPanel(wx.ScrolledWindow):
         ('cap_board_edge_clearance', 0.0),
         ('cap_max_passes', 30),
         ('cap_prefix', 'C,R,FB'),
+        # #742. bga_fanout.constants.DEFAULT_VIA_SIZE, which is what
+        # place_fanout_clearance.py --default-via-size defaults to. NOT the
+        # Basic tab's via_size (0.5 out of the box) -- see the control.
+        ('cap_default_via_size', CAP_DEFAULT_VIA_SIZE),
         ('cap_allow_rotation', True),
     )
 
@@ -1001,6 +1022,18 @@ class BGAOptionsPanel(wx.ScrolledWindow):
         self.cap_displacement_growth = _cap_spin(
             "Displacement growth:", 1.5, 1.0, 4.0, 0.1, 2,
             "Per-pass multiplier on the displacement budget (--displacement-growth)")
+        # #742: its OWN key, deliberately not the Basic tab's `via_size`. That
+        # value is three quantities at once on this tab -- the diameter of the
+        # vias fanout PLACES, this fallback, and the via floor
+        # update_live_drc_floors writes back -- and a plan param named
+        # `via_size` would additionally tick the Basic-tab override
+        # (ai_plan._GEOMETRY_OVERRIDE_CHECKS), leaking a floor into every later
+        # step. Same reasoning as --board-edge-clearance in #772.
+        self.cap_default_via_size = _cap_spin(
+            "Default via size (mm):", CAP_DEFAULT_VIA_SIZE, 0.05, 2.0, 0.05, 2,
+            "Fallback via outer diameter for vias whose size can't be read; "
+            "it sets the keep-out radius the cap nudge treats them at "
+            "(--default-via-size)")
         # #733 follow-up: the cap repair's OWN board-edge margin. It lives HERE,
         # with the other cap knobs, and NOT on the Basic tab's shared "Min Edge
         # Clearance" control -- that one is the SIGNAL copper-to-edge keep-out,
@@ -1028,8 +1061,9 @@ class BGAOptionsPanel(wx.ScrolledWindow):
         cap_grid.Add(wx.StaticText(self, label="Movable prefix(es):"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.cap_prefix = wx.TextCtrl(self, value="C,R,FB")
         self.cap_prefix.SetToolTip("Comma-separated reference prefix(es) for movable "
-                                   "passives near a BGA (--cap-prefix; default C,R = "
-                                   "caps and resistors; RN-style arrays auto-excluded "
+                                   "passives near a BGA (--cap-prefix; default "
+                                   "C,R,FB = caps, resistors and ferrite beads; "
+                                   "RN-style arrays auto-excluded "
                                    "by the 2-copper-pad test)")
         cap_grid.Add(self.cap_prefix, 0, wx.EXPAND)
 
@@ -1100,6 +1134,7 @@ class BGAOptionsPanel(wx.ScrolledWindow):
                 self.cap_board_edge_clearance.GetValue()
                 if self.cap_board_edge_clearance.GetValue() > 1e-9 else None),
             'cap_max_passes': self.cap_max_passes.GetValue(),
+            'cap_default_via_size': self.cap_default_via_size.GetValue(),
             'cap_prefix': self.cap_prefix.GetValue().strip() or 'C,R,FB',
             'cap_allow_rotation': self.cap_allow_rotation.GetValue(),
         }
@@ -1996,7 +2031,7 @@ class FanoutTab(wx.Panel):
         if self.on_fanout_complete:
             self.on_fanout_complete()
 
-    def _optimize_decoupling_caps(self, board, cfg):
+    def _optimize_decoupling_caps(self, board, fanout_config):
         """Run the fanout-clearance cap repair on the live board via IPC (#130).
 
         Rebuilds PCBData from the just-fanned board (so the new vias are
@@ -2006,7 +2041,7 @@ class FanoutTab(wx.Panel):
         Courtyards/locked refs come from the saved file (position-independent,
         unchanged by fanout). Returns a one-line summary, or an error string.
 
-        `cfg` must carry the Basic-tab floors (clearance / grid_step / via_size)
+        `fanout_config` must carry the Basic-tab floors (clearance / grid_step / via_size)
         and the advanced cap_* knobs.
         """
         try:
@@ -2021,7 +2056,7 @@ class FanoutTab(wx.Panel):
             result = repair_fanout_clearance(
                 pcb_data,
                 pcb_file=self.board_filename,
-                clearance=cfg.get('clearance', defaults.BGA_CLEARANCE),
+                clearance=fanout_config.get('clearance', defaults.BGA_CLEARANCE),
                 # #768: the --clearance ceiling. The CLI switches it on the
                 # PRESENCE of the flag; a dialog has no "absent", so the switch
                 # is the control that already MEANS "I am overriding the board's
@@ -2046,24 +2081,35 @@ class FanoutTab(wx.Panel):
                 # Default None, not a value: an absent key means the operator
                 # never ticked the override, and the safe reading of that is
                 # "honour the board", which is what an omitted CLI flag means.
-                netclass_ceiling=cfg.get('clearance_ceiling'),
-                grid_step=cfg.get('grid_step', defaults.GRID_STEP),
+                netclass_ceiling=fanout_config.get('clearance_ceiling'),
+                grid_step=fanout_config.get('grid_step', defaults.GRID_STEP),
                 # #733: the plugin used to pass NOTHING here, so it silently took
                 # the signature default whatever the board or the operator said,
                 # while the cap mover insets by max(clearance, this). None = the
                 # engine resolves it, which is what an omitted CLI flag does too.
-                board_edge_clearance=cfg.get('cap_board_edge_clearance'),
-                default_via_size=cfg.get('via_size', defaults.BGA_VIA_SIZE),
+                board_edge_clearance=fanout_config.get('cap_board_edge_clearance'),
+                # #742: the CLI's --default-via-size, on its own key. This used
+                # to read `via_size`, which on this tab is the diameter of the
+                # vias fanout PLACES and the via floor written back to the
+                # project -- a different quantity that happened to reach the
+                # same engine parameter, so a recorded run replayed here with a
+                # different keep-out radius and therefore different copper.
+                default_via_size=fanout_config.get('cap_default_via_size',
+                                         CAP_DEFAULT_VIA_SIZE),
                 # Advanced cap-placement knobs from the BGA fanout tab (#130)
-                capture_radius=cfg.get('cap_capture_radius', 2.0),
-                near_margin=cfg.get('cap_near_margin', 1.0),
-                step=cfg.get('cap_step', 0.2),
-                max_displacement=cfg.get('cap_max_displacement', 2.0),
-                max_displacement_cap=cfg.get('cap_max_displacement_cap', 3.0),
-                displacement_growth=cfg.get('cap_displacement_growth', 1.5),
-                max_passes=int(cfg.get('cap_max_passes', 30)),
-                cap_prefix=cfg.get('cap_prefix', 'C,R'),
-                allow_rotations=cfg.get('cap_allow_rotation', True),
+                capture_radius=fanout_config.get('cap_capture_radius', 2.0),
+                near_margin=fanout_config.get('cap_near_margin', 1.0),
+                step=fanout_config.get('cap_step', 0.2),
+                max_displacement=fanout_config.get('cap_max_displacement', 2.0),
+                max_displacement_cap=fanout_config.get('cap_max_displacement_cap', 3.0),
+                displacement_growth=fanout_config.get('cap_displacement_growth', 1.5),
+                max_passes=int(fanout_config.get('cap_max_passes', 30)),
+                # 'C,R,FB' -- the CLI's default, the engine signature's, and
+                # this tab's control value. It read 'C,R' (#742): unreachable,
+                # since both call paths populate the key, but a leaner config
+                # would have silently stopped moving ferrite beads.
+                cap_prefix=fanout_config.get('cap_prefix', 'C,R,FB'),
+                allow_rotations=fanout_config.get('cap_allow_rotation', True),
                 # Runs ON the UI thread; _fanout_status forces the repaint so
                 # the label moves per cap visit instead of freezing (#130).
                 # x/N lines only (see the fanout call sites).
@@ -2125,7 +2171,13 @@ class FanoutTab(wx.Panel):
         cfg.update({
             'clearance': shared.get('clearance', defaults.BGA_CLEARANCE),
             'grid_step': shared.get('grid_step', defaults.GRID_STEP),
-            'via_size': shared.get('via_size', defaults.BGA_VIA_SIZE),
+            # `via_size` used to be here, and it was here for exactly one
+            # reason: _optimize_decoupling_caps read it as the engine's
+            # `default_via_size`. That was #742's bug -- the Basic tab's via
+            # GEOMETRY standing in for the unreadable-via FALLBACK -- and the
+            # cap pass now takes `cap_default_via_size` from get_config()
+            # above. Nothing on this path reads `via_size` any more, so a row
+            # that looks load-bearing under the comment below would be dead.
             # #768: this path builds its config from a HANDFUL of shared keys,
             # so anything the engine call reads off `fanout_config` and that is
             # not listed here silently takes its `.get` default. That is how the

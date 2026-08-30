@@ -25,8 +25,8 @@ import subprocess
 import wx
 
 from .ai_backend import (
-    BACKENDS, BACKEND_IDS, DEFAULT_BACKEND_ID, get_backend,
-    extract_result_line,
+    ANALYSIS_CONSTRAINT, BACKENDS, BACKEND_IDS, DEFAULT_BACKEND_ID,
+    get_backend, extract_result_line,
 )
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -763,9 +763,9 @@ class AITab(wx.Panel):
             return
         self._start_run(
             "review-routed-board", board,
-            "analysis only, do not modify any files. After the report, end "
-            "your reply with exactly one line of the form RESULT=PASS or "
-            "RESULT=FAIL (the overall sign-off verdict)",
+            ANALYSIS_CONSTRAINT
+            + " After the report, end your reply with exactly one line of the "
+              "form RESULT=PASS or RESULT=FAIL (the overall sign-off verdict)",
             "review",
             f"Running review-routed-board on {os.path.basename(board)} ...\n"
             "(DRC + connectivity checkers + review; typically a few minutes)")
@@ -790,10 +790,11 @@ class AITab(wx.Panel):
             f.write(log_text)
         self._start_run(
             "diagnose-routing-failures", board,
-            f"the routing log from this GUI session is at {log_path}. "
-            "Analysis only, do not modify any files. After the report, end "
-            "your reply with exactly one line of the form RESULT=<one-line "
-            "recommended fix, or 'no failures found'>",
+            ANALYSIS_CONSTRAINT
+            + f" The routing log from this GUI session is at {log_path}."
+            + " After the report, end your reply with exactly one line of the "
+              "form RESULT=<one-line recommended fix, or 'no failures "
+              "found'>",
             "diagnose",
             f"Running diagnose-routing-failures on {os.path.basename(board)} "
             "+ the Log tab content ...\n(log analysis; typically a few minutes)")
@@ -811,9 +812,9 @@ class AITab(wx.Panel):
         from .ai_plan import PLAN_RESULT_SCHEMA
         self._start_run(
             "plan-pcb-routing", board,
-            "analysis and planning only: do not execute any routing commands "
-            "and do not modify any files. After the report, end your reply "
-            f"with exactly one line of the form {PLAN_RESULT_SCHEMA}",
+            ANALYSIS_CONSTRAINT
+            + " After the report, end your reply with exactly one line of the "
+              f"form {PLAN_RESULT_SCHEMA}",
             "plan",
             f"Running plan-pcb-routing on {os.path.basename(board)} ...\n"
             "(board analysis + datasheet lookups; typically several minutes)")

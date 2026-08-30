@@ -1,0 +1,56 @@
+[
+ {
+  "board": "neo6502",
+  "pop": "repair",
+  "partial": false,
+  "halo_gain": 0.383220319885423,
+  "hpwl_gain": 0.03554704431015819,
+  "ratio": 0.09275876686493612,
+  "blocking": 0
+ },
+ {
+  "board": "neo6502",
+  "pop": "legality",
+  "partial": false,
+  "halo_gain": 0.48159759378577494,
+  "hpwl_gain": 0.0045595389730703545,
+  "ratio": 0.009467528558912478,
+  "blocking": 0
+ },
+ {
+  "board": "urchin",
+  "pop": "repair",
+  "partial": true,
+  "halo_gain": 0.0026125406033623167,
+  "hpwl_gain": -0.15832161933775288,
+  "ratio": -60.600634927546906,
+  "blocking": 1
+ },
+ {
+  "board": "urchin",
+  "pop": "legality",
+  "partial": true,
+  "halo_gain": 0.0,
+  "hpwl_gain": 0.0,
+  "ratio": null,
+  "blocking": 1
+ },
+ {
+  "board": "piantor",
+  "pop": "repair",
+  "partial": true,
+  "halo_gain": 0.0,
+  "hpwl_gain": 0.0,
+  "ratio": null,
+  "blocking": 1
+ },
+ {
+  "board": "piantor",
+  "pop": "legality",
+  "partial": true,
+  "halo_gain": 0.0,
+  "hpwl_gain": 0.0,
+  "ratio": null,
+  "blocking": 1
+ }
+]

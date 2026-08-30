@@ -22,10 +22,17 @@ import time
 
 # The write-capable allowlist for placement runs. Write/Edit are the reason
 # this cannot ride ai_backend.CLAUDE_ALLOWED_TOOLS (read-only by convention);
-# Task stays because the skills dispatch verification subagents at close-out.
-# A headless -p run cannot answer permission prompts, so anything the skill
-# needs must be listed here (a refused tool errors visibly in the transcript).
-PLACEMENT_ALLOWED_TOOLS = "Bash,Read,Glob,Grep,Write,Edit,WebSearch,Task,TodoWrite"
+# the subagent-dispatch tool stays because the skills dispatch verification
+# subagents at close-out. A headless -p run cannot answer permission prompts,
+# so anything the skill needs must be listed here (a refused tool errors
+# visibly in the transcript).
+#
+# BOTH dispatch spellings (#552): Claude Code renamed the tool, and a
+# permission rule matches the canonical name only. This line has said `Task`
+# alone since #633; on 2.1.251 the dispatch event carries `"name":"Agent"`, so
+# the close-out verification this comment claims may never have been granted.
+PLACEMENT_ALLOWED_TOOLS = (
+    "Bash,Read,Glob,Grep,Write,Edit,WebSearch,Agent,Task,TodoWrite")
 
 # The machine-readable completion contract, appended to the instructions.
 # Same last-RESULT=-line convention as ai_plan.PLAN_RESULT_SCHEMA, parsed by
@@ -137,6 +144,16 @@ def build_placement_instructions(workdir, mode, extra=""):
         f"converge ledger at {wd}/ledger.jsonl.",
         f"Do not modify any file outside {wd}, and never edit "
         "input.kicad_pcb in place.",
+        # #552 item 2. This run's allowlist is the write-capable one, so it is
+        # the run whose CHILDREN can actually damage something -- and the
+        # workdir pin above was parent-only. A subagent inherits the tools and
+        # nothing else, so the pin has to be restated INTO the child, the same
+        # way the skills' own <subagent_prompt> blocks are copied verbatim.
+        f"If you dispatch a subagent, copy this sentence into its prompt "
+        f"verbatim: it must not modify any file outside {wd}, must never edit "
+        f"input.kicad_pcb in place, and must answer with a line beginning "
+        f"VERDICT= (never RESULT=, which this GUI reads as the run's own "
+        f"result line).",
         f"At close-out write the final board to {wd}/final.kicad_pcb (with "
         f"sibling final.kicad_pro), the movie to {wd}/placement.mp4 (or .gif "
         f"fallback), and the report to {wd}/REPORT.md.",

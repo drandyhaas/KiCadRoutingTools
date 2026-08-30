@@ -1,0 +1,114 @@
+[
+ {
+  "board": "neo6502",
+  "clearance": 0.2,
+  "stage_seconds": 6.5,
+  "pristine": {
+   "halo": 208.01396823510007,
+   "hpwl": 3622.5947400000005,
+   "crossings": 1324,
+   "total": 16940.40666298227
+  },
+  "damaged": {
+   "halo": 869.1450344927645,
+   "hpwl": 4193.6257399999995,
+   "crossings": 1871,
+   "total": 23595.63937899734
+  },
+  "pristine_blocking": 0,
+  "damaged_blocking": 18,
+  "g_null": {
+   "halo": 0.0,
+   "hpwl": 0.0,
+   "crossings": 0.0
+  },
+  "repair_rc": 0,
+  "repair_seconds": 29.7,
+  "repaired": {
+   "halo": 536.0709963476203,
+   "hpwl": 4044.5547399999996,
+   "crossings": 1828,
+   "total": 22703.72384030692
+  },
+  "repaired_blocking": 0,
+  "g_repair": {
+   "halo": 0.383220319885423,
+   "hpwl": 0.03554704431015819,
+   "crossings": 0.022982362373062535
+  },
+  "legality_rc": 4,
+  "legality_seconds": 31.5,
+  "legality_only": {
+   "halo": 450.56687723019473,
+   "hpwl": 4174.5047399999985,
+   "crossings": 1878,
+   "total": 23232.97892396079
+  },
+  "legality_only_blocking": 0,
+  "g_legality": {
+   "halo": 0.48159759378577494,
+   "hpwl": 0.0045595389730703545,
+   "crossings": -0.0037413148049171567
+  }
+ },
+ {
+  "board": "urchin",
+  "clearance": 0.2,
+  "stage_seconds": 16.4,
+  "pristine": {
+   "halo": 6721.157322698118,
+   "hpwl": 2581.5495029999993,
+   "crossings": 123,
+   "total": 10408.453732540213
+  },
+  "damaged": {
+   "halo": 7112.585966464552,
+   "hpwl": 3766.212792,
+   "crossings": 234,
+   "total": 13081.41439229641
+  },
+  "pristine_blocking": 0,
+  "damaged_blocking": 1,
+  "g_null": {
+   "halo": 0.0,
+   "hpwl": 0.0,
+   "crossings": 0.0
+  },
+  "repair_rc": 7,
+  "repair_seconds": 1061.8,
+  "repair_error": " \"RSW1\", \"SW29\", \"SW33\", \"SW34\", \"SW_POWER0\", \"SW_POWER1\"], \"zero_net\": [\"H1\", \"H2\", \"H3\", \"H4\", \"REF_PUCK_R\", \"Ref**\", \"mouse-bite-2mm-slot\"]}, \"vector_support\": {\"derived_support_total\": 0, \"fraction_explained\": 0.0, \"movable_parts\": 87, \"pattern_vectors\": 0}, \"vectors\": [], \"vectors_derived\": []}",
+  "legality_rc": 7,
+  "legality_seconds": 904.4,
+  "legality_error": "D23\", \"D24\", \"D25\", \"D26\", \"D27\", \"D28\", \"D29\", \"D3\", \"D30\", \"D31\", \"D32\", \"D33\", \"D34\", \"D4\", \"D5\", \"D6\", \"D7\", \"D8\", \"D9\", \"Display1\", \"Display2\", \"RSW0\", \"RSW1\", \"SW29\", \"SW33\", \"SW34\", \"SW_POWER0\", \"SW_POWER1\"], \"zero_net\": [\"H1\", \"H2\", \"H3\", \"H4\", \"REF_PUCK_R\", \"Ref**\", \"mouse-bite-2mm-slot\"]}}"
+ },
+ {
+  "board": "piantor",
+  "clearance": 0.2,
+  "stage_seconds": 5.9,
+  "pristine": {
+   "halo": 986.9139206228368,
+   "hpwl": 2263.6085449999996,
+   "crossings": 186,
+   "total": 5400.954345916671
+  },
+  "damaged": {
+   "halo": 1390.5453672868543,
+   "hpwl": 1965.0745359999999,
+   "crossings": 128,
+   "total": 4829.989356337518
+  },
+  "pristine_blocking": 0,
+  "damaged_blocking": 1,
+  "g_null": {
+   "halo": 0.0,
+   "hpwl": 0.0,
+   "crossings": 0.0
+  },
+  "repair_rc": 124,
+  "repair_seconds": 1200.0,
+  "repair_error": "TIMEOUT after 1200s",
+  "legality_rc": 7,
+  "legality_seconds": 901.4,
+  "legality_error": "m\": 15.926, \"anchors\": [\"K01\", \"K02\", \"K03\", \"K04\", \"K05\", \"K11\", \"K12\", \"K13\", \"K14\", \"K15\", \"K23\", \"K25\", \"K30\", \"U2\"], \"edge\": [], \"locked\": [], \"smalls\": [\"J1\", \"K00\", \"K10\", \"K20\", \"K21\", \"K22\", \"K24\", \"K31\", \"K32\", \"R1\", \"R2\"], \"zero_net\": [\"H1\", \"H2\", \"H3\", \"H4\", \"MB1\", \"MB2\", \"MB3\", \"MB4\"]}}"
+ }
+]

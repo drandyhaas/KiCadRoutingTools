@@ -724,6 +724,7 @@ class DifferentialTab(wx.Panel):
         """Run identify-diff-pairs headless and update the pair selection
         from its findings (issue #40)."""
         from .ai_gui import run_skill_dialog, board_path_for_analysis
+        from .ai_backend import ANALYSIS_CONSTRAINT
 
         board = board_path_for_analysis(self.board_filename)
         if board is None:
@@ -731,7 +732,7 @@ class DifferentialTab(wx.Panel):
         value = run_skill_dialog(
             self, "AI: identify differential pairs",
             "identify-diff-pairs", os.path.abspath(board),
-            "analysis only, do not modify any files. After the report, end "
+            ANALYSIS_CONSTRAINT + " After the report, end "
             "your reply with exactly one line of the form "
             "RESULT=confirm:<pair base names verified as "
             "differential by pin function, comma-separated, P/N suffix stripped>"
