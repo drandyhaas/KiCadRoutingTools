@@ -26,6 +26,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for _d in ('py_router', 'py_placer', 'py_tools'):
     sys.path.insert(0, os.path.join(ROOT, _d))
 
+sys.path.insert(0, os.path.join(ROOT, 'tests'))
+from run_utils import check                                     # noqa: E402
 from kicad_parser import parse_kicad_pcb                       # noqa: E402
 import check_pockets as CP                                     # noqa: E402
 
@@ -103,8 +105,17 @@ def t_the_partition_holds():
         report('%s: demand + under-part + warm-unowned + cold == in-outline'
                % name, total == doc['windows_in_outline'],
                '%d vs %d' % (total, doc['windows_in_outline']))
-        report('  %s: the under-part bucket is the big one, not cold' % name,
-               doc['under_part_windows'] >= 0 and doc['cold_windows'] >= 0)
+        # Not "under-part is the biggest" -- measured, that is FALSE on
+        # watchy (86 under-part vs 150 cold) and cap_chain (12 vs 134). What
+        # IS true is that they are disjoint counts of one universe.
+        report('  %s: every bucket is a non-negative count' % name,
+               all(isinstance(doc[k], int) and doc[k] >= 0
+                   for k in ('windows_demand_in_outline', 'under_part_windows',
+                             'warm_unowned_windows', 'cold_windows')),
+               str({k: doc[k] for k in ('windows_demand_in_outline',
+                                        'under_part_windows',
+                                        'warm_unowned_windows',
+                                        'cold_windows')}))
 
 
 def t_cold_means_no_copper_not_just_no_demand():
@@ -172,8 +183,12 @@ def t_area_accounting_never_exceeds_the_region():
                if r['band_area_mm2'] > r['area_mm2'] + 1e-6]
         report('%s: no band claims more area than its region' % name,
                not bad, str(bad[:1]))
+        # 5e-4, not 1e-6: `area_mm2` is rounded to 3 decimals, so the
+        # comparison has to allow the rounding grain or it is red on
+        # glasgow_revC / orangecrab / ulx3s at --bin 0.25 for a reason that
+        # is not the claim.
         worse = [r for r in doc['cold_regions']
-                 if r['area_mm2'] > r['windows'] * doc['bin_mm'] ** 2 + 1e-6]
+                 if r['area_mm2'] > r['windows'] * doc['bin_mm'] ** 2 + 5e-4]
         report('%s: no region claims more than its windows can hold' % name,
                not worse, str(worse[:1]))
 
@@ -225,16 +240,31 @@ def t_four_connected_not_eight():
     report('a diagonal pair is two components', len(got) == 2, str(got))
     got = CP.flood_regions([(0, 0), (1, 0), (1, 1)])
     report('an L is one component', len(got) == 1, str(got))
-    report('component output is sorted, not dict-ordered',
+    # Two singletons cannot see `sorted(comp)`; an L can. Discovery order
+    # from the seed (0,0) is (0,0),(1,0),(0,1); sorted is (0,0),(0,1),(1,0).
+    report('component MEMBERS are sorted, not discovery-ordered',
+           CP.flood_regions([(0, 0), (1, 0), (0, 1)])
+           == [[(0, 0), (0, 1), (1, 0)]],
+           str(CP.flood_regions([(0, 0), (1, 0), (0, 1)])))
+    report('  ...and the components themselves are ordered too',
            CP.flood_regions([(5, 5), (0, 0)]) == [[(0, 0)], [(5, 5)]])
 
 
 def t_largest_band_is_the_maximal_rectangle():
     #  X X X
     #  X X .      the maximal all-cold rectangle is the 3x1 top row
+    #  X X X
+    #  X X .    -- the solid 2x2 (area 4) beats the 3x1 row (area 3), and
+    #              accepting EITHER answer, as the first version did, made the
+    #              flagship maximality row assert nothing.
     got = CP.largest_band([(0, 0), (1, 0), (2, 0), (0, 1), (1, 1)])
-    report('picks the 3x1 row over the 2x2 that is not solid',
-           got in ((0, 0, 2, 0), (0, 0, 1, 1)), str(got))
+    report('picks the maximal-AREA rectangle, not the longest run',
+           got == (0, 0, 1, 1), str(got))
+    #  X X X
+    #  . . .    -- now the row IS maximal.
+    report('  ...and the row when the row is maximal',
+           CP.largest_band([(0, 0), (1, 0), (2, 0)]) == (0, 0, 2, 0),
+           str(CP.largest_band([(0, 0), (1, 0), (2, 0)])))
     report('a solid 2x2 is found whole',
            CP.largest_band([(0, 0), (1, 0), (0, 1), (1, 1)]) == (0, 0, 1, 1))
     report('a single cell is itself',
@@ -329,6 +359,184 @@ def t_a_printed_row_never_starts_with_a_bracket():
     report('  every ranked row carries >= 2 nets', True)
 
 
+def t_a_track_crossing_a_window_is_not_cold():
+    """`free` is midpoint accounting; a crossing track has no midpoint here.
+
+    congestion_bins charges a segment's whole area to the bin holding its
+    MIDPOINT, which is right for a demand/capacity ratio and wrong for "is
+    this window empty". Measured before the swept test:
+    rp2350_fpga_eensy_prePlane at --bin 1.0 -- the bin the docs' own example
+    uses -- reported 159 cold windows of which 27 had a track running through
+    them. The census's whole claim about them is "no copper".
+    """
+    p = os.path.join(ROOT, 'kicad_files',
+                     'rp2350_fpga_eensy_prePlane.kicad_pcb')
+    if not os.path.isfile(p):
+        report('rp2350 fixture present', False, 'missing')
+        return
+    pcb = parse_kicad_pcb(p)
+    report('the fixture is routed, or this proves nothing',
+           len(pcb.segments) > 100, '%d segments' % len(pcb.segments))
+    for bm in (2.0, 1.0, 0.5):
+        doc, _h = CP.pocket_census(parse_kicad_pcb(p), p, bin_mm=bm)
+        touched = CP.copper_touched_bins(pcb, doc['bin_mm'])
+        # A region BBOX may legitimately span a touched bin (an L-shape wraps
+        # around copper); the BAND cannot -- every cell in it is cold.
+        worse = [r for r in doc['cold_regions']
+                 if any((bx, by) in touched
+                        for bx in range(int(round(r['band_rect'][0] / bm)),
+                                        int(round(r['band_rect'][2] / bm)))
+                        for by in range(int(round(r['band_rect'][1] / bm)),
+                                        int(round(r['band_rect'][3] / bm))))]
+        report('bin %g: no cold BAND overlaps swept copper' % bm, not worse,
+               str(worse[:1]))
+    doc, _h = CP.pocket_census(parse_kicad_pcb(p), p, bin_mm=1.0)
+    report('and the count really moved (was 159 cold at bin 1.0)',
+           doc['cold_windows'] < 100, str(doc['cold_windows']))
+
+
+def t_a_cold_band_holds_no_part_and_the_report_says_so():
+    """The census's headline output used to be a command that lifts nothing.
+
+    A cold window cannot contain a pad centre BY CONSTRUCTION -- a pad's area
+    is charged to its bin, so a window holding one is warm, never cold -- so
+    `refs_in_rect(band)` is empty for every band this can ever name. The report
+    printed `--reseat-region <that band>` as its actionable line, and it
+    resolved to an empty scope on every board.
+    """
+    from placement.utility import refs_in_rect
+    for name in ('esp_prog', 'watchy', 'tigard', 'glasgow_revC', 'sonde_u'):
+        doc, _hot = census(name)
+        rt = doc.get('reseat_target')
+        if not rt:
+            report('%s: has a reseat target to check' % name, False)
+            continue
+        pcb = parse_kicad_pcb(board(name))
+        got = refs_in_rect(pcb, tuple(rt['zone']))
+        report('%s: the named landing site holds NO part' % name,
+               got == [], str(got))
+        report('  %s: and the record says so rather than implying otherwise'
+               % name, rt.get('contains_parts') is False)
+        b = doc['outline']['bounds']
+        report('  %s: the zone is CLIPPED to the board' % name,
+               rt['zone'][0] >= b[0] - 1e-6 and rt['zone'][1] >= b[1] - 1e-6
+               and rt['zone'][2] <= b[2] + 1e-6
+               and rt['zone'][3] <= b[3] + 1e-6,
+               '%s vs bounds %s' % (rt['zone'], b))
+        report('  %s: no --reseat-region command is advertised' % name,
+               'reseat_region' not in rt)
+    doc, hot = census('esp_prog')
+    txt = '\n'.join(CP.format_report(
+        dict(doc, bin_requested_mm=2.0, _clr=0.25, _trk=0.3), hot, 8))
+    report('the printed block calls it a DESTINATION, not a scope',
+           'DESTINATION, not a scope' in txt, txt[-400:])
+    # Not "the token never appears" -- the prose names the flag in order to
+    # warn about it, and a grep for the bare token is satisfied by prose. What
+    # must not appear is a RUNNABLE command: a line carrying both the tool and
+    # the flag.
+    cmd = [ln for ln in txt.splitlines()
+           if 'place_seed.py' in ln and '--reseat-region' in ln]
+    report('  ...and prints no runnable --reseat-region command for it',
+           not cmd, str(cmd[:1]))
+    report('  ...while still naming the flag to warn about it',
+           '--reseat-region' in txt)
+
+
+def t_unreadable_part_geometry_is_disclosed_not_absorbed():
+    """"I could not measure the parts" must not read as "there are none".
+
+    With graded_parts_from_file raising, esp_prog reported 81 cold windows
+    instead of 29 and a 260mm2 "empty pocket" on top of U1 and USB1 -- and
+    said nothing, because the provenance line only prints when there IS an
+    arrangement, and there is none without parts.
+    """
+    from placement import legality as leg
+    real = leg.graded_parts_from_file
+    p = board('esp_prog')
+    try:
+        leg.graded_parts_from_file = (
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError('no parts')))
+        doc, hot = CP.pocket_census(parse_kicad_pcb(p), p)
+    finally:
+        leg.graded_parts_from_file = real
+    report('the failure is recorded with its exception',
+           'no parts' in (doc['parts'].get('grading_error') or ''),
+           str(doc['parts'].get('grading_error')))
+    txt = '\n'.join(CP.format_report(
+        dict(doc, bin_requested_mm=2.0, _clr=0.25, _trk=0.3), hot, 8))
+    report('  ...and the REPORT says so, loudly and unconditionally',
+           'PART GEOMETRY UNREADABLE' in txt, txt[:400])
+    report('  ...and tells the reader not to act on the pockets',
+           'Do not act on them' in txt)
+    clean, _h = census('esp_prog')
+    report('  ...while a healthy run records no error',
+           clean['parts'].get('grading_error') is None)
+
+
+def t_a_non_finite_bin_is_refused_at_the_cli():
+    """`--bin inf` wrote a bare `Infinity` into the --json document.
+
+    congestion_bins' max(0.25, bin) passes inf straight through, the window
+    rectangles serialise as Infinity/NaN, and strict parsers refuse the file --
+    which is the exact failure the `ratio` comment and test_run23_pockets
+    exist to prevent, arriving through a different door.
+    """
+    b = board('esp_prog')
+    tool = os.path.join(ROOT, 'py_tools', 'check_pockets.py')
+    for bad, why in (('inf', 'finite'), ('nan', 'finite'),
+                     ('0', 'positive'), ('-1', 'positive')):
+        check([sys.executable, '-X', 'utf8', tool, b, '--bin', bad],
+              code=2, refuse=why, allow=('error: argument',))
+    report('a non-finite or non-positive --bin is refused by its reason', True)
+    report('  ...and a legitimate sub-floor --bin still WORKS',
+           CP.pocket_census(parse_kicad_pcb(b), b, bin_mm=0.1)[0]['bin_mm']
+           == 0.25)
+    check([sys.executable, '-X', 'utf8', tool, b, '--outline-samples', '999'],
+          code=2, refuse='quadratic', allow=('error: argument',))
+    report('  ...and an unbounded --outline-samples is refused too', True)
+
+
+def t_no_cold_suppresses_only_the_cold_half():
+    """--no-cold used to return before the outline sweep, taking the
+    arrangement census, the parts provenance and the reseat target with it --
+    while the docs and the argparse help both describe --no-arrangement as the
+    separate switch for those."""
+    doc, _hot = census('esp_prog', cold=False)
+    report('the cold numbers are gone',
+           doc['cold_windows'] is None and doc['cold_regions'] == []
+           and doc['reseat_target'] is None)
+    report('  ...but the ARRANGEMENT survives',
+           doc['arrangement'] is not None and bool(doc['arrangement']['sides']),
+           str(doc['arrangement'] is None))
+    report('  ...and so do the outline sweep and the parts provenance',
+           bool(doc['outline']) and doc['windows_in_outline'] == 128
+           and doc['parts']['graded'] == 20,
+           str(doc.get('windows_in_outline')))
+    live = census('esp_prog')[0]
+    report('  ...and they agree with the full run',
+           doc['arrangement'] == live['arrangement'])
+
+
+def t_the_lattice_survives_inexact_float_division():
+    """`math.ceil(21.0 / 0.7)` is 31: the quotient is 30.000000000000004.
+
+    The same defect floor/ceil replaced, moved into the division. Measured, it
+    invented 59 off-board windows on a 20x20mm rectangular board at --bin 0.7.
+    """
+    got = len(CP.lattice_windows((1.0, 1.0, 21.0, 21.0), 0.7))
+    report('a 20mm span at bin 0.7 tiles in exactly 29x29',
+           got == 29 * 29, '%d windows' % got)
+    for name in ('qfn_diffpair_escape', 'qfn_interior_pads'):
+        p = os.path.join(ROOT, 'kicad_files', name + '.kicad_pcb')
+        if not os.path.isfile(p):
+            continue
+        for bm in (0.5, 0.7, 0.3):
+            doc, _h = CP.pocket_census(parse_kicad_pcb(p), p, bin_mm=bm)
+            report('%s bin %g: no phantom off-board window on a rectangle'
+                   % (name, bm), doc['windows_offboard'] == 0,
+                   str(doc['windows_offboard']))
+
+
 TESTS = [
     ('the defect, by the numbers', t_the_defect_itself),
     ('lattice bounds are floor/ceil', t_the_lattice_bounds_are_floor_ceil),
@@ -343,6 +551,18 @@ TESTS = [
     ('--cold-cover ladder', t_cold_cover_is_a_ladder_not_a_cliff),
     ('every number finite', t_every_number_is_finite_and_json_safe),
     ('--no-cold', t_no_cold_is_a_clean_off_switch),
+    ('a crossing track is not cold',
+     t_a_track_crossing_a_window_is_not_cold),
+    ('a cold band holds no part',
+     t_a_cold_band_holds_no_part_and_the_report_says_so),
+    ('unreadable parts are disclosed',
+     t_unreadable_part_geometry_is_disclosed_not_absorbed),
+    ('a non-finite --bin is refused',
+     t_a_non_finite_bin_is_refused_at_the_cli),
+    ('--no-cold keeps the arrangement',
+     t_no_cold_suppresses_only_the_cold_half),
+    ('inexact float division',
+     t_the_lattice_survives_inexact_float_division),
     ('the print format contract', t_a_printed_row_never_starts_with_a_bracket),
 ]
 

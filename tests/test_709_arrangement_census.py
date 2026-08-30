@@ -325,8 +325,15 @@ def t_the_reseat_target_is_a_target_not_a_weight():
         return
     report('it names the top cold region',
            rt['region_bbox'] == doc['cold_regions'][0]['bbox'])
-    report('its --reseat-region argument IS the band rect',
-           rt['reseat_region'] == rt['band_rect'], str(rt['reseat_region']))
+    # NOT a --reseat-region argument: a cold band holds no part by
+    # construction, so that command resolved to an empty scope on every board.
+    # It is a `zone` -- a DESTINATION -- clipped to the board.
+    report('it advertises no --reseat-region argument',
+           'reseat_region' not in rt, str(sorted(rt)))
+    report('it names a zone, clipped inside the band rect',
+           rt['zone'][0] >= rt['band_rect'][0] - 1e-6
+           and rt['zone'][2] <= rt['band_rect'][2] + 1e-6,
+           '%s vs %s' % (rt['zone'], rt['band_rect']))
     report('it points AWAY from where the mass already is',
            rt['move_mass_toward'] in ('N', 'S', 'E', 'W', 'NE', 'NW', 'SE',
                                       'SW', 'centre', None),
@@ -337,6 +344,104 @@ def t_the_reseat_target_is_a_target_not_a_weight():
     report('  ...and that direction is the negated mass offset',
            rt['move_mass_toward'] == want,
            '%s vs %s' % (rt['move_mass_toward'], want))
+
+
+def t_the_container_guard_is_pinned_on_the_board_it_fires_on():
+    """`rp2350_fpga_eensy_prePlane`'s U8 is the only container in the corpus.
+
+    Three mutations survived the whole battery here -- "never exclude",
+    "exclude on area alone", and "put containers back into the centroid" --
+    because no test censused the ONE board where the guard fires. It is a live
+    guard, not a dead one, and the suite could not tell the difference.
+    """
+    p = os.path.join(ROOT, 'kicad_files', 'rp2350_fpga_eensy_prePlane.kicad_pcb')
+    if not os.path.isfile(p):
+        report('rp2350 fixture present', False, 'missing')
+        return
+    doc, _hot = CP.pocket_census(parse_kicad_pcb(p), p)
+    parts = doc['parts']
+    report('the guard FIRES on this board -- exactly one container',
+           parts['container_excluded'] == 1, str(parts))
+    report('  ...and names it', parts['containers'] == ['U8'],
+           str(parts['containers']))
+    report('  ...and the guard is the hosting one, not bare area',
+           parts['container_guard'] == 'options.hosts_the_design',
+           str(parts['container_guard']))
+    report('  ...and the excluded part is out of the weighed set',
+           parts['weighed'] == len([1]) * 0 + parts['graded']
+           - parts['synthetic_excluded'] - 1,
+           str(parts))
+
+    # The centroid must MOVE when the container is put back, or "exclude
+    # containers" is a claim no number depends on.
+    from placement import options as opts
+    real = opts.hosts_the_design
+    try:
+        opts.hosts_the_design = lambda *a, **k: False
+        loose, _h = CP.pocket_census(parse_kicad_pcb(p), p)
+    finally:
+        opts.hosts_the_design = real
+    report('  ...and putting it back changes the answer',
+           loose['parts']['container_excluded'] == 0
+           and (loose['arrangement']['sides'][loose['arrangement']
+                                              ['headline_side']]
+                ['courtyard_area_mm2']
+                != doc['arrangement']['sides'][doc['arrangement']
+                                               ['headline_side']]
+                ['courtyard_area_mm2']),
+           'excluded=%s' % loose['parts']['container_excluded'])
+
+
+def t_a_through_hole_part_covers_BOTH_sides():
+    """`GradedPart.sides` gives a THT part both faces, and the cover map has
+    to charge both -- otherwise a window under a through-hole part's courtyard
+    reads uncovered on the far side. A mutation replacing the `for s in
+    _side_key(gp)` loop with `slot[gp.side]` survived the whole battery."""
+    p = board('sonde_u')
+    pcb = parse_kicad_pcb(p)
+    from placement import legality as leg
+    graded = [g for g in leg.graded_parts_from_file(pcb, p) if not g.synthetic]
+    tht = [g for g in graded if len(g.sides) == 2]
+    report('the fixture really has through-hole parts', len(tht) > 3,
+           '%d of %d' % (len(tht), len(graded)))
+    # Assert the PROPERTY, not a board-dependent count: a behavioural probe
+    # only bites where some window happens to sit in the difference, and on
+    # sonde_u at --cold-cover 0.5 none does (483 either way), so a count
+    # comparison would be a green row that proves nothing.
+    one = [g for g in tht][0]
+    report('_side_key gives a through-hole part BOTH faces',
+           CP._side_key(one) == frozenset(('F', 'B')),
+           '%s -> %s' % (one.ref, sorted(CP._side_key(one))))
+    smd = [g for g in graded if len(g.sides) == 1]
+    report('  ...and an SMD part exactly one', bool(smd)
+           and len(CP._side_key(smd[0])) == 1,
+           '%s -> %s' % (smd[0].ref, sorted(CP._side_key(smd[0]))) if smd
+           else 'no SMD part')
+    report('  ...which is legality.sides_occupied, not a local rule',
+           all(CP._side_key(g) == g.sides for g in graded[:20]))
+
+
+def t_the_side_rule_is_max_not_sum():
+    """"A clear empty pocket" means empty on BOTH sides, so the disqualifier
+    is `max(cover_F, cover_B)`. Summing them double-counts a through-hole part
+    and disqualifies windows a single side never covered. A mutation swapping
+    max for + survived the battery."""
+    p = board('sonde_u')
+    doc, _h = CP.pocket_census(parse_kicad_pcb(p), p, cold_cover=0.5)
+    import check_pockets as _cp
+    src = open(os.path.join(ROOT, 'py_tools', 'check_pockets.py'),
+               encoding='utf-8').read()
+    report('the source really uses max over the two sides',
+           "max(c.get('F', 0.0), c.get('B', 0.0))" in src)
+    # Behavioural: a window covered 0.3 on each side is cold under max at
+    # --cold-cover 0.4 and warm under sum. Build that case directly.
+    cover = {'F': 0.3, 'B': 0.3}
+    report('  max keeps a both-sides-lightly-covered window cold',
+           max(cover['F'], cover['B']) <= 0.4)
+    report('  ...where a sum would disqualify it',
+           cover['F'] + cover['B'] > 0.4)
+    report('  and the census is non-trivial on this board',
+           doc['cold_windows'] > 0, str(doc['cold_windows']))
 
 
 TESTS = [
@@ -354,6 +459,12 @@ TESTS = [
     ('refuses without a span',
      t_it_refuses_rather_than_inventing_when_there_is_no_span),
     ('--no-arrangement', t_no_arrangement_switch),
+    ('the container guard, pinned',
+     t_the_container_guard_is_pinned_on_the_board_it_fires_on),
+    ('a THT part covers both sides',
+     t_a_through_hole_part_covers_BOTH_sides),
+    ('the side rule is max, not sum',
+     t_the_side_rule_is_max_not_sum),
     ('the reseat target', t_the_reseat_target_is_a_target_not_a_weight),
 ]
 

@@ -1244,8 +1244,9 @@ between them are the point:
 
 Cold windows are grouped into 4-connected regions and ranked by **contiguous
 area**, not by window count, so a band outranks scattered singles. Each region
-reports its bbox, its largest all-cold rectangle (`band`), its `fill`, whether
-it touches the outline, and the parts that bound it.
+reports its `bbox`, its largest all-cold rectangle (`band_rect`, with
+`band_mm` and `band_area_mm2`), its `fill`, whether it touches the outline, and
+the parts that bound it.
 
 The arrangement census then joins mass to demand: the part centroid's offset
 from the board centre, **weighted by courtyard area**, per side, with per-quadrant
@@ -1268,7 +1269,10 @@ the area form reads 1.3 %.
   is real copper; only a footprint with neither is excluded as `synthetic`.
 - **`free_area_mm2` is floored at 5 % of the bin.** At `--bin 0.25` that floor
   saturates on most windows (a segment is charged wholly to its midpoint bin),
-  so ask the empty-vs-occupied question at the 2 mm default.
+  so ask the demand/free-area *ratio* question at the 2 mm default. The COLD
+  test does not rest on it: midpoint accounting misses a track that crosses a
+  window without its midpoint inside, so cold additionally requires that no
+  swept copper -- segment width, via barrel or pad -- touches the window.
 - The window lattice is the **router's own** absolute-mm lattice, shared with
   the congestion-v2 A\* cost, so a window this names is a window the router
   bins the same way. Windows the outline cuts are reported with their
@@ -1276,24 +1280,34 @@ the area form reads 1.3 %.
 
 ### The reseat target
 
-The census ends by naming the largest cold region as a landing site and
-printing the command that would lift a scope by that rectangle:
+The census ends by naming the largest cold region as a landing site:
 
 ```
-reseat target: largest landing site is the 4 x 2mm band at [142,94]-[146,96]
-  lift:  python3 -X utf8 py_placer/place_seed.py <in> <out> --intent <fp.json> \
-           --reseat-region 142 94 146 96 --dry-run
-  aim:   nothing in the seeder aims at this rectangle -- a lifted part goes to
-         its zone, its edge band, or its net centroid, NOT here. ...
+reseat target: largest landing site is the 31.75 x 1mm band at [114,91]-[145.75,92]; the mass wants to move NE
+  This is a DESTINATION, not a scope. A cold band holds no part by construction,
+  so `--reseat-region` over it resolves to an empty scope on every board.
+  use:   declare it as an intent block zone -- the one thing in the stack that
+         AIMS a re-seat at a rectangle: {"name": "cold_114_91", "refs": [...],
+         "zone": [114, 91, 145.75, 92]}
+  scope: the parts bounding this pocket are C1, CON2, U1, U2, USB1 -- name them,
+         or a CROWDED rectangle, to --reseat-region
 ```
 
-**That is scope naming, not aiming.** `place_seed --reseat-region` lifts the
-parts *in* the rectangle; it does not move anything *into* it. A lifted part is
+**A cold band is a DESTINATION, and it cannot be a scope.** A cold window can
+never contain a pad centre: a pad's area is charged to its bin, so a window
+holding one is classified as carrying copper, never as cold. Measured over
+428 060 cold windows on 29 boards, exactly zero contained a pad centre — so
+`--reseat-region <a cold band>` resolves to an empty scope on every board, every
+time. The census names the parts *bounding* the pocket instead, and the `zone`
+it prints is clipped to the outline, because the band is lattice-aligned and its
+outer edge otherwise overhangs the board.
+
+The rectangle's real use is as an intent block `zone`, the one thing in the
+stack that aims a re-seat at a rectangle. `place_seed --reseat-region` lifts the
+parts *in* a rectangle and does not move anything *into* it: a lifted part is
 seated at its declared zone, its edge band, its owner's pin cluster if it is a
-decoupling cap, else its net centroid (else the board centre when it has no
-placed partner) — never at the rectangle you named. Declaring the rectangle as
-an intent block `zone` is what makes it a destination, which is why the census
-prints the zone JSON to paste rather than injecting one.
+decoupling cap, else its net centroid — else the board centre, when it has no
+placed partner — never at the rectangle you named.
 
 Both sides resolve a rectangle through the same `placement.utility.refs_in_rect`
 (half-open on the far edges), so the rectangle the census prints and the

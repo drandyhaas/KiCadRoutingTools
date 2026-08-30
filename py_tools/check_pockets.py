@@ -73,12 +73,24 @@ def lattice_windows(bounds, bin_mm):
     invisible-window count this tool exists to report would be overstated by
     exactly those 40.
     """
+    def _lo(v):
+        return int(math.floor(v / bin_mm))
+
+    def _hi(v):
+        # `math.ceil(21.0 / 0.7)` is 31, not 30: the quotient is
+        # 30.000000000000004. That is the SAME defect floor/ceil replaced,
+        # moved from the `+1` form into float division -- measured, it
+        # invented 59 off-board windows on a 20x20mm rectangular board at
+        # --bin 0.7. Snap the quotient to an integer it is within an ulp of
+        # before taking the ceiling.
+        q = v / bin_mm
+        r = round(q)
+        return int(r if abs(q - r) < 1e-9 else math.ceil(q))
+
     x0, y0, x1, y1 = bounds
     return [(bx, by)
-            for bx in range(int(math.floor(x0 / bin_mm)),
-                            int(math.ceil(x1 / bin_mm)))
-            for by in range(int(math.floor(y0 / bin_mm)),
-                            int(math.ceil(y1 / bin_mm)))]
+            for bx in range(_lo(x0), _hi(x1))
+            for by in range(_lo(y0), _hi(y1))]
 
 
 def window_rect(b, bin_mm):
@@ -180,6 +192,50 @@ def largest_band(cells):
                 start = s
             stack.append((start, h))
     return best[1]
+
+
+def copper_touched_bins(pcb, bin_mm):
+    """Every bin any copper geometry ACTUALLY overlaps, not just its midpoint.
+
+    `congestion_bins` charges a segment's whole area to the bin containing its
+    MIDPOINT, which is the right model for a demand/capacity ratio and the
+    wrong one for "is this window empty": a track running straight through a
+    window, with its midpoint elsewhere, leaves `free == bin_area_total` and
+    the window reads COLD. Measured on rp2350_fpga_eensy_prePlane at --bin 1.0
+    (the bin the docs' own example uses), 27 of 159 cold windows -- 17% -- had
+    a track crossing them.
+
+    So the copper test the cold predicate uses is this one: walk each segment
+    and stamp the bins its swept width touches, and stamp each via's and pad's
+    bounding box. Half a bin is the walk step, which cannot skip a bin.
+    """
+    hit = set()
+
+    def stamp_box(x0, y0, x1, y1):
+        for bx in range(int(math.floor(x0 / bin_mm)),
+                        int(math.floor(x1 / bin_mm)) + 1):
+            for by in range(int(math.floor(y0 / bin_mm)),
+                            int(math.floor(y1 / bin_mm)) + 1):
+                hit.add((bx, by))
+
+    for s in pcb.segments:
+        r = max(s.width, 0.0) / 2.0
+        n = max(1, int(math.hypot(s.end_x - s.start_x,
+                                  s.end_y - s.start_y) / (bin_mm / 2.0)) + 1)
+        for i in range(n + 1):
+            t = i / float(n)
+            x = s.start_x + (s.end_x - s.start_x) * t
+            y = s.start_y + (s.end_y - s.start_y) * t
+            stamp_box(x - r, y - r, x + r, y + r)
+    for v in pcb.vias:
+        r = max(v.size, 0.0) / 2.0
+        stamp_box(v.x - r, v.y - r, v.x + r, v.y + r)
+    for plist in (getattr(pcb, 'pads_by_net', {}) or {}).values():
+        for p in plist:
+            hx, hy = p.size_x / 2.0, p.size_y / 2.0
+            stamp_box(p.global_x - hx, p.global_y - hy,
+                      p.global_x + hx, p.global_y + hy)
+    return hit
 
 
 def _side_key(gp):
@@ -379,7 +435,7 @@ def pocket_census(pcb, board_path, *, nets=('*',), bin_mm=2.0, top=8,
     lattice = lattice_windows(bounds, bin_mm) if bounds else []
     bins, _terminals, bin_mm = congestion_bins(
         pcb, ids, len(layers), bin_mm,
-        include_bins=lattice if (cold and lattice) else None)
+        include_bins=(lattice or None))
 
     doc = {'board': board_path,
            # The bin the census USED. `bin_requested` is what the caller
@@ -425,16 +481,15 @@ def pocket_census(pcb, board_path, *, nets=('*',), bin_mm=2.0, top=8,
     doc['windows'] = rows[:max(top, 32)]
     doc['windows_demand'] = len(rows)
 
-    if not cold or not bounds:
+    if not bounds:
+        # The one genuine refusal: no span, no board centre, no lattice.
         doc['outline'] = None
         doc['cold_windows'] = None
         doc['cold_regions'] = []
         doc['arrangement'] = None
         doc['reseat_target'] = None
-        doc['skipped'] = (None if cold else 'cold census disabled')
-        if cold and not bounds:
-            doc['skipped'] = ('no board_bounds: nothing to enumerate an '
-                              'outline over')
+        doc['skipped'] = ('no board_bounds: nothing to enumerate an outline '
+                          'over')
         return doc, hot
 
     # --- the outline sweep --------------------------------------------------
@@ -463,10 +518,18 @@ def pocket_census(pcb, board_path, *, nets=('*',), bin_mm=2.0, top=8,
     doc['windows_partial'] = sum(1 for f in frac.values() if f < 1.0 - 1e-9)
 
     # --- part coverage, per side -------------------------------------------
+    #: A failure here CANNOT be swallowed into an empty part list. With the
+    #: grader raising, esp_prog reported 81 cold windows instead of 29 and a
+    #: 260mm2 "empty pocket" sitting on top of U1 and USB1 -- and said nothing,
+    #: because the provenance line only prints when there IS an arrangement.
+    #: "I could not measure the parts" and "the board has no parts" are the
+    #: same distinction this whole tool exists to draw, one level up.
+    graded_error = None
     try:
         graded = leg.graded_parts_from_file(pcb, board_path)
-    except Exception:                                           # noqa: BLE001
+    except Exception as exc:                                    # noqa: BLE001
         graded = []
+        graded_error = '%s: %s' % (type(exc).__name__, exc)
     real = [g for g in graded if not g.synthetic]
     board_area = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])
     containers = _containers(real, pcb.footprints, board_area, leg, opts)
@@ -489,6 +552,7 @@ def pocket_census(pcb, board_path, *, nets=('*',), bin_mm=2.0, top=8,
         from_courtyard = None
     doc['parts'] = {
         'graded': len(graded),
+        'grading_error': graded_error,
         'weighed': len([g for g in real if g.ref not in containers]),
         'synthetic_excluded': len(graded) - len(real),
         'container_excluded': len(containers),
@@ -525,6 +589,7 @@ def pocket_census(pcb, board_path, *, nets=('*',), bin_mm=2.0, top=8,
     # distinctions this tool exists to draw are exactly the ones that vanish
     # if a window is silently dropped: a window under a part is not a pocket,
     # and a part-free window full of another net's copper is not empty.
+    touched = copper_touched_bins(pcb, bin_mm)
     cold_keys = []
     warm_unowned = 0
     under_parts = 0
@@ -535,8 +600,11 @@ def pocket_census(pcb, board_path, *, nets=('*',), bin_mm=2.0, top=8,
             demand_in += 1
             continue
         # Part-free is not empty: on a routed board a window with no part
-        # still carries copper, and `free` is the only thing that knows.
-        if free < bin_area_total - 1e-9:
+        # still carries copper. TWO tests, because neither alone is enough --
+        # `free` is the demand/capacity model's midpoint accounting, which
+        # misses a track that crosses the window without its midpoint in it,
+        # and the swept test does not know about the 5% area floor.
+        if free < bin_area_total - 1e-9 or b in touched:
             warm_unowned += 1
             continue
         area_here = bin_area_2d * f
@@ -591,7 +659,12 @@ def pocket_census(pcb, board_path, *, nets=('*',), bin_mm=2.0, top=8,
     regions.sort(key=lambda r: (-r['area_mm2'], r['bbox']))
     for i, r in enumerate(regions):
         r['rank'] = i + 1
-    doc['cold_regions'] = regions[:max(top, 32)]
+    #: `--no-cold` suppresses the COLD half only. It used to return before
+    #: the outline sweep, so it silently took the arrangement census, the
+    #: parts provenance and the reseat target with it -- while both the docs
+    #: and the argparse help describe --no-arrangement as the separate switch
+    #: for those.
+    doc['cold_regions'] = regions[:max(top, 32)] if cold else []
     doc['cold_area_mm2'] = round(sum(r['area_mm2'] for r in regions), 3)
     in_area = sum(bin_area_2d * f for f in frac.values())
     doc['cold_area_frac'] = (round(doc['cold_area_mm2'] / in_area, 4)
@@ -607,17 +680,37 @@ def pocket_census(pcb, board_path, *, nets=('*',), bin_mm=2.0, top=8,
                 if quadrant_of((b[0] + 0.5) * bin_mm, (b[1] + 0.5) * bin_mm,
                                bounds) == q['index'])
 
-    doc['reseat_target'] = _reseat_target(doc)
+    if not cold:
+        doc['cold_windows'] = None
+        doc['warm_unowned_windows'] = None
+        doc['under_part_windows'] = None
+        doc['cold_area_mm2'] = None
+        doc['cold_area_frac'] = None
+        doc['skipped'] = 'cold census disabled'
+    doc['reseat_target'] = _reseat_target(doc, bounds) if cold else None
     return doc, hot
 
 
-def _reseat_target(doc):
-    """The census's product: a place to move mass TO, and a runnable command.
+def _reseat_target(doc, bounds=None):
+    """The census's product: a place to move mass TO. A DESTINATION, not a scope.
 
     A printed string, not a weight and not a gate. #709 records why: a density
     objective term was tried, measured and rejected, because a bounded nudge
     cannot migrate a part out of a packed belt into empty space. That is
     reseat-scale work, so the census names a target and stops.
+
+    IT IS NOT A `--reseat-region` ARGUMENT, and the first version of this
+    printed one, which was wrong on every board rather than sometimes. A cold
+    window cannot contain a pad centre BY CONSTRUCTION -- a pad's area is
+    charged to its bin, so a window holding one is `warm_unowned`, never cold
+    -- so `refs_in_rect(band_rect)` is empty for every band this ever names.
+    Measured: 428 060 cold windows over 29 boards, zero containing a pad
+    centre. The command was a scope that lifts nothing.
+
+    The cold band's real use is as an intent block `zone`, which is the one
+    thing in the stack that AIMS a re-seat at a rectangle. The scope to lift
+    is a different rectangle -- the crowded one -- and the census names the
+    parts bounding the pocket instead of pretending otherwise.
     """
     regions = doc.get('cold_regions') or []
     if not regions:
@@ -630,12 +723,26 @@ def _reseat_target(doc):
         dx, dy = s['offset_mm']
         # Mass sits at +offset, so the room is in the opposite direction.
         move = _compass(-dx, -dy)
+    #: Clipped to the board. The band is lattice-aligned, so its outer edge
+    #: overhangs the outline whenever a bound is not a multiple of the bin --
+    #: on 6 of 11 measured boards -- and a zone rectangle that reaches off the
+    #: board is not a zone anyone can seat a part in.
+    zone = list(top['band_rect'])
+    if bounds:
+        zone = [max(zone[0], bounds[0]), max(zone[1], bounds[1]),
+                min(zone[2], bounds[2]), min(zone[3], bounds[3])]
+        zone = [round(v, 3) for v in zone]
     return {'region_bbox': top['bbox'], 'band_rect': top['band_rect'],
             'band_mm': top['band_mm'], 'area_mm2': top['area_mm2'],
             'windows': top['windows'], 'refs': top['refs'],
             'move_mass_toward': move,
-            'reseat_region': [top['band_rect'][0], top['band_rect'][1],
-                              top['band_rect'][2], top['band_rect'][3]]}
+            # The DESTINATION, clipped to the board. Named `zone` because that
+            # is the intent key it belongs in; it is deliberately NOT called
+            # `reseat_region`, which would invite the empty-scope mistake.
+            'zone': zone,
+            'zone_mm': [round(zone[2] - zone[0], 3),
+                        round(zone[3] - zone[1], 3)],
+            'contains_parts': False}
 
 
 def census_scalars(doc):
@@ -668,7 +775,14 @@ def census_scalars(doc):
         'windows_offboard': doc.get('windows_offboard'),
         'windows_partial': doc.get('windows_partial'),
         'cold_windows': doc.get('cold_windows'),
-        'cold_regions': len(doc.get('cold_regions') or []),
+        # Exported so a consumer can reconstruct the partition from the
+        # summary line alone; `windows_demand` alone cannot, because it
+        # counts off-board demand bins too.
+        'windows_demand_in_outline': doc.get('windows_demand_in_outline'),
+        'under_part_windows': doc.get('under_part_windows'),
+        'warm_unowned_windows': doc.get('warm_unowned_windows'),
+        'cold_regions': (len(doc.get('cold_regions') or [])
+                         if doc.get('cold_windows') is not None else None),
         'cold_area_mm2': doc.get('cold_area_mm2'),
         'cold_area_frac': doc.get('cold_area_frac'),
         'cold_top_area_mm2': top.get('area_mm2'),
@@ -688,8 +802,18 @@ def format_report(doc, hot, top):
             f" = {doc['lane_mm']:g}mm" if doc['lane_mm'] is not None
             else "board floors unreadable")
     if doc.get('windows_in_outline') is not None:
-        counts = (f"{doc['windows_demand']} demand / {doc['cold_windows']} "
-                  f"cold / {doc['windows_in_outline']} in-outline window(s)")
+        # `windows_demand` counts demand bins wherever they are, including one
+        # under a part hanging off the board edge; the in-outline term is the
+        # one the partition is over, and printing them side by side without
+        # saying so mixes two populations.
+        cw = doc.get('cold_windows')
+        counts = (f"{doc.get('windows_demand_in_outline')} demand"
+                  + (f" / {cw} cold" if cw is not None else "")
+                  + f" / {doc['windows_in_outline']} in-outline window(s)"
+                  + (f" ({doc['windows_demand']} demand bins in all, some "
+                     f"off-board)"
+                     if doc['windows_demand'] != doc.get(
+                         'windows_demand_in_outline') else ""))
     else:
         counts = f"{doc['windows_demand']} window(s)"
     lines.append(f"Pocket census of {doc['board']}: {doc['demand_nets']} "
@@ -707,6 +831,15 @@ def format_report(doc, hot, top):
         if r.get('refs'):
             lines.append(f"      refs: {', '.join(r['refs'][:14])}"
                          + (" ..." if len(r['refs']) > 14 else ""))
+
+    if (doc.get('parts') or {}).get('grading_error'):
+        # Loudest line in the report, and NOT conditional on the arrangement
+        # block: without part geometry every window under a part reads cold,
+        # and the ranked pockets are on top of the parts.
+        lines.append("  !! PART GEOMETRY UNREADABLE (%s) -- every cold number "
+                     "below is measured as if the board had no parts, so the "
+                     "pockets it names may be underneath them. Do not act on "
+                     "them." % doc['parts']['grading_error'])
 
     regions = doc.get('cold_regions') or []
     if doc.get('cold_windows') is not None:
@@ -765,21 +898,25 @@ def format_report(doc, hot, top):
 
     rt = doc.get('reseat_target')
     if rt:
-        r = rt['reseat_region']
+        r = rt['zone']
         lines.append(f"reseat target: largest landing site is the "
-                     f"{rt['band_mm'][0]:g} x {rt['band_mm'][1]:g}mm band at "
+                     f"{rt['zone_mm'][0]:g} x {rt['zone_mm'][1]:g}mm band at "
                      f"[{r[0]:g},{r[1]:g}]-[{r[2]:g},{r[3]:g}]"
                      + (f"; the mass wants to move {rt['move_mass_toward']}"
                         if rt['move_mass_toward'] else ""))
-        lines.append(f"  lift:  python3 -X utf8 py_placer/place_seed.py "
-                     f"<in> <out> --intent <fp.json> --reseat-region "
-                     f"{r[0]:g} {r[1]:g} {r[2]:g} {r[3]:g} --dry-run")
-        lines.append(f"  aim:   nothing in the seeder aims at this rectangle "
-                     f"-- a lifted part goes to its zone, its edge band, or "
-                     f"its net centroid, NOT here. To make this the "
-                     f"destination, declare it as an intent block zone: "
+        lines.append("  This is a DESTINATION, not a scope. A cold band holds "
+                     "no part by construction, so `--reseat-region` over it "
+                     "resolves to an empty scope on every board.")
+        lines.append(f"  use:   declare it as an intent block zone -- the one "
+                     f"thing in the stack that AIMS a re-seat at a rectangle: "
                      f'{{"name": "cold_{r[0]:g}_{r[1]:g}", "refs": [...], '
                      f'"zone": [{r[0]:g}, {r[1]:g}, {r[2]:g}, {r[3]:g}]}}')
+        if rt.get('refs'):
+            lines.append(f"  scope: the parts bounding this pocket are "
+                         f"{', '.join(rt['refs'][:10])}"
+                         + (' ...' if len(rt['refs']) > 10 else '')
+                         + " -- name them, or a CROWDED rectangle, to "
+                           "--reseat-region")
     return lines
 
 
@@ -843,6 +980,24 @@ def main():
         p.error("--cold-cover is a fraction of a window in [0, 1]")
     if args.outline_samples < 1:
         p.error("--outline-samples is a per-axis sample count, at least 1")
+    if args.outline_samples > 32:
+        # The sweep is K*K per outline-cut window and unbounded above:
+        # measured, interf_u_unrouted --bin 0.25 --outline-samples 16 takes
+        # 3m50s against 26s at the default and produces IDENTICAL bucket
+        # counts. It refines edge-window areas, nothing else.
+        p.error("--outline-samples above 32 is quadratic for no measured "
+                "gain; it refines edge-window AREAS only, and 16 already "
+                "reproduces the default's bucket counts exactly")
+    if not math.isfinite(args.bin):
+        # `congestion_bins`' max(0.25, bin) passes inf straight through, and
+        # the window rectangles then serialise as bare `Infinity`/`NaN` --
+        # non-standard JSON that strict parsers refuse, which is the exact
+        # thing the `ratio` comment and test_run23_pockets guard against.
+        p.error("--bin must be a finite number of millimetres")
+    if args.bin <= 0:
+        p.error("--bin is a window size in mm; it must be positive "
+                "(values under the 0.25mm census floor are raised to it and "
+                "reported, but zero and negative are typos)")
 
     doc, hot = pocket_census(
         pcb, args.board, nets=args.nets, bin_mm=args.bin, top=args.top,

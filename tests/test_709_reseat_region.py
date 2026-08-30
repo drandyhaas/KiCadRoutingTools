@@ -97,12 +97,19 @@ def t_a_region_names_the_same_parts_the_census_does():
     report('every census window resolves to the same refs the mover would lift',
            not disagree, str(disagree[:2]))
     rt = doc.get('reseat_target')
-    report('the census prints a reseat_region argument', bool(rt), str(rt))
+    report('the census names a landing site', bool(rt), str(rt))
     if rt:
-        report('  ...and it is a well-formed rectangle',
-               rt['reseat_region'][2] > rt['reseat_region'][0]
-               and rt['reseat_region'][3] > rt['reseat_region'][1],
-               str(rt['reseat_region']))
+        report('  ...as a well-formed rectangle',
+               rt['zone'][2] > rt['zone'][0] and rt['zone'][3] > rt['zone'][1],
+               str(rt['zone']))
+        # ...and deliberately NOT as a --reseat-region argument. A cold band
+        # holds no part by construction, so that command resolves to an empty
+        # scope on every board -- which is what the census used to advertise.
+        report('  ...and NOT as a --reseat-region argument',
+               'reseat_region' not in rt, str(sorted(rt)))
+        report('  ...which the mover agrees with: the zone lifts nothing',
+               refs_in_rect(pcb, tuple(rt['zone'])) == [],
+               str(refs_in_rect(pcb, tuple(rt['zone']))))
     report('the census run itself is clean', r.returncode == 0)
 
 
