@@ -286,8 +286,24 @@ def get_board_full_path(kicad: Optional["kipy.KiCad"] = None) -> Optional[str]:
 # --- Coordinate helpers -----------------------------------------------------
 
 def vec_mm(x_mm: float, y_mm: float):
-    """Construct a kipy Vector2 from millimetre coordinates."""
-    return _ensure_kipy().Vector2.from_xy_mm(x_mm, y_mm)
+    """Construct a kipy Vector2 from millimetre coordinates.
+
+    ROUNDS to the nearest nanometre; deliberately NOT `Vector2.from_xy_mm`,
+    whose `kipy.util.from_mm` is a bare `int(value_mm * 1_000_000)` and so
+    TRUNCATES. 66.1mm is 66099999.99999999 in binary float, which truncates to
+    66099999 nm -- every coordinate whose mm value is not exactly representable
+    lands 1 nm short, on every track, via and shape this plugin emits.
+
+    This is the SWIG side's #493 `FromMM` bug in kipy's clothing (see the
+    project notes: "mm_to_iu, not FromMM: FromMM truncates"). Measured, before
+    this fix: a GUI/CLI replay of nano_eeprom_prog through
+    tests/gui_parity/replay_plan_vs_run.py graded EQUIVALENT rather than
+    IDENTICAL -- 6 segments 1 nm off on the three y-values (66.1, 65.6, 64.6)
+    that float cannot hold exactly. 1 nm is far below any DRC or fab threshold,
+    but it is a real coordinate fork between the two fronts, and A* tie-breaks
+    are exactly the place a sub-nanometre difference stops being invisible.
+    """
+    return _ensure_kipy().Vector2.from_xy(_mm_to_nm(x_mm), _mm_to_nm(y_mm))
 
 
 def _mm_to_nm(v: float) -> int:
@@ -552,14 +568,11 @@ def make_zone(net_map: NetMap, polygon_mm, layer_name: str,
     Zone, ZoneType, PolyLine, PolyLineNode, PolygonWithHoles = _zone_types()
 
     polyline = PolyLine()
-    # PolyLineNode.from_xy_mm exists on kipy 0.7+; older releases only
-    # have from_xy which takes nanometres. Probe both.
-    if hasattr(PolyLineNode, "from_xy_mm"):
-        for x_mm, y_mm in polygon_mm:
-            polyline.append(PolyLineNode.from_xy_mm(x_mm, y_mm))
-    else:
-        for x_mm, y_mm in polygon_mm:
-            polyline.append(PolyLineNode.from_xy(_mm_to_nm(x_mm), _mm_to_nm(y_mm)))
+    # from_xy (nanometres) on EVERY kipy, not the 0.7+ from_xy_mm convenience:
+    # that one truncates, exactly as Vector2.from_xy_mm does -- see vec_mm for
+    # the measurement. from_xy is the older of the two, so it is always there.
+    for x_mm, y_mm in polygon_mm:
+        polyline.append(PolyLineNode.from_xy(_mm_to_nm(x_mm), _mm_to_nm(y_mm)))
 
     poly_with_holes = PolygonWithHoles()
     poly_with_holes.outline = polyline
