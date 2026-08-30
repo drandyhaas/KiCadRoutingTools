@@ -1,5 +1,5 @@
-66e60fb2 2026-08-30 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
-Audit 722ea1cc..66e60fb2 on main. ONE REAL GAP FOUND AND FIXED -- the first time
+31004f43 2026-08-30 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit 722ea1cc..31004f43 on main. ONE REAL GAP FOUND AND FIXED -- the first time
 this ledger has caught a live routing break rather than confirming its absence.
 Twelve gates green after the fix.
 
@@ -102,3 +102,10 @@ NOT COVERED BY THIS AUDIT: none of the routing changes in this range has a
 corpus A/B yet. Three opt-in arms are owed (KICAD_POCKET_RIP,
 KICAD_VICTIM_RESTORE, and the fix stack itself), each separately, because one
 combined run cannot attribute a regression.
+
+ADDENDUM (31004f43): 31004f43 flipped KICAD_VICTIM_RESTORE to default ON after the
+sets 1-5 corpus A/B. That is a py_router/ change AND a routing-behaviour change,
+so the engine parity gate was RE-RUN rather than carried: PARITY, copper sets
+IDENTICAL (1267/1267 segs, 128/128 vias). The knob is read in reroute_loop -- a
+shared engine module, not a CLI main() -- so it stays class-free with nothing to
+mirror on the GUI side. No other parity surface moved.
