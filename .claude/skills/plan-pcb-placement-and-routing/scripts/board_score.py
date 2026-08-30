@@ -463,6 +463,21 @@ def score_floorplan(root: str, board: str, intent: str, tmp: str) -> dict:
     Carries rules_run/rules_skipped through, because an intent that resolves to
     zero rules grades clean by vacuity -- and a typo'd block is exactly the
     failure the grader exists to catch.
+
+    `count` is the ERROR-severity violations only, because it is summed into
+    `blocking` and `blocking` is what `converge` requires to reach 0. Counting
+    every violation made this instrument CONTRADICT the one it reads: measured
+    on splitflap_driver with one warn-demoted `block_unresolved`, check_floorplan
+    reported `errors 0, warnings 1, pass true` and exited 0, while this function
+    returned count 1 and drove `blocking` to 84 and exit 4. A warn was therefore
+    a permanent blocker with no way to clear it -- the intent schema has no
+    `off` severity, and `--exit-zero` disables every rule at once -- so
+    `severity: warn` did not mean what floorplan.py:57 says it means ("reported
+    and does not fail the run").
+
+    Warnings stay REPORTED, in their own keys, so demoting a rule still surfaces
+    it. A missing `severity` counts as an error: this must never silently
+    un-block something on an older JSON.
     """
     if not intent:
         return skipped('no --intent given; the floorplan is ungraded')
@@ -475,10 +490,17 @@ def score_floorplan(root: str, board: str, intent: str, tmp: str) -> dict:
         return skipped(f'check_floorplan.py exited {rc}: {out.strip()[-200:]}')
     with open(out_json, encoding='utf-8') as f:
         d = json.load(f)
-    return {'ran': True, 'count': len(d.get('violations') or []),
+    viols = d.get('violations') or []
+    errors = [v for v in viols if (v.get('severity') or 'error') == 'error']
+    warns = [v for v in viols if (v.get('severity') or 'error') != 'error']
+    return {'ran': True, 'count': len(errors),
             'rules_run': len(d.get('rules_run') or []),
             'rules_skipped': list((d.get('rules_skipped') or {}).keys()),
-            'violations': [v.get('rule') for v in (d.get('violations') or [])]}
+            'violations': [v.get('rule') for v in errors],
+            # Reported, never summed into `blocking`. Printed even when zero,
+            # so "no warnings" and "warnings not looked at" cannot look alike.
+            'warnings': len(warns),
+            'warning_rules': sorted({str(v.get('rule')) for v in warns})}
 
 
 def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
