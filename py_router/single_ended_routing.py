@@ -5019,6 +5019,49 @@ def _trim_after_fill_via(path, coord, layer_names, pcb_data, net_id):
     return path, None
 
 
+def _reusable_same_net_via(pcb_data, net_id, x, y, new_drill, config):
+    """An existing same-net via this path can RIDE instead of drilling beside it
+    (#671), or None.
+
+    Two conditions, and both matter:
+
+      1. A new drill here would be ILLEGAL against it -- centres closer than
+         (new_drill + its_drill)/2 + hole_to_hole. Outside that, a fresh via is
+         perfectly legal and reusing would silently move the transition.
+      2. The path point still lands on its COPPER (dist <= its_size/2), so the
+         track that meets here is actually connected to the barrel.
+
+    Condition 2 is the one the issue does not state and the one that keeps this
+    from trading a DRC violation for an OPEN: an offset large enough to clear
+    the pad would leave the track ending in space beside a via it never touches.
+
+    #671: the iteration/weld and tap passes re-place a same-net via a few tens
+    of um from a surviving copy instead of reusing it, and the writer's dedup
+    cannot merge them -- its key is exact ON PURPOSE, because two barrels with
+    different drill/size are not interchangeable and dropping either would be a
+    silent geometry change. So the merge has to happen HERE, at emission, where
+    the alternative (ride the existing barrel) is still available.
+    Measured on glasgow_revC: /~{ALERT} 0.28/0.18 at (73.80,96.70) and 0.25/0.15
+    at (73.85,96.75) -- 0.071mm apart, from two separate phase-3 tap passes,
+    against a 0.25mm hole-to-hole rule.
+    """
+    if pcb_data is None or not getattr(pcb_data, 'vias', None):
+        return None
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.25) or 0.25
+    best = None
+    for v in pcb_data.vias:
+        if v.net_id != net_id:
+            continue
+        d = math.hypot(v.x - x, v.y - y)
+        if d >= (new_drill + (v.drill or 0.0)) / 2.0 + h2h:
+            continue                      # a fresh drill here is legal
+        if d > (v.size or 0.0) / 2.0:
+            continue                      # too far to be connected by its pad
+        if best is None or d < best[0]:
+            best = (d, v)
+    return best[1] if best else None
+
+
 def _path_to_segments_vias(
     path: List[Tuple[int, int, int]],
     coord: GridCoord,
@@ -5113,14 +5156,27 @@ def _path_to_segments_vias(
                 vx, vy = coord.to_float(gx1, gy1)  # via stays on the grid cell
                 _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config,
                                             net_id=net_id, x=vx, y=vy)
-                via = Via(
-                    x=vx, y=vy,
-                    size=_vsz,
-                    drill=_vdr,
-                    layers=["F.Cu", "B.Cu"],  # Always through-hole
-                    net_id=net_id
-                )
-                vias.append(via)
+                # #671: ride an existing same-net barrel rather than drilling a
+                # second one a few tens of um away. Same idea as the
+                # through_hole_positions skip above -- an existing conductor
+                # already provides this transition.
+                _reuse = _reusable_same_net_via(pcb_data, net_id, vx, vy,
+                                                _vdr, config)
+                if _reuse is not None:
+                    if os.environ.get('KICAD_VIA_REUSE_DEBUG') == '1':
+                        print(f"      via reuse (#671): net {net_id} rides the "
+                              f"existing via at ({_reuse.x:.3f},{_reuse.y:.3f}) "
+                              f"instead of drilling at ({vx:.3f},{vy:.3f}) "
+                              f"({math.hypot(_reuse.x - vx, _reuse.y - vy)*1000:.0f} um)")
+                else:
+                    via = Via(
+                        x=vx, y=vy,
+                        size=_vsz,
+                        drill=_vdr,
+                        layers=["F.Cu", "B.Cu"],  # Always through-hole
+                        net_id=net_id
+                    )
+                    vias.append(via)
         else:
             if (x1, y1) != (x2, y2):
                 layer_name = layer_names[layer1]
