@@ -193,7 +193,9 @@ def congestion_bins(pcb_data, net_ids, num_layers, bin_mm,
     WHEN NOTHING DEMANDS THEM. The result was keyed off `owners`, which only
     gains a key where some net has a terminal -- so a window with nothing in
     it never entered the dict and `check_pockets` could not represent an
-    empty region at all (esp_prog: 44 of 128 windows over the bbox at 2mm).
+    empty region at all. Measured on esp_prog at 2mm: the lattice over
+    `board_bounds` is 128 windows and the census returned 44, so 84 of them
+    -- 66% -- were not merely un-ranked but absent.
     Such a bin comes back with `owners` empty and its free area computed the
     same way as everyone else's, which is what separates "empty" from "full
     of another net's copper".
