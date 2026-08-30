@@ -27,6 +27,7 @@ nothing).
 """
 import os
 import io
+import math
 import sys
 import tempfile
 import contextlib
@@ -76,6 +77,23 @@ def _board_text():
         + stubs + ')\n')
 
 
+def _copper_mm(pcb, nid):
+    """Total routed copper on a net, in mm.
+
+    The "did the requested net route" assertion below used to count SEGMENTS,
+    which is a proxy, not the property. #811's collinear merge joins a route to
+    the collinear pre-existing stub it continues, and this fixture is the worst
+    case for that proxy: N1's two pads are on one horizontal line and its stub
+    lies along it, so the whole routed net legitimately collapses to a SINGLE
+    segment. Measured, both arms: N1 copper 3.0 -> 34.0 mm, while the count
+    went 1 -> 2 with the merge off and 1 -> 1 with it on. Counting segments
+    called the second one a routing failure. Copper is what "gained copper"
+    means, so measure copper.
+    """
+    return math.fsum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                     for s in pcb.segments if s.net_id == nid)
+
+
 def _seg_sigs(pcb, nid):
     out = set()
     for s in pcb.segments:
@@ -121,10 +139,13 @@ def test_narrow_scope():
         ids_b = _ids(before)
         ids_a = _ids(after)
 
-        # The requested net routed.
-        check("requested net N1 gained copper",
-              len(_seg_sigs(after, ids_a['N1']))
-              > len(_seg_sigs(before, ids_b['N1'])))
+        # The requested net routed. Graded on COPPER, not segment count --
+        # see _copper_mm for why the count is the wrong instrument here.
+        _n1_before = _copper_mm(before, ids_b['N1'])
+        _n1_after = _copper_mm(after, ids_a['N1'])
+        check(f"requested net N1 gained copper "
+              f"({_n1_before:.2f} -> {_n1_after:.2f} mm)",
+              _n1_after > _n1_before + 1e-6)
 
         # Every bystander's copper is byte-identical: not routed by the
         # reconciliation, not trimmed by the sweeps.

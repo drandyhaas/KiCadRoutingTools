@@ -49,6 +49,7 @@ from pcb_modification import (
     neck_wide_segments_grazing_pads,
     smooth_octolinear_chains,
     close_soft_joints,
+    merge_collinear_segments,
 )
 
 from terminal_colors import RED, RESET
@@ -99,6 +100,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                            keep_input_copper: bool = False,
                            progress_callback=None,
                            smooth: bool = False,
+                           merge_collinear: bool = True,
                            ) -> CleanupOutcome:
     """Run the post-route cleanup passes in their one canonical order.
 
@@ -135,6 +137,16 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                                   _restore_soft_joint_bridges guard, so every
                                   joint close sees is router-born, never one a
                                   cleanup pass manufactured.
+     11. merge_collinear_segments -- #811: join collinear same-net/layer/width
+                                  pieces into one track. Runs AFTER close on
+                                  purpose, and is the only pass allowed to:
+                                  it MOVES NO COPPER (a vertex merges only
+                                  when it lies within 1nm of the line joining
+                                  its neighbours), so it cannot reopen a joint
+                                  close just bridged -- it absorbs the bridge
+                                  into the track instead. It must run last to
+                                  catch the joints close, smooth and the cycle
+                                  prune each leave behind.
 
     ``label`` prefixes the progress prints (e.g. "Diff-pair "). The pass
     switches exist for front parity, not taste:
@@ -473,6 +485,23 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         if _bridged:
             print(f"{label}Bridged {_bridged} same-net soft joint(s) with a tiny "
                   f"connector")
+
+    # #811 FINAL pass. Geometry-preserving by construction (see the pass
+    # docstring), which is what lets it run after close_soft_joints and what
+    # makes it safe on every front without a per-front switch. KICAD_MERGE_
+    # COLLINEAR=0 ablates it for A/B isolation.
+    if merge_collinear and env_knobs.MERGE_COLLINEAR:
+        _prog("collinear merge")
+        _mc_n, _mc_nets, _mc_strip, _mc_added, _mc_stats = merge_collinear_segments(
+            results, pcb_data, scope_net_ids,
+            keep_input_copper=keep_input_copper)
+        counts['collinear_merged'] = _mc_n
+        counts['collinear_joints'] = _mc_stats.get('joints', 0)
+        _trace('merge_collinear')
+        strip.extend(_mc_strip)
+        if _mc_n:
+            print(f"{label}Merged {_mc_stats.get('joints', 0)} collinear joint(s) "
+                  f"on {_mc_nets} net(s): -{_mc_n} redundant segment(s) (#811)")
 
     return out
 

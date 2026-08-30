@@ -4458,6 +4458,333 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
             nets_changed, original_to_remove, added_segments, stats)
 
 
+def _geometric_collapse(vpts, max_deviation: float, forced=()):
+    """Indices of the vertices that survive a pure-geometry collinear collapse.
+
+    Deviation is measured from the vertex to the line joining the LAST KEPT
+    point and the next one -- not to its immediate neighbours -- so the error
+    of a 3+ piece run is bounded against the segment that will actually be
+    emitted, instead of accumulating one hop at a time.
+
+    A vertex that doubles back (the two legs point opposite ways) is always
+    kept: the union of those two capsules is SHORTER than the joined span, so
+    collapsing it would ADD copper. That case is same-net overlapping copper
+    (issue #606), which this pass deliberately leaves alone.
+    """
+    kept = [0]
+    for i in range(1, len(vpts) - 1):
+        if i in forced:
+            kept.append(i)
+            continue
+        ax, ay = vpts[kept[-1]]
+        bx, by = vpts[i]
+        cx, cy = vpts[i + 1]
+        abx, aby = bx - ax, by - ay
+        bcx, bcy = cx - bx, cy - by
+        if math.hypot(abx, aby) <= 0.0 or math.hypot(bcx, bcy) <= 0.0:
+            kept.append(i)
+            continue
+        if abx * bcx + aby * bcy <= 0.0:          # doubles back -- never merge
+            kept.append(i)
+            continue
+        acx, acy = cx - ax, cy - ay
+        L = math.hypot(acx, acy)
+        dev = abs(acx * (ay - by) - (ax - bx) * acy) / L if L > 0.0 else 0.0
+        if dev > max_deviation:
+            kept.append(i)
+    kept.append(len(vpts) - 1)
+    return kept
+
+
+def _collapse_collinear_vertices(vpts, max_deviation: float, pad_cover=None):
+    """The collinear collapse of a chain's vertices, with PAD CUSTODY held.
+
+    Geometry alone would let every collinear vertex go -- the merged capsule is
+    the union of the ones it replaces, so the copper is identical and any pad
+    the chain physically touched, it still touches. But connectivity is not
+    graded on the copper: ``check_connected`` credits a pad at a segment
+    ENDPOINT (``connectivity.endpoint_reaches_pad``), not at its closest point
+    the way ``_pad_touches_copper_group`` does. Dropping a vertex that sits in a
+    pad can therefore lose that pad's credit in the MODEL while the board is
+    unchanged -- a phantom open that the downstream repair passes would then
+    "fix" by adding copper nobody needed.
+
+    So a vertex is droppable only when every same-net pad covering it also
+    covers a vertex that SURVIVES. Re-solved to a fixpoint (each round forces
+    the orphaned vertices back and recollapses) because forcing one vertex back
+    changes which line the others are measured against.
+
+    ``pad_cover`` is a callable (x, y) -> frozenset of pad ids, NOT a
+    precomputed list: it is consulted only once the cheap geometric pass has
+    found something to merge. Most chains on a board have no collinear joint at
+    all, and pad_cover is the expensive part (a scan of the net's pads per
+    vertex), so paying it per chain up front made the pass several times
+    dearer for no result. None disables the custody rule entirely.
+    """
+    kept_idx = _geometric_collapse(vpts, max_deviation)
+    if len(kept_idx) == len(vpts) or pad_cover is None:
+        return [vpts[i] for i in kept_idx]
+
+    pad_sets = [pad_cover(px, py) for (px, py) in vpts]
+    if not any(pad_sets):
+        return [vpts[i] for i in kept_idx]
+
+    forced = set()
+    while True:
+        keep_set = set(kept_idx)
+        covered = set()
+        for i in kept_idx:
+            covered |= pad_sets[i]
+        orphaned = [i for i in range(len(vpts))
+                    if i not in keep_set and not (pad_sets[i] <= covered)]
+        if not orphaned:
+            return [vpts[i] for i in kept_idx]
+        forced.update(orphaned)
+        kept_idx = _geometric_collapse(vpts, max_deviation, forced)
+
+
+def merge_collinear_segments(results, pcb_data: PCBData, scope_net_ids=None,
+                             keep_input_copper: bool = False,
+                             max_deviation: float = 1e-6,
+                             max_net_segs: int = 4000,
+                             max_chain_segs: int = 1000,
+                             dry_run: bool = False):
+    """Join collinear same-net/same-layer/same-width track pieces (#811).
+
+    ``simplify_path`` collapses collinear points at PATH level, before copper is
+    emitted. Everything after that can re-introduce a collinear joint, and until
+    this pass nothing joined them back, so a dead-straight track shipped as two
+    or three separate segments. Measured sources, per-pass instrumented on
+    splitflap_driver (25 joints at the end of the pipeline):
+
+      * ``smooth_octolinear_chains``  +10 -- the elbow it substitutes lands
+        collinear with the neighbouring kept segment, a joint it never revisits;
+      * route emission                 11 -- terminal exact-pad stubs that
+        ``_merge_terminal_to_exact`` declined (the merged span would graze), and
+        multipoint links whose paths are simplified INDEPENDENTLY then joined;
+      * ``prune_redundant_cycles``     +4 -- dropping a cycle branch turns a
+        degree-3 junction into a collinear degree-2 joint;
+      * ``close_soft_joints``          +1 -- its bridge is collinear with the
+        two ends it joins, by construction.
+
+    Denser boards carry proportionally more: kicad_files/routed_output.kicad_pcb
+    ships 322 removable segments of 1701 (19%), with 78 straight tracks broken
+    into three pieces.
+
+    THE PASS MOVES NO COPPER. A joint is merged only when the shared vertex lies
+    within ``max_deviation`` of the line joining its neighbours AND the two legs
+    point the same way, so the merged capsule is the union of the originals. The
+    default 1e-6 mm is KiCad's own internal unit (1 nm) -- below the board's
+    coordinate resolution, so the copper polygon is unchanged, not merely close.
+    That is not a guess at what is safe: the real population is bit-exactly
+    collinear (deviation <= 1e-12 mm on every one of 322/25/81 joints measured
+    across three boards), while genuine sub-degree KINKS sit at 1.2-2.4 um and
+    are correctly left alone. Because nothing moves, this pass needs none of the
+    clearance/connectivity guards the shape passes carry, and it is the one
+    copper pass that may run AFTER ``close_soft_joints``: merging a bridge into
+    its neighbours keeps the joint closed rather than reopening it.
+
+    Merge eligibility comes from smooth_octolinear_chains' anchor model, with
+    one deliberate difference. A vertex is interior only when the two chain
+    segments are the ONLY same-net copper touching it (any layer, any width)
+    and no same-net via sits there -- our connectivity model joins segments and
+    barrels at ENDPOINTS, so merging across a tee or a barrel would strand that
+    branch in the model even though the board is unchanged. A same-net PAD over
+    the vertex does NOT veto the merge, because this pass keeps the copper the
+    pad touches; instead the pad's custody is carried per vertex and a vertex is
+    dropped only when every pad covering it also covers a surviving vertex (see
+    _collapse_collinear_vertices). That distinction matters: pad-covered joints
+    are 15 of the 25 on splitflap_driver -- the terminal exact-pad stubs that
+    are the issue's own screenshot -- so vetoing them outright would have left
+    the reported case unfixed. KiCad-locked segments are never merged at all:
+    the user pinned that exact track.
+
+    Overlapping (rather than merely touching) same-net copper is a different
+    defect with a different fix -- see issue #606; this pass does not address it.
+
+    Returns (merged_count, nets_changed, original_segments_to_remove,
+    added_segments, stats)."""
+    from collections import defaultdict
+    from check_drc import point_to_pad_distance
+    from connectivity import COINCIDENCE_TOL
+
+    def vk(x, y):
+        return (round(x, 3), round(y, 3))
+
+    routed_seg_result = {}
+    for r in results:
+        for s in r.get('new_segments') or []:
+            routed_seg_result[id(s)] = r
+
+    vias_by_net = defaultdict(list)
+    for v in pcb_data.vias:
+        vias_by_net[v.net_id].append(v)
+    segs_by_net = defaultdict(list)
+    for s in pcb_data.segments:
+        if s.net_id and (scope_net_ids is None or s.net_id in scope_net_ids):
+            segs_by_net[s.net_id].append(s)
+
+    removed_ids = set()
+    original_to_remove = []
+    added_segments = []
+    nets_changed = 0
+    stats = {'nets': 0, 'nets_skipped_large': 0, 'chains': 0, 'joints': 0,
+             'segs_removed': 0, 'segs_added': 0}
+
+    for net_id in sorted(segs_by_net.keys()):
+        net_segs = segs_by_net[net_id]
+        if len(net_segs) < 2:
+            continue
+        if len(net_segs) > max_net_segs:
+            stats['nets_skipped_large'] += 1
+            continue
+        net_pads = pcb_data.pads_by_net.get(net_id, [])
+        net_vias = vias_by_net.get(net_id, [])
+
+        candidates = [s for s in net_segs
+                      if not getattr(s, 'graphic', False)
+                      and not getattr(s, 'locked', False)
+                      and (not keep_input_copper or id(s) in routed_seg_result)
+                      and math.hypot(s.end_x - s.start_x, s.end_y - s.start_y) > 1e-9]
+        if len(candidates) < 2:
+            continue
+        stats['nets'] += 1
+
+        # Endpoint incidence over ALL same-net segments (any layer/width): a
+        # third endpoint at a vertex (other width, other layer via a barrel, a
+        # tee) makes it an anchor, not an interior point.
+        inc = defaultdict(int)
+        for s in net_segs:
+            inc[vk(s.start_x, s.start_y)] += 1
+            inc[vk(s.end_x, s.end_y)] += 1
+        via_pts = {vk(v.x, v.y) for v in net_vias}
+
+        groups = defaultdict(list)
+        for s in candidates:
+            groups[(s.layer, round(s.width, 4))].append(s)
+
+        net_changed = False
+        for (layer, w), gsegs in sorted(groups.items()):
+            if len(gsegs) < 2:
+                continue
+            gadj = defaultdict(list)
+            for s in gsegs:
+                gadj[vk(s.start_x, s.start_y)].append(s)
+                gadj[vk(s.end_x, s.end_y)].append(s)
+
+            def pad_cover(x, y, _layer=layer, _w=w):
+                """Ids of the same-net pads whose copper covers this point --
+                the vertex's pad CUSTODY, which the collapse must not orphan.
+                Same geometry smooth_octolinear_chains anchors on; here it is
+                carried per vertex instead of vetoing the vertex outright."""
+                out = set()
+                for pad in net_pads:
+                    if not (_layer in pad.layers or any('*' in L for L in pad.layers)):
+                        continue
+                    r = math.hypot(pad.size_x, pad.size_y) / 2.0 + _w / 2.0 + COINCIDENCE_TOL
+                    if abs(x - pad.global_x) > r or abs(y - pad.global_y) > r:
+                        continue
+                    if point_to_pad_distance(x, y, pad) <= _w / 2.0 + COINCIDENCE_TOL:
+                        out.add(id(pad))
+                return frozenset(out)
+
+            def interior(v):
+                # A pad-covered vertex is NOT vetoed here (unlike smoothing,
+                # which moves copper and so must not shortcut across a pad):
+                # the merge keeps the copper, and pad custody is enforced per
+                # vertex in _collapse_collinear_vertices instead. A third
+                # same-net endpoint (inc > 2) and a via DO veto: our
+                # connectivity model joins those at endpoints, so merging
+                # across one would strand the third branch in the model.
+                return len(gadj[v]) == 2 and inc[v] == 2 and v not in via_pts
+
+            anchors = [v for v in gadj if not interior(v)]
+            used = set()
+            for start_key in anchors:
+                for seg0 in list(gadj[start_key]):
+                    if id(seg0) in used:
+                        continue
+                    # Walk anchor -> anchor, carrying the ACTUAL endpoint
+                    # coordinates (the vk() keys are adjacency only).
+                    chain = []
+                    if vk(seg0.start_x, seg0.start_y) == start_key:
+                        vpts = [(seg0.start_x, seg0.start_y)]
+                    else:
+                        vpts = [(seg0.end_x, seg0.end_y)]
+                    cur_key = start_key
+                    s = seg0
+                    while True:
+                        used.add(id(s))
+                        chain.append(s)
+                        if vk(s.start_x, s.start_y) == cur_key:
+                            nxt_pt = (s.end_x, s.end_y)
+                        else:
+                            nxt_pt = (s.start_x, s.start_y)
+                        vpts.append(nxt_pt)
+                        cur_key = vk(*nxt_pt)
+                        if cur_key == start_key:
+                            break                     # ring
+                        if not interior(cur_key) or len(chain) >= max_chain_segs:
+                            break
+                        nxt = [t for t in gadj[cur_key] if id(t) not in used]
+                        if not nxt:
+                            break
+                        s = nxt[0]
+                    if cur_key == start_key or len(chain) < 2:
+                        continue
+                    stats['chains'] += 1
+
+                    kept = _collapse_collinear_vertices(vpts, max_deviation,
+                                                        pad_cover)
+                    if len(kept) == len(vpts):
+                        continue
+
+                    new_chain_segs = [
+                        Segment(start_x=kept[q][0], start_y=kept[q][1],
+                                end_x=kept[q + 1][0], end_y=kept[q + 1][1],
+                                width=w, layer=layer, net_id=net_id)
+                        for q in range(len(kept) - 1)]
+                    stats['joints'] += len(vpts) - len(kept)
+                    stats['segs_removed'] += len(chain)
+                    stats['segs_added'] += len(new_chain_segs)
+                    if dry_run:
+                        continue
+
+                    res = None
+                    for s in chain:
+                        if id(s) in routed_seg_result:
+                            removed_ids.add(id(s))
+                            res = res or routed_seg_result[id(s)]
+                        else:
+                            original_to_remove.append(s)
+                    if res is None:
+                        res = {'new_segments': [], 'new_vias': [],
+                               'cleanup': 'merge_collinear'}
+                        results.append(res)
+                    res['new_segments'] = list(res.get('new_segments') or []) + new_chain_segs
+                    added_segments.extend(new_chain_segs)
+                    # Splice pcb_data NOW, per chain (#508 finding 5), so the
+                    # board and the write-list never disagree mid-pass.
+                    _rm = {id(s) for s in chain}
+                    pcb_data.segments = [s for s in pcb_data.segments
+                                         if id(s) not in _rm] + new_chain_segs
+                    net_changed = True
+        if net_changed:
+            nets_changed += 1
+
+    if removed_ids:
+        for r in results:
+            segs = r.get('new_segments')
+            if segs:
+                r['new_segments'] = [s for s in segs if id(s) not in removed_ids]
+    if not dry_run and hasattr(pcb_data, '_foreign_seg_arr_cache'):
+        pcb_data._foreign_seg_arr_cache = None
+    # NO fill-model invalidation, unlike the shape passes: the copper polygon is
+    # unchanged, so every cached pour model stays exactly as valid as it was.
+    return (stats['segs_removed'] - stats['segs_added'], nets_changed,
+            original_to_remove, added_segments, stats)
+
+
 def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
                         config=None):
     """The single worst foreign-copper offender below clearance of segment `s`:

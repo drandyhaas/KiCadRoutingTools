@@ -323,6 +323,10 @@ def refresh() -> None:
     g['GATE_DEBUG'] = _truthy('KICAD_GATE_DEBUG')
     g['NO_SWEEP_PLATED'] = _truthy('KICAD_NO_SWEEP_PLATED')
     g['NO_SOFT_JOINT_BRIDGE'] = _truthy('KICAD_NO_SOFT_JOINT_BRIDGE')
+    # #811 collinear merge (default ON, KICAD_MERGE_COLLINEAR=0 ablates).
+    # The pass moves no copper, so this is an A/B isolation knob like
+    # KICAD_NO_SOFT_JOINT_BRIDGE, not a behaviour choice.
+    g['MERGE_COLLINEAR'] = _on_default('KICAD_MERGE_COLLINEAR')
     g['BOARD_LEDGER'] = _truthy('KICAD_BOARD_LEDGER')
     # "x,y" via position string ('' = off; consumers test truthiness + parse)
     g['RESCUE_DEBUG_VIA'] = _s('KICAD_RESCUE_DEBUG_VIA')
