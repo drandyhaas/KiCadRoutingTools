@@ -17,6 +17,31 @@ CONFIDENT number where there is no evidence:
 Each of those has a check here, and `tests/mutate_553.py` re-introduces them one
 at a time to prove these checks are not vacuous.
 
+MEASURED, from the run -- never predicted and never edited afterwards to match:
+
+    15 rows: 12 killed, 3 survived (3 of them expected), 0 broken
+
+    identity-rank                       KILLED     sign-flip            KILLED
+    omit-becomes-zero                   KILLED     preexisting-counts-one KILLED
+    high-fanout-cut-removed             KILLED     every-owner-gets-the-cells KILLED
+    concat-not-round-robin              KILLED     no-spread-ranks-anyway KILLED
+    internal-pair-counts-twice          KILLED     budget-ignored       KILLED
+    selected-by-claims-the-whole-pool   KILLED     efficacy-claim-emptied KILLED
+    unrounded-compare                   SURVIVED, expected -- see below
+    a-comment-restates-the-unit         SURVIVED, expected (inert probe)
+    top-k-widens                        SURVIVED, expected (inert probe)
+
+`unrounded-compare` is the one real gap, and it is recorded rather than
+papered over: every value in this fixture differs by far more than 1e-4, so
+dropping `round(..., RANK_DECIMALS)` changes no order here. The determinism
+guarantee it protects -- two processes must not order two near-equal
+candidates differently -- is therefore UNATTACKED. Closing it needs a fixture
+whose values differ below RANK_DECIMALS.
+
+`identity-rank` did not always pass. Its first run SURVIVED, because the blocks
+were called sheet:A and sheet:B and alphabetical order reproduced the value
+order; that is why they are now named so the strongest sorts last.
+
 No board and no router: the ranking reads `state.parts`, `state.net_refs` and
 `Part.pad_globals()`, so a handful of fakes exercises it exactly. That also
 keeps this file in `run_all.py --fast`.
