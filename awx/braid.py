@@ -1589,15 +1589,18 @@ class Corridor:
             log('  reserved: ' + ', '.join(f'[{a:.2f},{b:.2f}]' for a, b in self.reserved)
                 + f'  (free {self.L_free:.2f} of {self.s1 - self.s0:.2f} mm)')
         sched = Schedule(self.launch, self.target, ctx.tooth_layer, log=log,
-                         dest_layer=ctx.dest_layer)
+                         dest_layer=ctx.dest_layer,
+                         pages=getattr(ctx, 'pages', None))
         gaps = {d: 1 for d in sched.divers}
         lead = {d: 0 for d in sched.divers}
         boost = {}                # ribbon: refused lanes route earlier
+        prev_refused = None
         best = None
         for attempt in range(6):
             self.offsets(ly_floor)
             sched = Schedule(self.launch, self.target, ctx.tooth_layer,
-                             dest_layer=ctx.dest_layer)
+                             dest_layer=ctx.dest_layer,
+                             pages=getattr(ctx, 'pages', None))
             cols, gate = self.plan_columns(sched, gaps, lead)
             self.lay_lanes(cols)
             swaps = [sw for col in cols for sw in col]
@@ -1666,6 +1669,17 @@ class Corridor:
             if not self.refused:
                 break
             if sched.two_page:
+                # attempts converge fast on the ribbon: once the
+                # refused set repeats with the launch pitch maxed and
+                # the boost already applied, later attempts are
+                # identical -- and each one re-runs tens of thousands
+                # of exhausted A* iterations per refusal (K28: 378k
+                # per attempt)
+                if attempt >= 2 and self.refused == prev_refused \
+                        and ly_floor >= 0.40 - 1e-9:
+                    log('    attempts converged; stopping early')
+                    break
+                prev_refused = list(self.refused)
                 for nm in self.refused:
                     boost[nm] = boost.get(nm, 0) + 1
             # FEEDBACK. Room across first -- the launch pitch is the
@@ -1862,6 +1876,19 @@ def setup(board, names, dest, log, cluster=6.0):
                                   byname[nm][1].pads) for nm in names}
     ctx.stub_dir = {nm: _end_dir(pcb, byname[nm][0], ends[nm][1],
                                  byname[nm][1].pads) for nm in names}
+    # the PLAN's page assignment, written beside the fanout board by
+    # the two-page chain: with it the braid's Schedule uses the pages
+    # the escapes were laid FOR, instead of re-deriving them from its
+    # own orders and disagreeing (loaded here so the probe tools see
+    # the same board the same way)
+    ctx.pages = None
+    _pages_path = os.path.splitext(board)[0] + '.pages.json'
+    if os.path.exists(_pages_path):
+        import json
+        with open(_pages_path, encoding='utf-8') as _f:
+            ctx.pages = json.load(_f)
+        log(f'pages sidecar: {_pages_path} '
+            f'({sum(1 for v in ctx.pages.values() if v)} paged)')
 
     # ---- corridors: taut paths, grouped by where they arrive and
     # whether one spine can reach them all

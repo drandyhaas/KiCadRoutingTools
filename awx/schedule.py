@@ -66,7 +66,8 @@ class Schedule:
 
     def __init__(self, launch: Sequence[str], target: Sequence[str],
                  tooth_layer: Optional[Dict[str, str]] = None, log=None,
-                 dest_layer: Optional[Dict[str, str]] = None):
+                 dest_layer: Optional[Dict[str, str]] = None,
+                 pages: Optional[Dict[str, Optional[str]]] = None):
         self.launch = list(launch)
         self.target = list(target)
         assert sorted(self.launch) == sorted(self.target)
@@ -97,29 +98,76 @@ class Schedule:
         # single-page floor made 13 of them dive. TWO_PAGE=0 keeps the
         # single page (every non-keeper a swimmer).
         self.two_page = os.environ.get('TWO_PAGE', '0') == '1'
-        # single page: the plain LIS (the form every recorded ladder
-        # was routed with); two pages: weighted by the ends' layers
-        keep = (lis_keep_weighted(ranks, [on(nm, 'F.Cu') for nm in self.launch])
-                if self.two_page else lis_keep(ranks))
-        self.page: Dict[str, Optional[str]] = {nm: None for nm in self.launch}
-        for i in keep:
-            self.page[self.launch[i]] = 'F.Cu'
-        if self.two_page:
-            rest = [nm for i, nm in enumerate(self.launch) if i not in keep]
-            if len(rest) >= 2:
-                # (a B-page of the WORST CROSSERS -- the human's
-                # constant-layer SWE idiom -- was tried and measured
-                # WORSE on all-F-escape fanouts: it demotes the
-                # mutually-increasing risers to swimmers, and with the
-                # F layer saturated by the escapes whoever swims is
-                # refused: K11 10/11 -> 7/11, K28 5 -> 6 open. Revisit
-                # when the fanout escapes by page, step 3.)
-                keep_b = lis_keep_weighted([self.trank[nm] for nm in rest],
-                                           [on(nm, 'B.Cu') for nm in rest])
-                for i in keep_b:
-                    self.page[rest[i]] = 'B.Cu'
-            elif rest:
-                self.page[rest[0]] = 'B.Cu'
+        if self.two_page and pages is not None:
+            # the PLAN's page assignment, used verbatim (the chain
+            # writes it beside the fanout board), so plan and braid
+            # can never disagree about who is a swimmer. A member
+            # that crosses an earlier member of its own page is
+            # demoted to a swimmer: the assignment came from another
+            # geometry's orders, and a page must stay crossing-free
+            # under THIS corridor's orders.
+            keep = set()
+            self.page = {nm: None for nm in self.launch}
+            for L in ('F.Cu', 'B.Cu'):
+                kept: List[str] = []
+                for i, nm in enumerate(self.launch):
+                    if pages.get(nm) != L:
+                        continue
+                    if all(not self.inverted(nm, om) for om in kept):
+                        kept.append(nm)
+                        self.page[nm] = L
+                        if L == 'F.Cu':
+                            keep.add(i)
+            if log:
+                demoted = [nm for nm in self.launch
+                           if pages.get(nm) in ('F.Cu', 'B.Cu')
+                           and self.page[nm] is None]
+                if demoted:
+                    log(f'  pages sidecar: demoted to swimmers '
+                        f'(cross their own page here): {demoted}')
+        else:
+            # single page: the plain LIS (the form every recorded
+            # ladder was routed with); two pages: weighted by the
+            # ends' layers
+            keep = (lis_keep_weighted(ranks,
+                                      [on(nm, 'F.Cu') for nm in self.launch])
+                    if self.two_page else lis_keep(ranks))
+            self.page = {nm: None for nm in self.launch}
+            for i in keep:
+                self.page[self.launch[i]] = 'F.Cu'
+            if self.two_page:
+                rest = [nm for i, nm in enumerate(self.launch)
+                        if i not in keep]
+                if len(rest) >= 2:
+                    if os.environ.get('TWO_PAGE_B') == 'worst':
+                        # the B-page RESCUES THE WORST CROSSERS first
+                        # -- the human's constant-layer SWE idiom. On
+                        # an all-F-escape fanout this measured WORSE
+                        # (K11 10/11 -> 7/11: it demotes the mutually-
+                        # increasing risers to swimmers against a
+                        # saturated F layer); with escapes BY PAGE
+                        # (step 3) it is the arm to re-try, hence a
+                        # knob rather than a default.
+                        inv = {nm: sum(1 for om in self.launch
+                                       if om != nm and self.inverted(nm, om))
+                               for nm in rest}
+                        page_b: List[str] = []
+                        for nm in sorted(rest,
+                                         key=lambda n: (-inv[n],
+                                                        -on(n, 'B.Cu'))):
+                            if all(not self.inverted(nm, om)
+                                   for om in page_b):
+                                page_b.append(nm)
+                        for nm in page_b:
+                            self.page[nm] = 'B.Cu'
+                    else:
+                        keep_b = lis_keep_weighted(
+                            [self.trank[nm] for nm in rest],
+                            [on(nm, 'B.Cu') for nm in rest])
+                        for i in keep_b:
+                            self.page[rest[i]] = 'B.Cu'
+                elif rest:
+                    self.page[rest[0]] = 'B.Cu'
         self.b_page = [nm for nm in self.launch if self.page[nm] == 'B.Cu']
         self.swimmers = [nm for nm in self.launch if self.page[nm] is None]
         self.divers = {self.launch[i] for i in range(len(self.launch))

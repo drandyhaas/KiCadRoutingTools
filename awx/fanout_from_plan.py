@@ -234,97 +234,122 @@ schoice, choice, lp, report = pe.plan_ends(
     # the 'spend' objective only when the source moves will be APPLIED
     objective='spend' if SOURCE else 'floor', model=model)
 if TWO_PAGE_PLAN and choice:
-    # STEP 3: pages from the braid's own orders for THIS choice, then
-    # each page net's escape re-picked to its page layer (v1: pages
-    # computed once from the plan's pick; a re-pick moves the exit a
-    # little, so the permutation -- and with it the pages -- could
-    # shift, which iterating this block would chase; measure first)
+    # STEP 3: pages from the braid's own orders for THIS choice, and
+    # each page net's escape re-picked to its page layer at both ends
+    # -- iterated to a FIXED POINT with the orders. A re-pick moves
+    # the exit (and, with SOURCE, the tooth), which shifts the very
+    # permutation the pages were computed from: computed once, K11's
+    # SDQ12 was planned B-page and braided as a swimmer with both
+    # ends on B, and K28's plan said F18/B7/sw3 where the braid then
+    # found F17/B5/sw5.
     from schedule import Schedule
     import select_moves as sm_mod
-    grp = [n for n in names if n in choice]
-    tooth_now = dict(tooth0)
-    for n, m in schoice.items():
-        tooth_now[n] = m.layer
-    sched = Schedule(model.order(grp, choice),
-                     model.target_order(grp, choice), tooth_now,
-                     dest_layer={n: choice[n].layer for n in grp})
-    n_f = sum(1 for n in grp if sched.page.get(n) == 'F.Cu')
-    print(f'\ntwo-page plan: pages F {n_f} / B {len(sched.b_page)} / '
-          f'swimmers {len(sched.swimmers)}')
-    re_d = re_s = 0
-    for n in grp:
-        P = sched.page.get(n)
-        if not P:
-            continue
-        m0 = choice[n]
-        if m0.layer != P:
-            # lanes_free re-checked against the WHOLE choice: the
-            # re-pick happens after plan_ends, and an unchecked gap
-            # via landed in the street a kept surface move uses
-            # (K11 SDQ11's site under SDQ14's run, 6 DRC)
-            cand = [m for m in dmenu.get(n, ())
-                    if m.layer == P and m.direction == m0.direction
-                    and sm_mod.lanes_free(m, choice, n, strict=True)]
-            if cand:
-                # dogbone preferred over via_in_pad: the page moves
-                # are laid VERBATIM from their own geometry (see the
-                # apply below), and a dogbone's gap via is a standard
-                # barrel where a via-in-pad needs the pad clamp and
-                # the IPC-4761 burden
-                choice[n] = min(cand, key=lambda m: (
-                    m.kind != 'dogbone', m.vias,
-                    abs(m.exit_pt[0] - m0.exit_pt[0])
-                    + abs(m.exit_pt[1] - m0.exit_pt[1])))
-                re_d += 1
-        if SOURCE and n in smenu:
-            cur = schoice.get(n) or src_seed.get(n)
-            if cur is not None and cur.layer != P:
-                # checked against the UNMOVED seeds too: a re-pick that
-                # only saw the moved nets shared a gap with a stub the
-                # plan left alone
-                merged = {**src_seed, **schoice}
-                cand = [m for m in smenu[n]
-                        if m.layer == P and m.direction == cur.direction
-                        and sm_mod.lanes_free(m, merged, n, strict=True)]
-                if cand:
-                    schoice[n] = min(cand, key=lambda m: m.vias)
-                    re_s += 1
-    print(f'  re-picked to the page layer: {re_d} berth escape(s), '
-          f'{re_s} source escape(s)')
-    # DE-CONFLICT the final berth choice under the STRICT test. The
-    # moves are laid VERBATIM now: what select() tolerated (it only
-    # ever handed the fanout a direction; the engine re-assigned gaps)
-    # must hold as real geometry -- two same-layer runs in one gap,
-    # a via site in a foreign lane. The loser of a conflicting pair
-    # moves to a free move of the same layer and direction.
     import itertools
-    n_fix = 0
-    for _r in range(4):
-        moved_any = False
-        for a_, b_ in itertools.combinations(
-                [n for n in names if n in choice], 2):
-            if not sm_mod._conflict(choice[a_], choice[b_], strict=True):
+    unresolved = set()
+    # ONE round, not a fixed point: iterating re-picks against the
+    # re-shifted orders converged to WORSE pages (K28 sw3 -> sw5, K21
+    # split into two corridors as de-conflict moved faces). Instead
+    # the assignment is written BESIDE the board (below) and the braid
+    # uses it verbatim, so plan and braid cannot disagree.
+    for _round in range(1):
+        grp = [n for n in names if n in choice]
+        tooth_now = dict(tooth0)
+        launch_now = dict(launch)
+        for n, m in schoice.items():
+            tooth_now[n] = m.layer
+            launch_now[n] = m.exit_pt
+        geo_now = (model if launch_now == model.launch
+                   else model.rebased(launch_now))
+        sched = Schedule(geo_now.order(grp, choice),
+                         geo_now.target_order(grp, choice), tooth_now,
+                         dest_layer={n: choice[n].layer for n in grp})
+        n_f = sum(1 for n in grp if sched.page.get(n) == 'F.Cu')
+        print(('\n' if not _round else '')
+              + f'two-page plan round {_round}: pages F {n_f} / B '
+              f'{len(sched.b_page)} / swimmers {len(sched.swimmers)}')
+        re_d = re_s = 0
+        for n in grp:
+            P = sched.page.get(n)
+            if not P:
                 continue
-            done = False
-            for n2 in (b_, a_):
-                m0 = choice[n2]
-                cand = [m for m in dmenu.get(n2, ())
-                        if m.layer == m0.layer and m.direction == m0.direction
-                        and m is not m0
-                        and sm_mod.lanes_free(m, choice, n2, strict=True)]
+            m0 = choice[n]
+            if m0.layer != P:
+                # lanes_free re-checked STRICTLY against the WHOLE
+                # choice: the re-pick happens after plan_ends, and an
+                # unchecked gap via landed in the street a kept
+                # surface move uses (K11 SDQ11 under SDQ14, 6 DRC)
+                cand = [m for m in dmenu.get(n, ())
+                        if m.layer == P and m.direction == m0.direction
+                        and sm_mod.lanes_free(m, choice, n, strict=True)]
                 if cand:
-                    choice[n2] = min(cand, key=lambda m: (
-                        m.vias, abs(m.exit_pt[0] - m0.exit_pt[0])
+                    # dogbone preferred over via_in_pad: the moves are
+                    # laid VERBATIM, and a gap via is a standard
+                    # barrel where a via-in-pad needs the pad clamp
+                    # and the IPC-4761 burden
+                    choice[n] = min(cand, key=lambda m: (
+                        m.kind != 'dogbone', m.vias,
+                        abs(m.exit_pt[0] - m0.exit_pt[0])
                         + abs(m.exit_pt[1] - m0.exit_pt[1])))
-                    n_fix += 1
-                    moved_any = done = True
-                    break
-            if not done:
-                print(f'  UNRESOLVED lane conflict: {a_} vs {b_}')
-        if not moved_any:
+                    re_d += 1
+            if SOURCE and n in smenu:
+                cur = schoice.get(n) or src_seed.get(n)
+                if cur is not None and cur.layer != P:
+                    # checked against the UNMOVED seeds too: a re-pick
+                    # that only saw the moved nets shared a gap with a
+                    # stub the plan left alone
+                    merged = {**src_seed, **schoice}
+                    cand = [m for m in smenu[n]
+                            if m.layer == P and m.direction == cur.direction
+                            and sm_mod.lanes_free(m, merged, n, strict=True)]
+                    if cand:
+                        schoice[n] = min(cand, key=lambda m: m.vias)
+                        re_s += 1
+        # DE-CONFLICT under the STRICT test: the moves are laid
+        # VERBATIM, so what select() tolerated (it only ever handed
+        # the fanout a direction; the engine re-assigned gaps) must
+        # hold as real geometry. The loser of a conflicting pair moves
+        # to a free same-layer move -- same direction preferred, any
+        # allowed direction as the fallback (an unresolved conflict
+        # ships as real DRC: K21 SCKE0's column run under SRAS/SODT0;
+        # a moved face is absorbed by the next round's page recompute).
+        n_fix = 0
+        for _r in range(4):
+            moved_any = False
+            for a_, b_ in itertools.combinations(
+                    [n for n in names if n in choice], 2):
+                if not sm_mod._conflict(choice[a_], choice[b_], strict=True):
+                    continue
+                done = False
+                for n2 in (b_, a_):
+                    m0 = choice[n2]
+                    cand = [m for m in dmenu.get(n2, ())
+                            if m.layer == m0.layer and m is not m0
+                            and sm_mod.lanes_free(m, choice, n2, strict=True)]
+                    if cand:
+                        choice[n2] = min(cand, key=lambda m: (
+                            m.direction != m0.direction,
+                            m.kind != m0.kind, m.vias,
+                            abs(m.exit_pt[0] - m0.exit_pt[0])
+                            + abs(m.exit_pt[1] - m0.exit_pt[1])))
+                        n_fix += 1
+                        moved_any = done = True
+                        break
+                if not done:
+                    unresolved.add((a_, b_))
+            if not moved_any:
+                break
+        if re_d or re_s or n_fix:
+            print(f'  round {_round}: re-picked {re_d} berth / {re_s} '
+                  f'source escape(s), de-conflicted {n_fix}')
+        else:
             break
-    if n_fix:
-        print(f'  de-conflicted the berth choice: {n_fix} move(s) shifted')
+    for a_, b_ in sorted(unresolved):
+        print(f'  UNRESOLVED lane conflict: {a_} vs {b_}')
+    import json
+    pages_path = os.path.splitext(out_path)[0] + '.pages.json'
+    with open(pages_path, 'w', encoding='utf-8') as f:
+        json.dump({n: sched.page.get(n) for n in grp}, f)
+    print(f'  pages -> {os.path.basename(pages_path)}')
 # only the nets the plan actually MOVED are re-fanned: a move of the
 # same kind, side, layer and gap as the stub already on the board IS
 # that stub (the menu's exit x differs from the tooth's by the array
