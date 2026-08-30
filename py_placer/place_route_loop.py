@@ -1066,8 +1066,14 @@ def main():
         quench_base = cur_file
         reloc = None
         if args.relocate:
+            # `blocks` is already filtered to the ones with a targeted member,
+            # and that is the right scope rather than an accident: #554 says
+            # "move only DIAGNOSED blocks", and a block none of whose members
+            # owns a failed or blocker net is not implicated in this round's
+            # failure. `--relocate-refs` bypasses the whole derivation for a
+            # caller who has decided otherwise.
             reloc = relocate_round(
-                pcb_data, cur_file, blocks or frozen_blocks or {},
+                pcb_data, cur_file, blocks,
                 block=args.relocate_block, refs=args.relocate_refs,
                 ignore_nets=args.ignore_nets,
                 max_corridor_mm=args.relocate_max_corridor,
