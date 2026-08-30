@@ -449,6 +449,12 @@ discharging, not a number chosen afterwards.*
    lower `blocking` than the baseline, the `crossings` clause of `rule1_check`
    is withdrawn — and the withdrawal keeps its row, with its measured direction,
    in the `rejected` style `test_placement_ab.py` uses.
+   **DISCHARGED 2026-08-30** by the slate run below, on esp_prog and
+   kit-dev-coldfire. The clause is withdrawn; the direction survives in
+   `portfolio.rule1_advisory`; the row is
+   `tests/placement_rule1_withdrawal.json` and its detector is
+   `tests/test_789_rule1_withdrawal.py`. `rank_key` slot 1 is untouched — rule
+   2 was about the bar, and the order is rule 5.
 3. A predictor is reported as ranking `blocking` only on ≥ N−1 boards right and
    none wrong, over boards with a *defined* ρ, with N ≥ 3 and the shuffle-control
    rate printed beside it.
@@ -500,6 +506,107 @@ discharging, not a number chosen afterwards.*
    varies. Saying that after seeing the rate would read as excuse-making;
    saying it here is the honest form. A discharge at a high null rate is still
    a discharge, and still evidence of very little.
+
+## The slate run (#789) — what the rank key and the rule-1 bar are worth
+
+Six boards, K=11 each: candidate 0 (the plain quench, which `portfolio.generate`
+refuses to produce under `only=`, so #703 never made one) generated, routed and
+graded here, plus #703's ten recorded portfolio candidates grafted in. **One new
+route per board instead of eleven.** Regenerate with
+
+```bash
+python3 -X utf8 tests/stress/slate_study.py --out wk/789 -j 4
+python3 -X utf8 tests/stress/slate_study.py --from-rows wk/789/slate_rows.jsonl
+```
+
+The graft is guarded rather than asserted, and every guard ran: the board's
+#703 `argv_sha`, the input-board sha, each candidate's `variant_board_sha`, a
+regeneration control (two candidates per board re-derived and required to match
+their recorded `poses_sha256`) and a re-route control (one grafted candidate
+re-routed to a fresh path and required to return the `blocking` its `score.json`
+recorded). Zero boards voided. kit-dev-coldfire ran with reduced guards — one
+regeneration check, no re-route control — declared before the run, because its
+quench and route cost hours each.
+
+### Rule 2: DISCHARGED, and the criterion that discharged it is weak
+
+| board | verdict | baseline `blocking` | barred on crossings | fired | null rate |
+|---|---|---|---|---|---|
+| esp_prog | **fires** | 4 | 4 | 3 | 100% |
+| kit-dev-coldfire | **fires** | 5 | 4 | 1 | 99% |
+| tigard | does not fire | 2 | 1 | 0 | 0% |
+| watchy | does not fire | 3 | 2 | 0 | 21% |
+| sonde_u | cannot fire (baseline clean) | 0 | 0 | — | — |
+| splitflap_driver | cannot fire (baseline clean) | 0 | 5 | — | — |
+
+esp_prog's three firing candidates are barred on crossings **alone** — their
+hpwl is below the baseline's — and routed to `blocking` 3, 3 and 2 against the
+baseline's 4. The one at 2 carries the **highest crossings on the slate**, and
+the best candidate the bar allows through routes to 3.
+
+**The null rate is the number that says how much that is worth**, and it was
+pre-registered as expected-high before the run: permuting `blocking` within a
+board, the criterion still fires 100% of the time on esp_prog and 99% on
+kit-dev, because almost every candidate on those slates routed below their
+baseline. On tigard it is 0%. So the criterion is easy to satisfy exactly where
+it fired, and a discharge on it is evidence of very little.
+
+### What the withdrawal actually changes — the consequence, not the criterion
+
+`select_best` takes the first index in `ranking_primary + ranking_static` that
+is 0 or not a violator, so the answer depends on whether a probe ranking exists.
+`--route-top` defaults to 2, so in a shipped run one does. Both arms:
+
+| arm | result |
+|---|---|
+| static order only (`--route-top 0`) | **6 of 6 unchanged** |
+| with a probe ranked by the candidates' actual routed `blocking` | esp_prog picks `blocking` **2** where the bar forced a fall-through to **3**; the other five unchanged |
+| **worse on** | **0 boards, in either arm** |
+
+The static-only result is structural rather than lucky: `rank_key`'s slot 1 *is*
+crossings, so a candidate barred for having more crossings than the baseline
+already sorts below every candidate with fewer, and `select_best` reaches a
+non-violator first. The bar could only ever bite when the head of the static
+order is itself crossings-barred. **That is what makes the withdrawal safe to
+ship** — it rests on a measured consequence, not on the weak criterion alone.
+
+### Rule 5: NOT SHOWN TO AGREE
+
+| board | tau-b (static position vs routed `blocking`) |
+|---|---|
+| watchy | +0.816 [LOO +0.816..+0.816, K=4] (7 gate-rejected) |
+| kit-dev-coldfire | +0.250 [LOO +0.094..+0.454, K=11] |
+| esp_prog | −0.070 [LOO −0.218..+0.183, K=11] |
+| sonde_u | −0.341 [LOO −0.447..−0.348, K=11] |
+| tigard | −0.408 [LOO −0.816..+0.000, K=4] (7 gate-rejected) |
+| splitflap_driver | n/a — saturated, every candidate routes to `blocking` 0 |
+
+2 positive, 3 negative, N=5, two-sided p = 1.000. Rule 5 requires positive on
+≥ N−1 and negative on none (or the mirror image to license a reorder *issue*).
+Neither holds. **So this licenses nothing**: `rank_key` slot 1 is unchanged and
+the contradiction between it and the drivers' prohibition stays disclosed at
+both code sites, exactly as rule 1 left it.
+
+Two disclosures travel with that table. splitflap_driver is saturated and out
+of the denominator per rule 4. tigard and watchy report K=4 because 7 of their
+11 candidates fail `score_candidate`'s baseline-relative legality gates — which
+is the shipped selector's own behaviour, since `rank_static` ranks only viable
+candidates, but a tau over 4 and a tau over 11 are not the same evidence.
+
+### What this run does not claim
+
+- **It measures `portfolio.generate`'s library-default slate, not the CLI's.**
+  #703 generated its candidates with `quench_kw=None` (max_displacement 10.0,
+  crossing_penalty 10.0, length_weight 1.0, halo_coef 0.25) while
+  `place_portfolio.main` ships 3.0 / 30.0 / 0.3 / 0.15. Candidate 0 is generated
+  the same way, so the comparison inside a board is on equal terms and rule 2 is
+  discharged on its own terms — but the 4× lower crossing penalty is on exactly
+  the axis the question is about, and a replication on the CLI's slate would be
+  a different measurement.
+- The probe arm uses each candidate's **actual routed `blocking`** as the probe
+  order. A real probe ranks on windowed route failures, so that arm bounds the
+  effect rather than predicting a particular run.
+- Six boards is six boards, and the tau side is N=5 with two boards at K=4.
 
 ## What this does not claim
 

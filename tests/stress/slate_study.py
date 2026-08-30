@@ -507,6 +507,57 @@ def qorder(rows):
             'blocking': ys}
 
 
+def delta(rows):
+    """What withdrawing the crossings clause would CHANGE, per board.
+
+    Rule 2 asks whether the clause ever bars a candidate that routed better.
+    That is the criterion. This is the consequence, and they are not the same
+    question: a criterion can fire on a clause that decides nothing.
+
+    `select_best` takes the first index in `ranking_primary + ranking_static`
+    that is 0 or not a violator, so the answer depends on whether a PROBE
+    ranking exists -- and `--route-top` defaults to 2, so in a shipped run one
+    does. Both arms are computed:
+
+      static-only   `--route-top 0`. Expect no change: `rank_key`'s slot 1 IS
+                    crossings, so a candidate barred for having MORE crossings
+                    than the baseline already sorts below every candidate with
+                    fewer, and select_best reaches a non-violator first.
+      with-probe    the probe ranked by each candidate's ACTUAL routed
+                    `blocking`. This is an IDEALISED probe -- a real one ranks
+                    on windowed route failures -- so it bounds the effect
+                    rather than predicting one run.
+    """
+    from placement import portfolio as PF
+    out = {}
+    for b, rr in sorted(rs.per_board(rows).items()):
+        R = sorted(rr, key=lambda r: r['index'])
+        viable = [r for r in R if r['viable']
+                  and r['truth'].get('blocking') is not None]
+        if not viable:
+            continue
+        static = [r['index'] for r in sorted(viable,
+                                             key=lambda r: tuple(r['rank_key']))]
+        probe = [r['index'] for r in sorted(
+            viable, key=lambda r: (r['truth']['blocking'], r['index']))]
+        now = {r['index'] for r in R if r['rule1_clauses']}
+        after = {r['index'] for r in R if r['rule1_would_bar_on_hpwl']}
+        blk = {r['index']: r['truth'].get('blocking') for r in R}
+        arms = {}
+        for name, primary in (('static_only', []), ('with_probe', probe)):
+            n = PF.select_best(primary, static, now)
+            a = PF.select_best(primary, static, after)
+            arms[name] = {
+                'pick_now': n, 'pick_after': a,
+                'blocking_now': blk.get(n), 'blocking_after': blk.get(a),
+                'verdict': ('unchanged' if n == a else
+                            'better' if blk.get(a) < blk.get(n) else
+                            'worse' if blk.get(a) > blk.get(n) else
+                            'same blocking')}
+        out[b] = arms
+    return out
+
+
 def aggregate(rows):
     """Per board, then across boards by SIGN -- never pooled, never averaged."""
     by_board = rs.per_board(rows)
@@ -530,6 +581,7 @@ def aggregate(rows):
                  and not pos)
     return {
         'per_board': per,
+        'delta': delta(rows),
         'rule2': {
             'discharged': bool(fired),
             'boards_that_fired': fired,
@@ -578,6 +630,23 @@ def report(agg):
                + f'  [{len(r2["boards_able_to_fire"])} board(s) ABLE to fire]')
     out.append('     Rule 2 is an EXISTENCE claim: it can be discharged, never')
     out.append('     refuted. The clause standing is a default, not a finding.')
+    out.append('')
+    out.append('WHAT THE WITHDRAWAL WOULD CHANGE (the consequence, not the '
+               'criterion)')
+    for b, arms in sorted((agg.get('delta') or {}).items()):
+        out.append('  %-30s static-only: %-14s with-probe: %s'
+                   % (b, arms['static_only']['verdict'],
+                      arms['with_probe']['verdict']
+                      + ('' if arms['with_probe']['verdict'] == 'unchanged'
+                         else '  (blocking %s -> %s)'
+                         % (arms['with_probe']['blocking_now'],
+                            arms['with_probe']['blocking_after']))))
+    _w = [b for b, a in (agg.get('delta') or {}).items()
+          if 'worse' in (a['static_only']['verdict'],
+                         a['with_probe']['verdict'])]
+    out.append('  => worse on %d board(s)%s'
+               % (len(_w), (': ' + ', '.join(_w)) if _w else
+                  ' in either arm'))
     out.append('')
     out.append('Q-ORDER -- newly pre-registered rule 5 (rank_key slot 1\'s order)')
     for b, d in sorted(agg['per_board'].items()):

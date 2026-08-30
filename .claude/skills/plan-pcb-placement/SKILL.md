@@ -1034,7 +1034,16 @@ HARD gates is legality + intent (rule 2); **rule 1 — metrics no worse than
 the baseline — is ANNOTATED, not gated**: violators carry `gates.rule1` /
 `rule1_violators` in portfolio.json and are excluded from the
 JSON_SUMMARY `best` pick (which falls back to the baseline), but they stay
-in the rankings. Verify rule 1 YOURSELF against the baseline row before
+in the rankings.
+**Rule 1 is now the hpwl clause only.** Its crossings half was WITHDRAWN by
+#789 on the exit criterion `docs/placement-predictors.md` pre-registered for
+it: a six-board slate found candidates barred on crossings alone that routed
+to strictly lower `blocking` than the baseline, and removing the bar made no
+board worse in either arm while making one better. The direction is still
+measured and printed as `RULE1-ADVISORY` / `gates.rule1_advisory`; it simply
+no longer bars. `rank_key` still ORDERS on crossings — that is a separate
+question, and the same run left it unresolved.
+Verify rule 1 YOURSELF against the baseline row before
 adopting ANY index (measured, run 7: a slate's routed-best carried
 crossings 74 vs baseline 67 with hpwl also worse; only the manual
 conjunction check at adoption caught it). The repo-local gates are still
