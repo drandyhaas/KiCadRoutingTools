@@ -22,6 +22,19 @@ Every accepting arm has a CONTROL, because a check that reports every `allow`
 would pass all the fire arms and none of the quiet ones -- and the corpus is
 protected by the quiet ones (`emit_intent` writes `keepouts: []`, so every
 emitted intent must stay silent).
+
+THE MUTATION TABLE, RECORDED FROM THE RUN (`python3 tests/mutate_799.py`, which
+carries both issues' rows), never predicted:
+
+    20 rows: 16 killed, 4 survived, 0 broken, 0 disagreeing with expectation
+
+The five rows aimed at this file are all KILLED --
+`allow-unresolved-fires-at-error` (the `default=WARN` that `severity_of`'s
+ERROR default would otherwise swallow),
+`allow-unresolved-checks-the-tuple-not-each-pattern`,
+`the-audit-uses-its-own-matcher`, `the-exemption-uses-its-own-matcher` (the two
+halves of the identity claim), and `grade-does-not-raise-either-finding`.
+The four survivors all belong to #799; see that file's header for their reasons.
 """
 import json
 import os

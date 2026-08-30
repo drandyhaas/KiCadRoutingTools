@@ -335,6 +335,42 @@ Its leads pass through. `keepout` tests the courtyard **and** the drilled-pad
 rect against every face the part occupies, so a mounting-hole keep-out cannot be
 walked through from the back.
 
+### A zone a keep-out leaves no room in is refused
+
+[#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702) refuses an
+intent whose keep-out covers a declared zone **entirely**. The question
+underneath is *does the zone minus the binding keep-outs still hold this part at
+some rotation*, and the two coincide only at total coverage. Measured before
+[#799](https://github.com/drandyhaas/KiCadRoutingTools/issues/799): zone
+`[10,10,20,20]` at `tolerance_mm: 0` against a keep-out `[10,10,19.9,20]` — 99%
+of it — raised nothing while the member had **zero** satisfying poses, and two
+keep-outs covering half each were missed the same way.
+
+It has to be refused where it is authored because the #702 quench gate is
+termwise-monotone: `keepout` falls only by leaving the zone, leaving raises
+`zone_containment`, and no candidate lowers both. Such a member is **confined to
+its zone** for the whole run — confined, not frozen: every pose inside the zone
+scores identically, so the rule admits all of them. What it can never do is get
+out.
+
+Reported **per member**, since the answer differs per member: a 2×2 part and an
+8×8 part in the same zone under the same keep-out disagree. Total coverage is
+still reported once per block, with its original message.
+
+What the check does **not** claim: it models the zone and the intent's own
+keep-outs, and deliberately not the board outline, clearance or neighbours.
+A feasible verdict says there is room, never that the part can be seated —
+`place_seed`'s `keepout_blocks` verdict answers that, with the seat predicate
+and a pose count. Two consequences are disclosed rather than hidden:
+
+- **circle keep-outs never refuse.** Nothing in this tree computes disc/rect
+  free area (`keepout_hit` returns a marker for a disc and says so), so a
+  refusal resting on one would be unsound. When the rects alone still refuse,
+  the refusal stands; only when dropping the discs would have found a pose is
+  the answer undecided. Total disc coverage is still caught exactly, as before.
+- **a part with no courtyard is modelled by its pad bbox**, which is smaller, so
+  the check under-reports rather than over-reports on such a part.
+
 ### `oob_area` cannot be budgeted, and says so
 
 `legality_budget.oob_area` is **refused at load time**:

@@ -26,6 +26,36 @@ passed. Four of them WERE wrong in the first implementation and are fixed here:
 The fix that makes most of these disappear at once: the rect algebra only
 PROPOSES candidate origins, and every candidate is judged by `zone_escape` and
 `keepout_hit` -- the same two functions the grade judges with.
+
+THE MUTATION TABLE, RECORDED FROM THE RUN (`python3 tests/mutate_799.py`),
+never predicted and never edited afterwards to match:
+
+    20 rows: 16 killed, 4 survived, 0 broken, 0 disagreeing with expectation
+
+The first run was 14 killed, 6 survived, 4 WRONG, and all four were defects in
+THIS file or dead code in the engine rather than bad rows:
+
+  * `total-coverage-no-longer-runs-first` measured nothing -- its anchor was a
+    `continue` that was already the last statement of its loop body. The dead
+    line is gone and the row targets the real dedupe.
+  * `the-binding-resolver-is-bypassed` survived because both whole-block
+    exemption controls exempt EVERY member, so the per-member loop is never
+    entered and they passed for a reason that was not the resolver. The mixed
+    block in `arm_reporting` covers it now.
+
+The four SURVIVORS are recorded with their reasons, not deleted:
+
+  * `the-degenerate-keepout-still-forbids` and
+    `the-through-hole-rect-is-forgotten-by-the-GENERATOR` -- both drop a hole
+    from candidate GENERATION only, and verification still decides every
+    candidate with `keepout_hit`. The guards are belt-and-braces; the rows are
+    the change detector for the day verification stops backing the generator.
+  * `the-zone-side-eps-slack-is-dropped` -- the EPS slack on the zone side
+    guards a float-scale case (measured elsewhere: `(z0-tol-b0)+b0 < z0-tol` on
+    6.3% of random triples) that no arm here constructs. The row exists so the
+    guard is already written the day one does.
+  * `synthetic-parts-are-graded-too` -- no fixture here carries a footprint with
+    neither courtyard nor pads.
 """
 import json
 import os
