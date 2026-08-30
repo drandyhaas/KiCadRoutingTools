@@ -140,6 +140,24 @@ Examples:
                         "pose being discarded). Composes with --repair and "
                         "runs BEFORE it. Judge it on witnesses_after, not on "
                         "how far anything moved")
+    p.add_argument("--reseat-region", nargs=4, type=float, action="append",
+                   default=None, metavar=("X0", "Y0", "X1", "Y1"),
+                   help="Name the reseat scope by GEOMETRY instead of by ref: "
+                        "every part with a pad in the rectangle X0 Y0 X1 Y1 "
+                        "(board mm, half-open on X1/Y1) joins the scope. "
+                        "Repeatable; unions with any --reseat REF. This is "
+                        "#459's 'a way to name a REGION rather than a ref "
+                        "list', whose other half -- a gate that can accept an "
+                        "on-board part -- landed as #698. "
+                        "`check_pockets` prints a ready-made rectangle for "
+                        "its top cold region. IT IS SCOPE NAMING, NOT AIMING: "
+                        "a re-seat lands each part at its own NET CENTROID, "
+                        "so passing an empty region does not move anything "
+                        "INTO it. Declaring the rectangle as an intent block "
+                        "`zone` is what makes it a destination. Resolves "
+                        "through placement.utility.refs_in_rect, the same "
+                        "call check_pockets names its windows with, so the "
+                        "rectangle cannot mean two different sets of parts")
     p.add_argument("--reseat-min-gain", type=float, default=0.0, metavar="MM",
                    help="With --reseat REF (an EXPLICIT scope): the smallest "
                         "wirelength win, in mm, that counts as a re-seat. 0 "
@@ -170,6 +188,30 @@ Examples:
     print(f"legality at clearance {args.clearance} "
           f"({_knobs['clearance']['source']}), edge {args.board_edge_clearance} "
           f"({_knobs['board_edge_clearance']['source']})")
+    # #459: a region is an EXPLICIT scope that stands on its own, so it turns
+    # --reseat on without the flag being typed. Normalised before every check
+    # below, so `--reseat-region ... --dry-run` is not rejected by a rule that
+    # only knows about --reseat.
+    if args.reseat_region:
+        for _r in args.reseat_region:
+            if _r[2] <= _r[0] or _r[3] <= _r[1]:
+                p.error("--reseat-region takes X0 Y0 X1 Y1 with X1>X0 and "
+                        "Y1>Y0 (board mm); got %g %g %g %g" % tuple(_r))
+        if args.reseat == []:
+            # #698 gave the two scopes DIFFERENT acceptance policies: an
+            # explicit scope is graded on its own terms, the AUTO damage-
+            # witness scope on 'the off-board amount strictly improved'.
+            # Silently picking one of the two is how that distinction gets
+            # lost, so a bare --reseat beside a region is a usage error rather
+            # than a quiet merge.
+            p.error("--reseat-region is an EXPLICIT scope and a bare --reseat "
+                    "is the AUTO damage-witness scope; #698 grades them by "
+                    "different rules, so they do not combine. Use "
+                    "--reseat-region on its own (it implies an explicit "
+                    "--reseat), or name refs: --reseat REF ... "
+                    "--reseat-region X0 Y0 X1 Y1")
+        if args.reseat is None:
+            args.reseat = []          # explicit; the refs come from the rects
     if (args.repair or args.reseat is not None) and args.force:
         p.error("--repair/--reseat and --force are mutually exclusive (they "
                 "move only the parts that need it; force re-derives "
@@ -181,7 +223,7 @@ Examples:
     if args.reseat_min_gain < 0:
         p.error("--reseat-min-gain is a magnitude in mm; negative is not a "
                 "looser threshold, it is a typo")
-    if args.reseat_min_gain and args.reseat == []:
+    if args.reseat_min_gain and args.reseat == [] and not args.reseat_region:
         # An inert knob says so, rather than reading as a threshold that
         # happened to find nothing wrong (cli_gates' own disclosure rule).
         print("--reseat-min-gain is inert on the AUTO scope: that rule is "
@@ -259,9 +301,49 @@ Examples:
         if args.reseat is not None:
             # `nargs='*'`: bare --reseat is [] and means AUTO scope; None is
             # the flag being absent.
+            _refs = list(args.reseat or ())
+            _selector = None
+            if args.reseat_region:
+                # #459's "a way to name a REGION rather than a ref list".
+                # Resolved HERE, at the CLI layer, into the ordinary `refs`
+                # argument -- never by inventing a new scope_source. The
+                # acceptance policy in seeder.reseat_accept switches on
+                # `scope_source != 'explicit'` by string equality, so a
+                # 'region:...' source would drop every region re-seat into the
+                # auto:oob-strict policy, which a legal on-board part can
+                # never satisfy: the pass would refuse everything and look
+                # broken rather than wrong.
+                #
+                # refs_in_rect is the same call check_pockets names its own
+                # windows with, so the rectangle it prints and the rectangle
+                # this lifts cannot mean two different sets of parts.
+                from placement.utility import refs_in_rect
+                _hits = []
+                for _r in args.reseat_region:
+                    _in = refs_in_rect(cur_pcb, tuple(_r))
+                    print("  region [%g,%g]-[%g,%g]: %d part(s)%s"
+                          % (_r[0], _r[1], _r[2], _r[3], len(_in),
+                             ('  ' + ', '.join(_in[:12])
+                              + (' ...' if len(_in) > 12 else ''))
+                             if _in else ''))
+                    _hits.extend(_in)
+                _region_refs = sorted(set(_hits))
+                if not _region_refs:
+                    # A result, not a failure -- and it must not fall through
+                    # to `refs=None`, which is the AUTO scope under a
+                    # different acceptance rule entirely.
+                    print("Reseat (explicit): the region(s) contain no part; "
+                          "nothing to lift. This is a RESULT, not a failure -- "
+                          "an empty region is exactly what check_pockets ranks."
+                          )
+                    return 0
+                _refs.extend(_region_refs)
+                _selector = 'region:' + ';'.join(
+                    '%g,%g,%g,%g' % tuple(_r) for _r in args.reseat_region)
+                _refs = sorted(set(_refs))
             reseat = seeder.reseat_scope(
                 cur_pcb, cur, intent,
-                refs=(args.reseat or None), group_sources=sources,
+                refs=(_refs or None), group_sources=sources,
                 clearance=args.clearance,
                 board_edge_clearance=args.board_edge_clearance,
                 grid_step=args.grid_step, seed=args.seed,
@@ -284,6 +366,13 @@ Examples:
                 if fp is not None:
                     _rmax = max(_rmax, _math.hypot(mv['new_x'] - fp.x,
                                                   mv['new_y'] - fp.y))
+            if _selector:
+                # A SEPARATE key. Overloading scope_source is what would have
+                # broken the acceptance policy switch, so the provenance of
+                # the scope is reported beside it rather than inside it.
+                print(f"  scope_selector: {_selector} "
+                      f"({len(_region_refs)} from the region, "
+                      f"{len(args.reseat or ())} named)")
             print(f"Reseat ({reseat['scope_source']}): "
                   f"{len(reseat['scope'])} in scope, "
                   f"{len(reseat['reseated'])} re-seated "
@@ -320,6 +409,9 @@ Examples:
                 'reseat': True,
                 'scope': reseat['scope'],
                 'scope_source': reseat['scope_source'],
+                # #459: how the scope was NAMED, beside (never inside) what
+                # policy graded it. None when refs were typed directly.
+                'scope_selector': _selector,
                 'reseated': len(reseat['reseated']),
                 'reseated_refs': reseat['reseated'],
                 'unseated': reseat['unseated'],
