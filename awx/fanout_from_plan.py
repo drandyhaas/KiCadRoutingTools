@@ -266,6 +266,7 @@ if TWO_PAGE_PLAN and choice:
                 or any(_legs_cross(m, om) for o, om in sel.items()
                        if o != me))
     unresolved = set()
+    repicked = set()          # berths actually moved by this block
     # ONE round, not a fixed point: iterating re-picks against the
     # re-shifted orders converged to WORSE pages (K28 sw3 -> sw5, K21
     # split into two corridors as de-conflict moved faces). Instead
@@ -298,9 +299,25 @@ if TWO_PAGE_PLAN and choice:
               + f'two-page plan round {_round}: pages F {n_f} / B '
               f'{len(sched.b_page)} / swimmers {len(sched.swimmers)}')
         re_d = re_s = 0
+        # TP_SCOPE=swim: re-pick ONLY the predicted SWIMMERS' escapes,
+        # to the smaller page's layer, and leave every page net on the
+        # plain plan. Rationale: no page POLICY completes K28 (lis/
+        # wmax 49v/3 open SDQ0,SDQ15,SWE; worst 46v/4 open -- the
+        # demoted risers), so the swimmers are a PHYSICAL wall: they
+        # weave against the all-F escape saturation. Moving all ~20
+        # page escapes (the default scope) costs vias and DRC (t10:
+        # 69v/4 open/2 DRC vs the plain plan's 49/3/0); moving only
+        # the ~5 swimmers removes F copper exactly where they weave.
+        scope = os.environ.get('TP_SCOPE', 'pages')
+        n_b = len(sched.b_page)
+        minor = 'B.Cu' if n_f >= n_b else 'F.Cu'
         for n in grp:
             P = sched.page.get(n)
-            if not P:
+            if scope == 'swim':
+                if P is not None:
+                    continue
+                P = minor
+            elif not P:
                 continue
             m0 = choice[n]
             if m0.layer != P:
@@ -309,17 +326,22 @@ if TWO_PAGE_PLAN and choice:
                 # unchecked gap via landed in the street a kept
                 # surface move uses (K11 SDQ11 under SDQ14, 6 DRC)
                 cand = [m for m in dmenu.get(n, ())
-                        if m.layer == P and m.direction == m0.direction
+                        if m.layer == P
+                        and (m.direction == m0.direction or scope == 'swim')
                         and not _clashes(m, choice, n)]
                 if cand:
                     # dogbone preferred over via_in_pad: the moves are
                     # laid VERBATIM, and a gap via is a standard
                     # barrel where a via-in-pad needs the pad clamp
-                    # and the IPC-4761 burden
+                    # and the IPC-4761 burden. Swim scope relaxes the
+                    # direction to a PREFERENCE (t12: with it required,
+                    # 0 of 7 swimmers had a B candidate at all).
                     choice[n] = min(cand, key=lambda m: (
+                        m.direction != m0.direction,
                         m.kind != 'dogbone', m.vias,
                         abs(m.exit_pt[0] - m0.exit_pt[0])
                         + abs(m.exit_pt[1] - m0.exit_pt[1])))
+                    repicked.add(n)
                     re_d += 1
             if SOURCE and n in smenu:
                 cur = schoice.get(n) or src_seed.get(n)
@@ -347,6 +369,14 @@ if TWO_PAGE_PLAN and choice:
             moved_any = False
             for a_, b_ in itertools.combinations(
                     [n for n in names if n in choice], 2):
+                if scope == 'swim' and a_ not in repicked \
+                        and b_ not in repicked:
+                    # swim scope: un-re-picked nets go to the ENGINE,
+                    # which resolves its own geometry -- de-conflicting
+                    # them here verbatim-lays moves that did not need
+                    # to move (t12: 0 re-picks, 6 'de-conflicted' nets
+                    # laid verbatim, braid 15 open vs the plain 3)
+                    continue
                 if not (sm_mod._conflict(choice[a_], choice[b_], strict=True)
                         or _legs_cross(choice[a_], choice[b_])):
                     continue
@@ -362,6 +392,7 @@ if TWO_PAGE_PLAN and choice:
                             m.kind != m0.kind, m.vias,
                             abs(m.exit_pt[0] - m0.exit_pt[0])
                             + abs(m.exit_pt[1] - m0.exit_pt[1])))
+                        repicked.add(n2)
                         n_fix += 1
                         moved_any = done = True
                         break
@@ -573,6 +604,15 @@ if TWO_PAGE_PLAN and not NO_HINTS:
     import shutil
     stem2 = os.path.splitext(out_path)[0]
     kind_of = {nm: choice[nm].kind for nm in names if nm in choice}
+    if os.environ.get('TP_SCOPE') == 'swim':
+        # swimmer scope: only the RE-PICKED berths are laid verbatim;
+        # every untouched net goes through the production engine pass
+        # below ('unplanned', with the plan's hints and lines), i.e.
+        # the plain-plan fanout the 49-via arm graded. t11 laid ALL 28
+        # moves verbatim and the braid opened 13 -- the verbatim apply
+        # is a worse fanout than the engine for nets that didn't move.
+        kind_of = {nm: k for nm, k in kind_of.items()
+                   if nm in globals().get('repicked', set())}
     passes = []
     for kind, method in (('via_in_pad', 'underpad'), ('dogbone', 'dogbone'),
                          ('surface', 'channel')):
