@@ -217,6 +217,17 @@ def t_the_null_rate_is_reported_and_can_be_high():
     check(n is not None and n < 1.0,
           f'a slate where the barred candidate is the worst reports a LOWER '
           f'rate ({n})')
+    # ...and the AGGREGATE carries it, which is what a reader sees. The
+    # mutation battery caught this arm calling `qbar_null` directly and
+    # therefore surviving a change that stopped `aggregate` computing it at
+    # all -- a null rate nobody can see is a null rate nobody was told.
+    agg = SS.aggregate(rows)
+    check(agg['per_board']['b'].get('qbar_null') == 1.0,
+          f"aggregate() carries the per-board null rate: "
+          f"{agg['per_board']['b'].get('qbar_null')}")
+    lines = chr(10).join(SS.report(agg))
+    check('null' in lines and '100%' in lines,
+          'and the report PRINTS it, so a discharge cannot be read without it')
 
 
 def main():
