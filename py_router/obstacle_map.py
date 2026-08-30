@@ -2120,9 +2120,15 @@ def _ledger_bracket(obstacles):
 
 
 def _ledger_close(obstacles, pre, tag: str):
+    import obstacle_cache as _oc
+    # The cell watch is armed by its own env var and must see RAW ops too --
+    # they are the other half of a cell's history -- so it runs before the
+    # ledger's own early return.
+    if _oc._CELL_WATCH != []:
+        _oc.ledger_cell_watch(obstacles, f"raw {tag} @ "
+                              + _oc._ledger_site(depth=3, frames=2))
     if pre is None:
         return
-    import obstacle_cache as _oc
     st = obstacles.get_stats()
     site = _oc._ledger_site(depth=3, frames=2)
     _oc.ledger_raw_delta(obstacles, f"{tag} @ {site}", st[0] - pre[0], st[1] - pre[1])

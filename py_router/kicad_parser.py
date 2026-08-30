@@ -231,6 +231,45 @@ class Pad:
     # Set by BOTH parse paths (text + pcbnew).
 
 
+_VIA_BIRTH_WATCH = None
+
+
+def _via_birth_watch():
+    """Parsed KICAD_VIA_BIRTH_WATCH spec (mm points), [] when unset."""
+    global _VIA_BIRTH_WATCH
+    if _VIA_BIRTH_WATCH is None:
+        spec = os.environ.get("KICAD_VIA_BIRTH_WATCH", "").strip()
+        out = []
+        for part in spec.split(";"):
+            part = part.strip()
+            if part:
+                try:
+                    xs, ys = part.split(",")
+                    out.append((float(xs), float(ys)))
+                except ValueError:
+                    pass
+        _VIA_BIRTH_WATCH = out
+    return _VIA_BIRTH_WATCH
+
+
+    def __post_init__(self):
+        # #803 VIA BIRTH WATCH (debug only). KICAD_VIA_BIRTH_WATCH="x,y;x,y"
+        # prints a stack trace for every Via CONSTRUCTED near a watched point,
+        # naming the producer. The obstacle-map probes can only say a cell was
+        # free; this says who put copper there. Off unless the env var is set.
+        _w = _via_birth_watch()
+        if _w:
+            for wx, wy in _w:
+                if abs(self.x - wx) <= 0.05 and abs(self.y - wy) <= 0.05:
+                    import traceback
+                    print(f"[VIABIRTH] via net={self.net_id} "
+                          f"({self.x:.3f},{self.y:.3f}) size={self.size} "
+                          f"drill={self.drill}")
+                    for ln in traceback.format_stack()[-7:-1]:
+                        print("    " + ln.rstrip().replace("\n", " | "))
+                    break
+
+
 @dataclass
 class Via:
     """Represents a via."""
@@ -259,6 +298,23 @@ class Via:
     # is what keeps solder out of the barrel.
     tenting_attrs: Dict[str, str] = field(default_factory=dict)
 
+
+    def __post_init__(self):
+        # VIA BIRTH WATCH (debug only): KICAD_VIA_BIRTH_WATCH="x,y;x,y" prints a
+        # stack trace for every Via CONSTRUCTED near a watched point, naming the
+        # producer. The obstacle probes can only say a cell was free; this says
+        # who put copper there. Off unless the env var is set.
+        _w = _via_birth_watch()
+        if _w:
+            for wx, wy in _w:
+                if abs(self.x - wx) <= 0.05 and abs(self.y - wy) <= 0.05:
+                    import traceback
+                    print(f"[VIABIRTH] via net={self.net_id} "
+                          f"({self.x:.3f},{self.y:.3f}) size={self.size} "
+                          f"drill={self.drill}")
+                    for ln in traceback.format_stack()[-7:-1]:
+                        print("    " + ln.rstrip().replace("\n", " | "))
+                    break
 
 @dataclass
 class Segment:

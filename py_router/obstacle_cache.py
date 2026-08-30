@@ -67,6 +67,96 @@ if _LEDGER_ENV:
     }
 
 
+# ---------------------------------------------------------------------------
+# CELL WATCH (#803). The ledger above accounts per cache-OBJECT and per call
+# SITE; neither can answer "who unblocked THIS cell". That is the question a
+# contact DRC violation asks: a track ended on a foreign via's centre, so that
+# cell must have been free when the track routed, and something freed it.
+#
+#   KICAD_CELL_WATCH="77.80,91.20;75.70,90.50"   (board mm, ';'-separated)
+#   KICAD_CELL_WATCH_GRID=0.1                    (grid step; must match the run)
+#
+# Every cache add/remove and every raw list op re-queries the watched cells and
+# prints only TRANSITIONS, with the call site -- so the output is the blocked/
+# free history of exactly those cells, not a flood.
+_CELL_WATCH = None
+_CELL_WATCH_STATE = {}
+
+
+def _cell_watch_spec():
+    global _CELL_WATCH
+    if _CELL_WATCH is not None:
+        return _CELL_WATCH
+    spec = os.environ.get("KICAD_CELL_WATCH", "").strip()
+    if not spec:
+        _CELL_WATCH = []
+        return _CELL_WATCH
+    step = float(os.environ.get("KICAD_CELL_WATCH_GRID", "0.1"))
+    out = []
+    for part in spec.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            xs, ys = part.split(",")
+            x, y = float(xs), float(ys)
+        except ValueError:
+            print(f"[CELLWATCH] bad spec {part!r} -- want 'x,y' in mm")
+            continue
+        out.append((int(round(x / step)), int(round(y / step)), x, y))
+    print(f"[CELLWATCH] watching {len(out)} cell(s) at grid {step}: "
+          + ", ".join(f"({x},{y})->g({gx},{gy})" for gx, gy, x, y in out))
+    _CELL_WATCH = out
+    return _CELL_WATCH
+
+
+def ledger_cell_watch(obstacles, site: str) -> None:
+    """Print blocked/free TRANSITIONS of the watched cells, with the site."""
+    cells = _cell_watch_spec()
+    if not cells:
+        return
+    try:
+        n = obstacles.num_layers
+        n = n() if callable(n) else n
+    except Exception:
+        n = 4
+    # VIA-block state first: it is layer-independent, has NO source/target
+    # override, and it -- not is_blocked -- is what gates via PLACEMENT. A cell
+    # can be correctly cell-blocked while its via-block is missing, which is
+    # exactly how a via lands on a foreign track.
+    for gx, gy, mx, my in cells:
+        try:
+            vb = bool(obstacles.is_via_blocked(gx, gy))
+        except Exception:
+            vb = None
+        if vb is not None:
+            key = (id(obstacles), gx, gy, 'via')
+            prev = _CELL_WATCH_STATE.get(key)
+            if prev is None:
+                _CELL_WATCH_STATE[key] = vb
+            elif prev != vb:
+                _CELL_WATCH_STATE[key] = vb
+                print(f"[CELLWATCH] ({mx},{my}) VIA-BLOCK: "
+                      f"{'BLOCKED' if prev else 'free'} -> "
+                      f"{'BLOCKED' if vb else 'FREE'}   @ {site}")
+    for gx, gy, mx, my in cells:
+        for li in range(int(n)):
+            try:
+                b = bool(obstacles.is_blocked(gx, gy, li))
+            except Exception:
+                continue
+            key = (id(obstacles), gx, gy, li)
+            prev = _CELL_WATCH_STATE.get(key)
+            if prev is None:
+                _CELL_WATCH_STATE[key] = b
+                continue
+            if prev != b:
+                _CELL_WATCH_STATE[key] = b
+                print(f"[CELLWATCH] ({mx},{my}) layer{li}: "
+                      f"{'BLOCKED' if prev else 'free'} -> "
+                      f"{'BLOCKED' if b else 'FREE'}   @ {site}")
+
+
 def _ledger_site(depth: int = 2, frames: int = 3) -> str:
     import sys as _sys
     parts = []
@@ -769,6 +859,8 @@ def add_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetObst
     _small = getattr(cache_data, 'blocked_vias_small', None)
     if _small is not None and len(_small) > 0:
         obstacles.add_blocked_vias_small_batch(_small)
+    if _CELL_WATCH != []:
+        ledger_cell_watch(obstacles, "cache-add " + _ledger_site(depth=2, frames=3))
 
 
 def remove_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetObstacleData):
@@ -790,6 +882,8 @@ def remove_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetO
     _small = getattr(cache_data, 'blocked_vias_small', None)
     if _small is not None and len(_small) > 0:
         obstacles.remove_blocked_vias_small_batch(_small)
+    if _CELL_WATCH != []:
+        ledger_cell_watch(obstacles, "cache-remove " + _ledger_site(depth=2, frames=3))
 
 
 def build_working_obstacle_map(base_obstacles: GridObstacleMap,
