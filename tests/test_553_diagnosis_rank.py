@@ -78,11 +78,18 @@ class _PCB:
 
 
 # Two blocks and two loose parts.
-#   net 1 (/D0): A1 A2 C1      -> block A owns the plurality
+#   net 1 (/D0): A1 A2 C1      -> sheet:mag owns the plurality
 #   net 2 (/D1): B1 C2
 #   net 9 (GND): everything    -> the rail that must never rank anything
+#
+# The block NAMES are deliberately not in value order: `sheet:mag` outranks
+# `sheet:acq` on every signal while sorting after it. The first version of this
+# fixture called them sheet:A and sheet:B, and `mutate_553.py`'s `identity-rank`
+# row -- ranking by NAME instead of by value -- SURVIVED, because alphabetical
+# order happened to reproduce the right answer. A fixture whose ordering
+# coincides with the tie-break cannot test the ordering.
 NET_NAMES = {1: '/D0', 2: '/D1', 9: 'GND'}
-BLOCKS = {'sheet:A': ['A1', 'A2'], 'sheet:B': ['B1', 'B2']}
+BLOCKS = {'sheet:mag': ['A1', 'A2'], 'sheet:acq': ['B1', 'B2']}
 
 
 def _state(**over):
@@ -188,14 +195,14 @@ def t_no_blocks_skips_displacement_by_name():
 
 def t_a_block_with_no_foreign_pads_is_omitted_not_zeroed():
     state, pcb = _state()
-    # sheet:B keeps only its own net: no pad outside the block is on it.
+    # sheet:acq keeps only its own net: no pad outside the block is on it.
     state.net_refs[2] = ['B1', 'B2']
     state.parts['C2'] = _Part([(12.0, 0.0, 7)])
     d = D.diagnose(state, pcb, BLOCKS, blocker_report=None, legality=None,
                    max_fanout=4)
     vals = {c.key: [r.value for r in c.rows if r.signal == 'block_displacement']
             for c in d.candidates}
-    check(vals.get('sheet:B') in (None, []),
+    check(vals.get('sheet:acq') in (None, []),
           'a block with no foreign pads carries no displacement row')
     check(all(v != [0.0] for v in vals.values()),
           'and is never reported as a 0.0 distance')
@@ -235,7 +242,7 @@ def t_no_spread_refuses_to_rank():
                 'clearance': 0.15, 'notes': []}
     d = D.diagnose(state, pcb, {}, blocker_report=None, legality=legality,
                    max_fanout=4)
-    # sheet:A is gone (no blocks), so A1/A2/C1/C2 each score exactly 1.
+    # sheet:mag is gone (no blocks), so A1/A2/C1/C2 each score exactly 1.
     check('no spread' in d.skipped.get('legality_pairs', ''),
           f'all-equal candidates are refused, not ranked '
           f'({d.skipped.get("legality_pairs")!r})')
@@ -269,7 +276,7 @@ def t_plurality_attribution_and_its_disclosure():
     d = _run()
     cells = {c.key: r.value for c in d.candidates for r in c.rows
              if r.signal == 'blocker_cells'}
-    check(cells.get('sheet:A') == 100,
+    check(cells.get('sheet:mag') == 100,
           f'/D0 goes whole to the block owning 2 of its 3 pad owners ({cells})')
     check('C1' not in cells,
           'the minority owner does not also get the cells')
@@ -279,13 +286,13 @@ def t_legality_pairs_attribute_to_both_ends_and_count_internal_once():
     d = _run()
     pairs = {c.key: r.value for c in d.candidates for r in c.rows
              if r.signal == 'legality_pairs'}
-    # (A1,C1) -> sheet:A + C1 ; (C1,C2) -> C1 + C2 ; (A1,A2) -> sheet:A once
-    check(pairs.get('sheet:A') == 2,
+    # (A1,C1) -> sheet:mag + C1 ; (C1,C2) -> C1 + C2 ; (A1,A2) -> sheet:mag once
+    check(pairs.get('sheet:mag') == 2,
           f'a pair internal to a block counts ONCE for it ({pairs})')
     check(pairs.get('C1') == 2 and pairs.get('C2') == 1,
           f'each loose end carries its own pairs ({pairs})')
     det = [r.detail for c in d.candidates for r in c.rows
-           if c.key == 'sheet:A' and r.signal == 'legality_pairs'][0]
+           if c.key == 'sheet:mag' and r.signal == 'legality_pairs'][0]
     check(det.get('internal') == 1, 'the internal pair is disclosed as such')
     check(det.get('kinds') == ['pad_clearance'], 'and the kinds are named')
 
@@ -294,18 +301,18 @@ def t_round_robin_not_concatenation():
     """Concatenation lets one signal own the head; round-robin cannot.
 
     The discriminating fact on this fixture: `block_displacement` ranks
-    sheet:A then sheet:B, and `legality_pairs` ranks C1 first. Concatenating
+    sheet:mag then sheet:acq, and `legality_pairs` ranks C1 first. Concatenating
     the per-signal lists takes BOTH of displacement's before C1; sweeping them
-    takes C1 second. So the position of C1 relative to sheet:B IS the rule.
+    takes C1 second. So the position of C1 relative to sheet:acq IS the rule.
     """
     d = _run()
     order = d.selected_keys
-    check(order[0] == 'sheet:A', f'the strongest candidate still leads {order}')
-    check(order.index('C1') < order.index('sheet:B'),
+    check(order[0] == 'sheet:mag', f'the strongest candidate still leads {order}')
+    check(order.index('C1') < order.index('sheet:acq'),
           f"legality's top-1 is reached before displacement's rank-2 -- "
           f'concatenation would reverse these ({order})')
     by = {c.key: c.selected_by for c in d.candidates}
-    check(by.get('sheet:A') == D.SIGNAL_ORDER,
+    check(by.get('sheet:mag') == D.SIGNAL_ORDER,
           f'a candidate ranked by all three records all three ({by})')
     tops = {}
     for sig in D.SIGNAL_ORDER:
@@ -345,7 +352,7 @@ def t_no_combined_score_is_ever_emitted():
 
 def t_a_block_is_added_whole_and_the_overshoot_is_reported():
     d = _run(budget=1)
-    check(d.selected_keys == ['sheet:A'],
+    check(d.selected_keys == ['sheet:mag'],
           f'a budget of 1 part stops after the first candidate ({d.selected_keys})')
     check(sorted(d.selected) == ['A1', 'A2'],
           f'and that block came WHOLE -- never half-moved ({d.selected})')
@@ -353,7 +360,7 @@ def t_a_block_is_added_whole_and_the_overshoot_is_reported():
           f'the overshoot past the budget is reported ({d.overshoot})')
     check(any('overshot' in n for n in d.disclosures),
           'and disclosed in words rather than left to arithmetic')
-    check(_run(budget=None).selected_keys != ['sheet:A'],
+    check(_run(budget=None).selected_keys != ['sheet:mag'],
           'without a budget the sweep continues -- the cap is doing the work')
 
 
@@ -361,7 +368,7 @@ def t_selected_by_is_only_recorded_for_selected_keys():
     """A signal may not claim credit for a candidate it merely ranked."""
     d = _run(budget=1)
     claimed = sorted(c.key for c in d.candidates if c.selected_by)
-    check(claimed == ['sheet:A'],
+    check(claimed == ['sheet:mag'],
           f'only the selected candidate carries a selected_by ({claimed})')
     for c in d.candidates:
         if c.selected_by:

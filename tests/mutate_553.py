@@ -113,7 +113,7 @@ ROWS = [
        "            for row in bd:\n"),
       ("    return sorted(((k, v) for k, v in values.items() if v > 0),\n",
        "    return sorted(((k, v) for k, v in values.items() if v >= 0),\n")],
-     (T553,), 'KILLED'),
+     None, (T553,), 'KILLED'),
 
     # ---- inventing the router's evidence ----------------------------------
     # route.py's stage='preexisting' entries carry a net name and nothing else.
