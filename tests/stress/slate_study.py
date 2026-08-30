@@ -467,11 +467,20 @@ def qorder(rows):
     from placement import portfolio as PF
     viable = [r for r in rows if r['viable']
               and r['truth'].get('blocking') is not None]
+    # WHY K IS OFTEN BELOW 11, disclosed rather than left for a reader to
+    # notice. `rank_static` ranks only gate-passing candidates, so a candidate
+    # `score_candidate` rejected is not one this order ever had to get right --
+    # excluding it is the shipped behaviour, not a convenience. But the count
+    # travels with the tau, because a K of 4 and a K of 11 are not the same
+    # evidence and the coefficient alone does not say which it is.
+    excluded = {'not_viable': len([r for r in rows if not r['viable']]),
+                'ungraded': len([r for r in rows if r['viable']
+                                 and r['truth'].get('blocking') is None])}
     if len(viable) < rs.MIN_N_FOR_TAU:
         return {'verdict': 'no_verdict',
                 'reason': f'{len(viable)} viable graded candidates < '
                           f'{rs.MIN_N_FOR_TAU}',
-                'n': len(viable)}
+                'n': len(viable), 'excluded': excluded}
     order = sorted(viable, key=lambda r: tuple(r['rank_key']))
     pos = {r['row_id']: i for i, r in enumerate(order)}
     xs = [pos[r['row_id']] for r in viable]
@@ -479,6 +488,7 @@ def qorder(rows):
     side = rs.constant_side(xs, ys)
     if side:
         return {'verdict': 'no_verdict', 'n': len(viable),
+                'excluded': excluded,
                 'reason': {'dependent': 'truth constant (saturated)',
                            'predictor': 'static order constant',
                            'both': 'both sides constant'}[side],
@@ -486,7 +496,8 @@ def qorder(rows):
     k = rs.tau_counts(xs, ys)
     lo, hi = rs.tau_loo_span(xs, ys)
     tau = rs.kendall_tau(xs, ys)
-    return {'verdict': 'measured', 'n': len(viable), 'tau': tau,
+    return {'verdict': 'measured', 'n': len(viable), 'excluded': excluded,
+            'tau': tau,
             'tau_a': rs.tau_a(xs, ys), 'concordant': k['concordant'],
             'discordant': k['discordant'], 'ties_a': k['ties_a'],
             'ties_b': k['ties_b'], 'loo_lo': lo, 'loo_hi': hi,
@@ -571,14 +582,18 @@ def report(agg):
     out.append('Q-ORDER -- newly pre-registered rule 5 (rank_key slot 1\'s order)')
     for b, d in sorted(agg['per_board'].items()):
         q = d['qorder']
+        ex = q.get('excluded') or {}
+        exs = (f'  ({ex.get("not_viable", 0)} gate-rejected, '
+               f'{ex.get("ungraded", 0)} ungraded)'
+               if any(ex.values()) else '')
         if q.get('verdict') == 'measured':
             out.append(f'  {b:30s} {q["display"]}'
-                       f'  [C={q["concordant"]} D={q["discordant"]}]')
+                       f'  [C={q["concordant"]} D={q["discordant"]}]{exs}')
         else:
             out.append(f'  {b:30s} tau=n/a [{q.get("reason")}'
                        + (f', constant {q["constant_value"]}'
                           if q.get('constant_value') is not None else '')
-                       + f', K={q.get("n")}]')
+                       + f', K={q.get("n")}]{exs}')
     r5 = agg['rule5']
     out.append(f'  => rule 5: {r5["verdict"]}  '
                f'({len(r5["positive"])} positive, {len(r5["negative"])} '
