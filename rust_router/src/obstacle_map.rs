@@ -480,6 +480,48 @@ impl GridObstacleMap {
         self.allowed_cells.insert(pack_xy(gx, gy));
     }
 
+    /// #800: add a RECTANGLE of allowed cells in one crossing, inclusive of
+    /// both bounds. Exactly `add_allowed_cell` over the same cells -- same set,
+    /// same idempotence -- with the loop moved across the boundary.
+    ///
+    /// A rect rather than the `N x 3` cell batch the issue sketched, for two
+    /// reasons found in the code. First, `allowed_cells` is ONE set keyed by
+    /// `pack_xy` with no layer dimension at all, so an `N x 3` array would
+    /// carry a column this map cannot store. Second, every caller is already a
+    /// rectangle around a terminal (5 sites: the 21x21 exemption block in
+    /// `route_net_with_obstacles`, the via-unblock 11x11, the target 11x11, and
+    /// two diff-pair blocks), so a rect costs 4 ints per terminal where a cell
+    /// batch would have Python build a 441-row array first -- paying much of
+    /// the per-cell cost the batch exists to remove.
+    ///
+    /// Cost, per cell, which is the part that reproduces: ~50 ns -> ~3 ns, a
+    /// 15-17x reduction, against the ~2.5x an `N x 3` cell batch would have
+    /// given (93 -> 37 ns/cell in the issue's own microbenchmark). One rp2350
+    /// route emits 655,531,651 exemption cells in 1,487,872 blocks (441 cells
+    /// each), counted directly.
+    ///
+    /// Deliberately no whole-route percentage: it divides by a route time that
+    /// swings with board, machine and run, and a single A/B pair cannot resolve
+    /// a low-single-digit effect from noise.
+    ///
+    /// An inverted range (min > max) inserts nothing, which is what makes the
+    /// callers' bounds clipping safe to hand over verbatim: a terminal whose
+    /// block lies wholly outside `bounds` clips to an empty range and must add
+    /// no cells, exactly as the Python `range()` did.
+    pub fn add_allowed_rect(&mut self, min_gx: i32, min_gy: i32, max_gx: i32, max_gy: i32) {
+        if min_gx > max_gx || min_gy > max_gy {
+            return;
+        }
+        let w = (max_gx - min_gx + 1) as usize;
+        let h = (max_gy - min_gy + 1) as usize;
+        self.allowed_cells.reserve(w.saturating_mul(h));
+        for gx in min_gx..=max_gx {
+            for gy in min_gy..=max_gy {
+                self.allowed_cells.insert(pack_xy(gx, gy));
+            }
+        }
+    }
+
     /// Add a BGA exclusion zone (multiple zones supported)
     pub fn set_bga_zone(&mut self, min_gx: i32, min_gy: i32, max_gx: i32, max_gy: i32) {
         self.bga_zones.push((min_gx, min_gy, max_gx, max_gy));

@@ -1803,10 +1803,13 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             hi_y = gy + allow_radius
             if hi_y > bounds[3]:
                 hi_y = bounds[3]
-        add_allowed = obstacles.add_allowed_cell
-        for ax in range(lo_x, hi_x + 1):
-            for ay in range(lo_y, hi_y + 1):
-                add_allowed(ax, ay)
+        # #800: ONE crossing for the whole clipped block. The ranges above are
+        # already the exact cell set the per-cell loop admitted, and
+        # add_allowed_rect is inclusive of both bounds and no-ops on an
+        # inverted range -- so a terminal clipped wholly outside `bounds`
+        # still adds nothing. 509,109,266 crossings per route on rp2350 became
+        # one per terminal.
+        obstacles.add_allowed_rect(lo_x, lo_y, hi_x, hi_y)
 
     # Mark exact source/target cells so routing can start/end there even if blocked by
     # adjacent track expansion (but NOT blocked by BGA zones - use allowed_cells for that)
@@ -2642,9 +2645,7 @@ def _register_unblock_via(obstacles, vgx, vgy, layer_names):
     obstacles.add_free_via(vgx, vgy)
     for li in range(len(layer_names)):
         obstacles.add_source_target_cell(vgx, vgy, li)
-    for dx in range(-5, 6):
-        for dy in range(-5, 6):
-            obstacles.add_allowed_cell(vgx + dx, vgy + dy)
+    obstacles.add_allowed_rect(vgx - 5, vgy - 5, vgx + 5, vgy + 5)   # #800
 
 
 def _route_with_via_unblock(router, obstacles, config, sources, targets, track_margin,
@@ -4616,9 +4617,8 @@ def _route_multipoint_taps_impl(
         # Add allowed cells around target to escape blocked areas
         allow_radius = 5
         tgt_gx, tgt_gy = tgt_pad[0], tgt_pad[1]
-        for dx in range(-allow_radius, allow_radius + 1):
-            for dy in range(-allow_radius, allow_radius + 1):
-                obstacles.add_allowed_cell(tgt_gx + dx, tgt_gy + dy)
+        obstacles.add_allowed_rect(tgt_gx - allow_radius, tgt_gy - allow_radius,
+                                   tgt_gx + allow_radius, tgt_gy + allow_radius)  # #800
 
         # Check which proximity zones the endpoints are in for precise heuristic estimate
         src_in_stub = any(obstacles.get_stub_proximity_cost(gx, gy) > 0 for gx, gy, _ in sources)

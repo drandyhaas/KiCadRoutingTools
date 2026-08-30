@@ -2252,10 +2252,13 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
             obstacles.clear_source_target_cells()
 
         # Add allowed cells around source and target
-        for dx in range(-allow_radius, allow_radius + 1):
-            for dy in range(-allow_radius, allow_radius + 1):
-                obstacles.add_allowed_cell(s_gx + dx, s_gy + dy)
-                obstacles.add_allowed_cell(t_gx + dx, t_gy + dy)
+        # #800: two crossings instead of 2*(2r+1)^2. The two blocks were
+        # interleaved cell-by-cell; `allowed_cells` is a SET, so emitting one
+        # block then the other admits the identical set.
+        obstacles.add_allowed_rect(s_gx - allow_radius, s_gy - allow_radius,
+                                   s_gx + allow_radius, s_gy + allow_radius)
+        obstacles.add_allowed_rect(t_gx - allow_radius, t_gy - allow_radius,
+                                   t_gx + allow_radius, t_gy + allow_radius)
         obstacles.add_source_target_cell(s_gx, s_gy, src_layer)
         obstacles.add_source_target_cell(t_gx, t_gy, tgt_layer)
 
@@ -2908,10 +2911,8 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         tgt_thetas = _theta_options(tgt_ex, tgt_ey, _slx, _sly, arrival=True)
         obstacles.clear_allowed_cells()
         obstacles.clear_source_target_cells()
-        for ox in range(-2, 3):
-            for oy in range(-2, 3):
-                obstacles.add_allowed_cell(s_gx + ox, s_gy + oy)
-                obstacles.add_allowed_cell(t_gx + ox, t_gy + oy)
+        obstacles.add_allowed_rect(s_gx - 2, s_gy - 2, s_gx + 2, s_gy + 2)  # #800
+        obstacles.add_allowed_rect(t_gx - 2, t_gy - 2, t_gx + 2, t_gy + 2)  # #800
         obstacles.add_source_target_cell(s_gx, s_gy, a_layer)
         obstacles.add_source_target_cell(t_gx, t_gy, b_layer)
         # Middle angle selection (issue #244). The straight src->tgt line is the

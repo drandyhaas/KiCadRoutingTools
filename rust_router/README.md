@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.20.0**
+**Current Version: 0.21.2**
 
 > **Release note:** the 0.20.0 per-platform binaries are published as of
 > [v0.20.0](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.20.0),
@@ -311,6 +311,31 @@ src/
 
 ## Version History
 
+### 0.21.2 (2026-08-30)
+
+- #800: `GridObstacleMap.add_allowed_rect(min_gx, min_gy, max_gx, max_gy)` --
+  add a whole inclusive rectangle of allowed cells in ONE Python->Rust
+  crossing. The terminal-exemption block in `route_net_with_obstacles` was
+  calling `add_allowed_cell` once per cell -- the issue measured 509,109,266
+  crossings per route on rp2350.
+
+  Measured: **~50 ns/cell -> ~3 ns/cell (15-17x)**, against the ~2.5x an
+  `N x 3` cell batch would have given. One rp2350 route emits **655,531,651**
+  exemption cells in 1,487,872 blocks, counted directly. Output is
+  byte-identical. No whole-route percentage is quoted: it divides by a route
+  time that swings with board, machine and run.
+
+  A rect rather than the `N x 3` cell batch the issue sketched, for two reasons
+  in the code: `allowed_cells` is ONE set keyed by `pack_xy` with **no layer
+  dimension**, so an `N x 3` array carries a column the map cannot store; and
+  all five callers are already rectangles around a terminal, so a rect costs 4
+  ints where a cell batch would have Python build a 441-row array first --
+  paying much of the per-cell cost the batch exists to remove.
+
+  An inverted range (min > max) inserts nothing, which is what lets callers
+  hand over their `bounds` clipping verbatim: a terminal whose block lies
+  wholly outside `bounds` must add no cells, exactly as Python's `range()` did.
+  `add_allowed_cell` is unchanged and still exported.
 
 ### 0.21.1 (2026-08-16)
 
