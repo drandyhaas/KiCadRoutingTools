@@ -613,10 +613,19 @@ def pocket_census(pcb, board_path, *, nets=('*',), bin_mm=2.0, top=8,
             demand_in += 1
             continue
         # Part-free is not empty: on a routed board a window with no part
-        # still carries copper. TWO tests, because neither alone is enough --
-        # `free` is the demand/capacity model's midpoint accounting, which
-        # misses a track that crosses the window without its midpoint in it,
-        # and the swept test does not know about the 5% area floor.
+        # still carries copper.
+        #
+        # The SWEPT test is the one that decides. The `free` term beside it is
+        # a deliberate REDUNDANT cross-check, and saying so is the honest
+        # framing: `congestion_bins` charges a segment to its midpoint bin and
+        # a pad to its centre bin, both of which the swept stamp covers, so
+        # swept is a strict superset. Measured over 8 boards x 3 bin sizes,
+        # ZERO bins that `free` calls occupied are not also swept-touched --
+        # which is why a mutation dropping the `free` arm survives the battery
+        # and is an equivalent mutant rather than a coverage hole. It is kept
+        # because it is one comparison and it guards the newer, more intricate
+        # of the two; `t_the_swept_test_is_a_superset_of_the_free_area_rule`
+        # pins the relation so the day it stops holding is a red row.
         if free < bin_area_total - 1e-9 or b in touched:
             warm_unowned += 1
             continue

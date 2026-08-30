@@ -537,6 +537,49 @@ def t_the_lattice_survives_inexact_float_division():
                    str(doc['windows_offboard']))
 
 
+def t_the_swept_test_is_a_superset_of_the_free_area_rule():
+    """Why the cold predicate keeps two copper terms, and why one is redundant.
+
+    `congestion_bins` charges a segment to its MIDPOINT bin and a pad to its
+    CENTRE bin; the swept stamp covers a segment's whole path and a pad's whole
+    bbox, so swept should be a strict superset of "free-area says occupied".
+    Measured here across boards and bin sizes: zero counterexamples.
+
+    That is worth pinning rather than assuming, for two reasons. It is what
+    makes a mutation dropping the `free` arm an EQUIVALENT MUTANT rather than a
+    hole in the battery -- and it is the assumption under which keeping that
+    arm is a cheap cross-check on the newer, more intricate swept code instead
+    of dead weight. The day the relation stops holding, one of the two terms is
+    wrong, and this row says which direction.
+    """
+    from congestion_field import congestion_bins
+    from net_queries import expand_net_patterns
+    total = 0
+    for name in ('esp_prog', 'routed_output', 'rp2350_fpga_eensy_prePlane',
+                 'tigard', 'watchy'):
+        p = os.path.join(ROOT, 'kicad_files', name + '.kicad_pcb')
+        if not os.path.isfile(p):
+            continue
+        for bm in (2.0, 1.0):
+            pcb = parse_kicad_pcb(p)
+            layers = len(pcb.board_info.copper_layers or ['F.Cu'])
+            names = set(expand_net_patterns(pcb, ['*']))
+            ids = [n for n, v in pcb.nets.items() if v.name in names]
+            bins, _t, bm2 = congestion_bins(pcb, ids, layers, bm)
+            cap = bm2 * bm2 * layers
+            touched = CP.copper_touched_bins(pcb, bm2)
+            occupied = [k for k, (free, _o) in bins.items()
+                        if free < cap - 1e-9]
+            stray = [k for k in occupied if k not in touched]
+            total += len(occupied)
+            report('%s bin %g: every free-area-occupied bin is swept-touched'
+                   % (name, bm2), not stray,
+                   '%d of %d stray, e.g. %s' % (len(stray), len(occupied),
+                                                stray[:2]))
+    report('and the check was not vacuous -- there were bins to check',
+           total > 500, '%d occupied bins examined' % total)
+
+
 TESTS = [
     ('the defect, by the numbers', t_the_defect_itself),
     ('lattice bounds are floor/ceil', t_the_lattice_bounds_are_floor_ceil),
@@ -551,6 +594,8 @@ TESTS = [
     ('--cold-cover ladder', t_cold_cover_is_a_ladder_not_a_cliff),
     ('every number finite', t_every_number_is_finite_and_json_safe),
     ('--no-cold', t_no_cold_is_a_clean_off_switch),
+    ('swept copper subsumes the free-area rule',
+     t_the_swept_test_is_a_superset_of_the_free_area_rule),
     ('a crossing track is not cold',
      t_a_track_crossing_a_window_is_not_cold),
     ('a cold band holds no part',
