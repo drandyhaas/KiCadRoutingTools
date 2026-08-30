@@ -1713,11 +1713,12 @@ class Corridor:
                     [nm for nm in self.target if nm not in divers]
             routed = set()
             self.refused = []
+            failed_rescues = 0
             for nm in order:
                 unrouted = [om for om in M if om != nm and om not in routed]
                 res = self.route_lane(nm, self.virtual_of(unrouted),
                                       self.virtual_vias_of(unrouted))
-                if res is None and sched.two_page:
+                if res is None and sched.two_page and failed_rescues < 3:
                     # BUDGET ESCALATION (two-page only). A refused lane
                     # whose plan is feasible usually died at the SEARCH
                     # budget, not at a wall: K19 SODT1's band flood
@@ -1738,6 +1739,12 @@ class Corridor:
                         ctx.cfg = cfg0
                     if res is not None:
                         log(f'    rescued at x4 budget: {nm}')
+                    else:
+                        # a board whose refusals are real walls (K32:
+                        # 14 refused, 0 rescued) must not grind 4x on
+                        # every one -- after three failed rescues the
+                        # attempt stops escalating
+                        failed_rescues += 1
                 if res is None:
                     self.refused.append(nm)
                     log(f'    refused: {nm}')

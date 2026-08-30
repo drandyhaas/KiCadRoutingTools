@@ -139,7 +139,35 @@ class Schedule:
                 rest = [nm for i, nm in enumerate(self.launch)
                         if i not in keep]
                 if len(rest) >= 2:
-                    if os.environ.get('TWO_PAGE_B') == 'worst':
+                    if os.environ.get('TWO_PAGE_B') == 'wmax':
+                        # MAX-WEIGHT increasing subsequence of the rest,
+                        # weight = 1 + inversions: between 'lis' (length
+                        # first -- keeps the mutually-increasing risers,
+                        # strands the worst crossers: K28 49v/3 open
+                        # SDQ0/SDQ15/SWE) and 'worst' (crossers first --
+                        # rescues those, demotes the risers: K28 46v/4
+                        # open SDQM1/SDQ9/11/12). A heavy crosser is
+                        # worth a page slot exactly as much as the
+                        # swimmers it would otherwise refuse into.
+                        inv = {nm: sum(1 for om in self.launch
+                                       if om != nm and self.inverted(nm, om))
+                               for nm in rest}
+                        rr = [self.trank[nm] for nm in rest]
+                        W = [1.0 + inv[rest[i]] for i in range(len(rest))]
+                        n_ = len(rest)
+                        bestw = [(W[i], ) for i in range(n_)]
+                        prev = [-1] * n_
+                        for i in range(n_):
+                            for j in range(i):
+                                if rr[j] < rr[i] and \
+                                        bestw[j][0] + W[i] > bestw[i][0]:
+                                    bestw[i] = (bestw[j][0] + W[i], )
+                                    prev[i] = j
+                        i = max(range(n_), key=lambda k: bestw[k][0])
+                        while i >= 0:
+                            self.page[rest[i]] = 'B.Cu'
+                            i = prev[i]
+                    elif os.environ.get('TWO_PAGE_B') == 'worst':
                         # the B-page RESCUES THE WORST CROSSERS first
                         # -- the human's constant-layer SWE idiom. On
                         # an all-F-escape fanout this measured WORSE
