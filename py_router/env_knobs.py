@@ -343,6 +343,18 @@ def refresh() -> None:
     g['RASTER_CACHE_MB'] = _f('KICAD_RASTER_CACHE_MB', 256.0)
     g['BUS_XLAYER_PCT'] = _i('KICAD_BUS_XLAYER_PCT', 35)
     g['BUS_OFFLANE_MULT'] = _f('KICAD_BUS_OFFLANE_MULT', 1.0)   # off-lane surcharge (1.0 = off)
+    # #622 victim-priority restore (ported from bus622-take2 a693919b): a rip
+    # victim whose terminal reroute failed AND whose full restore is
+    # short-refused gets its channel back -- the squatting nets (routed since
+    # the rip, rippable this run) are ripped + requeued, the victim restored
+    # whole and protected from re-ripping. Runs ONCE, at the reroute queue's
+    # drain, and only inside a reconcile sub-run.
+    #
+    # OPT-IN here, though the source branch shipped it default ON: it changes
+    # which copper survives a rip exchange on every board, and nothing on
+    # main's corpus has measured it yet. Arm it for the A/B; flip the default
+    # only once a sets 1-5 run says it earns it.
+    g['VICTIM_RESTORE'] = _opt_in('KICAD_VICTIM_RESTORE')
     g['BUS_CORRIDOR_PROBE_VIA_MULT'] = _f('KICAD_BUS_CORRIDOR_PROBE_VIA_MULT', 20.0)
     g['BUS_MAX_CORRIDOR_LAYER_CHANGES'] = _i('KICAD_BUS_MAX_CORRIDOR_LAYER_CHANGES', 1)
     g['TAP_RELOCATION_MAX'] = _i('KICAD_TAP_RELOCATION_MAX', 2)

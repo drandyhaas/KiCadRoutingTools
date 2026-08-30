@@ -95,6 +95,15 @@ class RoutingState:
     # in a restore-crossing (cparti +1V8<->B_{n}ON). No clearing needed: a net only
     # re-routes after being ripped, so its ancestry is always freshly set then.
     rip_ancestry: Dict[int, Any] = field(default_factory=dict)
+    # #622 victim-priority restore: victims restored WITH AUTHORITY (their
+    # channel squatter ripped so the full restore could land) are protected
+    # from being ripped again for the rest of the run -- rip_exclude_set
+    # folds this set in, so every blocker analysis skips them. Without the
+    # protection the requeued squatter's own ladder just rips the victim
+    # back and the exchange oscillates. victim_authority_used caps the
+    # mechanism at once per victim.
+    restore_protected_net_ids: Set[int] = field(default_factory=set)
+    victim_authority_used: Set[int] = field(default_factory=set)
 
     # #572: exact-fill links the plane-finalize oracle left unroutable,
     # forced into this (reconcile sub-)run -- net_id ->
@@ -342,8 +351,11 @@ def diff_pair_rip_exclude(state: RoutingState, p_net_id: int, n_net_id: int) -> 
 
 
 def rip_exclude_set(state: RoutingState, net_id: int) -> Set[int]:
-    """Nets a (re)routing net must NOT rip: itself plus its rip-ancestry."""
-    return {net_id} | set(state.rip_ancestry.get(net_id, frozenset()))
+    """Nets a (re)routing net must NOT rip: itself, its rip-ancestry, and
+    every victim restored with authority (#622 victim-priority restore --
+    re-ripping one just re-opens the exchange this mechanism closed)."""
+    return ({net_id} | set(state.rip_ancestry.get(net_id, frozenset()))
+            | set(getattr(state, 'restore_protected_net_ids', None) or ()))
 
 
 def get_net_history_summary(state: RoutingState, net_id: int, pcb_data: 'PCBData') -> str:

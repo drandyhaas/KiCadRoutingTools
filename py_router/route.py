@@ -1119,6 +1119,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
               f"(bus members deprioritized in the rip ladder)")
     # The SE loop needs the strategy to apply the explicit 'bus' ordering.
     config.ordering_strategy = ordering_strategy
+    # #622 victim-priority restore scoping: the endgame sweep fires only in
+    # a reconcile SUB-run (final_reconcile=False), where no deeper recovery
+    # tier exists to pre-empt -- measured, firing in the outermost run's
+    # loop or drain regressed a clean control both times (yz2, za2).
+    config.final_reconcile = final_reconcile
     if config.ripup_blocker_select != 'count':
         print(f"Rip-up blocker-select algorithm: {config.ripup_blocker_select}")
 
