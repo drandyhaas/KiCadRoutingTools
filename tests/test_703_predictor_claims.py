@@ -89,6 +89,11 @@ REGISTERED = {
     '.claude/skills/plan-pcb-placement-and-routing/scripts/loop_driver.py',
     'py_placer/placement/reconstruct.py',
     'py_placer/placement/routability.py',
+    # #553's mover ranking, which quotes the legality rows in order to say
+    # exactly what they do and do not license: they were measured as
+    # BOARD-level scalars ranking a BOARD-level outcome, and this module uses
+    # them as PER-CANDIDATE counts within one board.
+    'py_placer/placement/diagnosis.py',
     'tests/test_run8_gate_conjuncts.py',
     'docs/placement-optimization.md',
     # The measurement apparatus itself, which quotes the numbers in order to
