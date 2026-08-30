@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""The stub-debris trim must not leave a GHOST via (#796).
+"""The stub-debris trim must not leave a GHOST via (#805).
+
+MISLABEL, corrected here: this was committed as "#796" (176f9328, already
+pushed, so its message cannot be rewritten). 796 is a MERGED PR -- "#702: the
+quench refuses a move that breaks a declared floorplan claim" -- and has nothing
+to do with this. The number was inferred from the gap in the open-ISSUE list
+without checking pull requests, which share the numbering. The real issue is
+#805 (obstacle bookkeeping: copper placed or freed without a matching map
+update).
 
 `f30f44d5` frees unused stub branches and dangling vias the moment a route
 commits, so the cells are routable by the very next net. The freeing was only
@@ -31,7 +39,7 @@ board and inspects the real lists -- and it carries its own negative control:
 the same scenario with the swap list NOT handed over must produce the ghost, or
 the test proves nothing.
 
-    python3 tests/test_796_trim_ghost_vias.py
+    python3 tests/test_805_trim_ghost_vias.py
 """
 import os
 import sys
@@ -131,14 +139,14 @@ def test_the_swap_list_is_filtered_in_place():
 
 
 def main():
-    print('--- #796 the stub-debris trim must not leave ghost vias')
+    print('--- #805 the stub-debris trim must not leave ghost vias')
     test_negative_control_the_ghost_is_reproducible()
     test_the_swap_list_is_stripped()
     test_the_swap_list_is_filtered_in_place()
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s): {', '.join(FAILURES)}")
         return 1
-    print('\ntest_796_trim_ghost_vias: all checks passed')
+    print('\ntest_805_trim_ghost_vias: all checks passed')
     return 0
 
 
