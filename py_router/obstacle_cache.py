@@ -91,7 +91,13 @@ def ledger_set_working_map(obstacles) -> None:
     phantom UNBALANCED serials."""
     if _LEDGER is not None:
         _LEDGER["wid"] = id(obstacles)
-        _LEDGER["meta"] = {}
+        # KEEP meta across the reset. Serials are unique for the life of the
+        # process, so an old entry can never collide with a new one -- and this
+        # run's caches are precomputed BEFORE its working map is built
+        # (route.py:1928 then :1952), so wiping meta here erased the net-id of
+        # every initially-built cache. The report then printed "net ?" for
+        # exactly the objects most likely to be unbalanced, which is the whole
+        # question it exists to answer.
         _LEDGER["adds"] = {}
         _LEDGER["removes"] = {}
         _LEDGER["raw"] = {}
