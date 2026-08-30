@@ -1,0 +1,57 @@
+{
+  "_why": [
+    "The record pre-registered rule 2 demands: the withdrawal keeps its row,",
+    "with its measured direction, in the `rejected` style test_placement_ab.py",
+    "uses. It could not live in test_placement_ab.ROWS -- those rows are",
+    "quench-objective A/B pairs graded by floorplan.grade, and this one is a",
+    "route -- so it is the same discipline on the object that has the shape:",
+    "a committed literal, re-checked in milliseconds by",
+    "tests/test_789_rule1_withdrawal.py, failing if the mark changes.",
+    "",
+    "Numbers are from the slate run recorded in docs/placement-predictors.md.",
+    "They are metrics, not board bytes, so the test needs no wk/ tree."
+  ],
+  "rejected": true,
+  "expect": "crossings-clause WITHDRAWN",
+  "issue": 789,
+  "discharges": "docs/placement-predictors.md pre-registered rule 2",
+  "measured": {
+    "board_key": "esp_prog",
+    "argv_sha_prefix": "52aaeed47e14fea7",
+    "baseline": {
+      "index": 0,
+      "crossings": 19,
+      "hpwl": 263.929,
+      "blocking": 4,
+      "note": "candidate 0, the plain quench, generated and routed by the slate study"
+    },
+    "firing_candidates": [
+      {"index": 1, "crossings": 23, "hpwl": 236.74883999999992, "blocking": 3},
+      {"index": 4, "crossings": 23, "hpwl": 243.7041599999999, "blocking": 3},
+      {"index": 5, "crossings": 24, "hpwl": 254.54641999999996, "blocking": 2}
+    ],
+    "best_unbarred_blocking": 3,
+    "note": [
+      "All three are barred on crossings ALONE -- their hpwl is BELOW the",
+      "baseline's, so none is barred by the clause that survives. Candidate 5",
+      "carries the highest crossings on the slate and the best routed blocking,",
+      "and the best candidate the bar allows through routes to 3."
+    ]
+  },
+  "null_rate": {
+    "esp_prog": 1.0,
+    "watchy": 0.21,
+    "tigard": 0.0,
+    "_note": [
+      "Permuting `blocking` within the board and re-evaluating the criterion.",
+      "esp_prog is 1.0 because 9 of its 10 candidates route below the",
+      "baseline's 4, so ANY permutation fires. Pre-registered as expected-high;",
+      "recorded so the discharge is never read as strong evidence."
+    ]
+  },
+  "behavioural_delta": {
+    "static_only": "5 of 5 boards unchanged -- rank_key slot 1 IS crossings, so a crossings-barred candidate already sorts below every candidate with fewer",
+    "with_probe": "esp_prog changes from blocking 3 to blocking 2; the other four unchanged",
+    "worse_on": 0
+  }
+}
