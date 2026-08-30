@@ -454,6 +454,52 @@ discharging, not a number chosen afterwards.*
    rate printed beside it.
 4. Saturated and starved boards are reported with their constant value and
    excluded from the denominator. They are never dropped.
+5. *Recorded 2026-08-30, before any slate run has produced a tau. This is NEW
+   pre-registration, not a discharge of rule 2: rule 2 is about the BAR and
+   says nothing about rank order, and no tau discharges it.*
+
+   `portfolio.rank_key` puts `crossings` in slot 1, which decides which
+   candidates a probe budget is spent on. **A slate run measures Kendall tau-b
+   between the static order and the routed order over the SAME candidate set**,
+   the static side being `sorted(..., key=rank_key(c, 0))` with candidate 0's
+   key COMPUTED rather than pinned first by fiat, and the routed side being
+   `board_score`'s `blocking` VALUE with its ties left as ties. It is never
+   `ranking_routed` as printed, whose final tiebreak is the static position and
+   which would therefore agree with the static order by construction. tau is
+   computed on `(static_position, blocking)`, so a POSITIVE tau means the key
+   AGREES: three candidates at static positions 0, 1, 2 routing to `blocking`
+   1, 2, 3 give three concordant pairs and tau-b +1.0.
+
+   **The rule.** `rank_key`'s order is reported as agreeing only if tau is
+   positive on >= N-1 boards and negative on none, over boards with a *defined*
+   tau, with N >= 3 and the shuffle-control rate printed beside it. That is
+   rule 3's shape, unchanged. **No magnitude threshold is introduced**, because
+   any tau cut-off would be a number chosen after seeing tau's scale; the
+   threshold IS the sign rule and its null is exactly binomial. Clearing it
+   licenses *reporting agreement over the population the rank key actually
+   sees*, and nothing else — not a reorder, and not rule 2. Failing it is
+   reported as NOT SHOWN TO AGREE and licenses nothing. The one asymmetric
+   outcome pre-registered here: tau NEGATIVE on >= N-1 boards and positive on
+   none licenses opening a reorder issue — the issue, not the reorder,
+   following rule 1's precedent that neither arm was licensed.
+
+   **Declared before the run, so that a later denominator cannot be chosen:**
+   the board set is #703's six; K is 11 per board (candidate 0 plus the ten
+   #703 recorded); kit-dev-coldfire-xilinx_5213 runs with REDUCED guards (one
+   regeneration check, no re-route control) because its quench and route cost
+   hours. `splitflap_driver` is expected to come back `baseline_clean` and
+   `sonde_u` probably — their #703 candidates route to `blocking` 0 and
+   {0 x9, 2} — so N is expected to be 3-5 and `MIN_SIGN_BOARDS` is 3. A NO
+   VERDICT at N < 3 is a first-class outcome, committed like any other.
+
+   **Rule 2 is an EXISTENCE claim: it can be discharged, never refuted.** The
+   clause standing is a default, not a finding. And the null rate of rule 2's
+   own criterion is measured and printed beside its verdict — permuting
+   `blocking` within each board and re-evaluating the predicate. It is expected
+   to be HIGH, because roughly half a slate is crossings-barred and `blocking`
+   varies. Saying that after seeing the rate would read as excuse-making;
+   saying it here is the honest form. A discharge at a high null rate is still
+   a discharge, and still evidence of very little.
 
 ## What this does not claim
 
