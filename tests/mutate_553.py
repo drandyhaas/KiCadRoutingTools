@@ -71,7 +71,7 @@ _WINNER = (
     "                    values['blocker_cells'].get(win[0], 0) + cells)\n")
 
 _CLAIM_ANCHOR = ("    selected_by: Dict[str, List[str]] = {}\n"
-                 "    n_parts = 0\n")
+                 "    picked: set = set()")
 
 
 ROWS = [
@@ -174,13 +174,13 @@ ROWS = [
      "    for _s, _ks in pools.items():\n"
      "        for _k in _ks:\n"
      "            selected_by.setdefault(_k, []).append(_s)\n"
-     "    n_parts = 0\n",
+     "    picked: set = set()",
      (T553,), 'KILLED'),
 
     # The budget ignored: a block is still added whole, but nothing stops the
     # sweep, so "budget" becomes a label on a number nobody enforces.
     ('budget-ignored', 'd',
-     "            if budget is not None and n_parts >= budget:\n",
+     "            if budget is not None and len(picked) >= budget:\n",
      "            if False:\n",
      (T553,), 'KILLED'),
 
