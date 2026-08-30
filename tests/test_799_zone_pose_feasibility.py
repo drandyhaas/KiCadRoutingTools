@@ -30,7 +30,7 @@ PROPOSES candidate origins, and every candidate is judged by `zone_escape` and
 THE MUTATION TABLE, RECORDED FROM THE RUN (`python3 tests/mutate_799.py`),
 never predicted and never edited afterwards to match:
 
-    20 rows: 16 killed, 4 survived, 0 broken, 0 disagreeing with expectation
+    22 rows: 18 killed, 4 survived, 0 broken, 0 disagreeing with expectation
 
 The first run was 14 killed, 6 survived, 4 WRONG. TWO were defects -- one in
 this file, one dead line in the engine -- and two were rows whose EXPECTATION

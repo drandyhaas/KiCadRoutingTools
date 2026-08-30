@@ -26,7 +26,7 @@ emitted intent must stay silent).
 THE MUTATION TABLE, RECORDED FROM THE RUN (`python3 tests/mutate_799.py`, which
 carries both issues' rows), never predicted:
 
-    20 rows: 16 killed, 4 survived, 0 broken, 0 disagreeing with expectation
+    22 rows: 18 killed, 4 survived, 0 broken, 0 disagreeing with expectation
 
 The five rows aimed at this file are all KILLED --
 `allow-unresolved-fires-at-error` (the `default=WARN` that `severity_of`'s
