@@ -384,6 +384,20 @@ def summarise(rows):
             round(deltas[len(deltas) // 2] if len(deltas) % 2 else
                   (deltas[len(deltas) // 2 - 1] + deltas[len(deltas) // 2]) / 2, 4)),
         'cells_up': len(up), 'cells_down': len(down),
+        # THE comparison that decides whether #554 is interesting at all. #411
+        # measured `loop@allon` taking tigard from 13 routing failures to 2; a
+        # relocation that ties that has demonstrated nothing, and one that loses
+        # to it has demonstrated something worse. Reported as a count of cells,
+        # never folded into the verdict -- the verdict is about the delta, and
+        # conflating the two would let a win over the loop hide a null against
+        # the undamaged control.
+        'cells_where_loop_beats_relocation': sum(
+            1 for r in ev
+            if r.get('loop_route_recovery') is not None
+            and r.get('route_recovery') is not None
+            and r['loop_route_recovery'] > r['route_recovery']),
+        'cells_with_a_loop_number': sum(
+            1 for r in ev if r.get('loop_route_recovery') is not None),
         'instrument_cells': [r['board'] + '/' + r['kind'] for r in live
                              if r['kind'] in INSTRUMENT_KINDS],
         'skipped': [{'board': r['board'], 'kind': r['kind'],
