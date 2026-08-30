@@ -989,8 +989,10 @@ def main():
     #                       flank corridor's runs;
     #   Cmts.User (orange)  where the schedule REQUIRES the back layer:
     #                       the planned under-passes, on the centreline;
-    #   Eco2.User (yellow)  the connection ends as crosses -- source
-    #                       teeth, stub ends, port leave points, run ends.
+    #   Eco2.User (yellow)  the connection ends: the FANOUT's free ends
+    #                       (source teeth, stub ends) as an "x", the
+    #                       braid's own exit points (a port net's leave
+    #                       point, a flank run's two ends) as a "+".
     def gl(p, q, layer, w=0.05):
         (ax, ay), (bx_, by_) = back_xy(*p), back_xy(*q)
         return (f'  (gr_line (start {ax:.4f} {ay:.4f}) '
@@ -1000,6 +1002,10 @@ def main():
     def cross(p, layer='Eco2.User', r=0.12):
         return gl((p[0] - r, p[1] - r), (p[0] + r, p[1] + r), layer) + \
             gl((p[0] - r, p[1] + r), (p[0] + r, p[1] - r), layer)
+
+    def plus(p, layer='Eco2.User', r=0.10):
+        return gl((p[0] - r, p[1]), (p[0] + r, p[1]), layer) + \
+            gl((p[0], p[1] - r), (p[0], p[1] + r), layer)
 
     def sub_line(nm, xa, xb):
         """The centreline's polyline between x = xa and xb."""
@@ -1030,16 +1036,19 @@ def main():
         if nm in leave:
             yl = line_y(nm, leave[nm])
             if yl is not None:
-                add.append(cross((leave[nm], yl)))
+                add.append(plus((leave[nm], yl)))
     for nm in river:
         a_, b_ = run_of[nm]
         add.append(gl(a_, b_, 'Eco1.User'))
         n_eco += 1
-        for p_ in (ends[nm][0], ends[nm][1], a_, b_):
-            add.append(cross(p_))
+        add.append(cross(ends[nm][0]))
+        add.append(cross(ends[nm][1]))
+        add.append(plus(a_))
+        add.append(plus(b_))
     print(f'eco overlay: {n_eco} planned centreline segments, '
           f'{sum(len([r for r in req[nm] if r[2] == "B.Cu"]) for nm in west)} '
-          f'planned under-passes, {2 * len(west) + 4 * len(river)} ends')
+          f'planned under-passes, {2 * len(names)} fanout ends (x), '
+          f'{len(leave) + 2 * len(river)} braid exits (+)')
     k = txt.rstrip().rfind(')')
     out_board = a.out + '.kicad_pcb'
     with open(out_board, 'w') as f:

@@ -4,8 +4,9 @@
 Layers drawn (bottom to top): mm grid + rulers, board outline (Edge.Cuts),
 pads (yellow; routed-set pads brighter), bench copper (faint by layer),
 ROUTED-set copper (saturated by layer), vias, then the braid's plan
-overlay (braid.py writes it): Eco2 connection ENDS as yellow crosses
-(source teeth, stub ends, port leave points, flank-run ends), Cmts the
+overlay (braid.py writes it): Eco2 connection ENDS in yellow -- the
+fanout's free ends (source teeth, stub ends) as an "x", the braid's own
+exit points (port leave points, flank-run ends) as a "+" -- Cmts the
 planned UNDER-PASSES in orange (where the schedule requires the back
 layer), Eco1 the planned lane CENTRELINES in white. Copper that leaves
 its white line is the router disagreeing with the plan; a via outside

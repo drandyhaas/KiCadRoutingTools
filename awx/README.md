@@ -186,7 +186,7 @@ against copper:
 |---|---|---|
 | Eco1.User | white | every lane's planned centreline; the flank runs |
 | Cmts.User | orange | where the schedule REQUIRES the back layer — the planned under-passes |
-| Eco2.User | yellow crosses | connection ends: source teeth, stub ends, port leave points, run ends |
+| Eco2.User | yellow | connection ends: the fanout's free ends (source teeth, stub ends) as an "×", the braid's own exit points (port leave points, flank-run ends) as a "+" |
 
 Copper that leaves its white line is the router disagreeing with the plan
 (a via it had to place elsewhere, an obstacle it went round); a via outside
