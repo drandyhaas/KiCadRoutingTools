@@ -200,7 +200,14 @@ def build_slate(board_key, board_file, out_dir, seed=0, timeout=14400,
     # command from the one candidate 0 will get, `blocking_0` is incomparable
     # with every grafted `blocking_i`, and it is incomparable in the direction
     # that MANUFACTURES a fire. This is the guard that matters most.
-    sig = PS.freeze_argv(board_key, abs_board, out_dir)
+    #
+    # The REPO-RELATIVE path is what gets signed, because that is what #703
+    # signed: `argv_signature` basenames only the `.py` entries, so the board
+    # path itself is inside the hash and an absolute path hashes differently.
+    # This guard caught that on its first run -- which is the guard working,
+    # not a false alarm, since a signature that ignored the board would not be
+    # a signature of the command.
+    sig = PS.freeze_argv(board_key, board_file, out_dir)
     old_argv = os.path.join(STUDY_DIR, board_key, 'ARGV.json')
     if not os.path.isfile(old_argv):
         return [], f'VOID:no #703 ARGV.json for {board_key}', notes
@@ -344,7 +351,7 @@ def _row(board_key, board_file, c, zero, argv_sha, seed, reduced):
         'truth': {'blocking': (c.route or {}).get('blocking'),
                   'source': (c.route or {}).get('source')},
         'provenance': {'input_board': board_file, 'argv_sha': argv_sha,
-                       'seed': seed, 'measured_git': PS.git_describe(),
+                       'seed': seed, 'measured_git': PS.git_describe(ROOT),
                        'reduced_guards': reduced,
                        'quench_kw': 'library defaults (quench_kw=None)'},
     }
