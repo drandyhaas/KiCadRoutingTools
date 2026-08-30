@@ -74,12 +74,71 @@ confirm the matching `kicad_routing_plugin/` call site was updated (see the
 parity rules in `CLAUDE.md`). Fix any gap and commit it, then update
 `.gui-parity-checked` to the new HEAD (SHA + date + outcome) and commit that.
 
-`check_release_version.py --tag vX.Y.Z` (step 2 and the first CI gate) **fails
+`check_release_version.py --tag vX.Y.Z` (step 3 and the first CI gate) **fails
 the release** unless `.gui-parity-checked` references the current HEAD, so this
 audit is mandatory. For a release that provably touches no engine/GUI code
 (docs-only), pass `--skip-parity-check` to bypass the gate.
 
-### 2. Bump and edit metadata
+### 2. Confirm obstacle ref-count integrity
+
+The working obstacle map is reference-counted. When a net's cache entry is
+replaced while its footprint is still added to the map, the old object's cells
+are stranded there and the next `prepare()` subtracts the *new* footprint
+instead -- driving shared cells below their true refcount, so real copper stops
+blocking and a later net routes straight through it. That ships as foreign
+Via<->Seg DRC violations on a board that graded clean.
+
+Run the audit on a board that actually reproduces, and read the REAL counts:
+
+```bash
+python3 tests/release/check_obstacle_balance.py --self-test   # gate logic, ms
+python3 tests/release/check_obstacle_balance.py               # the real run, ~6 min
+```
+
+It is **self-contained**: it routes `kicad_files/glasgow_revC.kicad_pcb` and its
+`.kicad_pro` sibling, both in this repo, so it runs on a fresh clone with no
+stress corpus. (`--manifest <redo_commands.sh>` replays a recorded corpus run
+instead, for comparison.) The board is byte-identical to the corpus's
+`boards_unrouted_set1/glasgow_revC.kicad_pcb`; the chain is the recorded
+`runs_set1/glasgow_revC` manifest verbatim, duplicated route step included --
+that step re-reads the sibling `.kicad_pro` floor and changes the routing, so
+it is load-bearing, not redundant.
+
+It enforces three invariants and records a fourth:
+
+| | invariant | |
+|---|---|---|
+| A | hard ref-counted maps return to base | ENFORCED |
+| B | no unbalanced cache OBJECT | ENFORCED |
+| C | no cells unaccounted for by any net cache | ENFORCED |
+| D | raw add/remove op deltas cancel | RECORDED, not enforced |
+
+**Do not substitute a faster board.** Measured 2026-08-29: `splitflap_driver`
+(8 s) reports every invariant BALANCED with the fix *disabled*, so a gate
+pointed at it passes no matter what. `glasgow_revC` reproduces -- an unbalanced
+cache object and 30510/23699/22244 cells unaccounted, alongside 7 DRC
+violations. The ~6 minute cost is why this is a release gate rather than a
+`run_all` test.
+
+**D is a separate pre-existing leak**, recorded so it stays a change detector
+instead of folklore: `add_segments_list @ phase3_routing.py:try_phase3_ripup`
+is unbalanced with the stub-debris trim OFF too, and *larger* there
+(+19529 cells vs +11326). Enforcing it today would fail every release for a bug
+this gate did not find. When it is fixed, promote it to ENFORCED.
+
+The `.kicad_pro` is required, not decoration: it carries `min_hole_to_hole
+0.25`, the rule the violating via pair breaks. Routing without it resolves a
+looser floor from the stock netclass (#441).
+
+A chain step that exits non-zero **aborts and prints the reason** rather than
+grading a partial log, and a log with no audit output reports `BROKEN GATE`
+rather than passing -- a check that dies before it checks anything must not
+read as a satisfied guard. `--manifest` replays rewrite the recorded paths into
+a workdir and abort if any still point at the recorded run (replaying
+unrewritten overwrites the corpus board -- measured, it cost 7 intermediate
+boards of a graded run).
+
+### 3. Bump and edit metadata
 
 ```bash
 # Edit:
@@ -101,7 +160,7 @@ python3 check_release_version.py --tag v0.15.5
 It must print `OK:`. (A `VERSION`-only bump that forgets `metadata.json` is the
 exact mistake that failed the v0.17.0 release.)
 
-### 3. Commit and tag
+### 4. Commit and tag
 
 ```bash
 git add -u
@@ -113,7 +172,7 @@ git push origin v0.15.5
 
 The tag push triggers `.github/workflows/release.yml`.
 
-### 4. Watch the CI
+### 5. Watch the CI
 
 ```bash
 gh run watch $(gh run list --workflow=release.yml --limit 1 --json databaseId -q '.[0].databaseId')
