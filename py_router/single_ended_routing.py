@@ -321,14 +321,6 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     return min(float(np.min(d)), best_custom)
 
 
-_SEGARR_STALE = [0]
-if os.environ.get('KICAD_SEGARR_STATS') == '1':
-    import atexit as _atexit_sa
-    _atexit_sa.register(lambda: print(
-        f"[SEGARR] cache HITS whose signature matched but copper DIFFERED "
-        f"(stale arrays served to the #339 refit): {_SEGARR_STALE[0]}"))
-
-
 def _foreign_seg_arrays(pcb_data, layer):
     """Cached per-layer numpy arrays (net_id, x1, y1, x2, y2, half_width) for every
     routed SEGMENT on `layer`, plus every VIA folded in as a degenerate (zero-length)
@@ -337,25 +329,28 @@ def _foreign_seg_arrays(pcb_data, layer):
     Counts alone go stale across rip-reroute (#339: a ripped net re-adds the SAME
     number of segments at new coordinates -- cynthion's refit judged a via against
     MEZZANINE5's OLD track), so the tail elements' geometry joins the signature."""
+    # #803: count + TAIL is not enough either. It cannot see an IN-PLACE field
+    # mutation of a segment ALREADY in the list -- apply_stub_layer_switch
+    # rewrites seg.layer in place ("segments will be modified in place", see
+    # stub_layer_switching), which changes which layer's array a segment belongs
+    # to while leaving lengths and the tail object identical. It also omitted
+    # end_y, layer and width outright. This cache feeds _seg_foreign_seg_dist,
+    # hence _unblock_via_refit, which decides the SIZE of a shipped via -- the
+    # #339 failure it was hardened against ("cynthion's refit judged a via
+    # against MEZZANINE5's OLD track") in a form the #339 fix still admits.
+    # Fold the mutable geometry of the tail in, and a cheap whole-list digest of
+    # the fields the arrays are BUILT from, so an in-place edit moves the
+    # signature.
     segs, vias = pcb_data.segments, pcb_data.vias
     tail = segs[-1] if segs else None
     vtail = vias[-1] if vias else None
-    sig = (len(segs), len(vias),
-           (tail.start_x, tail.start_y, tail.end_x, tail.net_id) if tail is not None else None,
-           (vtail.x, vtail.y, vtail.net_id) if vtail is not None else None)
+    sig = (len(segs), len(vias), id(segs), id(vias),
+           (tail.start_x, tail.start_y, tail.end_x, tail.end_y,
+            tail.layer, tail.width, tail.net_id) if tail is not None else None,
+           (vtail.x, vtail.y, vtail.size, vtail.net_id) if vtail is not None else None,
+           sum(map(id, segs)), sum(map(id, vias)),
+           hash(tuple(sg.layer for sg in segs)))
     cache = getattr(pcb_data, '_foreign_seg_arr_cache', None)
-    # #803 instrumentation (KICAD_SEGARR_STATS=1): the signature is count+TAIL
-    # (#339). Detect the case it CANNOT see -- signature identical but the
-    # actual copper different -- by carrying a content fingerprint alongside.
-    # The fingerprint never decides the hit; it only counts how often a hit
-    # WOULD have served stale arrays. This guard feeds _unblock_via_refit, so a
-    # stale hit here means a via approved against copper that has moved.
-    if os.environ.get('KICAD_SEGARR_STATS') == '1':
-        _fp = (len(segs), sum(map(id, segs)))
-        if cache is not None and cache[0] == sig:
-            if getattr(pcb_data, '_foreign_seg_arr_fp', None) != _fp:
-                _SEGARR_STALE[0] += 1
-        pcb_data._foreign_seg_arr_fp = _fp
     if cache is None or cache[0] != sig:
         cache = (sig, {})
         pcb_data._foreign_seg_arr_cache = cache
@@ -615,27 +610,9 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
         pair = (round(f['via_diameter'], 3), round(f['via_drill'], 3))
         if pair[0] < rec[0] - 1e-9 and pair not in cands:
             cands.append(pair)
-    _dbg = os.environ.get('KICAD_REFIT_DEBUG')
-    _dbgpt = None
-    if _dbg:
-        for _p in _dbg.split(';'):
-            try:
-                _px, _py = (float(t) for t in _p.split(','))
-            except ValueError:
-                continue
-            if abs(x - _px) <= 0.05 and abs(y - _py) <= 0.05:
-                _dbgpt = (_px, _py)
-                break
     for vs, dr in cands:
         need = vs / 2.0 + clearance - eps
         ok = True
-        if _dbgpt:
-            print(f"[REFIT] net {net_id} at ({x:.3f},{y:.3f}) trying "
-                  f"{vs}/{dr}: need={need:.4f} (clearance={clearance} eps={eps})")
-            for _l in layers:
-                _d = _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y, _l)
-                print(f"        {_l}: foreign-seg dist={_d:.4f}"
-                      + ("  << FAILS" if _d < need else ""))
         for layer in layers:
             if _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y, layer) < need:
                 ok = False
@@ -647,11 +624,7 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
         if ok and _seg_foreign_via_dist(pcb_data, net_id, x, y, x, y, layers[0] if layers else 'F.Cu') < need:
             ok = False
         if ok:
-            if _dbgpt:
-                print(f"[REFIT] net {net_id} at ({x:.3f},{y:.3f}) APPROVED {vs}/{dr}")
             return (vs, dr)
-    if _dbgpt:
-        print(f"[REFIT] net {net_id} at ({x:.3f},{y:.3f}) rejected every size")
     return None
 
 
@@ -4717,6 +4690,23 @@ def _route_multipoint_taps_impl(
                     if path is not None:
                         unblock_vias = list(unblock_vias) + [_via189]
                         unblock_segments = list(unblock_segments) + _stub189
+                        # #803: same as the _route_with_via_unblock keep-path --
+                        # commit the kept copper to pcb_data NOW. _register_
+                        # unblock_via above is purely permissive, and this via is
+                        # not in pcb_data until the tap result commits, so until
+                        # then it blocks nobody and a foreign track routes
+                        # through it. add_route_to_pcb_data dedupes by id()
+                        # (#195), so the caller's later commit skips these.
+                        if not getattr(config, 'plan_probe', False):
+                            _hv = {id(v) for v in pcb_data.vias}
+                            if id(_via189) not in _hv:
+                                pcb_data.vias.append(_via189)
+                            _hs = {id(sg) for sg in pcb_data.segments}
+                            for _sg in _stub189:
+                                if id(_sg) not in _hs:
+                                    pcb_data.segments.append(_sg)
+                            pcb_data._copper_epoch = getattr(
+                                pcb_data, '_copper_epoch', 0) + 1
                         print(f"      {GREEN}TAP PAD-VIA RESCUE: edge routed after "
                               f"unconditional via-in-pad at "
                               f"{_pad_obj.component_ref}.{_pad_obj.pad_number}{RESET}")

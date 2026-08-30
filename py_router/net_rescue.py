@@ -1056,6 +1056,11 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                         continue
                     pcb_data.segments.extend(_gsegs)
                     pcb_data.vias.extend(_gvias)
+                    # #803: bump the copper epoch -- _blockid_geom_memo and
+                    # _via_place_fail_memo key on it, and without this they keep
+                    # serving answers computed before this escape existed.
+                    pcb_data._copper_epoch = getattr(
+                        pcb_data, '_copper_epoch', 0) + 1
                     tap_results.append({'new_segments': _gsegs,
                                         'new_vias': _gvias,
                                         'iterations': 0})
@@ -1083,6 +1088,9 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                     continue
                 pcb_data.segments.extend(_tsegs)
                 pcb_data.vias.extend(_tvias)
+                # #803: bump the copper epoch (see the sibling append above).
+                pcb_data._copper_epoch = getattr(
+                    pcb_data, '_copper_epoch', 0) + 1
                 tap_results.append({'new_segments': _tsegs,
                                     'new_vias': _tvias, 'iterations': 0})
                 _tapped += 1

@@ -194,8 +194,15 @@ def retap_pad(pcb_data: PCBData, config: GridRouteConfig,
         add_net_obstacles_from_cache(working_obstacles,
                                      net_obstacles_cache[nid])
     else:
+        # #803: no cache entry for this net, so the remove/recompute/add cycle
+        # above cannot run -- but the copper is real and every later route must
+        # see it. Append it and bump the copper epoch so the geometry memos
+        # (_blockid_geom_memo, _via_place_fail_memo) cannot serve a pre-re-tap
+        # answer. Without the bump this branch adds copper that the memos still
+        # believe is absent.
         pcb_data.vias.append(new_via)
         pcb_data.segments.extend(_stub_segs)
+        pcb_data._copper_epoch = getattr(pcb_data, '_copper_epoch', 0) + 1
     print(f"  TAP RELOCATION: re-tapped {pad.component_ref}.{pad.pad_number} "
           f"with a fresh via at ({new_via.x:.2f}, {new_via.y:.2f})")
     return new_via
