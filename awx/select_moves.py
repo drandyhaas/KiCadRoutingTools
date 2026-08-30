@@ -665,16 +665,21 @@ def select(menu: Dict[str, List[Move]],
            # wash at K11; 24.0 regresses at K51.
            cross_weight: float = 6.0,
            align_rounds: int = 4,
-           log=None) -> Tuple[Dict[str, Move], List[str]]:
+           log=None, geo: Optional['Corridor'] = None
+           ) -> Tuple[Dict[str, Move], List[str]]:
     """Pick one move per net. `launch[n]` is where the net enters the
     corridor, used to price how far the corridor must carry it to reach
-    a move's exit point. Returns (choice, unplaced)."""
+    a move's exit point. `geo`: the order model to use for the floor,
+    the LIS refinement and the layer alignment (plan_order.BraidOrder,
+    the braid's own rules) instead of this module's projection.
+    Returns (choice, unplaced)."""
     dirs = set(only_dirs) if only_dirs else None
     cand = {}
     for n, ms in menu.items():
         ms = [m for m in ms if dirs is None or m.direction in dirs]
         cand[n] = ms
-    geo = Corridor(keep_out, launch) if keep_out else None
+    if geo is None:
+        geo = Corridor(keep_out, launch) if keep_out else None
 
     def cost(n: str, m: Move) -> float:
         lx, ly = launch[n]

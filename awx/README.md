@@ -43,6 +43,10 @@ python3 band_check.py FO_BOARD K                            # band_of against it
 bash prof_k.sh FO_BOARD K OUTSTEM                           # cProfile of one braid run (prof_top.py prints the top)
 python3 compare_human.py OUR_BOARD K [--top N]              # ours vs 00_human_original on the same nets: vias, copper, per net
 python3 human_at_k.py [K ...]                               # the human's via count per checkpoint
+python3 net_faces.py BOARD NET [NET ...]                    # per net: faces left/entered, vias (in an array / open), copper per layer
+python3 sched_whatif.py FO_BOARD K [--exit-block NET,..]    # the schedule under another target order; two-page count
+python3 plan_model_check.py FO_BOARD K                      # the plan's order model vs the braid's orders on a recorded board
+PLAN_OPTS=--order-model DIRS=left,down bash chain_k.sh TAG 21 28 -- --no-plane-drop   # the chain with the order model (opt-in)
 python3 test_connect.py ch6_fo_k15.kicad_pcb SDQ0           # connect() unit test
 ```
 
@@ -200,6 +204,44 @@ Input: the bench with the source fanned out and the destination bare.
    point (the fanout artefact behind K21 SRAS/SCKE1); `ends_of.py BOARD K`
    prints every net's two free ends and the corridor grouping, to diff two
    fanout boards of the same K.
+8. **The braid's order model** (`plan_order.BraidOrder`, `--order-model` /
+   `PLAN_OPTS=--order-model`, opt-in). The plan's floor was read off a
+   transverse projection of launch and exit points; the braid lays lanes
+   by other rules — a flank tooth joins from the side and its join block
+   puts it OUTERMOST in join order, a side exit takes a slot in an exit
+   block (ports by exit *s*, then the joined in reverse join order) — so
+   the projection had K28's SWE and SCAS (joiners) next to SCKE0 in the
+   middle of the bundle and sent them head-on into the left face among
+   the data lanes: 22 of 71 swaps. `BraidOrder` subclasses
+   `select_moves.Corridor` with the braid's spine (built from the taut
+   pre-routes with the arrival flow), its launch classification and
+   offsets rules (fixed once the teeth are), its exit rules (head-on
+   unless something upstream at the offset, AND a straight run-in clear
+   of the arrays' pads — the first stub along a flank is otherwise
+   "head-on" and its tail runs along the ball row), and prices a choice
+   by `schedule.Schedule`: **corridor vias** (2 per diver, 2 per lane an
+   exit leg crosses, 2 per diver passed in flight when the gated
+   columns exceed the corridor's capacity and the braid drops its gate),
+   plus the corridor count (`cluster_corridors`' linkage: a second
+   corridor is laid against the first's copper). `plan_model_check.py
+   FO_BOARD K` replays the model on a recorded board: at K28 its launch
+   order matches the braid's to a near-tie (SODT0/SODT1, 0.01 mm of
+   *s*), its target order and exit kinds are IDENTICAL. Integration:
+   `select()` still places every net by its projection; `refine_faces`
+   then moves the JOINERS between faces while the model's cost falls.
+   Measured (restricted chain): K4..K19 bit-identical; K21 moves SWE
+   down/B (as the human does) — 32 vias from 34 and **2 open** (SA7,
+   SA9); K28 moves SWE down — 68 vias from 75, 14 columns from 16, and
+   **3 open** (SA1, SA7, SDQ7) from 1. Both times the refusals are
+   exit-block lanes behind the late-exiting joiner — a braid defect at
+   the exit legs, the next thing to chase; until it is fixed the model
+   stays opt-in. Letting the model move EVERY net was worse (K11..K21
+   two open each, more vias: the head-on nets' faces the projection
+   chose are what the braid was tuned on), and handing the fanout the
+   plan's exit LINES (`LINES=1`, so the model's gap choices would be
+   laid) is broken at the fanout (K11: 10 DRC on the fanout board,
+   K21: 21) — the gap is still the fanout's choice, which is the
+   model's residual uncertainty for head-on exits.
 
 The plan's move menus are array-grid based (`escape_moves.grid_of` measures
 rows and columns in board axes), so a rotated array has no plan;

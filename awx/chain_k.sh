@@ -37,6 +37,12 @@ DIRS_OPT=${DIRS:+--dirs=$DIRS}
 # SOURCE=1: apply the plan's source choices too (re-fan the chosen
 # nets of the source array in the planned direction and kind)
 SRC_OPT=${SOURCE:+--source}
+# LINES=1: hand the fanout the plan's exit LINES (gaps) as well as its
+# directions (default: directions only, --no-lines)
+LINES_OPT=${LINES:---no-lines}
+[ "$LINES_OPT" = "1" ] && LINES_OPT=""
+# PLAN_OPTS: extra fanout_from_plan options (e.g. --legacy-order)
+PLAN_OPTS=${PLAN_OPTS:-}
 KS=()
 while [ $# -gt 0 ] && [ "$1" != "--" ]; do KS+=("$1"); shift; done
 [ "$1" = "--" ] && shift
@@ -45,7 +51,7 @@ for K in "${KS[@]}"; do
   echo "=== K$K  $(date +%H:%M:%S)"
   NETS=$(python3 coherent_nets.py "$K")
   python3 fanout_from_plan.py "${TAG}_fo_k${K}.kicad_pcb" "$K" \
-    --board="$BASE" $DIRS_OPT $SRC_OPT --no-lines "${FO_OPTS[@]}" \
+    --board="$BASE" $DIRS_OPT $SRC_OPT $LINES_OPT $PLAN_OPTS "${FO_OPTS[@]}" \
     > "${TAG}_fo_k${K}.log" 2>&1
   grep -E "kept |^plan:|obeyed|failed|^source:|^  [a-z_]+ -> " \
     "${TAG}_fo_k${K}.log" | sed 's/^/  /'

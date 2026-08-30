@@ -91,6 +91,16 @@ NO_LINES = '--no-lines' in sys.argv
 # delivers on -- a B tooth the corridor must bring back to F costs the
 # braid a via the plan already knew it did not want (K15 SRAS).
 SOURCE = '--source' in sys.argv
+# --order-model: the braid's own launch and exit rules
+# (plan_order.BraidOrder) score the JOINERS' face choice by the
+# schedule the braid will lay -- corridor vias (divers, exit-leg
+# crossings, in-flight surfacings) and columns against the corridor's
+# capacity -- after select() has placed everything by its projection.
+# Opt-in: it moves SWE down at K21 and K28 as the human does (vias
+# 34 -> 32, 75 -> 68) and the braid then refuses two exit-block lanes
+# behind it each time (SA7/SA9, SA1/SA7) -- a braid defect to chase
+# before this becomes the default. Off, the chain is bit-identical.
+ORDER_MODEL = '--order-model' in sys.argv
 base = next((a.split('=', 1)[1] for a in sys.argv
              if a.startswith('--board=')),
             os.path.join(HERE, 'fb_t2q_base.kicad_pcb'))
@@ -197,11 +207,18 @@ if ONLY:
     if _empty:
         print(f'  {len(_empty)} net(s) have NO move on {",".join(ONLY)}: '
               + ','.join(_empty[:8]))
+model = None
+if ORDER_MODEL:
+    import plan_order as po
+    model = po.build_model(pcb, names, ends, byname, obs, paths, launch, tooth0,
+                           dref, sref, dgrid.bbox)
+    print(f'  order model: {len(model.joiners)} joiner(s) '
+          f'{sorted(model.joiners)}, s0 {model.s0:.2f}')
 schoice, choice, lp, report = pe.plan_ends(
     smenu, dmenu, launch, sgrid.bbox, dgrid.bbox, buses=buses,
     tooth_layer0=tooth0, src_seed=src_seed,
     # the 'spend' objective only when the source moves will be APPLIED
-    objective='spend' if SOURCE else 'floor')
+    objective='spend' if SOURCE else 'floor', model=model)
 # only the nets the plan actually MOVED are re-fanned: a move of the
 # same kind, side, layer and gap as the stub already on the board IS
 # that stub (the menu's exit x differs from the tooth's by the array

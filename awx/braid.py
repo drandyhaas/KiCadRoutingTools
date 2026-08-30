@@ -107,6 +107,9 @@ LEG_O = 0.2                    # ...and beyond its two ends in o: a leg
                                # the law there, the band only a guide
 TOL_S = 0.5                    # "at the same s" for head-on classification
 DIST_O = 0.2                   # distinct offsets for head-on classification
+HEAD_RUN = 3.0                 # a head-on stub's straight run-in that must
+                               # be clear of static copper (its own row of
+                               # balls, when it sits on a flank)
 CROSS_TUBE = 1.0               # a lane's freedom through a crossing region
 W_GATE = 0.33                  # narrowest swap column the gated schedule
                                # gets: every clean gated K on the bench
@@ -479,7 +482,18 @@ class Corridor:
                 s_j, o_j = se[om]
                 if s_j < s_i - TOL_S and abs(o_j - o_i) < DIST_O:
                     return False
-            return True
+            # a head-on exit runs straight in at its own offset, so
+            # that run must be clear of the ARRAYS' PADS -- the mirror
+            # of head_launch's check, against the pad fields only (the
+            # corridor's other copper is the lanes' business; checked
+            # against every static track it reclassified K21's SDQ0
+            # and SRAS and left 3 lanes open). Without it the FIRST
+            # stub along a flank, with nothing upstream at its offset,
+            # read as head-on and its tail ran along the array's outer
+            # ball row (K11 SDQ13 sent to the bottom face by the order
+            # model: refused by its own band, the band being the row).
+            run_from = sp.xy(s_i - HEAD_RUN, o_i)
+            return ctx.pad_obs.seg_clear(run_from, self.stubs[nm])
 
         self.heads_l = [nm for nm in M if head_launch(nm)]
         self.joiners = [nm for nm in M if nm not in self.heads_l]
@@ -1515,6 +1529,7 @@ def setup(board, names, dest, log, cluster=6.0):
     ctx.paths = db.taut_paths(names, ends, lambda nm: obs_for(nm, 'F.Cu'))
     pad_obs = array_pad_obstacles(pcb, set(ctx.src_ref.values())
                                   | {ends[nm][2] for nm in names})
+    ctx.pad_obs = pad_obs
     ctx.spine_obs = build_obstacles(pcb, -1, kids, 'F.Cu')
 
     def spine_of(members, extra=None, log=None, H=None, relax=True,

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import plan_order as po
 import select_moves as sm
 from escape_moves import Move
 
@@ -46,7 +47,7 @@ def refine_source(src_choice: Dict[str, Move],
                   dst_box, launch0: Dict[str, Pt],
                   rounds: int = 5, cache=None, log=None,
                   tooth_layer: Optional[Dict[str, str]] = None,
-                  objective: str = 'floor'):
+                  objective: str = 'floor', geo_fn=None):
     """Move source exits to cut the WHOLE-PLAN cost, one net at a time.
 
     select() at the source end optimises select()'s cost -- reach,
@@ -100,11 +101,16 @@ def refine_source(src_choice: Dict[str, Move],
     spend = objective == 'spend'
 
     def cost(launch_c, tooth_c, src_c):
-        geo = sm.Corridor(dst_box, launch_c, cache=cache)
+        geo = geo_fn(launch_c) if geo_fn else sm.Corridor(dst_box, launch_c, cache=cache)
         if not spend:
-            return sm.plan_floor(dst_choice, geo)
+            return (geo.cost(dst_choice) if geo_fn
+                    else sm.plan_floor(dst_choice, geo))
         tv = sm.true_vias(dst_choice, sm.corridors(dst_choice), geo, tooth_c)
-        return tv + sum(m.vias - seed_vias.get(n, 0) for n, m in src_c.items())
+        tv += sum(m.vias - seed_vias.get(n, 0) for n, m in src_c.items())
+        if geo_fn:
+            nc, _fl, over, cols = geo.cost(dst_choice)
+            return (nc, tv, over, cols)
+        return tv
     cur = cost(launch, tooth, src_choice)
     best = (cur, dict(launch), dict(src_choice))
     for r in range(rounds):
@@ -163,11 +169,20 @@ def plan_ends(src_menu: Dict[str, List[Move]],
               rounds: int = 4,
               log=None,
               src_seed: Optional[Dict[str, Move]] = None,
-              objective: str = 'floor'):
+              objective: str = 'floor',
+              model=None):
     """Returns (src_choice, dst_choice, launch, report). `objective`:
     'floor' (the crossing floor, the plan's original) or 'spend' (what
     the braid spends, for a chain that APPLIES the source moves --
     SOURCE=1); see refine_source.
+
+    `model` (plan_order.BraidOrder): the braid's own order model. With
+    it the floor, the LIS refinement and the alignment run on the
+    order the braid will lay, a face-refinement pass moves nets
+    between faces while the schedule's (floor, columns over capacity,
+    columns) falls, and the source refinement is skipped unless the
+    source moves are applied (SOURCE=1): its launch points were never
+    on the board, and the destination was being chosen against them.
 
     `launch0` is where the source stubs end today -- the seed, and the
     fallback for any net whose source pad is boxed in. A net with no
@@ -187,25 +202,56 @@ def plan_ends(src_menu: Dict[str, List[Move]],
 
     spend = objective == 'spend'
 
+    def geo_for(launch_c):
+        if model is not None:
+            return model if launch_c == model.launch else model.rebased(launch_c)
+        return sm.Corridor(dst_box, launch_c, cache=cache)
+
     def total(dst_c, launch_c, tooth_c, src_c):
         """What the plan is judged on at both ends. 'spend': true vias
         for the destination choice given the teeth's layers, plus the
-        source escapes' own vias. 'floor': the crossing floor."""
-        geo = sm.Corridor(dst_box, launch_c, cache=cache)
+        source escapes' own vias. 'floor': the crossing floor -- under
+        the order model (floor, columns over capacity, columns)."""
+        geo = geo_for(launch_c)
         if not spend:
-            return sm.plan_floor(dst_c, geo)
-        return (sm.true_vias(dst_c, sm.corridors(dst_c), geo, tooth_c)
-                + sum(m.vias for m in src_c.values()))
+            return geo.cost(dst_c) if model is not None else sm.plan_floor(dst_c, geo)
+        tv = (sm.true_vias(dst_c, sm.corridors(dst_c), geo, tooth_c)
+              + sum(m.vias for m in src_c.values()))
+        if model is not None:
+            nc, _fl, over, cols = geo.cost(dst_c)
+            return (nc, tv, over, cols)
+        return tv
+
+    def fmt(f):
+        if not isinstance(f, tuple):
+            return str(f)
+        return (f'{f[1]} corridor vias ({f[0] + 1} corridor(s), cols {f[3]}, '
+                f'{f[2]} gated over)')
+
+    def _free(m, sel, me):
+        return sm.lanes_free(m, sel, me, strict=False)
     for r in range(rounds):
+        geo = geo_for(launch)
+        # select() keeps its own projection for the head-on nets (the
+        # choices the braid was tuned on); the model then moves the
+        # JOINERS between faces by the braid's schedule -- the decision
+        # the projection got wrong (K28 SWE/SCAS)
         dst_choice, un = sm.select(dst_menu, launch, keep_out=dst_box,
                                    buses=buses, tooth_layer=tooth)
         if not dst_choice:
             break
-        geo = sm.Corridor(dst_box, launch, cache=cache)
+        if model is not None:
+
+            def note(msg):
+                report.append(msg)
+                if log:
+                    log(msg)
+            po.refine_faces(dst_choice, dst_menu, geo, _free, log=note,
+                            only=geo.joiners)
         fl = sm.plan_floor(dst_choice, geo)
         f = total(dst_choice, launch, tooth, src_choice)
         line = (f'  round {r}: '
-                + (f'true vias {f} (floor {fl})' if spend else f'floor {f}')
+                + (f'true vias {fmt(f)} (floor {fl})' if spend else f'floor {fmt(f)}')
                 + f', {len(dst_choice)} placed'
                 + (f', {len(un)} unplaced' if un else ''))
         if best is None or f < best[0]:
@@ -220,7 +266,7 @@ def plan_ends(src_menu: Dict[str, List[Move]],
         # and the source escapes are what is being chosen
         dst_pts = {n: m.exit_pt for n, m in dst_choice.items()}
         sub = {n: ms for n, ms in src_menu.items() if n in dst_pts and ms}
-        if not sub:
+        if not sub or (model is not None and not spend):
             break
         # Start from the fanout ALREADY ON THE BOARD and change a tooth
         # only when moving it helps. Two seeds were tried first and both
@@ -242,7 +288,8 @@ def plan_ends(src_menu: Dict[str, List[Move]],
         src_choice, nxt, sf = refine_source(
             dict(src_seed or {}) if spend else {}, sub,
             dst_choice, dst_box, launch0, cache=cache, log=log,
-            tooth_layer=tooth_layer0, objective=objective)
+            tooth_layer=tooth_layer0, objective=objective,
+            geo_fn=geo_for if model is not None else None)
         # Record the REFINED pair, not just the state the round opened
         # with. The source refinement optimises against this round's
         # destination choice, and re-selecting the destination next
@@ -266,7 +313,14 @@ def plan_ends(src_menu: Dict[str, List[Move]],
     if best is None:
         return {}, {}, launch, report
     f, sc, dc, lp, tl = best
-    geo = sm.Corridor(dst_box, lp, cache=cache)
-    report.append(f'  kept true vias {f} (floor {sm.plan_floor(dc, geo)})'
-                  if spend else f'  kept floor {f}')
+    geo = geo_for(lp)
+    report.append(f'  kept true vias {fmt(f)} (floor {sm.plan_floor(dc, geo)})'
+                  if spend else f'  kept floor {fmt(f)}')
+    if model is not None:
+        vias, fl, cols, cap, n_gated = geo.schedule(dc)
+        report.append(f'  order model: corridor vias {vias} (floor {fl}, exit-leg '
+                      f'crossed {len(geo.leg_crossed(list(dc), dc))}), {n_gated} gated '
+                      f'columns, capacity {cap}'
+                      + (f'  (OVER by {n_gated - cap}: the braid drops its gate, '
+                         f'{cols} columns)' if n_gated > cap else ''))
     return sc, dc, lp, report

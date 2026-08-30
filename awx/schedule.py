@@ -169,6 +169,7 @@ class Schedule:
         columns for vias, when the corridor is out of columns."""
         gate = gate or os.environ.get('SCHED_GATE', 'last')
         assert gate in ('strict', 'last', 'off'), gate
+        self.surfaced: List[str] = []
         trank, divers = self.trank, self.divers
         seq = list(self.launch)
         cols: List[List[Tuple[str, str]]] = []
@@ -244,6 +245,10 @@ class Schedule:
                 on_b.add(m)
                 last_move[m] = len(cols)
                 if p in divers:
+                    if p in on_b and todo[p]:
+                        # passed mid-flight with crossings still to
+                        # make: it dives again later, two more vias
+                        self.surfaced.append(p)
                     on_b.discard(p)             # it surfaced to be passed
                     last_passed[p] = len(cols)
                 if not todo[m]:
