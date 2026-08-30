@@ -465,6 +465,36 @@ def predictors_for(board_path):
         if fnd.get('courtyard_census_error'):
             gaps.append(f'legality.courtyard_census_error='
                         f'{fnd["courtyard_census_error"]}')
+
+    # The pocket census (#709). SEPARATE from the placement model on purpose:
+    # it is the aggregate question -- how much of the board is EMPTY, and does
+    # the part mass sit where the demand does -- which the per-part legality
+    # checklist structurally does not ask.
+    #
+    # #703's comment set the bar and it is the right one: this family has to
+    # earn its place against legality counts already at median rho +0.785 on
+    # 6/6 boards. Adding the columns is what makes that answerable by the
+    # per-board sign test instead of by argument. Note the CHOICE of scalars:
+    # the hot ranking is a known constant predictor (rank_stats records an
+    # empty ranked list on three of five real boards), and a constant
+    # contributes nothing to a sign test; the cold ones exist on every board.
+    #
+    # A failure here is recorded as a gap with its exception and every key
+    # stays None -- never 0, which would be a measurement.
+    try:
+        import check_pockets as _cp
+        _doc, _hot = _cp.pocket_census(pcb, board_path)
+        _arr = _doc.get('arrangement') or {}
+        _side = (_arr.get('sides') or {}).get(_arr.get('headline_side')) or {}
+        _off = (_side.get('offset_frac_span') or [None, None])[0]
+        pred['cold_area_frac'] = _doc.get('cold_area_frac')
+        pred['cold_regions'] = len(_doc.get('cold_regions') or [])
+        _top = (_doc.get('cold_regions') or [{}])[0]
+        pred['cold_top_area_mm2'] = _top.get('area_mm2')
+        pred['centroid_offset_frac'] = _off
+    except Exception as e:                                      # noqa: BLE001
+        gaps.append(f'pockets:{type(e).__name__}: {e}')
+
     for k, v in list(pred.items()):
         if v is None and f'metrics.{k}' not in gaps:
             gaps.append(f'predictor.{k}')
