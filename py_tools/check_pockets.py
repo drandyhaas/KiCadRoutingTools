@@ -238,6 +238,37 @@ def copper_touched_bins(pcb, bin_mm):
     return hit
 
 
+def courtyard_cover(parts, containers, windows, bin_mm, leg):
+    """{window: {'F': mm2, 'B': mm2}} of courtyard area, charged PER SIDE.
+
+    A through-hole part is charged to BOTH faces, because `GradedPart.sides`
+    says its leads really are on both and a window under it is not clear on
+    either. Charging only `gp.side` is nearly an equivalent mutation -- the two
+    disagree only where a B-side part ALSO covers the window, so that the
+    far-side sum overtakes the near one -- which is exactly why it is asserted
+    here directly rather than through a cold-window count that no in-repo board
+    happens to move.
+    """
+    cover = {}
+    for gp in parts:
+        if gp.ref in containers:
+            continue
+        for bx in range(int(math.floor(gp.rect[0] / bin_mm)),
+                        int(math.ceil(gp.rect[2] / bin_mm))):
+            for by in range(int(math.floor(gp.rect[1] / bin_mm)),
+                            int(math.ceil(gp.rect[3] / bin_mm))):
+                b = (bx, by)
+                if b not in windows:
+                    continue
+                a = leg.rect_overlap_area(window_rect(b, bin_mm), gp.rect)
+                if a <= 0:
+                    continue
+                slot = cover.setdefault(b, {'F': 0.0, 'B': 0.0})
+                for s in _side_key(gp):
+                    slot[s] = slot.get(s, 0.0) + a
+    return cover
+
+
 def _side_key(gp):
     return getattr(gp, 'sides', None) or frozenset((gp.side,))
 
@@ -564,25 +595,7 @@ def pocket_census(pcb, board_path, *, nets=('*',), bin_mm=2.0, top=8,
                            else 'unavailable',
     }
 
-    cover = {}
-    for gp in real:
-        if gp.ref in containers:
-            continue
-        gx0 = int(math.floor(gp.rect[0] / bin_mm))
-        gx1 = int(math.ceil(gp.rect[2] / bin_mm))
-        gy0 = int(math.floor(gp.rect[1] / bin_mm))
-        gy1 = int(math.ceil(gp.rect[3] / bin_mm))
-        for bx in range(gx0, gx1):
-            for by in range(gy0, gy1):
-                b = (bx, by)
-                if b not in frac:
-                    continue
-                a = leg.rect_overlap_area(window_rect(b, bin_mm), gp.rect)
-                if a <= 0:
-                    continue
-                slot = cover.setdefault(b, {'F': 0.0, 'B': 0.0})
-                for s in _side_key(gp):
-                    slot[s] = slot.get(s, 0.0) + a
+    cover = courtyard_cover(real, containers, frac, bin_mm, leg)
 
     # --- cold classification ------------------------------------------------
     # Four buckets that PARTITION the in-outline windows, because the two

@@ -404,10 +404,37 @@ def t_a_through_hole_part_covers_BOTH_sides():
     tht = [g for g in graded if len(g.sides) == 2]
     report('the fixture really has through-hole parts', len(tht) > 3,
            '%d of %d' % (len(tht), len(graded)))
-    # Assert the PROPERTY, not a board-dependent count: a behavioural probe
-    # only bites where some window happens to sit in the difference, and on
-    # sonde_u at --cold-cover 0.5 none does (483 either way), so a count
-    # comparison would be a green row that proves nothing.
+    # Assert it on the COVER MAP, which is where the loop lives. A
+    # cold-window count cannot see it: charging `gp.side` only differs from
+    # charging both faces where a B-side part ALSO covers the window and the
+    # far-side sum overtakes the near one, and no in-repo board has such a
+    # window at any --cold-cover (measured on 7 boards x 4 thresholds). A
+    # count comparison would be a green row that proves nothing, which is
+    # exactly what the first version of this case was.
+    from placement import legality as leg2
+    win = {}
+    for g in tht[:1] + [x for x in graded if len(x.sides) == 1][:1]:
+        import math as _m
+        for bx in range(int(_m.floor(g.rect[0] / 2.0)),
+                        int(_m.ceil(g.rect[2] / 2.0))):
+            for by in range(int(_m.floor(g.rect[1] / 2.0)),
+                            int(_m.ceil(g.rect[3] / 2.0))):
+                win[(bx, by)] = 1.0
+    cov = CP.courtyard_cover(tht[:1], set(), win, 2.0, leg2)
+    charged = [v for v in cov.values() if v['F'] > 0 or v['B'] > 0]
+    report('a THT part charges cover to BOTH faces', bool(charged)
+           and all(v['F'] > 0 and v['B'] > 0 for v in charged),
+           str(charged[:1]))
+    smd1 = [x for x in graded if len(x.sides) == 1]
+    if smd1:
+        cov2 = CP.courtyard_cover(smd1[:1], set(), win, 2.0, leg2)
+        touched2 = [v for v in cov2.values() if v['F'] > 0 or v['B'] > 0]
+        report('  ...and a single-sided part charges exactly one',
+               all((v['F'] > 0) != (v['B'] > 0) for v in touched2),
+               str(touched2[:1]))
+    report('  ...and a container is charged nothing at all',
+           CP.courtyard_cover(tht[:1], {tht[0].ref}, win, 2.0, leg2) == {})
+
     one = [g for g in tht][0]
     report('_side_key gives a through-hole part BOTH faces',
            CP._side_key(one) == frozenset(('F', 'B')),
