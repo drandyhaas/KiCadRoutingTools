@@ -1,0 +1,66 @@
+{
+ "H": 9750,
+ "M": 18,
+ "boards": [
+  "esp_prog.kicad_pcb",
+  "flat_hierarchy.kicad_pcb",
+  "glasgow_revC.kicad_pcb",
+  "interf_u_unrouted.kicad_pcb",
+  "interf_u_unrouted_placed.kicad_pcb",
+  "kit-dev-coldfire-xilinx_5213.kicad_pcb",
+  "orangecrab_ext_pll.kicad_pcb",
+  "rp2350_fpga_eensy_prePlane.kicad_pcb",
+  "sonde_u.kicad_pcb",
+  "splitflap_driver.kicad_pcb",
+  "tigard.kicad_pcb",
+  "ulx3s.kicad_pcb",
+  "watchy.kicad_pcb"
+ ],
+ "cases": 33696,
+ "dropped": [
+  [
+   "cap_chain.kicad_pcb",
+   "4 footprints < 20"
+  ],
+  [
+   "haasoscope_pro_max_test.kicad_pcb",
+   "8 footprints < 20"
+  ],
+  [
+   "lvds_converter_dualclk.kicad_pcb",
+   "13 footprints < 20"
+  ],
+  [
+   "lvds_converter_dualclk_gnd.kicad_pcb",
+   "13 footprints < 20"
+  ],
+  [
+   "qfn_csi_underpad_diff.kicad_pcb",
+   "2 footprints < 20"
+  ],
+  [
+   "qfn_diffpair_escape.kicad_pcb",
+   "1 footprints < 20"
+  ],
+  [
+   "qfn_interior_pads.kicad_pcb",
+   "1 footprints < 20"
+  ],
+  [
+   "qfn_underpad_coupling.kicad_pcb",
+   "1 footprints < 20"
+  ],
+  [
+   "routed_output.kicad_pcb",
+   "8 footprints < 20"
+  ]
+ ],
+ "exempted_cases": 16812,
+ "hard_false_positives": 0,
+ "members": 39,
+ "old_total_coverage": 804,
+ "oracle_consulted": 11558,
+ "refusals_with_no_binding_keepout": 0,
+ "refused": 10550,
+ "soft_misses": 990
+}

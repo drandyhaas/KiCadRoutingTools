@@ -336,27 +336,30 @@ def report(rows, dropped):
         print(f"    {fam:<7} {fr[0] if fr else 'never refuses'}"
               + ("   <-- refusing at frac 0 would contradict arm O"
                  if fr and fr[0] == 0.0 else ""))
-    # `allow` exempts unconditionally, so a refusal there is a bug. `sides`
-    # does NOT: a through-hole part occupies both faces, so a B-side keep-out
-    # binds an F-side THT part on purpose. The check is therefore that every
-    # `sides` refusal is a THT part, and that some SMD part was actually
-    # probed -- otherwise the exemption was never exercised.
-    k = [r for r in refused if r['filter'] == 'allow']
-    print(f"  refusals under the `allow` exemption: {len(k)}   "
-          f"{'OK -- the resolver is honoured' if not k else 'BUG'}")
-    sd = [r for r in refused if r['filter'] == 'sides']
-    bad_sd = [r for r in sd if not r['has_tht']]
-    smd_probed = {(r['board'], r['ref']) for r in rows if not r['has_tht']}
-    print(f"  refusals under the `sides` exemption: {len(sd)}, of which "
-          f"NON-through-hole: {len(bad_sd)}   "
-          f"{'OK -- all are THT, which occupy both faces' if not bad_sd else 'BUG'}")
-    print(f"  SMD members probed (the only ones `sides` can exempt): "
-          f"{len(smd_probed)}   "
-          f"{'OK' if smd_probed else 'VACUOUS -- the sides arm had no subject'}")
+    # THE INVARIANT IS THE RESOLVER'S OWN ANSWER, not a proxy for it. Two
+    # earlier versions of this block used proxies and both were wrong:
+    # "no refusal under `sides`" (wrong -- a through-hole part occupies BOTH
+    # faces, so a B-side keep-out binds an F-side THT part on purpose), then
+    # "every `sides` refusal is a through-hole part" (wrong too -- measured
+    # 624 refusals of B-SIDE SMD parts, which a B-side keep-out also binds,
+    # correctly). The question either proxy was groping for is simply whether
+    # `keepouts_for_ref` bound anything, and `bound` records exactly that.
+    unbound = [r for r in refused if not r['bound']]
+    print(f"  refusals with NO binding keep-out: {len(unbound)}   "
+          f"{'OK -- every refusal names a keep-out that binds it' if not unbound else 'BUG'}")
+    for filt in ('allow', 'sides'):
+        f_rows = [r for r in rows if r['filter'] == filt]
+        exempt = [r for r in f_rows if not r['bound']]
+        ref_ex = [r for r in exempt if not r['feasible']]
+        print(f"  `{filt}`: {len(exempt)} of {len(f_rows)} case(s) exempted by "
+              f"the resolver, {len(ref_ex)} of them refused   "
+              f"{'OK' if not ref_ex else 'BUG'}"
+              + ('' if exempt else
+                 "   VACUOUS -- the exemption was never exercised"))
     return {'cases': n, 'refused': len(refused), 'old_total_coverage':
             len(old_hit), 'H': len(H), 'M': len(M),
-            'sides_refusals': len(sd), 'sides_refusals_not_tht': len(bad_sd),
-            'allow_refusals': len(k), 'smd_members_probed': len(smd_probed),
+            'refusals_with_no_binding_keepout': len(unbound),
+            'exempted_cases': sum(1 for r in rows if not r['bound']),
             'oracle_consulted': len(with_oracle),
             'hard_false_positives': len(hard_fp), 'soft_misses': len(soft),
             'boards': sorted({r['board'] for r in rows}),
@@ -372,8 +375,20 @@ def main():
                     help='write the summary the claims test reads')
     ap.add_argument('--boards', type=int, default=0,
                     help='stop after N boards (a declared cap, not a filter)')
+    ap.add_argument('--from-rows', metavar='PATH',
+                    help='re-derive the summary from committed rows, running '
+                         'nothing -- the change detector for the published '
+                         'numbers')
     ap.add_argument('-v', '--verbose', action='store_true')
     a = ap.parse_args()
+    if a.from_rows:
+        with open(a.from_rows, encoding='utf-8') as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+        summ = report(rows, [])
+        if a.summary:
+            with open(a.summary, 'w', encoding='utf-8') as f:
+                json.dump(summ, f, indent=1, sort_keys=True)
+        return 1 if summ['hard_false_positives'] else 0
     if a.dump:
         arm_a(a.dump)
         return 0
