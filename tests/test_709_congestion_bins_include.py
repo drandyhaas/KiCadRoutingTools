@@ -103,11 +103,30 @@ TESTS = [
 ]
 
 
+def _every_case_is_registered():
+    """A `t_*` defined and left out of TESTS is a test that never runs.
+
+    That happened here once, to the row that pins the quadrant counts against
+    `_region_unit`. The mutation battery is what noticed, which is a long way
+    round for something the module can check on itself in three lines.
+    """
+    g = globals()
+    declared = {fn for _l, fn in TESTS}
+    missing = sorted(n for n, v in g.items()
+                     if n.startswith('t_') and callable(v)
+                     and v not in declared)
+    if missing:
+        print('  FAIL  every t_* case is registered in TESTS  -- ORPHANED: %s'
+              % ', '.join(missing))
+        FAILURES.append('unregistered cases: %s' % ', '.join(missing))
+
+
 def main():
     print('congestion_bins include_bins (#709)')
     for label, fn in TESTS:
         print(' ' + label)
         fn()
+    _every_case_is_registered()
     if FAILURES:
         print('\nFAILED: ' + ', '.join(FAILURES))
         return 1

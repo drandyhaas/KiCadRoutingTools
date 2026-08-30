@@ -161,15 +161,70 @@ def t_quadrants_join_mass_to_demand():
     report('distinct nets never exceed net-windows of demand',
            all(q['distinct_nets'] <= q['demand_nets'] for q in quads.values()),
            str([(q['distinct_nets'], q['demand_nets']) for q in quads.values()]))
-    report('quadrant part counts total the footprints on the board',
-           sum(q['parts'] for q in quads.values())
-           == len(parse_kicad_pcb(board('esp_prog')).footprints),
-           str(sum(q['parts'] for q in quads.values())))
+    # The footprints a PLACER would see, which is not every footprint: a
+    # graphic-only one (no courtyard, no pads) is the +/-0.5mm fiction and is
+    # absent from the quench's own part set too.
+    report('quadrant part counts total the WEIGHED parts, not every footprint',
+           sum(q['parts'] for q in quads.values()) == doc['parts']['weighed']
+           < len(parse_kicad_pcb(board('esp_prog')).footprints),
+           '%d quadrant / %d weighed / %d footprints'
+           % (sum(q['parts'] for q in quads.values()),
+              doc['parts']['weighed'],
+              len(parse_kicad_pcb(board('esp_prog')).footprints)))
     report('cold windows are attributed to quadrants too',
            sum(q['cold_windows'] for q in quads.values())
            == doc['cold_windows'],
            '%d vs %d' % (sum(q['cold_windows'] for q in quads.values()),
                          doc['cold_windows']))
+
+
+def t_the_quadrant_counts_are_the_block_region_qN_would_move():
+    """The printed count must be `_region_unit`'s OWN membership, not a
+    lookalike -- otherwise `--block region:q0` moves a different set than the
+    census named, which makes the whole "reseat target" claim false.
+
+    So this CALLS `_region_unit` rather than mirroring its rule.
+    """
+    from placement.perturb import _region_unit
+    from placement import quench as Q
+    p = board('esp_prog')
+    pcb = parse_kicad_pcb(p)
+    doc, _hot = census('esp_prog')
+    quads = {q['index']: q for q in doc['arrangement']['quadrants']}
+    try:
+        state = Q.build_state(pcb, p) if hasattr(Q, 'build_state') else None
+    except Exception:                                           # noqa: BLE001
+        state = None
+    if state is None:
+        from pose_score import make_state
+        state = make_state(pcb, p)
+    free = set(state.parts)
+    bounds = pcb.board_info.board_bounds
+    total_picked = 0
+    for q in range(4):
+        pick = _region_unit(state, free, pcb, q)
+        members = list(pick.members) if pick else []
+        total_picked += len(members)
+        # The geometric rule must AGREE: every ref region:qN picks has to land
+        # in the census's quadrant N. Bucketing by courtyard centre instead of
+        # footprint origin breaks this on any part whose courtyard is not
+        # centred on its origin.
+        stray = [r for r in members
+                 if CP.quadrant_of(pcb.footprints[r].x, pcb.footprints[r].y,
+                                   bounds) != q]
+        report('region:q%d picks nothing the census puts elsewhere' % q,
+               not stray, str(stray))
+        # ...and the census count is an upper bound: it cannot know which
+        # parts a given run locks, but it must never UNDER-count.
+        report('  census %s (%d) >= region:q%d membership (%d)'
+               % (CP.QUADRANTS[q], quads[q]['parts'], q, len(members)),
+               quads[q]['parts'] >= len(members))
+    # On esp_prog nothing is locked, so the two totals meet exactly -- which
+    # is what caught the census counting three graphic-only footprints as
+    # parts (20 against 17).
+    report('esp_prog: nothing locked, so the totals meet exactly',
+           sum(q['parts'] for q in quads.values()) == total_picked,
+           '%d vs %d' % (sum(q['parts'] for q in quads.values()), total_picked))
 
 
 def t_the_quadrant_split_is_perturb_s_own():
@@ -233,6 +288,16 @@ def t_it_refuses_rather_than_inventing_when_there_is_no_span():
            'board_bounds' in (doc.get('skipped') or ''), str(doc.get('skipped')))
     report('  ...and the hot rows still come out',
            doc['windows_demand'] > 0, str(doc['windows_demand']))
+    # ...and the refusal lives in arrangement_census itself, not only in the
+    # caller that happens to short-circuit first. Reached directly, because a
+    # guard only the caller protects is a guard that disappears the moment
+    # someone adds a second caller.
+    from placement import legality as leg
+    report('arrangement_census refuses bounds=None on its own',
+           CP.arrangement_census(pcb, [], set(), {}, 2.0, None, leg) is None)
+    report('  ...and refuses an EMPTY part set rather than dividing by zero',
+           CP.arrangement_census(pcb, [], set(), {}, 2.0,
+                                 (0.0, 0.0, 10.0, 10.0), leg) is None)
 
 
 def t_no_arrangement_switch():
@@ -270,6 +335,8 @@ TESTS = [
     ('synthetic parts excluded', t_synthetic_parts_are_excluded_and_counted),
     ('sides stay separate', t_sides_are_separate_never_summed),
     ('quadrants join mass to demand', t_quadrants_join_mass_to_demand),
+    ('quadrant counts == region:qN membership',
+     t_the_quadrant_counts_are_the_block_region_qN_would_move),
     ("the split is perturb's own", t_the_quadrant_split_is_perturb_s_own),
     ('degrades on a courtyard-free board',
      t_it_degrades_on_a_board_with_no_courtyards_and_says_so),
@@ -280,11 +347,30 @@ TESTS = [
 ]
 
 
+def _every_case_is_registered():
+    """A `t_*` defined and left out of TESTS is a test that never runs.
+
+    That happened here once, to the row that pins the quadrant counts against
+    `_region_unit`. The mutation battery is what noticed, which is a long way
+    round for something the module can check on itself in three lines.
+    """
+    g = globals()
+    declared = {fn for _l, fn in TESTS}
+    missing = sorted(n for n, v in g.items()
+                     if n.startswith('t_') and callable(v)
+                     and v not in declared)
+    if missing:
+        print('  FAIL  every t_* case is registered in TESTS  -- ORPHANED: %s'
+              % ', '.join(missing))
+        FAILURES.append('unregistered cases: %s' % ', '.join(missing))
+
+
 def main():
     print('arrangement census (#709)')
     for label, fn in TESTS:
         print(' ' + label)
         fn()
+    _every_case_is_registered()
     if FAILURES:
         print('\nFAILED (%d): %s' % (len(FAILURES), ', '.join(FAILURES)))
         return 1

@@ -195,6 +195,26 @@ def t_ranking_is_area_and_deterministic():
     report('two runs produce byte-identical regions',
            again['cold_regions'] == regions)
 
+    # The issue's explicit requirement -- "rank cold regions by contiguous
+    # area rather than window count, so a 6 to 8mm band outranks scattered
+    # singles" -- needs a board where the two ACTUALLY disagree, or it is
+    # untestable. On ulx3s they pick a different region for RANK 1: a compact
+    # 4 x 16mm slot wins on area over a wider, partly-off-board band that has
+    # more windows. esp_prog agrees under both rules and proves nothing.
+    doc2, _h3 = census('ulx3s')
+    rs = doc2['cold_regions']
+    by_count = sorted(rs, key=lambda r: (-r['windows'], r['bbox']))
+    report('ulx3s: area-ranking and count-ranking pick DIFFERENT regions',
+           rs[0]['bbox'] != by_count[0]['bbox'],
+           '%s vs %s' % (rs[0]['bbox'], by_count[0]['bbox']))
+    report('  ...and the census takes the AREA one',
+           rs[0]['area_mm2'] >= max(r['area_mm2'] for r in rs) - 1e-9,
+           '%.1f vs max %.1f' % (rs[0]['area_mm2'],
+                                 max(r['area_mm2'] for r in rs)))
+    report('  ...which really does have FEWER windows than the count winner',
+           rs[0]['windows'] < by_count[0]['windows'],
+           '%d vs %d' % (rs[0]['windows'], by_count[0]['windows']))
+
 
 def t_four_connected_not_eight():
     """Direct on the labeller: a diagonal touch is TWO regions."""
@@ -324,11 +344,30 @@ TESTS = [
 ]
 
 
+def _every_case_is_registered():
+    """A `t_*` defined and left out of TESTS is a test that never runs.
+
+    That happened here once, to the row that pins the quadrant counts against
+    `_region_unit`. The mutation battery is what noticed, which is a long way
+    round for something the module can check on itself in three lines.
+    """
+    g = globals()
+    declared = {fn for _l, fn in TESTS}
+    missing = sorted(n for n, v in g.items()
+                     if n.startswith('t_') and callable(v)
+                     and v not in declared)
+    if missing:
+        print('  FAIL  every t_* case is registered in TESTS  -- ORPHANED: %s'
+              % ', '.join(missing))
+        FAILURES.append('unregistered cases: %s' % ', '.join(missing))
+
+
 def main():
     print('cold windows and cold regions (#709)')
     for label, fn in TESTS:
         print(' ' + label)
         fn()
+    _every_case_is_registered()
     if FAILURES:
         print('\nFAILED (%d): %s' % (len(FAILURES), ', '.join(FAILURES)))
         return 1

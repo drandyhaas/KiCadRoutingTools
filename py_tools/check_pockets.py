@@ -279,10 +279,17 @@ def arrangement_census(pcb, parts, containers, bins, bin_mm, bounds, leg):
     quads = [{'name': QUADRANTS[q], 'index': q, 'parts': 0,
               'part_area_mm2': 0.0, 'demand_nets': 0, 'distinct_nets': 0,
               'cold_windows': 0} for q in range(4)]
-    #: `_region_unit` filters on the footprint ORIGIN, so the count this
-    #: prints names exactly the block `--block region:qN` would move.
+    #: `_region_unit` filters on the footprint ORIGIN, so this count uses the
+    #: origin too and the quadrant it names is the one `--block region:qN`
+    #: would act on. It counts the parts the placer would SEE: a graphic-only
+    #: footprint (no courtyard, no pads -- the +/-0.5mm fiction) is not a part
+    #: and is not in the quench's own part set either, so counting it here
+    #: made the number 20 where `region:q*` totalled 17 on esp_prog. What the
+    #: census cannot know is which of them a given run LOCKS, so this is an
+    #: upper bound on the movable set, never a promise about it.
+    seat = {gp.ref for gp in parts if gp.ref not in containers}
     for ref, fp in pcb.footprints.items():
-        if ref in containers:
+        if ref not in seat:
             continue
         quads[quadrant_of(fp.x, fp.y, bounds)]['parts'] += 1
     qrects = []
