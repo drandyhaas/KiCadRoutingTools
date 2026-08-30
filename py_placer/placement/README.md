@@ -119,6 +119,47 @@ A run in this mode prints a group-source census before round 0, because
 `--group-by auto` derives NO BLOCK on five of the six boards this repo grades
 placement on.
 
+### Moving the block: `--relocate` (#554)
+
+The quench can translate a block rigidly (#538), but only while every member
+stays within `--max-displacement` of its own seed and everybody else is frozen.
+Measured with the neighbours frozen, a block travels a **median 0.1 mm toward
+its connectivity target against a median want of 6.1 mm** over 24 blocks on 10
+boards — a shipped board has no vacancy to translate into. `--relocate`
+(**default off**) lets the neighbours yield instead, with their relative order
+as a hard constraint and their total displacement minimised, and writes the
+result as its own board so the quench can refine the new pose. The round's
+re-route accepts or reverts it, byte for byte.
+
+```bash
+python py_placer/place_route_loop.py in.kicad_pcb out.kicad_pcb \
+    --route-args '--nets "*"' \
+    --relocate --group-by auto,netprefix,decap --relocate-max-corridor 20
+```
+
+Every proposal reports the corridor (*who* yielded, and how far) and a
+**binding chain** — the named parts and gaps that stopped the block, straight
+off the constraint graph's own shortest path. Every refusal is a named reason,
+never a count: `no_room_at_any_dose`, `block_member_locked:<ref>`,
+`geometry_worsened:<ref>`, `declared_keepout_refused_a_shift:<ref>`,
+`corridor_over_budget`, and the rest are enumerated in `relocate.py`.
+
+**What is measured is the MECHANISM, not the routing.** Letting neighbours yield
+bought ≥ 1 mm more travel than freezing them on 11 of 24 blocks over 6 boards,
+max 16.66 mm (`tests/stress/relocation_reach.py`; its frozen arm is the same
+solve with everything else pinned, so the arms differ in exactly one thing —
+and `reach >= frozen` is a theorem, so the evidence is the magnitude, never a
+win rate). **No measurement shows a relocated board routes better**, and the run
+verdict carries that sentence as `relocate_efficacy`.
+
+Three limits worth knowing before reaching for it: it never fires on a board
+that already routes (the loop stops at `failures == 0`, and `--target-nets` does
+not lift that stop); `--group-by auto` derives no block on most tracked boards;
+and the one board where every precondition holds, kit-dev-coldfire, is already
+taken from 3 failed nets to 0 by 3 mm nudges. See `relocate.py`'s docstring for
+why the constraint graph is *not* a conservative model of legality, and why the
+exact re-check rather than the graph is what makes the pass safe.
+
 ## place_portfolio.py — K diverse candidates from one placement
 
 The quench is deterministic by design (#457), so re-running it never produces
