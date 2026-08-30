@@ -400,9 +400,14 @@ def nets_to_refs(pcb_data, net_names, max_pins, locked_patterns):
 
 
 def _locked_out(pcb_data, locked_patterns):
-    """Refs an operator's --lock globs exclude, by the SAME rule nets_to_refs
-    applies -- so a diagnosis cannot select what the pin filter would have
-    refused to. The ranking says what SHOULD move; the lock says what MAY."""
+    """Refs an operator's --lock globs exclude. The LOCK rule only.
+
+    Deliberately NOT `nets_to_refs`'s whole filter: that also drops anything
+    over `--max-target-pins`, and bypassing the pin cap is the entire point of
+    #553 -- "the part that needs to move is never a passive". So a diagnosis
+    may offer a 100-pin IC the pin selector would have refused, and that is the
+    feature. It may not offer a part the operator locked, and that is the rule.
+    The ranking says what SHOULD move; the lock says what MAY."""
     import fnmatch
     if not locked_patterns:
         return set()
@@ -436,7 +441,7 @@ def block_census(pcb_data) -> str:
 
 def diagnose_round(pcb_data, pcb_file, blocks, metrics, *, ignore_nets=None,
                    budget=None, top_k=None):
-    """One round's diagnosis, or None when the evidence cannot support one.
+    """One round's diagnosis. Always a `placement.diagnosis.Diagnosis`.
 
     Split out of main() so it can be exercised without a router, and so the
     expensive parts -- a QuenchState and two legality graders -- are visible in
@@ -543,6 +548,11 @@ def main():
                              "connectivity-centroid displacement, blocked "
                              "cells owned, and legality defect pairs -- and "
                              "take the round-robin union of their top-k. "
+                             "It also changes what --group-by hands the "
+                             "quench as a rigid body: diagnosis mode "
+                             "FREEZES the blocks before round 0, because "
+                             "netprefix and decap membership is a "
+                             "function of poses the optimizer is moving. "
                              "NO MEASUREMENT SHOWS 'diagnosis' ROUTES BETTER "
                              "THAN 'pins'; see py_placer/placement/"
                              "diagnosis.py. Requires --group-by for the "
@@ -551,10 +561,13 @@ def main():
                         metavar="K",
                         help=f"How many candidates each diagnosis signal "
                              f"offers per sweep (default: {DIAGNOSIS_TOP_K}). "
-                             f"A report size, not a threshold. This is what "
-                             f"bounds the move set in --target-select "
-                             f"diagnosis, where --max-target-pins does not "
-                             f"apply to block members")
+                             f"A report size, not a threshold. NOT usually "
+                             f"what bounds the move set: the loop budgets "
+                             f"each round at the number of parts the pin "
+                             f"filter would have offered, and that budget "
+                             f"is normally the binding constraint -- "
+                             f"measured on glasgow_revC, every k above 3 "
+                             f"selected the same 8 parts")
     parser.add_argument("--group-by", default="none",
                         help="Move blocks of parts as one rigid body. Comma "
                              "list of: kicad, sheet, netprefix, decap; 'auto' = "
@@ -648,6 +661,36 @@ def main():
     if _rc:
         return _rc
 
+    # BEFORE record_invocation, for the reason stated just above for the
+    # intent: an exit 2 must touch no file, and a manifest carrying a command
+    # that produced nothing leaves the next step's input made by nothing. That
+    # rule applies to the group spelling and the #553 gates too -- they need
+    # only `args`, so nothing forces them to sit after the recorder.
+    try:
+        group_sources = parse_sources(args.group_by)
+    except GroupError as exc:
+        parser.error(str(exc))
+    # #553. Only the DISPLACEMENT signal needs blocks; the other two rank loose
+    # parts, so a source that derives NOTHING on this board is a warning about
+    # a lost signal (printed by `block_census` before round 0), not a refusal.
+    # `--group-by none` with `--target-select diagnosis` is different: it is a
+    # contradiction the operator can only have typed by accident.
+    #
+    # `--suggest-locks` is report-only -- it advises, prints and exits without
+    # deriving a group, running a diagnosis or routing anything -- so refusing
+    # it for the shape of a flag it never reads is a refusal with no subject.
+    if (args.target_select == 'diagnosis' and not group_sources
+            and not args.suggest_locks):
+        parser.error(
+            "--target-select diagnosis ranks derived BLOCKS on connectivity "
+            "displacement, and --group-by none derives none. Pass --group-by "
+            "auto (kicad,sheet), or a source list, or drop --target-select. "
+            "(The other two signals -- blocked cells and legality pairs -- do "
+            "rank loose parts, so a source that derives NOTHING on this board "
+            "is a warning, not this refusal.)")
+    if args.diagnosis_top_k < 1:
+        parser.error("--diagnosis-top-k must be >= 1")
+
     if not args.suggest_locks:
         try:
             from redo_record import record_invocation
@@ -659,27 +702,6 @@ def main():
         parser.error("--max-displacement must be >= 0")
     if args.ratsnest_screen < 0:
         parser.error("--ratsnest-screen must be >= 0 (0 disables it)")
-    try:
-        group_sources = parse_sources(args.group_by)
-    except GroupError as exc:
-        parser.error(str(exc))
-    # #553. Refused HERE, beside the other cheap argument gates and long before
-    # round 0 routes the whole board -- the same reason the board-state gates
-    # sit where they do. Only the DISPLACEMENT signal needs blocks; the other
-    # two rank loose parts, so this is a warning about a lost signal, not a
-    # refusal, UNLESS no source was asked for at all. `--group-by none` with
-    # `--target-select diagnosis` is a contradiction the operator can only have
-    # typed by accident.
-    if args.target_select == 'diagnosis' and not group_sources:
-        parser.error(
-            "--target-select diagnosis ranks derived BLOCKS on connectivity "
-            "displacement, and --group-by none derives none. Pass --group-by "
-            "auto (kicad,sheet), or a source list, or drop --target-select. "
-            "(The other two signals -- blocked cells and legality pairs -- do "
-            "rank loose parts, so a source that derives NOTHING on this board "
-            "is a warning, not this refusal.)")
-    if args.diagnosis_top_k < 1:
-        parser.error("--diagnosis-top-k must be >= 1")
     if args.swap_max_displacement is not None:
         if args.swap_max_displacement < 0:
             parser.error("--swap-max-displacement must be >= 0")
@@ -835,20 +857,39 @@ def main():
                 ignore_nets=args.ignore_nets, budget=len(pins_targets),
                 top_k=args.diagnosis_top_k)
             print(diagnosis_format(diag))
+            # An operator's --lock is never overridden by a diagnosis: the
+            # ranking says what SHOULD move, the lock says what MAY. Resolved
+            # ONCE per round -- putting the call in a comprehension condition
+            # re-scans every footprint against every glob per selected ref.
+            locked = _locked_out(pcb_data, args.lock)
+            picked = {r for r in diag.selected if r not in locked}
+            why = ''
             if diag.degenerate:
+                why = diag.fallback_reason()
+            elif not picked:
+                # A selection wholly inside --lock is a FALLBACK, not a
+                # decision. Without this the round reached the "no movable
+                # target parts" stop and ended the whole run, while the verdict
+                # reported rounds_diagnosis=1 and rounds_fallback=0 -- the run
+                # where the flag did the most damage reading as the run where
+                # it worked.
+                why = (f'every one of the {len(diag.selected)} diagnosed '
+                       f'part(s) matches --lock')
+            if why:
                 fallback_rounds += 1
-                fallback_reasons.append(f'round {rnd}: {diag.fallback_reason()}')
+                fallback_reasons.append(f'round {rnd}: {why}')
                 print(f"  target-select: FALLING BACK to pins this round -- "
-                      f"{diag.fallback_reason()}")
+                      f"{why}")
             else:
                 diagnosis_rounds += 1
-                # An operator's --lock is never overridden by a diagnosis: the
-                # ranking says what SHOULD move, the lock says what MAY.
-                targets = {r for r in diag.selected
-                           if r not in _locked_out(pcb_data, args.lock)}
+                targets = picked
             select_overlap.append({'round': rnd, 'pins': len(pins_targets),
                                    'diagnosis': len(targets),
-                                   'overlap': len(targets & pins_targets)})
+                                   'overlap': len(targets & pins_targets),
+                                   # Without this a fallback round and a round
+                                   # where the diagnosis independently agreed
+                                   # with pins carry identical numbers.
+                                   'fallback': bool(why)})
 
         if not targets:
             print("No movable target parts - stopping.")
@@ -944,7 +985,13 @@ def main():
             write_round_sidecar(work, rnd, board=None, routed=None,
                                 parent=cur_file, accepted=False, screened=True,
                                 targets=targets, groups=blocks,
-                                moved=moves_from_placements(pcb_data, placements))
+                                moved=moves_from_placements(pcb_data, placements),
+                                # A screened round writes no board, so this
+                                # sidecar is the ONLY record of what the
+                                # diagnosis chose -- the one round that cannot
+                                # afford to lose it.
+                                diagnosis=(diagnosis_to_json(diag)
+                                           if diag is not None else None))
             max_disp *= 1.5
             continue
 

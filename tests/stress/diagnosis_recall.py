@@ -112,6 +112,24 @@ def _pin_counts(pcb):
             for r, fp in (pcb.footprints or {}).items()}
 
 
+def exact_chance(movable: int, truth: int, n: int) -> float:
+    """P(a size-n random pick from `movable` parts hits any of `truth`).
+
+    The hypergeometric complement, computed exactly rather than approximated by
+    n/movable -- which is only right for a one-member truth. It matters: the
+    perturber picks a 117-member block out of 234 movable parts on ulx3s, where
+    almost any selection intersects it and a "hit" carries no information.
+    """
+    from math import comb
+    if not movable or n <= 0 or truth <= 0:
+        return 0.0
+    n = min(n, movable)
+    miss = movable - truth
+    if n > miss:
+        return 1.0
+    return 1.0 - comb(miss, n) / comb(movable, n)
+
+
 def _low_pin_arm(pcb, movable, n):
     """The pin filter's essence: the n movable parts with the fewest pins.
 
@@ -150,9 +168,14 @@ def run_one(board_path, kind, *, dose, group_by, top_k, workroot):
                 'truth_members': truth,
                 'dose_mm_applied': rec.get('max_feasible_dose_mm'),
                 'clipped': rec.get('clipped')})
-    if rec.get('clipped') and not rec.get('max_feasible_dose_mm'):
-        row['skipped'] = ('the dose clipped to zero -- the damage was never '
-                          'applied, so the recovery half is void')
+    applied = rec.get('max_feasible_dose_mm') or 0.0
+    if dose and applied < MIN_DOSE_FRACTION * dose:
+        # NOT read off `clipped`: measured on esp_prog, a 20 mm request landed
+        # 0.316 mm and the record still said `clipped: false`.
+        row['skipped'] = (
+            f'the dose that landed was {applied:.3f} mm of {dose:g} mm asked '
+            f'for ({applied / dose:.1%}); the damage was never applied, so the '
+            f'recovery half is void')
         return row
 
     pcb = parse_kicad_pcb(damaged)
@@ -175,17 +198,21 @@ def run_one(board_path, kind, *, dose, group_by, top_k, workroot):
     sel = set(diag.selected)
     n = len(sel)
     low = _low_pin_arm(pcb, movable, n)
-    tset = set(truth)
+    tset = set(truth) & movable
+    chance = exact_chance(len(movable), len(tset), n)
     row.update({
         'blocks': len(blocks),
         'movable': len(movable),
+        'truth_movable': len(tset),
         'selected': n,
         'selected_refs': sorted(sel),
         'signals': diag.signals_defined,
         'skipped_signals': dict(sorted(diag.skipped.items())),
+        'clearance': legality.get('clearance'),
+        'clearance_source': legality.get('clearance_source'),
         'hit_diagnosis': bool(sel & tset),
         'hit_low_pin': bool(low & tset),
-        'chance': round(n / len(movable), 6) if movable else None,
+        'chance': round(chance, 6),
         'selected_by': {c.key: list(c.selected_by) for c in diag.candidates
                         if c.selected_by},
         'displacement_ranked_truth': any(
@@ -194,6 +221,12 @@ def run_one(board_path, kind, *, dose, group_by, top_k, workroot):
             for c in diag.candidates),
     })
     shutil.rmtree(work, ignore_errors=True)
+    if chance >= MAX_CHANCE:
+        row['skipped'] = (
+            f'a size-matched RANDOM pick hits this truth {chance:.0%} of the '
+            f'time ({len(tset)} of {len(movable)} movable parts are in the '
+            f'damaged block, {n} selected). A coin flip cannot distinguish a '
+            f'selector from chance, whichever way this cell landed')
     return row
 
 

@@ -198,6 +198,49 @@ def t_the_default_passes_the_quench_identical_kwargs():
           'with no --group-by there are still no groups')
 
 
+def t_the_default_still_derives_its_blocks_per_round():
+    """The one line the change touched INSIDE the pins path.
+
+    Comparing "flag absent" with "--target-select pins" cannot see this: both
+    arms run the new code, so argparse's default makes that test true by
+    construction. A review gutted pins-mode block derivation
+    (`else derive_groups(...)` -> `else {}`) and the whole file still passed,
+    because no case ran pins mode WITH --group-by. This one does.
+    """
+    calls, _ = _run(['--group-by', 'decap'])
+    check(calls[0]['groups'] == {},
+          'decap derives nothing on this board, so no groups reach quench')
+    calls2, out = _run(['--target-select', 'pins', '--group-by', 'netprefix'])
+    check(calls2[0]['move_refs'] == PINS_SET,
+          f'and the move set is unchanged by asking for groups '
+          f'({calls2[0]["move_refs"]})')
+    check('Group sources on this board' not in out,
+          'pins mode prints no census -- that is diagnosis-mode output')
+
+
+def t_a_diagnosis_wholly_inside_lock_falls_back_rather_than_ending_the_run():
+    """Measured bug: the round reached "No movable target parts - stopping."
+    and ended the WHOLE run, while the verdict reported rounds_diagnosis=1 and
+    rounds_fallback=0 -- the run where the flag did the most damage reading as
+    the run where it worked."""
+    calls, out = _run(['--target-select', 'diagnosis', '--group-by', 'decap',
+                       '--lock', 'C2'], rounds=2, diag=_diagnosis({'C2'}))
+    check(len(calls) >= 1,
+          f'the run continues instead of stopping ({len(calls)} quench call(s))')
+    check(calls[0]['move_refs'] == PINS_SET - {'C2'},
+          f'on the pin set, minus what the operator locked '
+          f'({calls[0]["move_refs"]})')
+    s = _summary(out)
+    check(s.get('target_select_rounds_fallback') >= 1
+          and s.get('target_select_rounds_diagnosis') == 0,
+          f'and it is COUNTED as a fallback, not as a working round '
+          f'({s.get("target_select_rounds_diagnosis")}/'
+          f'{s.get("target_select_rounds_fallback")})')
+    reasons = s.get('target_select_fallback_reasons') or []
+    check(reasons and 'matches --lock' in reasons[0],
+          f'naming the lock as the reason ({reasons})')
+
+
 def t_the_default_sidecar_keeps_its_key_set():
     seen = {}
     _run([], seen=seen)
@@ -313,10 +356,11 @@ def t_the_verdict_cannot_be_read_without_the_no_efficacy_sentence():
     check(s.get('target_select_rounds_diagnosis') == 1,
           'and counts the round the diagnosis actually steered')
     ov = s.get('target_select_overlap') or []
-    check(ov and ov[0] == {'round': 1, 'pins': len(PINS_SET),
-                           'diagnosis': 1, 'overlap': 1},
+    check(ov and ov[0] == {'round': 1, 'pins': len(PINS_SET), 'diagnosis': 1,
+                           'overlap': 1, 'fallback': False},
           f'the pins/diagnosis overlap is recorded per round ({ov}) -- if the '
-          f'flag ever degenerates into pins, these three numbers are equal')
+          f'flag ever degenerates into pins, these three numbers are equal, '
+          f'and `fallback` is what tells the two cases apart')
 
 
 def t_the_round_sidecar_carries_the_diagnosis():
@@ -351,6 +395,8 @@ def t_the_block_census_is_printed_before_round_zero():
 
 TESTS = [
     t_the_default_passes_the_quench_identical_kwargs,
+    t_the_default_still_derives_its_blocks_per_round,
+    t_a_diagnosis_wholly_inside_lock_falls_back_rather_than_ending_the_run,
     t_the_default_sidecar_keeps_its_key_set,
     t_the_default_verdict_gains_exactly_one_key,
     t_the_pins_branch_is_still_the_pins_branch,

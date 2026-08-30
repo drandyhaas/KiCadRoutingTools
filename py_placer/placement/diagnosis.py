@@ -498,7 +498,22 @@ def diagnose(state, pcb_data, blocks: Optional[Dict[str, Sequence[str]]] = None,
         ignored.update(nid for nid, refs in net_refs.items()
                        if len(refs) > max_fanout)
 
-    # ---- candidate universe: every block, plus every part in no block.
+    # ---- candidate universe: every block, plus every MOVABLE part in no block.
+    #
+    # A KiCad-locked part is not a candidate. `nets_to_refs` does offer them
+    # (quench filters them later, at no cost, because the pin selector has no
+    # budget), but a ranking that spends a top-k slot AND a budget unit on a
+    # part nothing can move has spent them on nothing. `QuenchState` already
+    # knows: `Part.locked`.
+    locked_parts = sorted(r for r, p in parts.items()
+                          if getattr(p, 'locked', False))
+    parts = {r: p for r, p in parts.items() if r not in set(locked_parts)}
+    if locked_parts:
+        d.disclosures.append(
+            f'{len(locked_parts)} KiCad-locked part(s) are not candidates: '
+            f'{", ".join(locked_parts[:6])}'
+            f'{"..." if len(locked_parts) > 6 else ""}')
+
     block_of: Dict[str, str] = {}
     for name in sorted(blocks):
         for ref in sorted(blocks[name]):

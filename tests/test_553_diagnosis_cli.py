@@ -18,7 +18,9 @@ all-blocks design would have been inert on almost the entire tracked corpus.
 """
 
 import os
+import shutil
 import sys
+import tempfile
 
 RUN_ALL_TIMEOUT = 300
 
@@ -35,7 +37,12 @@ from run_utils import check, evidence, tool  # noqa: E402
 LOOP = tool('place_route_loop.py')
 BOARD = evidence(os.path.join(ROOT, 'kicad_files', 'esp_prog.kicad_pcb'),
                  'the board every refusal below is fed')
-OUT = os.path.join(ROOT, 'kicad_files', 'should_never_be_written.kicad_pcb')
+# A temp dir, NOT kicad_files/. If any of the four gates ever regresses, the
+# loop routes esp_prog and scatters loop_round0*.{kicad_pcb,json,log} beside the
+# board it read -- `--work-dir` defaults to the output's directory. The tree
+# must not be the blast radius of a failing test.
+_TMP = tempfile.mkdtemp(prefix='t553_cli_')
+OUT = os.path.join(_TMP, 'should_never_be_written.kicad_pcb')
 
 FAILURES = []
 
@@ -77,10 +84,15 @@ def t_diagnosis_without_blocks_names_the_flag_that_fixes_it():
 def t_the_refusal_happens_before_anything_is_routed():
     check(_argv('--target-select', 'diagnosis'), code=2,
           refuse='--group-by none derives none')
-    assert not os.path.exists(OUT), (
-        'the refusal wrote a board -- it must land before round 0, which '
-        'routes the WHOLE board and is the expensive thing these gates exist '
-        'to save')
+    # The output board is the weak half of this check -- a run that routed for
+    # twenty minutes and then died would also leave it absent. The load-bearing
+    # half is that the WORK DIR is untouched: round 0 writes loop_round0.kicad_pcb
+    # into it before it routes anything.
+    assert not os.path.exists(OUT), 'the refusal wrote a board'
+    left = sorted(os.listdir(_TMP))
+    assert left == [], (
+        f'the refusal reached round 0 -- it left {left} in the work dir, and '
+        f'it must land before the whole-board route these gates exist to save')
 
 
 def t_a_zero_report_size_is_refused():
@@ -106,7 +118,7 @@ def t_auto_derives_no_block_on_the_boards_this_repo_grades_on():
 
     esp_prog, splitflap_driver, watchy, tigard and sonde_u are five of the six
     boards in docs/placement-predictors.md's declared table, and `auto`
-    (kicad,sheet) derives NOTHING on any of them -- they are flat schematics
+    (kicad,sheet) derives NOTHING on ANY of the five -- they are flat schematics
     whose `(path ...)` entries are all distinct top-level uuids, and no corpus
     board carries a KiCad `(group ...)` at all. A blocks-only mover ranking
     would have been inert here.
@@ -125,13 +137,25 @@ def t_auto_derives_no_block_on_the_boards_this_repo_grades_on():
             flat.append(name)
         # decap is the source that DOES fire on these boards; if that ever
         # stops being true the census line in the loop becomes useless.
-        assert derive_groups(pcb, ('decap',)) or name == 'sonde_u', (
-            f'{name}: no source derives anything, so --target-select '
-            f'diagnosis has no block substrate at all here')
-    assert len(flat) >= 4, (
-        f'auto was expected to derive nothing on at least four of these five '
-        f'boards; it derived nothing on {flat}. If that changed, the reason '
-        f'the diagnosis ranks loose parts needs re-examining, not deleting')
+        # sonde_u is the sharp case and is named rather than waived: NO
+        # source derives a block on it, so the displacement signal can never
+        # run there under any --group-by. That is what the census before
+        # round 0 exists to tell the operator.
+        if name == 'sonde_u':
+            assert not derive_groups(pcb, ('decap',)), (
+                'sonde_u: decap derived a block; the census claim changed')
+            assert len(derive_groups(pcb, ('netprefix',))) == 1, (
+                'sonde_u was the board with exactly ONE derivable block, so a '
+                'ranking over its candidates makes no choice; if that changed, '
+                'the census claim changed with it')
+        else:
+            assert derive_groups(pcb, ('decap',)), (
+                f'{name}: decap was the source that fires here; if it stopped, '
+                f'the census line in the loop is telling the operator nothing')
+    assert len(flat) == 5, (
+        f'auto was expected to derive nothing on ALL FIVE of these boards; it '
+        f'derived nothing on {flat}. If that changed, the reason the diagnosis '
+        f'ranks loose parts needs re-examining, not deleting')
 
 
 TESTS = [
@@ -154,8 +178,7 @@ def main():
     print(f'run_utils: {os.path.basename(run_utils.ROOT_DIR)}')
     for what, fn in TESTS:
         report(what, fn)
-    if os.path.exists(OUT):
-        os.unlink(OUT)
+    shutil.rmtree(_TMP, ignore_errors=True)
     if FAILURES:
         print(f'\nFAILED {len(FAILURES)}:')
         for f in FAILURES:
