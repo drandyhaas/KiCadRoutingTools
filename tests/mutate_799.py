@@ -227,7 +227,7 @@ def _selftest():
              "import sys; sys.path.insert(0,'py_placer');"
              "from placement import floorplan as f;"
              "p=f._LocalPart(0.0,(-1,-1,1,1));"
-             "print(len(f.zone_pose_feasibility((0,0,9,9),0.0,p,"
+             "print(sorted(f.zone_pose_feasibility((0,0,9,9),0.0,p,"
              "[{'name':'k','rect':(0,0,1,1),'allow':(),'sides':('F','B')}])"
              "['rotations']))"]
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
@@ -244,9 +244,16 @@ def _selftest():
     finally:
         _drop_pyc()
         io.open(FLOORPLAN, 'w', encoding='utf-8', newline='').write(src)
-    ok = seen == ['4', '4'] and all(s for s in seen)
+    # The two mutants must be DISTINGUISHABLE by the probe, or the selftest
+    # passes without ever reaching what it claims to test. An earlier version
+    # printed the rotation COUNT, which is 4 for both mutants and for the
+    # original -- it would have reported OK against a completely stale cache.
+    ok = len(seen) == 2 and all(seen) and seen[0] != seen[1]
     print(f"  selftest: two same-second size-preserving mutations, probe read "
-          f"{seen} -- {'OK' if ok else 'the second may be a STALE .pyc'}")
+          f"{seen} -- "
+          + ('OK: the second import saw the SECOND mutant' if ok else
+             'the probe cannot tell the mutants apart, or the second read a '
+             'STALE .pyc'))
     return 0 if ok else 1
 
 
