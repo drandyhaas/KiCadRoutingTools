@@ -154,6 +154,25 @@ def t_a_tighter_wall_binds_instead_of_the_neighbour():
           % (r.binding['x'],))
 
 
+def t_travel_in_the_NEGATIVE_direction_reads_the_lower_envelope():
+    """Leftward travel is bounded by `lo`, not by `hi`.
+
+    A pass that read `hi` for both directions still returns a float and still
+    looks like an answer: the cap comes out negative, gets clamped to 0, and the
+    block silently reports that it cannot move left at all. Here it can move
+    10.75 -- A retreats to the wall and B follows.
+    """
+    r, _ = _reach(row_fixture(), None, 'B', (-1.0, 0.0))
+    check(close(r.reach_mm, 10.75, tol=5e-4),
+          'leftward reach %.4f, want 10.75 (A runs to the low wall at -10 and B '
+          'follows at 0.75 behind it)' % r.reach_mm)
+    f, _ = _reach(row_fixture(), None, 'B', (-1.0, 0.0), frozen=True)
+    check(close(f.reach_mm, 0.75),
+          'frozen leftward reach %.4f, want 0.75' % f.reach_mm)
+    check(r.binding_axis == 'x',
+          'the binding axis is %r, want x' % r.binding_axis)
+
+
 def t_the_binding_chain_names_the_parts_not_a_number():
     r, _ = _reach(row_fixture(), None, 'B', (1.0, 0.0))
     named = [b[0] for b in r.binding['x']]

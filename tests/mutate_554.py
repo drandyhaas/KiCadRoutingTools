@@ -268,8 +268,16 @@ ROWS = [
     # inherits that. Dropping the sentence is how a null gets laundered by the
     # presence of a solver.
     ('drop-no-efficacy-claim', 'r',
-     "                     disclosures=(NO_EFFICACY_CLAIM,))\n",
+     "                     disclosures=(NO_EFFICACY_CLAIM, DIAG_NO_EFFICACY))\n",
      "                     disclosures=())\n",
+     (T554, T554S), 'KILLED'),
+
+    # The relocation's own disclosure replaced by the SELECTOR's. It still reads
+    # like a disclosure and still says NOT MEASURED -- about a different
+    # experiment. This is the shape a laundered claim actually takes.
+    ('efficacy-names-the-wrong-experiment', 'r',
+     "NO_EFFICACY_CLAIM = (\n    'NOT MEASURED: no paired routed A/B of relocate-on vs relocate-off exists, '\n",
+     "NO_EFFICACY_CLAIM = (\n    'NOT MEASURED: no paired routed A/B of pins vs diagnosis exists. '\n",
      (T554, T554S), 'KILLED'),
 
     # ---- an expected survivor, recorded rather than deleted -----------------

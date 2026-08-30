@@ -224,6 +224,22 @@ def t_the_geometry_conjunct_is_baseline_relative():
     check(why == '',
           'a shift that IMPROVES an existing overlap was refused: %r. An absolute '
           'gate refuses every shift on 35-99%% of real parts.' % why)
+    # ... and the case that actually distinguishes the two rules: a shift that
+    # improves the violation but does NOT clear it. An absolute gate refuses this
+    # (the pose is still not legal); a no-worse gate accepts it. The test above
+    # passes under BOTH rules, because it lands at zero violation -- which is
+    # exactly why the `exact-check-absolute` mutation survived until this check
+    # existed.
+    small = RL.exact_refusal(st, units, {'B': (0.2, 0.0)})
+    after = sum(st.violation_parts('B', st.parts['B'].x + 0.2,
+                                   st.parts['B'].y, 0.0, exclude={'B'}))
+    check(0 < after < before,
+          'the fixture must leave a REDUCED but non-zero violation for this to '
+          'separate the two rules: before %.4f, after %.4f' % (before, after))
+    check(small == '',
+          'a shift that reduces a violation without clearing it was refused: %r. '
+          'That is the absolute rule, and it refuses every shift on a board whose '
+          'incumbent already violates -- which is most of them.' % small)
 
 
 def t_a_shift_that_worsens_geometry_is_refused_by_name():
@@ -351,6 +367,29 @@ def t_the_ladder_falls_to_a_shorter_dose():
           'expected a partial dose, got %.4f' % rel.dose_mm)
 
 
+def t_a_pin_from_one_rung_does_not_follow_the_ladder_down():
+    """Pins are per-RUNG. Carrying them makes every later rung fail for the first
+    rung's reason -- and the failure looks exactly like "there is no room".
+
+    The keep-out sits 1.0 mm to C's right, so:
+      * long doses need C to yield more than 1.0 mm  -> refused -> C pinned;
+      * the 0.25 rung needs C to yield only 0.6875   -> legal, and must succeed.
+    With pins carried forward, C is still frozen at the 0.25 rung, B is capped at
+    its own 0.75 mm gap, and the pass reports no_room_at_any_dose on a board that
+    plainly has room.
+    """
+    st = row(keepouts=((6.0, -1.0, 9.0, 2.0),))
+    rel = RL.relocate_block(st, None, 'B', (1.0, 0.0), want_mm=5.75)
+    check(not rel.refusal,
+          'the 0.25 rung was refused for the 1.0 rung\'s reason: %r' % rel.refusal)
+    if not rel.refusal:
+        check(close(rel.dose_mm, 1.4375, tol=1e-3),
+              'expected the 0.25 rung (1.4375 mm), got %.4f' % rel.dose_mm)
+        check('C' in rel.corridor,
+              'C had to yield 0.6875 mm for this dose but is not in the corridor: '
+              '%r' % (rel.corridor,))
+
+
 def t_a_reachable_block_reports_its_corridor_and_its_binding_chain():
     st = row()
     rel = RL.relocate_block(st, None, 'B', (1.0, 0.0), want_mm=5.75)
@@ -405,6 +444,13 @@ def t_every_proposal_carries_the_no_efficacy_disclosure():
         check(NO_EFFICACY_CLAIM in (rel.to_dict()['disclosures']),
               'to_dict() dropped the disclosure, so a machine consumer never '
               'sees it')
+        check(RL.NO_EFFICACY_CLAIM in rel.disclosures,
+              "the relocation's OWN disclosure is missing; the selector's is "
+              'about a different experiment and does not substitute for it')
+        check('relocate-on vs relocate-off' in RL.NO_EFFICACY_CLAIM,
+              'the relocation disclosure names the wrong comparison: %r. A '
+              'sentence that says NOT MEASURED about someone else\'s experiment '
+              'reads like a disclosure and is not one.' % RL.NO_EFFICACY_CLAIM)
 
 
 def t_an_unknown_block_is_refused_by_name():
