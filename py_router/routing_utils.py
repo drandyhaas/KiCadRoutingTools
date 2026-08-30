@@ -404,38 +404,40 @@ def pad_blocked_cells_array(
 _SEG_CAPSULE_CACHE: "OrderedDict[Tuple[float, float, float, float, float, float], np.ndarray]" = OrderedDict()
 _SEG_CAPSULE_ROWS = 0
 
+# Span twin of the capsule memo (#: 5.2x denser, so it holds a working set the
+# cell form evicted). The two SHARE the raster budget: spans take the bulk
+# because every stamping consumer uses them, and the cell form keeps a small
+# slice for the few consumers that iterate cells.
+_SEG_SPAN_CACHE: "OrderedDict[Tuple[float, float, float, float, float, float], np.ndarray]" = OrderedDict()
+_SEG_SPAN_ROWS = 0
+
+
+def _seg_span_row_budget() -> int:
+    # 12 bytes per (gx, lo, hi) int32 row, 40% of the shared raster budget.
+    return int(env_knobs.RASTER_CACHE_MB * 0.40 * 1e6 / 12)
+
 
 def _seg_capsule_row_budget() -> int:
-    # 8 bytes per (N,2) int32 row; the capsule cache gets half the shared
-    # KICAD_RASTER_CACHE_MB budget (the polygon cache takes most of the
-    # rest). LRU-evicted, never wholesale-cleared: profiling showed the old
+    # 8 bytes per (N,2) int32 row. Now 10% of the shared budget, not 50%:
+    # the stamping consumers moved to segment_blocked_spans (40%), and what is
+    # left here serves only the few consumers that iterate cells. LRU-evicted, never wholesale-cleared: profiling showed the old
     # 64MB clear-all cap cycling ~40x on orangecrab (69% hit rate where the
     # keyspace supports ~99%).
-    return int(env_knobs.RASTER_CACHE_MB * 0.5 * 1e6 / 8)
+    return int(env_knobs.RASTER_CACHE_MB * 0.10 * 1e6 / 8)
 
 
-def segment_blocked_cells_array(x1: float, y1: float, x2: float, y2: float,
-                                margin: float, grid_step: float) -> "np.ndarray":
-    """(N, 2) int32 cells whose centre is within ``margin`` mm of the TRUE float
-    segment (x1,y1)-(x2,y2) -- a capsule (fat line with rounded ends).
+_SQUARE_OFFSETS_CACHE: Dict[int, "np.ndarray"] = {}
+_CIRCLE_OFFSETS_CACHE: Dict[Tuple[int, float], "np.ndarray"] = {}
 
-    Replaces the walk_line(rounded endpoints) + square_offsets box stamp, which
-    rounded the endpoints to the grid and used a Chebyshev box: an off-grid track
-    (terminal connection to an off-grid pad, ~31% of segments) had its keep-out
-    shifted up to a half cell off its real centreline, and a diagonal track's box
-    staircase under-covered the perpendicular direction between steps. A foreign
-    track cleared the rounded stamp but grazed the real track (issue #70/B). Here
-    distances are measured from the real segment, so off-grid + diagonal are exact.
 
-    The result is memoized (exact float key) and READ-ONLY -- callers must not
-    mutate it.
+def _capsule_mask(x1: float, y1: float, x2: float, y2: float,
+                  margin: float, grid_step: float):
+    """(xs, ys, mask) for the capsule around (x1,y1)-(x2,y2).
+
+    THE predicate, in one place: both segment_blocked_cells_array and
+    segment_blocked_spans derive from this, so the cell form and the span form
+    can never disagree about membership.
     """
-    global _SEG_CAPSULE_ROWS
-    key = (x1, y1, x2, y2, margin, grid_step)
-    cached = _SEG_CAPSULE_CACHE.get(key)
-    if cached is not None:
-        _SEG_CAPSULE_CACHE.move_to_end(key)
-        return cached
     inv = 1.0 / grid_step
     glo_x = int(math.floor((min(x1, x2) - margin) * inv))
     ghi_x = int(math.ceil((max(x1, x2) + margin) * inv))
@@ -456,6 +458,87 @@ def segment_blocked_cells_array(x1: float, y1: float, x2: float, y2: float,
     ddx = cx - (x1 + t * dx)
     ddy = cy - (y1 + t * dy)
     mask = (ddx * ddx + ddy * ddy) < margin * margin
+    return xs, ys, gxg, gyg, mask
+
+
+def segment_blocked_spans(x1: float, y1: float, x2: float, y2: float,
+                          margin: float, grid_step: float) -> "np.ndarray":
+    """(M, 3) int32 SPANS (gx, gy_lo, gy_hi -- both inclusive) covering exactly
+    the cells segment_blocked_cells_array returns.
+
+    Same membership, ~5.2x less memory. A capsule is CONVEX, so each column's
+    cells are one contiguous run: storing (col, lo, hi) costs 12 bytes per
+    column against 8 bytes x ~8.3 cells (measured over 400 representative
+    capsules). That is what lets the memo hold a working set the cell form
+    could not -- on glasgow the cell cache sat pinned at its 16M-row ceiling
+    with 2,270,477 of its 2,317,497 misses being EVICTIONS, i.e. keys that
+    would have hit in a cache that fit.
+
+    Consumers stamp these through GridObstacleMap.add_blocked_cell_spans_batch
+    / add_blocked_via_spans_batch, which expand in Rust. Expanding in Python
+    instead measures 7.44 us against a 0.17 us cache hit (~65 s per route), so
+    the span form only pays when the CONSUMER takes spans.
+
+    Read-only and shared, exactly like the cell form.
+    """
+    global _SEG_SPAN_ROWS
+    key = (x1, y1, x2, y2, margin, grid_step)
+    cached = _SEG_SPAN_CACHE.get(key)
+    if cached is not None:
+        _SEG_SPAN_CACHE.move_to_end(key)
+        return cached
+    xs, ys, _gxg, _gyg, mask = _capsule_mask(x1, y1, x2, y2, margin, grid_step)
+    any_col = mask.any(axis=1)
+    sel = np.flatnonzero(any_col)
+    if sel.size:
+        lo = mask.argmax(axis=1)[sel]
+        hi = mask.shape[1] - 1 - mask[:, ::-1].argmax(axis=1)[sel]
+        out = np.empty((sel.size, 3), dtype=np.int32)
+        out[:, 0] = xs[sel]
+        out[:, 1] = ys[lo]
+        out[:, 2] = ys[hi]
+        # Convexity says each column is contiguous; verify rather than trust,
+        # because a non-contiguous column would silently BLOCK EXTRA cells.
+        if int((out[:, 2] - out[:, 1] + 1).sum()) != int(mask.sum()):
+            raise AssertionError("capsule column not contiguous")
+    else:
+        out = np.empty((0, 3), dtype=np.int32)
+    out.setflags(write=False)
+    _SEG_SPAN_CACHE[key] = out
+    _SEG_SPAN_ROWS += len(out)
+    budget = _seg_span_row_budget()
+    while _SEG_SPAN_ROWS > budget and _SEG_SPAN_CACHE:
+        _, old_arr = _SEG_SPAN_CACHE.popitem(last=False)
+        _SEG_SPAN_ROWS -= len(old_arr)
+    return out
+
+
+def segment_blocked_cells_array(x1: float, y1: float, x2: float, y2: float,
+                                margin: float, grid_step: float) -> "np.ndarray":
+    """(N, 2) int32 cells whose centre is within ``margin`` mm of the TRUE float
+    segment (x1,y1)-(x2,y2) -- a capsule (fat line with rounded ends).
+
+    Prefer ``segment_blocked_spans`` for anything that stamps into a
+    GridObstacleMap; this cell form remains for consumers that iterate cells.
+
+    Replaces the walk_line(rounded endpoints) + square_offsets box stamp, which
+    rounded the endpoints to the grid and used a Chebyshev box: an off-grid track
+    (terminal connection to an off-grid pad, ~31% of segments) had its keep-out
+    shifted up to a half cell off its real centreline, and a diagonal track's box
+    staircase under-covered the perpendicular direction between steps. A foreign
+    track cleared the rounded stamp but grazed the real track (issue #70/B). Here
+    distances are measured from the real segment, so off-grid + diagonal are exact.
+
+    The result is memoized (exact float key) and READ-ONLY -- callers must not
+    mutate it.
+    """
+    global _SEG_CAPSULE_ROWS
+    key = (x1, y1, x2, y2, margin, grid_step)
+    cached = _SEG_CAPSULE_CACHE.get(key)
+    if cached is not None:
+        _SEG_CAPSULE_CACHE.move_to_end(key)
+        return cached
+    _xs, _ys, gxg, gyg, mask = _capsule_mask(x1, y1, x2, y2, margin, grid_step)
     out = np.empty((int(mask.sum()), 2), dtype=np.int32)
     out[:, 0] = gxg[mask]
     out[:, 1] = gyg[mask]
@@ -467,13 +550,6 @@ def segment_blocked_cells_array(x1: float, y1: float, x2: float, y2: float,
         _, old_arr = _SEG_CAPSULE_CACHE.popitem(last=False)
         _SEG_CAPSULE_ROWS -= len(old_arr)
     return out
-
-
-# Offset-pattern caches for batched rasterization. The patterns are tiny
-# (a few hundred cells) and reused for every segment/via on the board.
-_SQUARE_OFFSETS_CACHE: Dict[int, "np.ndarray"] = {}
-_CIRCLE_OFFSETS_CACHE: Dict[Tuple[int, float], "np.ndarray"] = {}
-
 
 def circle_offsets(block_range: int, effective_sq: float) -> "np.ndarray":
     """(K, 2) int32 offsets with ex^2 + ey^2 <= effective_sq, matching the

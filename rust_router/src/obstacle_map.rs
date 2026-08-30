@@ -617,6 +617,73 @@ impl GridObstacleMap {
         }
     }
 
+    /// SPAN form of add_blocked_cells_batch (shape: N x 4, columns:
+    /// gx, y_lo, y_hi, layer; both y bounds INCLUSIVE).
+    ///
+    /// The capsule rasterizer's output is convex per column, so a keep-out is
+    /// naturally ~8 cells per column. Sending spans instead of cells is the
+    /// same cell multiset -- each span lists each of its cells exactly once,
+    /// so the refcounts land identically -- at 12 bytes per column instead of
+    /// 8 bytes per cell (measured 5.2x smaller over 400 representative
+    /// capsules), and it is what lets the Python-side memo cache spans rather
+    /// than materialised cells. Expanding in Python would cost 7.4 us per
+    /// call against a 0.17 us cache hit, i.e. ~65 s per route, which is why
+    /// the expansion belongs here.
+    pub fn add_blocked_cell_spans_batch(&mut self, spans: PyReadonlyArray2<i32>) {
+        let arr = spans.as_array();
+        for row in arr.rows() {
+            let gx = row[0];
+            let lo = row[1];
+            let hi = row[2];
+            let layer = row[3] as usize;
+            if layer >= self.num_layers || hi < lo {
+                continue;
+            }
+            for gy in lo..=hi {
+                let key = pack_xy(gx, gy);
+                let cnt = self.blocked_cells[layer].entry(key).or_insert(0);
+                *cnt += 1;
+                if *cnt == 1 {
+                    self.blocked_bitmap.set(gx, gy, layer); // S2: 0->1 transition
+                }
+            }
+        }
+    }
+
+    /// SPAN form of add_blocked_vias_batch (shape: N x 3: gx, y_lo, y_hi).
+    pub fn add_blocked_via_spans_batch(&mut self, spans: PyReadonlyArray2<i32>) {
+        let arr = spans.as_array();
+        for row in arr.rows() {
+            let gx = row[0];
+            let lo = row[1];
+            let hi = row[2];
+            if hi < lo {
+                continue;
+            }
+            for gy in lo..=hi {
+                let key = pack_xy(gx, gy);
+                *self.blocked_vias.entry(key).or_insert(0) += 1;
+            }
+        }
+    }
+
+    /// SPAN form of add_static_blocked_cells_batch (shape: N x 4).
+    pub fn add_static_blocked_cell_spans_batch(&mut self, spans: PyReadonlyArray2<i32>) {
+        let arr = spans.as_array();
+        for row in arr.rows() {
+            let gx = row[0];
+            let lo = row[1];
+            let hi = row[2];
+            let layer = row[3] as usize;
+            if layer >= self.num_layers || hi < lo {
+                continue;
+            }
+            for gy in lo..=hi {
+                self.static_blocked_bitmap.set(gx, gy, layer);
+            }
+        }
+    }
+
     /// Batch add blocked vias from numpy array (shape: N x 2, columns: gx, gy)
     pub fn add_blocked_vias_batch(&mut self, vias: PyReadonlyArray2<i32>) {
         let arr = vias.as_array();
@@ -670,6 +737,25 @@ impl GridObstacleMap {
             let gx = row[0];
             let gy = row[1];
             self.static_via_bitmap.set(gx, gy, 0);
+        }
+    }
+
+    /// SPAN form of add_static_blocked_vias_batch (shape: N x 3: gx, lo, hi).
+    /// Needed so _StaticStampProxy can redirect the span path too -- without
+    /// it, a base build (which stamps through that proxy) would fall back to
+    /// the cell form and lose the memo density the spans exist for.
+    pub fn add_static_blocked_via_spans_batch(&mut self, spans: PyReadonlyArray2<i32>) {
+        let arr = spans.as_array();
+        for row in arr.rows() {
+            let gx = row[0];
+            let lo = row[1];
+            let hi = row[2];
+            if hi < lo {
+                continue;
+            }
+            for gy in lo..=hi {
+                self.static_via_bitmap.set(gx, gy, 0);
+            }
         }
     }
 

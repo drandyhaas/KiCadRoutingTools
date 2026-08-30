@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.21.2**
+**Current Version: 0.21.3**
 
 > **Release note:** the 0.20.0 per-platform binaries are published as of
 > [v0.20.0](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.20.0),
@@ -310,6 +310,27 @@ src/
 - **Costs**: ORTHO_COST=1000, DIAG_COST=1414 (sqrt(2) * 1000), DEFAULT_TURN_COST=1000
 
 ## Version History
+
+### 0.21.3 (2026-08-30)
+
+- Capsule keep-outs can be stamped as SPANS instead of cells:
+  `add_blocked_cell_spans_batch` / `add_blocked_via_spans_batch` (+ the
+  `add_static_*` twins for the base build's stamp proxy). Each row is
+  `(gx, y_lo, y_hi[, layer])` with both y bounds INCLUSIVE, expanded in Rust.
+
+  A capsule is convex, so its rasterization is one contiguous run per column --
+  measured **8.3 cells per column** over 400 representative capsules. A span
+  costs 12 bytes per column against 8 bytes per cell, i.e. **5.2x denser** for
+  the identical cell multiset (each span lists each of its cells exactly once,
+  so refcounts land the same). Verified against the cell path on 720 capsules:
+  zero cell-state mismatches, identical `get_stats()`.
+
+  This exists so the Python-side capsule memo can cache spans rather than
+  materialised cells. It thrashes badly in the cell form -- on glasgow_revC,
+  2,270,477 of 2,317,497 misses were EVICTIONS with the cache pinned at its
+  16M-row ceiling. Expanding spans back to cells in Python costs 7.44 us
+  against a 0.17 us cache hit (~65 s/route), which is why the expansion has to
+  be here and the consumer has to take spans. See #815.
 
 ### 0.21.2 (2026-08-30)
 

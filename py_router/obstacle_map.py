@@ -17,7 +17,7 @@ from kicad_parser import PCBData, Segment, Via, Pad, pad_drill_circles, pad_dril
 from routing_config import GridRouteConfig, GridCoord
 import routing_defaults as defaults
 from routing_utils import build_layer_map, iter_pad_blocked_cells, pad_blocked_cells_array, \
-    circle_offsets, segment_blocked_cells_array
+    circle_offsets, segment_blocked_cells_array, segment_blocked_spans
 from net_queries import expand_pad_layers
 
 # Import Rust router
@@ -65,6 +65,12 @@ class _StaticStampProxy:
 
     def add_blocked_vias_batch(self, vias):
         self._real.add_static_blocked_vias_batch(vias)
+
+    def add_blocked_cell_spans_batch(self, spans):
+        self._real.add_static_blocked_cell_spans_batch(spans)
+
+    def add_blocked_via_spans_batch(self, spans):
+        self._real.add_static_blocked_via_spans_batch(spans)
 
     def __getattr__(self, name):
         return getattr(self._real, name)
@@ -223,7 +229,14 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                 # rule for that layer replaces the net/class value.
                 seg_clearance = config.layer_clearance(seg.layer, _obstacle_clearance(seg.net_id))
                 via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
-                vias_arr = segment_blocked_cells_array(
+                # SPANS, like the main loop below: both producers feed
+                # _seg_via_batch and it is concatenated as one array, so a
+                # cell (N,2) here beside a span (N,3) there is a hard
+                # ValueError at the flush. Only reachable on a board with
+                # copper on a layer OUTSIDE config.layers (a 6/8-layer board
+                # routed with a subset), which is why the signal/plane boards
+                # never tripped it and test_dru_layer_clearance_e2e did.
+                vias_arr = segment_blocked_spans(
                     seg.start_x, seg.start_y, seg.end_x, seg.end_y,
                     via_block_mm, coord.grid_step)
                 _seg_via_batch.append(vias_arr)
@@ -247,12 +260,12 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         # (memoized, read-only) cell arrays and stamp once per build below --
         # concatenation preserves the exact row multiset and order, and the
         # batch inserts process rows identically whether split or joined.
-        cells_arr = segment_blocked_cells_array(
+        cells_arr = segment_blocked_spans(
             seg.start_x, seg.start_y, seg.end_x, seg.end_y,
             expansion_mm, coord.grid_step)
         if len(cells_arr):
             _seg_cell_batch.setdefault(layer_idx, []).append(cells_arr)
-        vias_arr = segment_blocked_cells_array(
+        vias_arr = segment_blocked_spans(
             seg.start_x, seg.start_y, seg.end_x, seg.end_y,
             via_block_mm, coord.grid_step)
         if len(vias_arr):
@@ -261,15 +274,21 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # Flush the accumulated segment stamps: one Rust call per layer for the
     # track keep-outs, one for the via keep-outs.
     for _li, _arrs in sorted(_seg_cell_batch.items()):
-        _cells = np.concatenate(_arrs) if len(_arrs) > 1 else _arrs[0]
-        _rows = np.empty((len(_cells), 3), dtype=np.int32)
-        _rows[:, :2] = _cells
-        _rows[:, 2] = _li
-        obstacles.add_blocked_cells_batch(np.ascontiguousarray(_rows))
+        _sp = np.concatenate(_arrs) if len(_arrs) > 1 else _arrs[0]
+        _rows = np.empty((len(_sp), 4), dtype=np.int32)
+        _rows[:, :3] = _sp
+        _rows[:, 3] = _li
+        obstacles.add_blocked_cell_spans_batch(np.ascontiguousarray(_rows))
     if _seg_via_batch:
+        # Every producer must emit the SAME form (spans, 3 columns). Assert it
+        # rather than let np.concatenate raise a dimension error three frames
+        # away from the producer that disagreed.
+        assert all(a.shape[1] == 3 for a in _seg_via_batch), (
+            "_seg_via_batch mixes cell and span rows: "
+            + repr(sorted({a.shape[1] for a in _seg_via_batch})))
         _vall = (np.concatenate(_seg_via_batch)
                  if len(_seg_via_batch) > 1 else _seg_via_batch[0])
-        obstacles.add_blocked_vias_batch(
+        obstacles.add_blocked_via_spans_batch(
             np.ascontiguousarray(_vall.astype(np.int32)))
 
     # Add vias as obstacles (excluding nets we'll route)
