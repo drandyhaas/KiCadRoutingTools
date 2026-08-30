@@ -58,11 +58,19 @@ def main():
     c.classify()
     c.offsets(0.35)
     c.reserve_intervals()
-    sched = Schedule(c.launch, c.target, ctx.tooth_layer)
+    sched = Schedule(c.launch, c.target, ctx.tooth_layer,
+                     dest_layer=ctx.dest_layer)
     cols, _gate = c.plan_columns(sched, {d: 1 for d in sched.divers},
                                  {d: 0 for d in sched.divers})
     c.lay_lanes(cols)
-    order = list(sched.priority) + [x for x in c.target if x not in sched.divers]
+    if getattr(sched, 'two_page', False):
+        # mirror Corridor.run()'s ribbon order (attempt 0: no boost)
+        sw_ = [x for x in grp if sched.page.get(x) is None]
+        order = ([x for x in c.target if x not in sw_]
+                 + sorted(sw_, key=lambda x: -abs(c.launch_o[x] - c.target_o[x])))
+    else:
+        order = list(sched.priority) + [x for x in c.target
+                                        if x not in sched.divers]
     routed = set()
     for om in order:
         if om == a.net:

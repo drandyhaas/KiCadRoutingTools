@@ -114,6 +114,32 @@ CROSS_TUBE = 1.0               # a lane's freedom through a crossing region
 RESERVE = 0.3                  # room after the last column
 W_FREE = 0.18                  # pitch of a FREE column (two page lanes
                                # crossing: no via, only the lanes' slope)
+W_XING = 0.02                  # two-page: pitch of a column with no layer
+                               # change in it -- a crossing of two lanes
+                               # on different layers costs no length,
+                               # only slope (the band floor grows with
+                               # it, SLOPE_W); the schedule region is
+                               # spent on layer CHANGES alone
+SLOPE_W = 0.02                 # extra band half-width per unit |do/ds|:
+                               # a steep diagonal's +-0.03 tube holds no
+                               # connected cell path on the 0.025 grid
+SWIM_TUBE = 1.2                # ribbon swimmer's band half-width: it
+                               # WEAVES through the page lattice, so
+                               # the neighbour-pinch band is wrong for
+                               # it -- its same-layer neighbours are
+                               # the very lanes it must cross (K11: a
+                               # thin fragmented thread, refused; the
+                               # obstacle map and the virtual copper
+                               # are the law inside the tube)
+PAGE_TUBE = 0.35               # ribbon page lane's dodge room: its
+                               # band is floored at this half-width
+                               # around its straight line, so copper
+                               # that lands ON the line (a dive via, a
+                               # swimmer's weave) can be stepped
+                               # around -- the free cells were there
+                               # and the pinched band cut them off
+                               # (K11 SDQ13, forward stuck in 276
+                               # cells at its own tooth)
 HW_COL = 0.15                  # half-width of a constrained column's
                                # required-layer stretch (the converging
                                # part where two lanes are too close for
@@ -758,9 +784,49 @@ class Corridor:
         u = []
         last_col, last_layer = {}, {}
         tl = self.ctx.tooth_layer
+        two = sched is not None and getattr(sched, 'two_page', False)
+        prev_gate = False
         for k, col in enumerate(cols):
-            # an EMPTY column is a spacer the schedule put there for a
-            # via: it keeps the full pitch
+            if two:
+                # TWO PAGES: a column is priced by its VIA NEED, not by
+                # who is in it. A grouped swimmer crossing page lanes on
+                # its settled layer is as free as an F x B pair -- every
+                # crossing is between two lanes on different layers --
+                # so only a column where some lane's layer CHANGES costs
+                # W_GATE and via room; everything else is W_XING. A
+                # change is vs the lane's previous crossing OR ITS BIRTH
+                # layer: a B-page lane born on F must dive before its
+                # FIRST crossing, free crossings included (K4's SDQ11
+                # had all three of its crossings in tiny columns just
+                # past s0 and nowhere to put its dive via). An EMPTY
+                # column is a spacer the schedule put there for a via:
+                # full pitch. A gated column also holds its neighbour
+                # off at W_GATE (prev_gate), so its via has room along
+                # the corridor on both sides.
+                def _pairs(d, p):
+                    if sched.is_free(d, p):
+                        return ((d, sched.page[d]), (p, sched.page[p]))
+                    Ld, Lp = sched.pair_layers(d, p)
+                    return ((d, Ld), (p, Lp))
+                changes = any(
+                    last_layer.get(nm, tl.get(nm, 'F.Cu')) != L
+                    for (d, p) in col for nm, L in _pairs(d, p))
+                gate_col = (not col) or changes
+                pitch = W_GATE if (gate_col or prev_gate) else W_XING
+                prev_gate = gate_col
+                uk = (u[-1] + pitch) if u else pitch
+                for (d, p) in col:
+                    for nm, L in _pairs(d, p):
+                        # via room along the corridor between two
+                        # crossings on different layers (a page lane
+                        # changes at most at birth, before it is in
+                        # last_layer, so this never fires for one)
+                        if nm in last_layer and last_layer[nm] != L:
+                            uk = max(uk, u[last_col[nm]] + 2 * HW_COL + VIA_ROOM)
+                        last_col[nm], last_layer[nm] = k, L
+                u.append(uk)
+                continue
+            # single page: the recorded ladders' exact layout
             free_col = bool(col) and sched is not None and \
                 all(sched.is_free(d, p) for d, p in col)
             pitch = W_FREE if free_col else W_GATE
@@ -788,6 +854,7 @@ class Corridor:
         sp = self.spine
         M = self.members
         sched = sched or self.sched_cur
+        two = getattr(sched, 'two_page', False)
         n = len(cols)
         L_avail = self.L_free - RESERVE
         u, need = self.column_layout(cols, sched)
@@ -795,7 +862,35 @@ class Corridor:
         # the uniform layout was: with one page every column is a
         # constrained one at W_GATE and this is exactly (k + 1) W
         scale = L_avail / need if need > 0 else 1.0
-        u = [x * scale for x in u]
+        if getattr(sched, 'two_page', False) and u and scale > 1.0:
+            # surplus length is WATERFILLED over the gaps: every pitch
+            # is raised to a common level T (never lowered -- the gated
+            # pitches and via-room gaps are minima) with sum = L_avail,
+            # so the layout is as close to UNIFORM as the constraints
+            # allow. Proportional stretch kept the W_XING columns tiny
+            # relative to the gated ones, and an equal ADD left them at
+            # 0.1 when the need approached the room (K11: 15 columns in
+            # 4.95 mm, W=0.096, six lanes refused against the escape
+            # field's maze -- where the single-page braid lays the same
+            # count at ~0.33 uniform and routes). Compression below
+            # uniform appears only at a K that genuinely lacks room.
+            gaps_p = [b - a for a, b in zip([0.0] + u, u)] + [W_GATE]
+            lo_, hi_ = 0.0, L_avail
+            for _ in range(50):
+                T = (lo_ + hi_) / 2
+                if sum(max(p, T) for p in gaps_p) > L_avail:
+                    hi_ = T
+                else:
+                    lo_ = T
+            T = lo_
+            filled = [max(p, T) for p in gaps_p[:-1]]
+            u = []
+            acc = 0.0
+            for p in filled:
+                acc += p
+                u.append(acc)
+        else:
+            u = [x * scale for x in u]
         pitches = [b - a for a, b in zip([0.0] + u, u)]
         self.W = min(pitches) if pitches else L_avail
         self.layout_need, self.cols = need, cols
@@ -828,6 +923,18 @@ class Corridor:
             pitch = min(u[k] - (u[k - 1] if k else 0.0),
                         (u[k + 1] if k + 1 < n else L_avail) - u[k])
             hw = 0.4 * pitch + 0.05
+            if getattr(sched, 'two_page', False):
+                # a W_XING column still needs a threadable crossing
+                # window: outside the req interval the crossed lane's
+                # virtual copper may hold BOTH layers, and a slot
+                # narrower than a track and two clearances is a wall
+                # (K4 SDQ14 -- an F-page lane that never vias -- stuck
+                # against SDQ11's F virtual either side of a 0.07
+                # half-width crossing). Same-layer overlaps of the
+                # widened intervals are harmless; different-layer ones
+                # cannot happen, the change columns stand 2 HW_COL +
+                # VIA_ROOM apart by the layout
+                hw = max(hw, HW_COL)
             a, b = self.s_of_u(u[k] - hw), self.s_of_u(u[k] + hw)
             for (d, p) in col:
                 # a free crossing: each lane on its page there (the
@@ -896,6 +1003,77 @@ class Corridor:
                 b = min(b, self.se[om][0] - 0.03)
             if b > a:
                 req[om].append((a, b, other))
+        if two:
+            # RIBBON page rules. A page lane is required on its page
+            # over the whole schedule region -- from just past its
+            # birth via (0.45 for the via and its clearances when the
+            # tooth is on the other layer) to just before its landing
+            # via -- which is what makes every crossing with it free
+            # for a lane on the other layer. The req stops short of an
+            # exit corner and of any exit leg that crosses the lane
+            # (those stretches carry their own rules above).
+            tlr, dlr = self.ctx.tooth_layer, self.ctx.dest_layer
+            line = {}
+            for nm in M:
+                s_a = (self.join_leg_s[nm] if nm in self.join_block
+                       else max(self.s0, self.st[nm][0]))
+                line[nm] = (s_a, self.launch_o[nm], self.s1, py[trank[nm]])
+
+            def _o_at(ln, s):
+                s_a, o_a, s_b, o_b = ln
+                t = (s - s_a) / max(s_b - s_a, 1e-9)
+                return o_a + t * (o_b - o_a)
+
+            def _cross_s(a_, b_):
+                lo_s = max(line[a_][0], line[b_][0])
+                hi_s = min(line[a_][2], line[b_][2])
+                if hi_s <= lo_s:
+                    return None
+                d0 = _o_at(line[a_], lo_s) - _o_at(line[b_], lo_s)
+                d1 = _o_at(line[a_], hi_s) - _o_at(line[b_], hi_s)
+                if d0 == d1:
+                    return None
+                x = lo_s + (hi_s - lo_s) * d0 / (d0 - d1)
+                return x if lo_s <= x <= hi_s else None
+            for nm in M:
+                pg = sched.page.get(nm)
+                if not pg:
+                    continue
+                # the page req must COVER the lane's first and last
+                # geometric crossings: a B-page riser that crosses its
+                # neighbour inside the birth stretch left that stretch
+                # stamped on BOTH layers exactly across the crossing
+                # and sealed the neighbour in (K11 SDQ13, 276 cells).
+                # The birth/landing via moves out toward the launch or
+                # exit run when a crossing comes that early.
+                xs_ = [x for om in M if om != nm and sched.inverted(nm, om)
+                       and (x := _cross_s(nm, om)) is not None]
+                a = self.s0 + (0.05 if tlr[nm] == pg else 0.45)
+                if tlr[nm] != pg and xs_:
+                    a = min(a, max(self.s0 + 0.02, min(xs_) - HW_COL))
+                b = self.s1 - (0.05 if dlr[nm] == pg else 0.45)
+                if dlr[nm] != pg and xs_:
+                    b = max(b, min(self.s1 - 0.02, max(xs_) + HW_COL))
+                if nm in self.exit_block:
+                    b = min(b, self.exit_leg_s[nm] - 0.35)
+                if nm in crossings:
+                    b = min(b, min(crossings[nm]) - LEG_REQ - 0.03)
+                if b > a:
+                    req[nm].append((a, b, pg))
+            # SWIMMER x SWIMMER needs no assigned crossing: swimmers
+            # route LAST, one at a time, against each other's REAL
+            # copper -- an unrouted swimmer stamps no mid-corridor
+            # virtual at all (see virtual_of), because a fixed pair of
+            # layers at a fixed line intersection just recreated the
+            # rigidity the ribbon removes (K28: 3/27, every swimmer
+            # refused against the others' both-layer virtual walls).
+            # (RESERVED HOPS -- planned via sites at each swimmer's
+            # run boundaries, stamped as virtual vias for the pages to
+            # clear -- were tried and measured WORSE: the hop midpoint
+            # lands between page lines under a lane pitch apart, so
+            # the reservation walls the PAGES instead: K11 10/11 ->
+            # 5/11. The swimmer's real bottleneck on this fanout is
+            # the F layer saturated by all-F escapes; step 3.)
         # POSSIBLE back-layer intervals: a diver may be on B only from
         # after the last foreign pass before its first own swap until
         # before the first foreign crossing after its last -- it must be
@@ -906,6 +1084,10 @@ class Corridor:
         bwin = {}
         for nm in M:
             wins = [(self.s1 - 0.1, 1e9)]
+            if two and sched.page.get(nm) is None:
+                # a ribbon swimmer may weave anywhere: the page lanes'
+                # copper and its own assigned crossings are the law
+                wins.append((-1e9, 1e9))
             # the diver window is derived from the SCHEDULE's B rules
             # (those inside the corridor): a B stretch in the tail --
             # an exit block's -- is already inside the tail window, and
@@ -959,8 +1141,13 @@ class Corridor:
                 pts = [(s_l, self.join_block[nm])]
             else:
                 pts = [(s_t, o_t)]
-            for k in range(n + 1):
-                pts.append((s_m[k], slot(morph_t(s_m[k]), orders[k].index(nm))))
+            if two:
+                # RIBBON: hold the launch offset at the region start,
+                # then run STRAIGHT to the target slot at s1
+                pts.append((self.s_of_u(0.0), self.launch_o[nm]))
+            else:
+                for k in range(n + 1):
+                    pts.append((s_m[k], slot(morph_t(s_m[k]), orders[k].index(nm))))
             pts.append((self.s1, py[trank[nm]]))
             if nm in self.exit_block:
                 s_l = self.exit_leg_s[nm]
@@ -1104,36 +1291,67 @@ class Corridor:
             present = (S >= ms[0] - 1e-9) & (S <= ms[-1] + 1e-9)
             o_nm = np.interp(S, ms, mo)
             okL = self.allowed_vec(nm, S, L)
-            o_nm1 = np.interp(sg, ms, mo)
-            prev = np.full(sg.shape, -BIG)
-            nxt = np.full(sg.shape, BIG)
-            for om in self.members:
-                if om == nm:
-                    continue
-                os_ = np.array([p[0] for p in self.mid[om]])
-                oo_ = np.array([p[1] for p in self.mid[om]])
-                pres = (sg >= os_[0] - 1e-9) & (sg <= os_[-1] + 1e-9)
-                if not pres.any():
-                    continue
-                o_m = np.interp(sg, os_, oo_)
-                m = pres & self.allowed_vec(om, sg, L)
-                prev = np.where(m & (o_m < o_nm1), np.maximum(prev, o_m), prev)
-                nxt = np.where(m & (o_m > o_nm1), np.minimum(nxt, o_m), nxt)
-            lo1 = np.where(prev > -BIG / 2, (prev + o_nm1) / 2 + HALF_SEP, -BIG)
-            hi1 = np.where(nxt < BIG / 2, (nxt + o_nm1) / 2 - HALF_SEP, BIG)
-            lo = np.interp(S, sg, lo1)
-            hi = np.interp(S, sg, hi1)
+            sc = getattr(self, 'sched_cur', None)
+            if (sc is not None and getattr(sc, 'two_page', False)
+                    and sc.page.get(nm) is None):
+                # a ribbon SWIMMER weaves through the page lattice: the
+                # neighbour-pinch band is wrong for it -- its same-layer
+                # neighbours are the very lanes it crosses, and they
+                # squeezed it to a thin fragmented thread (K11,
+                # refused). A wide tube around its straight line; the
+                # obstacle map and the virtual copper are the law
+                lo = o_nm - SWIM_TUBE
+                hi = o_nm + SWIM_TUBE
+            else:
+                o_nm1 = np.interp(sg, ms, mo)
+                prev = np.full(sg.shape, -BIG)
+                nxt = np.full(sg.shape, BIG)
+                for om in self.members:
+                    if om == nm:
+                        continue
+                    os_ = np.array([p[0] for p in self.mid[om]])
+                    oo_ = np.array([p[1] for p in self.mid[om]])
+                    pres = (sg >= os_[0] - 1e-9) & (sg <= os_[-1] + 1e-9)
+                    if not pres.any():
+                        continue
+                    o_m = np.interp(sg, os_, oo_)
+                    m = pres & self.allowed_vec(om, sg, L)
+                    prev = np.where(m & (o_m < o_nm1), np.maximum(prev, o_m), prev)
+                    nxt = np.where(m & (o_m > o_nm1), np.minimum(nxt, o_m), nxt)
+                lo1 = np.where(prev > -BIG / 2, (prev + o_nm1) / 2 + HALF_SEP, -BIG)
+                hi1 = np.where(nxt < BIG / 2, (nxt + o_nm1) / 2 - HALF_SEP, BIG)
+                lo = np.interp(S, sg, lo1)
+                hi = np.interp(S, sg, hi1)
+                if sc is not None and getattr(sc, 'two_page', False):
+                    # a RIBBON page lane may dodge locally: the
+                    # neighbours' virtual/real copper is the law, the
+                    # pinch only a guide (PAGE_TUBE)
+                    lo = np.minimum(lo, o_nm - PAGE_TUBE)
+                    hi = np.maximum(hi, o_nm + PAGE_TUBE)
             # never narrower than a grid cell: at the stub ends the
             # lanes are 0.25 apart and the corridor formula gives
             # 0.0115 -- a band that on an unlucky grid alignment holds
             # no cell at all. Clearance to the neighbours' copper is
             # the obstacle map's job. (A floor growing with the lane's
             # slope was tried for K28 SDQ7 -- slope 6 where two movers
-            # pass it -- and measured inert: band_conn.py shows the
-            # 0.03 band connected end to end there; what refuses that
-            # lane is C5 inside the corridor, see Known walls.)
-            lo = np.minimum(lo, o_nm - 0.03)
-            hi = np.maximum(hi, o_nm + 0.03)
+            # pass it -- and measured inert THERE: band_conn.py shows
+            # the 0.03 band connected end to end; what refuses that
+            # lane is C5 inside the corridor, see Known walls. Under
+            # TWO pages it is load-bearing: a W_XING crossing is a
+            # steep diagonal, and the +-0.03 tube around it holds no
+            # connected cell path, so the floor grows with the local
+            # slope of the lane's own centreline.)
+            if getattr(self, 'sched_cur', None) is not None \
+                    and getattr(self.sched_cur, 'two_page', False):
+                dms = np.maximum(np.diff(ms), 1e-9)
+                sl = np.abs(np.diff(mo)) / dms
+                seg_i = np.clip(np.searchsorted(ms, S, side='right') - 1,
+                                0, len(sl) - 1)
+                fl = 0.03 + SLOPE_W * np.minimum(sl[seg_i], 30.0)
+            else:
+                fl = 0.03
+            lo = np.minimum(lo, o_nm - fl)
+            hi = np.maximum(hi, o_nm + fl)
             ok = present & okL & (O >= lo) & (O <= hi)
             for (s_l, oa, ob) in self.legs[nm]:
                 rect = ((np.abs(S - s_l) <= LEG_W)
@@ -1155,8 +1373,15 @@ class Corridor:
         except through a crossing region, where the plan is not a
         promise."""
         sp = self.spine
+        sc = getattr(self, 'sched_cur', None)
+        two = sc is not None and getattr(sc, 'two_page', False)
         segs = []
         for om in unrouted:
+            # a ribbon SWIMMER's mid-corridor line is not a promise
+            # either -- it weaves wherever the A* takes it -- so only
+            # its rigid ends are stamped; stamped on both layers along
+            # its whole line it walled every lane that must cross it
+            swim_om = two and sc.page.get(om) is None
             # the layers a lane may occupy change at every required-
             # interval boundary, so a polyline piece is split there and
             # each part stamped on its own layers -- deciding per whole
@@ -1194,6 +1419,8 @@ class Corridor:
                     # tooth under SA1's B tooth at the same point).
                     tail = abs(s_b - s_end) < 1e-6 and om not in self.exit_block
                     head = abs(s_a - s_start) < 1e-6 and om not in self.join_block
+                    if swim_om and not (tail or head):
+                        continue
                     for p_, q_ in zip(xy, xy[1:]):
                         for L in ('F.Cu', 'B.Cu'):
                             if tail and L != self.ctx.dest_layer[om]:
@@ -1253,6 +1480,15 @@ class Corridor:
         (segments, vias) or None; partial copper is discarded."""
         ctx, sp = self.ctx, self.spine
         nid, _ = ctx.byname[nm]
+        # a ribbon swimmer's search window must HOLD its tube: the
+        # window is built from the straight lane_xy with `margin`, so
+        # at the default 0.6 the SWIM_TUBE band was clipped to half --
+        # the A* explored 12k cells and never saw the via diamonds a
+        # lane's width away (K11 SDQ15)
+        sc = getattr(self, 'sched_cur', None)
+        margin = (SWIM_TUBE + 0.4 if sc is not None
+                  and getattr(sc, 'two_page', False)
+                  and sc.page.get(nm) is None else 0.6)
         pieces = os.environ.get('LANE_PIECES') == '1'
         way = [(self.teeth[nm], ctx.tooth_layer[nm])]
         if pieces and nm in self.join_block:
@@ -1274,7 +1510,7 @@ class Corridor:
         added = 0
         for (a, aL), (b, bL) in zip(way, way[1:]):
             res = cn.connect(ctx.pcb, nid, a, aL, b, bL, ctx.cfg, band=band,
-                             virtual=virt, margin=0.6,
+                             virtual=virt, margin=margin,
                              window_pts=self.lane_xy[nm],
                              virtual_vias=virt_vias)
             if res is None:
@@ -1309,6 +1545,15 @@ class Corridor:
         policy. The probe tools go through here too, so they diagnose
         the schedule the braid actually laid."""
         self.sched_cur = sched
+        if getattr(sched, 'two_page', False):
+            # RIBBON: two pages need no swap columns at all. Every
+            # lane runs straight from its launch slot to its target
+            # slot; same-page lanes never cross, an inverted pair
+            # crosses once, where the lines cross, and a crossing of
+            # two lanes on different layers costs neither length nor
+            # via. The schedule's remaining job is the pages
+            # themselves and the swimmers' priority.
+            return [], 'last'
         gate = os.environ.get('SCHED_GATE')
         if gate is None:
             cols = sched.columns(gaps, lead, gate='last')
@@ -1347,6 +1592,7 @@ class Corridor:
                          dest_layer=ctx.dest_layer)
         gaps = {d: 1 for d in sched.divers}
         lead = {d: 0 for d in sched.divers}
+        boost = {}                # ribbon: refused lanes route earlier
         best = None
         for attempt in range(6):
             self.offsets(ly_floor)
@@ -1374,8 +1620,23 @@ class Corridor:
             ctx.pcb.vias = list(ctx.base_vias)
             self.out_segs, self.out_vias = {}, {}
             divers = set(sched.divers)
-            order = list(sched.priority) + \
-                [nm for nm in self.target if nm not in divers]
+            if sched.two_page:
+                # RIBBON order: the rigid lanes first -- the pages, in
+                # target order (a page diagonal cannot dodge anything)
+                # -- then the swimmers, largest displacement first,
+                # each weaving through the REAL copper laid so far. A
+                # REFUSED lane is boosted to the front of its class on
+                # the next attempt (the greedy that boxed it routes
+                # after it instead); the best attempt is kept as ever
+                sw_ = [nm for nm in M if sched.page.get(nm) is None]
+                ti = {nm: i for i, nm in enumerate(self.target)}
+                order = (sorted((nm for nm in self.target if nm not in sw_),
+                                key=lambda nm: (-boost.get(nm, 0), ti[nm]))
+                         + sorted(sw_, key=lambda nm: (-boost.get(nm, 0), -abs(
+                             self.launch_o[nm] - self.target_o[nm]))))
+            else:
+                order = list(sched.priority) + \
+                    [nm for nm in self.target if nm not in divers]
             routed = set()
             self.refused = []
             for nm in order:
@@ -1404,6 +1665,9 @@ class Corridor:
                         list(ctx.pcb.segments), list(ctx.pcb.vias), sched)
             if not self.refused:
                 break
+            if sched.two_page:
+                for nm in self.refused:
+                    boost[nm] = boost.get(nm, 0) + 1
             # FEEDBACK. Room across first -- the launch pitch is the
             # cheap dimension, every lane gets it, and a via beside a
             # neighbour is what usually fails. Then room along for a

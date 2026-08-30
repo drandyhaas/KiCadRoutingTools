@@ -41,7 +41,8 @@ def main():
     c.classify()
     c.offsets(0.35)
     c.reserve_intervals()
-    sched = Schedule(c.launch, c.target, ctx.tooth_layer, log=print)
+    sched = Schedule(c.launch, c.target, ctx.tooth_layer, log=print,
+                     dest_layer=ctx.dest_layer)
     cols, gate = c.plan_columns(sched, {d: 1 for d in sched.divers},
                                 {d: 0 for d in sched.divers})
     print(f'  {len(cols)} columns, gate {gate}')

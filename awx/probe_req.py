@@ -31,7 +31,8 @@ def main():
         c.classify()
         c.offsets(0.35)
         c.reserve_intervals()
-        sched = Schedule(c.launch, c.target, ctx.tooth_layer)
+        sched = Schedule(c.launch, c.target, ctx.tooth_layer,
+                     dest_layer=ctx.dest_layer)
         cols = sched.columns({d: 1 for d in sched.divers}, {d: 0 for d in sched.divers})
         c.lay_lanes(cols)
         print(f'corridor {gi}: {len(grp)} lanes, s0={c.s0:.2f} s1={c.s1:.2f}')

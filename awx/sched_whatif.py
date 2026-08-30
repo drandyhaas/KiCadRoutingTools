@@ -39,8 +39,8 @@ def two_page(ranks):
     return sum(len(r) for r in rows[:2])
 
 
-def report(tag, launch, target, tooth_layer):
-    sched = Schedule(launch, target, tooth_layer)
+def report(tag, launch, target, tooth_layer, dest_layer=None):
+    sched = Schedule(launch, target, tooth_layer, dest_layer=dest_layer)
     ranks = [sched.trank[n] for n in launch]
     lis = len(lis_keep(ranks))
     cols = sched.columns({d: 1 for d in sched.divers}, {d: 0 for d in sched.divers},
@@ -69,7 +69,7 @@ def main():
     c.classify()
     c.offsets(0.35)
     c.reserve_intervals()
-    report('as planned', c.launch, c.target, ctx.tooth_layer)
+    report('as planned', c.launch, c.target, ctx.tooth_layer, ctx.dest_layer)
     move = [n for n in a.exit_block.split(',') if n]
     if not move:
         return
@@ -87,7 +87,8 @@ def main():
     # head-on order, then the block
     sg = 1 if any(c.exit_side[n] > 0 for n in block) else -1
     target = head + new_block if sg > 0 else new_block[::-1] + head
-    report(f'{",".join(move)} in the exit block', c.launch, target, ctx.tooth_layer)
+    report(f'{",".join(move)} in the exit block', c.launch, target,
+           ctx.tooth_layer, ctx.dest_layer)
 
 
 if __name__ == '__main__':

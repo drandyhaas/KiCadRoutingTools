@@ -75,6 +75,8 @@ class Schedule:
         ranks = [self.trank[nm] for nm in self.launch]
         tl = tooth_layer or {}
         dl = dest_layer or {}
+        # birth layers: what a swimmer is on before its first crossing
+        self.tl = {nm: tl.get(nm, 'F.Cu') for nm in self.launch}
 
         def on(nm, L):
             # how many of the net's two ends already sit on L: a page
@@ -105,6 +107,13 @@ class Schedule:
         if self.two_page:
             rest = [nm for i, nm in enumerate(self.launch) if i not in keep]
             if len(rest) >= 2:
+                # (a B-page of the WORST CROSSERS -- the human's
+                # constant-layer SWE idiom -- was tried and measured
+                # WORSE on all-F-escape fanouts: it demotes the
+                # mutually-increasing risers to swimmers, and with the
+                # F layer saturated by the escapes whoever swims is
+                # refused: K11 10/11 -> 7/11, K28 5 -> 6 open. Revisit
+                # when the fanout escapes by page, step 3.)
                 keep_b = lis_keep_weighted([self.trank[nm] for nm in rest],
                                            [on(nm, 'B.Cu') for nm in rest])
                 for i in keep_b:
@@ -251,7 +260,7 @@ class Schedule:
         while seq != self.target:
             col: List[Tuple[str, str]] = []
             used: Set[str] = set()
-            gap_block = gate_block = False
+            gap_block = gate_block = phase_block = False
             i = 0
             while i < len(seq) - 1:
                 a, b = seq[i], seq[i + 1]
@@ -305,6 +314,39 @@ class Schedule:
                         gap_block = True
                         i += 1
                         continue
+                if self.two_page:
+                    # PHASE GROUPING. A swimmer's layer changes are the
+                    # only priced events, so group its crossings by
+                    # layer: defer a crossing that would change its
+                    # layer while it still has PAGE partners crossable
+                    # on the layer it is on (a partner of the other
+                    # page keeps it). Swimmer partners do NOT hold a
+                    # deferral -- counted as crossable-on-current they
+                    # kept every deferral alive to the end and the
+                    # overrides fired chaotically (K28: SWE 6 changes,
+                    # SCAS 5, 8 surfacings). Two same-page partners
+                    # cross in a fixed order -- only an inverted F x B
+                    # pair between them can be re-ordered -- so a
+                    # forced interleave ends in an empty column and
+                    # phase_free lets ONE change through, then re-arms:
+                    # a whole ungated column let every deferred swap
+                    # proceed at once.
+                    defer = False
+                    for nm, L in ((m, Lm), (p, Lp)):
+                        if nm not in swim:
+                            continue
+                        cur = last_layer.get(nm, self.tl[nm])
+                        if L == cur:
+                            continue
+                        want = 'B.Cu' if cur == 'F.Cu' else 'F.Cu'
+                        other = p if nm == m else m
+                        if any(page.get(y) == want
+                               for y in todo[nm] if y != other):
+                            defer = True
+                    if defer and not override:
+                        phase_block = True
+                        i += 1
+                        continue
                 # a layer change needs columns of its own: a swimmer
                 # crossing on the other layer from its last crossing
                 # waits gaps[d] columns after it (room for the via)
@@ -337,7 +379,7 @@ class Schedule:
                         if not todo[nm]:
                             on_b.discard(nm)     # landed
                 i += 2
-            if not col and gate_block and not gap_block:
+            if not col and (gate_block or phase_block) and not gap_block:
                 override = True                 # retry this column ungated
                 continue
             override = False

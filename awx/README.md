@@ -416,6 +416,40 @@ was measured inert for SDQ7 but is load-bearing here). At K28 that
 would put the corridor at ~12 swimmer vias + the escapes, against the
 human's 46 total.
 
+**The RIBBON lay** (`TWO_PAGE=1`, 2026-08-30 later still) is how the two
+pages actually get laid: the columns are DELETED. A transposition sort
+cannot reach the separated form at all — [all F][all B] needs
+non-inversion F×B pairs to cross twice, and each pair swaps exactly
+once — so under two pages `plan_columns` returns no columns and every
+lane runs STRAIGHT from its launch slot to its target slot: same-page
+linear morphs never cross (a page is an increasing subsequence), every
+inverted pair crosses exactly once, where the lines cross, and a
+crossing costs neither length nor via. A page lane is required on its
+page over the whole region, bounds pulled to cover its first/last
+geometric crossing (a B-page riser crossing a neighbour inside its
+birth stretch had that stretch on both layers and sealed the neighbour
+in — K11 SDQ13). Pages route first, in target order (a diagonal cannot
+dodge; PAGE_TUBE gives it local dodge room past a via on its line),
+then the swimmers, largest displacement first, weaving through the
+REAL lattice by A* in a SWIM_TUBE band — with the connect() window
+margin widened to hold the tube (at 0.6 the tube was clipped in half),
+and NO mid-corridor virtual for an unrouted swimmer (stamped on both
+layers along its line it walls every lane that must cross it). A
+refused lane is boosted to the front of its class next attempt.
+Measured (vias/open; control bit-identical throughout): K4 4/0, K11
+8/1, K15 22/1, K19 30/1, K21 38/0, **K28 46/5 — the human's 46, down
+from 75, with the columns wall gone outright (need 0.00)**. Every
+still-open lane is a SWIMMER (SDQ15; K28 adds SWE, SDQ0, SA4, SA6):
+with all-F escapes the F layer carries every F-page lane, escape and
+B-page birth/landing via — near-solid copper — so a swimmer riding B
+finds no both-layer diamond to hop at its run boundaries. Tried and
+measured worse, reverted with the numbers in comments: a worst-crosser
+B-page (K11 10/11→7/11), reserved hop vias (10/11→5/11 — the
+reservation walls the pages). Stage 3, escapes by page, is therefore
+the UNBLOCKER: a B-page net fanned to B at both ends removes exactly
+the F copper that seals the hops, and re-opens the worst-crosser
+(constant-layer SWE) paging.
+
 **Layers.** At the crossing of column *k* the mover is REQUIRED on B and the
 passed net on F over `0.4 W + 0.05` either side (not the whole column: a net
 passed at *k* and moving at *k+2* needs a cell between to put its via in);
