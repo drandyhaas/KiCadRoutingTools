@@ -34,10 +34,21 @@ and each graded by `board_score`.
 > naive divide puts it near 15 h. It is the recorded finding.
 >
 > An earlier revision of this box said 8.8 h over 87 rows, median 217 s, max
-> 2012 s on `tigard:perturb-wrong_side`. Those are the FOUR-board run's numbers,
-> carried forward unchanged when the table grew to six — the 87 shortest rows do
-> sum to 5.9 h, and `tigard:perturb-wrong_side` really is 2012.2 s, but neither
-> describes the study this document reports.
+> 2012 s on `tigard:perturb-wrong_side`. Those are the numbers of the rows file
+> this document used to carry, `tests/stress/predictor_rows.json`, dropped in
+> `acad9c0c` and still recoverable:
+>
+> ```bash
+> git show acad9c0c^:tests/stress/predictor_rows.json
+> ```
+>
+> 87 rows over **eight** `board_key`s — four swept at K≈20 (esp_prog 21,
+> tigard 21, splitflap_driver 20, watchy 20) plus four singletons (smartknob 2,
+> neo6502, piantor, urchin) — summing to 8.77 h over the **77** rows that carry
+> a `total_seconds`, with a median of 217 s when the 10 that do not are counted
+> as zero, and a max of 2012.2 s on `tigard:perturb-wrong_side`. Every figure
+> was correct for that file, and all four were carried forward unchanged when
+> the study was re-run at six boards x K=20.
 >
 > ```bash
 > # rebuild the rows (60 h serial; ~15 h at -j 4, and one row alone is 3.3 h)
@@ -105,13 +116,29 @@ pooled.
 
 ### Three things this says that the repo did not know
 
-**1. `pad_copper` -- the one pre-route number that already refuses -- is
-validated.** `loop_driver.py`'s L2 gate blocks the first route on
-`checklist.a_off_outline.pad_copper`, and it is the only pre-route quantity in
-this repo that refuses anything. It ranks `blocking` positively on 6 of 6
-boards: +0.481 esp_prog, +0.392 kit-dev-coldfire, +0.649 sonde_u, +0.568
-splitflap, +0.473 tigard, +0.622 watchy. The gate was right, and now it is
-measured rather than assumed.
+**1. The off-outline channel ranks `blocking` on 6 of 6 boards, and the number
+that REFUSES is a different census of it.** `pad_copper` ranks positively on
+every board: +0.481 esp_prog, +0.392 kit-dev-coldfire, +0.649 sonde_u, +0.568
+splitflap, +0.473 tigard, +0.622 watchy. Two sentences this document printed
+beside that finding were wrong, and #788 corrects them:
+
+- **The L2 gate does not read this key.** `loop_driver.py`'s refusal reads
+  `check_assembly.py`'s `oob_pad_count` — a part-level pad AABB against an
+  outline inflated by the grading clearance, so it moves when `--clearance`
+  moves — while `checklist.a_off_outline.pad_copper` is `render_placement.py`'s
+  per-PAD, margin-0 census, which reads no `--intent`. `legality.py`'s own
+  `oob_pad_basis` string has recorded the distinction all along. The skill
+  guidance had the same conflation and is corrected with it.
+- **It is not the only pre-route number here that refuses.** L2 also refuses on
+  `buildable`/`verdict`, on `locked_contacts`
+  and on `blocking` — and `blocking` belongs to the +0.785 family, because
+  `check_assembly`'s `blocking` counts pad-INTERSECTION pairs only, which is
+  this table's `pad_intersection_pairs`. So the strongest member of the family
+  was already gating before anyone measured it; what the +0.524 member adds is
+  a different failure, not a weaker version of the same one.
+
+How close the two censuses actually are, and what the answer depends on, is
+measured below.
 
 **2. `hpwl` -- which the drivers DO gate on -- barely relates to the routed
 outcome.** 4 boards right, 2 wrong, median **+0.059**, two-sided p = 0.69:
@@ -257,6 +284,154 @@ is frozen per board in `ARGV.json`, and each row carries its
   the shuffle control says the rule's real false-positive rate here is 1.5-5.5%.
   Ten predictors clearing that is evidence, not proof, and the six sharing a
   median of +0.785 are one quantity seen through six counters.
+
+## What #788 asked of these numbers
+
+#788 read the table above and asked why the family that ranks `blocking` best
+is advisory while the weakest passing member is the only one that refuses. Two
+measurements answer it. Both regenerate with
+
+```bash
+python3 -X utf8 tests/measure_788_censuses.py -j 8
+```
+
+and `tests/test_788_marginal_literals.py` is the clean-clone change detector
+for a declared subset of the same rows.
+
+### The two censuses agree, but not unconditionally — the floor decides
+
+The study measured its predictors on the PRE-ROUTE variant board;
+`check_assembly` runs on a placed board. Copper is inert to
+`grade_pad_legality`, which reads footprints, courtyards and the outline, so
+anything that moves between the two arms is the clearance floor and nothing
+else. That is measured, not assumed — `measure_788_censuses.py --inertness`
+grades both boards at a PINNED clearance and requires all five keys to agree:
+**60 variants across esp_prog, watchy and tigard, 0 disagreements**, including
+`perturb-pile` at 109 grazes / 112 courtyard pairs / 88 blocking pairs. (An
+earlier version of this claim rested on three esp_prog variants, two of which
+are all-zero on every key — a sample that cannot tell inertness from
+cleanliness.) And the floor does move, because the study's variant writer
+produced
+no sibling `.kicad_pro` (the #441 hazard, live in this dataset): the pre-route
+boards all grade at the `fixed default` 0.25, the routed boards at each board's
+own netclass, 0.1 to 0.2 mm.
+
+| study predictor vs `check_assembly` key | at each board's own floor | at the 0.25 fallback |
+|---|---|---|
+| `pad_copper` vs `oob_pad_count` | **119/119** sign, 118/119 exact | **112/120** sign, 104/120 exact |
+| `pad_clearance_pairs` vs `pad_conflicts` | 118/119 sign, 109/119 exact | 119/120 sign, 114/120 exact |
+| `hole_conflicts` vs `hole_conflicts` | 118/119 sign, 116/119 exact | 120/120 exact |
+| `courtyard_blocking_pairs` vs `courtyard_blocking` | 119/119 exact | 120/120 exact |
+| `pad_intersection_pairs` vs `blocking` | 119/119 sign, 113/119 exact | 120/120 sign, 113/120 exact |
+
+The off-outline row is the one that moves, and it moves in one direction:
+every one of the 8 sign disagreements is `check_assembly` reporting a breach
+the per-pad measure does not.
+
+**Those 8 rows are 2 distinct placements**, and the difference matters. Seven
+are watchy — `authored` plus six perturbations that did not move it, all
+sharing one `poses_sha256` — and the eighth is `sonde_u:portfolio-2`. The study
+drops such duplicates before computing anything (`9 DUPLICATE placement(s)
+dropped`); the table above counts rows, so it does not. On the 111 distinct
+placements the same measurement reads **108/110**, not 112/120. Neither number
+is wrong and they are not interchangeable, so both are stated.
+
+The watchy placement is worth naming because it is the human shipping board: at
+0.25 the gate's census says four parts carry off-board pad copper (SW1..SW4,
+0.1696 mm each) and the per-pad census says none. That is the
+AABB-vs-inflated-outline basis behaving exactly as `legality.py` documents it.
+
+**So "the two are the same quantity" is not safe as an unconditional claim.**
+The #703 validation of the off-outline channel transfers to the shipped gate at
+the floor a routed board carries, and degrades at a looser one. Neither arm is
+the deployment condition, because a real placed board does carry a project;
+what the study never pinned is the floor, and this table is the size of that
+gap rather than a reason to prefer one number.
+
+### Conditioned on the refusals that already run, the ungated half earns nothing
+
+The question #788 poses for any gate proposal — how many placements would it
+refuse, and how many of those routed worse than the ones it passed — answered
+on the same rows, at each board's own floor:
+
+```
+L2 as it ships (blocking > 0 or oob_pad_count > 0)   refuses 35 of 119
+    the 84 it passes routed to blocking   min 0 / median 1 / max 9
++ (pad_conflicts > 0 or hole_conflicts > 0)          refuses 37
+    the 2 it adds routed to blocking      0 and 2
+```
+
+23 of the 25 rows carrying a clearance graze and 7 of the 7 carrying a hole
+conflict are refused already. There is no tail to catch either: the worst row
+that gets past the four checks routed to 9.
+
+**Be precise about the two it would add, because the first draft of this
+section was not.** They routed to 0 and 2 against a passed distribution of
+`{0: 41, 1: 14, 2: 8, 3: 10, 6: 3, 7: 2, 8: 1, 9: 5}`. One is as good as
+anything the gate passes; the other is worse than 55 of the 84 rows it passes
+and better than 21. So they are not "both false refusals" — that is a claim
+this data does not make. What they are is *inside* the range the gate already
+accepts, and nowhere near what it exists for: every one of the 23 rows
+`blocking` refuses on its own routed to 12 or worse.
+
+**The channel is not weak.** `pad_conflicts` is one of five pair counts tied at
+the top of the table above (+0.785; only `pad_shortfall`, at +0.786, is
+higher). **It is REDUNDANT with what already refuses.** `hole_conflicts` is a
+weaker case again — +0.501 on four boards, and the study's second-worst
+shuffle-control rate — and it contributes no marginal refusal at all.
+
+The same measurement rules out `courtyard_blocking_pairs` as an absolute census
+far more sharply: it would add 21 rows whose routed `blocking` is
+`{0: x6, 1: x12, 2: x3}`, 18 of them at or below the median of the rows the
+gate passes. That is the reason `check_assembly` narrows it to the
+moved-vs-baseline subset.
+
+**Row counts, not board counts.** The study is six boards; 119 is its graded
+placements, of which 110 are distinct. On distinct placements the picture is
+the same where it matters — the same two marginal rows, routing to the same 0
+and 2 — while the passed median falls from 1 to 0 and courtyard's marginal 21
+becomes 15. On the 0.25 arm the absolute counts change again (L2 refuses 43,
+passed median 0) and the marginal result still does not. That invariance across
+all four arms is the finding; the absolute counts are not.
+
+### Two things this measurement says about the gate that already ships
+
+- **The two conjuncts are complementary, not a strong one and a weak one.**
+  `blocking > 0` alone refuses 23, and every one of those routed to `blocking`
+  12 or worse. `oob_pad_count > 0` alone refuses 24; 12 of those are refusals
+  the first conjunct does not make. The worst board in the study
+  (`tigard:perturb-pile`, routed `blocking` 13078) has `oob_pad_count` **0** and
+  `blocking` 2783 — the catastrophe is caught by the pad-intersection conjunct,
+  not the off-outline one, and each conjunct catches boards the other passes.
+- **The off-outline conjunct's own marginal refusals sit where a graze gate's
+  would.** Those 12 routed to `blocking`
+  `[0, 1, 1, 2, 3, 3, 3, 3, 3, 5, 5, 5]`, against a passed median of 1.
+  `check_assembly.py` predicted this in source — the count "moves with
+  `--clearance`, so a clearance-band graze reads as copper in the air". This is
+  an argument against adding a second marginal channel, **not** an argument for
+  removing this one: its rationale is a mechanism (a part whose pads lie off the
+  board carries nets no router can reach, and it produces no blocking pair
+  because there is nothing out there to collide with) and it ranks `blocking`
+  on 6 of 6 boards. Removing a gate is its own decision and would need its own
+  measurement.
+
+### What would reverse the answer
+
+Not "the corpus never exercises per-pair clearance" — it does.
+`pad_clearance_required`, the #697 disclosure of *conflicting* pairs whose
+requirement exceeds the board-wide floor (`legality.py` appends to it only
+inside `if pair_hit:`, so a raised requirement with adequate spacing never
+appears there), is non-empty on 11 of 119 rows at the routed floor and 4 of
+120 at 0.25, from two distinct causes: a 1.016 mm **pad override** on four
+esp_prog rows and an **NPTH hole** requirement at 0.2 on seven watchy / tigard
+/ splitflap rows. And the two marginal refusals a graze gate would add are
+themselves pad-override pairs, not netclass grazes — so the case #697 built
+`PadClearanceModel` for is represented, and the grazes it produced routed to
+`blocking` 0 and 2.
+
+What is NOT represented is a board where such a raised requirement is violated
+on a placement that the four shipped checks pass and that then routes badly.
+One of those, routed, re-opens this on evidence.
 
 ## Pre-registered decision rules
 
