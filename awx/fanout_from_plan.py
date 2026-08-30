@@ -101,6 +101,20 @@ SOURCE = '--source' in sys.argv
 # behind it each time (SA7/SA9, SA1/SA7) -- a braid defect to chase
 # before this becomes the default. Off, the chain is bit-identical.
 ORDER_MODEL = '--order-model' in sys.argv
+# --two-page: STEP 3 of the two-page design -- escapes BY PAGE. After
+# the plan, the braid's own orders give each net its page (schedule.
+# Schedule under TWO_PAGE), and every page net's escape is re-picked to
+# a menu move on its PAGE LAYER at both ends (same direction; the
+# fanout then applies the chosen KIND per net, dogbones and via-in-pads
+# first, like the source apply). A B-page net fanned to B at both ends
+# costs the corridor nothing and takes its birth/landing copper off F
+# -- the layer whose saturation refuses the ribbon's swimmers. Implies
+# --order-model; pair with SOURCE=1 and TWO_PAGE=1 in the chain so the
+# source is applied and the braid lays the ribbon.
+TWO_PAGE_PLAN = '--two-page' in sys.argv
+if TWO_PAGE_PLAN:
+    os.environ['TWO_PAGE'] = '1'
+    ORDER_MODEL = True
 base = next((a.split('=', 1)[1] for a in sys.argv
              if a.startswith('--board=')),
             os.path.join(HERE, 'fb_t2q_base.kicad_pcb'))
@@ -219,6 +233,98 @@ schoice, choice, lp, report = pe.plan_ends(
     tooth_layer0=tooth0, src_seed=src_seed,
     # the 'spend' objective only when the source moves will be APPLIED
     objective='spend' if SOURCE else 'floor', model=model)
+if TWO_PAGE_PLAN and choice:
+    # STEP 3: pages from the braid's own orders for THIS choice, then
+    # each page net's escape re-picked to its page layer (v1: pages
+    # computed once from the plan's pick; a re-pick moves the exit a
+    # little, so the permutation -- and with it the pages -- could
+    # shift, which iterating this block would chase; measure first)
+    from schedule import Schedule
+    import select_moves as sm_mod
+    grp = [n for n in names if n in choice]
+    tooth_now = dict(tooth0)
+    for n, m in schoice.items():
+        tooth_now[n] = m.layer
+    sched = Schedule(model.order(grp, choice),
+                     model.target_order(grp, choice), tooth_now,
+                     dest_layer={n: choice[n].layer for n in grp})
+    n_f = sum(1 for n in grp if sched.page.get(n) == 'F.Cu')
+    print(f'\ntwo-page plan: pages F {n_f} / B {len(sched.b_page)} / '
+          f'swimmers {len(sched.swimmers)}')
+    re_d = re_s = 0
+    for n in grp:
+        P = sched.page.get(n)
+        if not P:
+            continue
+        m0 = choice[n]
+        if m0.layer != P:
+            # lanes_free re-checked against the WHOLE choice: the
+            # re-pick happens after plan_ends, and an unchecked gap
+            # via landed in the street a kept surface move uses
+            # (K11 SDQ11's site under SDQ14's run, 6 DRC)
+            cand = [m for m in dmenu.get(n, ())
+                    if m.layer == P and m.direction == m0.direction
+                    and sm_mod.lanes_free(m, choice, n, strict=True)]
+            if cand:
+                # dogbone preferred over via_in_pad: the page moves
+                # are laid VERBATIM from their own geometry (see the
+                # apply below), and a dogbone's gap via is a standard
+                # barrel where a via-in-pad needs the pad clamp and
+                # the IPC-4761 burden
+                choice[n] = min(cand, key=lambda m: (
+                    m.kind != 'dogbone', m.vias,
+                    abs(m.exit_pt[0] - m0.exit_pt[0])
+                    + abs(m.exit_pt[1] - m0.exit_pt[1])))
+                re_d += 1
+        if SOURCE and n in smenu:
+            cur = schoice.get(n) or src_seed.get(n)
+            if cur is not None and cur.layer != P:
+                # checked against the UNMOVED seeds too: a re-pick that
+                # only saw the moved nets shared a gap with a stub the
+                # plan left alone
+                merged = {**src_seed, **schoice}
+                cand = [m for m in smenu[n]
+                        if m.layer == P and m.direction == cur.direction
+                        and sm_mod.lanes_free(m, merged, n, strict=True)]
+                if cand:
+                    schoice[n] = min(cand, key=lambda m: m.vias)
+                    re_s += 1
+    print(f'  re-picked to the page layer: {re_d} berth escape(s), '
+          f'{re_s} source escape(s)')
+    # DE-CONFLICT the final berth choice under the STRICT test. The
+    # moves are laid VERBATIM now: what select() tolerated (it only
+    # ever handed the fanout a direction; the engine re-assigned gaps)
+    # must hold as real geometry -- two same-layer runs in one gap,
+    # a via site in a foreign lane. The loser of a conflicting pair
+    # moves to a free move of the same layer and direction.
+    import itertools
+    n_fix = 0
+    for _r in range(4):
+        moved_any = False
+        for a_, b_ in itertools.combinations(
+                [n for n in names if n in choice], 2):
+            if not sm_mod._conflict(choice[a_], choice[b_], strict=True):
+                continue
+            done = False
+            for n2 in (b_, a_):
+                m0 = choice[n2]
+                cand = [m for m in dmenu.get(n2, ())
+                        if m.layer == m0.layer and m.direction == m0.direction
+                        and m is not m0
+                        and sm_mod.lanes_free(m, choice, n2, strict=True)]
+                if cand:
+                    choice[n2] = min(cand, key=lambda m: (
+                        m.vias, abs(m.exit_pt[0] - m0.exit_pt[0])
+                        + abs(m.exit_pt[1] - m0.exit_pt[1])))
+                    n_fix += 1
+                    moved_any = done = True
+                    break
+            if not done:
+                print(f'  UNRESOLVED lane conflict: {a_} vs {b_}')
+        if not moved_any:
+            break
+    if n_fix:
+        print(f'  de-conflicted the berth choice: {n_fix} move(s) shifted')
 # only the nets the plan actually MOVED are re-fanned: a move of the
 # same kind, side, layer and gap as the stub already on the board IS
 # that stub (the menu's exit x differs from the tooth's by the array
@@ -348,19 +454,41 @@ if SOURCE and schoice:
             continue
         pcb_k = parse_kicad_pcb(board)
         fp_k = pcb_k.footprints[sref]
-        hints_k = {pad_key(src_pad[nm]): schoice[nm].direction for nm in nets_k}
-        # the plan's exit LINE too: it checked that exact gap against
-        # the static copper (a foreign via in the next gap grazed the
-        # engine's own pick of gap -- K15 SDQ8 vs SDQS1N)
-        lines_k = {pad_key(src_pad[nm]): (schoice[nm].exit_pt[1]
-                                          if schoice[nm].direction in ('left', 'right')
-                                          else schoice[nm].exit_pt[0])
-                   for nm in nets_k}
-        tr, va, vr, fl = generate_bga_fanout(
-            fp_k, pcb_k, net_filter=nets_k, layers=['F.Cu', 'B.Cu'],
-            track_width=tw, clearance=0.1, via_size=vs, via_drill=vd,
-            exit_margin=0.5, escape_method=method, plane_drop='off',
-            escape_dir_hints=hints_k, escape_line_hints=lines_k)
+        if kind != 'surface' or TWO_PAGE_PLAN:
+            # DIRECT EMIT. The escape engines optimise for "escaped",
+            # not "delivered on layer L": measured at K11 the underpad
+            # passes escaped every ball ON F with 0 vias -- the
+            # planned B tooth never existed and the braid opened
+            # exactly those nets. A via/dogbone MOVE carries its own
+            # geometry (legs + via site), clear()-checked against the
+            # static copper and lanes_free-checked against the other
+            # moves, so it is laid verbatim.
+            tr, va, vr, fl = [], [], [], []
+            for nm in nets_k:
+                m = schoice[nm]
+                nid = byname[nm][0]
+                for (a_, b_, L_) in m.legs:
+                    tr.append({'start': a_, 'end': b_, 'width': tw,
+                               'layer': L_, 'net_id': nid})
+                if m.site is not None:
+                    va.append({'x': m.site[0], 'y': m.site[1], 'size': vs,
+                               'drill': vd, 'layers': ['F.Cu', 'B.Cu'],
+                               'net_id': nid})
+        else:
+            hints_k = {pad_key(src_pad[nm]): schoice[nm].direction
+                       for nm in nets_k}
+            # the plan's exit LINE too: it checked that exact gap against
+            # the static copper (a foreign via in the next gap grazed the
+            # engine's own pick of gap -- K15 SDQ8 vs SDQS1N)
+            lines_k = {pad_key(src_pad[nm]): (schoice[nm].exit_pt[1]
+                                              if schoice[nm].direction in ('left', 'right')
+                                              else schoice[nm].exit_pt[0])
+                       for nm in nets_k}
+            tr, va, vr, fl = generate_bga_fanout(
+                fp_k, pcb_k, net_filter=nets_k, layers=['F.Cu', 'B.Cu'],
+                track_width=tw, clearance=0.1, via_size=vs, via_drill=vd,
+                exit_margin=0.5, escape_method=method, plane_drop='off',
+                escape_dir_hints=hints_k, escape_line_hints=lines_k)
         nxt = f'{stem}_src_{kind}.kicad_pcb'
         if tr:
             add_tracks_and_vias_to_pcb(
@@ -382,27 +510,101 @@ fp = pcb.footprints[dref]
 print(f'\nfanning out {dref} ({len(fp.pads)} pads), method {METHOD}'
       + ('  WITHOUT hints (negative control)' if NO_HINTS else
          '  with the plan\'s directions'))
-tracks, vias_add, vias_rm, failed = generate_bga_fanout(
-    fp, pcb,
-    net_filter=names,
-    layers=['F.Cu', 'B.Cu'],
-    track_width=0.1, clearance=0.1,
-    via_size=0.45, via_drill=0.25,
-    exit_margin=0.5,
-    escape_method=METHOD,
-    plane_drop=('off' if NO_DROP else 'auto'),
-    escape_dir_hints=(None if NO_HINTS else hints),
-    escape_line_hints=(None if (NO_HINTS or NO_LINES) else lines),
-)
-
-net_names = {nid: n.name for nid, n in pcb.nets.items()}
-if tracks:
-    add_tracks_and_vias_to_pcb(board, out_path, tracks, vias_add, vias_rm,
-                               net_id_to_name=net_names)
-else:
+if TWO_PAGE_PLAN and not NO_HINTS:
+    # apply the plan's KIND per net, like the source apply: dogbones
+    # and via-in-pads first (short stubs against the pad), channel
+    # escapes last, routing round whatever copper is there
     import shutil
-    shutil.copy(board, out_path)
-copy_pro(board, out_path)
+    stem2 = os.path.splitext(out_path)[0]
+    kind_of = {nm: choice[nm].kind for nm in names if nm in choice}
+    passes = []
+    for kind, method in (('via_in_pad', 'underpad'), ('dogbone', 'dogbone'),
+                         ('surface', 'channel')):
+        nets_k = [nm for nm in names if kind_of.get(nm) == kind]
+        if nets_k:
+            passes.append((kind, method, nets_k))
+    rest_k = [nm for nm in names if nm not in kind_of]
+    if rest_k:
+        passes.append(('unplanned', METHOD, rest_k))
+    tracks, vias_add, vias_rm, failed = [], [], [], set()
+    cur = board
+    for i, (kind, method, nets_k) in enumerate(passes):
+        pcb_k = parse_kicad_pcb(cur)
+        fp_k = pcb_k.footprints[dref]
+        last = i == len(passes) - 1
+        if kind != 'unplanned':
+            # DIRECT EMIT -- see the source apply: the engines do not
+            # honour a target layer, the move's own geometry does. A
+            # via-in-pad barrel is clamped for the 0.8 mm ball
+            # (advanced fab tier); a gap-site dogbone keeps the
+            # standard via.
+            tr, va, vr, fl = [], [], [], []
+            for nm in nets_k:
+                m = choice[nm]
+                nid = byname[nm][0]
+                for (a_, b_, L_) in m.legs:
+                    tr.append({'start': a_, 'end': b_, 'width': 0.127,
+                               'layer': L_, 'net_id': nid})
+                if m.site is not None:
+                    in_pad = m.kind == 'via_in_pad'
+                    va.append({'x': m.site[0], 'y': m.site[1],
+                               'size': 0.35 if in_pad else 0.45,
+                               'drill': 0.2 if in_pad else 0.25,
+                               'layers': ['F.Cu', 'B.Cu'], 'net_id': nid})
+        else:
+            hints_k = {pad_key(dst_pad[nm]): choice[nm].direction
+                       for nm in nets_k if nm in choice}
+            lines_k = {pad_key(dst_pad[nm]): (choice[nm].exit_pt[1]
+                                              if choice[nm].direction in ('left', 'right')
+                                              else choice[nm].exit_pt[0])
+                       for nm in nets_k if nm in choice}
+            tr, va, vr, fl = generate_bga_fanout(
+                fp_k, pcb_k, net_filter=nets_k, layers=['F.Cu', 'B.Cu'],
+                track_width=0.1, clearance=0.1, via_size=0.45, via_drill=0.25,
+                exit_margin=0.5, escape_method=method,
+                plane_drop=(('off' if NO_DROP else 'auto') if last else 'off'),
+                escape_dir_hints=hints_k,
+                escape_line_hints=(None if NO_LINES else lines_k) or None)
+        nxt = f'{stem2}_dst_{kind}.kicad_pcb'
+        if tr:
+            add_tracks_and_vias_to_pcb(
+                cur, nxt, tr, va, vr,
+                net_id_to_name={ii: n.name for ii, n in pcb_k.nets.items()})
+        else:
+            shutil.copy(cur, nxt)
+        copy_pro(cur, nxt)
+        print(f'  {kind} -> {method}: {len(nets_k)} net(s), {len(tr)} tracks, '
+              f'{len(va)} vias, {len(fl)} failed'
+              + (f' ({", ".join(sorted(fl)[:6])})' if fl else ''))
+        tracks.extend(tr)
+        vias_add.extend(va)
+        vias_rm.extend(vr)
+        failed |= set(fl)
+        cur = nxt
+    shutil.copy(cur, out_path)
+    copy_pro(cur, out_path)
+else:
+    tracks, vias_add, vias_rm, failed = generate_bga_fanout(
+        fp, pcb,
+        net_filter=names,
+        layers=['F.Cu', 'B.Cu'],
+        track_width=0.1, clearance=0.1,
+        via_size=0.45, via_drill=0.25,
+        exit_margin=0.5,
+        escape_method=METHOD,
+        plane_drop=('off' if NO_DROP else 'auto'),
+        escape_dir_hints=(None if NO_HINTS else hints),
+        escape_line_hints=(None if (NO_HINTS or NO_LINES) else lines),
+    )
+
+    net_names = {nid: n.name for nid, n in pcb.nets.items()}
+    if tracks:
+        add_tracks_and_vias_to_pcb(board, out_path, tracks, vias_add, vias_rm,
+                                   net_id_to_name=net_names)
+    else:
+        import shutil
+        shutil.copy(board, out_path)
+    copy_pro(board, out_path)
 
 print(f'\nwrote {out_path}: {len(tracks)} tracks, {len(vias_add)} vias, '
       f'{len(failed)} failed nets')
