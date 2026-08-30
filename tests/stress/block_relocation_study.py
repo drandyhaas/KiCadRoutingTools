@@ -327,14 +327,27 @@ def run_cell(board, kind, out_dir, *, dose_mm=8.0, seed=1, rounds=2):
         routed[name].update({'max_move_mm': mx, 'parts_moved': mv})
 
     denom = bD - bC
-    for name in ('R', 'R0', 'L'):
+    # R and L repair the DAMAGED board, so they are normalised against its
+    # blocking. R0 repairs the CONTROL, and normalising it against `bD` would be
+    # arithmetic about a board it never touched -- measured on esp_prog/swap,
+    # that mistake reported R0 at a recovery of 1.0 (because C already routes
+    # clean) and turned a real +0.333 into a false -0.667. The undamaged arm's
+    # question is "how much does this solve change a board that was not damaged",
+    # normalised the same way so the two are subtractable.
+    for name in ('R', 'L'):
         b = routed.get(name, {}).get('blocking')
         routed[name]['route_recovery'] = (
             None if b is None or denom == 0 else round((bD - b) / denom, 4))
-    # THE evidence column: the repair minus what the same repair does to an
-    # UNDAMAGED board.
-    rr, r0 = routed['R'].get('route_recovery'), routed['R0'].get('route_recovery')
+    b0 = routed.get('R0', {}).get('blocking')
+    routed['R0']['route_effect_on_control'] = (
+        None if b0 is None or denom == 0 else round((bC - b0) / denom, 4))
+
+    # THE evidence column: what the repair did to the damaged board, MINUS what
+    # the same repair does to an undamaged one.
+    rr = routed['R'].get('route_recovery')
+    r0 = routed['R0'].get('route_effect_on_control')
     row['route_recovery'] = rr
+    row['route_effect_on_control'] = r0
     row['route_recovery_delta'] = (None if rr is None or r0 is None
                                    else round(rr - r0, 4))
     row['loop_route_recovery'] = routed['L'].get('route_recovery')
@@ -432,9 +445,20 @@ def self_test():
             dict(rows[0], board='d', route_recovery_delta=-1.0)]
     if 'NOT SUPPORTED' not in summarise(rows)['verdict']:
         fails.append('a cell that got WORSE did not block the claim')
+    # The undamaged arm repairs the CONTROL, so it must be normalised against
+    # the control's own blocking. Normalising it against the damaged board's
+    # reported R0 at a recovery of 1.0 on a board that already routed clean, and
+    # turned a real +0.333 into a false -0.667 (esp_prog/swap, measured).
+    src = open(os.path.abspath(__file__), encoding='utf-8').read()
+    body = src.split('    denom = bD - bC', 1)[1].split('\n    # Contract', 1)[0]
+    if 'route_effect_on_control' not in body:
+        fails.append('the undamaged arm no longer has its own normalisation')
+    if "for name in ('R', 'R0', 'L')" in body:
+        fails.append('R0 is being normalised against the DAMAGED board again: '
+                     'that is arithmetic about a board it never touched')
     for f in fails:
         print('SELF-TEST FAIL: ' + f)
-    print('self-test: %s (4 check groups)' % ('FAIL' if fails else 'ok'))
+    print("self-test: %s (5 check groups)" % ("FAIL" if fails else "ok"))
     return 1 if fails else 0
 
 
