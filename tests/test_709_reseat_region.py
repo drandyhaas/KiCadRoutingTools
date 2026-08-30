@@ -106,6 +106,59 @@ def t_a_region_names_the_same_parts_the_census_does():
     report('the census run itself is clean', r.returncode == 0)
 
 
+def t_the_mover_resolves_the_rectangle_THE_SAME_WAY():
+    """The property the whole design rests on, tested where it can fail.
+
+    A rectangle that contains no part on its boundary cannot tell a half-open
+    resolver from a closed one -- and that is exactly what a mutation replacing
+    `refs_in_rect` with an inline closed-interval scan exploited: it survived
+    the whole battery, because the fixture rectangle had nothing on its edge.
+
+    So this builds the rectangle FROM the board: its far corner is placed
+    exactly on a pad centre, so the two rules genuinely disagree, and then it
+    asserts the CLI's own printed answer against `refs_in_rect`.
+    """
+    with tempfile.TemporaryDirectory() as wd:
+        b, it = _fixture(wd)
+        pcb = parse_kicad_pcb(b)
+        # A pad to sit on the far edge, and one strictly inside, so the
+        # rectangle is neither empty nor everything.
+        pads = sorted(((p.global_x, p.global_y, p.component_ref)
+                       for fp in pcb.footprints.values() for p in fp.pads
+                       if p.component_ref),
+                      key=lambda t: (t[0], t[1]))
+        report('the fixture has pads to build an edge case from', len(pads) > 4,
+               str(len(pads)))
+        if len(pads) <= 4:
+            return
+        edge = pads[len(pads) // 2]
+        rect = (-1.0, -1.0, edge[0], edge[1])
+
+        half_open = refs_in_rect(pcb, rect)
+        closed = sorted({ref for x, y, ref in pads
+                         if rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]})
+        report('the probe rectangle really does separate the two rules',
+               half_open != closed,
+               'half-open %s vs closed %s' % (half_open, closed))
+        if half_open == closed:
+            return
+
+        out = os.path.join(wd, 'out.kicad_pcb')
+        r = check(_argv(b, out, '--intent', it, '--dry-run',
+                        '--reseat-region', repr(rect[0]), repr(rect[1]),
+                        repr(rect[2]), repr(rect[3])), accept=True)
+        line = next((ln for ln in r.stdout.splitlines()
+                     if ln.strip().startswith('region [')), '')
+        report('the CLI printed its region line', bool(line), r.stdout[-300:])
+        named = sorted(x.strip() for x in
+                       line.split('part(s)')[1].split(',')) if 'part(s)' in line \
+            else []
+        named = [x for x in named if x and x != '...']
+        report('the mover lifts the HALF-OPEN set, not the closed one',
+               named == half_open,
+               'CLI %s / half-open %s / closed %s' % (named, half_open, closed))
+
+
 def t_the_policy_stays_explicit():
     """Property 2: the acceptance basis must be the EXPLICIT one.
 
@@ -222,6 +275,8 @@ def t_the_union_with_named_refs():
 
 TESTS = [
     ('one rectangle, one answer', t_a_region_names_the_same_parts_the_census_does),
+    ('the mover resolves it the same way, ON the boundary',
+     t_the_mover_resolves_the_rectangle_THE_SAME_WAY),
     ('the policy stays explicit', t_the_policy_stays_explicit),
     ('an empty region is a result', t_an_empty_region_is_a_result_not_a_failure),
     ('a bare --reseat beside a region is refused',
