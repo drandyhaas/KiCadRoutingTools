@@ -202,6 +202,40 @@ def count_copper_layers_in_file(pcb_path):
         return 0
 
 
+def min_via_center_distance(via_diameter, clearance, via_drill,
+                            hole_to_hole=0.0):
+    """Minimum centre-to-centre distance between two via drills (#491).
+
+    Two INDEPENDENT rules bind and using only the first ships legal copper with
+    unmanufacturable holes:
+
+      copper: via_diameter + clearance
+      drill : drill/2 + drill/2 + hole_to_hole  ==  via_drill + hole_to_hole
+
+    On lvds_rx1_10 (0.3 via / 0.2 drill / 0.09 clearance, board
+    min_hole_to_hole 0.3) the copper rule asks 0.39mm and the drill rule 0.5mm,
+    so a pair placed to the copper rule sits 0.088mm inside the fab's drill
+    spacing. The router READ the board constraint correctly and then never
+    applied it to via placement.
+
+    Lifted here from ``diff_pair_routing._min_via_center_distance`` so a
+    stdlib-only, parser-free consumer can reach it. The placement escape ledger
+    needs exactly this arithmetic, and importing ``diff_pair_routing`` from
+    ``placement/escape.py`` costs a measured +0.243s and +126 modules --
+    including the Rust ``grid_router``, numpy, ``kicad_parser`` and
+    ``obstacle_map`` -- into a module whose own docstring says "numpy only; no
+    networkx in the placement stack" and which ``board_brief`` and
+    ``routability.health`` import on every run. From here it is +0 modules:
+    ``list_nets`` (which the ledger already imports) imports this module.
+
+    VALUES IN, not a config object: ``py_placer`` has no ``GridRouteConfig`` to
+    hand it, and a values-in signature is what lets both fronts share one rule
+    rather than one of them re-deriving it.
+    """
+    return max(float(via_diameter) + float(clearance),
+               float(via_drill) + float(hole_to_hole or 0.0))
+
+
 def enforce_fab_floors(copper_layer_count, tier=None, overrides=None, **params):
     """CLI guard: pin any routing parameter that is below the fab floor UP to the
     floor, warn, and keep running (issue #237). The fab physically can't make
