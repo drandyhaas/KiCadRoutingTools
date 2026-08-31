@@ -441,12 +441,19 @@ class RefillStatus(NamedTuple):
 
     @property
     def is_timeout(self) -> bool:
-        """The one arm that is a property of THIS MACHINE and this run.
+        """The one arm whose answer depends on how fast THIS MACHINE is.
 
-        A caller may legitimately treat every other reason as a stable fact
-        about the board or the install -- the same answer next run -- and must
-        NOT treat this one that way. It is the arm that makes an output depend
-        on CPU speed, which is the whole of #713.
+        It is the arm that makes an output depend on CPU speed, which is the
+        whole of #713, and a caller deciding between candidates must not treat
+        it as a fact about the board.
+
+        This says nothing about whether the OTHER reasons are stable: an
+        `error` (a full disk, a transient OSError) and a `memoised_failure`
+        (scoped to this process, by its own wording) are not "the same answer
+        next run" either. Only `no_kicad_python` is genuinely stable, and
+        `PlaneScoreStatus.uniform` is where that finer question is answered --
+        an earlier draft of this docstring claimed every non-timeout reason was
+        stable, which contradicted `uniform` in the same change.
         """
         return self.reason == 'timeout'
 
@@ -461,10 +468,33 @@ class RefillStatus(NamedTuple):
             'refill_failed': 'the KiCad refill failed',
             'timeout': 'the KiCad refill TIMED OUT',
             'error': 'the KiCad refill could not be attempted',
-        }.get(self.reason, self.reason)
+        }.get(self.reason)
+        if base is None:
+            # REFILL_REASONS is otherwise only a convention. Say so loudly
+            # rather than echoing the token, which reads like a real clause.
+            return f'unknown refill reason {self.reason!r}'
         if self.reason == 'timeout' and self.elapsed_s is not None:
             base += f' after {self.elapsed_s:.0f}s'
         return f'{base} ({self.detail})' if self.detail else base
+
+
+def _ok_status(out, elapsed_s=None, memo=False) -> RefillStatus:
+    """The success status, DERIVED from the islands rather than written at one
+    return site.
+
+    An EMPTY dict is a sixth outcome that several callers treat exactly like
+    None (they test truthiness, not `is None`): the refill ran and KiCad poured
+    nothing, which is a real answer about the board rather than an
+    unavailability. Deriving the detail here is what makes that survive the
+    MEMO -- an earlier draft wrote the clause only at the fresh-refill return,
+    so the second consumer of the same unchanged file got a bare 'memo hit' and
+    the distinction evaporated in exactly the many-consumers-one-file case the
+    memo exists for.
+    """
+    detail = '' if out else 'the refill ran and produced no islands'
+    if memo:
+        detail = f'{detail}; memo hit' if detail else 'memo hit'
+    return RefillStatus('ok', detail, elapsed_s)
 
 
 def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
@@ -486,8 +516,9 @@ def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
                       ) -> Tuple[Optional[Dict[Tuple[str, str],
                                                List[List[Tuple[float, float]]]]],
                                  RefillStatus]:
-    """{(net_name, layer): [island_polygon, ...]} from a KiCad refill of
-    `board_file`, or None when pcbnew is unavailable / the refill fails.
+    """({(net_name, layer): [island_polygon, ...]}, RefillStatus) from a KiCad
+    refill of `board_file`. The islands are None whenever `status.ok` is False,
+    and the status says WHICH of the six causes it was.
 
     The board is staged into a temp dir WITH its sibling .kicad_pro so the
     refill runs at the project's real netclasses (a bare board refills at
@@ -515,7 +546,8 @@ def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
         return None, RefillStatus('memoised_failure')
     if _mk is not None and _mk in _REFILL_MEMO:
         import copy as _copy
-        return _copy.deepcopy(_REFILL_MEMO[_mk]), RefillStatus('ok', 'memo hit')
+        return (_copy.deepcopy(_REFILL_MEMO[_mk]),
+                _ok_status(_REFILL_MEMO[_mk], memo=True))
     tmpdir = tempfile.mkdtemp(prefix='exact_fill_')
     _t0 = time.monotonic()
     try:
@@ -579,13 +611,7 @@ def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
             _REFILL_MEMO.pop(next(iter(_REFILL_MEMO)))
         import copy as _copy
         _REFILL_MEMO[_mk] = _copy.deepcopy(_out)
-    # An EMPTY dict is a sixth outcome that several callers treat exactly like
-    # None (they test truthiness, not `is None`), so it gets its own detail
-    # rather than reading as an ordinary success: the refill ran and KiCad
-    # poured nothing, which is a real answer about the board.
-    return _out, RefillStatus(
-        'ok', '' if _out else 'the refill ran and produced no islands',
-        time.monotonic() - _t0)
+    return _out, _ok_status(_out, time.monotonic() - _t0)
 
 
 def parse_filled_islands(text: str

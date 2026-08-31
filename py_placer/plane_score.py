@@ -83,19 +83,29 @@ class PlaneScoreStatus(NamedTuple):
         A `timeout` is NOT uniform: it can strike candidate 7 and spare
         candidate 1 on the same run. That asymmetry is what makes dropping
         the plane terms on a timeout a machine-speed decision rather than a
-        capability one, and it is #713 item 1. `refill_failed` and `error`
-        are per-board accidents and are treated as non-uniform for the same
-        reason.
+        capability one, and it is #713 item 1. `refill_failed`, `error` and
+        `empty_fill` are per-candidate accidents and are non-uniform for the
+        same reason -- `empty_fill` most clearly, since what KiCad manages to
+        pour is exactly what moving the parts changes.
         """
         return self.reason in ('no_bounds', 'no_named_net', 'no_kicad_python')
 
     def why(self) -> str:
-        return {
+        base = {
             'ok': 'the plane score was computed',
             'no_bounds': 'the board declares no outline bounds',
             'no_named_net': ('none of the --plane-score nets exists on this '
                              'board'),
-        }.get(self.reason, '') or _refill_why(self)
+            'empty_fill': ('the KiCad refill poured no copper for any '
+                           '--plane-score net'),
+        }.get(self.reason)
+        if base is None:
+            return _refill_why(self)
+        # `detail` is rendered for THIS module's own reasons too. The first
+        # draft dropped it here while forwarded refill reasons kept theirs, so
+        # `no_named_net` carefully built the list of nets it wanted and then
+        # threw it away -- the one fact the reader needs to fix the flag.
+        return f'{base} ({self.detail})' if self.detail else base
 
 
 def _refill_why(status: 'PlaneScoreStatus') -> str:
@@ -178,6 +188,15 @@ def plane_fragility_score_ex(
             # capability fact or a clock, and re-deriving it here would be a
             # second opinion that can drift from the first.
             return None, PlaneScoreStatus(_rst.reason, _rst.detail,
+                                          _rst.elapsed_s)
+        if not fills:
+            # The refill RAN and poured nothing. Scoring it would report
+            # `islands: 0` -- which is the OPTIMUM of a term that sorts before
+            # hpwl -- while `neck_sum` came from drawn zone outlines via
+            # compute_plane_fragility_cells' own fallback. This module's
+            # docstring says the score is "never guessed from drawn outlines",
+            # so an empty fill is no score at all rather than the best one.
+            return None, PlaneScoreStatus('empty_fill', _rst.detail,
                                           _rst.elapsed_s)
 
         wanted = {(net, layer) for net, layer in specs}

@@ -83,6 +83,29 @@ check("every reason has a why() that is not the bare token",
       all(RefillStatus(r).why() not in ('', r) for r in kef.REFILL_REASONS),
       str({r: RefillStatus(r).why() for r in kef.REFILL_REASONS}))
 
+print("\n--- the sixth outcome: a refill that RAN and poured nothing")
+# Asserted against the REAL status builder, not against a stub. The fragility
+# arm below stubs `refill_islands_ex` and so asserts on a string the test
+# itself wrote -- deleting the clause in kicad_exact_fill.py left that arm
+# green (found by mutation). This is the check that pins the source.
+check("an empty fill says so", 'produced no islands' in kef._ok_status({}).why(),
+      kef._ok_status({}).why())
+check("a non-empty fill does not", 'produced no islands'
+      not in kef._ok_status({('GND', 'B.Cu'): [[(0, 0)]]}).why())
+check("both report ok -- the refill DID run",
+      kef._ok_status({}).ok and kef._ok_status({'x': 1}).ok)
+# The memo is why this is derived rather than written at one return site.
+check("the clause SURVIVES a memo hit",
+      'produced no islands' in kef._ok_status({}, memo=True).why(),
+      kef._ok_status({}, memo=True).why())
+check("a memo hit is still disclosed as one",
+      'memo hit' in kef._ok_status({}, memo=True).why())
+
+print("\n--- an unknown reason is not passed off as a clause")
+check("why() refuses a token outside REFILL_REASONS",
+      'unknown refill reason' in RefillStatus('banana').why(),
+      RefillStatus('banana').why())
+
 print("\n--- arm: no_kicad_python")
 with _Reset():
     kef._KICAD_PYTHON_MEMO.append(None)
@@ -295,6 +318,49 @@ check("the fallback warning is reachable WITHOUT an exception",
 check("it is still reachable FROM an exception too",
       True in _calls, f"guarded-by-except flags: {_calls}")
 
+# An AST check that the warner is CALLED cannot see whether the empty-fill
+# case still reaches it, nor whether the warner says anything. Both survived a
+# mutation run. Call the real function and read the real guard.
+_warn = _find_func(_tree, '_warn_live_fill_fallback')
+check("_warn_live_fill_fallback actually prints",
+      _warn is not None and any(
+          isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+          and n.func.id == 'print' for n in ast.walk(_warn)),
+      "a warner that builds a string and drops it is not a warning")
+_guard = next((n for n in ast.walk(_lf)
+               if isinstance(n, ast.If)
+               and isinstance(n.test, ast.Name) and n.test.id == 'islands'),
+              None) if _lf else None
+check("the success guard is truthiness, so an EMPTY fill takes the warn path",
+      _guard is not None,
+      "`if islands is not None:` looks more precise and silently restores the "
+      "quiet {} fall-through this item is about")
+check("the warning does not call a non-fill 'failed'",
+      _warn is not None
+      and 'did not yield a fill' in ast.get_source_segment(
+          open(_kp, encoding='utf-8').read(), _warn),
+      "an empty fill is a refill that SUCCEEDED and poured nothing")
+
+print("\n--- the stitch validator treats an empty map as no verdict")
+# `_build_exact_stitch_validator` needs a staged board and eight arguments, so
+# pin the guard structurally, on the AST, the same way as the GUI provider.
+_rp = os.path.join(ROOT, 'py_router', 'route_planes.py')
+with open(_rp, encoding='utf-8') as _f:
+    _rp_tree = ast.parse(_f.read())
+_bev = _find_func(_rp_tree, '_build_exact_stitch_validator')
+check("_build_exact_stitch_validator still exists to be checked",
+      _bev is not None)
+_map_guards = [n for n in ast.walk(_bev)
+               if isinstance(n, ast.If)
+               and isinstance(n.test, ast.UnaryOp)
+               and isinstance(n.test.op, ast.Not)
+               and isinstance(n.test.operand, ast.Name)
+               and n.test.operand.id == 'islands_map'] if _bev else []
+check("an EMPTY island map returns 'unavailable', not a per-net empty verdict",
+      bool(_map_guards),
+      "`if islands_map is None` lets {} through, and the caller then reports "
+      "'0 of N owned layer(s)' -- blaming the board for an absent verdict")
+
 print("\n--- plane_score forwards the reason, and classifies it")
 import plane_score as psc  # noqa: E402
 
@@ -316,6 +382,25 @@ with _Reset():
 check("plane_fragility_score returns the score alone",
       not isinstance(psc.plane_fragility_score(BOARD, [('__nonexistent__',
                                                         'B.Cu')]), tuple))
+check("why() renders this module's OWN detail, not only forwarded ones",
+      'wanted GND:B.Cu' in psc.PlaneScoreStatus('no_named_net',
+                                                'wanted GND:B.Cu').why(),
+      psc.PlaneScoreStatus('no_named_net', 'wanted GND:B.Cu').why())
+with _Reset():
+    kef._KICAD_PYTHON_MEMO.append(sys.executable)
+    _real = kef.refill_islands_ex
+    kef.refill_islands_ex = lambda *a, **k: ({}, RefillStatus('ok', '', 1.0))
+    try:
+        _sc, _st = psc.plane_fragility_score_ex(BOARD, [('GND', 'B.Cu')])
+    finally:
+        kef.refill_islands_ex = _real
+    # islands=0 is the OPTIMUM of a term that sorts before hpwl, so scoring an
+    # empty fill would rank an unscoreable candidate FIRST.
+    check("an empty fill is no score at all, not the best possible one",
+          _sc is None and _st.reason == 'empty_fill',
+          f"score={_sc} reason={_st.reason}")
+    check("and it is not uniform -- what KiCad pours is what moving parts "
+          "changes", not _st.uniform)
 
 print(f"\n{passed}/{passed + failed} checks passed")
 sys.exit(1 if failed else 0)

@@ -74,8 +74,9 @@ ROWS = [
 
     ('plane_score restates the refill wording instead of forwarding it',
      'py_placer/plane_score.py',
-     "        }.get(self.reason, '') or _refill_why(self)",
-     "        }.get(self.reason, '') or 'the plane score was unavailable'",
+     "        if base is None:\n            return _refill_why(self)",
+     "        if base is None:\n            return 'the plane score was "
+     "unavailable'",
      'two wordings for one cause drift apart'),
 
     ('the GUI provider goes back to falling through silently',
@@ -89,6 +90,46 @@ ROWS = [
      "            elif not fills:",
      "            elif False:",
      'the sixth outcome must not read as an ordinary success'),
+
+    # The three rows below survived a first battery and were found by an
+    # independent adversarial pass, not by this file. They are the shapes an
+    # AST "is it called?" check and a stubbed-return arm cannot see, so they
+    # are kept permanently rather than fixed and forgotten.
+    ('the {} guard becomes `is not None`, which looks MORE precise',
+     'py_router/kicad_parser.py',
+     "            if islands:",
+     "            if islands is not None:",
+     'a correct-looking tightening silently restores the quiet fall-through'),
+
+    ('the warner is still called from both arms but prints nothing',
+     'py_router/kicad_parser.py',
+     '        print(f"WARNING: live-board staged refill did not yield a fill "',
+     '        _unused = (f"WARNING: live-board staged refill did not yield a fill "',
+     'an AST check that a warner is CALLED cannot see that it is silent'),
+
+    ('the empty-fill clause is deleted at its SOURCE',
+     'py_router/kicad_exact_fill.py',
+     "    detail = '' if out else 'the refill ran and produced no islands'",
+     "    detail = ''",
+     'an arm that stubs the return asserts on a string the test wrote'),
+
+    ('an empty fill is scored as the best possible rank again',
+     'py_placer/plane_score.py',
+     "        if not fills:",
+     "        if False:",
+     'islands=0 is the OPTIMUM of a term that sorts before hpwl'),
+
+    ('plane_score.why() drops its own detail again',
+     'py_placer/plane_score.py',
+     "        return f'{base} ({self.detail})' if self.detail else base",
+     "        return base",
+     'no_named_net builds the net list the reader needs, then discards it'),
+
+    ('an empty map passes the stitch validator again',
+     'py_router/route_planes.py',
+     "    if not islands_map:\n        return None",
+     "    if islands_map is None:\n        return None",
+     'an absent verdict must not be reported as a fact about the board'),
 ]
 
 

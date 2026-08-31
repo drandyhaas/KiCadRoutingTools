@@ -4895,8 +4895,12 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         working either way; the operator must know which fill truth they got.
 
         One function, two callers, because the two ways of arriving here used
-        to be one loud and one silent (#713 item 4)."""
-        print(f"WARNING: live-board staged refill failed "
+        to be one loud and one silent (#713 item 4).
+
+        "did not yield a fill" rather than "failed", because one of the ways
+        to arrive is a refill that SUCCEEDED and poured nothing -- which made
+        the first draft print "failed (the KiCad refill succeeded ...)"."""
+        print(f"WARNING: live-board staged refill did not yield a fill "
               f"({why}); falling back to the "
               f"in-process fill, which resolves clearances from the "
               f"project state at board LOAD time -- a netclass this run "
