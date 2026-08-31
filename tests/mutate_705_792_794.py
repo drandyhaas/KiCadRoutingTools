@@ -8,11 +8,13 @@ a `finally`; a refusal to start on a dirty engine, because restoring would write
 the committed text back over uncommitted work; and the `.pyc` defence, with a
 `--selftest` that PROVES it rather than asserting it.
 
-THE MEASURED TABLE LIVES IN THE HEADER OF `test_705_decap_pin_distance.py`,
-FROM THE RUN -- never predicted here and never edited afterwards to match.
+THE MEASURED TABLE LIVES IN THIS FILE'S OWN `RESULTS` BLOCK BELOW, from the
+run -- never predicted and never edited afterwards to match. (An earlier
+header pointed at `test_705_decap_pin_distance.py`'s docstring, where no such
+table has ever existed. Review caught it.)
 
-TWO ROWS ARE EXPECTED SURVIVORS, and both are findings rather than holes. Each
-carries its reason inline. A survivor recorded with a reason is a change
+FIVE ROWS ARE EXPECTED SURVIVORS, and each is a finding rather than a hole,
+with its reason inline. A survivor recorded with a reason is a change
 detector; a survivor quietly deleted is a hole.
 
 NOT named `test_*.py`, so `tests/run_all.py` never collects it: it rewrites
@@ -145,6 +147,26 @@ ROWS = [
      "    if net_id <= 0:\n",
      (T705, T792P), 'KILLED'),
 
+    ('the-pin-rules-exempt-filter-is-deleted', 'fp',
+     "            caps = [c for c in on_rail\n"
+     "                    if not any(fnmatch.fnmatch(c.reference, pat)\n"
+     "                               for pat in exempt)]\n",
+     "            caps = list(on_rail)\n",
+     (T705,), 'KILLED'),
+
+    # EXPECTED SURVIVOR, and an EQUIVALENT MUTANT on this corpus: measured,
+    # deleting the through-hole relaxation changes nothing on any of the 22
+    # boards (glasgow_revC alone: 1657 pin/cap pairs, ZERO saved by it),
+    # because no tracked board pairs an SMD IC with a through-hole cap on
+    # the far face. The branch is defended instead by a direct predicate
+    # assertion on a synthetic pair, since the semantics are real -- a THT
+    # part occupies BOTH faces -- even though the corpus cannot show them.
+    ('same_side-drops-the-through-hole-exemption', 'fp',
+     "                        if legality.footprint_side(c) == ic_side\n"
+     "                        or legality.footprint_has_through_pads(c)]\n",
+     "                        if legality.footprint_side(c) == ic_side]\n",
+     (T705,), 'SURVIVED'),
+
     ('the-gap-is-measured-to-the-caps-nearest-pad', 'fp',
      "        if q.net_id != net_id:\n",
      "        if False:\n",
@@ -195,14 +217,20 @@ ROWS = [
      "        for ref in []:\n",
      (T792S,), 'KILLED'),
 
-    # The seat still happens; only the note is suppressed. It SURVIVED the
-    # first run, because in the arm that names it the declined cap has a
-    # declared zone and the 2.6 put-back emits its own note -- the pass-2 note
-    # was masked by the fix that follows it. A no-zone arm now covers it.
+    # EXPECTED SURVIVOR, and the honest reason is coverage rather than
+    # design: measured by review, ZERO notes come from the `_seat`-failure
+    # path in ANY arm of `test_792_decap_seeding` -- in every fixture both
+    # pass-2 seats succeed, and the leftover cap is caught by the
+    # TRUNCATION note instead. Making `_try_place` genuinely refuse at a
+    # pin centroid needs a board packed tight enough that the fallback
+    # unconstrained placement also fails, which no fixture here builds.
+    # Recorded so the gap is visible rather than implied by a green run;
+    # its sibling `the-cap-no-cluster-wanted-is-silent-again` DOES kill,
+    # so the other half of the disclosure is covered.
     ('the-declined-cap-is-silent-again', 'sdr',
      "                if not _seat(ref, cx2, cy2, cluster[0][1], rail):\n",
      "                if _seat(ref, cx2, cy2, cluster[0][1], rail) and False:\n",
-     (T792S,), 'KILLED'),
+     (T792S,), 'SURVIVED'),
 
     # The SECOND silent path, found by writing the arm that kills the first:
     # `zip` truncates to the shorter list, so a cap past the cluster count is

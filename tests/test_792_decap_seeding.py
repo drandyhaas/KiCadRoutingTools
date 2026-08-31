@@ -256,20 +256,25 @@ def test_a_cap_the_pin_stage_DECLINES_is_put_back_and_named():
         # did not claim carries a note saying so.
         claimed = {n.split(':')[0] for n in _notes(res, 'decap for')}
         put_back = {n.split(':')[0] for n in _notes(res, 'zone-packed into')}
-        declined = {n.split(':')[0] for n in _notes(res, 'falls through')}
         scope = {'C1', 'C2', 'C5'}
+        assert len(claimed) == 2, (claimed, res['notes'])
+        # THE PUT-BACK, NAMED. Asserted as an EQUALITY against the caps
+        # the pin stage did not take, never as membership in a union of
+        # note kinds: the union version accepted the put-back being
+        # DELETED, because the pin stage's own truncation note supplied
+        # the coverage. A battery row that had been KILLED started
+        # surviving and this arm stayed green -- found in review, and it
+        # is why the two notes now have distinct wording.
+        assert put_back == scope - claimed, (put_back, claimed)
+        # ...and the cap really is INSIDE its declared zone, not merely
+        # mentioned. Without the put-back it lands near the board centre.
+        for ref in put_back:
+            x, y = poses[ref]
+            assert 2.0 - 0.5 <= x <= 14.0 + 0.5, (ref, poses[ref])
+            assert 30.0 - 0.5 <= y <= 38.0 + 0.5, (ref, poses[ref])
         for ref in sorted(scope):
             assert ref in poses, ref
-            assert ref in (claimed | put_back | declined), (
-                ref, res['notes'])
-        assert len(put_back | declined) == len(scope - claimed), (
-            claimed, put_back, declined)
-        # THE ARM'S POINT: the pin stage must actually have declined one.
-        # Three caps compete for U1's two VCC pins, so exactly one is left
-        # over -- and it must be NAMED rather than silently dropped to the
-        # centroid stage, which is the pass-2 loss path this fixes.
-        assert len(claimed) == 2, (claimed, res['notes'])
-        assert len(put_back | declined) == 1, (put_back, declined)
+        declined = set()
     print(f"  PASS: claimed {sorted(claimed)}, put back {sorted(put_back)}, "
           f"declined {sorted(declined)} -- every scope cap is accounted for by "
           f"a note, none unseated")
@@ -299,9 +304,13 @@ def test_a_declined_cap_with_NO_zone_is_still_named_by_the_pin_stage():
         zones = [{"name": "u", "refs": ["U1"], "zone": [24, 14, 36, 26]}]
         res, poses, _p = _seed(wd, {'max_distance_mm': 3.0}, zones)
         claimed = {n.split(':')[0] for n in _notes(res, 'decap for')}
-        declined = ({n.split(':')[0] for n in _notes(res, 'no legal pose at')}
-                    | {n.split(':')[0] for n in
-                       _notes(res, 'pin cluster left for it')})
+        # The two pin-stage notes are matched SEPARATELY. Unioning them
+        # is what let the put-back arm above accept its own deletion.
+        truncated = {n.split(':')[0] for n in
+                     _notes(res, 'pin cluster left for it')}
+        refused = {n.split(':')[0] for n in
+                   _notes(res, 'no legal pose at')}
+        declined = truncated | refused
         put_back = {n.split(':')[0] for n in _notes(res, 'zone-packed into')}
         scope = {'C1', 'C2', 'C5'}
         # Two pins, three caps: one is left over, and it has no zone to be put
@@ -311,7 +320,12 @@ def test_a_declined_cap_with_NO_zone_is_still_named_by_the_pin_stage():
                                         "should have been put back")
         left = scope - claimed
         assert len(left) == 1, left
-        assert left <= declined, (left, declined, res['notes'])
+        # Named by the TRUNCATION path specifically -- three caps, two
+        # clusters, `zip` reaches two. The `_seat`-refusal note is a
+        # different path and no fixture here reaches it (see the
+        # battery's recorded survivor).
+        assert left == truncated, (left, truncated, res['notes'])
+        assert not refused, refused
         # And it is still SEATED, by the generic stage, not lost.
         for ref in scope:
             assert ref in poses, ref

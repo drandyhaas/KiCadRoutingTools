@@ -28,6 +28,8 @@ import json
 import os
 import sys
 
+import run_utils  # noqa: E402
+
 RUN_ALL_FAST_OK = True
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -57,11 +59,107 @@ def _rows():
 
 
 def _armed(rows):
-    return [r for r in rows if r.get('armed') and 'error' not in r]
+    return [r for r in rows
+            if r.get('kind') != 'provenance'
+            and r.get('armed') and 'error' not in r]
+
+
+def _provenance(rows):
+    for r in rows:
+        if r.get('kind') == 'provenance':
+            return r
+    raise AssertionError(
+        f"{ROWS} carries no provenance row. Regenerate with "
+        f"`python3 tests/measure_792_seeding.py` -- a rows file that cannot "
+        f"say which tree produced it cannot be checked against one.")
+
+
+def test_the_rows_describe_THIS_tree_and_this_board_set():
+    """Review's sharpest finding about this file: EVERY arm passed with stage
+    2.5 deleted outright, because the arms read the committed rows and the rows
+    were generated before the deletion. A rows file that cannot be tied to a
+    tree is a constant wearing a measurement's clothes.
+
+    So the file records the head sha and a digest of the board set, and this
+    arm refuses one that does not match. A legitimately stale file fails here
+    with the regeneration command, rather than silently blessing whatever the
+    engine now does.
+    """
+    import hashlib
+    import subprocess
+    prov = _provenance(_rows())
+    paths = run_utils.corpus_boards()
+    assert paths, 'corpus_boards() returned nothing; cannot verify provenance'
+    digest = hashlib.sha256(
+        '\n'.join(sorted(os.path.basename(x) for x in paths))
+        .encode()).hexdigest()[:16]
+    assert prov['board_digest'] == digest, (
+        f"the rows were measured over a DIFFERENT board set "
+        f"({prov['boards']} boards, digest {prov['board_digest']}) than this "
+        f"tree has ({len(paths)}, {digest}). Re-run "
+        f"`python3 tests/measure_792_seeding.py`.")
+    head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
+                          capture_output=True, text=True).stdout.strip()
+    if head and prov.get('head') and head != prov['head']:
+        # NOT fatal: the rows legitimately outlive commits that cannot move
+        # them (docs, other tests). The LIVE arm below is what catches a rows
+        # file that no longer describes the engine.
+        print(f"  note: rows measured at {prov['head'][:12]}, tree is at "
+              f"{head[:12]} -- the live arm below is the real check")
+    print(f"  PASS: rows cover {prov['boards']} board(s), digest matches this "
+          f"tree's corpus")
+
+
+def test_one_board_is_RE_MEASURED_live_so_a_stale_file_cannot_pass():
+    """The arm that makes the others mean something.
+
+    Every other arm here reads the file. This one re-runs the smallest armed
+    board through the real `seed_from_intent` and requires the committed row to
+    match -- so deleting stage 2.5, or changing what it claims, fails HERE even
+    though the JSONL still says what it always said.
+
+    esp_prog is chosen for being cheap (20 footprints) and armed.
+    """
+    import random
+    for _d in ('py_placer', 'py_router', 'py_tools'):
+        _p = os.path.join(ROOT, _d)
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+    from kicad_parser import parse_kicad_pcb
+    from placement import floorplan as fp
+    from placement import seeder
+
+    rows = {r['board']: r for r in _armed(_rows())}
+    name = next((n for n in ('esp_prog', 'lvds_converter_dualclk', 'tigard')
+                 if n in rows), None)
+    if name is None:
+        print("  SKIP: none of the cheap boards is armed in the rows")
+        return
+    path = os.path.join(ROOT, 'kicad_files', name + '.kicad_pcb')
+    if not os.path.exists(path):
+        print(f"  SKIP: {name} absent")
+        return
+    doc = fp.emit_intent(parse_kicad_pcb(path), path, derive_decaps=True)
+    res = seeder.seed_from_intent(
+        parse_kicad_pcb(path), path, fp.intent_from_dict(doc, path),
+        random.Random(11), group_sources=('kicad', 'sheet'))
+    live = {p['reference']: [round(p['new_x'], 4), round(p['new_y'], 4),
+                             round(p['new_rotation'], 3)]
+            for p in res['placements']}
+    recorded = rows[name]['on']['poses']
+    moved = sorted(r for r in set(live) | set(recorded)
+                   if live.get(r) != recorded.get(r))
+    assert not moved, (
+        f"{name}: the live seed disagrees with the committed row on "
+        f"{len(moved)} part(s) ({moved[:6]}). Either the engine changed and "
+        f"the rows are stale -- re-run tests/measure_792_seeding.py -- or the "
+        f"rows describe a tree this one is not.")
+    print(f"  PASS: {name} re-seeded live and matches its committed row on "
+          f"{len(live)} part(s), so a stale JSONL cannot pass this file")
 
 
 def test_the_rows_cover_the_tracked_corpus_and_say_what_they_skipped():
-    rows = _rows()
+    rows = [r for r in _rows() if r.get('kind') != 'provenance']
     armed = _armed(rows)
     inert = [r['board'] for r in rows if not r.get('armed')]
     errs = [(r['board'], r['error']) for r in rows if 'error' in r]
@@ -195,6 +293,8 @@ def test_the_put_back_actually_fires_somewhere():
 
 
 TESTS = [
+    test_the_rows_describe_THIS_tree_and_this_board_set,
+    test_one_board_is_RE_MEASURED_live_so_a_stale_file_cannot_pass,
     test_the_rows_cover_the_tracked_corpus_and_say_what_they_skipped,
     test_the_control_arm_is_never_what_changed,
     test_the_SHIPPING_arm_leaves_no_part_unseated_that_the_control_seated,

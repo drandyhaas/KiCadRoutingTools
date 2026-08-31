@@ -579,6 +579,21 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         raise IntentError(
             f"decaps.same_side must be true or false, got "
             f"{type(decaps['same_side']).__name__}")
+    if 'search_radius_mm' in decaps:
+        # Retrofitted after all, because the review found it accepts a NEGATIVE
+        # radius: `{"max_distance_mm": 2.5, "search_radius_mm": -5.0}` loads,
+        # and every tether on glasgow_revC then reports as "beyond the -5.00mm
+        # tether search radius" -- 92 warnings whose text is nonsense. The
+        # neighbouring keys got real checks and this one did not, which is the
+        # kind of gap a reviewer finds and an author meets.
+        v = decaps['search_radius_mm']
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise IntentError(
+                f"decaps.search_radius_mm must be a number, got "
+                f"{type(v).__name__}")
+        if v <= 0:
+            raise IntentError(
+                f"decaps.search_radius_mm must be positive, got {v}")
 
     health = _obj(raw.get('health'), 'health')
     _reject_unknown(health, _HEALTH_KEYS, 'health')
@@ -2305,25 +2320,50 @@ def rule_decap_pin_distance(ctx) -> Iterator[Violation]:
         ic_side = legality.footprint_side(ic_fp) if ic_fp is not None else None
         uncovered_rails = {}
         for pad, net in rec['pins']:
-            caps = [c for c in by_net.get(pad.net_id, ())
-                    if c.reference != ref
-                    and not any(fnmatch.fnmatch(c.reference, pat)
-                                for pat in exempt)]
+            # THREE states, not two, and conflating them made the rule LIE.
+            # `on_rail` is the ground truth: every decoupling cap carrying this
+            # net. `caps` is what the author's constraints leave usable.
+            on_rail = [c for c in by_net.get(pad.net_id, ())
+                       if c.reference != ref]
+            caps = [c for c in on_rail
+                    if not any(fnmatch.fnmatch(c.reference, pat)
+                               for pat in exempt)]
             if same_side:
-                # A MANUFACTURING claim, never an electrical one, and never
-                # inferred: the author is asserting the back side is not
-                # available -- single-sided assembly, a can or heatsink over
-                # it, an enclosure wall. See the docs for what it costs.
+                # A MANUFACTURING claim, never an electrical one: the author is
+                # asserting the back side is not available -- single-sided
+                # assembly, a can or heatsink over it, an enclosure wall. See
+                # the docs for what it costs.
                 caps = [c for c in caps
                         if legality.footprint_side(c) == ic_side
                         or legality.footprint_has_through_pads(c)]
             if not caps:
-                # Not a placement failure -- a design fact (#705's own item 4).
-                # Reported once per (IC, rail), and only for a DECLARED pin: an
-                # inferred pin's rail is required to carry a cap already, so
-                # this cannot fire for one.
-                if not inferred:
-                    uncovered_rails.setdefault(net, pad.pad_number)
+                if not on_rail:
+                    # Genuinely uncovered: no decoupling cap on this net
+                    # anywhere. A design fact, not a placement failure (#705's
+                    # own item 4), reported once per (IC, rail). Unreachable
+                    # for an INFERRED pin, whose channel requires the net to
+                    # carry a cap already.
+                    if not inferred:
+                        uncovered_rails.setdefault(net, (pad.pad_number, 0, ()))
+                    continue
+                # The rail HAS caps and the author's own constraints removed
+                # every one. Silence here was a real defect, in two directions:
+                # it printed "has NO decoupling capacitor on it anywhere on the
+                # board" for a rail carrying two (glasgow /VCCPLL0 under
+                # `same_side`), and for an INFERRED pin it printed nothing at
+                # all -- so turning a STRICTER constraint on took ulx3s from 39
+                # findings to 4 while the evidence line did not move.
+                #
+                # The invariant that must hold is about COVERAGE, not counts:
+                # no (IC, rail) pair reported without the filter may go
+                # unreported with it. Raw counts legitimately fall, because a
+                # per-pin distance finding collapses into ONE per-rail
+                # exclusion -- ulx3s 39 findings over 14 rails becomes 15 over
+                # 15 rails. Asserting the count would have been asserting the
+                # granularity.
+                excluded = tuple(sorted(c.reference for c in on_rail))
+                uncovered_rails.setdefault(
+                    net, (pad.pad_number, len(on_rail), excluded))
                 continue
             gaps = [(g, c.reference) for g, c in
                     ((_pin_gap(pad, c, pad.net_id), c) for c in caps)
@@ -2363,17 +2403,34 @@ def rule_decap_pin_distance(ctx) -> Iterator[Violation]:
                                 **payload)
             else:
                 yield Violation(rule='decap_pin_distance', **payload)
-        for net, pad_no in sorted(uncovered_rails.items()):
+        for net, (pad_no, n_on_rail, excluded) in sorted(
+                uncovered_rails.items()):
+            # The MESSAGE distinguishes the two causes, because they call for
+            # opposite actions: add a cap, versus relax a constraint you set.
+            # `measured` carries the excluded refs so the finding is falsifiable
+            # from its own payload -- it was not, and that is how the false
+            # "anywhere on the board" survived.
+            if n_on_rail:
+                msg = (f"{ref} rail {net} (e.g. pin {pad_no}) carries "
+                       f"{n_on_rail} decoupling cap(s) "
+                       f"({', '.join(excluded)}), and this intent's own "
+                       f"constraints exclude every one of them")
+            else:
+                msg = (f"{ref} rail {net} (e.g. pin {pad_no}) has NO "
+                       f"decoupling capacitor on it anywhere on the board")
             yield Violation(
                 rule='decap_pin_uncovered', severity=sev_unc,
                 ref=ref, block=ctx.owner.get(ref),
-                message=(f"{ref} rail {net} (e.g. pin {pad_no}) has NO "
-                         f"decoupling capacitor on it anywhere on the board"),
+                message=msg,
                 measured={'net': net, 'pad': pad_no,
                           'channel': rec['channel'],
+                          'caps_on_rail': n_on_rail,
+                          'caps_usable': 0,
+                          'excluded': list(excluded),
                           'pins_on_rail': sum(
                               1 for _p, n in rec['pins'] if n == net)},
-                expected={'caps_on_rail': '>= 1'})
+                expected={'caps_on_rail': '>= 1'} if not n_on_rail
+                else {'caps_usable': '>= 1'})
 
 
 def rule_must_lock(ctx) -> Iterator[Violation]:
@@ -2829,9 +2886,15 @@ def decap_census(pcb_data, radius: float = None) -> Dict:
     # `--declare-decaps` stdout, in the withholding reason, and in
     # docs/floorplan-intent.md's censoring table, so all three understated
     # the thing the census exists to disclose.
-    # Counted INDEPENDENTLY of the election, straight off the predicate, so
-    # `unaccounted` is a real subtraction rather than a restatement. A
-    # cap the election silently dropped would show up here as a non-zero.
+    # Counted off the predicate rather than off the election's output --
+    # but NOT independently of it, and the first draft of this comment
+    # claimed otherwise. `_elect_tethers(movable=None)` walks the same
+    # footprint dict through the same `is_decoupling_cap` call, so
+    # `unaccounted` is 0 by CONSTRUCTION, not by measurement: it catches
+    # a future election that drops a cap for some new reason, and it
+    # cannot catch today's. Its battery row is recorded as an expected
+    # survivor for exactly that reason, paired with one that breaks the
+    # election so the tripwire has something to catch.
     scope = sum(1 for _r, _fp in (pcb_data.footprints or {}).items()
                 if groups_mod.is_decoupling_cap(_fp, _r))
     out = {

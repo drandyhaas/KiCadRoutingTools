@@ -84,10 +84,19 @@ def pad_half_extents(pad):
 
     `pad.size_x/size_y` are already resolved to board space for an orthogonal
     pad; `rect_rotation` is the residual tilt for one on a non-orthogonal angle
-    (in (-90, 90]), and ignoring it UNDER-sizes the pad. Three copies of this
-    algebra existed before #705 -- `fanout_clearance._Cap`, its via pass, and
-    `reachability._point_rect_dist`'s pad frame -- so it lives here now, beside
-    the gap function its callers pair it with.
+    (in (-90, 90]), and ignoring it UNDER-sizes the pad. THREE copies lived in
+    `fanout_clearance` alone -- `_Cap`'s pad list, its via pass, and its rect
+    builder -- so it lives here now, beside the gap function its callers pair
+    it with.
+
+    Two near neighbours are deliberately NOT folded in, and naming them is the
+    point of this paragraph: `reachability._point_rect_dist` rotates the query
+    POINT into the pad frame instead, which is an exact rotated-rect distance
+    rather than a bbox; and `py_router/check_drc._pad_half_extents` computes
+    the same numbers but lives across the package boundary and also handles
+    custom-pad polygons. A first draft of this docstring listed `reachability`
+    as one of the three and did not mention `check_drc` at all -- which is
+    exactly the map a later reader hunting duplicates would have trusted.
 
     The bbox OVER-states a tilted pad, so a gap computed from it UNDER-states
     the true clearance: the safe direction for a proximity rule, and the same

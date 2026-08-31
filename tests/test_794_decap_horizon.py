@@ -117,7 +117,12 @@ def test_it_is_a_WARNING_and_the_board_still_passes_on_it():
     """Loud without being fatal. The severity is the whole design: ten tracked
     boards newly emit this, and on kit-dev it is 12 findings against a limit
     the emitter itself derived and blessed."""
-    for name in _present(('splitflap_driver', 'watchy', 'tigard')):
+    names = _present(('splitflap_driver', 'watchy', 'tigard'))
+    # FLOORED. Without this the loop printed a hardcoded "3 board(s)"
+    # however many were actually present, so a corpus that lost two of
+    # them would have passed while saying otherwise. Review found it.
+    assert len(names) >= 2, names
+    for name in names:
         r, _doc, _pcb = _graded(name)
         hits = _hits(r)
         assert hits, name
@@ -125,8 +130,8 @@ def test_it_is_a_WARNING_and_the_board_still_passes_on_it():
         # None of them may be in `errors`, which is what the exit code reads.
         assert not [v for v in r.errors if v.rule == 'decap_ungraded'], name
         assert r.passed, (name, [v.message for v in r.errors[:2]])
-    print("  PASS: 3 board(s) carry decap_ungraded findings and still pass -- "
-          "warn is reported, not counted")
+    print(f"  PASS: {len(names)} board(s) carry decap_ungraded findings "
+          f"and still pass -- warn is reported, not counted")
 
 
 def test_the_severity_is_SETTABLE_and_promoting_it_fails_the_board():

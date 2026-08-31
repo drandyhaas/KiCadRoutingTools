@@ -68,6 +68,14 @@ _AUTO_NET = re.compile(r'^(net-\(|unconnected-\(|net\d)', re.I)
 # `py_router` sibling (see `decap_tethers`) -- a module-level import would need
 # `py_router` on `sys.path` before `placement` is imported, which several test
 # files do not arrange.
+#
+# It does EXTEND that requirement to `_from_netprefix`, which had no py_router
+# dependency before: with only `py_placer` on the path it now raises
+# ModuleNotFoundError where it used to work. Every in-tree caller is safe --
+# `kicad_parser` also lives in `py_router`, so holding a real `PCBData` already
+# implies it, and `swig_gui` inserts `py_router` first -- but the constraint is
+# now wider than the sentence above, and saying so is cheaper than a reader
+# rediscovering it.
 _PREFIX = re.compile(r'^([A-Za-z][A-Za-z0-9]+)[_\-]')
 NETPREFIX_MIN_REFS = 3
 # Max distance from the cluster centroid to any member. A prefix scattered wider
@@ -209,18 +217,49 @@ def _pads_are_collinear(fp, eps: float = 1e-6) -> bool:
     return len(xs) <= 1 or len(ys) <= 1
 
 
+def _copper_pads(fp) -> int:
+    """How many of a footprint's pads carry copper.
+
+    `chip_boundary.build_chip_list` gates on RAW pad count, and a KiCad 0201
+    footprint carries two solder-paste apertures beside its two copper pads --
+    so a two-terminal passive reaches four and is called a chip. The
+    collinearity guard does not save it: at a non-orthogonal angle its two
+    copper pads share neither an x nor a y, so the row test says "not a row".
+    Measured, exactly two parts corpus-wide reach the chip list this way, both
+    on rp2350: `C28` (Capacitor_SMD:C_0201_0603Metric at -45 degrees) and `R9`
+    (the resistor of the same body at the same angle). `orangecrab_ext_pll C1`
+    is the same four-pad shape and escapes only because it sits at 90 degrees,
+    where the x coordinates collapse and the row test catches it -- so the old
+    behaviour was rotation-dependent, which is not a property anyone chose.
+
+    Found by review, and it was not theoretical: the pin rule graded C28 as an
+    IC needing decoupling and reported `C28 pin 1 (/RP2354A/1V1) is 6.11mm from
+    C30`, i.e. a capacitor flagged for being far from another capacitor.
+    """
+    if fp is None or not fp.pads:
+        return 0
+    return sum(1 for p in fp.pads
+               if any(str(l).endswith('.Cu') for l in (p.layers or ())))
+
+
+def _chip_list(pcb_data):
+    """The ChipBoundary objects this module calls ICs. ONE answer, one place."""
+    from chip_boundary import build_chip_list
+    return [c for c in build_chip_list(pcb_data, min_pads=DECAP_MIN_IC_PADS)
+            if not _pads_are_collinear(pcb_data.footprints.get(c.reference))
+            and _copper_pads(pcb_data.footprints.get(c.reference))
+            >= DECAP_MIN_IC_PADS]
+
+
 def chip_refs(pcb_data) -> Set[str]:
-    """The refs this module calls an IC: >= 4 pads, and NOT a collinear row.
+    """The refs this module calls an IC: >= 4 COPPER pads, and not a row.
 
     Public since #792, because the seeder was answering the same question with
     `owner[0] == 'U'` -- a second answer to the problem `_pads_are_collinear`
     was written for, and the one without the measurement behind it. One
     question, one answer, and this is the one that carries its scar.
     """
-    from chip_boundary import build_chip_list
-    return {c.reference
-            for c in build_chip_list(pcb_data, min_pads=DECAP_MIN_IC_PADS)
-            if not _pads_are_collinear(pcb_data.footprints.get(c.reference))}
+    return {c.reference for c in _chip_list(pcb_data)}
 
 
 def is_decoupling_cap(fp, ref: str) -> bool:
@@ -265,9 +304,10 @@ def _elect_tethers(pcb_data, movable=None):
     different questions rather than two spellings of one (#792).
     """
     from net_queries import is_ground_net_name
-    from chip_boundary import build_chip_list
-    chips = [c for c in build_chip_list(pcb_data, min_pads=DECAP_MIN_IC_PADS)
-             if not _pads_are_collinear(pcb_data.footprints.get(c.reference))]
+    # THE SAME chip list `chip_refs` publishes, so the seeder's owner
+    # test and the grader's tether election cannot answer "what is an
+    # IC" differently -- which is the whole of #792.
+    chips = _chip_list(pcb_data)
     if movable is None:
         movable = set(pcb_data.footprints)
     ic_nets = {}
@@ -340,9 +380,13 @@ def decap_tethers(pcb_data, movable=None,
     PYTHONHASHSEED (#457).
 
     Since #794 this is a thin filter over `_elect_tethers`. **Signature and
-    result are unchanged, deliberately**: six callers depend on both, and one of
-    them (`_from_decap`) is what `--group-by decap` resolves through on BOTH the
-    CLI and the GUI, so a change here is a change to grouping on two front ends.
+    result are unchanged, deliberately**: THREE callers depend on both --
+    `_from_decap`, `reseat.clusters_from_tethers` and `board_brief` -- and
+    `_from_decap` is what `--group-by decap` resolves through on BOTH the CLI
+    and the GUI, so a change here is a change to grouping on two front ends.
+    (`rule_decap_distance` and `decap_census` used to be a fourth and fifth;
+    they now reach the election through `decap_populations`. An earlier draft
+    of this line said six, which was the count before that refactor.)
     """
     out: Dict[str, List[Tuple[str, float]]] = {}
     for cap, ic, d in _elect_tethers(pcb_data, movable):

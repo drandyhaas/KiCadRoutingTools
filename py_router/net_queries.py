@@ -980,8 +980,12 @@ def is_supply_pintype(pintype: str) -> bool:
 
     Token-split, and BOTH halves are load-bearing. KiCad writes compound
     pintypes, and every compound spelling in the tracked corpus is
-    `X+no_connect` -- 557 `passive+no_connect`, 63 `tri_state+no_connect`, 3
-    `power_in+no_connect`. So:
+    `X+no_connect` -- 383 pads in all: 275 `passive`, 51 `bidirectional`,
+    21 `tri_state`, 15 `input`, 14 `output`, 4 `open_collector` and 3
+    `power_in`. (An earlier draft said 557 and 63 for the first two: those
+    came from a wider board glob rather than `corpus_boards()`, and were
+    overstated in the direction that flatters the argument. Only the
+    load-bearing 3 was right.) So:
 
     * `pintype in ('power_in', 'power_out')` DROPS `power_in+no_connect`, which
       is the right answer for the wrong reason -- it would drop a
@@ -1011,7 +1015,14 @@ def is_supply_pinfunction(pinfunction: str, keywords=None) -> bool:
     fn = (pinfunction or '').upper()
     if not fn:
         return False
-    kws = POWER_PIN_KEYWORDS if keywords is None else tuple(keywords)
+    # UPPER-CASED on both sides. The pad's value is upper-cased above, so an
+    # author writing `"pin_functions": ["vcc"]` silently disabled channel 2
+    # entirely -- measured on lvds_converter_dualclk, `["VCC"]` gives 3 errors
+    # and `["vcc"]` gives 0, falling through to the rail-net channel. That is
+    # exactly the failure the empty-list refusal was added to prevent, arriving
+    # through a spelling instead of a length.
+    kws = (POWER_PIN_KEYWORDS if keywords is None
+           else tuple(str(k).upper() for k in keywords))
     return any(fn == kw or fn.startswith(kw) for kw in kws)
 
 

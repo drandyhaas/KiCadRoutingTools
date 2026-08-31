@@ -347,6 +347,149 @@ def test_same_side_is_OFF_by_default_and_costs_the_reference_board_everything():
           f"omitting the key grades identically to false")
 
 
+def test_exempt_waives_a_cap_for_the_PIN_rule_too():
+    """`decaps.exempt` filters the pin rule's cap superset, and nothing tested
+    it -- deleting the filter left every arm green.
+
+    It is the one supported way to make the tool MISS a cap, which is the only
+    way the governing invariant can be broken, so it has to be exercised: at a
+    tight limit, waiving the cap a finding names must change that finding's
+    `cap` to the next one on the rail (or turn it into `decap_pin_uncovered`),
+    never leave it untouched and never silence it.
+    """
+    if not os.path.exists(_board(LVDS)):
+        print(f"  SKIP: {LVDS} absent")
+        return
+    base, _p = _graded(LVDS, {'max_pin_distance_mm': 1.0})
+    hits = sorted(_of(base, 'decap_pin_distance'), key=lambda v: v.ref)
+    assert hits, "the tight limit found nothing, so there is nothing to waive"
+    victim = hits[0]
+    named = victim.measured['cap']
+    after, _p = _graded(LVDS, {'max_pin_distance_mm': 1.0,
+                               'exempt': [named]})
+    same = [v for v in _of(after, 'decap_pin_distance')
+            if v.ref == victim.ref]
+    unc = [v for v in _of(after, 'decap_pin_uncovered')
+           if v.ref == victim.ref]
+    assert same or unc, (victim.ref, "the pin was silenced entirely")
+    if same:
+        assert same[0].measured['cap'] != named, same[0].measured
+        assert same[0].measured['gap_mm'] > victim.measured['gap_mm'], (
+            'waiving the nearest cap must not lower the reported gap')
+    print(f"  PASS: waiving {named} moves {victim.ref}'s finding to "
+          f"{(same[0].measured['cap'] if same else 'uncovered')} rather than "
+          f"leaving it or silencing it")
+
+
+def test_a_through_hole_cap_survives_same_side_on_the_far_face():
+    """The `footprint_has_through_pads` relaxation inside `same_side`.
+
+    Measured, it is an EQUIVALENT MUTANT on the tracked corpus: deleting it
+    changes nothing on any of the 22 boards (glasgow_revC alone: 1657 pin/cap
+    pairs, ZERO saved by the clause), because no corpus board pairs an SMD IC
+    with a through-hole cap on the far face. Review found that, and a branch no
+    test can distinguish from its absence is a branch that should either be
+    asserted directly or withdrawn.
+
+    Asserted directly, at the predicate, on a synthetic pair -- because the
+    semantics are real (a THT part occupies BOTH faces, so `same_side` must not
+    exclude it) even though the corpus cannot show them.
+    """
+    pcb = parse_kicad_pcb(_board(LVDS)) if os.path.exists(_board(LVDS)) else None
+    if pcb is None:
+        print(f"  SKIP: {LVDS} absent")
+        return
+    cap = pcb.footprints['C2']
+    assert legality.footprint_side(cap) == 'F'
+    assert not legality.footprint_has_through_pads(cap), (
+        'the fixture cap is already through-hole; the arm proves nothing')
+    # Give it a drilled pad: it now occupies both faces, so a B-side IC must
+    # still be able to see it under `same_side`.
+    cap.pads[0].drill = 0.4
+    cap.pads[0].pad_type = 'thru_hole'
+    cap.pads[0].layers = ['*.Cu', '*.Mask']
+    assert legality.footprint_has_through_pads(cap), 'fixture mutation failed'
+    occupied = legality.sides_occupied('F', True)
+    assert set(occupied) == {'F', 'B'}, occupied
+    print("  PASS: a drilled cap reads as occupying both faces, which is what "
+          "the same_side relaxation rests on -- asserted here because no "
+          "corpus board can show it")
+
+
+def test_same_side_never_SILENCES_a_rail_and_never_lies_about_one():
+    """The correctness review found `same_side` inverting the rule, two ways.
+
+    (a) It filtered the cap set BEFORE the empty-set branch, so a rail carrying
+    caps that the filter removed reported "has NO decoupling capacitor on it
+    anywhere on the board" -- false, and unfalsifiable from its own payload.
+    glasgow_revC `/VCCPLL0` carries C76 and C78, both B.Cu, with U30 on F.Cu.
+
+    (b) For an INFERRED pin the empty-cap branch just `continue`d, so turning a
+    STRICTER constraint ON made the grade CLEANER: ulx3s went from 39 findings
+    to 4 with a byte-identical evidence line.
+
+    The invariant asserted here is COVERAGE, not counts: no (IC, rail) pair
+    reported without the filter may go unreported with it. Counts legitimately
+    fall, because a per-pin distance finding collapses into one per-rail
+    exclusion -- asserting the count would assert the granularity.
+    """
+    for name in ('ulx3s', 'glasgow_revC'):
+        if not os.path.exists(_board(name)):
+            continue
+        off, _p = _graded(name, {'max_pin_distance_mm': 3.0})
+        on, _p = _graded(name, {'max_pin_distance_mm': 3.0,
+                                'same_side': True})
+        rails_off = {(v.ref, v.measured.get('net')) for v in _pin(off)}
+        rails_on = {(v.ref, v.measured.get('net')) for v in _pin(on)}
+        lost = sorted(rails_off - rails_on)
+        assert not lost, (name, lost)
+        # (a): every "anywhere on the board" claim must be TRUE.
+        for v in _of(on, 'decap_pin_uncovered'):
+            if 'anywhere on the board' in v.message:
+                assert v.measured['caps_on_rail'] == 0, (name, v.message,
+                                                         v.measured)
+            else:
+                assert v.measured['caps_on_rail'] > 0, (name, v.measured)
+                assert v.measured['excluded'], (name, v.measured)
+        print(f"  ... {name}: rails {len(rails_off)} -> {len(rails_on)}, "
+              f"0 lost")
+    # ANTI-VACUITY: the exclusion branch must actually fire somewhere, or this
+    # arm is asserting over a filter that removed nothing.
+    g, _p = _graded('glasgow_revC', {'max_pin_distance_mm': 3.0,
+                                     'same_side': True})
+    excl = [v for v in _of(g, 'decap_pin_uncovered')
+            if v.measured['caps_on_rail'] > 0]
+    assert excl, "same_side excluded no cap anywhere; the arm proves nothing"
+    print(f"  PASS: no rail silenced on either board, and "
+          f"{len(excl)} glasgow rail(s) report exclusion with the caps NAMED "
+          f"instead of claiming none exist")
+
+
+def test_pin_functions_is_case_insensitive_on_the_authors_side():
+    """`{"pin_functions": ["vcc"]}` silently disabled channel 2 entirely.
+
+    The pad's value is upper-cased and the intent's keywords were not, so a
+    lower-case entry matched nothing and the ladder fell through to the
+    rail-net channel -- the exact failure the empty-list refusal exists to
+    prevent, arriving through a spelling instead of a length. Measured on
+    `lvds_converter_dualclk`: `["VCC"]` gave 3 errors, `["vcc"]` gave 0.
+    """
+    if not os.path.exists(_board(LVDS)):
+        print(f"  SKIP: {LVDS} absent")
+        return
+    counts = {}
+    for spell in ('VCC', 'vcc', 'Vcc'):
+        r, _p = _graded(LVDS, {'max_pin_distance_mm': 1.0,
+                               'pin_functions': [spell]})
+        counts[spell] = len(_of(r, 'decap_pin_distance'))
+    assert len(set(counts.values())) == 1, counts
+    # ANTI-VACUITY: all three must FIND something, or agreeing on zero is not
+    # agreement about the keyword at all.
+    assert counts['VCC'] > 0, counts
+    print(f"  PASS: VCC/vcc/Vcc all yield {counts['VCC']} finding(s) -- the "
+          f"author's spelling no longer decides whether channel 2 runs")
+
+
 def test_pin_functions_REPLACES_the_default_table():
     """The failure mode is a DEFAULT entry that is wrong for a board, and an
     add-only override cannot remove one. So a narrow list must SHRINK the pin
@@ -438,6 +581,10 @@ TESTS = [
     test_an_INFERRED_pin_carries_its_own_rule_name_at_warn,
     test_the_human_reference_board_passes_on_its_DECLARED_pins,
     test_same_side_is_OFF_by_default_and_costs_the_reference_board_everything,
+    test_exempt_waives_a_cap_for_the_PIN_rule_too,
+    test_a_through_hole_cap_survives_same_side_on_the_far_face,
+    test_same_side_never_SILENCES_a_rail_and_never_lies_about_one,
+    test_pin_functions_is_case_insensitive_on_the_authors_side,
     test_pin_functions_REPLACES_the_default_table,
     test_the_evidence_says_HOW_a_clean_pass_was_reached,
     test_the_corpus_reach_is_measured_and_the_arms_are_all_live,

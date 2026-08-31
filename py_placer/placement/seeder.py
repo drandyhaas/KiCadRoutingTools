@@ -1633,10 +1633,20 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
         # decouples'"). A ref prefix also refuses a real IC for its NAME:
         # measured, caps whose rail gains a pin source under the grouper's
         # answer -- watchy +8, kit-dev +5, lvds +4, orangecrab +3, ulx3s +2,
-        # glasgow +1, tigard +1, and ZERO losses on any board. The new sources
-        # are IC*, J*, VR*, SD* and a crystal: exactly the parts
+        # glasgow +1, tigard +1, and zero losses IN THAT METRIC. The new
+        # sources are IC*, J*, VR*, SD* and a crystal: exactly the parts
         # `decap_tethers` already tethers caps to, so this makes the seeder
         # AGREE with the grader.
+        #
+        # "Zero losses" is true of pin SOURCES and false of the outcome,
+        # and the first draft of this comment said the former while
+        # meaning the latter. Measured on the rows this PR commits, the
+        # widened arm STRANDS four parts across three boards that the
+        # control seats (orangecrab U4, rp2350 L1, tigard H1 and H3) and
+        # worsens `pin_gap_sum` on glasgow (346.63 -> 404.80) and rp2350
+        # (86.99 -> 91.30). Coverage is not seating. That is why the flag
+        # is OFF, and `test_792_seeding_claims.py` asserts the stranding
+        # so it cannot be flipped on without confronting it.
         #
         # Behind a flag until the A/B rows run, following `evict_depth`'s
         # precedent: it changes where parts go, and this file's own rule is
@@ -1749,10 +1759,18 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             for ref in caps_r[len(clusters):]:
                 if ref in avail:
                     net = getattr(pcb_data.nets.get(rail), 'name', rail)
+                    # WORDED so it does not contain "falls through". The first
+                    # draft ended with the same phrase the `_seat`-failure note
+                    # uses, and the arm that matched on that substring then
+                    # accepted EITHER note as coverage -- which silently
+                    # un-tested the 2.6 put-back: a battery row that had been
+                    # KILLED started SURVIVING, and the headline #792 fix
+                    # became deletable with every arm still green. Two paths,
+                    # two texts, so an arm can name exactly one.
                     notes.append(
                         f"{ref}: no {net} pin cluster left for it "
                         f"({len(clusters)} cluster(s), {len(caps_r)} cap(s)) "
-                        f"-- falls through to the zone/centroid stages")
+                        f"-- left to the zone/centroid stages")
             # pins beyond the cap supply, and caps no pin wanted, fall
             # through to the generic stage, which reports honestly
 

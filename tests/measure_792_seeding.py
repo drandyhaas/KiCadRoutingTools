@@ -45,9 +45,12 @@ for ..." notes would be the seeder grading itself, which is the circularity
 `test_placement_ab`'s own header warns about; the notes are recorded as
 evidence and never compared.
 """
+import hashlib
 import json
+import math
 import os
 import random
+import subprocess
 import sys
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -70,11 +73,28 @@ SEED = 11
 def _pin_gaps(pcb, poses):
     """Sum and max of every supply pin's gap to its nearest same-rail cap, at
     the SEEDED poses. Independent of the seeder: this is the grader's own
-    `supply_pins` + `_pin_gap`, over a board whose parts have been moved."""
+    `supply_pins` + `_pin_gap`, over a board whose parts have been moved.
+
+    ROTATION IS APPLIED, and the first draft did not apply it -- it translated
+    pads by (dx, dy) and dropped `new_rotation` on the floor. The seeder rotates
+    parts on 3 of the 11 armed boards, and on ulx3s the rotated parts ARE the
+    put-back caps being measured, so those arms' numbers came from cap pads in
+    the wrong place. Found by review; the rows are regenerated with this fix.
+    """
     for ref, (x, y, rot) in poses.items():
         fpp = pcb.footprints.get(ref)
         if fpp is None:
             continue
+        dr = math.radians(rot - fpp.rotation)
+        if dr:
+            c, s = math.cos(dr), math.sin(dr)
+            for pad in fpp.pads:
+                lx, ly = pad.global_x - fpp.x, pad.global_y - fpp.y
+                # KiCad's footprint angle runs clockwise on screen, which is
+                # the sign convention `legality.rotate_local_bounds` uses too.
+                pad.global_x = fpp.x + lx * c + ly * s
+                pad.global_y = fpp.y - lx * s + ly * c
+            fpp.rotation = rot
         dx, dy = x - fpp.x, y - fpp.y
         if dx or dy:
             for pad in fpp.pads:
@@ -137,7 +157,18 @@ def main(argv=None):
         paths = [p for p in paths
                  if os.path.basename(p).replace('.kicad_pcb', '') in want]
 
-    rows = []
+    # PROVENANCE. Without it a stale JSONL is undetectable: the claims
+    # test reads the file, not the tree, and review showed every one of
+    # its arms passing with stage 2.5 DELETED. The head sha and a digest
+    # of the board set let the reader refuse a file that describes a
+    # different tree.
+    head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
+                          capture_output=True, text=True).stdout.strip()
+    digest = hashlib.sha256(
+        '\n'.join(sorted(os.path.basename(x) for x in paths))
+        .encode()).hexdigest()[:16]
+    rows = [{'kind': 'provenance', 'head': head, 'boards': len(paths),
+             'board_digest': digest}]
     for path in paths:
         name = os.path.basename(path).replace('.kicad_pcb', '')
         pcb = parse_kicad_pcb(path)

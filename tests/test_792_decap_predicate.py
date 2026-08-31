@@ -312,6 +312,51 @@ def test_an_unconnected_net_is_refused_even_when_the_pad_says_power_in():
           f"graded, and their chips ARE candidates")
 
 
+def test_a_two_terminal_passive_is_not_an_IC_however_it_is_rotated():
+    """`chip_refs` counted PASTE apertures toward the four-pad gate.
+
+    A KiCad 0201 footprint carries two solder-paste apertures beside its two
+    copper pads, so it reaches four and `build_chip_list` calls it a chip. The
+    collinearity guard does not save it: at a non-orthogonal angle its two
+    copper pads share neither an x nor a y, so the row test says "not a row".
+    The old behaviour was therefore ROTATION-DEPENDENT -- `orangecrab C1` is
+    the same four-pad shape and escaped only because it sits at 90 degrees.
+
+    Found by review, and not theoretical: the pin rule graded `rp2350 C28`
+    (Capacitor_SMD:C_0201_0603Metric at -45) as an IC needing decoupling and
+    reported it 6.11mm from C30 -- a capacitor flagged for being far from
+    another capacitor.
+    """
+    board = os.path.join(ROOT, 'kicad_files',
+                         'rp2350_fpga_eensy_prePlane.kicad_pcb')
+    if not os.path.exists(board):
+        print("  SKIP: rp2350 absent")
+        return
+    pcb = parse_kicad_pcb(board)
+    chips = G.chip_refs(pcb)
+    for ref in ('C28', 'R9'):
+        assert ref in pcb.footprints, ref
+        f = pcb.footprints[ref]
+        # The trap must still be ARMED: four raw pads, two copper, tilted.
+        assert len(f.pads) >= 4, (ref, len(f.pads))
+        assert G._copper_pads(f) == 2, (ref, G._copper_pads(f))
+        assert round(f.rotation) % 90 != 0, (ref, f.rotation)
+        assert not G._pads_are_collinear(f), (
+            ref, 'the row test alone would have caught it, so this arm proves '
+                 'nothing about the copper-pad gate')
+        assert ref not in chips, ref
+    # And no capacitor anywhere in the corpus is called an IC.
+    bad = []
+    for path in run_utils.corpus_boards():
+        p2 = parse_kicad_pcb(path)
+        bad += [(os.path.basename(path), r) for r in G.chip_refs(p2)
+                if G._copper_pads(p2.footprints[r]) < 4]
+    assert not bad, bad[:5]
+    print("  PASS: rp2350 C28 and R9 are 4-pad/2-copper parts at -45 degrees, "
+          "not collinear, and not chips; no corpus part reaches the chip list "
+          "on paste apertures")
+
+
 TESTS = [
     test_the_three_decap_predicates_named_the_same_parts,
     test_no_tracked_board_has_a_lowercase_capacitor_reference,
@@ -321,6 +366,7 @@ TESTS = [
     test_the_lifted_power_pin_predicate_did_not_change_any_pad,
     test_a_compound_no_connect_pintype_is_refused_by_name,
     test_an_unconnected_net_is_refused_even_when_the_pad_says_power_in,
+    test_a_two_terminal_passive_is_not_an_IC_however_it_is_rotated,
 ]
 
 
