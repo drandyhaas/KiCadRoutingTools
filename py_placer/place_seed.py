@@ -566,8 +566,17 @@ Examples:
         # a part into a declared keep-out -- on a board this tool's own seeder
         # placed correctly, which then exits 4 against its own intent. Same
         # repair, same reason, one more rule name.
+        #
+        # #797 adds the third, and it only WORKS because of #797: before the
+        # seat predicate had an exclusive-zone conjunct, this re-seat was free
+        # to put the stranger straight back into the zone it was moved out of,
+        # so listing the rule here would have been a repair that cannot
+        # repair. The quench does gate `zone_exclusive` per move (#702), and
+        # monotonically, so it can hold a clean seed clean but never fixes a
+        # breach that reaches the written board by any other route -- which is
+        # what this net is for.
         if not args.no_polish:
-            _repairable = ('zone_containment', 'keepout')
+            _repairable = ('zone_containment', 'keepout', 'zone_exclusive')
             broke = sorted({v.ref for v in graded.errors
                             if v.rule in _repairable and v.ref})
             _rules = sorted({v.rule for v in graded.errors

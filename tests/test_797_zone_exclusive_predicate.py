@@ -36,6 +36,7 @@ simply never armed, and then the arm passes in both directions.
 No subprocess and no `run_utils`, so this stays in `run_all.py --fast`.
 """
 import inspect
+import io
 import os
 import sys
 import tempfile
@@ -564,6 +565,85 @@ def test_gate_and_grade_agree_over_a_pose_lattice(wd):
           f"case")
 
 
+# --------------------------------------------------------------------------
+# 9. the seat-search column, readable from the engine instead of re-typed
+# --------------------------------------------------------------------------
+
+_DOC = os.path.join(REPO, 'docs', 'floorplan-intent.md')
+
+
+def test_the_seat_enforced_tuple_matches_the_doc_column_and_an_arm(wd):
+    """#797 existed because `docs/floorplan-intent.md`'s "seat search" column
+    was PROSE. It said "no" against `zone_exclusive` and stayed true only for
+    as long as nobody changed the engine; when someone did, nothing would have
+    told them the column had gone stale.
+
+    So the column is pinned to `seeder.SEAT_ENFORCED_RULES`, BOTH ways -- a
+    rule the engine enforces and the table does not claim is as much a defect
+    as the reverse -- and every member is mapped to an arm that exercises it,
+    so the tuple cannot become a decorative constant.
+    """
+    want = {'zone_containment', 'zone_exclusive', 'keepout'}
+    assert set(seeder.SEAT_ENFORCED_RULES) == want, \
+        f"SEAT_ENFORCED_RULES is {seeder.SEAT_ENFORCED_RULES}, want {sorted(want)}"
+
+    #: rule -> where it is exercised. A rule with no entry is a rule this
+    #: file claims the search enforces and nothing here demonstrates.
+    covered = {
+        'zone_containment': 'seeder.zone_gate, via the anchor fixtures here '
+                            'and tests/test_702 arm N',
+        'zone_exclusive': 'every arm in this file, and arms X/Y/Z/S of '
+                          'tests/test_797_zone_exclusive_seating.py',
+        'keepout': 'tests/test_701_keepout_predicate.py and its seating '
+                   'battery',
+    }
+    assert set(covered) == set(seeder.SEAT_ENFORCED_RULES), \
+        (f"the coverage map and the tuple disagree: "
+         f"{sorted(set(covered) ^ set(seeder.SEAT_ENFORCED_RULES))}")
+
+    if not os.path.exists(_DOC):
+        print(f"  SKIP the doc half: {_DOC} not present")
+        return
+    text = io.open(_DOC, encoding='utf-8').read()
+    # The row for each rule in the "Which rules the SEARCH can see" table.
+    # Read positionally rather than by regex over the whole file: the same
+    # rule name appears in the rules table above it.
+    rows = {}
+    for line in text.splitlines():
+        s = line.strip()
+        if not s.startswith('| `'):
+            continue
+        cells = [c.strip() for c in s.strip('|').split('|')]
+        if len(cells) != 5:
+            continue                      # not the 5-column search table
+        rows[cells[0].strip('`')] = cells
+    # The column has THREE vocabularies, not two, and conflating them is how
+    # the first draft of this arm failed: a per-pose GATE ("**yes**", "via
+    # `zone_gate`"), a STAGE that merely consults the rule somewhere
+    # ("anchor tier" for edge_connector, "scope stage" for decap_distance),
+    # and an absence ("—"). `SEAT_ENFORCED_RULES` is about the first only.
+    def _claims_a_gate(cell):
+        s = cell.strip().strip('*').strip('`').strip().lower()
+        return s == 'yes' or s.startswith('via ')
+
+    for rule in sorted(want):
+        assert rule in rows, \
+            f"{rule} has no row in the 'Which rules the SEARCH can see' table"
+        assert _claims_a_gate(rows[rule][2]), (
+            f"the doc does not claim a per-pose seat gate for {rule!r} "
+            f"({rows[rule][2]!r}), but seeder.SEAT_ENFORCED_RULES lists it")
+    # ... and the other direction: a rule whose cell claims a GATE must be in
+    # the tuple, or the column is promising enforcement that does not exist.
+    for rule, cells in sorted(rows.items()):
+        if not _claims_a_gate(cells[2]):
+            continue
+        assert rule in want, (
+            f"the doc claims a per-pose seat gate for {rule!r} "
+            f"({cells[2]!r}), but seeder.SEAT_ENFORCED_RULES does not list it")
+    print(f"  PASS: {len(want)} seat-enforced rule(s), each with an arm and "
+          f"each matching its row in docs/floorplan-intent.md, both ways")
+
+
 TESTS = [
     test_the_channel_exists_and_carries_only_zone_exclusive_terms,
     test_a_stranger_is_refused_where_a_member_is_seated,
@@ -573,6 +653,7 @@ TESTS = [
     test_a_zone_with_no_rect_and_exclusive_false_arm_nothing,
     test_two_zones_give_two_named_terms_never_one_aggregate,
     test_gate_and_grade_agree_over_a_pose_lattice,
+    test_the_seat_enforced_tuple_matches_the_doc_column_and_an_arm,
 ]
 
 

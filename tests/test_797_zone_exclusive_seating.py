@@ -46,6 +46,38 @@ summary alone -- test_630_seeder_eviction.py records that its own first version
 passed while one part sat 100% inside another's courtyard, because it believed
 a count. The JSON is checked too, for what it claims.
 
+MEASURED MUTATION TABLE, from `python3 -X utf8 tests/mutate_797.py`. The edits
+are in that file; these are the verdicts, recorded FROM THE RUN and not
+predicted here:
+
+    24 rows: 21 killed, 3 survived, 0 broken, 0 disagreeing with expectation
+
+    the three survivors, recorded rather than deleted:
+      the-grade-threshold-is-ge-not-gt     `> EPS` and `>= EPS` differ on
+      the-gate-threshold-is-zero-not-EPS   exactly one input -- an overlap of
+                                           1e-6 mm2 -- and no board can produce
+                                           one. The only sub-EPS value real
+                                           geometry yields is exactly 0.0, a
+                                           zero-area touch, where every
+                                           threshold in [0, EPS] agrees. The
+                                           EPS arm in the predicate file pins
+                                           the direction arithmetically but
+                                           does not import either branch. The
+                                           `zero-area-touch` rows are the
+                                           killable form and DO guard it.
+      the-reseat-resolves-blocks-at-bare-empty-sources
+                                           no fixture here puts a `group:`-
+                                           shaped block on the re-seat path --
+                                           the synthetic boards have no KiCad
+                                           groups and no sheets, so 'auto' and
+                                           '()' resolve identically on them.
+                                           The guard is by construction.
+
+Two rows exist because the RUN corrected a prediction, not the engine:
+`the-gate-threshold-is-zero-not-EPS` was written expecting a kill and survived
+(see above), and `the-grade-threshold-is-ge-not-gt` was reported BROKEN rather
+than applied, because its one-line anchor matched twice in floorplan.py.
+
 NOT COVERED HERE, and why rather than silently: the courtyard-only measurement
 (a stranger whose LEADS cross a reserved zone is a pose the grade calls clean).
 An end-to-end version needs the zone's owner seated inside a lead-width rect,
@@ -503,12 +535,174 @@ def arm_S_side_filter_and_its_control(wd):
     check("S: and the board is pairwise legal", ok, why)
 
 
+# --------------------------------------------------------------------------
+# E -- the EDGE path, which bypasses pose_ok by design
+# --------------------------------------------------------------------------
+
+E_SIZE = (20.0, 14.0)
+E_RF = (7.0, 10.0, 13.0, 14.0)      # a reserved band across the south edge
+
+
+def _e_board(path):
+    board(path, [_part('J1', 10.0, 7.0, 2.0, 1.5, 2, pad_y=-1.0),
+                 _part('M1', 3.0, 12.5, 0.4, 0.4, 2)], size=E_SIZE)
+
+
+def _e_intent(exclusive):
+    return {"schema": 1, "kind": "floorplan-intent", "units": "mm",
+            "envelope": {"rect": [0.0, 0.0, E_SIZE[0], E_SIZE[1]],
+                         "tolerance_mm": 0.5},
+            "blocks": [{"name": "b", "refs": ["J1"]},
+                       dict({"name": "rf", "refs": ["M1"],
+                             "zone": list(E_RF), "tolerance_mm": 0.5},
+                            **({"exclusive": True} if exclusive else {}))],
+            "edge_connectors": [{"ref": "J1", "edge": "south",
+                                 "overhang_mm": {"min": 0.0, "max": 1.0}}]}
+
+
+def arm_E_edge_seat_and_its_control(wd):
+    """`_seat_edge` and stage 1 use `edge_seat_ok`, NOT `pose_ok` -- an edge
+    connector overhangs by design, so full containment is the wrong predicate
+    and that path deliberately bypasses the one #797's conjunct sits in.
+
+    A change that guarded only `pose_ok` leaves this red, and nothing else in
+    either #797 file catches it. That is the whole reason this arm exists, and
+    it is the same argument `tests/test_701_keepout_seating.py`'s own edge arm
+    makes for keep-outs.
+
+    The control is the identical board with the flag off, showing J1 landing
+    INSIDE the rect the exclusive zone will cover -- without it, "J1 is out of
+    the rect" is satisfied by a board where it was never going there.
+    """
+    print("--- E: the edge path bypasses pose_ok, so it needs its own conjunct")
+    r0, s0, out0 = _run_e(wd, False, 'Ectrl')
+    check("E-control: the edge connector is seated with the flag off",
+          bool(s0) and s0.get('unseated') == 0,
+          f"rc={r0.returncode} unseated={s0 and s0.get('unseated')}")
+    if not (s0 and s0.get('unseated') == 0):
+        return
+    ov0 = overlap(out0, 'J1', E_RF)
+    check("E-control: and it lands INSIDE the rect the zone will reserve, so "
+          "arm E's assertion is not vacuous",
+          ov0 > 0.0, f"overlap {ov0}mm2 at {poses(out0)['J1']}")
+
+    r1, s1, out1 = _run_e(wd, True, 'E')
+    check("E: with the zone reserved the edge seat is refused there",
+          bool(s1), f"rc={r1.returncode}")
+    if not s1:
+        return
+    ov1 = overlap(out1, 'J1', E_RF)
+    check("E: J1's courtyard is clear of the reserved band",
+          ov1 == 0.0, f"overlap {ov1}mm2 at {poses(out1)['J1']}")
+    check("E: and the written board grades clean on zone_exclusive",
+          not graded_exclusive_errors(out1, _e_intent(True)),
+          f"{[(v.ref, v.block) for v in graded_exclusive_errors(out1, _e_intent(True))]}")
+
+
+def _run_e(wd, exclusive, tag):
+    return run(wd, _e_board, _e_intent(exclusive), tag=tag)
+
+
+# --------------------------------------------------------------------------
+# P -- the post-polish repair, which is what `_repairable` is for
+# --------------------------------------------------------------------------
+
+#: Fault injection for arm P-a, the rig `tests/test_701_keepout_seating.py`
+#: uses for the same reason. The quench on a fixture this small happens to
+#: leave the part alone, so a plain end-to-end run never reaches the repair and
+#: would pass with `zone_exclusive` deleted from `_repairable` -- a test that
+#: passes in both directions. This forces the polish to return the one move
+#: that walks R1 back into the reserved zone, which is what a MONOTONE gate
+#: cannot prevent for a part that is already clean only because the seeder put
+#: it there.
+_INJECT = '''
+import placement.quench as _q
+_real = _q.quench
+
+
+def _walk_it_in(*a, **kw):
+    _real(*a, **kw)
+    return [{'reference': 'R1', 'new_x': 9.0, 'new_y': 6.0,
+             'new_rotation': 0.0}]
+
+
+_q.quench = _walk_it_in
+'''
+
+
+def arm_P_polish_repair(wd):
+    """`place_seed`'s polish runs a quench, and #702 gates it per move -- but
+    MONOTONICALLY, so it holds a clean seed clean and never REPAIRS a breach
+    that reaches the written board by another route. `_repairable` is the net
+    under that, and #797 adds `zone_exclusive` to it.
+
+    P-a injects exactly that fault and requires the repair to undo it. P-b is
+    the ordinary polished run, which the `--no-polish` arms above cannot see
+    because they never run the quench at all.
+    """
+    print("--- P: the post-polish repair, and the ordinary polished run")
+    it = intent([blk('rf', ['X1'], X_RF, exclusive=True),
+                 blk('s', ['R1'], X_S)])
+
+    # ---- P-a: the polish IS forced to break it --------------------------
+    inj = os.path.join(wd, 'inj797')
+    os.makedirs(inj, exist_ok=True)
+    with open(os.path.join(inj, 'sitecustomize.py'), 'w',
+              encoding='utf-8') as f:
+        f.write(_INJECT)
+    import json as _json
+    bpath = os.path.join(wd, 'Pa-in.kicad_pcb')
+    ipath = os.path.join(wd, 'Pa-fp.json')
+    out_a = os.path.join(wd, 'Pa-out.kicad_pcb')
+    _x_board(bpath)
+    with open(ipath, 'w', encoding='utf-8') as f:
+        _json.dump(it, f)
+    env = dict(os.environ, PYTHONHASHSEED='0', PYTHONIOENCODING='utf-8',
+               PYTHONPATH=inj + os.pathsep
+               + os.pathsep.join(os.path.join(REPO, d) for d in
+                                 ('py_placer', 'py_router', 'py_tools')))
+    r = subprocess.run(
+        [sys.executable, '-X', 'utf8',
+         os.path.join('py_placer', 'place_seed.py'), bpath, out_a,
+         '--intent', ipath, '--clearance', '0.2',
+         '--board-edge-clearance', '0.5', '--force'],
+        capture_output=True, text=True, encoding='utf-8', errors='replace',
+        cwd=REPO, timeout=900, env=env)
+    injected = 'polish walked' in r.stdout
+    check("P-a: the injected polish really did break the board, so this arm "
+          "is not vacuous", injected, f"repair line present: {injected}")
+    if injected:
+        check("P-a: the repair names `zone_exclusive` as what it repaired -- "
+              "this is the assertion that reverting `_repairable` turns red",
+              'zone_exclusive' in r.stdout,
+              f"names zone_exclusive: {'zone_exclusive' in r.stdout}")
+        ov = overlap(out_a, 'R1', X_RF)
+        check("P-a: and R1 is back out of the reserved zone on the WRITTEN "
+              "board", ov == 0.0,
+              f"overlap {ov}mm2 at {poses(out_a)['R1'][:2]}")
+        check("P-a: place_seed exits 0 after repairing itself",
+              r.returncode == 0, f"rc={r.returncode}")
+
+    # ---- P-b: the ordinary polished run ---------------------------------
+    r2, s2, out2 = run(wd, _x_board, it, tag='Pb', polish=True)
+    check("P-b: the polished run exits 0 with no grade errors",
+          r2.returncode == 0 and s2 and s2.get('grade_errors') == 0,
+          f"rc={r2.returncode} grade_errors={s2 and s2.get('grade_errors')}")
+    if not s2:
+        return
+    ov2 = overlap(out2, 'R1', X_RF)
+    check("P-b: and R1 is still clear of the reserved zone after the quench",
+          ov2 == 0.0, f"overlap {ov2}mm2 at {poses(out2)['R1'][:2]}")
+
+
 def main():
     with tempfile.TemporaryDirectory() as wd:
         arm_X_displaced_and_its_control(wd)
         arm_Y_stranded_and_its_controls(wd)
         arm_Z_jointly_blocked(wd)
         arm_S_side_filter_and_its_control(wd)
+        arm_E_edge_seat_and_its_control(wd)
+        arm_P_polish_repair(wd)
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
 

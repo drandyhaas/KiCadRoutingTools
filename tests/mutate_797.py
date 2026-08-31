@@ -224,6 +224,28 @@ ROWS = [
      "                f\"add {ref} to an `allow` list\")",
      (T797S,), 'KILLED'),
 
+    # ---- the paths that bypass pose_ok, and the net under the polish ----
+    ('the-edge-seat-has-no-exclusive-conjunct', 's',
+     "    _zblockers = state.exclusive_blockers(part.ref, (r, tht))\n"
+     "    if _zblockers:\n"
+     "        if reasons is not None:\n"
+     "            reasons.extend(f\"exclusive zone of block {n!r}\" "
+     "for n in _zblockers)\n"
+     "        return False\n",
+     "",
+     (T797S,), 'KILLED'),
+
+    ('the-repair-list-drops-zone_exclusive', 'ps',
+     "            _repairable = ('zone_containment', 'keepout', "
+     "'zone_exclusive')",
+     "            _repairable = ('zone_containment', 'keepout')",
+     (T797S,), 'KILLED'),
+
+    ('the-seat-enforced-tuple-drops-the-rule', 's',
+     "SEAT_ENFORCED_RULES = ('zone_containment', 'zone_exclusive', 'keepout')",
+     "SEAT_ENFORCED_RULES = ('zone_containment', 'keepout')",
+     (T797P,), 'KILLED'),
+
     # ---- rows kept as EXPECTED SURVIVORS, with the reason ---------------
     #
     # Recorded rather than deleted, per this file's own header: an inert row

@@ -550,6 +550,31 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
             state.exclusive_for[ref] = saved_z
 
 
+#: The declared-intent rules the SEAT SEARCH enforces, as `quench.py` states
+#: its own `INTENT_ENFORCED_RULES` for the per-move gate (#797).
+#:
+#: This exists because `docs/floorplan-intent.md` carries a "Which rules the
+#: SEARCH can see" table whose seat-search column was RE-TYPED prose, and it
+#: sat reading "no" against `zone_exclusive` for as long as it took someone to
+#: notice -- which is this issue. A tuple the tests can read makes that column
+#: derivable from the engine instead of remembered about it.
+#:
+#: Each rule reaches the search by a DIFFERENT mechanism, and the differences
+#: are the reason the other six are absent rather than an oversight:
+#:   zone_containment  the per-call `constraint` of `zone_gate`, anchor-aware
+#:                     and per-part -- never a state-wide gate, because a
+#:                     monotone one would make a repair refuse its own target
+#:                     (pose_score.make_state, and test_698 arm H)
+#:   zone_exclusive    `QuenchState.exclusive_clear`, ABSOLUTE, over the
+#:                     zone_exclusive slice of the same `build_zone_spec` the
+#:                     quench gate reads
+#:   keepout           `QuenchState.keepout_clear`, ABSOLUTE, over
+#:                     `floorplan.keepout_hit`
+#: The remaining rules are graded and not gated, each for a stated reason --
+#: see that document's table, whose "if not, why not" column is the record.
+SEAT_ENFORCED_RULES = ('zone_containment', 'zone_exclusive', 'keepout')
+
+
 #: The verdicts a part with no legal pose can be given (#699). Two of them
 #: used to be the SAME ledger entry -- an empty `no_pose_blockers[ref]` --
 #: and they have opposite answers for the reader: NO_MOVABLE_NEIGHBOUR says
@@ -1188,6 +1213,23 @@ def edge_seat_ok(state, part, x: float, y: float, edge: str,
     if _blockers:
         if reasons is not None:
             reasons.extend(f"keep-out {n!r}" for n in _blockers)
+        return False
+    # A FOURTH conjunct, since #797, and here for the same reason the keep-out
+    # one is: this predicate deliberately bypasses `pose_ok`, so a rule added
+    # there is absent here unless it is added here too. An edge connector's
+    # body may leave the OUTLINE; it may not enter a region some other block
+    # reserved, and neither the band nor the pad test can see that.
+    #
+    # THE TRADE THIS MAKES, stated as #701 stated its own: a stranger edge
+    # connector whose entire declared band lies inside a reserved zone will
+    # slide along the edge, exhaust, and fall through to the ordinary stages
+    # -- trading a `zone_exclusive` error for an `edge_connector` one. That is
+    # a worse-looking grade about a better board, and it is reported BY NAME
+    # through `reasons` rather than as a silent missing pose.
+    _zblockers = state.exclusive_blockers(part.ref, (r, tht))
+    if _zblockers:
+        if reasons is not None:
+            reasons.extend(f"exclusive zone of block {n!r}" for n in _zblockers)
         return False
     gate = state.edge_gate
     for px, py, _sz in part.pad_globals(x, y, part.rot):
