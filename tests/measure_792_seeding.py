@@ -11,19 +11,32 @@ WHY THIS AND NOT A `test_placement_ab.py` ROW. That harness's `_run` calls
 `_intent_for` emits without `derive_decaps`, so every existing row's intent
 carries `decaps: {}` and no decap rule can arm. Hosting a seed row there means a
 new arm kind inside a gate seven pinned rows depend on -- a change to the gate
-made in the same PR whose evidence the gate would be producing. So the pairing,
-the >=3 distinct boards and the directional reading are reproduced HERE, over
-the metric the change is actually about, and the harness is left alone. That is
-stated in the PR body rather than left for a reviewer to notice.
+made in the same PR whose evidence the gate would be producing. So the >= 3
+distinct boards and the recorded-rather-than-argued discipline are reproduced
+HERE, and the harness is left alone. That is stated in the PR body rather than
+left for a reviewer to notice.
+
+WHAT THESE ROWS DO AND DO NOT MEASURE. The `off` arm carries NO `decaps` key,
+so stage 2.5 does not run in it at all. `off` vs `on` therefore measures what
+DECLARING `decaps.max_distance_mm` costs -- a property of #704's feature -- and
+NOT what #792 changed. That distinction was got wrong in the first draft of the
+claims test, which gated on "pin geometry does not get worse" and read a 32%
+rp2350 regression as a defect in this change; rp2350 has ZERO orphans, so the
+narrowing cannot touch it, and the whole delta is the pin stage claiming 15 caps
+that nothing claimed before.
+
+The base-vs-head comparison -- the one that measures #792 itself -- is a
+separate paired run over both worktrees, quoted in the PR body: every CONTROL
+arm byte-identical, no part newly unseated, ulx3s 181 parts moved with 19
+put-backs. It is not committed here because it needs two trees.
 
 THREE ARMS per board, all from the same rng seed:
 
-  off    no `decaps` key            -- the control. Must be byte-identical
-                                       between base and head, or the change is
-                                       not scoped to armed intents.
-  on     `decaps` as emitted        -- the narrowing + the put-back
+  off    no `decaps` key            -- the stage never runs
+  on     `decaps` as emitted        -- the stage runs, with the narrowing and
+                                      the put-back
   chips  `+ decap_owner_chips=True` -- also the grouper's answer to "what is an
-                                       IC", which is flagged OFF pending this
+                                      IC", which is flagged OFF pending this
 
 WHAT IS MEASURED, and why it is not the seeder's own notes. `pin_gap_sum` and
 `pin_gap_max` come from `floorplan.supply_pins` + `_pin_gap` on the SEEDED

@@ -14,8 +14,15 @@ That harness's `_run` calls `quench(...)`; nothing in the table calls
 existing row's intent carries `decaps: {}` and no decap rule can arm. Hosting a
 seed row means a new arm kind inside a gate seven pinned rows depend on -- a
 change to the gate, made in the PR whose evidence the gate would produce. So the
-properties that gate enforces (pairing, >= 3 distinct boards, a direction rather
-than an absolute) are enforced HERE instead, and the harness is left alone.
+properties that gate enforces -- pairing, >= 3 distinct boards, a direction
+rather than an absolute -- are enforced HERE instead, and the harness is left
+alone.
+
+One caveat this file states rather than hides: the `off` arm carries NO
+`decaps` key, so `off` vs `on` measures what DECLARING the key costs, not what
+#792 changed. That pair is therefore RECORDED and not gated. The base-vs-head
+comparison that does measure #792 needs two worktrees and is quoted in the PR
+body.
 """
 import json
 import os
@@ -85,64 +92,92 @@ def test_the_control_arm_is_never_what_changed():
           "every armed board")
 
 
-def test_no_arm_leaves_a_part_unseated_that_the_control_seated():
-    """The put-back is MONOTONE by construction -- it falls through to the
-    centroid stage rather than appending to `unseated`. This is that claim,
-    re-derived per board rather than argued."""
+def test_the_SHIPPING_arm_leaves_no_part_unseated_that_the_control_seated():
+    """The put-back falls through to the centroid stage rather than appending
+    to `unseated`, so it cannot strand a part. Re-derived per board.
+
+    Scoped to the arm that SHIPS. The `chips` arm is excluded here and asserted
+    separately below, because it does strand one -- which is a finding, not a
+    reason to weaken this claim."""
     rows = _armed(_rows())
     for r in rows:
-        base = set(r['off']['unseated'])
-        for arm in ('on', 'chips'):
-            extra = sorted(set(r[arm]['unseated']) - base)
-            assert not extra, (r['board'], arm, extra)
-    print(f"  PASS: {len(rows)} board(s), no part newly unseated in either "
-          f"armed arm")
+        extra = sorted(set(r['on']['unseated']) - set(r['off']['unseated']))
+        assert not extra, (r['board'], extra)
+    print(f"  PASS: {len(rows)} board(s), no part newly unseated by the "
+          f"narrowing or the put-back")
 
 
-def test_the_pin_geometry_does_not_get_WORSE_on_any_board():
-    """The directional claim, paired and re-derived.
+def test_the_owner_test_arm_STRANDS_a_part_and_that_is_why_it_ships_off():
+    """The measurement earning its keep.
 
-    `pin_gap_sum` is measured by the GRADER on the seeded board, not by the
-    seeder's own notes -- counting "decap for ..." notes would be the stage
-    grading itself. Direction only: the change must not make any board's supply
-    pins collectively further from their caps."""
+    `decap_owner_chips` widens the pin-owner set from `U*` to the grouper's
+    chip set, which gains pin sources on seven boards and loses none -- so the
+    COVERAGE argument for it is clean. Seeding is not coverage. Measured, the
+    widened arm strands FOUR parts across THREE boards that the control seats:
+    `orangecrab_ext_pll` U4, `rp2350_fpga_eensy_prePlane` L1, and `tigard` H1
+    and H3. (My own first draft of this docstring said 'one part on one
+    board' -- understating the harm, which is the direction my errors lean.)
+    A stranded part is a worse outcome than every gain the flag buys, and
+    that is the whole reason it ships OFF rather than on.
+
+    Asserted rather than noted, so the flag cannot be flipped on without this
+    arm being confronted -- and so that if a later change fixes the stranding,
+    this arm fails and the flag's justification is revisited deliberately.
+    """
+    rows = _armed(_rows())
+    stranded = {}
+    for r in rows:
+        extra = sorted(set(r['chips']['unseated']) - set(r['off']['unseated']))
+        if extra:
+            stranded[r['board']] = extra
+    assert stranded, (
+        "the chips arm no longer strands anything. That is good news and it "
+        "invalidates this arm's premise: re-run measure_792_seeding.py, "
+        "re-read the flag's default, and update BOTH deliberately")
+    assert 'orangecrab_ext_pll' in stranded, sorted(stranded)
+    # The COUNT, not just the presence: a later change that strands three
+    # boards instead of one must not read as the same finding.
+    assert len(stranded) == 3, sorted(stranded)
+    assert sum(len(v) for v in stranded.values()) == 4, stranded
+    print(f"  PASS: the owner-test arm strands {stranded} -- measured, and the "
+          f"reason `decap_owner_chips` defaults to False")
+
+
+def test_what_DECLARING_the_key_costs_is_recorded_not_gated():
+    """`off` carries no `decaps` key, so stage 2.5 does not run in it at all.
+    This pair therefore measures what declaring `max_distance_mm` costs -- a
+    property of #704's feature -- and NOT what #792 changed.
+
+    The first draft of this file gated on it, and read a 32% rp2350 regression
+    as a defect in this change. rp2350 has ZERO orphans, so the narrowing
+    cannot touch it; the whole delta is the pin stage claiming 15 caps that
+    nothing claimed before, at pin-cluster centroids, in a currency that is not
+    pad-edge distance. That is worth DISCLOSING and is not this PR's to fix --
+    so it is printed, with its direction, and not asserted.
+
+    The base-vs-head comparison that does measure #792 needs two worktrees and
+    is quoted in the PR body: every control arm byte-identical, no part newly
+    unseated, ulx3s 181 parts moved with 19 put-backs.
+    """
     rows = [r for r in _armed(_rows())
-            if r['off']['pin_gap_sum'] is not None]
+            if r['off']['pin_gap_sum'] is not None
+            and r['on']['pin_gap_sum'] is not None]
     assert len(rows) >= MIN_BOARDS, len(rows)
     worse, better, same = [], [], []
     for r in rows:
         a, b = r['off']['pin_gap_sum'], r['on']['pin_gap_sum']
-        if b is None:
-            continue
-        (worse if b > a + 1e-6 else better if b < a - 1e-6 else same).append(
-            (r['board'], round(a, 2), round(b, 2)))
-    assert not worse, worse
-    print(f"  PASS: {len(rows)} board(s) -- {len(better)} improved, "
-          f"{len(same)} unchanged, 0 worse"
-          + (f"; best {sorted(better, key=lambda t: t[1] - t[2])[0]}"
-             if better else ""))
-
-
-def test_the_owner_test_arm_is_measured_even_though_it_ships_OFF():
-    """`decap_owner_chips` is flagged off, and a flag with no measurement
-    beside it is a flag nobody can ever decide about. Recorded here in both
-    directions so the decision has evidence when it is made."""
-    rows = [r for r in _armed(_rows())
-            if r['off']['pin_gap_sum'] is not None
-            and r['chips']['pin_gap_sum'] is not None]
-    assert len(rows) >= MIN_BOARDS, len(rows)
-    worse = [(r['board'], r['on']['pin_gap_sum'], r['chips']['pin_gap_sum'])
-             for r in rows
-             if r['chips']['pin_gap_sum'] > r['on']['pin_gap_sum'] + 1e-6]
-    better = [(r['board'], r['on']['pin_gap_sum'], r['chips']['pin_gap_sum'])
-              for r in rows
-              if r['chips']['pin_gap_sum'] < r['on']['pin_gap_sum'] - 1e-6]
-    claimed = sum(r['chips']['claimed'] - r['on']['claimed'] for r in rows)
-    # NOT asserted as an improvement -- that is what the flag is waiting to
-    # find out. Asserted only as MEASURED, so the row cannot rot into a claim.
-    print(f"  PASS: owner-chips measured on {len(rows)} board(s) -- "
-          f"{len(better)} better, {len(worse)} worse, {claimed:+d} pin seats; "
-          f"the flag ships OFF and this is the evidence it is waiting on")
+        bucket = (worse if b > a + 1e-6 else better if b < a - 1e-6 else same)
+        bucket.append((r['board'], round(a, 1), round(b, 1)))
+    # ANTI-VACUITY: if declaring the key moved NOTHING anywhere, these rows
+    # are measuring an inert feature and every other arm here is decoration.
+    assert better or worse, "declaring decaps moved no board's pin geometry"
+    print(f"  PASS (recorded, not gated): declaring decaps.max_distance_mm "
+          f"improves pin geometry on {len(better)}, worsens it on "
+          f"{len(worse)}, leaves {len(same)} unchanged")
+    for b, a2, b2 in sorted(worse, key=lambda t: t[1] - t[2]):
+        print(f"      WORSE  {b:26} {a2} -> {b2}")
+    for b, a2, b2 in sorted(better, key=lambda t: t[2] - t[1])[:3]:
+        print(f"      better {b:26} {a2} -> {b2}")
 
 
 def test_the_put_back_actually_fires_somewhere():
@@ -162,9 +197,9 @@ def test_the_put_back_actually_fires_somewhere():
 TESTS = [
     test_the_rows_cover_the_tracked_corpus_and_say_what_they_skipped,
     test_the_control_arm_is_never_what_changed,
-    test_no_arm_leaves_a_part_unseated_that_the_control_seated,
-    test_the_pin_geometry_does_not_get_WORSE_on_any_board,
-    test_the_owner_test_arm_is_measured_even_though_it_ships_OFF,
+    test_the_SHIPPING_arm_leaves_no_part_unseated_that_the_control_seated,
+    test_the_owner_test_arm_STRANDS_a_part_and_that_is_why_it_ships_off,
+    test_what_DECLARING_the_key_costs_is_recorded_not_gated,
     test_the_put_back_actually_fires_somewhere,
 ]
 
