@@ -268,6 +268,7 @@ if TWO_PAGE_PLAN and choice:
     unresolved = set()
     repicked = set()          # berths actually moved by this block
     relay_cand = {}           # surgical scope: net -> ranked B moves
+    split_targets = []        # split scope: nets whose berth goes B
     # ONE round, not a fixed point: iterating re-picks against the
     # re-shifted orders converged to WORSE pages (K28 sw3 -> sw5, K21
     # split into two corridors as de-conflict moved faces). Instead
@@ -328,6 +329,27 @@ if TWO_PAGE_PLAN and choice:
                 if P is not None:
                     continue
                 P = minor
+            elif scope == 'split':
+                # PAGE-SPLIT FANOUT (built for K35, where the all-F
+                # fanout SATURATES: channel drops 11 of 35 balls and
+                # the under-pad rescue punts 10 "elsewhere", through
+                # the decoupling caps -- 15 DRC). Only the B PAGE's
+                # escapes are re-picked here (and laid verbatim,
+                # dogbone preferred, before the engine runs); the F
+                # page and the swimmers stay with the engine, which
+                # then fans a load the faces can hold. The census of
+                # the HUMAN's own DU1 fanout is the blueprint: 22 of
+                # 35 nets travel B, the down face splits 10 B / 4 F,
+                # dogbones in the gaps, NO via-in-pad. SWIMMERS
+                # offload to B too (the human's ratio is 22 of 35
+                # travelling B; the B page alone is 7). No menu move
+                # is needed: the apply places the VIA verbatim and
+                # ROUTES the B run (a straight-leg B move exists for
+                # almost nobody -- the cap field is in the way, which
+                # is exactly why the runs must be routed).
+                if P is None or P == 'B.Cu':
+                    split_targets.append(n)
+                continue
             elif scope == 'surgical':
                 # the target set may include nets the plan's own
                 # Schedule called swimmers: with TP_RELAY_NETS the
@@ -369,10 +391,17 @@ if TWO_PAGE_PLAN and choice:
                 # choice: the re-pick happens after plan_ends, and an
                 # unchecked gap via landed in the street a kept
                 # surface move uses (K11 SDQ11 under SDQ14, 6 DRC)
+                # split: the F moves are the ENGINE's, not verbatim
+                # copper, so a B re-pick need only clear the OTHER
+                # re-picked moves (checked vs the whole choice, 5 of
+                # K35's 7 B-page nets found no candidate at all)
+                sel_chk = ({k: choice[k] for k in repicked}
+                           if scope == 'split' else choice)
                 cand = [m for m in dmenu.get(n, ())
                         if m.layer == P
-                        and (m.direction == m0.direction or scope == 'swim')
-                        and not _clashes(m, choice, n)]
+                        and (m.direction == m0.direction
+                             or scope in ('swim', 'split'))
+                        and not _clashes(m, sel_chk, n)]
                 if cand:
                     # dogbone preferred over via_in_pad: the moves are
                     # laid VERBATIM, and a gap via is a standard
@@ -413,8 +442,14 @@ if TWO_PAGE_PLAN and choice:
             moved_any = False
             for a_, b_ in itertools.combinations(
                     [n for n in names if n in choice], 2):
-                if scope in ('swim', 'surgical') and a_ not in repicked \
-                        and b_ not in repicked:
+                if scope == 'split' and (a_ not in repicked
+                                         or b_ not in repicked):
+                    # split: only verbatim-vs-verbatim pairs are ours
+                    # to de-conflict; a B move vs an engine net's
+                    # paper move is the engine's business
+                    continue
+                if scope in ('swim', 'surgical') \
+                        and a_ not in repicked and b_ not in repicked:
                     # swim scope: un-re-picked nets go to the ENGINE,
                     # which resolves its own geometry -- de-conflicting
                     # them here verbatim-lays moves that did not need
@@ -453,7 +488,7 @@ if TWO_PAGE_PLAN and choice:
         print(f'  UNRESOLVED lane conflict: {a_} vs {b_}')
     import json
     pages_path = os.path.splitext(out_path)[0] + '.pages.json'
-    if scope == 'surgical':
+    if scope in ('surgical', 'split'):
         # NO sidecar: the plan's orders are not the braid's (t15: 7 of
         # 25 planned page members crossed their own page under the
         # braid's real orders and were demoted -- 46v/5 vs plain 49/3).
@@ -461,8 +496,13 @@ if TWO_PAGE_PLAN and choice:
         # (schedule.on) adopts whichever teeth actually arrive on B.
         if os.path.exists(pages_path):
             os.remove(pages_path)
-        print(f'  surgical: {len(relay_cand)} B-page escape(s) to re-lay '
-              f'after the engine: {sorted(relay_cand)} (no pages sidecar)')
+        if scope == 'surgical':
+            print(f'  surgical: {len(relay_cand)} B-page escape(s) to '
+                  f're-lay after the engine: {sorted(relay_cand)} '
+                  '(no pages sidecar)')
+        else:
+            print(f'  split: {len(split_targets)} berth(s) to fan out '
+                  f'on B {sorted(split_targets)} (no pages sidecar)')
     else:
         with open(pages_path, 'w', encoding='utf-8') as f:
             json.dump({n: sched.page.get(n) for n in grp}, f)
@@ -829,6 +869,176 @@ if TWO_PAGE_PLAN and not NO_HINTS \
     else:
         shutil.copy(board, out_path)
     copy_pro(board, out_path)
+elif TWO_PAGE_PLAN and not NO_HINTS \
+        and os.environ.get('TP_SCOPE') == 'split':
+    # PAGE-SPLIT FANOUT, engine-honest form. The engines cannot be
+    # told a layer (a layers=['B.Cu'] underpad probe escaped 17/17
+    # with ZERO vias -- disconnected B copper), and a verbatim
+    # straight B leg clears almost nowhere (the decoupling caps live
+    # on B under the array). So: VERBATIM what must be exact -- the
+    # dogbone via at the ball, clearance-checked -- and ROUTED what
+    # must negotiate -- the B run from the via to the planned face,
+    # by the braid's own router around the cap field. The F rest then
+    # goes to the engine, which routes round the B copper. Blueprint:
+    # the HUMAN's own DU1 fanout (22 of 35 nets travel B, dogbones in
+    # the gaps, no via-in-pad).
+    import shutil
+    from kicad_parser import Segment, Via
+    stem2 = os.path.splitext(out_path)[0]
+    split_targets = list(globals().get('split_targets', []))
+    # CAPACITY GATE: try the PLAIN engine first and LOOK at what it
+    # did. At K21/K28 the all-F fanout is clean and complete, and the
+    # split only perturbs it (sp3 K28: split stubs starved the
+    # channel, the under-pad rescue went dirty, braid 8 open); at
+    # K32/K35 the plain fanout ships cap-pad grazes and elsewhere-
+    # escapes. Engine for everyone -> adopt iff its copper is
+    # DRC-clean and nothing failed; else the B pass proceeds from the
+    # bare board.
+    import subprocess as _sp
+    pcb_p = parse_kicad_pcb(board)
+    fp_p = pcb_p.footprints[dref]
+    tr_p, va_p, vr_p, fl_p = generate_bga_fanout(
+        fp_p, pcb_p, net_filter=names, layers=['F.Cu', 'B.Cu'],
+        track_width=0.1, clearance=0.1, via_size=0.45, via_drill=0.25,
+        exit_margin=0.5, escape_method=METHOD,
+        plane_drop=('off' if NO_DROP else 'auto'),
+        escape_dir_hints=hints,
+        escape_line_hints=(None if NO_LINES else lines) or None)
+    probe = f'{stem2}_dst_probe.kicad_pcb'
+    if tr_p:
+        add_tracks_and_vias_to_pcb(
+            board, probe, tr_p, va_p, vr_p,
+            net_id_to_name={i: n_.name for i, n_ in pcb_p.nets.items()})
+    else:
+        shutil.copy(board, probe)
+    copy_pro(board, probe)
+    r_ = _sp.run([sys.executable,
+                  os.path.join(HERE, '..', 'py_router', 'check_drc.py'),
+                  probe, '--clearance', '0.1',
+                  '--clearance-margin', '0.1'],
+                 capture_output=True, text=True)
+    clean_ = 'NO DRC VIOLATIONS' in (r_.stdout + r_.stderr)
+    if clean_ and not fl_p:
+        print('  split GATE: plain engine fanout is DRC-clean and '
+              'complete -- adopted, no B pass needed')
+        shutil.copy(probe, out_path)
+        copy_pro(probe, out_path)
+        print(f'\nwrote {out_path}: {len(tr_p)} tracks, {len(va_p)} '
+              f'vias, {len(set(fl_p))} failed nets')
+        obeyed(tr_p, choice, dst_pad, 'berth')
+        sys.exit(0)
+    print('  split GATE: plain engine fanout is '
+          + ('INCOMPLETE' if fl_p else 'DIRTY') + ' -- B pass proceeds')
+    pcb_w = parse_kicad_pcb(board)
+    cfg_w = te.cn.make_config(pcb_w, te.TRACK, te.CLEAR, te.VIA_SIZE,
+                              te.VIA_DRILL, grid_step=0.025)
+    wobs = {}
+    n_laid = [0]
+
+    def obs_w(nid, L):
+        k = (nid, L, n_laid[0])
+        if k not in wobs:
+            wobs[k] = te.build_obstacles(pcb_w, nid, set(), L)
+        return wobs[k]
+
+    laid_b, b_tracks, b_vias = [], [], []
+    hx, hy = dgrid.pitch_x / 2.0, dgrid.pitch_y / 2.0
+    pad_r = (te.VIA_SIZE - te.TRACK) / 2
+    for n in [x for x in names if x in set(split_targets)]:
+        nid = byname[n][0]
+        p = dst_pad[n]
+        m0 = choice.get(n)
+        if m0 is None:
+            continue
+        bx, by = p.global_x, p.global_y
+        dv = _DIRV[m0.direction]
+        sites = sorted([(sx, sy) for sx in (-1, 1) for sy in (-1, 1)],
+                       key=lambda s: -(s[0] * dv[0] + s[1] * dv[1]))
+        # every clear diagonal gets its RUN tried (the first-clear
+        # site's run refusing does not mean the others' would), each
+        # at two margins -- the last call's own lesson
+        res, got = None, None
+        for sx, sy in sites:
+            site = (bx + sx * hx, by + sy * hy)
+            if any(obs_w(nid, L_).point_violation(site, pad=pad_r)
+                   is not None for L_ in LAYERS):
+                continue
+            if not obs_w(nid, 'F.Cu').seg_clear((bx, by), site):
+                continue
+            pcb_w.segments.append(Segment(bx, by, site[0], site[1],
+                                          te.TRACK, 'F.Cu', nid))
+            pcb_w.vias.append(Via(site[0], site[1], te.VIA_SIZE,
+                                  te.VIA_DRILL, ['F.Cu', 'B.Cu'], nid))
+            for mg in (1.2, 2.5):
+                res = te.cn.connect(pcb_w, nid, site, 'B.Cu',
+                                    m0.exit_pt, 'B.Cu', cfg_w,
+                                    band=None, margin=mg)
+                if res is not None:
+                    break
+            if res is not None:
+                got = site
+                break
+            pcb_w.segments.pop()
+            pcb_w.vias.pop()
+        if got is None:
+            print(f'    split: no site/B run for {n} -- engine keeps it')
+            continue
+        segs_o, vias_o = res
+        pcb_w.segments.extend(segs_o)
+        pcb_w.vias.extend(vias_o)
+        n_laid[0] += 1
+        laid_b.append(n)
+        b_tracks.append({'start': (bx, by), 'end': got,
+                         'width': te.TRACK, 'layer': 'F.Cu',
+                         'net_id': nid})
+        for s_ in segs_o:
+            b_tracks.append({'start': (s_.start_x, s_.start_y),
+                             'end': (s_.end_x, s_.end_y),
+                             'width': s_.width, 'layer': s_.layer,
+                             'net_id': nid})
+        b_vias.append({'x': got[0], 'y': got[1], 'size': te.VIA_SIZE,
+                       'drill': te.VIA_DRILL,
+                       'layers': ['F.Cu', 'B.Cu'], 'net_id': nid})
+        for v_ in vias_o:
+            b_vias.append({'x': v_.x, 'y': v_.y, 'size': v_.size,
+                           'drill': v_.drill,
+                           'layers': ['F.Cu', 'B.Cu'], 'net_id': nid})
+    print(f'  split B pass: {len(laid_b)} of {len(split_targets)} '
+          'berth(s) via-and-routed on B: ' + ','.join(laid_b))
+    binter = f'{stem2}_dst_bsplit.kicad_pcb'
+    if b_tracks:
+        add_tracks_and_vias_to_pcb(
+            board, binter, b_tracks, b_vias, [],
+            net_id_to_name={i: n_.name for i, n_ in pcb_w.nets.items()})
+    else:
+        shutil.copy(board, binter)
+    copy_pro(board, binter)
+    pcb_e = parse_kicad_pcb(binter)
+    fp_e = pcb_e.footprints[dref]
+    rest = [nm for nm in names if nm not in set(laid_b)]
+    hints_r = {pad_key(dst_pad[nm]): choice[nm].direction
+               for nm in rest if nm in choice}
+    lines_r = {pad_key(dst_pad[nm]): (choice[nm].exit_pt[1]
+                                      if choice[nm].direction in ('left', 'right')
+                                      else choice[nm].exit_pt[0])
+               for nm in rest if nm in choice}
+    tracks, vias_add, vias_rm, failed = generate_bga_fanout(
+        fp_e, pcb_e, net_filter=rest, layers=['F.Cu', 'B.Cu'],
+        track_width=0.1, clearance=0.1, via_size=0.45, via_drill=0.25,
+        exit_margin=0.5, escape_method=METHOD,
+        plane_drop=('off' if NO_DROP else 'auto'),
+        escape_dir_hints=hints_r,
+        escape_line_hints=(None if NO_LINES else lines_r) or None)
+    failed = set(failed)
+    if tracks:
+        add_tracks_and_vias_to_pcb(
+            binter, out_path, tracks, vias_add, vias_rm,
+            net_id_to_name={i: n_.name for i, n_ in pcb_e.nets.items()})
+    else:
+        shutil.copy(binter, out_path)
+    copy_pro(binter, out_path)
+    tracks = b_tracks + tracks
+    vias_add = b_vias + vias_add
 elif TWO_PAGE_PLAN and not NO_HINTS:
     # apply the plan's KIND per net, like the source apply: dogbones
     # and via-in-pads first (short stubs against the pad), channel
@@ -836,7 +1046,7 @@ elif TWO_PAGE_PLAN and not NO_HINTS:
     import shutil
     stem2 = os.path.splitext(out_path)[0]
     kind_of = {nm: choice[nm].kind for nm in names if nm in choice}
-    if os.environ.get('TP_SCOPE') == 'swim':
+    if os.environ.get('TP_SCOPE') in ('swim', 'split'):
         # swimmer scope: only the RE-PICKED berths are laid verbatim;
         # every untouched net goes through the production engine pass
         # below ('unplanned', with the plan's hints and lines), i.e.
