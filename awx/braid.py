@@ -2172,6 +2172,41 @@ def write_out(a, ctx, corridors, names, log):
     nseg = sum(len(emit[nm]) for nm in names)
     log(f'\nwrote {out_board}: {nseg} segments, {nv} vias'
         + (f' -- {len(refused)} net(s) REFUSED' if refused else ''))
+    if refused and os.environ.get('TAIL_RESCUE') == '1':
+        # TAIL RESCUE (opt-in, DEFAULT OFF -- deliberately env-gated):
+        # hand each refused lane to the production generalist router,
+        # ONE net per call, against the finished board. Measured at K28
+        # it completes the board (49v/3 open -> 62v/0/0) but the
+        # rescued weaves are the generalist's, not the ribbon's --
+        # messy copper by this project's standard. The DEFAULT stays
+        # the honest refusal: the goal is to solve the swimmers INSIDE
+        # the topo model (escapes by page / surgical re-lay), and a
+        # default fallback would hide exactly the signal that work
+        # needs. One net per call is deliberate: the same-call partner
+        # crossing was #817 (fixed), and separate calls also measured
+        # cheaper (fewer vias) on the bench.
+        import subprocess
+        rp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          '..', 'py_router', 'route.py')
+        cur = out_board
+        for nm in refused:
+            full = ctx.byname[nm][1].name
+            tmp = a.out + '_tr.kicad_pcb'
+            r = subprocess.run(
+                [sys.executable, rp, cur, '--output', tmp,
+                 '--nets', full, '--clearance', str(CLEAR),
+                 '--track-width', str(TRACK)],
+                capture_output=True, text=True)
+            ok = ('"failed": 0' in r.stdout and os.path.exists(tmp))
+            log(f'  tail rescue {nm}: '
+                + ('routed' if ok else 'REFUSED (kept as-is)'))
+            if ok:
+                os.replace(tmp, cur)
+                tpro = a.out + '_tr.kicad_pro'
+                if os.path.exists(tpro):
+                    os.replace(tpro, a.out + '.kicad_pro')
+            elif os.path.exists(tmp):
+                os.remove(tmp)
     return 1 if refused else 0
 
 
