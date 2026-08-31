@@ -144,9 +144,10 @@ def t_no_caller_still_open_codes_the_rule():
                 | {n.id for n in ast.walk(node) if isinstance(n, ast.Name)})
 
     for rel in GUARDED:
+        # No `isfile` guard: a path typo would make this guard silently
+        # vacuous, and GUARDED deliberately names files BEFORE they carry the
+        # rule, which is exactly when a typo would go unnoticed.
         path = os.path.join(ROOT, rel)
-        if not os.path.isfile(path):
-            continue
         tree = ast.parse(io.open(path, encoding='utf-8').read())
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Call)

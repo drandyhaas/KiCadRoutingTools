@@ -299,15 +299,27 @@ def add_layers(pcb_data, pcb_file: str, *, clearance: float,
                step: int = 2) -> Dict:
     """Would more copper layers clear the escape-lane deficits?
 
-    Two effects, and only one of them is modelled here honestly:
+    Two effects, and since #700 BOTH are measured -- the second as a bound
+    rather than as an answer:
 
     * a finer FAB FLOOR at a higher layer count narrows the lane pitch, so a
       face supplies more lanes. That is computable, and it is what this
       reports -- `fab_tiers.fab_floor_min` already indexes on layer count and
-      `check_channels.py:160-170` ran exactly this experiment by hand at three
-      clearances (supply 29 -> 120 -> 242).
-    * nets escaping on OTHER layers relieve a face entirely. That needs a
-      routing attempt, so it is named as not modelled rather than guessed.
+      `check_channels.py` ran exactly this experiment by hand at three
+      clearances (supply 29 -> 120 -> 242). Above 4 copper layers the table
+      has one rung, so the comparison is BLIND rather than negative, and
+      `fab_floor_layer_blind` says which.
+    * nets escaping on OTHER layers relieve a face. `deficit_all_layers_*` is
+      the lower bound on what survives that relief. It is NOT the answer to
+      "would the router take the escape", which still needs a routing attempt
+      -- see `not_modelled`.
+
+    Expect the two `deficit_all_layers_*` numbers to be EQUAL, and read
+    `escape_supply_bound` for why: the relief is bounded by the via slots
+    along a face, and that count does not depend on the layer stack (the
+    derivation is in `escape.FaceLedger.supply_bound`). A pair of identical
+    numbers with no stated reason would be #700's own complaint one level
+    down, so the reason is reported beside them.
     """
     from placement.escape import escape_ledger, lane_pitch  # noqa: F401
     try:
@@ -365,6 +377,14 @@ def add_layers(pcb_data, pcb_file: str, *, clearance: float,
                          field='deficit_floor')
         f_more = _deficit(clearance, track_width, layers=n + step,
                           field='deficit_floor')
+        # WHICH term bounds the relief. Without this the two numbers above are
+        # equal with no stated reason, which is exactly #700's complaint one
+        # level down: a number that does not move with the layer count and
+        # does not say why.
+        _led = escape_ledger(pcb_data, pcb_file=pcb_file, clearance=clearance,
+                             track_width=track_width, signal_layers=n)
+        _bounds = [f.supply_bound for p in _led for f in p.faces if f.deficit]
+        _slots = [f.via_slots for p in _led for f in p.faces if f.deficit]
     except Exception as e:                       # noqa: BLE001
         return _skip(f'the escape ledger did not run: {type(e).__name__}: {e}')
 
@@ -405,8 +425,17 @@ def add_layers(pcb_data, pcb_file: str, *, clearance: float,
             # #700 item 2. A LOWER bound on the deficit: lanes short even
             # when every other signal layer is counted. Both at the board's
             # own clearance, so the layer count is the only thing that moves.
-            'deficit_floor_lanes_now': f_now['lanes'],
-            'deficit_floor_lanes_at_more': f_more['lanes'],
+            # NOT `deficit_floor_*`: `deficit_lanes_at_fab_floor` sits three
+            # tokens away in this same digest line and means a JLC fab floor,
+            # while this is a lower bound with nothing to do with fabs. One
+            # line carrying "floor" in two senses is a misreading waiting to
+            # happen. (The per-face ledger key is `deficit_floor`, in a
+            # context where only one floor exists.)
+            'deficit_all_layers_lanes_now': f_now['lanes'],
+            'deficit_all_layers_lanes_at_more': f_more['lanes'],
+            'escape_supply_bound': (max(sorted(set(_bounds)), key=_bounds.count)
+                                    if _bounds else None),
+            'via_slots_min_on_a_short_face': min(_slots) if _slots else None,
             # COPPER layers, and named so. `add_layers` asks about a stackup
             # this board does not have, so it hands the ledger the copper
             # count as the signal count -- which OVER-states on a poured
@@ -424,7 +453,7 @@ def add_layers(pcb_data, pcb_file: str, *, clearance: float,
             # router would actually take that escape.
             'whether a net that COULD escape on another layer actually does '
             '-- that needs a routing attempt; the bound is '
-            'deficit_floor_lanes_*'
+            'deficit_all_layers_lanes_*'
             + ('' if not layer_blind else
                f". AND, above {b_now.buckets[-1]} copper layers, any fab-floor "
                f"difference at all -- fab_tiers models buckets "
@@ -455,10 +484,15 @@ def add_layers(pcb_data, pcb_file: str, *, clearance: float,
             f"repo does not invent the rest. What more layers would actually "
             f"buy is nets escaping on the new layers, and THAT is now "
             f"bounded: {f_now['lanes']} lane(s) are short even if all {n} "
-            f"copper layers carried signal, against {f_more['lanes']} at "
-            f"{n + step}. Those are LOWER bounds -- a drop to 0 does not mean "
-            f"the board routes, and a board whose inner layers are poured has "
-            f"fewer signal layers than this assumes.")
+            f"copper layers carried signal, and {f_more['lanes']} at "
+            f"{n + step}. EXPECT THOSE TWO TO BE EQUAL -- the relief is capped "
+            f"by the via slots along a face"
+            + (f", as few as {min(_slots)} on a face that is short"
+               if _slots else "")
+            + f", and that cap does not move with the stackup. Both are LOWER "
+            f"bounds: a drop to 0 does not mean the board routes, and a board "
+            f"whose inner layers are poured has fewer signal layers than this "
+            f"assumes.")
     elif same_floor:
         # Reachable only if a future table gains a bucket whose floors happen
         # to match its neighbour's. Then "identical floors" IS the measurement.
@@ -752,7 +786,9 @@ _DIGEST_ALWAYS = ('deficit_lanes_now', 'deficit_lanes_at_more',
                   # IS add_layers' digest now, so it has to be the curated
                   # headline rather than a supplement to one.
                   'fab_floor_layer_blind', 'copper_layers',
-                  'deficit_floor_lanes_now', 'deficit_floor_lanes_at_more')
+                  'deficit_all_layers_lanes_now',
+                  'deficit_all_layers_lanes_at_more',
+                  'escape_supply_bound')
 
 
 def _digest(measured: Dict, limit: int = 5) -> str:

@@ -8,24 +8,29 @@ derivation someone can re-run rather than a claim someone has to trust.
 
 The proposed term replaces the quench's shape halo
 
-    halo_i = halo_base + halo_coef * sqrt(pin_count)          (quench.py:581)
+    halo_i = halo_base + halo_coef * sqrt(pin_count)     (_Part.__init__)
 
 with, or rather takes the max against,
 
     demand_i * lane_pitch / copper_layers
 
 where `demand_i` is the largest per-face net count on the part. The formula is
-not invented here -- .claude/skills/plan-pcb-placement/SKILL.md:430-437 already
-states `cut_nets x (track_width + clearance) / copper_layers` verbatim, layer
-divisor included.
+not invented here -- the placement skill's corridor law already states
+`cut_nets x (track_width + clearance) / copper_layers` verbatim, layer divisor
+included, and records it as almost never binding.
+
+(Line numbers are deliberately absent: an earlier draft cited four and three
+of them were already stale at the commit that added them. A name a grep can
+find outlives a number.)
 
 Two questions, and neither is "does the number change":
 
   A. Does the term reach any blocker the shipped halo does not already charge?
-     The escape ledger NAMES the parts eating a deficit face (`blockers`,
-     escape.py:308). For each such pair, compare the pad-rect gap against the
-     shipped pair requirement `halo_a + halo_b` at the A/B harness's own
-     coefficients (tests/test_placement_ab.py:312-316, coef 0.15). A pair
+     The escape ledger NAMES the parts eating a deficit face (the `blockers`
+     field of `escape.FaceLedger`). For each such pair, compare the pad-rect
+     gap against the shipped pair requirement `halo_a + halo_b` at the A/B
+     harness's own coefficients (`QUENCH_BASE` in test_placement_ab, coef
+     0.15). A pair
      already inside that requirement is one the OFF arm already repels; the
      term can only charge it MORE, which is a magnitude change, not a new
      finding.
@@ -33,7 +38,8 @@ Two questions, and neither is "does the number change":
   B. Where does the term fire, against where the grader can see? The only
      independent escape instrument the placement A/B has is
      `health_escape_deficit_parts` / `health_escape_worst_deficit`
-     (routability.py:718-722 -> floorplan.py:2455-2458). A term that is large
+     (`routability.health` -> `floorplan`'s JSON_SUMMARY map). A term that is
+     large
      where those read zero, and inert where they read their maximum, cannot be
      graded by them however the run comes out.
 

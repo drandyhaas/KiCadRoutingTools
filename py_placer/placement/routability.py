@@ -991,6 +991,16 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
                     'deficit_finest_grid': max(0, n_demand - supply_fine),
                     'eaten_by': eaten[:8],
                     'taps_not_modeled': True})
+    # NO LAYER TERM HERE, deliberately (#700). `escape.FaceLedger` gained
+    # `via_slots` / `supply_other_max` / `deficit_floor`; this ledger did not,
+    # because its supplies are GRID-QUANTIZED (`_quantized_pitch` above) while
+    # a via pitch is not. Pairing the two would give a `supply_bound` that
+    # flips with `--grid-step` -- a structural verdict moving with a raster
+    # setting, which is the confound `check_channels.py` documents at its
+    # floor-wrapping block. Adding it here needs
+    # `_quantized_pitch(via_pitch, 0.0, grid_step)` and its own thought.
+    # (Also note `escape_band_mm` above: a public keyword no caller has ever
+    # passed, in either of this function's two call sites or its tests.)
     return out
 
 

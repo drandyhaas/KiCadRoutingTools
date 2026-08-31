@@ -20,6 +20,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 sys.path.insert(0, os.path.join(ROOT, 'py_placer'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from kicad_parser import parse_kicad_pcb                    # noqa: E402
 from placement import escape                                # noqa: E402
@@ -32,8 +33,17 @@ BOARDS = ('rp2350_fpga_eensy_prePlane', 'glasgow_revC', 'tigard', 'watchy',
 
 
 def _board(name):
-    p = os.path.join(ROOT, 'kicad_files', name + '.kicad_pcb')
-    return (parse_kicad_pcb(p), p) if os.path.isfile(p) else (None, None)
+    """Parse a fixture board, GENERATING it if it is one of the untracked ones.
+
+    5 of the 27 boards in `kicad_files/` are gitignored and built on demand
+    (`tests/fixture_boards.py`), `interf_u_plane` among them -- and that is the
+    board the signal-layer clamp is pinned on. Without `ensure()` the row that
+    matters most prints SKIP on a clean clone, which is a test that passes by
+    not running.
+    """
+    import fixture_boards
+    path = fixture_boards.ensure(name + '.kicad_pcb')
+    return parse_kicad_pcb(path), path
 
 
 def t_supply_and_deficit_are_untouched_on_every_board():
@@ -88,9 +98,6 @@ def t_a_fully_poured_two_layer_board_clamps_instead_of_going_negative():
     board on BOTH. The raw subtraction is 0, and `(L-1) * lanes` would be
     NEGATIVE -- an upper bound tightening a verdict."""
     pcb, path = _board('interf_u_plane')
-    if pcb is None:
-        print("  SKIP: interf_u_plane not in kicad_files/")
-        return
     n, source, planes = escape.signal_layer_count(pcb)
     assert n == 1, n
     assert source == 'zones', source
@@ -108,10 +115,7 @@ def t_a_tiny_unnamed_zone_is_not_a_plane():
     name. Real planes in this corpus cover 0.94-0.98 of the board; that one
     covers 0.0002. Treating it as a plane would silently halve the board's
     signal-layer count on the strength of a sliver."""
-    pcb, _path = _board('lvds_converter_dualclk')
-    if pcb is None:
-        print("  SKIP: lvds_converter_dualclk not in kicad_files/")
-        return
+    pcb, path = _board('lvds_converter_dualclk')
     assert pcb.zones, 'the fixture lost its zone; this test proves nothing now'
     n, source, planes = escape.signal_layer_count(pcb)
     assert planes == (), planes
@@ -122,10 +126,7 @@ def t_a_tiny_unnamed_zone_is_not_a_plane():
 def t_a_real_plane_stack_is_observed():
     """kit-dev-coldfire: GND on B.Cu and In1.Cu, +3.3V on In2.Cu, on a 4-layer
     board -- so ONE signal layer, observed rather than declared."""
-    pcb, _path = _board('kit-dev-coldfire-xilinx_5213')
-    if pcb is None:
-        print("  SKIP: kit-dev-coldfire not in kicad_files/")
-        return
+    pcb, path = _board('kit-dev-coldfire-xilinx_5213')
     n, source, planes = escape.signal_layer_count(pcb)
     assert n == 1, n
     assert source == 'zones', source
@@ -135,18 +136,21 @@ def t_a_real_plane_stack_is_observed():
 
 def t_declared_planes_and_a_declared_count_outrank_observation():
     """The channel that matters on a board being placed, which has no pours."""
-    pcb, _path = _board('kit-dev-coldfire-xilinx_5213')
-    if pcb is None:
-        print("  SKIP: kit-dev-coldfire not in kicad_files/")
-        return
+    pcb, path = _board('kit-dev-coldfire-xilinx_5213')
     n, source, planes = escape.signal_layer_count(pcb, plane_layers=['In1.Cu'])
     assert (n, source, planes) == (3, 'declared_planes', ('In1.Cu',)), \
         (n, source, planes)
     n, source, planes = escape.signal_layer_count(pcb, signal_layers=2)
     assert (n, source) == (2, 'declared_count'), (n, source)
-    # A declared plane that is not a copper layer is ignored, not counted.
-    n, _s, planes = escape.signal_layer_count(pcb, plane_layers=['F.SilkS'])
-    assert n == 4 and planes == (), (n, planes)
+    # A declaration that matched NOTHING must not read as one that was
+    # honoured: the answer falls back to the OPTIMISTIC every-copper-layer
+    # count, so a source still saying plain `declared_planes` would report a
+    # user's typo as their intent. Three ways to get there.
+    for bad in (['F.SilkS'], ['In1.cu'], 'In1.Cu'):
+        n, source, planes = escape.signal_layer_count(pcb, plane_layers=bad)
+        assert n == 4 and planes == (), (bad, n, planes)
+        assert source.startswith('declared_planes'), (bad, source)
+        assert 'none matched' in source, (bad, source)
     print("  PASS: declared_count > declared_planes > zones > copper_layers")
 
 
@@ -179,9 +183,6 @@ def t_the_other_layer_term_survives_a_fully_blocked_face():
     layer term of exactly zero.
     """
     pcb, path = _board('rp2350_fpga_eensy_prePlane')
-    if pcb is None:
-        print("  SKIP: rp2350 not in kicad_files/")
-        return
     led = escape.escape_ledger(pcb, pcb_file=path, refs=['U6'])
     assert led, 'U6 not on this board any more'
     u6 = led[0]
@@ -209,9 +210,6 @@ def t_the_saturation_is_asserted_rather_than_discovered():
     design instead of quietly shipping a different meaning.
     """
     pcb, path = _board('glasgow_revC')
-    if pcb is None:
-        print("  SKIP: glasgow_revC not in kicad_files/")
-        return
     two = escape.escape_ledger(pcb, pcb_file=path, signal_layers=2)
     six = escape.escape_ledger(pcb, pcb_file=path, signal_layers=6)
     pairs = [(a, b) for pa, pb in zip(two, six)
@@ -234,9 +232,6 @@ def t_the_via_pitch_obeys_both_the_copper_and_the_drill_rule():
     of six real boards, which is a supply term erasing the finding it
     annotates."""
     pcb, path = _board('glasgow_revC')
-    if pcb is None:
-        print("  SKIP: glasgow_revC not in kicad_files/")
-        return
     # Board's own: via 0.6 + clearance 0.2 = 0.8 copper; drill 0.3 + h2h.
     got = escape.via_pitch(pcb, path)
     assert abs(got - 0.8) < 1e-9, got
@@ -254,9 +249,6 @@ def t_the_two_halves_of_a_row_use_one_clearance():
     ledger passes `lane_pitch`'s resolved value in so they agree by
     construction."""
     pcb, path = _board('tigard')
-    if pcb is None:
-        print("  SKIP: tigard not in kicad_files/")
-        return
     tw, clr = escape.lane_pitch_parts(pcb, path)
     assert abs((tw + clr) - escape.lane_pitch(pcb, path)) < 1e-12
     # An explicit clearance must move BOTH halves, not just the lane one.
@@ -275,9 +267,6 @@ def t_worst_floor_is_a_property_not_only_a_dict_key():
     `getattr(p, 'worst_deficit', 0)` silently returned 0 and turned "38 faces
     are short" into "0". One monument to that is enough."""
     pcb, path = _board('rp2350_fpga_eensy_prePlane')
-    if pcb is None:
-        print("  SKIP: rp2350 not in kicad_files/")
-        return
     led = escape.escape_ledger(pcb, pcb_file=path)
     hit = [p for p in led if p.worst_floor]
     assert hit, 'no part is short at the floor; pick another fixture'
@@ -339,7 +328,7 @@ def t_worst_floor_selects_by_the_FLOOR_deficit_not_the_own_layer_one():
     # own-layer rule gives `east`. Pinned by its answer, not by re-deriving
     # the selection expression, which would only compare the code with itself.
     pcb, path = _board('tigard')
-    if pcb is not None:
+    if True:
         rn5 = [q for q in escape.escape_ledger(pcb, pcb_file=path)
                if q.ref == 'RN5']
         if rn5:
@@ -365,9 +354,6 @@ def t_a_declared_plane_list_reaches_the_ledger_through_health():
     from placement import routability
     from placement.quench import QuenchState
     pcb, path = _board('rp2350_fpga_eensy_prePlane')
-    if pcb is None:
-        print("  SKIP: rp2350 not in kicad_files/")
-        return
     state = QuenchState(pcb, path, clearance=defaults.CLEARANCE,
                         board_edge_clearance=0.55, crossing_penalty=10.0,
                         halo_base=0.5, halo_coef=0.15, halo_weight=2.0,
@@ -449,9 +435,6 @@ def t_deficit_totals_can_sum_either_field_and_refuses_a_third():
     failure this function's docstring is about."""
     from placement.options import deficit_totals
     pcb, path = _board('rp2350_fpga_eensy_prePlane')
-    if pcb is None:
-        print("  SKIP: rp2350 not in kicad_files/")
-        return
     led = escape.escape_ledger(pcb, pcb_file=path)
     own = deficit_totals(led)
     floor = deficit_totals(led, field='deficit_floor')
@@ -477,9 +460,6 @@ def t_the_health_block_reports_both_and_gates_on_neither():
     from placement import routability
     from placement.quench import QuenchState
     pcb, path = _board('rp2350_fpga_eensy_prePlane')
-    if pcb is None:
-        print("  SKIP: rp2350 not in kicad_files/")
-        return
     # A real QuenchState, as test_549_routability builds one. `health` reads
     # the ledger off `pcb_data.source_path`, which `parse_kicad_pcb` sets --
     # there is no pcb_file parameter.

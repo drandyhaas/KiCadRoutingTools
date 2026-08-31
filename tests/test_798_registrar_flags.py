@@ -4,9 +4,11 @@
 `krt_capabilities.script_flags` reads flags from SOURCE rather than by
 importing, because a consumer asking "can this clone do X" must not be able to
 trigger a side effect by asking. That makes it a static approximation of a
-runtime fact, and the approximation was wrong in one direction on every
-published script: measured at the parent commit, all eight `FLAG_SCRIPTS`
-under-reported, by 1 to 18 flags each.
+runtime fact, and the approximation was wrong in one direction: measured at
+the parent commit, SEVEN of the eight `FLAG_SCRIPTS` under-reported, by 3 to
+12 flags each -- the four routing CLIs and `check_floorplan` by 3 apiece, the
+two placement CLIs by 12. `check_drc.py` was already exact at 19 of 19, which
+is the case a "they were all broken" summary gets wrong.
 
 The gate here is the RELATION, enumerated over `FLAG_SCRIPTS` rather than
 written out as a list of rows. A hand-written row list only ever covers the
@@ -128,9 +130,10 @@ def t_a_registrar_that_also_owns_a_cli_is_still_followed():
 def t_a_short_alias_does_not_hide_the_long_option():
     """The third mechanism, in the base regex.
 
-    48 call sites spell `add_argument('-q', '--quiet', ...)`. Requiring the
-    long form FIRST reported every one as unsupported; `check_floorplan.py`'s
-    `--quiet` was the last flag still missing after the registrar work.
+    46 call sites in the tracked tree spell `add_argument('-q', '--quiet',
+    ...)`. Requiring the long form FIRST reported every one as unsupported;
+    `check_floorplan.py`'s `--quiet` was the last flag still missing after the
+    registrar work.
     """
     got = set(k.script_flags(k._tool_path(k.ROOT, 'check_floorplan.py')))
     assert '--quiet' in got, 'a long option declared after a short alias'

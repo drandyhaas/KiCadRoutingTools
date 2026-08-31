@@ -159,6 +159,13 @@ class FaceLedger:
         """
         if self.signal_layers <= 1:
             return 'no_other_layer'
+        # Guard the pitch the same way `via_slots` and `other_layer_lanes` do.
+        # Without it a degenerate `lane_pitch_mm <= 0` makes `other_layer_lanes`
+        # 0 and this blames the LAYER COUNT for what is a broken pitch.
+        # Unreachable through `escape_ledger`, which floors both to the repo
+        # defaults; reachable by constructing a FaceLedger directly.
+        if self.lane_pitch_mm <= 0 or self.via_pitch_mm <= 0:
+            return 'no_other_layer'
         return ('via_slots' if self.via_slots <= self.other_layer_lanes
                 else 'layer_lanes')
 
@@ -339,9 +346,14 @@ def via_pitch(pcb_data, pcb_file: Optional[str] = None,
               hole_to_hole: Optional[float] = None) -> float:
     """Centre-to-centre spacing of two escape vias, at the board's OWN floor.
 
-    The via-side twin of `lane_pitch`, and resolved by the SAME policy for the
-    same reason -- board Default netclass, then the repo defaults, and NO fab
-    wrap. Fab-flooring one half while the other stays board-first is not a
+    The via-side twin of `lane_pitch`, and resolved by the same POLICY for the
+    same reason -- board first, repo defaults second, and NO fab wrap. Not by
+    the same call: this goes through `list_nets.board_floor`, which has a
+    third tier `lane_pitch`'s `board_default_netclass_param` does not -- the
+    board CONSTRAINTS (`min_via_diameter`, `min_hole_to_hole`). That tier is
+    necessary, because `hole_to_hole` has no netclass at all. The two agree on
+    `clearance` on all 27 in-repo boards, and rather than rely on that the
+    ledger passes `lane_pitch`'s own resolved value in. Fab-flooring one half while the other stays board-first is not a
     conservative choice, it is an incommensurate one. Measured, summed
     `deficit_floor` over each whole board, shipped resolution against a
     fab-floored via pitch:
@@ -457,7 +469,17 @@ def signal_layer_count(pcb_data, *, signal_layers: Optional[int] = None,
     if not cu:
         return 1, 'unknown', ()
     if plane_layers is not None:
-        found = tuple(sorted({l for l in plane_layers if l in cu}))
+        # A declaration that matched NOTHING must not read as a declaration
+        # that was honoured. A typo (`In1.cu`), a net name where a layer was
+        # meant, or a bare string instead of a list (which iterates into
+        # characters) all yield an empty match -- and the answer would then be
+        # the OPTIMISTIC `len(cu)` while the source still said
+        # `declared_planes`. The user's input was ignored and the report said
+        # it was used, which is the shape `bus_corridors_phantom` exists for.
+        wanted = [l for l in plane_layers if isinstance(l, str)]
+        found = tuple(sorted({l for l in wanted if l in cu}))
+        if wanted and not found:
+            return len(cu), 'declared_planes (none matched a copper layer)', ()
         return max(1, len(cu) - len(found)), 'declared_planes', found
     found = _pour_layers(pcb_data, cu)
     if found:

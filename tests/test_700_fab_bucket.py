@@ -9,11 +9,18 @@ it as a routing fact: on rp2350_fpga_eensy_prePlane, 6 copper layers and 121
 escape lanes short, it said "more layers buy NO extra lanes on a face".
 
 The issue offers two fixes. Extending `_FAB_FLOORS` with 6- and 8-layer rungs
-is declined and the reason is checkable: `fab_tiers.py`'s module docstring
-cites jlcpcb.com/capabilities for every number in the table, a 6-layer rung has
-no such source, and `tests/test_fab_tiers.py` pins the ladder PER BUCKET -- so
-inventing the rung means inventing its expected via pair in the test too. This
-is the other fix: report the bucket.
+is declined, on one ground rather than two: `fab_tiers.py` sources its table
+from jlcpcb.com/capabilities, which publishes ONE multilayer column, so a
+6-layer rung would be a number with no source behind it.
+
+(An earlier version of this docstring also claimed `tests/test_fab_tiers.py`
+would force the invention into the open by pinning the ladder per bucket. A
+fact-checker disproved it: that test loops `for ncu in (2, 4)` over a
+hardcoded table, so a synthetic 6-layer rung passes it UNMODIFIED. A new rung
+would be untested, not red -- which is a weaker position for the decline, and
+worth saying so.)
+
+This is the other fix: report the bucket.
 """
 import io
 import os
@@ -168,11 +175,8 @@ def t_add_layers_stops_claiming_a_result_it_could_not_measure():
     from kicad_parser import parse_kicad_pcb
     from placement.options import add_layers
 
-    board = os.path.join(ROOT, 'kicad_files',
-                         'rp2350_fpga_eensy_prePlane.kicad_pcb')
-    if not os.path.isfile(board):
-        print("  SKIP: rp2350_fpga_eensy_prePlane not in kicad_files/")
-        return
+    import fixture_boards
+    board = fixture_boards.ensure('rp2350_fpga_eensy_prePlane.kicad_pcb')
     out = add_layers(parse_kicad_pcb(board), board, clearance=0.2)
     assert out.get('ran'), out.get('reason')
     m = out['measured']
@@ -197,10 +201,8 @@ def t_a_two_layer_board_still_gets_the_real_comparison():
     from kicad_parser import parse_kicad_pcb
     from placement.options import add_layers
 
-    board = os.path.join(ROOT, 'kicad_files', 'esp_prog.kicad_pcb')
-    if not os.path.isfile(board):
-        print("  SKIP: esp_prog not in kicad_files/")
-        return
+    import fixture_boards
+    board = fixture_boards.ensure('esp_prog.kicad_pcb')
     out = add_layers(parse_kicad_pcb(board), board, clearance=0.2)
     assert out.get('ran'), out.get('reason')
     m = out['measured']

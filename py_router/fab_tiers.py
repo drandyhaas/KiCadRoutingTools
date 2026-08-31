@@ -280,10 +280,18 @@ def fab_floor_for_param(param_name, copper_layer_count, tier=None, overrides=Non
 def count_copper_layers_in_file(pcb_path):
     """Count copper layers in a .kicad_pcb (matches `(0 "F.Cu" signal)`-style layer
     defs, not pad layer lists). Returns 0 on any read error. Stdlib-only."""
+    # `None` is the in-memory case, and it is the one this counter exists to
+    # hand over to `count_copper_layers_in_data` -- a live GUI board has
+    # `source_path is None`, not `''`. Without this it raised TypeError out of
+    # `open`, which `placement.options.capacity_options` reports as INTERNAL
+    # ERROR, a channel reserved for genuine crashes. Worse than the skip it
+    # replaced.
+    if not pcb_path:
+        return 0
     try:
         with open(pcb_path, encoding='utf-8') as f:
             return len(re.findall(r'\(\d+\s+"[^"]*\.Cu"', f.read())) or 0
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return 0
 
 
