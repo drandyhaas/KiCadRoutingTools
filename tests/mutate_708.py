@@ -208,21 +208,13 @@ ROWS = [
     # The pre-existing acceptance defect #708's slot change exposed: decide on
     # the PREDICTION again instead of the seated cost.
     ('the-reseat-accepts-on-the-prediction', 'rs',
-     "        keep = False
-"
+     "        keep = False\n"
      "        try:",
-     "        keep = apply
-"
-     "        res.accepted = True
-"
-     "        if True:
-"
-     "            for m in moved:
-"
-     "                state.apply_move(m, *poses[m])
-"
-     "            return res
-"
+     "        res.accepted = True\n"
+     "        for m in moved:\n"
+     "            state.apply_move(m, *poses[m])\n"
+     "        return res\n"
+     "        keep = False\n"
      "        try:",
      (T_SNAP, T_RESEAT), 'KILLED'),
 
