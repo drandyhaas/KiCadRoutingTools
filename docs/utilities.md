@@ -1344,6 +1344,22 @@ Both sides resolve a rectangle through the same `placement.utility.refs_in_rect`
 (half-open on the far edges), so the rectangle the census prints and the
 rectangle the mover lifts cannot mean two different sets of parts.
 
+### The board's placement lattice (#708)
+
+The `JSON_SUMMARY` line also carries `board_grid_step`, `board_grid_occupancy`
+and `board_grid_reason`: the pitch the board appears to have been laid out on,
+read through the same `placement.board_grid.infer_board_grid` the placer
+resolves its candidate offsets with, so the census cannot report a pitch the
+engine does not use.
+
+`board_grid_step` is `None` for a board that declares no lattice, and that is a
+real answer rather than a missing one -- `board_grid_reason` says which test it
+failed (`best occupancy 0.226 < floor 0.67`, `n_parts 4 < 8`), so "no lattice"
+and "never measured" stay distinguishable from the summary line alone. Measured
+over the tracked corpus, 12 of 22 boards resolve: four imperial at 0.3175 mm
+(`splitflap_driver` 0.92, `flat_hierarchy` 0.83, `sonde_u` 0.78,
+`interf_u_unrouted` 0.70) and eight metric-fine at 0.05 mm.
+
 ### Example
 
 ```bash
