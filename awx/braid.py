@@ -1265,6 +1265,88 @@ class Corridor:
             self.lane_xy[nm] = [p for i, p in enumerate(poly)
                                 if i == 0 or math.hypot(p[0] - poly[i - 1][0],
                                                         p[1] - poly[i - 1][1]) > 1e-6]
+        # ---- LEDGER-INFORMED DIAMOND RESERVATION (two-page only).
+        # The cut and diamond ledgers (cut_ledger.py) measured both
+        # STATIC resources ample -- what starves a swimmer is DYNAMIC:
+        # by its turn, the other lanes' real+virtual copper has eaten
+        # the both-layer-clear spots exactly where its layer changes
+        # must land. So reserve one diamond per required change at
+        # plan time, placed by the ledger's rules: statically clear on
+        # BOTH layers at barrel radius, near the swimmer's own line,
+        # and a lane-pitch clear of every other lane's line at that s.
+        # (The naive reservation was measured WORSE once -- hops
+        # landed between page lines and walled the pages; the
+        # distance rule is what makes this one safe to stamp.) The
+        # spots ride virtual_vias_of, so every lane routed while the
+        # owner is still unrouted keeps clear of them.
+        self.hops = {}
+        if getattr(sched, 'two_page', False) \
+                and os.environ.get('HOP_RESERVE', '1') == '1':
+            two_obs = {L: self.ctx.obs_but(M[0], M, L)
+                       for L in ('F.Cu', 'B.Cu')}
+            pad_r = (VIA_SIZE - TRACK) / 2
+
+            def line_o(om, s):
+                ms_ = self.mid[om]
+                if not (ms_[0][0] - 1e-9 <= s <= ms_[-1][0] + 1e-9):
+                    return None
+                return float(np.interp(s, [p[0] for p in ms_],
+                                       [p[1] for p in ms_]))
+
+            for nm in M:
+                if sched.page.get(nm) is not None:
+                    continue
+                # the swimmer's crossings with PAGE lanes, each forcing
+                # the layer opposite the page it crosses
+                want = []
+                for om in M:
+                    P = sched.page.get(om)
+                    if om == nm or P is None or not sched.inverted(nm, om):
+                        continue
+                    lo_s = max(self.mid[nm][0][0], self.mid[om][0][0])
+                    hi_s = min(self.mid[nm][-1][0], self.mid[om][-1][0])
+                    if hi_s - lo_s < 0.1:
+                        continue
+                    S = np.arange(lo_s, hi_s, 0.05)
+                    d = np.array([line_o(nm, s) - line_o(om, s) for s in S])
+                    for i in np.where(np.sign(d[:-1]) != np.sign(d[1:]))[0]:
+                        want.append((float(S[i]),
+                                     'B.Cu' if P == 'F.Cu' else 'F.Cu'))
+                if not want:
+                    continue
+                want.sort()
+                seq = ([(self.mid[nm][0][0], self.ctx.tooth_layer[nm])]
+                       + want
+                       + [(self.mid[nm][-1][0], self.ctx.dest_layer[nm])])
+                spots = []
+                for (s_a, L_a), (s_b, L_b) in zip(seq, seq[1:]):
+                    if L_a == L_b or s_b - s_a < 0.1:
+                        continue
+                    got = None
+                    mid_s = (s_a + s_b) / 2
+                    for ds in sorted(np.arange(s_a + 0.05, s_b - 0.049, 0.05),
+                                     key=lambda v: abs(v - mid_s)):
+                        o0 = line_o(nm, ds)
+                        if o0 is None:
+                            continue
+                        for do in (0.0, .15, -.15, .3, -.3, .45, -.45,
+                                   .6, -.6, .9, -.9, 1.2, -1.2):
+                            xy = sp.xy(ds, o0 + do)
+                            if any(two_obs[L].point_violation(xy, pad=pad_r)
+                                   is not None for L in ('F.Cu', 'B.Cu')):
+                                continue
+                            if any(om != nm and (oo := line_o(om, ds))
+                                   is not None and abs(o0 + do - oo) < 0.30
+                                   for om in M):
+                                continue
+                            got = xy
+                            break
+                        if got:
+                            break
+                    if got:
+                        spots.append(got)
+                if spots:
+                    self.hops[nm] = spots
 
     def allowed(self, nm, s, L):
         if any(xa <= s <= xb and RL != L for (xa, xb, RL) in self.req.get(nm, ())):
@@ -1536,8 +1618,14 @@ class Corridor:
         hugging its edge there (K19 SCAS: SA7 0.23 mm off, SWE 0.26)
         leaves no legal via cell when the corner's owner is routed."""
         sp = self.spine
-        return [sp.xy(self.exit_leg_s[om], self.exit_block[om])
-                for om in unrouted if om in self.exit_leg_s]
+        out = [sp.xy(self.exit_leg_s[om], self.exit_block[om])
+               for om in unrouted if om in self.exit_leg_s]
+        # ...plus every unrouted swimmer's RESERVED DIAMONDS (#622
+        # reservation pass): the spots its layer changes will need,
+        # kept clear of everything routed before it
+        for om in unrouted:
+            out.extend(getattr(self, 'hops', {}).get(om, ()))
+        return out
 
     # ------------------------------------------------------------ routing
     def route_lane(self, nm, virt, virt_vias=None):
@@ -1557,9 +1645,20 @@ class Corridor:
         # the A* explored 12k cells and never saw the via diamonds a
         # lane's width away (K11 SDQ15)
         sc = getattr(self, 'sched_cur', None)
-        margin = (SWIM_TUBE + 0.4 if sc is not None
-                  and getattr(sc, 'two_page', False)
-                  and sc.page.get(nm) is None else 0.6)
+        swim = (sc is not None and getattr(sc, 'two_page', False)
+                and sc.page.get(nm) is None)
+        margin = SWIM_TUBE + 0.4 if swim else 0.6
+        # FREE SWIMMERS (#622): route the whole swimmer class the way
+        # the last call routes refusals -- no band, wide window --
+        # from the start. The BAND was the refusal: band-free search
+        # measured 1-2 via paths (K28 SWE 1, SDQ0 2) where the
+        # in-band model wove for more or refused, and the virtual
+        # lines plus reserved diamonds still protect every lane routed
+        # after. Pages stay banded: their rigidity is what makes them
+        # cheap. FREE_SWIM=0 restores the tube.
+        free_swim = swim and os.environ.get('FREE_SWIM', '1') == '1'
+        if free_swim:
+            margin = 2.0
         pieces = os.environ.get('LANE_PIECES') == '1'
         way = [(self.teeth[nm], ctx.tooth_layer[nm])]
         if pieces and nm in self.join_block:
@@ -1576,7 +1675,7 @@ class Corridor:
                 L = 'B.Cu' if L == 'F.Cu' else 'F.Cu'
             way.append((sp.xy(s_l, oa), L))
         way.append((self.stubs[nm], ctx.dest_layer[nm]))
-        band = self.band_of(nm)
+        band = None if free_swim else self.band_of(nm)
         segs_all, vias_all = [], []
         added = 0
         for (a, aL), (b, bL) in zip(way, way[1:]):
@@ -1840,13 +1939,22 @@ class Corridor:
                 for nm in list(still):
                     others = [om for om in still if om != nm]
                     nid, _ = ctx.byname[nm]
-                    res = cn.connect(
-                        ctx.pcb, nid, self.teeth[nm], ctx.tooth_layer[nm],
-                        self.stubs[nm], ctx.dest_layer[nm], ctx.cfg,
-                        band=None, margin=2.0,
-                        virtual=self.virtual_of(others),
-                        window_pts=self.lane_xy[nm],
-                        virtual_vias=self.virtual_vias_of(others))
+                    res = None
+                    # margin escalation: a refused lane whose whole
+                    # BAND is walled (wc SA0: corridor 2's band under
+                    # corridor 1's copper, 5-via detour at 2.0) may
+                    # have a short path just outside the first window
+                    for mg in (2.0, 4.0):
+                        res = cn.connect(
+                            ctx.pcb, nid, self.teeth[nm],
+                            ctx.tooth_layer[nm],
+                            self.stubs[nm], ctx.dest_layer[nm], ctx.cfg,
+                            band=None, margin=mg,
+                            virtual=self.virtual_of(others),
+                            window_pts=self.lane_xy[nm],
+                            virtual_vias=self.virtual_vias_of(others))
+                        if res is not None:
+                            break
                     if res is None:
                         log(f'    last call: {nm} still refused')
                         continue
