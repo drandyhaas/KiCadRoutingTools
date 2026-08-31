@@ -282,11 +282,16 @@ def refresh() -> None:
     # failure disclosure", but it also APPENDS to failed_multipoint, which
     # the reconcile gate reads, so oracle-open nets were retried and the
     # board's copper changed. That made routing depend on whether kicad-cli
-    # is INSTALLED: the cloud image ships no KiCad, so the retry never fired
-    # there and the same commit produced different copper locally vs in the
-    # container -- the lora_v3 failure mode (7 DRC without KiCad, 0 with),
-    # and it silently breaks A/B comparability. Disclosure is fine to make
-    # environment-dependent; copper is not. See issue #675.
+    # is INSTALLED: the cloud image of the day shipped no KiCad, so the retry
+    # never fired there and the same commit produced different copper locally
+    # vs in the container -- the lora_v3 failure mode (7 DRC without KiCad,
+    # 0 with), and it silently breaks A/B comparability. Disclosure is fine to
+    # make environment-dependent; copper is not. See issue #675.
+    #
+    # (The stress image HAS carried KiCad since 2026-08-23 -- `--with-kicad` is
+    # cloud_replay_sets' default. That does not retire the argument, it sharpens
+    # it: the image is now a per-wave CHOICE, so a `--no-kicad` arm and a default
+    # one at the same commit would differ in copper, not just in disclosure.)
     g['ORACLE_SUMMARY'] = _opt_in('KICAD_ORACLE_SUMMARY')
     # #648's third link-source branch (exact-fill -> kicad-cli -> raster).
     # OPT-IN on purpose: a silent fallback would make the oracle run off a

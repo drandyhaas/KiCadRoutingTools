@@ -708,6 +708,25 @@ boards" and "which commit broke connectivity".
   baseline. Six stages, pick with `--only`: `plan` (prices it, spends nothing) /
   `upload` / `run` / `harvest` / `baseline` / `compare`.
 
+  **The image carries KiCad by default (since 2026-08-23).** `--with-kicad` is
+  the default and builds on `kicad/kicad:10.0.0`, so the **oracle legs actually
+  run**. `--no-kicad` builds `debian_slim` instead, and there every oracle leg
+  is **DEAD, not degraded** -- `oracle_reconnect` returns `available=False` the
+  moment `find_kicad_cli()` is None -- so a change acting through the finalize
+  audit, the plane/oracle recheck or #589 measures as exactly zero on such a
+  wave. Prefer the default unless you are deliberately reproducing an old one.
+
+  A KiCad wave suffixes its label `-kc`, because the results volume RESUMES by
+  arm name and arm = label + sha: two waves at the same commit differing only by
+  the image would otherwise share rows, which is precisely the
+  "the baseline was not the baseline" failure `arm_name()` exists to prevent.
+
+  Note the crate is built IN the image. When `rust_router/Cargo.toml` is ahead
+  of the latest release tag (i.e. a crate bump whose binaries are not published
+  yet) `build_router.py` skips the prebuilt and compiles from source -- rustup
+  is installed for exactly this, at the cost of a ~10 min cold build that Modal
+  then caches.
+
   ```bash
   # where does HEAD stand vs the recorded runs, sets 10-19?
   python3 tests/stress/cloud_replay_sets.py --sets set10-set19
@@ -745,8 +764,9 @@ boards" and "which commit broke connectivity".
   regrade drops (`arm`, `steps`, `rescue_steps`, `patched_defaults`) — feed
   rank_arms the regraded rows alone and you silently disable its arm
   identification, its chain-identity guard and its rescue cell at once. Rows
-  the regrade could not re-score (cloud-graded, so no kicad-cli `drc_real`)
-  are dropped rather than paired against locally-graded rows, per rule 2.
+  the regrade could not re-score are dropped rather than paired against
+  locally-graded rows, per rule 2 (waves banked before 2026-08-23, or launched
+  `--no-kicad`, carry no `drc_real` at all).
 
   **Launch the arms at ONE commit and do not commit in between.** The image is
   `git archive HEAD`, so a commit landing between two launches makes the arms
@@ -761,11 +781,20 @@ boards" and "which commit broke connectivity".
    wave did, so diffing against it mixes a different PLAN in with the engine
    delta. `--baseline recorded` (the default) compares like with like; preflight
    refuses a wave whose chains disagree.
-2. **Grade both sides on the same terms.** The cloud image ships no KiCad, so
-   `drc_real` falls back to raw DRC and connectivity uses the raster fill model.
-   Comparing a cloud row against a locally-graded baseline measures the GRADER:
-   it once reported "DRC +40 worse" when the truth was "-37 better". Harvest
+2. **Grade both sides on the same terms.** Comparing a row graded one way
+   against a baseline graded another measures the GRADER, not the engine: it
+   once reported "DRC +40 worse" when the truth was "-37 better". Harvest
    re-grades the kept boards locally by default (`--no-local-regrade` opts out).
+
+   **Keep that default even though the cloud now HAS KiCad.** Since 2026-08-23
+   `--with-kicad` is the default (`kicad/kicad:10.0.0`), so the containers do
+   have `kicad-cli` and their `drc_real` is genuine rather than a raw-DRC
+   fallback. The rule survives anyway, because its reason changed rather than
+   disappeared: the BASELINE is the recorded runs graded on YOUR machine, so the
+   arm has to be graded there too. Same-terms is the invariant; which grader is
+   incidental. (A wave built `--no-kicad` is a different matter -- see the
+   image note under `cloud_replay_sets.py` -- and its rows carry no `drc_real`
+   at all.)
 3. **Compare arms only on boards that replayed an IDENTICAL chain** — same step
    count and same final board. A short chain grades artificially WELL, because
    nets its missing steps never attempted are not counted as incomplete.

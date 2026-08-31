@@ -932,9 +932,11 @@ def main():
                          "commit (`modal volume ls kicad-sweep-results /` lists them).")
     ap.add_argument("--stress-dir", default=str(DEFAULT_STRESS))
     ap.add_argument("--no-local-regrade", action="store_true",
-                    help="do NOT re-grade harvested boards locally. The cloud has no "
-                         "kicad-cli, so its drc_real falls back to raw DRC; leaving that "
-                         "un-regraded compares graders, not engines.")
+                    help="do NOT re-grade harvested boards locally. The BASELINE is "
+                         "the recorded runs graded on this machine, so an arm graded "
+                         "anywhere else compares graders, not engines -- true even now "
+                         "that the image carries kicad-cli (default since 2026-08-23) "
+                         "and its drc_real is genuine.")
     ap.add_argument("--env", action="append", default=[], metavar="K=V",
                     help="KICAD_* knob for this arm, repeatable. Rides the arm spec "
                          "(containers do not inherit this shell's environment).")
