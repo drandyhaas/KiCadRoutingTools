@@ -80,6 +80,29 @@ while i < n:
     name = txt[i + 1:j]
     depth = len(stack)
     parent = stack[-1] if stack else None
+    if (depth == 3 and name == 'at' and parent == 'pad'
+            and len(stack) >= 2 and stack[-2] == 'footprint'):
+        # A pad's stored angle is ABSOLUTE (the footprint's angle is
+        # included -- the same convention as ref_label). Rotating the
+        # footprint's placement angle without touching these leaves
+        # every rectangular pad's stored ORIENTATION stale: the pad
+        # centres verify (position is local + fp angle) while the
+        # rectangle does not, and the obstacle models then price 0402
+        # cap pads ~30 um thin on one axis -- the rotated-bench-only
+        # cap-graze DRC class (9/22/17 at 90/180/270, found 0831).
+        # Local x y are kept verbatim; only the angle turns.
+        k = txt.index(')', j)
+        parts = txt[j:k].split()
+        try:
+            nums = [float(v) for v in parts]
+        except ValueError:
+            nums = None
+        if nums and len(nums) >= 2:
+            a0 = nums[2] if len(nums) > 2 else 0.0
+            out.append(f'({name} {parts[0]} {parts[1]} '
+                       f'{(a0 - deg) % 360:g})')
+            i = k + 1
+            continue
     # A point is global only at level 2 whose parent is a top-level item
     # that is NOT a footprint, plus the footprint's own placement `at`.
     is_global = (
@@ -145,6 +168,16 @@ for ref, f0 in pcb0.footprints.items():
             bad.append(f'pad {ref}.{p0.pad_number} '
                        f'{rot(p0.global_x, p0.global_y)} != '
                        f'({p1.global_x:.3f},{p1.global_y:.3f})')
+        # the rectangle must turn WITH the board, not just its centre
+        # -- centres alone let the stale-pad-angle bug through
+        if deg % 90 == 0:
+            exp = ((p0.size_y, p0.size_x) if deg % 180 == 90
+                   else (p0.size_x, p0.size_y))
+            if (abs(exp[0] - p1.size_x) > 1e-3
+                    or abs(exp[1] - p1.size_y) > 1e-3):
+                bad.append(f'pad {ref}.{p0.pad_number} extents '
+                           f'({p1.size_x:.3f},{p1.size_y:.3f}) != '
+                           f'rotated ({exp[0]:.3f},{exp[1]:.3f})')
 for a, b, what in ((pcb0.segments, pcb1.segments, 'segment'),
                    (pcb0.vias, pcb1.vias, 'via')):
     if len(a) != len(b):
