@@ -932,11 +932,12 @@ def main():
                          "commit (`modal volume ls kicad-sweep-results /` lists them).")
     ap.add_argument("--stress-dir", default=str(DEFAULT_STRESS))
     ap.add_argument("--no-local-regrade", action="store_true",
-                    help="do NOT re-grade harvested boards locally. The BASELINE is "
-                         "the recorded runs graded on this machine, so an arm graded "
-                         "anywhere else compares graders, not engines -- true even now "
-                         "that the image carries kicad-cli (default since 2026-08-23) "
-                         "and its drc_real is genuine.")
+                    help="do NOT re-grade harvested boards locally. SAFE on a KiCad "
+                         "image (the default since 2026-08-23): the containers run the "
+                         "same kicad-cli grader this machine does and the two were "
+                         "checked to agree, so cloud grading is not a different grader. "
+                         "Do NOT use it on a --no-kicad wave or one banked before that "
+                         "date -- those rows have no real drc_real to compare.")
     ap.add_argument("--env", action="append", default=[], metavar="K=V",
                     help="KICAD_* knob for this arm, repeatable. Rides the arm spec "
                          "(containers do not inherit this shell's environment).")

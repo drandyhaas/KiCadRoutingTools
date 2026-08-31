@@ -786,15 +786,19 @@ boards" and "which commit broke connectivity".
    once reported "DRC +40 worse" when the truth was "-37 better". Harvest
    re-grades the kept boards locally by default (`--no-local-regrade` opts out).
 
-   **Keep that default even though the cloud now HAS KiCad.** Since 2026-08-23
-   `--with-kicad` is the default (`kicad/kicad:10.0.0`), so the containers do
-   have `kicad-cli` and their `drc_real` is genuine rather than a raw-DRC
-   fallback. The rule survives anyway, because its reason changed rather than
-   disappeared: the BASELINE is the recorded runs graded on YOUR machine, so the
-   arm has to be graded there too. Same-terms is the invariant; which grader is
-   incidental. (A wave built `--no-kicad` is a different matter -- see the
-   image note under `cloud_replay_sets.py` -- and its rows carry no `drc_real`
-   at all.)
+   **On a KiCad image you can grade in the cloud and skip the regrade.** Since
+   2026-08-23 `--with-kicad` is the default (`kicad/kicad:10.0.0`), so the
+   containers run the SAME `kicad-cli` grader your machine does, and the two
+   have been checked to agree (drandyhaas, 2026-08-31). `--no-local-regrade` is
+   therefore the faster path on such a wave, and it does not violate this rule:
+   the rule is same-TERMS, and same terms is exactly what a shared grader gives.
+
+   What the rule still forbids is mixing GRADERS, and that is what the "+40
+   worse / -37 better" incident actually was -- a wave whose `drc_real` had
+   fallen back to raw DRC, paired against a kicad-cli baseline. So the regrade
+   remains mandatory for a wave banked before 2026-08-23 or launched
+   `--no-kicad`: those rows carry no `drc_real` at all, and nothing about a
+   shared grader applies to them.
 3. **Compare arms only on boards that replayed an IDENTICAL chain** — same step
    count and same final board. A short chain grades artificially WELL, because
    nets its missing steps never attempted are not counted as incomplete.
