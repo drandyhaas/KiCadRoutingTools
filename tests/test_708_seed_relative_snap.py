@@ -27,24 +27,26 @@ Both are properties of the mechanism rather than of a board, which is why they
 are asserted on an imperial board, a metric-fine one, and one with no
 inferable lattice at all.
 
-MEASURED, `tests/mutate_708.py`, third run: 15 rows, 14 killed, 1 survived
-(expected), 0 broken. The table, from the run:
+MEASURED, `tests/mutate_708.py`, sixth run: 17 rows, 16 killed, 1
+survived (expected), 0 broken. The table, from the run:
 
-    the-tie-break-takes-the-argmax                  SURVIVED  (expected)
-    the-tie-break-takes-the-coarsest                KILLED   6
-    the-min-parts-gate-is-dropped                   KILLED   7
-    the-occupancy-floor-is-dropped                  KILLED   4
-    the-floor-returns-to-the-round-0.70             KILLED   2
-    the-tolerance-becomes-relative-to-the-step      KILLED   3
-    the-sample-drops-one-axis                       KILLED   3
-    the-candidate-snap-goes-back-to-absolute        KILLED  10
-    the-offset-snaps-to-the-raster-not-the-lattice  KILLED   5
-    the-radius-test-goes-back-before-the-snap       KILLED   2
-    the-lattice-is-never-resolved                   KILLED   5
-    the-group-probe-goes-back-to-the-absolute-pose  KILLED   2
-    the-group-offset-snaps-the-absolute-pose        KILLED   3
-    the-fanout-snap-goes-back-to-absolute           KILLED   4
-    the-reseat-slot-snaps-the-absolute-point        KILLED   3
+    the-tie-break-takes-the-argmax                 SURVIVED 0
+    the-tie-break-takes-the-coarsest               KILLED   6
+    the-min-parts-gate-is-dropped                  KILLED   7
+    the-occupancy-floor-is-dropped                 KILLED   4
+    the-floor-returns-to-the-round-0.70            KILLED   2
+    the-tolerance-becomes-relative-to-the-step     KILLED   3
+    the-sample-drops-one-axis                      KILLED   4
+    the-candidate-snap-goes-back-to-absolute       KILLED   10
+    the-offset-snaps-to-the-raster-not-the-lattice KILLED   6
+    the-radius-test-goes-back-before-the-snap      KILLED   2
+    the-lattice-is-never-resolved                  KILLED   6
+    the-group-probe-goes-back-to-the-absolute-pose KILLED   2
+    the-group-offset-snaps-the-absolute-pose       KILLED   3
+    the-fanout-snap-goes-back-to-absolute          KILLED   4
+    the-reseat-accepts-on-the-prediction           KILLED   6
+    the-reseat-dedup-key-is-not-injective          KILLED   2
+    the-reseat-slot-snaps-the-absolute-point       KILLED   7
 
 The first run killed only 9 of 15. Five of its six survivors were holes in
 THESE arms rather than in the engine: an assertion at `step=1.0` where the
