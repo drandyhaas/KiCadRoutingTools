@@ -137,20 +137,27 @@ source, suspect, suspect_reason
 | `keepouts[]` | `name`, `rect`, `circle`, `sides`, `allow`, `note`, `context` |
 | `edge_connectors[]` | `ref`, `edge`, `overhang_mm`, `max_setback_mm`, `class`, `note`, `context`, and the emitter-written `source`, `suspect`, `suspect_reason`, `overhang_capped`, `observed_overhang_mm` |
 | `edge_connectors[].overhang_mm` | `min`, `max` |
-| `decaps` | `max_distance_mm`, `exempt`, `search_radius_mm` |
+| `decaps` | `max_distance_mm`, `exempt`, `search_radius_mm`, `max_pin_distance_mm`, `pin_functions`, `same_side` |
 | `legality_budget` | `overlap_area`, `oob_count`, `oob_amount` (`oob_area` refused — see below) |
 | `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids` |
 | `health.bus_corridors[]` | `name`, `nets`, `width_mm` |
-| `severity` | any of the 14 rule names below |
+| `severity` | any of the 18 rule names below |
 | `overlap_waivers[]` | `pair`, `reason`, `context` |
 | `must_lock` | a list of reference globs (no nested keys) |
 
-`severity` keys are checked too. The settable names are the nine rules —
+`severity` keys are checked too. The settable names are the eleven rules —
 `envelope`, `zone_containment`, `zone_side`, `zone_exclusive`, `keepout`,
-`edge_connector`, `decap_distance`, `must_lock`, `legality` — plus the five
-findings raised outside the rule loop: `intent_zone_outside_envelope`,
-`intent_zone_overlap`, `block_unresolved`, `intent_zone_in_keepout`,
-`keepout_allow_unresolved`. All but the last default to **error**;
+`edge_connector`, `decap_distance`, `decap_ungraded`, `decap_pin_distance`,
+`must_lock`, `legality` — plus the five findings raised outside the rule
+loop: `intent_zone_outside_envelope`, `intent_zone_overlap`,
+`block_unresolved`, `intent_zone_in_keepout`, `keepout_allow_unresolved`,
+plus two more that `rule_decap_pin_distance` raises BESIDE its own name —
+`decap_pin_distance_inferred` and `decap_pin_uncovered` (#705). One
+measurement can support several claims, and an author must be able to set
+their severities apart: a pin inferred from a net name and a pin the pad
+declares are not the same evidence. `decap_ungraded`,
+`decap_pin_distance_inferred` and `decap_pin_uncovered` default to
+**warn**; all but those and the last of the five default to **error**;
 `keepout_allow_unresolved` defaults to **warn** and is upgraded by writing
 `{"keepout_allow_unresolved": "error"}`.
 `{"decap_distanc": "warn"}` is a
@@ -279,7 +286,11 @@ for it, and the reason is printed:
 | `zone_exclusive` | a non-member intrudes on a reserved zone | `rect_overlap_area`. **Enforced since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702)**, same way |
 | `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect. **Enforced, not only graded, since [#701](https://github.com/drandyhaas/KiCadRoutingTools/issues/701)** — the seat search refuses such a pose through the same `keepout_hit` this rule calls — and since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702) the quench refuses such a MOVE through it too |
 | `edge_connector` | overhang outside `[min,max]`, or the wrong edge; a `connector_affinity` entry seated more than 3 mm from every edge fires at **warn** whatever the configured severity | `BoardOutlineGate.rect_outside_amount`, `edge_clearance` |
-| `decap_distance` | a decoupling cap is too far from its own IC | `groups.decap_tethers` |
+| `decap_distance` | a decoupling cap is too far from its own IC | `groups.decap_populations` (`near`) |
+| `decap_ungraded` | a cap in scope lies BEYOND the tether search radius, so `decap_distance` never measured it against the declared limit — a claim about COVERAGE, not compliance. **warn** by default ([#794](https://github.com/drandyhaas/KiCadRoutingTools/issues/794)) | `groups.decap_populations` (`beyond`) |
+| `decap_pin_distance` | a DECLARED supply pin is further than `max_pin_distance_mm` from the nearest decoupling cap on its own rail, pad edge to pad edge ([#705](https://github.com/drandyhaas/KiCadRoutingTools/issues/705)) | `floorplan.supply_pins`, `legality.pad_rect` + `rect_gap` |
+| `decap_pin_distance_inferred` | the same measurement for a pin inferred from a net NAME rather than from a `pintype` or `pinfunction`. **warn** by default, because the pin set is the inference | same |
+| `decap_pin_uncovered` | a declared supply pin's rail carries no decoupling cap at all, anywhere. A design fact, not a placement failure, so **warn** and per (IC, rail) rather than per pin | same |
 | `must_lock` | a declared-critical part is not locked in the file | `parser.extract_locked_refs` |
 | `legality` | overlap or off-board parts exceed a budget | `QuenchState.legality_metrics` |
 | `block_unresolved` | a block matched no footprint | — |
@@ -290,8 +301,11 @@ for it, and the reason is printed:
 Every one of them measures with the geometry the **optimizer itself gates on**.
 A grader with its own idea of what "legal" means grades the reimplementation
 rather than the board — so where re-deriving was plausible, a test asserts the
-two agree exactly (all 34 of ulx3s's cap distances identical to the grouper's,
-all five legality numbers identical to the quench's).
+two agree exactly (all 39 of ulx3s's NON-ZERO cap distances identical to
+the grouper's — of 53 tethers; the other 14 clamp to 0 inside their IC's
+bounding box and a 0 mm limit does not flag them — and all five legality
+numbers identical to the quench's). The count read **34** here until #705
+re-derived it; the test never asserted a number, so nothing caught it.
 
 ### Which rules the SEARCH can see
 
@@ -320,6 +334,7 @@ reports the whole picture in `accept_basis`.
 | `edge_connector` | yes | anchor tier | **by freezing** | two of its three sub-claims are bounds on being *off* the board, so a per-pose term would fight the containment gate rather than complement it |
 | `zone_side` | yes | — | no | **vacuous, not conservative**: the quench never flips a side, so the term is invariant under every move it can make. Reported once at load instead |
 | `envelope` | yes | — | no | a claim about the intent FILE against the board, not about any pose |
+| `decap_ungraded`, `decap_pin_*` | yes | — | no | `decap_ungraded` is a claim about what the GRADE covers rather than about any pose, so there is nothing for a search to refuse. The pin rules are a THIRD currency — pad edge to pad edge on one net — and the objection below applies to them more strongly, not less |
 | `decap_distance` | yes | scope stage | no | graded in a currency the optimizer does not carry — pad centroid to an IC's pad bbox inflated 0.5 mm, not courtyard to courtyard. A gate in the wrong currency can *admit what the grade flags*, which is worse than no gate. And the cap→IC tether is re-elected from live poses, so a per-move form would have the `corridor_weight` non-stationarity problem too |
 | `legality` | yes | — | no | a whole-board aggregate against a BUDGET, so a per-pose form is non-local: whether A's move is admissible would depend on B's violation |
 
