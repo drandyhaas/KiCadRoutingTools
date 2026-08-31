@@ -1316,6 +1316,26 @@ pitch understated supply a 0.025 mm pass could reach), and remember the ledger
 does not model **supply taps** — a via field feeding the part eats lanes exactly
 like signals do, so subtract those by hand before trusting a marginal pass.
 
+**Then read `deficit_floor` (#700), and read it as a floor.** Beside the
+own-layer `deficit` the ledger reports what the other signal layers could take,
+bounded by the via slots along the face. `deficit_floor > 0` means the face is
+short *even using every other layer* — a strictly stronger verdict than
+`deficit > 0`, and the one worth acting on. **`deficit_floor == 0` proves
+nothing**: it is a lower bound, not a clean bill, and nothing gates on it.
+
+Two fields to check before believing it:
+
+- **`signal_layers_source`.** A board being placed has no pours yet, so the
+  ledger falls back to counting every copper layer, which is optimistic.
+  Declare `plane_layers` under `health` in the intent for the real number.
+- **`supply_bound`.** It is almost always `via_slots`, and that is the finding
+  rather than a defect: the via row along the face fills before the layer count
+  binds, so **more layers will not help that face**. The action is via geometry,
+  underpad fanout, or freeing span — not a stackup change.
+  `check_capacity.py --only add_layers` says the same thing at board scale, and
+  says "structurally blind" when the fab table cannot tell two layer counts
+  apart at all.
+
 
 
 ---

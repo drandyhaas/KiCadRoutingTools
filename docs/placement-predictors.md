@@ -114,7 +114,7 @@ direction on ≥ N−1 boards, wrong direction on none, over the boards that
 produced a *defined* ρ. Spearman is computed **within each board** and never
 pooled.
 
-### Three things this says that the repo did not know
+### Four things this says that the repo did not know
 
 **1. The off-outline channel ranks `blocking` on 6 of 6 boards, and the number
 that REFUSES is a different census of it.** `pad_copper` ranks positively on
@@ -166,6 +166,74 @@ crossings went with *less* blocking on one of six boards, and sonde_u is
 indistinguishable from zero. Its median of +0.515 is the highest of any failing
 predictor -- it is not useless, it is inconsistent, and the sign rule is about
 consistency.
+
+**4. A demand-derived halo does not reach the parts that eat lanes.** Issue
+#700's third suggestion was to scale the quench's whitespace halo by a part's
+escape demand instead of its pin count, divided by the copper layer count. It
+is not implemented, and this is the measurement rather than a preference:
+`tests/stress/demand_halo_study.py` re-derives every number below.
+
+*It reaches no blocker the shipped halo does not already charge.* The escape
+ledger NAMES the parts eating a face in deficit. Across six boards there are
+219 such (face, blocker) pairs, and **205 of them (93.6%) already sit inside
+`halo_a + halo_b`** at the A/B harness's own coefficients -- the OFF arm
+already repels them. Of the 14 it does not charge, the demand term fires on
+**0 of the 26 parts involved**. Its whole mechanism is a larger quadratic on
+repulsions that already exist, which is the mode
+`docs/placement-optimization.md` records as scattering the layout.
+
+| board | named blockers | already charged |
+|---|---|---|
+| rp2350_fpga_eensy_prePlane | 71 | 67 (94.4%) |
+| orangecrab_ext_pll | 86 | 79 (91.9%) |
+| ulx3s | 10 | 9 (90.0%) |
+| watchy | 15 | 13 (86.7%) |
+| glasgow_revC | 18 | 18 (100%) |
+| tigard | 19 | 19 (100%) |
+| **total** | **219** | **205 (93.6%)** |
+
+*And it fires where the grader is blind.* The only independent escape
+instrument the placement A/B has is `health_escape_deficit_parts` /
+`health_escape_worst_deficit`. The two boards where the term is largest report
+**zero** escape deficit; the board with the worst deficit on the corpus is the
+one board where the term is exactly inert, so its two arms would be identical:
+
+| board | deficit parts / worst | term fires on | largest ask |
+|---|---|---|---|
+| kit-dev-coldfire | 0 / 0 | 88 of 160 (55%) | **18.15 mm** (U301) |
+| esp_prog | 0 / 0 | 3 of 16 (19%) | 2.48 mm (U1) |
+| rp2350_fpga_eensy_prePlane | 9 / **14** | **0 of 61** | -- |
+| orangecrab_ext_pll | 21 / 10 | 2 of 154 (1%) | 1.38 mm (J2) |
+| ulx3s | 4 / 8 | 6 of 226 (3%) | 3.03 mm (U2) |
+| glasgow_revC | 14 / 3 | 1 of 257 (0%) | 1.50 mm (J5) |
+| tigard | 8 / 3 | 4 of 85 (5%) | 1.51 mm (U5) |
+
+U301 is the 144-pin Xilinx that `docs/placement-optimization.md` already
+records as unable to satisfy a 6.5 mm halo on a dense board. This term asks it
+for 18.15 mm.
+
+Three things were already on record and point the same way: the formula is
+written down verbatim in the placement skill's corridor law, layer divisor
+included, and recorded there as "almost never binding" (0.4-1.6 mm against gaps
+of 2.9-9.8 mm); the `halo` predictor fails in the table above; and
+`corridor_weight`, which computes that same quantity properly at net level
+rather than from pad counts, went through `test_placement_ab.py` and all three
+of its rows are marked `rejected`.
+
+*The gate it would have to pass cannot be run on this corpus.* `CLAUDE.md`
+requires a new objective term to improve on at least 3 distinct boards. Of the
+four in `ROWS`, rp2350 produces bit-identical arms and kit-dev-coldfire's
+signal is already at floor 0 -- and no in-repo 2-layer board can carry a row at
+all (`esp_prog` has one fine-pitch part at deficit 0, `splitflap_driver` has
+none so its verdict is `skip` and it does not count toward N,
+`qfn_diffpair_escape` has one part and therefore no pairs). A term whose entire
+claim is layer dependence is untestable on the corpus that must approve it.
+
+*What the evidence does point at.* `routability.health` already emits
+`escape_blockers` -- it names WHO to move. The 14 uncharged pairs miss their
+requirement by 0.001 to 0.56 mm. A per-ref halo override driven by that list is
+a targeted lever this measurement supports; a global pin-count-and-layer
+formula is not. Filed, not built.
 
 ## The circularity control changed the answer for `crossings`
 

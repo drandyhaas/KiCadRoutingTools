@@ -174,7 +174,13 @@ for how they fit together.
 
 - **`fab_tiers`** — JLCPCB fab-capability floors as selectable cost tiers
   (issue #237). `fab_floor_ladder` / `fab_floors` / `fab_floor_for_param` give
-  the minimum manufacturable value per parameter for a tier;
+  the minimum manufacturable value per parameter for a tier; `fab_floor_bucket`
+  reports WHICH layer bucket a floor came from, so a consumer comparing two
+  layer counts can tell "the floor does not move" from "this table cannot see
+  the difference" (#700); `count_copper_layers_in_file` /
+  `count_copper_layers_in_data` count copper layers from a path or from a
+  parsed board; `min_via_center_distance` is the one #491 via-pitch rule
+  (copper AND drill);
   `enforce_fab_floors` / `check_param_floors` clamp or reject below-floor
   params; `add_fab_tier_args` + `fab_tier_from_args` /
   `set_fab_tier_from_config` thread the tier through the CLI and GUI;
