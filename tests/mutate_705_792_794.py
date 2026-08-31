@@ -241,13 +241,22 @@ ROWS = [
      "            for ref in []:\n",
      (T792S,), 'KILLED'),
 
+    # RE-ANCHORED. The review's copper-pad fix moved the collinearity test out
+    # of `chip_refs` into the shared `_chip_list`, and this row reported BROKEN
+    # rather than quietly becoming a survivor -- which is exactly why a
+    # non-matching anchor is a hard error in this harness and not a skip.
     ('the-owner-test-drops-the-collinear-guard', 'grp',
-     "    return {c.reference\n"
-     "            for c in build_chip_list(pcb_data, min_pads=DECAP_MIN_IC_PADS)\n"
-     "            if not _pads_are_collinear(pcb_data.footprints.get(c.reference))}\n",
-     "    return {c.reference\n"
-     "            for c in build_chip_list(pcb_data, min_pads=DECAP_MIN_IC_PADS)}\n",
+     "            if not _pads_are_collinear(pcb_data.footprints.get(c.reference))\n"
+     "            and _copper_pads(pcb_data.footprints.get(c.reference))\n",
+     "            if _copper_pads(pcb_data.footprints.get(c.reference))\n",
      (T792S, T792P), 'KILLED'),
+
+    # The gate the review added, given its own row so it cannot rot either.
+    ('the-owner-test-drops-the-copper-pad-gate', 'grp',
+     "            and _copper_pads(pcb_data.footprints.get(c.reference))\n"
+     "            >= DECAP_MIN_IC_PADS]\n",
+     "            ]\n",
+     (T792P,), 'KILLED'),
 ]
 
 
