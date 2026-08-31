@@ -139,7 +139,8 @@ _DEFAULTS_KEYS = {'zone_tolerance_mm'}
 #: may also set the ids directly. Both are accepted for that reason.
 _HEALTH_KEYS = {'bus_corridors', 'classes', 'zoned_blocks',
                 'affinity_exempt_nets', 'affinity_exempt_net_ids',
-                'ignore_net_ids', 'max_fanout', 'block_displacement_mm'}
+                'ignore_net_ids', 'max_fanout', 'block_displacement_mm',
+                'plane_layers'}
 _CORRIDOR_KEYS = {'name', 'nets', 'width_mm'}
 _BUDGET_KEYS = {'overlap_area', 'oob_count', 'oob_amount'}
 _WAIVER_KEYS = {'pair', 'reason', 'context'}
@@ -2903,6 +2904,18 @@ def format_text(r: GradeResult) -> str:
                         f"        {w['blocked_mm']}mm of that face is taken by "
                         f"{', '.join(w['blockers'][:3])} -- move those, not "
                         f"the nets: ordering only chooses WHICH nets strand")
+                # #700: printed ONLY when the face is short even after every
+                # other signal layer is counted. `deficit_floor == 0` proves
+                # nothing -- it is a lower bound -- so emitting it there would
+                # read as an all-clear on the line under a real deficit.
+                if w.get('deficit_floor'):
+                    lines.append(
+                        f"        still short {w['deficit_floor']} with "
+                        f"{p.get('signal_layers')} signal layer(s) "
+                        f"({p.get('signal_layers_source')}), bounded by "
+                        f"{w.get('supply_bound')}"
+                        + (f" -- {w['via_slots']} via slot(s) along the face"
+                           if w.get('supply_bound') == 'via_slots' else ''))
                 if p.get('interior_pads'):
                     lines.append(
                         f"        {p['interior_pads']} interior pad(s) escape "

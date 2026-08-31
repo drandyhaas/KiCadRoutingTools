@@ -25,12 +25,21 @@ import it without pulling in the PCB parser. ``list_nets`` re-exports the public
 so ``from list_nets import fab_floors`` keeps working.
 """
 
+import collections
 import os
 import re
 
 # Flat floor keys every tier dict carries. Also the set an override file may set.
 FLOOR_KEYS = ('clearance', 'track_width', 'via_diameter', 'via_drill',
               'hole_to_hole', 'pad_hole_to_hole', 'annular', 'board_edge')
+
+# Which layer BUCKET a floor came from -- see fab_floor_bucket. Deliberately a
+# separate object from the floor dict: a floor and its provenance must not be
+# confusable, and FLOOR_KEYS is a written-out public contract.
+FabBucket = collections.namedtuple(
+    'FabBucket',
+    ('bucket', 'requested', 'bucketed', 'saturated', 'buckets',
+     'fine_via_rung'))
 
 # _FAB_FLOORS[layer_count][tier] -> flat floor dict. Layer count is bucketed to
 # 2 (1-2 layer) vs 4 (multilayer). 'standard' preserves the historical floors so a
@@ -94,8 +103,84 @@ def get_default_fab_tier():
     return (_DEFAULT_TIER, dict(_DEFAULT_OVERRIDES))
 
 
+def _layer_bucket(copper_layer_count):
+    """The ``_FAB_FLOORS`` key a copper-layer count resolves to.
+
+    THE ONE statement of the bucketing rule, so the bucket
+    ``fab_floor_bucket`` reports can never disagree with the floor
+    ``_layer_floors`` returns. Derived from the table's own keys rather than
+    restating 2/4, so adding a rung to ``_FAB_FLOORS`` re-buckets by itself
+    instead of needing a second edit somebody has to remember.
+
+    Byte-identical to the ``(n or 2) <= 2`` rule it replaces for the keys the
+    table actually has: 1->2, 2->2, 3->4, 4->4, 6->4, 8->4. Pinned by
+    ``tests/test_768_cap_clearance_ceiling.py:580-591``, which must keep
+    passing unmodified.
+    """
+    n = copper_layer_count or 2
+    keys = sorted(_FAB_FLOORS)
+    return next((k for k in keys if n <= k), keys[-1])
+
+
 def _layer_floors(copper_layer_count):
-    return _FAB_FLOORS[2] if (copper_layer_count or 2) <= 2 else _FAB_FLOORS[4]
+    return _FAB_FLOORS[_layer_bucket(copper_layer_count)]
+
+
+def fab_floor_bucket(copper_layer_count):
+    """WHICH layer bucket a count lands in -- the provenance the floor dict
+    deliberately does not carry.
+
+    ``fab_floor_min(4)``, ``(6)`` and ``(8)`` return byte-identical dicts,
+    because ``_FAB_FLOORS`` has exactly two rungs. That is a MODELLING LIMIT,
+    not a fab fact: JLC publishes one multilayer capability column (see the
+    module docstring's source line) and this module does not invent the rest.
+
+    A consumer that COMPARES two layer counts cannot otherwise tell "the floor
+    genuinely does not move" from "this table cannot see the difference", and
+    `placement.options.add_layers` -- the only such consumer -- printed the
+    first while meaning the second on every board above 2 copper layers. On a
+    6-layer board 121 escape lanes short it said "more layers buy NO extra
+    lanes on a face" (issue #700).
+
+    A SEPARATE FUNCTION, not a key on the floor dict: the floor dicts contain
+    exactly ``FLOOR_KEYS`` and are written out as-is --
+    ``list_nets.effective_floors`` returns one under ``'fab'`` and
+    ``read_design_rules`` embeds that whole structure as a documented public
+    return -- so a key added there silently joins that contract. Several
+    consumers also index the dict directly.
+
+    TAKES ONE ARGUMENT ON PURPOSE. No ``tier``, no ``overrides``: an override
+    file must not be able to forge provenance, and giving it no channel is the
+    only way to guarantee that rather than promise it. (``fab_floor_ladder``
+    can today only REPLACE keys already present, but "cannot today" and
+    "cannot by construction" are different guarantees.)
+
+    Returns a ``FabBucket`` -- a NamedTuple rather than a dict so a mistyped
+    field raises instead of returning ``None``, which is the silent-default
+    failure this whole function exists to end (see ``options.deficit_totals``
+    for the one that cost "38 faces are short" -> "0").
+
+        bucket        int    the ``_FAB_FLOORS`` key used (2 or 4 today)
+        requested     int    the count asked for, after the ``or 2`` default
+        bucketed      bool   requested != bucket: the floor is a PROXY
+        saturated     bool   bucket is the table's LAST, so every higher layer
+                             count returns this identical floor
+        buckets       tuple  every bucket the table models, ascending
+        fine_via_rung bool   whether the STANDARD ladder carries its 0.30/0.15
+                             intermediate via rung at this count -- the one
+                             other layer-count branch in this module. Derived
+                             by asking ``fab_floor_ladder`` rather than
+                             restating its condition, and pinned to the
+                             standard tier with no overrides, which is what the
+                             one-argument signature buys. Read
+                             ``len(fab_floor_ladder(n))`` for the ACTIVE ladder.
+    """
+    n = copper_layer_count or 2
+    keys = tuple(sorted(_FAB_FLOORS))
+    bucket = _layer_bucket(n)
+    return FabBucket(bucket=bucket, requested=n, bucketed=(n != bucket),
+                     saturated=(bucket == keys[-1]), buckets=keys,
+                     fine_via_rung=len(fab_floor_ladder(n, 'standard')) > 2)
 
 
 def fab_floor_ladder(copper_layer_count, tier=None, overrides=None):
@@ -195,11 +280,91 @@ def fab_floor_for_param(param_name, copper_layer_count, tier=None, overrides=Non
 def count_copper_layers_in_file(pcb_path):
     """Count copper layers in a .kicad_pcb (matches `(0 "F.Cu" signal)`-style layer
     defs, not pad layer lists). Returns 0 on any read error. Stdlib-only."""
+    # `None` is the in-memory case, and it is the one this counter exists to
+    # hand over to `count_copper_layers_in_data` -- a live GUI board has
+    # `source_path is None`, not `''`. Without this it raised TypeError out of
+    # `open`, which `placement.options.capacity_options` reports as INTERNAL
+    # ERROR, a channel reserved for genuine crashes. Worse than the skip it
+    # replaced.
+    if not pcb_path:
+        return 0
     try:
         with open(pcb_path, encoding='utf-8') as f:
             return len(re.findall(r'\(\d+\s+"[^"]*\.Cu"', f.read())) or 0
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return 0
+
+
+def count_copper_layers_in_data(pcb_data):
+    """Copper layers on an IN-MEMORY board -- the twin of
+    ``count_copper_layers_in_file``.
+
+    The file twin returns 0 for a live GUI board whose ``board_info.copper_layers``
+    is perfectly good, which is why ``placement.options.add_layers`` skipped
+    entirely on one ("could not count this board's copper layers") and why
+    ``fanout_clearance.resolve_drill_floors`` says so in its own docstring.
+
+    Returns 0 when the list is missing or empty -- the SAME "I could not look"
+    value its file twin returns, and deliberately NOT a 2-or-4 guess. The
+    ~25 sites that open-code this expression each spell their own fallback and
+    they DISAGREE (``or 2`` in check_drc and fanout_clearance, ``or 4`` and
+    ``else 2`` in the fanouts), so folding them into one helper would silently
+    re-bucket boards through ``_layer_bucket`` and change routed output. The
+    fallback stays at the call site, where it is visible.
+
+    Filters on ``.Cu``, matching ``fanout_clearance``. ``check_drc`` does not
+    filter; the two can only disagree on a layer list mixing copper and
+    non-copper names, which neither parse path produces (the text one requires
+    '.Cu' in the name, the pcbnew one maps copper ids through a canonical
+    table).
+    """
+    cu = getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None)
+    return len([l for l in (cu or ()) if str(l).endswith('.Cu')])
+
+
+def min_via_center_distance(via_diameter, clearance, via_drill,
+                            hole_to_hole=0.0):
+    """Minimum centre-to-centre distance between two via drills (#491).
+
+    Two INDEPENDENT rules bind and using only the first ships legal copper with
+    unmanufacturable holes:
+
+      copper: via_diameter + clearance
+      drill : drill/2 + drill/2 + hole_to_hole  ==  via_drill + hole_to_hole
+
+    On lvds_rx1_10 (0.3 via / 0.2 drill / 0.09 clearance, board
+    min_hole_to_hole 0.3) the copper rule asks 0.39mm and the drill rule 0.5mm,
+    so a pair placed to the copper rule sits 0.088mm inside the fab's drill
+    spacing. The router READ the board constraint correctly and then never
+    applied it to via placement.
+
+    Lifted here from ``diff_pair_routing._min_via_center_distance`` so a
+    stdlib-only, parser-free consumer can reach it. The placement escape ledger
+    needs exactly this arithmetic, and importing ``diff_pair_routing`` from
+    ``placement/escape.py`` costs a measured **+126 modules** -- including the
+    Rust ``grid_router``, numpy, ``kicad_parser`` and ``obstacle_map`` -- into
+    a module whose own docstring says "numpy only; no networkx in the placement
+    stack" and which ``board_brief`` and ``routability.health`` import on every
+    run. (Roughly half a second, but the module count is the
+    machine-independent half, so that is the number quoted.) From here it is
+    +1 module / ~4ms from a bare ``placement.escape`` import, and +0 once
+    ``list_nets`` is loaded -- which the ledger's own ``lane_pitch`` does.
+
+    VALUES IN, not a config object: ``py_placer`` has no ``GridRouteConfig`` to
+    hand it, and a values-in signature is what lets both fronts share one rule
+    rather than one of them re-deriving it.
+
+    ``hole_to_hole`` of ``None`` means NO DRILL RULE DECLARED and yields the
+    copper rule alone -- inherited verbatim from the adapter's long-standing
+    ``getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0``. Worth naming
+    because it is the permissive direction on the constraint this function
+    exists to enforce: every caller in the tree resolves the value through
+    ``list_nets.resolve_cli_floor`` or the GUI's floored spin control, and
+    ``GridRouteConfig.hole_to_hole_clearance`` defaults to 0.20, so no reachable
+    path passes None today. A future caller that can must pass a real floor.
+    """
+    return max(float(via_diameter) + float(clearance),
+               float(via_drill) + float(hole_to_hole or 0.0))
 
 
 def enforce_fab_floors(copper_layer_count, tier=None, overrides=None, **params):

@@ -218,10 +218,33 @@ if os.path.isfile(DENSE):
             # finer than the netclass -- which is most of them.
             check("identical floors report NO lane gain from layers",
                   al['measured']['deficit_lanes_at_fab_floor']
-                  == al['measured']['deficit_lanes_at_more']
-                  and 'buy NO extra lanes' in al['action'],
+                  == al['measured']['deficit_lanes_at_more'],
                   f"{al['measured']['deficit_lanes_at_fab_floor']} -> "
                   f"{al['measured']['deficit_lanes_at_more']}: {al['action']}")
+        # ...and WHY they are identical, which is the half #700 is about. On
+        # this board (4 copper layers) the answer is the TABLE, not the fab:
+        # `_FAB_FLOORS` carries one multilayer rung, so 4 and 6 resolve to the
+        # same dict and the comparison could not have differed however the
+        # board was built. The old wording -- "more layers buy NO extra lanes
+        # on a face" -- stated a routing fact this comparison never measured,
+        # and is now reserved for the case where two DISTINCT buckets happen
+        # to carry equal floors.
+        check("a bucket-blind comparison says so instead of claiming a result",
+              al['measured']['fab_floor_layer_blind'] is True
+              and 'STRUCTURALLY BLIND' in al['action']
+              and 'buy NO extra lanes' not in al['action'],
+              f"blind={al['measured'].get('fab_floor_layer_blind')} "
+              f"buckets={al['measured'].get('fab_buckets_modelled')}: "
+              f"{al['action']}")
+        check("and the bucket is disclosed on both sides of the comparison",
+              al['measured']['fab_bucket_now'] == 4
+              and al['measured']['fab_bucket_at_more'] == 4
+              and al['measured']['fab_bucket_saturated'] is True,
+              str({k: v for k, v in al['measured'].items()
+                   if k.startswith('fab_')}))
+        check("the not-modelled note names the bucketing too",
+              'fab_tiers models buckets' in al['not_modelled'],
+              al['not_modelled'])
     rc = dopts['relax_clearance']
     # NOT `if rc.get('ran'):`. That guard made this the only relax_clearance
     # assertion in the suite AND made it dead code: `ran` was False on every

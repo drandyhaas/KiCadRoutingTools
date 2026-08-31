@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 from typing import List, Dict
 
+import fab_tiers
 from kicad_parser import PCBData, Via, pad_drill_capsule
 from geometry_utils import point_to_segment_distance
 from routing_config import GridRouteConfig, GridCoord
@@ -108,9 +109,12 @@ def add_gnd_vias_to_existing_board(
     # Minimum distance from signal via center to GND via center: larger of the
     # copper ring clearance (via_size + clearance) and the drill hole-to-hole
     # minimum (via_drill + hole_to_hole_clearance), so the paired GND via clears
-    # the signal via on both measures (issue #125).
-    min_distance = max(config.via_size + config.clearance,
-                       config.via_drill + config.hole_to_hole_clearance)
+    # the signal via on both measures (issue #125). ONE kernel, in fab_tiers,
+    # shared with diff_pair_routing._min_via_center_distance and the placement
+    # escape ledger -- three open-coded copies of one rule is how they drift.
+    min_distance = fab_tiers.min_via_center_distance(
+        config.via_size, config.clearance, config.via_drill,
+        config.hole_to_hole_clearance)
 
     # Debug: Print clearance parameters
     print(f"GND via placement parameters:")
@@ -124,9 +128,12 @@ def add_gnd_vias_to_existing_board(
     # Via-to-via minimum clearance (center-to-center) for batch placement: larger
     # of copper ring (via_size + clearance) and drill hole-to-hole (via_drill +
     # hole_to_hole_clearance), so a thin-ring via can't land inside the drill
-    # hole-to-hole minimum (issue #125).
-    via_via_min_dist = max(config.via_size + config.clearance,
-                           config.via_drill + config.hole_to_hole_clearance)
+    # hole-to-hole minimum (issue #125). Literally the same rule on the same
+    # config, so the same number as `min_distance` above -- kept as its own
+    # name because the two READ differently (signal-via-to-GND-via, versus
+    # GND-via-to-GND-via within one batch), and a reader tracing either should
+    # land on a name that says which question it answers.
+    via_via_min_dist = min_distance
 
     # Grid cells to check for via clearance
     # The obstacle map already expands tracks by track_width/2 + clearance.

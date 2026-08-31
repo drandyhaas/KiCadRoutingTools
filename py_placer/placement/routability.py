@@ -710,7 +710,12 @@ def health(state, pcb_data, blocks: Dict[str, Sequence[str]],
         from . import escape as _escape
         led = _escape.escape_ledger(
             pcb_data, pcb_file=getattr(pcb_data, 'source_path', None),
-            ignore_net_ids=spec.get('ignore_net_ids'))
+            ignore_net_ids=spec.get('ignore_net_ids'),
+            # #700: name the plane layers the way `ignore_net_ids` names the
+            # plane NETS. Left undeclared the ledger observes pours, and a
+            # board being placed has none yet -- so the declaration is the
+            # channel that actually carries an answer here.
+            plane_layers=spec.get('plane_layers'))
     except Exception as exc:                      # noqa: BLE001
         out['skipped']['escape_lanes'] = f'not computed: {exc}'
         led = []
@@ -721,6 +726,31 @@ def health(state, pcb_data, blocks: Dict[str, Sequence[str]],
         out['escape_deficit_parts'] = len(short)
         out['escape_worst_deficit'] = (led[0].worst.deficit
                                        if led[0].worst else 0)
+        # #700's layer-aware pair, reported BESIDE the own-layer numbers and
+        # never in place of them. `escape_worst_deficit_floor` is a LOWER
+        # bound -- short even using every other signal layer -- so > 0 is a
+        # strictly stronger verdict than the own-layer one, and == 0 proves
+        # nothing. Nothing gates on either; see this function's own contract.
+        floor_short = [p for p in led if p.worst_floor]
+        out['escape_deficit_parts_all_layers'] = len(floor_short)
+        out['escape_worst_deficit_floor'] = max(
+            [p.worst_floor.deficit_floor for p in floor_short], default=0)
+        f0 = led[0].faces[0] if led[0].faces else None
+        out['escape_signal_layers'] = f0.signal_layers if f0 else 1
+        out['escape_signal_layers_source'] = (f0.signal_layers_source if f0
+                                              else 'unknown')
+        # WHICH term bounds the relief, over the faces actually in deficit.
+        # `via_slots` is layer-independent, so this is usually 'via_slots' --
+        # which is the finding, not a defect: more layers do not help a face
+        # whose via row is full.
+        # `max(set(...), key=count)` would be PYTHONHASHSEED-dependent on a
+        # tie -- set iteration over strings is randomised, so a published key
+        # would differ run to run. Unreachable today (every board yields one
+        # bound value) and fixed anyway: a nondeterministic output is a bug
+        # whether or not a fixture reaches it.
+        bounds = [f.supply_bound for p in led for f in p.faces if f.deficit]
+        out['escape_supply_bound'] = (
+            max(sorted(set(bounds)), key=bounds.count) if bounds else None)
         # WHO to move, deduped across parts in face order. This is the field
         # that turns "a face is short" into an action.
         blockers: List[str] = []
@@ -961,6 +991,16 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
                     'deficit_finest_grid': max(0, n_demand - supply_fine),
                     'eaten_by': eaten[:8],
                     'taps_not_modeled': True})
+    # NO LAYER TERM HERE, deliberately (#700). `escape.FaceLedger` gained
+    # `via_slots` / `supply_other_max` / `deficit_floor`; this ledger did not,
+    # because its supplies are GRID-QUANTIZED (`_quantized_pitch` above) while
+    # a via pitch is not. Pairing the two would give a `supply_bound` that
+    # flips with `--grid-step` -- a structural verdict moving with a raster
+    # setting, which is the confound `check_channels.py` documents at its
+    # floor-wrapping block. Adding it here needs
+    # `_quantized_pitch(via_pitch, 0.0, grid_step)` and its own thought.
+    # (Also note `escape_band_mm` above: a public keyword no caller has ever
+    # passed, in either of this function's two call sites or its tests.)
     return out
 
 

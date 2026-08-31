@@ -182,6 +182,37 @@ unavailable rather than guessing from drawn outlines.
 python py_placer/plane_score.py board.kicad_pcb --plane-nets GND 3V3:F.Cu
 ```
 
+## Capacity Options (`check_capacity.py`)
+
+Answers "can this board hold its parts, and if not, what are the levers?" with
+measured numbers rather than a verdict. Five options, each reporting `measured`
+/ `expected` / `action` and naming what it does **not** model: grow the
+outline, add copper layers, move the neighbour eating a starved face, relax
+clearance (floored at what the fab can etch), and use a smaller package.
+
+**It reports; it never refuses and it never acts** — no outline is written, no
+stackup edited, no part moved. There is deliberately no exit code for "too
+small": the area test is a necessary condition, not a sufficient one, and the
+executor decides.
+
+`add_layers` is the one to read on a dense multilayer board, and since #700 it
+answers in two parts. The fab-floor half says whether a finer floor at a higher
+layer count buys lanes, and says **"structurally blind"** when it cannot tell —
+`fab_tiers` models two layer buckets (2 and 4), so every board above four
+copper layers resolves to the same floor and the comparison was never capable
+of differing. The routing half is `deficit_floor_lanes_*`: lanes still short
+after counting what the other signal layers could take. Both are bounds; a drop
+to zero does not mean the board routes.
+
+```bash
+python3 -X utf8 py_tools/check_capacity.py board.kicad_pcb
+python3 -X utf8 py_tools/check_capacity.py board.kicad_pcb --json capacity.json
+python3 -X utf8 py_tools/check_capacity.py board.kicad_pcb --only grow_board add_layers
+```
+
+Exit codes: 0 = measured (whatever the answer), 2 = usage/load error, 3 = no
+outline, so there is no capacity question to ask.
+
 ## Connectivity Checker (`check_connected.py`)
 
 Verifies that all nets are fully connected after routing. Detects two types of issues:

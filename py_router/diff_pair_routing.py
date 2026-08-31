@@ -1035,10 +1035,16 @@ def _min_via_center_distance(config):
     so a pair placed to the copper rule ships 0.088mm inside the fab's drill
     spacing -- legal copper, unmanufacturable holes. The router READ the board
     constraint correctly and then never applied it to via placement.
+
+    The rule itself now lives in `fab_tiers.min_via_center_distance`, so the
+    placement escape ledger can price a via slot by the SAME arithmetic without
+    importing this module (which drags in grid_router, numpy and the parser).
+    This stays as the config-shaped adapter its three callers already use.
     """
-    return max(config.via_size + config.clearance,
-               config.via_drill
-               + (getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0))
+    from fab_tiers import min_via_center_distance
+    return min_via_center_distance(
+        config.via_size, config.clearance, config.via_drill,
+        getattr(config, 'hole_to_hole_clearance', 0.0))
 
 
 def _pair_via_offset(config, spacing_mm):
