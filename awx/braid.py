@@ -722,8 +722,62 @@ class Corridor:
             for k, nm in enumerate(order):
                 target_o[nm] = base + sg * LPITCH * k
                 self.exit_block[nm] = target_o[nm]
+        if os.environ.get('TWO_PAGE') == '1' \
+                and os.environ.get('FACE_COMB', '0') == '1' \
+                and self.exit_block:
+            # DEFAULT OFF (measured 2026-08-31, both forms): with the
+            # order reshuffled, K35 69v/6 open (-11 vias, +2 opens),
+            # K32 90/3 (best K32 completion), K28 +8 vias; with the
+            # order PRESERVED and only the geometry compressed, K35
+            # 88/7 -- worse than no comb (80/4) -- and the recorded
+            # K28 +12 (its 3 under-pad B stubs' shared o's change the
+            # ride geometry the lanes then pay for). A scale- and
+            # form-dependent trade, not a win. FACE_COMB=1 to study;
+            # comb-off baselines re-verified exact (50/0, 32/0, 75/1).
+            # FACE COMB BY LAYER (the reworked head-on model for
+            # face-line stubs). The block above stacks ONE comb at
+            # LPITCH -- 17 side exits at K35 = a 6 mm excursion, the
+            # plan-audit's 10 mm white detours, and the depth is pure
+            # layer-blindness: an F ride and a B ride at the same
+            # offset cross for FREE (the ribbon's own principle; the
+            # human's face river interleaves layers exactly so). So
+            # re-slot each side's comb per DELIVERED layer: two
+            # interleaved combs sharing the o range, each ordered as
+            # before within its layer (no same-layer leg crosses a
+            # same-layer ride still present), the B comb 0.02 out so
+            # the target order stays total. An all-F board has an
+            # empty B comb and reproduces the old slots EXACTLY.
+            # FACE_COMB=0 restores the single comb.
+            #
+            # ORDER IS PRESERVED, GEOMETRY COMPRESSED (the sp7
+            # lesson): re-slotting changed the TARGET ORDER wherever B
+            # stubs interleaved the comb (the recorded K28 carries 3
+            # under-pad B escapes; its schedule shifted and cost +8
+            # vias). The order -- and with it the pages and the whole
+            # schedule -- stays the single comb's; only the ride
+            # offsets (py) compress per layer. A non-monotone py is
+            # legal: the pairs it re-orders are opposite-layer, and
+            # those cross free.
+            self._order_o = dict(target_o)
+            for sg in (-1, 1):
+                xs = [nm for nm in self.siders
+                      if self.exit_side[nm] == sg and nm in self.exit_block]
+                if not xs:
+                    continue
+                order = sorted(xs, key=lambda nm: sg * self.exit_block[nm])
+                base = self.exit_block[order[0]]
+                kL = {}
+                for nm in order:
+                    L = self.ctx.dest_layer[nm]
+                    o_ = base + sg * LPITCH * kL.get(L, 0) \
+                        + (sg * 0.02 if L == 'B.Cu' else 0.0)
+                    kL[L] = kL.get(L, 0) + 1
+                    target_o[nm] = o_
+                    self.exit_block[nm] = o_
         self.launch_o, self.target_o = launch_o, target_o
-        self.target = sorted(self.members, key=lambda nm: target_o[nm])
+        _oo = getattr(self, '_order_o', None) or target_o
+        self.target = sorted(self.members,
+                             key=lambda nm: _oo.get(nm, target_o[nm]))
         self.launch = sorted(self.members, key=lambda nm: launch_o[nm])
         self.Ly = [launch_o[nm] for nm in self.launch]
         self.py = [target_o[nm] for nm in self.target]
