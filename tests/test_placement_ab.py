@@ -151,10 +151,14 @@ ROWS = [
         'expect': 'regress',
         'rejected': True,
         'why': ('MECHANISM: the term buys its signal with intent-zone '
-                'containment. Both guards improve and the re-derived '
-                'bus_foreign_crossings improves too, but the ON arm leaves '
-                'more members outside their block zone, so the row marks '
-                'REGRESS on intent errors rather than on its signal. AT HEAD '
+                'containment. UPDATED for #708: "both guards improve" was '
+                'true before the seed-relative candidate snap and is not now '
+                '-- crossings worsens 2429 -> 2442 while hpwl still improves, '
+                'so this row marks REGRESS on a GUARD as well as on intent '
+                'errors. The mark did not move, which is exactly the masking '
+                'this file warns about, so the reason is corrected here rather '
+                'than left to look intact. The re-derived '
+                'bus_foreign_crossings still improves (62 -> 55). AT HEAD '
                 'that direction is decided by the hard pad+drill legality '
                 'layer: quench(pad_legality=False) on this board sends the '
                 'signal the other way -- the direction recorded at 82dbf662 '
@@ -258,12 +262,21 @@ ROWS = [
         'quench_on': {'intent_gate': ROW_INTENT},
         'signal': 'intent_errors_enforced',
         'guard': ('crossings', 'hpwl', 'intent_errors_other'),
-        'expect': 'improve',
+        'expect': 'regress',
         'why': ('MECHANISM: same as intent-ulx3s but thinner, and a SECOND '
-                'board -- which is what the >=3-board rule is about. Here the '
-                'constraint costs nothing: both guards improve as well, so a '
-                'gated search is not inherently worse, it depends on whether '
-                'the poses it removes were load-bearing.'),
+                'board -- which is what the >=3-board rule is about. The '
+                'signal still works: intent_errors_enforced 1 -> 0, and '
+                'crossings improves 1087 -> 1065. UPDATED for #708: this row '
+                'used to record that "the constraint costs nothing -- both '
+                'guards improve as well". That is now FALSE: hpwl worsens '
+                '2121.92 -> 2131.25 and the mark went improve -> regress. '
+                'Nothing about the gate changed; the seed-relative candidate '
+                'snap gives the search a different candidate set, and on THIS '
+                'board the poses the gate removes are now mildly '
+                'load-bearing. The original sentence is kept above as the '
+                'question the row asks -- whether a gated search is inherently '
+                'worse -- because the answer just moved from "no" to "it '
+                'depends on the candidate set too".'),
     },
     {
         'name': 'intent-rp2350',
@@ -273,7 +286,7 @@ ROWS = [
         'quench_on': {'intent_gate': ROW_INTENT},
         'signal': 'intent_errors_enforced',
         'guard': ('crossings', 'hpwl', 'intent_errors_other'),
-        'expect': 'regress',
+        'expect': 'improve',
         'why': ('MECHANISM: the CHEAP row (61 parts), and the corpus-scale '
                 'test of the monotone FREEZE. This board SEEDS with a '
                 'containment error, and the ON arm holds that count instead '
@@ -282,7 +295,16 @@ ROWS = [
                 'showed this signal reaching 0 would mean the gate had '
                 'started repairing and the contract had changed. It also '
                 'carries the known CONTAINER footprint, so the gate is '
-                'exercised beside that exemption.'),
+                'exercised beside that exemption. UPDATED for #708: the mark '
+                'moved regress -> improve, and the tripwire above did NOT '
+                'fire. Measured: the seed board grades exactly ONE '
+                'zone_containment error, and the ON arm now measures exactly '
+                '1 -- it holds the seed count, which is the contract stated '
+                'above, and holds it more precisely than the baseline (2). '
+                'The mark flipped because the OFF arm DEGRADED, 2 -> 3: a '
+                'different candidate set lets the ungated search walk out one '
+                'more part. The signal reaching 0 would still mean the gate '
+                'had started repairing; it is at 1.'),
     },
     {
         'name': 'intent-exclusive-coldfire',
