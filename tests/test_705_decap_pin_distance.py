@@ -180,10 +180,20 @@ def test_ground_pins_are_not_graded():
             if gs:
                 far.append(round(min(g for g in gs if g is not None), 2))
     assert len(far) == 3 and min(far) > 6.0, far
-    r, _p = _graded(LVDS, {'max_pin_distance_mm': 3.0})
+    r = _graded(LVDS, {'max_pin_distance_mm': 3.0})[0]
     assert not _pin(r), [v.message for v in _pin(r)]
-    print(f"  PASS: the 3 GND pins sit {sorted(far)}mm from their nearest cap "
-          f"and produce 0 findings at a 3mm limit")
+    # POSITIVE CONTROL. "0 findings at 3mm" is also what a rule that
+    # emits nothing reports -- my own deletion probe passed this arm.
+    # At 1.9mm the SAME board must produce exactly the three VCC pins,
+    # and still no GND pin, which an inert rule cannot do.
+    tight = _graded(LVDS, {'max_pin_distance_mm': 1.9})[0]
+    hits = _pin(tight)
+    assert len(hits) == 3, [v.message for v in hits]
+    nets = [v.measured['net'] for v in hits]
+    assert all('GND' not in n.upper() for n in nets), nets
+    print(f"  PASS: the 3 GND pins sit {sorted(far)}mm from their nearest "
+          f"cap and produce 0 findings at 3mm -- while the 3 VCC pins all "
+          f"fire at 1.9mm, so the zero is a measurement")
 
 
 def test_a_board_with_no_supply_pin_ABSTAINS_with_a_reason():
@@ -294,11 +304,24 @@ def test_the_human_reference_board_passes_on_its_DECLARED_pins():
         gaps.append(min(gs))
     assert min(gaps) < 0, min(gaps)          # a real overlap, not clamped away
     assert max(gaps) < 3.0, max(gaps)
-    r, _p = _graded('glasgow_revC', {'max_pin_distance_mm': 3.0})
+    r = _graded('glasgow_revC', {'max_pin_distance_mm': 3.0})[0]
     assert not _of(r, 'decap_pin_distance'), [v.message for v in
                                               _of(r, 'decap_pin_distance')]
-    print(f"  PASS: U30's 9 declared pins span {min(gaps):.3f}..{max(gaps):.3f}"
-          f"mm; the human board reports 0 declared findings at 3mm")
+    # POSITIVE CONTROL, and it caught a real hole: a rule that emits
+    # nothing also reports "the human board passes". Shaving the limit
+    # below U30's own worst pin must flag that pin BY NAME, which only
+    # a rule doing the measurement can do.
+    worst = max(gaps)
+    tight = _graded('glasgow_revC',
+                    {'max_pin_distance_mm': round(worst - 0.01, 4)})[0]
+    named = [v for v in _of(tight, 'decap_pin_distance')
+             if v.ref == 'U30']
+    assert named, [v.message for v in _of(tight, 'decap_pin_distance')]
+    assert abs(max(v.measured['gap_mm'] for v in named) - worst) < 1e-3
+    print(f"  PASS: U30's 9 declared pins span {min(gaps):.3f}.."
+          f"{max(gaps):.3f}mm and report 0 findings at 3mm -- while a "
+          f"limit 0.01mm under the worst flags that pin by name, so the "
+          f"pass is a measurement")
 
 
 def test_same_side_is_OFF_by_default_and_costs_the_reference_board_everything():
