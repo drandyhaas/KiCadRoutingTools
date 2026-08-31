@@ -51,6 +51,41 @@ T792S = os.path.join(_TESTS, 'test_792_decap_seeding.py')
 T704 = os.path.join(_TESTS, 'test_704_decap_emission.py')
 T549S = os.path.join(_TESTS, 'test_549_floorplan_schema.py')
 
+#: RESULTS -- from the run, never predicted, never edited afterwards to match.
+#:
+#:     25 row(s): 20 killed, 5 survived, 0 broken, 0 disagreeing
+#:
+#: THE FIVE SURVIVORS, each with the reason it is a finding and not a hole:
+#:
+#:   the-partition-does-not-add-up
+#:       `unaccounted` is a tripwire whose correct value is 0 on every board,
+#:       so no test can tell a computed 0 from a literal one. Paired with
+#:       `the-election-drops-a-cap-so-the-tripwire-must-fire`, which KILLS.
+#:   the-dead-electrical-recheck-is-restored
+#:       An equivalent mutant, and the PROOF the deleted branch was
+#:       unreachable: `power` is a subset of `nets`, and `best` is assigned
+#:       only inside a branch that already required a non-empty intersection.
+#:   same_side-drops-the-through-hole-exemption
+#:       An equivalent mutant on this corpus: 0 of glasgow_revC's 1657 pin/cap
+#:       pairs are saved by the relaxation, because no tracked board pairs an
+#:       SMD IC with a through-hole cap on the far face. Defended instead by a
+#:       direct predicate assertion on a synthetic pair.
+#:   the-uncovered-rail-is-emitted-for-an-INFERRED-pin-too
+#:       Unreachable by design one level up: channel 3 admits only a pin whose
+#:       net already carries a cap, so an inferred rail can never be uncovered.
+#:   the-declined-cap-is-silent-again
+#:       A COVERAGE GAP, stated rather than hidden: no fixture makes pass-2's
+#:       `_seat` refuse, so the note it guards is unreachable in every arm.
+#:       Its sibling `the-cap-no-cluster-wanted-is-silent-again` does kill, so
+#:       the other half of that disclosure is covered.
+#:
+#: Two rows earned their keep beyond passing. `the-put-back-is-deleted` went
+#: KILLED -> SURVIVED -> KILLED across the runs, catching a regression where a
+#: new note reused the phrase an arm matched on and made the headline #792 fix
+#: deletable with the whole suite green. And `the-owner-test-drops-the-
+#: collinear-guard` reported BROKEN when a later fix moved its anchor, rather
+#: than quietly becoming a survivor.
+
 ROWS = [
     # ---- #794: the horizon rule -------------------------------------------
     ('the-horizon-rule-never-fires', 'fp',
