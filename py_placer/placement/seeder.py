@@ -1266,6 +1266,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                      anchors_first: bool = False,
                      anchor_rounds: int = 1,
                      evict_depth: int = 0,
+                     decap_owner_chips: bool = False,
                      immovable_extra: Sequence[str] = ()) -> Dict:
     """Compute a full placement for an unplaced board from its intent.
 
@@ -1528,8 +1529,36 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     decap_scope: Set[str] = set()
     if decap_spec.get('max_distance_mm') is not None:
         exempt = tuple(decap_spec.get('exempt') or ())
-        decap_scope = {r for r in state.parts
-                       if r[0] == 'C' and state.parts[r].pin_count == 2
+        # NARROWED by #792 to the caps that ELECT A TETHER at any distance --
+        # `near | beyond`, i.e. the scope minus the caps whose rail no chip
+        # carries.
+        #
+        # It used to be a syntactic test (`r[0] == 'C'` and two net-bearing
+        # pads) -- a third spelling of the grouper's predicate and, more to the
+        # point, an answer to the WRONG QUESTION. This stage seats a cap AT A
+        # CHIP'S PIN. A cap whose rail no >=4-pad non-collinear part touches
+        # has no such pin, ever, on any board, at any run time -- so evicting
+        # it from zone packing below is a promise the stage is structurally
+        # incapable of keeping. It then fell through to the generic centroid
+        # stage, whose fanout cap nulls out a rail net, and landed near the
+        # board middle.
+        #
+        # Measured, ulx3s: ten caps -- C3 C4 C22 on /power/P1V1, C7 C8 C24 on
+        # /power/P3V3, C11 C12 C23 on /power/P2V5, C14 on /power/SHUT. Those
+        # rails are owned only by two-pad passives (the caps, L1-L3, RA*/RP*),
+        # so they are bulk and filter caps upstream of an LC network, not
+        # decouplers. cap_chain 2 of 2, flat_hierarchy 3, watchy 2.
+        #
+        # The three syntactic spellings name the SAME parts on every tracked
+        # board (`tests/test_792_decap_predicate.py`), so unifying them would
+        # have preserved this bug rather than fixed it. The defect was never
+        # the spelling; it was one predicate asked two different questions.
+        from placement import groups as _groups
+        near, beyond, _orphans = _groups.decap_populations(pcb_data)
+        tethered = ({c for caps in near.values() for c, _d in caps}
+                    | {c for c, _ic, _d in beyond})
+        decap_scope = {r for r in tethered
+                       if r in state.parts
                        and not any(fnmatch.fnmatch(r, pat) for pat in exempt)}
 
     # ---- 2. zoned blocks: radial pack from the zone center -----------------
@@ -1595,8 +1624,29 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                 rail_of[ref] = rail
         rails = set(rail_of.values())
         pins: List[Tuple[int, str, float, float, int]] = []
+        # WHAT IS AN IC gets one answer, and it is the grouper's (#792).
+        # `owner[0] != 'U'` and `groups._pads_are_collinear` are two answers to
+        # the SAME documented problem -- "a castellated row carries the rail
+        # too and must not eat a claim" -- and only the grouper's carries the
+        # measurement behind it ("Measured on one board it captured three, and
+        # the grader then reported 'C12 is 3.30mm from CN2, the IC it
+        # decouples'"). A ref prefix also refuses a real IC for its NAME:
+        # measured, caps whose rail gains a pin source under the grouper's
+        # answer -- watchy +8, kit-dev +5, lvds +4, orangecrab +3, ulx3s +2,
+        # glasgow +1, tigard +1, and ZERO losses on any board. The new sources
+        # are IC*, J*, VR*, SD* and a crystal: exactly the parts
+        # `decap_tethers` already tethers caps to, so this makes the seeder
+        # AGREE with the grader.
+        #
+        # Behind a flag until the A/B rows run, following `evict_depth`'s
+        # precedent: it changes where parts go, and this file's own rule is
+        # that such a change is opt-in until three boards say otherwise.
+        from placement import groups as _g
+        # Built ONCE: `chip_refs` walks every footprint's pads, and this loop
+        # runs per placed part.
+        chips = _g.chip_refs(pcb_data) if decap_owner_chips else None
         for owner in sorted(placed):
-            if owner[0] != 'U':
+            if (owner not in chips) if chips is not None else (owner[0:1] != 'U'):
                 continue
             o = state.parts[owner]
             for gx, gy, pn in o.pad_globals():
@@ -1676,9 +1726,56 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             for cluster, ref in zip(clusters, list(caps_r)):
                 cx2 = round(sum(k[2] for k in cluster) / len(cluster), 3)
                 cy2 = round(sum(k[3] for k in cluster) / len(cluster), 3)
-                _seat(ref, cx2, cy2, cluster[0][1], rail)
+                if not _seat(ref, cx2, cy2, cluster[0][1], rail):
+                    # SILENTLY lost before #792. `caps_r` is snapshotted above
+                    # while `_seat` mutates `avail`, so the zip consumes the
+                    # cluster whether or not the seat succeeded: the cap stayed
+                    # in `avail`, the pins went unserved, and NOTHING said so --
+                    # while the comment below claimed the fall-through "reports
+                    # honestly". It does now.
+                    net = getattr(pcb_data.nets.get(rail), 'name', rail)
+                    notes.append(
+                        f"{ref}: no legal pose at {cluster[0][1]}'s {net} pin "
+                        f"cluster ({cx2}, {cy2}) -- falls through to the "
+                        f"zone/centroid stages")
             # pins beyond the cap supply, and caps no pin wanted, fall
             # through to the generic stage, which reports honestly
+
+        # ---- 2.6 put back what the pin stage DECLINED (#792) ---------------
+        # Narrowing the scope is the predictive half and it is a theorem; this
+        # is the run-time safety net, and it is much the bigger of the two.
+        # Measured with `seed_from_intent`: splitflap_driver has 12 tethered
+        # caps and this stage claims ZERO; watchy 26 tethered, ZERO; kit-dev 53
+        # in scope, 12 claimed. The residue the stage declines at run time --
+        # the owner not yet placed, the cap supply exhausted, `_seat` refusing
+        # -- dwarfs the orphan population.
+        #
+        # NOT "re-run stage 2": that path appends a failure to `unseated`
+        # (see above), and UNSEATED is worse than the board centre. This is
+        # `_try_place` inside the declared zone, falling through to stage 3 on
+        # refusal, which makes the whole put-back MONOTONE -- no cap can end up
+        # worse placed than it is today, and none can become newly unseated.
+        # That is what lets it ship on without an A/B row.
+        for ref in _order(sorted(unplaced & decap_scope)):
+            z = zone_of_cap.get(ref)
+            if z is None or not getattr(z, 'rect', None):
+                continue
+            zx0, zy0, zx1, zy1 = z.rect
+            clr = _try_place(state, ref, round((zx0 + zx1) / 2.0, 3),
+                             round((zy0 + zy1) / 2.0, 3), unplaced - {ref},
+                             constraint=z.rect,
+                             tol=intent.zone_tolerance(z))
+            if clr is None:
+                notes.append(f"{ref}: the pin stage declined it and its zone "
+                             f"{z.name!r} has no legal pose either -- falls "
+                             f"through to the centroid stage")
+                continue
+            placed.add(ref)
+            unplaced.discard(ref)
+            if ref in avail:
+                avail.remove(ref)
+            notes.append(f"{ref}: zone-packed into {z.name!r} after the pin "
+                         f"stage declined it")
 
     # ---- 3. the rest: connectivity centroid --------------------------------
     # --anchors-first (run-4 C): the default queue is pin-count descending,
