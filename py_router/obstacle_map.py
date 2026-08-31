@@ -1590,7 +1590,12 @@ def override_pad_hole_track_cells(pcb_data: PCBData, track_width: float,
             exempt_r_sq = None
             if has_copper:
                 exempt_r = max(pad.size_x, pad.size_y) / 2.0
-                exempt_r_sq = exempt_r * exempt_r
+                # Note the SIGN: this radius exempts cells from being blocked,
+                # so resolving its boundary tie OPEN means growing it, not
+                # shrinking it like every other epsilon here. Both edges of this
+                # predicate therefore move the same way -- toward fewer blocked
+                # cells -- which is what "tie -> OPEN" means for the outcome.
+                exempt_r_sq = (exempt_r + GRID_TIE_EPS) ** 2
             for hx, hy, drill_dia in pad_drill_circles(pad):
                 required = drill_dia / 2.0 + track_width / 2.0 + lc + extra_clearance
                 req_sq = (required - GRID_TIE_EPS) ** 2   # tie -> OPEN, see above
@@ -2174,7 +2179,12 @@ def _via_h2h_cells(via, config: GridRouteConfig, coord: GridCoord):
     dxg, dyg = np.meshgrid(off, off, indexing="ij")
     cx = (gx + dxg) * config.grid_step
     cy = (gy + dyg) * config.grid_step
-    dm = ((cx - via.x) ** 2 + (cy - via.y) ** 2) < req * req
+    # tie -> OPEN (GRID_TIE_EPS), like the three other implementations of this
+    # same keep-out: block_via_cells_near_drills and obstacle_cache's two. All
+    # four must agree cell-for-cell or the incremental via maps desync from a
+    # fresh rebuild (that is exactly how test_shared_via_maps failed when only
+    # one of them had the epsilon).
+    dm = ((cx - via.x) ** 2 + (cy - via.y) ** 2) < (req - GRID_TIE_EPS) ** 2
     if not dm.any():
         return None
     return np.column_stack([(gx + dxg)[dm], (gy + dyg)[dm]]).astype(np.int32)

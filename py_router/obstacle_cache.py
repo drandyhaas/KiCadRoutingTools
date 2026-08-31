@@ -1174,7 +1174,11 @@ def precompute_via_placement_obstacles(
                     + config.layer_clearance(layer, obs_clr)  # #543 (#434/#498)
                     + config.grid_step / 2)
             rg = coord.to_grid_dist_safe(r_mm)
-            r_sq = r_mm * r_mm
+            # tie -> OPEN. Mirrors build_routing_obstacle_map's via loop, which
+            # applies the identical epsilon -- the half-cell buffer in r_mm puts
+            # this radius on an exact grid multiple readily (0.25 + 0.1 + 0.2 +
+            # 0.05 = 0.6 = 6 x a 0.1 grid).
+            r_sq = (r_mm - GRID_TIE_EPS) ** 2
             off = np.arange(-rg, rg + 1)
             exg, eyg = np.meshgrid(off, off, indexing="ij")
             ddx = (gx + exg) * config.grid_step - via.x

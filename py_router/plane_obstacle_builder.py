@@ -1262,7 +1262,7 @@ def build_routing_obstacle_map(
                     route_layer, config.obstacle_clearance(via.net_id))
                 + config.grid_step / 2)
         rg = coord.to_grid_dist_safe(r_mm)
-        r_sq = r_mm * r_mm
+        r_sq = (r_mm - GRID_TIE_EPS) ** 2   # tie -> OPEN; twin in obstacle_cache
         # Vectorized real-centre disc (bit-identical to the scalar double loop:
         # same (gx+ex)*step - via.x distance and <= r_sq test), one batch call (#225).
         ex = np.arange(-rg, rg + 1, dtype=np.int32)

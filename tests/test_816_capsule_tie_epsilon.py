@@ -287,13 +287,52 @@ def test_one_shared_epsilon():
               '%s uses the shared GRID_TIE_EPS' % mod.__name__)
 
 
+def test_every_float_centre_disc_carries_the_epsilon():
+    """A source check, because this class is defined by MIRRORS and the failure
+    mode is one implementation left behind.
+
+    The drill hole-to-hole keep-out alone has FOUR implementations
+    (obstacle_map.block_via_cells_near_drills, obstacle_map._via_h2h_cells, and
+    two in obstacle_cache), each documenting the others as its mirror. Giving
+    three of them the epsilon and not the fourth desynced the incremental via
+    map from a fresh rebuild by 2 cells -- test_shared_via_maps caught that one;
+    nothing caught the fourth until a source census did. So census the source.
+
+    Integer-offset discs (circle_offsets: `vr_sq`, `vv_sq`) are excluded -- they
+    work in grid units and are position-free by construction.
+    """
+    import re
+    roots = ('obstacle_map.py', 'obstacle_cache.py', 'plane_obstacle_builder.py')
+    pat = re.compile(r'^\s*(?:_?\w*req_sq|r_sq|exempt_r_sq)\s*=\s*(.+)$')
+    missing = []
+    checked = 0
+    for fn in roots:
+        path = os.path.join(_R, 'py_router', fn)
+        for i, line in enumerate(open(path), 1):
+            m = pat.match(line)
+            if not m:
+                continue
+            rhs = m.group(1).strip()
+            if rhs == 'None' or 'vr_sq' in rhs or 'vv_sq' in rhs:
+                continue
+            checked += 1
+            if 'GRID_TIE_EPS' not in rhs:
+                missing.append(f'{fn}:{i}  {rhs}')
+    check(checked >= 6,
+          'the census actually found the disc radii (%d)' % checked)
+    check(not missing,
+          'every float-centre disc radius carries GRID_TIE_EPS'
+          + ('' if not missing else ' -- MISSING: ' + '; '.join(missing)))
+
+
 def main():
     print('#816 grid keep-out boundary tie epsilon (capsule, polygon, drill)')
     for t in (test_margin_is_actually_a_tie, test_position_independence,
               test_relative_frame_is_now_bit_safe, test_epsilon_headroom,
               test_tie_cell_is_open_not_blocked, test_cell_and_span_forms_agree,
               test_polygon_raster_position_independence,
-              test_drill_disc_position_independence, test_one_shared_epsilon):
+              test_drill_disc_position_independence, test_one_shared_epsilon,
+              test_every_float_centre_disc_carries_the_epsilon):
         print('\n%s:' % t.__name__)
         t()
     print('')
