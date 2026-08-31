@@ -343,7 +343,8 @@ def via_pitch(pcb_data, pcb_file: Optional[str] = None,
               clearance: Optional[float] = None,
               via_diameter: Optional[float] = None,
               via_drill: Optional[float] = None,
-              hole_to_hole: Optional[float] = None) -> float:
+              hole_to_hole: Optional[float] = None,
+              design_rules: Optional[dict] = None) -> float:
     """Centre-to-centre spacing of two escape vias, at the board's OWN floor.
 
     The via-side twin of `lane_pitch`, and resolved by the same POLICY for the
@@ -395,7 +396,11 @@ def via_pitch(pcb_data, pcb_file: Optional[str] = None,
     if path and any(v is None for v in want.values()):
         try:
             import list_nets
-            dr = list_nets.read_design_rules(path)
+            # The caller may already have read them -- `escape_ledger` does,
+            # for the lane pitch. A second read per ledger is ~12ms against a
+            # ~46ms ledger, on a path `portfolio` grades once per candidate.
+            dr = (design_rules if design_rules is not None
+                  else list_nets.read_design_rules(path))
             for key, val in want.items():
                 if val is None:
                     got, _src = list_nets.board_floor(path, key, None,
@@ -544,8 +549,8 @@ def _polygon_area(poly) -> float:
 
 def lane_pitch_parts(pcb_data, pcb_file: Optional[str] = None,
                      track_width: Optional[float] = None,
-                     clearance: Optional[float] = None
-                     ) -> Tuple[float, float]:
+                     clearance: Optional[float] = None,
+                     return_rules: bool = False):
     """``(track_width, clearance)`` as `lane_pitch` resolves them.
 
     Split out so the VIA half of a face's arithmetic can be priced at the
@@ -554,7 +559,8 @@ def lane_pitch_parts(pcb_data, pcb_file: Optional[str] = None,
     in-repo boards still agree by coincidence; this makes them agree by
     construction.
     """
-    return _lane_parts(pcb_data, pcb_file, track_width, clearance)
+    tw, clr, dr = _lane_parts(pcb_data, pcb_file, track_width, clearance)
+    return (tw, clr, dr) if return_rules else (tw, clr)
 
 
 def lane_pitch(pcb_data, pcb_file: Optional[str] = None,
@@ -568,12 +574,17 @@ def lane_pitch(pcb_data, pcb_file: Optional[str] = None,
     structural finding. Explicit arguments win, then the board's Default
     netclass, then the repo defaults.
     """
-    tw, clr = _lane_parts(pcb_data, pcb_file, track_width, clearance)
+    tw, clr, _dr = _lane_parts(pcb_data, pcb_file, track_width, clearance)
     return tw + clr
 
 
 def _lane_parts(pcb_data, pcb_file, track_width, clearance):
+    """``(track_width, clearance, design_rules_or_None)``.
+
+    The rules come back so the VIA half can be priced off the same read.
+    """
     import routing_defaults as defaults
+    dr = None
     path = pcb_file or getattr(pcb_data, 'source_path', None)
     if path and (track_width is None or clearance is None):
         try:
@@ -591,7 +602,7 @@ def _lane_parts(pcb_data, pcb_file, track_width, clearance):
         clearance = defaults.CLEARANCE
     if not track_width:
         track_width = getattr(defaults, 'TRACK_WIDTH', 0.25)
-    return float(track_width), float(clearance)
+    return float(track_width), float(clearance), dr
 
 
 def _part_rect(fp) -> Tuple[float, float, float, float]:
@@ -779,13 +790,14 @@ def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,
     `part_escape`'s escape-band depth, which was previously unreachable
     through this entry point at all.
     """
-    tw, clr = lane_pitch_parts(pcb_data, pcb_file, track_width, clearance)
+    tw, clr, dr = lane_pitch_parts(pcb_data, pcb_file, track_width, clearance,
+                                   return_rules=True)
     lane = tw + clr
     # The via half is priced at the SAME clearance the lane half resolved, so
     # the two numbers on one row cannot come from different rules.
     vpitch = via_pitch(pcb_data, pcb_file, clearance=clr,
                        via_diameter=via_diameter, via_drill=via_drill,
-                       hole_to_hole=hole_to_hole)
+                       hole_to_hole=hole_to_hole, design_rules=dr)
     nsig, source, planes = signal_layer_count(
         pcb_data, signal_layers=signal_layers, plane_layers=plane_layers)
     targets = list(refs) if refs is not None else fine_pitch_parts(pcb_data)
