@@ -886,6 +886,13 @@ elif TWO_PAGE_PLAN and not NO_HINTS \
     from kicad_parser import Segment, Via
     stem2 = os.path.splitext(out_path)[0]
     split_targets = list(globals().get('split_targets', []))
+    # TP_SPLIT_NETS: probe knob -- force named nets into the dest B
+    # pass even when the plan's schedule called them F-page (SDQ14:
+    # the braid refuses it on F at K32 AND K35, margin 6, no rip
+    # victim; the human's answer is a B dogbone at the ball).
+    for x in os.environ.get('TP_SPLIT_NETS', '').split(','):
+        if x and x in names and x not in split_targets:
+            split_targets.append(x)
     # CAPACITY GATE: try the PLAIN engine first and LOOK at what it
     # did. At K21/K28 the all-F fanout is clean and complete, and the
     # split only perturbs it (sp3 K28: split stubs starved the
@@ -1100,7 +1107,12 @@ elif TWO_PAGE_PLAN and not NO_HINTS \
             b_vias.append({'x': v_.x, 'y': v_.y, 'size': v_.size,
                            'drill': v_.drill,
                            'layers': ['F.Cu', 'B.Cu'], 'net_id': nid})
-    if os.environ.get('TP_SRC_B') and fail1:
+    # TP_SRC_B_NETS: probe knob -- force named nets into the source
+    # pass even when the dest loop never saw them (an F-page net the
+    # braid refuses, e.g. SDQ14, is invisible to split_targets).
+    force_s = [x for x in os.environ.get('TP_SRC_B_NETS', '').split(',')
+               if x and x in names and x not in fail1]
+    if os.environ.get('TP_SRC_B') and (fail1 or force_s):
         # SOURCE-SIDE SPLIT: a net whose berth cannot reach B at the
         # destination gets its layer change at the SOURCE instead --
         # the human's own idiom for exactly this class (census 0831:
@@ -1114,7 +1126,7 @@ elif TWO_PAGE_PLAN and not NO_HINTS \
         cx = (dgrid.bbox[0] + dgrid.bbox[2]) / 2.0
         cy = (dgrid.bbox[1] + dgrid.bbox[3]) / 2.0
         laid_s = []
-        for n in fail1:
+        for n in fail1 + force_s:
             nid = byname[n][0]
             t0 = launch[n]
             tl = tooth0.get(n, 'F.Cu')
