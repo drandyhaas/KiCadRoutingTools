@@ -135,8 +135,13 @@ KEY_SETS = {
     '_EDGE_CONNECTOR_KEYS': {
         'ref', 'edge', 'overhang_mm', 'max_setback_mm', 'class', 'source',
         'note', 'suspect', 'suspect_reason', 'overhang_capped',
-        'observed_overhang_mm', 'context'},
+        'observed_overhang_mm', 'context',
+        # #712: WHERE ALONG the edge. Mutually exclusive, absent by default,
+        # and never written by `emit_intent`.
+        'center_on_edge', 'along_edge_band'},
     '_OVERHANG_KEYS': {'min', 'max'},
+    '_CENTER_ON_EDGE_KEYS': {'tolerance_mm'},
+    '_ALONG_EDGE_BAND_KEYS': {'from', 'to'},
     '_DECAP_KEYS': {'max_distance_mm', 'exempt', 'search_radius_mm'},
     '_HEALTH_KEYS': {'bus_corridors', 'classes', 'zoned_blocks',
                      'affinity_exempt_nets', 'affinity_exempt_net_ids',
@@ -197,7 +202,14 @@ def test_an_intent_using_every_known_key_loads():
             'overhang_mm': {'min': 0.0, 'max': 1.5}, 'max_setback_mm': 2.0,
             'class': 'edge_receptacle', 'source': 'auto-class', 'note': 'n',
             'suspect': True, 'suspect_reason': 'r', 'overhang_capped': True,
-            'observed_overhang_mm': 9.0, 'context': {'why': 'w'}}],
+            'observed_overhang_mm': 9.0, 'context': {'why': 'w'},
+            'center_on_edge': {'tolerance_mm': 1.0}},
+            # #712's two fields are MUTUALLY EXCLUSIVE, so covering the
+            # vocabulary needs a second entry -- one entry carrying both is
+            # refused at load, deliberately. Without this the "every known key
+            # is accepted" claim would silently degrade to "every key but one".
+            {'ref': 'J2', 'edge': 'west',
+             'along_edge_band': {'from': 0.10, 'to': 0.35}}],
         'decaps': {'max_distance_mm': 2.5, 'exempt': ['C99'],
                    'search_radius_mm': 6.0},
         'must_lock': ['MH*'],
@@ -218,8 +230,14 @@ def test_an_intent_using_every_known_key_loads():
     # claims -- the point is coverage of the vocabulary, not of a sample.
     seen = set(raw) | set(raw['envelope']) | set(raw['defaults'])
     seen |= set(raw['blocks'][0]) | set(raw['decaps']) | set(raw['health'])
-    seen |= set(raw['legality_budget']) | set(raw['edge_connectors'][0])
+    seen |= set(raw['legality_budget'])
+    # UNION over every entry, not entry [0]: the two #712 fields cannot share
+    # one entry, so reading only the first would under-report the vocabulary.
+    for c in raw['edge_connectors']:
+        seen |= set(c)
     seen |= set(raw['edge_connectors'][0]['overhang_mm'])
+    seen |= set(raw['edge_connectors'][0]['center_on_edge'])
+    seen |= set(raw['edge_connectors'][1]['along_edge_band'])
     seen |= set(raw['health']['bus_corridors'][0])
     seen |= set(raw['overlap_waivers'][0])
     for k in raw['keepouts']:

@@ -91,7 +91,17 @@ EDGE_BAND_SANITY_MM = 5.0
 #: Bump this whenever the loader learns a declarable field that changes a
 #: verdict, and say in docs/floorplan-intent.md which field arrived. Do NOT
 #: bump it for a field nothing grades.
-READER_VERSION = 1
+#:
+#: 2 (#712): `edge_connectors[].center_on_edge` and `.along_edge_band` -- WHERE
+#: ALONG the edge a connector sits. Both are declarable and both change a
+#: verdict, so the rule above mandates the bump. The unknown-key refusal
+#: already protects an older build (it raises `unknown key(s) center_on_edge`
+#: and refuses the file), so the bump is not needed for SAFETY; it is needed
+#: because READER_VERSION is the number an author copies into `min_reader`,
+#: and at 1 a brief-compiled intent would claim a reader-1 build acts on a
+#: claim it has never heard of. That is a false statement in the one field
+#: whose only job is to be true.
+READER_VERSION = 2
 
 _TOP_LEVEL_KEYS = {
     'schema', 'kind', 'board', 'units', 'envelope', 'defaults', 'blocks',
@@ -127,10 +137,23 @@ _KEEPOUT_KEYS = {'name', 'rect', 'circle', 'sides', 'allow', 'note',
 #: `observed_overhang_mm` are emitter-written and read by nothing today; they
 #: are accepted because `emit_intent` writes them and the round trip must
 #: survive, not because anything acts on them.
+#: `center_on_edge` / `along_edge_band` are #712: the along-edge half of an
+#: edge claim. Absent by default and NEVER written by `emit_intent`, so every
+#: intent that existed before them grades identically.
 _EDGE_CONNECTOR_KEYS = {'ref', 'edge', 'overhang_mm', 'max_setback_mm',
                         'class', 'source', 'note', 'suspect', 'suspect_reason',
-                        'overhang_capped', 'observed_overhang_mm', 'context'}
+                        'overhang_capped', 'observed_overhang_mm', 'context',
+                        'center_on_edge', 'along_edge_band'}
 _OVERHANG_KEYS = {'min', 'max'}
+#: #712. `tolerance_mm` is REQUIRED and has no default: "centred within what?"
+#: is the whole claim, and a defaulted tolerance is a threshold this tool
+#: chose. Measured on the tracked corpus, tigard's three connectors sit at
+#: +16.1 / -25.4 / -28.7 percent off their edge centres, so any default would
+#: fail a good human board 3 times out of 3.
+_CENTER_ON_EDGE_KEYS = {'tolerance_mm'}
+#: Fractions of the edge's own span, so a declaration survives an outline
+#: resize. `from < to`, both in [0, 1].
+_ALONG_EDGE_BAND_KEYS = {'from', 'to'}
 _DECAP_KEYS = {'max_distance_mm', 'exempt', 'search_radius_mm'}
 _DEFAULTS_KEYS = {'zone_tolerance_mm'}
 #: `zoned_blocks` is setdefault-injected into this same dict by `grade` after
@@ -371,6 +394,78 @@ def _str_tuple(value, where: str) -> Tuple[str, ...]:
     return tuple(value)
 
 
+def _number(value, where: str, lo=None, hi=None) -> float:
+    """A real number, `bool` refused. `True` is an `int` in Python, and a
+    tolerance of `True` is 1.0mm nobody typed."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise IntentError(f"{where}: expected a number, got {value!r}")
+    v = float(value)
+    if (lo is not None and v < lo) or (hi is not None and v > hi):
+        rng = (f"[{lo}, {hi}]" if lo is not None and hi is not None
+               else (f">= {lo}" if lo is not None else f"<= {hi}"))
+        raise IntentError(f"{where}: expected {rng}, got {v!r}")
+    return v
+
+
+def _along_edge_claim(c: Dict, i: int) -> None:
+    """Validate `center_on_edge` / `along_edge_band` on one entry (#712).
+
+    WHERE the part sits along its edge. The rule already grades the overhang
+    band, the nearest-edge identity and a setback, so a seat 2.35mm off the
+    centreline of a 14.5mm edge is satisfied exactly as well as a centred one.
+
+    Refused HERE, at load, rather than in `validate_intent`, and that is a
+    deliberate deviation from the issue's own text. `validate_intent` has
+    exactly one caller -- `grade()` -- while `place_seed` and
+    `place_reconstruct` load an intent and never call it. A refusal that lived
+    there would leave the SEEDER, which acts on these fields, holding an entry
+    that declares two conflicting bands with no policy for which wins. The
+    precedent is `legality_budget.oob_area`, refused at load for the same
+    reason: a contradiction the reader can never satisfy belongs in the
+    message, not in a verdict.
+    """
+    ref = c['ref']
+    where = f"edge_connectors[{i}] ({ref})"
+    centre = c.get('center_on_edge')
+    band = c.get('along_edge_band')
+    if centre is not None and band is not None:
+        raise IntentError(
+            f"{where}: declares BOTH center_on_edge and along_edge_band. "
+            f"center_on_edge is sugar for a symmetric along_edge_band, so "
+            f"this is two bands on one entry -- keep the one you mean")
+    if centre is not None:
+        if not isinstance(centre, dict):
+            raise IntentError(f"{where}: center_on_edge expects "
+                              f"{{'tolerance_mm': ..}}, got {centre!r}")
+        _reject_unknown(centre, _CENTER_ON_EDGE_KEYS,
+                        f"{where}.center_on_edge")
+        if 'tolerance_mm' not in centre:
+            raise IntentError(
+                f"{where}.center_on_edge: needs `tolerance_mm`. There is no "
+                f"default: measured on this repo's own tracked boards, "
+                f"tigard's connectors sit 16-29% off their edge centres, so "
+                f"any threshold this tool picked would fail a good board")
+        _number(centre['tolerance_mm'], f"{where}.center_on_edge.tolerance_mm",
+                lo=0.0)
+    if band is not None:
+        if not isinstance(band, dict):
+            raise IntentError(f"{where}: along_edge_band expects "
+                              f"{{'from': .., 'to': ..}}, got {band!r}")
+        _reject_unknown(band, _ALONG_EDGE_BAND_KEYS, f"{where}.along_edge_band")
+        missing = sorted(_ALONG_EDGE_BAND_KEYS - set(band))
+        if missing:
+            raise IntentError(f"{where}.along_edge_band: needs "
+                              f"{', '.join('`%s`' % m for m in missing)} "
+                              f"(fractions of the edge span, 0 to 1)")
+        f0 = _number(band['from'], f"{where}.along_edge_band.from", 0.0, 1.0)
+        f1 = _number(band['to'], f"{where}.along_edge_band.to", 0.0, 1.0)
+        if not f0 < f1:
+            raise IntentError(
+                f"{where}.along_edge_band: from {f0} is not less than to "
+                f"{f1}, so the band is empty or inverted and no pose can "
+                f"satisfy it")
+
+
 def load_intent(path: str) -> Intent:
     """Read and structurally validate an intent file.
 
@@ -516,6 +611,7 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
                                   f"{{'min': .., 'max': ..}}")
             _reject_unknown(oh, _OVERHANG_KEYS,
                             f"edge_connectors[{i}] ({c['ref']}).overhang_mm")
+        _along_edge_claim(c, i)
         conns.append(c)
 
     severity = _obj(raw.get('severity'), 'severity')
@@ -1082,15 +1178,108 @@ class _Ctx:
         for name, refs in sorted(blocks.items()):
             for r in refs:
                 self.owner.setdefault(r, name)
+        #: #712. A DECLARED claim this board's geometry cannot support a
+        #: verdict on. Neither a violation nor a pass -- it joins
+        #: `budget_withheld`'s existing channel, which already exists so a
+        #: reader can tell "checked and clean" from "never checked".
+        self.abstained: Dict[str, str] = {}
+        #: #712. The along-edge measurement, taken on EVERY entry that names
+        #: an edge, declared or not. A number nobody has to opt into is the
+        #: half of this feature that can catch a defect nobody suspected.
+        self.edge_seating: List[Dict[str, object]] = []
 
     def sev(self, rule: str) -> str:
         return self.intent.severity_of(rule)
+
+    def abstain(self, key: str, why: str) -> None:
+        self.abstained[key] = why
 
 
 def _nearest_edge(rect, bounds) -> str:
     d = {'west': rect[0] - bounds[0], 'north': rect[1] - bounds[1],
          'east': bounds[2] - rect[2], 'south': bounds[3] - rect[3]}
     return min(d, key=lambda k: d[k])
+
+
+#: The axis a part slides along when it moves ALONG the named edge: x for a
+#: horizontal edge, y for a vertical one.
+_EDGE_AXIS = {'north': 0, 'south': 0, 'east': 1, 'west': 1}
+
+#: How close a ring segment must lie to the bounding-box side to count as
+#: being ON that side. Board coordinates are mm at 4-6 decimal places.
+_EDGE_SPAN_TOL_MM = 0.01
+
+
+def edge_span(gate, bounds, edge: str, outline: Dict, *,
+              tol: float = _EDGE_SPAN_TOL_MM):
+    """(lo, hi, basis) along `edge`, or (None, None, reason-why-not) (#712).
+
+    An along-edge FRACTION is only as good as the span it is a fraction of,
+    and `_nearest_edge` / `edge_clearance` both answer off the bounding box.
+    On a notched board those disagree, measured: `interf_u_unrouted_placed`'s
+    bbox south side spans 115.570mm where the board's real south edge spans
+    81.280mm, and `BUS1` -- which sits EXACTLY on the real centre -- reads
+    5.715mm off against the bbox. A silently wrong centring number is worse
+    than none, so this abstains rather than guess.
+
+    Three branches, in order, and the order is the whole design:
+
+      1. The outline RINGS resolve this edge to ONE contiguous run -> use it.
+      2. There are no rings at all AND the outline is a simple rectangle with
+         no cutout -> the bounding box IS the outline, exactly. Use it. This
+         is not a fallback: `extract_board_contours` short-circuits a plain
+         rectangle and publishes no ring, so branch 1 cannot fire on most of
+         the corpus and the bbox is the only correct answer there.
+      3. Otherwise -> abstain, naming what was found.
+
+    Deliberately PER EDGE, not per board. The obvious rule ("abstain unless
+    `simple_rectangle`") is refuted by measurement: `watchy` is not a simple
+    rectangle (21 segments, 2 cutouts) yet its east and west ring spans are
+    IDENTICAL to the bbox on all 13 of its declared entries, so a per-board
+    abstention would discard 13 correct measurements to avoid one wrong one.
+    """
+    ax = _EDGE_AXIS[edge]
+    perp = 1 - ax
+    rings = list(getattr(gate, 'rings', None) or [])
+    if rings:
+        target = {'north': bounds[1], 'south': bounds[3],
+                  'west': bounds[0], 'east': bounds[2]}[edge]
+        runs = []
+        for seg in gate.edges():
+            a, b = (seg[0], seg[1]), (seg[2], seg[3])
+            if abs(a[perp] - target) > tol or abs(b[perp] - target) > tol:
+                continue
+            lo, hi = sorted((a[ax], b[ax]))
+            if hi - lo > 1e-9:
+                runs.append([lo, hi])
+        if not runs:
+            return (None, None,
+                    f"no Edge.Cuts segment lies on the {edge} side of this "
+                    f"outline ({len(rings)} ring(s), "
+                    f"{outline.get('cutouts', 0)} cutout(s)), so that edge has "
+                    f"no span to take a fraction of")
+        runs.sort()
+        merged = [runs[0]]
+        for lo, hi in runs[1:]:
+            if lo <= merged[-1][1] + tol:
+                merged[-1][1] = max(merged[-1][1], hi)
+            else:
+                merged.append([lo, hi])
+        if len(merged) != 1:
+            pieces = ', '.join(f"{m[1] - m[0]:.2f}mm" for m in merged)
+            return (None, None,
+                    f"the {edge} edge of this outline is {len(merged)} "
+                    f"separate runs ({pieces}), not one span, so 'along the "
+                    f"edge' has no single meaning here")
+        return (merged[0][0], merged[0][1], 'ring')
+    if outline.get('simple_rectangle') and not outline.get('cutouts'):
+        return ((bounds[0], bounds[2], 'bbox') if ax == 0
+                else (bounds[1], bounds[3], 'bbox'))
+    return (None, None,
+            f"this board's Edge.Cuts parsed no ring and is not a simple "
+            f"rectangle ({outline.get('edge_segments', 0)} segment(s), "
+            f"{outline.get('cutouts', 0)} cutout(s)), so the {edge} edge has "
+            f"no span this tool can defend a fraction against")
 
 
 def rule_envelope(ctx) -> Iterator[Violation]:
@@ -1351,6 +1540,117 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
                     measured={'edge_clearance_mm': round(clr, 4)},
                     expected={'max_setback_mm': float(setback)})
 
+        # #712: WHERE ALONG the edge. The three conjuncts above are all
+        # satisfied anywhere along it, so a receptacle 2.35mm off the
+        # centreline of a 14.5mm edge grades exactly as well as a centred one.
+        #
+        # MEASURED ALWAYS, GRADED ONLY WHEN DECLARED. The offset reaches
+        # `edge_seating` on every entry naming an edge, because a number
+        # nobody opted into is what catches a defect nobody suspected. A
+        # VIOLATION needs an explicit `center_on_edge` / `along_edge_band`,
+        # because there is no defensible default: measured on the tracked
+        # corpus, tigard's three connectors sit at +16.1 / -25.4 / -28.7
+        # percent off their edge centres, so any threshold this tool chose
+        # would fail a good human board 3 times out of 3. The author writes
+        # the number or there is no claim.
+        yield from _grade_along_edge(ctx, c, ref, part, _sev)
+
+
+def _grade_along_edge(ctx, c, ref, part, sev) -> Iterator[Violation]:
+    """The along-edge conjunct of `rule_edge_connector` (#712).
+
+    A separate function only for length; it is deliberately NOT a rule of its
+    own, so `RULES`, `_wants`, `_SKIP_REASON` and `_SEVERITY_KEYS` need no
+    entry and `rules_run` bookkeeping is untouched -- which is what the issue
+    asks for, and is safe because every conjunct in this rule yields
+    independently and none of them `continue`s.
+    """
+    centre_claim = c.get('center_on_edge')
+    band_claim = c.get('along_edge_band')
+    declared = centre_claim is not None or band_claim is not None
+    key = (f"edge_connectors[{ref}]."
+           + ('center_on_edge' if centre_claim is not None
+              else 'along_edge_band' if band_claim is not None else 'position'))
+
+    edge = c.get('edge')
+    if not edge:
+        if declared:
+            ctx.abstain(key, "the entry declares no `edge`, so there is no "
+                             "span to take a fraction along -- name the edge, "
+                             "or drop the along-edge claim")
+        return
+    if not ctx.outline_bounds:
+        if declared:
+            ctx.abstain(key, "this board has no usable bounds")
+        return
+
+    lo, hi, basis = edge_span(ctx.gate, ctx.outline_bounds, edge, ctx.outline)
+    if lo is None:
+        ctx.edge_seating.append({'ref': ref, 'edge': edge, 'declared': declared,
+                                 'abstained': basis})
+        if declared:
+            ctx.abstain(key, basis)
+        return
+
+    ax = _EDGE_AXIS[edge]
+    span = hi - lo
+    if span <= 1e-9:
+        return
+    centre = (part.rect[ax] + part.rect[ax + 2]) / 2.0
+    offset = centre - (lo + span / 2.0)
+    frac = (centre - lo) / span
+    row = {'ref': ref, 'edge': edge, 'declared': declared, 'basis': basis,
+           'span_mm': round(span, 4),
+           'along_edge_offset_mm': round(offset, 4),
+           'along_edge_offset_pct': round(100.0 * offset / span, 2),
+           'along_edge_fraction': round(frac, 4)}
+    ctx.edge_seating.append(row)
+    if not declared:
+        return
+
+    # `toward` reuses `_rect_escape`'s compass vocabulary rather than
+    # inventing a second one for the same four directions.
+    toward = ({0: ('west', 'east')}.get(ax) or ('north', 'south'))[offset > 0]
+    if centre_claim is not None:
+        tol = float(centre_claim['tolerance_mm'])
+        if abs(offset) > tol + legality.EPS:
+            yield Violation(
+                rule='edge_connector', severity=sev, ref=ref,
+                message=(f"{ref} sits {abs(offset):.2f}mm "
+                         f"({abs(100.0 * offset / span):.1f}% of the "
+                         f"{span:.2f}mm {edge} edge) {toward} of that edge's "
+                         f"centre, past the declared tolerance {tol:.2f}mm"),
+                measured={'along_edge_offset_mm': round(offset, 4),
+                          'along_edge_offset_pct': round(100.0 * offset / span, 2),
+                          'along_edge_fraction': round(frac, 4),
+                          # `_charge` in the seeder's repair census reads a
+                          # magnitude off `measured` and falls back to 1.0mm,
+                          # which would sort a 52mm centring error below every
+                          # pad graze. Publish the magnitude it can use.
+                          'outside_mm': round(abs(offset) - tol, 4)},
+                expected={'center_on_edge_mm': tol, 'edge_span_mm': round(span, 4)})
+        return
+
+    f0 = float(band_claim['from'])
+    f1 = float(band_claim['to'])
+    # Compared in MILLIMETRES, so there is one epsilon in one currency: a
+    # fraction epsilon would mean something different on a 14mm edge and a
+    # 200mm one.
+    past = max(f0 * span - (centre - lo), (centre - lo) - f1 * span)
+    if past > legality.EPS:
+        yield Violation(
+            rule='edge_connector', severity=sev, ref=ref,
+            message=(f"{ref} sits at {100.0 * frac:.0f}% along the "
+                     f"{span:.2f}mm {edge} edge, outside the declared band "
+                     f"{100.0 * f0:.0f}%-{100.0 * f1:.0f}% "
+                     f"({past:.2f}mm past its nearer end)"),
+            measured={'along_edge_fraction': round(frac, 4),
+                      'along_edge_offset_mm': round(offset, 4),
+                      'along_edge_offset_pct': round(100.0 * offset / span, 2),
+                      'outside_mm': round(past, 4)},
+            expected={'along_edge_band': {'from': f0, 'to': f1},
+                      'edge_span_mm': round(span, 4)})
+
 
 def rule_decap_distance(ctx) -> Iterator[Violation]:
     """Decoupling caps within reach of the IC they decouple.
@@ -1556,6 +1856,10 @@ class GradeResult:
     # withheld key was a bare `continue` in rule_legality and the run printed
     # "PASS: N rules ran, no violations" with overlap unmeasured.
     budget_abstained: Dict[str, str] = field(default_factory=dict)
+    #: #712: the along-edge position of every declared edge connector, taken
+    #: whether or not anyone declared a claim about it. Advisory, like the
+    #: `health` block -- a measurement, never a verdict.
+    edge_seating: List[Dict[str, object]] = field(default_factory=list)
 
     @property
     def errors(self) -> List[Violation]:
@@ -1640,6 +1944,11 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
             continue
         ran.append(name)
         violations.extend(fn(ctx))
+    # #712: a DECLARED along-edge claim this outline cannot support a verdict
+    # on joins the same not-derivable channel the withheld budgets use. It is
+    # neither a violation nor a pass, and `pass: true` beside a non-zero
+    # abstention count is the thing a caller must be able to see.
+    abstained.update(ctx.abstained)
     violations.sort(key=lambda v: v.sort_key())
 
     health_out: Dict[str, object] = {}
@@ -1687,6 +1996,7 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
         health=health_out,
         rules_run=tuple(ran), rules_skipped=skipped,
         budget_abstained=abstained,
+        edge_seating=list(ctx.edge_seating),
         n_footprints=len(pcb_data.footprints))
 
 
@@ -2297,6 +2607,21 @@ def format_text(r: GradeResult) -> str:
         for v in r.violations:
             tag = 'ERROR' if v.severity == ERROR else 'warn '
             lines.append(f"    [{tag}] {v.rule}: {v.message}")
+    rows = [e for e in r.edge_seating
+            if e.get('along_edge_offset_mm') is not None]
+    if rows:
+        rows.sort(key=lambda e: -abs(float(e['along_edge_offset_mm'])))
+        lines.append(f"  along-edge seating (measured, not a verdict -- a "
+                     f"violation needs a declared center_on_edge or "
+                     f"along_edge_band):")
+        for e in rows[:5]:
+            mark = ' DECLARED' if e.get('declared') else ''
+            lines.append(f"    {e['ref']} {e['edge']}: "
+                         f"{e['along_edge_offset_mm']:+.2f}mm "
+                         f"({e['along_edge_offset_pct']:+.1f}% of the "
+                         f"{e['span_mm']:.2f}mm edge, {e['basis']}){mark}")
+        if len(rows) > 5:
+            lines.append(f"    ... {len(rows) - 5} more")
     if r.budget_abstained:
         # "legality budget key(s)" since #704 would be a lie for a withheld
         # `decaps.max_distance_mm`, which is not a budget. The WIRE key keeps
@@ -2406,6 +2731,7 @@ def to_json(r: GradeResult) -> Dict:
         'rules_run': list(r.rules_run),
         'rules_skipped': r.rules_skipped,
         'budget_abstained': r.budget_abstained,
+        'edge_seating': r.edge_seating,
         'n_footprints': r.n_footprints,
     }
 
@@ -2427,6 +2753,16 @@ def summary(r: GradeResult) -> Dict:
         'rules_skipped': len(r.rules_skipped),
         # Not a violation count and not a pass: channels nothing graded.
         'budget_abstained': len(r.budget_abstained),
+        'edge_seating_rows': len(r.edge_seating),
+        'edge_seating_declared': sum(1 for e in r.edge_seating
+                                     if e.get('declared')),
+        'edge_seating_abstained': sum(1 for e in r.edge_seating
+                                      if e.get('abstained')),
+        'edge_seating_worst_offset_pct': (
+            max((abs(float(e['along_edge_offset_pct']))
+                 for e in r.edge_seating
+                 if e.get('along_edge_offset_pct') is not None),
+                default=None)),
         'budget_abstained_keys': sorted(r.budget_abstained),
         'blocks': len(r.blocks),
         'blocks_resolved': sum(1 for v in r.blocks.values() if v),
