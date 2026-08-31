@@ -122,7 +122,15 @@ def stage_inputs(workdir, snapshot_path, board_filename):
     shutil.copyfile(snapshot_path, staged)
     if board_filename:
         stem = os.path.splitext(os.path.abspath(board_filename))[0]
-        from copy_board import SIBLING_EXTS   # ONE list (#711)
+        # GUARDED, like route.py's own fallback: this module runs inside
+        # KiCad's plugin loader, which does not put py_router on sys.path.
+        # An unconditional import here raised ModuleNotFoundError and took
+        # `stage_inputs` with it -- caught by tests/test_placement_run.py.
+        try:
+            from copy_board import SIBLING_EXTS
+        except Exception:                                  # noqa: BLE001
+            SIBLING_EXTS = (".kicad_pro", ".kicad_prl", ".kicad_dru",
+                            ".design-brief.json")
         for ext in SIBLING_EXTS:
             sibling = stem + ext
             if os.path.isfile(sibling):

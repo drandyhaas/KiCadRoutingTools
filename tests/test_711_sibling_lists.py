@@ -22,6 +22,16 @@ think to edit.
     kicad_routing_plugin/ai_gui.py     inline (pro, dru only)
     py_router/route.py                 a fallback literal
 
+Three of them keep a literal, as a FALLBACK behind a guarded import, because
+they are reached exactly when the import cannot be: `route.py` for a clone
+whose layout predates the #522 split, and the two plugin modules because
+KiCad's plugin loader does not put `py_router` on `sys.path`. That last one is
+measured, not assumed -- converting `placement_run.stage_inputs` to an
+unconditional import raised `ModuleNotFoundError` and took the function with
+it. Their literals are asserted to MATCH the canonical list, since a fallback
+that names one extension fewer strands it on precisely the path that needed
+the fallback.
+
 And the test that was supposed to cover this, `test_411_placement_siblings.py`,
 carried a **tenth** copy of its own (`SIBLINGS = ('.kicad_pro', '.kicad_dru')`)
 -- so it would have stayed green while `place_seed` stranded the brief. A guard
@@ -68,6 +78,16 @@ _EXEMPT = {
     # only when the import above it fails. It cannot import the constant, by
     # construction -- that is the case it exists for.
     os.path.join('py_router', 'route.py'),
+    # The two PLUGIN modules, same shape and for a measured reason: they run
+    # inside KiCad's plugin loader, whose sys.path is not the CLI's. An
+    # unconditional `from copy_board import SIBLING_EXTS` in
+    # `placement_run.stage_inputs` raised ModuleNotFoundError and took the
+    # whole function with it -- caught by tests/test_placement_run.py in the
+    # full-suite run, not by this lint, which is why the waiver is written
+    # down rather than assumed. Both now import inside a try and fall back to
+    # a literal, so the literal is REACHED only where the import cannot be.
+    os.path.join('kicad_routing_plugin', 'placement_run.py'),
+    os.path.join('kicad_routing_plugin', 'ai_gui.py'),
 }
 
 
@@ -118,6 +138,36 @@ def test_every_consumer_imports_the_one_list():
           f"exempt with a stated reason")
 
 
+def test_every_fallback_literal_matches_the_canonical_list():
+    """A waiver that lets a literal DRIFT is worse than no waiver.
+
+    Three sites keep a literal because they are reached exactly when the
+    import cannot be (a pre-#522 clone; KiCad's plugin loader). That is a
+    fine reason to have one and no reason at all for it to say something
+    different -- a fallback naming three extensions where the canonical list
+    names four strands the fourth precisely on the path that needed the
+    fallback.
+    """
+    want = set(SIBLING_EXTS)
+    checked = 0
+    for rel in sorted(_EXEMPT):
+        path = os.path.join(REPO, rel)
+        if os.path.basename(rel) == 'copy_board.py':
+            continue                      # it IS the definition
+        with open(path, encoding='utf-8') as fh:
+            text = fh.read()
+        for m in re.finditer(r"""[\(\[]((?:\s*["']\.[\w.-]+["']\s*,?\s*)+)[\)\]]""",
+                             text):
+            exts = set(re.findall(r"""["'](\.[\w.-]+)["']""", m.group(1)))
+            if not (exts & {'.kicad_pro', '.kicad_dru'}):
+                continue                  # not a sibling tuple
+            assert exts == want, (rel, sorted(exts ^ want))
+            checked += 1
+    assert checked >= 3, (checked, "the scan found no fallback literal to "
+                                   "check; it is not looking where it thinks")
+    print(f"  PASS: {checked} fallback literal(s) match SIBLING_EXTS exactly")
+
+
 def test_the_importers_resolve_to_the_same_tuple():
     """Importing is not enough -- it has to be the SAME object's contents."""
     import board_store
@@ -142,6 +192,7 @@ def test_the_importers_resolve_to_the_same_tuple():
 TESTS = [
     test_the_brief_is_in_the_canonical_list,
     test_every_consumer_imports_the_one_list,
+    test_every_fallback_literal_matches_the_canonical_list,
     test_the_importers_resolve_to_the_same_tuple,
 ]
 
