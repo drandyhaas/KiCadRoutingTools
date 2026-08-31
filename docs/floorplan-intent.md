@@ -774,8 +774,10 @@ decouples satisfies that rule and fails the spec. A downstream project using
 this toolchain hit exactly that and wrote its own checker.
 
 `decaps.max_pin_distance_mm` grades the pin. It is **opt-in with no default** —
-at 3 mm the tracked corpus produces 121 findings with worsts of 30.77 / 33.92 /
-37.47 mm, so a shipped default would flood every board on day one.
+at 3 mm the tracked corpus produces **127** findings — 44 declared, 77 inferred,
+6 uncovered — with the worst gaps at 37.47 mm (`interf_u_unrouted_placed`),
+34.08 mm (`interf_u_unrouted`) and 30.77 mm (`flat_hierarchy`), so a shipped
+default would flood every board on day one.
 
 **The invariant.** Compute a SUPERSET of the caps that could serve a pin, and
 violate only when the MINIMUM over that superset exceeds the limit. Every cap
