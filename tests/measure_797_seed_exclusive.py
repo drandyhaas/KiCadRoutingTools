@@ -47,15 +47,30 @@ for _p in (REPO,):
         sys.path.insert(0, os.path.join(_p, 'py_tools'))
         sys.path.insert(0, os.path.join(_p, 'py_placer'))
 
-#: The boards `emit_intent` produces at least one ZONED block for. Checked, not
-#: assumed: splitflap_driver and tigard produce zero blocks and therefore
-#: cannot carry this measurement at all -- stated here because they are the two
-#: boards the placement tests most often reach for.
+#: Every board in `kicad_files/` that can carry this measurement, arrived at by
+#: SCANNING the corpus rather than by picking: it must be copper-free (else
+#: `place_seed` refuses with UNPLACED_EXIT -- "seeding moves footprints and
+#: would strand every track"), and `emit_intent` must produce at least one
+#: ZONED block (else there is nothing to mark exclusive).
+#:
+#: What the scan excluded, recorded because the exclusions are the part a
+#: reader cannot check:
+#:   splitflap_driver, tigard      emit ZERO blocks -- no zone, nothing to mark.
+#:                                 Stated because they are the two boards the
+#:                                 placement tests most often reach for.
+#:   orangecrab_ext_pll,           ROUTED. `place_seed` exits 3 in under a
+#:   rp2350_fpga_eensy_prePlane    second. Both were in the first draft of this
+#:                                 list and both produced a `None` row, which
+#:                                 is what sent me to check.
+#:
+#: `flat_hierarchy` is kept although its input board grades ZERO: a board where
+#: the seeder never intrudes is a NULL result and belongs in the table. Dropping
+#: it would leave a set selected for showing the effect.
 BOARDS = (
     'kit-dev-coldfire-xilinx_5213',
     'ulx3s',
-    'orangecrab_ext_pll',
-    'rp2350_fpga_eensy_prePlane',
+    'glasgow_revC',
+    'flat_hierarchy',
 )
 
 SOURCES = ('kicad', 'sheet')

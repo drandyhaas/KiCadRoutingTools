@@ -246,6 +246,19 @@ ROWS = [
      "SEAT_ENFORCED_RULES = ('zone_containment', 'keepout')",
      (T797P,), 'KILLED'),
 
+    # ---- the two guards a blind review added ---------------------------
+    ('the-unresolved-zone-guard-is-removed', 'q',
+     "    zones = tuple(z for z in (zones or ())\n"
+     "                  if z.get('refs') or not z.get('exclusive'))\n",
+     "",
+     (T797P,), 'KILLED'),
+
+    ('the-edge-slide-is-armed-for-keepouts-only', 's',
+     "            _slide = ((0.0,) if not (state.keepouts_for.get(ref)\n"
+     "                                     or state.exclusive_for.get(ref)) else",
+     "            _slide = ((0.0,) if not state.keepouts_for.get(ref) else",
+     (T797S,), 'KILLED'),
+
     # ---- rows kept as EXPECTED SURVIVORS, with the reason ---------------
     #
     # Recorded rather than deleted, per this file's own header: an inert row
@@ -284,19 +297,6 @@ ROWS = [
      "                   for v, t in zip(intent_term_values(spec, rects), spec))",
      (T797P, T797S), 'SURVIVED'),
 
-    # The `or auto` fallback on the RE-SEAT path's block resolution. Resolving
-    # at a bare `()` makes every `group:`-shaped block resolve to nothing, so
-    # its own members would become strangers to its own exclusive zone. No
-    # fixture in this repo puts a group-shaped block on the re-seat path --
-    # the synthetic boards have no KiCad groups and no sheets, so 'auto' and
-    # '()' resolve identically on them -- and building one would be a fixture
-    # about `groups.derive_groups`, not about #797. The guard is by
-    # construction and mirrors the rule stated at the probe's own resolution
-    # a few hundred lines below it.
-    ('the-reseat-resolves-blocks-at-bare-empty-sources', 's',
-     "    _rs_srcs = tuple(group_sources) or _parse_sources_seat('auto')",
-     "    _rs_srcs = tuple(group_sources)",
-     (T797P, T797S, T698), 'SURVIVED'),
 ]
 
 

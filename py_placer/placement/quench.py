@@ -193,6 +193,24 @@ def exclusive_spec(zones, parts, refs=None
     `zone_exclusive` one, and a member binds none -- rather than on this
     source.
     """
+    # A zone whose members did not RESOLVE binds nobody here. "Stranger" means
+    # "not a member", so with an empty member set EVERY part on the board is
+    # one, and enforcing such a zone evicts the very parts it was drawn
+    # around. Measured on `fanout_output1.kicad_pcb`, whose block is
+    # `group:`-shaped: resolved at bare `()` sources the seat gate refused all
+    # 5 of its OWN members at their own poses, and `repair_placement` then
+    # walked 4 of them 4.00mm out of the region their block reserved.
+    #
+    # Nothing is silently admitted by this: `resolve_blocks` already reports an
+    # unresolved block as `block_unresolved`, an ERROR, so such a board fails
+    # on the real finding rather than on a rule that cannot tell a member from
+    # a stranger.
+    #
+    # Applied HERE rather than in `build_zone_spec`, so the quench's #702 gate
+    # is untouched -- this is a SEAT-gate policy, and widening it would be a
+    # behaviour change shipped inside the wrong issue.
+    zones = tuple(z for z in (zones or ())
+                  if z.get('refs') or not z.get('exclusive'))
     full = build_zone_spec(zones, parts, refs)
     out: Dict[str, Tuple[_IntentTerm, ...]] = {}
     for _ref, _terms in full.items():

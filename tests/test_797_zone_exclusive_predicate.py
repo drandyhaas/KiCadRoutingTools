@@ -444,10 +444,17 @@ def test_two_zones_give_two_named_terms_never_one_aggregate(wd):
     """`_IntentTerm` is one term per (ref, ENTRY), never per (ref, rule): an
     aggregate lets a part buy its way into zone B by leaving zone A, and it
     leaves the verdict unable to name WHICH zone refuses."""
+    # The owners sit in a CORNER of their own zone, not at the probe poses.
+    # A first draft put M1 at (20, 12) and M2 at (8, 19) -- exactly the two
+    # points this arm probes -- so both "refused" assertions were satisfied by
+    # `candidate_valid` rejecting the courtyard overlap, and the arm passed
+    # with the exclusive conjunct deleted. Found by a blind review, which is
+    # the second time on this issue that a probe pose landed on the fixture
+    # part that made it uninformative.
     b = board(os.path.join(wd, 'two.kicad_pcb'), [
         _part('U1', 30.0, 4.0, 1.0, 1.0),
-        _part('M1', 20.0, 12.0, 0.5, 0.5),
-        _part('M2', 8.0, 19.0, 0.5, 0.5),
+        _part('M1', 17.5, 9.5, 0.5, 0.5),
+        _part('M2', 5.5, 17.5, 0.5, 0.5),
     ])
     it = load(intent_doc(blocks=[
         {"name": "rf", "refs": ["M1"], "zone": list(RF),
@@ -459,12 +466,79 @@ def test_two_zones_give_two_named_terms_never_one_aggregate(wd):
     names = sorted(t.name for t in terms_for(st, 'U1'))
     assert names == ['ant', 'rf'], \
         f"U1 binds {names}, want one NAMED term per declared zone"
-    assert refused(st, 'U1', *RF_CENTRE), "the rf zone did not refuse"
-    assert refused(st, 'U1', 8.0, 19.0), "the ant zone did not refuse"
+    # Each probe pose must be refused BY THE ZONE, so assert that the pose is
+    # otherwise legal: `candidate_valid` True and the exclusive gate False.
+    # Without the first half, "refused" is satisfied by any reason at all.
+    for tag, (px, py) in (('rf', RF_CENTRE), ('ant', (8.0, 19.0))):
+        assert st.candidate_valid('U1', px, py, 0.0, exclude=set()), \
+            (f"the {tag} probe pose {(px, py)} is refused by something OTHER "
+             f"than the zone, so this arm would pass with the gate deleted")
+        assert not st.exclusive_clear('U1', st.parts['U1'].rects(px, py, 0.0)), \
+            f"the {tag} zone did not refuse {(px, py)}"
+        assert refused(st, 'U1', px, py), \
+            f"pose_ok seated U1 at {(px, py)} inside the {tag} zone"
     assert not refused(st, 'U1', 30.0, 4.0), \
         "a pose outside BOTH zones was refused; something else is refusing"
     print(f"  PASS: the stranger binds two separately named terms {names}, is "
           f"refused inside each, and seated outside both")
+
+
+def test_a_zone_whose_members_did_not_resolve_binds_nobody(wd):
+    """"Stranger" means "not a member", so a zone whose member set is EMPTY
+    makes every part on the board one -- including the parts it was drawn
+    around. Enforcing it evicts them from the region their own block reserved,
+    which inverts the rule instead of applying it.
+
+    This is reachable: a block may name a `group` rather than explicit `refs`,
+    and `resolve_blocks` resolves a group only when it is given
+    `group_sources`. `place_reconstruct.py` passes `()` and has no
+    `--group-by` flag at all.
+
+    Measured on `fanout_output1.kicad_pcb` with a group-only block, before the
+    guard: the zone bound all 8 parts and refused 6 of them at their own
+    poses, all 5 of its own members among them. After: 0 and 0.
+
+    The pair below is what makes this non-vacuous -- the SAME zone declared
+    with explicit refs must still bind and still refuse.
+    """
+    b = board(os.path.join(wd, 'unres.kicad_pcb'), [
+        _part('U1', 20.0, 12.0, 1.0, 1.0),
+        _part('M1', 34.0, 20.0, 1.0, 1.0),
+    ])
+    # (a) group-only, and this board has no groups to resolve it against.
+    it_a = load(intent_doc(blocks=[
+        {"name": "rf", "group": "sheet:nope", "zone": list(RF),
+         "exclusive": True, "tolerance_mm": 0.5}]), wd, 'unres_a')
+    st_a, gate_a, _p = seat_state(b, it_a)
+    assert gate_a['zones'] and not gate_a['zones'][0]['refs'], \
+        (f"the fixture block RESOLVED ({gate_a['zones']}); this arm needs an "
+         f"unresolved one to test anything")
+    assert not st_a.exclusive_for, (
+        f"a zone with no resolved members bound {len(st_a.exclusive_for)} "
+        f"part(s): every one of them is a 'stranger' to a block that has no "
+        f"members, so the rule is inverted rather than applied")
+    # The EXCLUSIVE gate specifically, for every part at the zone centre.
+    # Not `pose_ok`: that would move each part onto the same point, where
+    # `candidate_valid` refuses them for overlapping each other and the arm
+    # would report a refusal the zone had nothing to do with.
+    for ref, prt in sorted(st_a.parts.items()):
+        assert st_a.exclusive_clear(ref, prt.rects(*RF_CENTRE, 0.0)), \
+            f"{ref} was refused by a zone whose members did not resolve"
+    # ... and end to end for U1, which already sits at the zone centre with
+    # no neighbour near it, so `pose_ok` has nothing else to object to.
+    assert not refused(st_a, 'U1', *RF_CENTRE), \
+        "pose_ok refused U1 over a zone whose members did not resolve"
+
+    # (b) the control: the same zone with explicit refs still bites.
+    it_b = load(intent_doc(blocks=[
+        {"name": "rf", "refs": ["M1"], "zone": list(RF),
+         "exclusive": True, "tolerance_mm": 0.5}]), wd, 'unres_b')
+    st_b, _g, _p = seat_state(b, it_b)
+    assert st_b.exclusive_for, "the resolved control bound nobody either"
+    assert refused(st_b, 'U1', *RF_CENTRE), \
+        "the resolved control did not refuse, so (a) proves nothing"
+    print("  PASS: an unresolved exclusive zone binds 0 parts and refuses "
+          "none; the same zone with explicit refs binds and refuses")
 
 
 # --------------------------------------------------------------------------
@@ -497,9 +571,15 @@ def _lattice_case(wd, tag, part_kw, block):
     for dx in range(-6, 7):
         for dy in range(-4, 5):
             x, y = LAT_CENTRE[0] + dx, LAT_CENTRE[1] + dy
-            spec = terms_for(st, 'U1')
-            vals = q.intent_term_values(spec, p.rects(x, y, 0.0)) if spec else ()
-            gate_clean = all(v <= t.threshold for v, t in zip(vals, spec))
+            # THE ENGINE'S OWN PREDICATE, never a re-implementation of it.
+            # The first draft of this sweep inlined `exclusive_clear`'s body
+            # (`all(v <= t.threshold for ...)`) and a blind review showed the
+            # whole lattice PASSING with `pose_ok`'s conjunct deleted: it was
+            # measuring the constructor parameter, not the seat search. That
+            # is precisely the trap `refused()` above names -- "an arm
+            # asserting against a second predicate proves nothing about the
+            # first" -- committed in the one place it was not being watched.
+            gate_clean = st.exclusive_clear('U1', p.rects(x, y, 0.0))
             fp.x, fp.y = x, y
             grade_clean = not graded_exclusive(pcb, b, it, ref='U1')
             if gate_clean:
@@ -601,22 +681,43 @@ def test_the_seat_enforced_tuple_matches_the_doc_column_and_an_arm(wd):
         (f"the coverage map and the tuple disagree: "
          f"{sorted(set(covered) ^ set(seeder.SEAT_ENFORCED_RULES))}")
 
-    if not os.path.exists(_DOC):
-        print(f"  SKIP the doc half: {_DOC} not present")
-        return
+    # NOT a skip. The older detector beside this one (`_VERDICT_DOCS`) asserts
+    # the file exists, and for the same reason: a renamed or moved document
+    # would turn this gate green while deleting the thing it guards.
+    assert os.path.exists(_DOC), \
+        f"{_DOC} is missing -- this gate cannot verify the column it exists for"
     text = io.open(_DOC, encoding='utf-8').read()
     # The row for each rule in the "Which rules the SEARCH can see" table.
     # Read positionally rather than by regex over the whole file: the same
     # rule name appears in the rules table above it.
+    #
+    # The seat column is located BY ITS HEADER, never by index. A first draft
+    # hardcoded index 2, and a blind review showed that reordering the five
+    # columns silently redirected it to the QUENCH column -- so the arm still
+    # passed with the seat cell reverted to "no", which is the exact staleness
+    # it exists to catch.
+    header = None
     rows = {}
     for line in text.splitlines():
         s = line.strip()
-        if not s.startswith('| `'):
-            continue
-        cells = [c.strip() for c in s.strip('|').split('|')]
+        cells = [c.strip() for c in s.strip('|').split('|')] \
+            if s.startswith('|') else []
         if len(cells) != 5:
             continue                      # not the 5-column search table
-        rows[cells[0].strip('`')] = cells
+        if 'seat search' in s.lower() and 'quench' in s.lower():
+            header = [c.lower() for c in cells]
+            continue
+        if s.startswith('| `'):
+            rows[cells[0].strip('`')] = cells
+    assert header is not None, (
+        "the 'Which rules the SEARCH can see' table has no recognisable "
+        "header row (wanted a 5-column row naming both 'seat search' and "
+        "'quench') -- the column cannot be located, so this gate is blind")
+    seat_ix = [i for i, h in enumerate(header) if 'seat search' in h]
+    assert len(seat_ix) == 1, \
+        f"the header names {len(seat_ix)} 'seat search' column(s): {header}"
+    seat_ix = seat_ix[0]
+    assert rows, "the table has no rule rows"
     # The column has THREE vocabularies, not two, and conflating them is how
     # the first draft of this arm failed: a per-pose GATE ("**yes**", "via
     # `zone_gate`"), a STAGE that merely consults the rule somewhere
@@ -629,17 +730,17 @@ def test_the_seat_enforced_tuple_matches_the_doc_column_and_an_arm(wd):
     for rule in sorted(want):
         assert rule in rows, \
             f"{rule} has no row in the 'Which rules the SEARCH can see' table"
-        assert _claims_a_gate(rows[rule][2]), (
+        assert _claims_a_gate(rows[rule][seat_ix]), (
             f"the doc does not claim a per-pose seat gate for {rule!r} "
-            f"({rows[rule][2]!r}), but seeder.SEAT_ENFORCED_RULES lists it")
+            f"({rows[rule][seat_ix]!r}), but seeder.SEAT_ENFORCED_RULES lists it")
     # ... and the other direction: a rule whose cell claims a GATE must be in
     # the tuple, or the column is promising enforcement that does not exist.
     for rule, cells in sorted(rows.items()):
-        if not _claims_a_gate(cells[2]):
+        if not _claims_a_gate(cells[seat_ix]):
             continue
         assert rule in want, (
             f"the doc claims a per-pose seat gate for {rule!r} "
-            f"({cells[2]!r}), but seeder.SEAT_ENFORCED_RULES does not list it")
+            f"({cells[seat_ix]!r}), but seeder.SEAT_ENFORCED_RULES does not list it")
     print(f"  PASS: {len(want)} seat-enforced rule(s), each with an arm and "
           f"each matching its row in docs/floorplan-intent.md, both ways")
 
@@ -652,6 +753,7 @@ TESTS = [
     test_the_measurement_is_courtyard_only_unlike_a_keepout,
     test_a_zone_with_no_rect_and_exclusive_false_arm_nothing,
     test_two_zones_give_two_named_terms_never_one_aggregate,
+    test_a_zone_whose_members_did_not_resolve_binds_nobody,
     test_gate_and_grade_agree_over_a_pose_lattice,
     test_the_seat_enforced_tuple_matches_the_doc_column_and_an_arm,
 ]

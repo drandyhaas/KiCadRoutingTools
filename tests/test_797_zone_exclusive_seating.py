@@ -604,6 +604,76 @@ def _run_e(wd, exclusive, tag):
 
 
 # --------------------------------------------------------------------------
+# E2 -- the SAME rect declared two ways must cost the same
+# --------------------------------------------------------------------------
+
+E2_SIZE = (20.0, 14.0)
+E2_RECT = (5.0, 10.0, 11.0, 14.0)       # the WEST HALF of the south band
+
+
+def _e2_board(path):
+    board(path, [_part('J1', 10.0, 12.5, 3.0, 1.5, 2, pad_y=-1.0),
+                 _part('M1', 7.5, 12.0, 0.4, 0.4, 2)], size=E2_SIZE)
+
+
+def _e2_intent(kind):
+    d = {"schema": 1, "kind": "floorplan-intent", "units": "mm",
+         "envelope": {"rect": [0.0, 0.0, E2_SIZE[0], E2_SIZE[1]],
+                      "tolerance_mm": 0.5},
+         "blocks": [{"name": "b", "refs": ["J1"]}],
+         "edge_connectors": [{"ref": "J1", "edge": "south",
+                              "overhang_mm": {"min": 0.0, "max": 1.0}}]}
+    if kind == 'keepout':
+        d["keepouts"] = [{"name": "shell", "rect": list(E2_RECT),
+                          "sides": ["F"]}]
+    elif kind == 'exclusive':
+        d["blocks"].append({"name": "rf", "refs": ["M1"],
+                            "zone": list(E2_RECT), "exclusive": True,
+                            "tolerance_mm": 0.5})
+    return d
+
+
+def arm_E2_the_same_rect_declared_two_ways(wd):
+    """Stage 1 slides an edge connector along its edge when a declared claim
+    refuses the even-distribution fraction. That ladder was armed for
+    KEEP-OUTS only, so the same rectangle cost J1 its declared edge when
+    declared as an exclusive zone and did not when declared as a keep-out --
+    an asymmetry with no reason behind it, found by a blind review.
+
+    The rect covers only the WEST HALF of the south band, so a free strip
+    exists to the east and the right answer is to slide, not to give up. The
+    control shows where J1 goes with nothing declared, which is what makes
+    "it moved" mean anything.
+    """
+    print("--- E2: the same rect as a keep-out and as an exclusive zone")
+    seats = {}
+    for kind in ('control', 'keepout', 'exclusive'):
+        r, s, out = run(wd, _e2_board, _e2_intent(kind), tag='E2' + kind)
+        if not s:
+            check(f"E2: the {kind} run produced a summary", False,
+                  f"rc={r.returncode}")
+            return
+        p = poses(out)['J1']
+        seats[kind] = (p[:2], overlap(out, 'J1', E2_RECT),
+                       p[1] > E2_SIZE[1] - 3.0)
+    check("E2-control: with nothing declared J1 sits INSIDE the rect, on its "
+          "south edge -- so the two declared arms have something to move",
+          seats['control'][1] > 0.0 and seats['control'][2],
+          f"seat {seats['control'][0]}, overlap {seats['control'][1]}mm2")
+    for kind in ('keepout', 'exclusive'):
+        check(f"E2-{kind}: J1 is out of the rect and KEEPS its declared south "
+              f"edge rather than being parked inland",
+              seats[kind][1] == 0.0 and seats[kind][2],
+              f"seat {seats[kind][0]}, overlap {seats[kind][1]}mm2, "
+              f"south={seats[kind][2]}")
+    check("E2: and the two declarations cost EXACTLY the same seat -- the "
+          "asymmetry is what this arm exists to catch",
+          seats['keepout'][0] == seats['exclusive'][0],
+          f"keep-out {seats['keepout'][0]} vs exclusive "
+          f"{seats['exclusive'][0]}")
+
+
+# --------------------------------------------------------------------------
 # P -- the post-polish repair, which is what `_repairable` is for
 # --------------------------------------------------------------------------
 
@@ -702,6 +772,7 @@ def main():
         arm_Z_jointly_blocked(wd)
         arm_S_side_filter_and_its_control(wd)
         arm_E_edge_seat_and_its_control(wd)
+        arm_E2_the_same_rect_declared_two_ways(wd)
         arm_P_polish_repair(wd)
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0

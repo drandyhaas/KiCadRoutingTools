@@ -1557,7 +1557,19 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # error for an `edge_connector` one, while 26 clear south-edge
             # seats existed. The ladder is skipped entirely when nothing is
             # declared, so a board with no keep-out is unchanged.
-            _slide = ((0.0,) if not state.keepouts_for.get(ref) else
+            #
+            # #797 arms it for a declared EXCLUSIVE ZONE too. `edge_seat_ok`
+            # got the exclusive conjunct, but this ladder was still keyed on
+            # keep-outs alone -- so identical geometry cost the connector its
+            # declared edge when declared one way and not the other. Measured
+            # on a 20x14 fixture with a rect over the WEST HALF of the south
+            # band: as a keep-out J1 slid to (13.0, 12.5), still on the south
+            # edge; as an exclusive zone it got one fraction, was refused, and
+            # fell through to the ordinary stages, which parked it at
+            # (7.489, 8.34) -- the board interior. Same rect, same free strip
+            # to the east, two different answers.
+            _slide = ((0.0,) if not (state.keepouts_for.get(ref)
+                                     or state.exclusive_for.get(ref)) else
                       (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
                        0.2, -0.2, 0.3, -0.3, 0.4, -0.4))
             _base_frac = frac
@@ -3297,16 +3309,20 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
     # (the unrepairable filter, and reseat's refusal list) pick it up for free.
     _extra_locked = {r for pat in (lock_globs or [])
                      for r in fnmatch.filter(sorted(pcb_data.footprints), pat)}
-    # Hoisted above `make_state` (#797), and resolved with the SAME `or auto`
-    # rule the acceptance probe below uses. Resolving the seat gate at a bare
-    # `()` would make every `group:`-shaped block resolve to nothing, which is
-    # not a quiet no-op here: a block with no members has no members to exempt,
-    # so its own parts become STRANGERS to its own exclusive zone and the seat
-    # search refuses them the region they were declared to occupy.
-    from placement.groups import parse_sources as _parse_sources_seat
-    _rs_srcs = tuple(group_sources) or _parse_sources_seat('auto')
+    # Hoisted above `make_state` (#797), resolved with the caller's OWN
+    # sources -- the same ones `place_seed` grades with, so the gate and the
+    # grade cannot disagree about who is a member.
+    #
+    # An earlier draft used `group_sources or auto` here, to stop a
+    # `group:`-shaped block resolving to nothing. That was the wrong place and
+    # the wrong mechanism, on two counts a blind review measured: this state is
+    # never consulted by the seat gate at all (`reseat_scope` re-enters through
+    # `seed_from_intent`, which builds its own), and guessing a source the
+    # GRADE will not use trades one round-trip break for its mirror image. The
+    # real guard is in `quench.exclusive_spec`, where a zone with no resolved
+    # members binds nobody.
     _rs_blocks, _rs_probs = floorplan.resolve_blocks(
-        intent, pcb_data, _rs_srcs)
+        intent, pcb_data, group_sources)
     state = pose_score.make_state(
         pcb_data, pcb_file, clearance=clearance,
         board_edge_clearance=board_edge_clearance, grid_step=grid_step,
