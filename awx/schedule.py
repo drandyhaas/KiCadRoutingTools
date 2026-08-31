@@ -248,6 +248,9 @@ class Schedule:
             placed.add(d)
         assert sseq == self.target, (sseq, self.target)
         if log:
+            if self.two_page:
+                log(f'  page F: {[n for n in self.launch if self.page[n] == "F.Cu"]}')
+                log(f'  page B: {self.b_page}   swimmers: {self.swimmers}')
             log(f'  launch order: {self.launch}')
             log(f'  target order: {self.target}  ranks: {ranks}')
             log(f'  divers ({len(divers)}): '

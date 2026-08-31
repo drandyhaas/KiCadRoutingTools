@@ -1816,6 +1816,50 @@ class Corridor:
             self.refused = refused
             self.out_segs, self.out_vias = segs_b, vias_b
             ctx.pcb.segments, ctx.pcb.vias = pcb_s, pcb_v
+        if self.refused and getattr(sched, 'two_page', False) \
+                and os.environ.get('FREE_PASS', '1') == '1':
+            # LAST CALL -- the corridor's own router, off the lattice.
+            # Every routed lane is real copper by now, and what
+            # refused a ribbon swimmer was its BAND -- the tube around
+            # a straight line through a saturated lattice -- not the
+            # corridor itself. Each refused lane gets one more search:
+            # the same engine, costs and virtual copper (for the other
+            # refused lanes), but no band, a wide window round its own
+            # planned path, and the x4 budget. The copper comes out
+            # lane-shaped because it is the lane router; the
+            # generalist fallback (TAIL_RESCUE) stays a separate,
+            # env-gated thing. FREE_PASS=0 disables. Two-page only, so
+            # the single-page default is bit-identical by construction.
+            import copy as _copy
+            cfg0 = ctx.cfg
+            big = _copy.copy(cfg0)
+            big.max_iterations = 4 * max(cfg0.max_iterations, 50_000)
+            ctx.cfg = big
+            try:
+                still = list(self.refused)
+                for nm in list(still):
+                    others = [om for om in still if om != nm]
+                    nid, _ = ctx.byname[nm]
+                    res = cn.connect(
+                        ctx.pcb, nid, self.teeth[nm], ctx.tooth_layer[nm],
+                        self.stubs[nm], ctx.dest_layer[nm], ctx.cfg,
+                        band=None, margin=2.0,
+                        virtual=self.virtual_of(others),
+                        window_pts=self.lane_xy[nm],
+                        virtual_vias=self.virtual_vias_of(others))
+                    if res is None:
+                        log(f'    last call: {nm} still refused')
+                        continue
+                    segs_o, vias_o = res
+                    ctx.pcb.segments.extend(segs_o)
+                    ctx.pcb.vias.extend(vias_o)
+                    self.out_segs[nm] = segs_o
+                    self.out_vias[nm] = vias_o
+                    still.remove(nm)
+                    log(f'    last call routed: {nm} ({len(vias_o)} via(s))')
+                self.refused = still
+            finally:
+                ctx.cfg = cfg0
         self.sched = sched
         self.finish()
 
