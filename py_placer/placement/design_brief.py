@@ -612,6 +612,14 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
         merged_ctx = dict(base.get('context') or {})
         merged_ctx.update(c.get('context') or {})
         base.update({k: v for k, v in c.items() if k != 'context'})
+        # The flag is a statement about THIS brief row, so a row that DOES
+        # declare an edge must clear it. Without that, re-merging a document
+        # that once carried `edge: "unknown"` drops the newly declared edge
+        # while the promotion below still fires -- leaving an
+        # `edge_receptacle` entry with no edge in `edge_claims()`, which the
+        # engines read as a claim they cannot act on.
+        if c.get('edge'):
+            merged_ctx.pop('edge_declared_unknown', None)
         if merged_ctx.get('edge_declared_unknown'):
             base.pop('edge', None)
         base['context'] = merged_ctx

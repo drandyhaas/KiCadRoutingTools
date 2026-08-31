@@ -164,9 +164,13 @@ def test_the_seat_is_deterministic_once_declared():
     # currency error the agreement sweep caught.
     st = _state()
     x0, _, x1, _ = st.board
-    off = seeder._centre_offset_frac(st.parts['J17'], st.board, 'north')
-    centre_frac = (xs_c[0] - x0) / (x1 - x0) + off
-    assert abs(centre_frac - 0.5) < 0.005, (centre_frac, off)
+    # Through the PRODUCTION converter, so the test exercises the function
+    # the seat search uses rather than a second implementation of it.
+    e_lo, e_hi, _ = seeder._declared_edge_span(st, st.board, 'north')
+    centre_frac = seeder.ladder_to_declared_frac(
+        st.parts['J17'], st.board, 'north', e_lo, e_hi,
+        (xs_c[0] - x0) / (x1 - x0))
+    assert abs(centre_frac - 0.5) < 0.005, centre_frac
     print(f"  PASS: undeclared lands at {len(xs_plain)} distinct x "
           f"{xs_plain[:4]}; centred at {xs_c[0]} (courtyard centre at frac "
           f"{centre_frac:.4f}); banded at {xs_b[0]}")
@@ -208,12 +212,13 @@ def test_a_declared_window_that_cannot_be_met_refuses_by_name():
     # 198.12mm edge -- measured, not assumed, because a band chosen from a
     # guess can overlap the window and then this test asserts nothing.
     lo, hi = seeder._edge_frac_bounds(st.parts['J5'], st.board, 'north')
-    off = seeder._centre_offset_frac(st.parts['J5'], st.board, 'north')
     assert abs(hi - 0.9851) < 0.001, (lo, hi)
     # The NOTE reports both windows in the declaration's own currency (rect
     # centre), not the ladder's (origin), or its two numbers would mean
     # different things in one sentence.
-    assert abs((hi + off) - 0.9597) < 0.002, (hi, off)
+    e_lo, e_hi, _ = seeder._declared_edge_span(st, st.board, 'north')
+    assert abs(seeder.ladder_to_declared_frac(
+        st.parts['J5'], st.board, 'north', e_lo, e_hi, hi) - 0.9597) < 0.002
     ok = seeder._seat_edge(
         st, 'J5', {'ref': 'J5', 'edge': 'north',
                    'overhang_mm': {'min': 0.0, 'max': 0.8},
@@ -473,7 +478,7 @@ def test_stage_one_honours_the_same_declaration():
     # SURVIVED). With two, the defaults are 1/3 and 2/3 and neither is 0.5.
     doc['edge_connectors'] = [{'ref': 'J17', 'edge': 'north',
                                'overhang_mm': {'min': 0.0, 'max': 1.0},
-                               'center_on_edge': {'tolerance_mm': 1.0}},
+                               'center_on_edge': {'tolerance_mm': 0.5}},
                               {'ref': 'J3', 'edge': 'north',
                                'overhang_mm': {'min': 0.0, 'max': 1.0}}]
     intent = fp.intent_from_dict(doc, board)
@@ -491,11 +496,14 @@ def test_stage_one_honours_the_same_declaration():
     frac = seeder.ladder_to_declared_frac(
         part, st.board, 'north', e_lo, e_hi, (px - x0) / (x1 - x0))
     off_mm = (frac - 0.5) * (e_hi - e_lo)
-    assert abs(off_mm) <= 1.0 + 1e-6, (frac, off_mm)
+    # 0.5, not 1.0. The battery caught the earlier bound being EXACTLY the
+    # answer: neutering stage 1's declared start moves J17 by 1.000mm, so
+    # `<= 1.0 + 1e-6` passed on the mutation it was meant to catch.
+    assert abs(off_mm) <= 0.5 + 1e-6, (frac, off_mm)
     # ...and it is NOT merely where the even distribution would have put it.
     assert abs(frac - 1.0 / 3.0) > 0.05 and abs(frac - 2.0 / 3.0) > 0.05, frac
     print(f"  PASS: stage 1 seated J17 with its courtyard centre at frac "
-          f"{frac:.4f} ({off_mm:+.3f}mm), inside the declared 1.00mm "
+          f"{frac:.4f} ({off_mm:+.3f}mm), inside the declared 0.50mm "
           f"tolerance -- measured, not grepped")
 
 

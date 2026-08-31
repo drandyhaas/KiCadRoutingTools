@@ -36,10 +36,10 @@ Key options:
 | `--ignore-nets` | – | Net patterns excluded from airwire scoring (plane-routed power nets) |
 | `--lock` | – | Reference patterns to pin in place (connectors, mounting-critical parts) |
 | `--halo-coef` | 0.25 | Extra whitespace per √(pin count); keep modest (~0.15) on dense boards |
-> **The declared design brief reaches these CLIs THROUGH `--intent`, not through a flag of their own (#711).** `<board>.design-brief.json` is read by `check_floorplan.py` (and reported by `board_brief.py`); `check_floorplan --emit-intent` COMPILES it into `edge_connectors` / `keepouts`, and the placement CLIs then consume that intent. One artifact, one flag: a second channel into the same engine is exactly the divergence this module's `cli_gates` exists to prevent. `--brief` / `--no-brief` therefore exist on `check_floorplan.py` and `board_brief.py` only. See [docs/design-brief.md](../../docs/design-brief.md).
-
 | `--intent` | – | Floorplan intent JSON. Its declared zones, keep-outs and exclusive zones become HARD per-move gates; its `must_lock` globs and `edge_connectors` edge claims are locked. MONOTONE: it prevents a part being walked out of a zone, it does not walk one back in. Omitted, the run is bit-identical to one built before the flag existed (#702) |
 | `--no-rotate` / `--no-swap` | off | Disable rotation / swap moves. `--no-rotate` freezes every part's angle: nudges keep the current rotation, and same-footprint swaps are restricted to pairs that already share one, since a swap exchanges full poses and a mixed-angle pair would rotate both parts |
+
+> **The declared design brief reaches these CLIs THROUGH `--intent`, not through a flag of their own (#711).** `<board>.design-brief.json` is read by `check_floorplan.py` (and reported by `board_brief.py`); `check_floorplan --emit-intent` COMPILES it into `edge_connectors` / `keepouts`, and the placement CLIs then consume that intent. One artifact, one flag: a second channel into the same engine is exactly the divergence this module's `cli_gates` exists to prevent. `--brief` / `--no-brief` therefore exist on `check_floorplan.py` and `board_brief.py` only. See [docs/design-brief.md](../../docs/design-brief.md).
 
 ## place_route_loop.py — router-in-the-loop repair
 
