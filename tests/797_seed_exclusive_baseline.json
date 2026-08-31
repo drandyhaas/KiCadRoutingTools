@@ -1,0 +1,314 @@
+{
+ "after": {
+  "board_edge_clearance": 0.55,
+  "clearance": 0.2,
+  "engine_sha": "00f1ff9f3f55f8cbad2e9266c9af3aa21cf1ca90",
+  "rows": [
+   {
+    "arm": "seed",
+    "blocks": 2,
+    "board": "kit-dev-coldfire-xilinx_5213",
+    "errors_by_rule": {},
+    "errors_total": 0,
+    "rc": 0,
+    "seconds": 60.2,
+    "summary_grade_errors": 0,
+    "unseated": 0,
+    "unseated_refs": [],
+    "verdicts": {},
+    "zone_exclusive": 0,
+    "zoned_blocks": 1
+   },
+   {
+    "arm": "polish",
+    "blocks": 2,
+    "board": "kit-dev-coldfire-xilinx_5213",
+    "errors_by_rule": {},
+    "errors_total": 0,
+    "rc": 0,
+    "seconds": 303.4,
+    "summary_grade_errors": 0,
+    "unseated": 0,
+    "unseated_refs": [],
+    "verdicts": {},
+    "zone_exclusive": 0,
+    "zoned_blocks": 1
+   },
+   {
+    "arm": "seed",
+    "blocks": 10,
+    "board": "ulx3s",
+    "errors_by_rule": {},
+    "errors_total": 0,
+    "rc": 4,
+    "seconds": 28.1,
+    "summary_grade_errors": 0,
+    "unseated": 5,
+    "unseated_refs": [
+     "H2",
+     "H3",
+     "H4",
+     "J1",
+     "J2"
+    ],
+    "verdicts": {
+     "no_single_lift_frees": 5
+    },
+    "zone_exclusive": 0,
+    "zoned_blocks": 4
+   },
+   {
+    "arm": "polish",
+    "blocks": 10,
+    "board": "ulx3s",
+    "errors_by_rule": {},
+    "errors_total": 0,
+    "rc": 4,
+    "seconds": 254.9,
+    "summary_grade_errors": 0,
+    "unseated": 5,
+    "unseated_refs": [
+     "H2",
+     "H3",
+     "H4",
+     "J1",
+     "J2"
+    ],
+    "verdicts": {
+     "no_single_lift_frees": 5
+    },
+    "zone_exclusive": 0,
+    "zoned_blocks": 4
+   },
+   {
+    "arm": "seed",
+    "blocks": 3,
+    "board": "glasgow_revC",
+    "errors_by_rule": {
+     "zone_exclusive": 3
+    },
+    "errors_total": 3,
+    "rc": 4,
+    "seconds": 10.9,
+    "summary_grade_errors": 3,
+    "unseated": 0,
+    "unseated_refs": [],
+    "verdicts": {},
+    "zone_exclusive": 3,
+    "zoned_blocks": 1
+   },
+   {
+    "arm": "polish",
+    "blocks": 3,
+    "board": "glasgow_revC",
+    "errors_by_rule": {
+     "zone_exclusive": 3
+    },
+    "errors_total": 3,
+    "rc": 4,
+    "seconds": 478.6,
+    "summary_grade_errors": 3,
+    "unseated": 0,
+    "unseated_refs": [],
+    "verdicts": {},
+    "zone_exclusive": 3,
+    "zoned_blocks": 1
+   },
+   {
+    "arm": "seed",
+    "blocks": 2,
+    "board": "flat_hierarchy",
+    "errors_by_rule": {},
+    "errors_total": 0,
+    "rc": 0,
+    "seconds": 11.7,
+    "summary_grade_errors": 0,
+    "unseated": 0,
+    "unseated_refs": [],
+    "verdicts": {},
+    "zone_exclusive": 0,
+    "zoned_blocks": 1
+   },
+   {
+    "arm": "polish",
+    "blocks": 2,
+    "board": "flat_hierarchy",
+    "errors_by_rule": {},
+    "errors_total": 0,
+    "rc": 0,
+    "seconds": 20.0,
+    "summary_grade_errors": 0,
+    "unseated": 0,
+    "unseated_refs": [],
+    "verdicts": {},
+    "zone_exclusive": 0,
+    "zoned_blocks": 1
+   }
+  ],
+  "sources": [
+   "kicad",
+   "sheet"
+  ]
+ },
+ "before": {
+  "board_edge_clearance": 0.55,
+  "clearance": 0.2,
+  "engine_sha": "a40551183259a18de2c459356b857ea476b96b29 (upstream/main py_placer/, checked out into the branch worktree so the measurement script itself was identical on both arms)",
+  "rows": [
+   {
+    "arm": "seed",
+    "blocks": 2,
+    "board": "kit-dev-coldfire-xilinx_5213",
+    "errors_by_rule": {
+     "zone_exclusive": 29
+    },
+    "errors_total": 29,
+    "rc": 4,
+    "seconds": 33.8,
+    "summary_grade_errors": 29,
+    "unseated": 0,
+    "unseated_refs": [],
+    "verdicts": {},
+    "zone_exclusive": 29,
+    "zoned_blocks": 1
+   },
+   {
+    "arm": "polish",
+    "blocks": 2,
+    "board": "kit-dev-coldfire-xilinx_5213",
+    "errors_by_rule": {
+     "zone_exclusive": 28
+    },
+    "errors_total": 28,
+    "rc": 4,
+    "seconds": 241.4,
+    "summary_grade_errors": 28,
+    "unseated": 0,
+    "unseated_refs": [],
+    "verdicts": {},
+    "zone_exclusive": 28,
+    "zoned_blocks": 1
+   },
+   {
+    "arm": "seed",
+    "blocks": 10,
+    "board": "ulx3s",
+    "errors_by_rule": {
+     "zone_exclusive": 72
+    },
+    "errors_total": 72,
+    "rc": 4,
+    "seconds": 17.7,
+    "summary_grade_errors": 72,
+    "unseated": 2,
+    "unseated_refs": [
+     "J1",
+     "J2"
+    ],
+    "verdicts": {
+     "no_single_lift_frees": 2
+    },
+    "zone_exclusive": 72,
+    "zoned_blocks": 4
+   },
+   {
+    "arm": "polish",
+    "blocks": 10,
+    "board": "ulx3s",
+    "errors_by_rule": {
+     "zone_exclusive": 70
+    },
+    "errors_total": 70,
+    "rc": 4,
+    "seconds": 226.6,
+    "summary_grade_errors": 70,
+    "unseated": 2,
+    "unseated_refs": [
+     "J1",
+     "J2"
+    ],
+    "verdicts": {
+     "no_single_lift_frees": 2
+    },
+    "zone_exclusive": 70,
+    "zoned_blocks": 4
+   },
+   {
+    "arm": "seed",
+    "blocks": 3,
+    "board": "glasgow_revC",
+    "errors_by_rule": {
+     "zone_exclusive": 33
+    },
+    "errors_total": 33,
+    "rc": 4,
+    "seconds": 12.4,
+    "summary_grade_errors": 33,
+    "unseated": 0,
+    "unseated_refs": [],
+    "verdicts": {},
+    "zone_exclusive": 33,
+    "zoned_blocks": 1
+   },
+   {
+    "arm": "polish",
+    "blocks": 3,
+    "board": "glasgow_revC",
+    "errors_by_rule": {
+     "zone_exclusive": 33
+    },
+    "errors_total": 33,
+    "rc": 4,
+    "seconds": 894.4,
+    "summary_grade_errors": 33,
+    "unseated": 0,
+    "unseated_refs": [],
+    "verdicts": {},
+    "zone_exclusive": 33,
+    "zoned_blocks": 1
+   },
+   {
+    "arm": "seed",
+    "blocks": 2,
+    "board": "flat_hierarchy",
+    "errors_by_rule": {
+     "zone_exclusive": 24
+    },
+    "errors_total": 24,
+    "rc": 4,
+    "seconds": 9.8,
+    "summary_grade_errors": 24,
+    "unseated": 0,
+    "unseated_refs": [],
+    "verdicts": {},
+    "zone_exclusive": 24,
+    "zoned_blocks": 1
+   },
+   {
+    "arm": "polish",
+    "blocks": 2,
+    "board": "flat_hierarchy",
+    "errors_by_rule": {
+     "zone_exclusive": 21
+    },
+    "errors_total": 21,
+    "rc": 4,
+    "seconds": 15.3,
+    "summary_grade_errors": 21,
+    "unseated": 0,
+    "unseated_refs": [],
+    "verdicts": {},
+    "zone_exclusive": 21,
+    "zoned_blocks": 1
+   }
+  ],
+  "sources": [
+   "kicad",
+   "sheet"
+  ]
+ },
+ "boards": "every copper-free board in kicad_files/ that emits at least one zoned block -- scanned, not picked. See BOARDS in tests/measure_797_seed_exclusive.py for what the scan excluded and why.",
+ "issue": 797,
+ "reproduce": "python3 -X utf8 tests/measure_797_seed_exclusive.py --out after.json ; git checkout <base> -- py_placer ; same again into before.json ; git checkout HEAD -- py_placer ; then --diff before.json after.json",
+ "what": "place_seed against an intent whose every ZONED block is marked exclusive, emitted from the board by floorplan.emit_intent. These are SYNTHETIC declarations, not a human RF keep-clear: a reproducible stress fixture. zone_exclusive counts are ERRORS from check_floorplan --json, never violations_by_rule, which counts warnings too."
+}

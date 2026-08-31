@@ -99,6 +99,7 @@ this part* and *everything near it is locked*.
 | verdict | what it means | what to do |
 | --- | --- | --- |
 | `keepout_blocks` | a **declared keep-out** refuses it — measured, by recounting the poses with that keep-out lifted (#701) | move the keep-out, or add the part to its `allow` list if it owns it |
+| `zone_exclusive_blocks` | a **declared exclusive zone** refuses it, and the part is not a member of the block that reserved it — measured by recounting with that zone lifted (#797) | add the part to the block that owns the zone, move the zone, or drop its `exclusive` flag. There is no `allow` list — membership is it |
 | `no_movable_neighbour` | nothing seated is near it | eviction cannot help — the pocket does not exist; re-check the outline or the intent |
 | `immovable_given_frozen` | everything near it is frozen (it names each neighbour **and the decision that froze it**) | unlock one of them, or accept it |
 | `blocker_available` | a useful blocker exists, the rung is disarmed | raise `--evict-depth` |

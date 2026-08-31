@@ -1210,6 +1210,28 @@ def zone_covered_by_keepout(zone, keepouts, member_sides=None,
     return None
 
 
+def zone_entries(intent: Intent, blocks: Dict[str, List[str]]) -> Tuple[Dict, ...]:
+    """The plain-dict zone rows, given ALREADY-RESOLVED blocks.
+
+    Split out of `resolve_intent_gate` (#797) because the SEAT search needs the
+    same rows and must not pay for the rest of that function: it has resolved
+    its blocks already, and re-running the gate resolver there would report the
+    `intent_zone_in_keepout` problems a second time.
+
+    One construction, several callers, for the reason `resolve_intent_gate`'s
+    own docstring gives about the join it replaced: a filter that must be
+    remembered is a filter that will be forgotten at the next call site.
+    """
+    return tuple(
+        {'name': z.name,
+         'rect': tuple(z.rect),
+         'tolerance_mm': intent.zone_tolerance(z),
+         'refs': tuple(blocks.get(z.name, ())),
+         'side': z.side,
+         'exclusive': bool(z.exclusive)}
+        for z in intent.blocks if z.rect is not None)
+
+
 def resolve_intent_gate(intent: Intent, pcb_data,
                         group_sources: Sequence[str] = ()
                         ) -> Tuple[Dict[str, object], List[Violation]]:
@@ -1239,14 +1261,7 @@ def resolve_intent_gate(intent: Intent, pcb_data,
         on tigard_placed).
     """
     blocks, problems = resolve_blocks(intent, pcb_data, group_sources)
-    zones = tuple(
-        {'name': z.name,
-         'rect': tuple(z.rect),
-         'tolerance_mm': intent.zone_tolerance(z),
-         'refs': tuple(blocks.get(z.name, ())),
-         'side': z.side,
-         'exclusive': bool(z.exclusive)}
-        for z in intent.blocks if z.rect is not None)
+    zones = zone_entries(intent, blocks)
 
     # Total coverage AND the per-member "leaves it no pose" case (#799), from
     # the one function `grade` also calls -- so the same intent on the same
@@ -2049,6 +2064,20 @@ def rule_zone_exclusive(ctx) -> Iterator[Violation]:
         if z.rect is None or not z.exclusive:
             continue
         members = set(ctx.blocks.get(z.name, ()))
+        # #797: a zone with no member VISIBLE HERE cannot tell a member from a
+        # stranger, so it grades nobody. Without this the rule flags every
+        # part on the board -- including the ones the block was drawn around --
+        # which is the rule inverted rather than applied.
+        #
+        # It is not enough to leave this to `block_unresolved`, and that was
+        # measured rather than assumed: `block_unresolved` is a SETTABLE
+        # severity, so an intent that downgrades it to `warn` produced a run
+        # whose ONLY error was `zone_exclusive`, against a part the seat gate
+        # had deliberately declined to bind and therefore could not repair.
+        # The seat gate (`quench.exclusive_spec`) skips the same zones, so the
+        # two agree at every severity.
+        if not (members & set(ctx.parts)):
+            continue
         for ref, part in sorted(ctx.parts.items()):
             if ref in members:
                 continue

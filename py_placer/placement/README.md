@@ -314,6 +314,7 @@ in the JSON_SUMMARY and as a NOTE:
 | verdict | what it means | what to do about it |
 | --- | --- | --- |
 | `keepout_blocks` | a **declared keep-out** is what refuses it — measured, not inferred: the poses are recounted with that keep-out lifted (#701) | move the keep-out, or add the part to its `allow` list if it owns it |
+| `zone_exclusive_blocks` | a **declared exclusive zone** is what refuses it, and the part is not a member of the block that reserved it — measured the same way, by recounting with that zone lifted (#797) | add the part to the block that owns the zone, move the zone, or drop its `exclusive` flag. There is no `allow` list here — **membership is the allow list** |
 | `no_movable_neighbour` | nothing seated is near enough to be in the way | the outline, the zone or the part's own size refuses it |
 | `immovable_given_frozen` | the only neighbours in the way are locked or declared edge connectors, **named with the decision that froze each** | relax that lock, or accept the pose |
 | `no_single_lift_frees` | movable neighbours censused; no single lift frees a pose | try `--evict-depth 2` |
@@ -326,7 +327,8 @@ in the JSON_SUMMARY and as a NOTE:
 `no_pose_census[ref]` carries the counts those verdicts came from — `boxed`,
 `movable`, `censused`, `frozen`, `truncated`, `baseline`, `pairs_total`,
 `pairs_censused`, `pairs_truncated`, `best_pair`, `keepouts_freeing`,
-`keepouts_joint` — so a capped sweep can never
+`keepouts_joint`, `zone_exclusive_freeing`, `zone_exclusive_joint` — so a
+capped sweep can never
 read as a complete one. `keepouts_freeing` is `{keep-out name: poses freed by
 lifting it}`, filled only for a part with no pose at all and only over the
 keep-outs that bind it; it is the count `keepout_blocks` is derived from, so
@@ -335,6 +337,13 @@ the verdict cannot drift from a differently-computed claim.
 once, and it exists because two that overlap over the part's feasible region
 each free *nothing alone* — so `keepouts_freeing` is `{}` and, without this,
 the verdict would fall back to `no_movable_neighbour` and blame the outline.
+`zone_exclusive_freeing` and `zone_exclusive_joint` are the identical pair for
+declared **exclusive zones** (#797), keyed by BLOCK name, and computed as a
+sibling of the keep-out sweep rather than inside it — a stranger can be refused
+by a reserved zone on a board that declares no keep-out anywhere. One gap is
+disclosed rather than fixed: both joint sweeps are per-RULE, so a part refused
+by a keep-out *and* an exclusive zone over the same pocket frees nothing under
+either and still falls back to `no_movable_neighbour`.
 `movable` and `censused` are deliberately separate:
 the first is how many neighbours *could* have been censused, the second how
 many were, and quoting the first as the second is the inversion the whole

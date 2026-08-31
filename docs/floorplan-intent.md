@@ -348,7 +348,7 @@ for it, and the reason is printed:
 | `envelope` | the declared envelope is not the board's outline | `board_bounds` |
 | `zone_containment` | a member's courtyard leaves its block's zone | `GradedPart.rect`. **Enforced, not only graded, since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702)** — the quench refuses such a MOVE, through the same `zone_escape` this rule calls |
 | `zone_side` | a member is on the other face | `legality.footprint_side` |
-| `zone_exclusive` | a non-member intrudes on a reserved zone | `rect_overlap_area`. **Enforced since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702)**, same way |
+| `zone_exclusive` | a non-member intrudes on a reserved zone | `rect_overlap_area`, **courtyard only** — a through-hole stranger's leads may cross a reserved zone, unlike a keep-out's. **Enforced since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702)**, same way — and since [#797](https://github.com/drandyhaas/KiCadRoutingTools/issues/797) the seat search refuses such a pose too, with the verdict `zone_exclusive_blocks` |
 | `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect. **Enforced, not only graded, since [#701](https://github.com/drandyhaas/KiCadRoutingTools/issues/701)** — the seat search refuses such a pose through the same `keepout_hit` this rule calls — and since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702) the quench refuses such a MOVE through it too |
 | `edge_connector` | overhang outside `[min,max]`, or the wrong edge; a `connector_affinity` entry seated more than 3 mm from every edge fires at **warn** whatever the configured severity | `BoardOutlineGate.rect_outside_amount`, `edge_clearance` |
 | `decap_distance` | a decoupling cap is too far from its own IC | `groups.decap_populations` (`near`) |
@@ -393,7 +393,7 @@ reports the whole picture in `accept_basis`.
 | rule | graded | seat search (#701) | quench gate (#702) | if not, why not |
 |---|---|---|---|---|
 | `zone_containment` | yes | via `zone_gate` | **yes** | — |
-| `zone_exclusive` | yes | no | **yes** | the seeder has no verdict string for this refusal yet |
+| `zone_exclusive` | yes | **yes** | **yes** | — |
 | `keepout` | yes | **yes** | **yes** | — |
 | `must_lock` | yes | — | **by freezing** | it is a claim about the FILE; no pose satisfies or violates it |
 | `edge_connector` | yes | anchor tier | **by freezing** | two of its three sub-claims are bounds on being *off* the board, so a per-pose term would fight the containment gate rather than complement it |
@@ -402,6 +402,29 @@ reports the whole picture in `accept_basis`.
 | `decap_ungraded`, `decap_pin_*` | yes | — | no | `decap_ungraded` is a claim about what the GRADE covers rather than about any pose, so there is nothing for a search to refuse. The pin rules are a THIRD currency — pad edge to pad edge on one net — and the objection below applies to them more strongly, not less |
 | `decap_distance` | yes | scope stage | no | graded in a currency the optimizer does not carry — pad centroid to an IC's pad bbox inflated 0.5 mm, not courtyard to courtyard. A gate in the wrong currency can *admit what the grade flags*, which is worse than no gate. And the cap→IC tether is re-elected from live poses, so a per-move form would have the `corridor_weight` non-stationarity problem too |
 | `legality` | yes | — | no | a whole-board aggregate against a BUDGET, so a per-pose form is non-local: whether A's move is admissible would depend on B's violation |
+
+The two zone rows reach the seat search by **different channels**, and the
+difference is the reason one of them could be gated and the other could not.
+`zone_containment` is a *must-be-inside* claim, so it arrives as the per-call
+`constraint` of `seeder.zone_gate` — anchor-aware, per-part, and never as a
+state-wide gate, because a monotone one would make a repair refuse its own
+target (`pose_score.make_state` withholds `intent_zones` from every seat state,
+and `tests/test_698_reseat_acceptance.py` arm H parses `seeder.py` to keep it
+that way). `zone_exclusive` is a *must-be-outside* claim whose target is clean
+by definition, so it can be — and is — gated **absolutely**, through
+`QuenchState.exclusive_clear` over the `zone_exclusive` slice of the same
+`build_zone_spec` the quench gate reads — one resolution and one measurement,
+so neither can invent its own idea of who is a member.
+
+They are not identical, and the one difference is deliberate. The seat slice
+drops a zone whose members did **not resolve**; the quench's per-move channel
+does not. "Stranger" means "not a member", so an unresolved block makes every
+part one, and a gate that can STRAND a part must not act on a claim it cannot
+attribute — while the quench only ever declines a move, so it cannot strand
+anything. `rule_zone_exclusive` carries the same filter, which is what keeps
+the pair that matters in step: a seat the search accepts and the grade then
+flags is an exit 4 on a correct board, and that is the round trip this table's
+`keepout` row records closing for #701.
 
 Enforcing is not free, and the price is recorded rather than described:
 `tests/test_placement_ab.py` carries four `intent-*` rows and

@@ -691,8 +691,17 @@ Examples:
         # a part into a declared keep-out -- on a board this tool's own seeder
         # placed correctly, which then exits 4 against its own intent. Same
         # repair, same reason, one more rule name.
+        #
+        # #797 adds the third, and it only WORKS because of #797: before the
+        # seat predicate had an exclusive-zone conjunct, this re-seat was free
+        # to put the stranger straight back into the zone it was moved out of,
+        # so listing the rule here would have been a repair that cannot
+        # repair. The quench does gate `zone_exclusive` per move (#702), and
+        # monotonically, so it can hold a clean seed clean but never fixes a
+        # breach that reaches the written board by any other route -- which is
+        # what this net is for.
         if not args.no_polish:
-            _repairable = ('zone_containment', 'keepout')
+            _repairable = ('zone_containment', 'keepout', 'zone_exclusive')
             broke = sorted({v.ref for v in graded.errors
                             if v.rule in _repairable and v.ref})
             _rules = sorted({v.rule for v in graded.errors
@@ -700,6 +709,8 @@ Examples:
             if broke:
                 import pose_score
                 pcb_cur = parse_kicad_pcb(args.output_file)
+                blocks2, _p = floorplan.resolve_blocks(intent, pcb_cur,
+                                                       sources)
                 st = pose_score.make_state(
                     pcb_cur, args.output_file, clearance=args.clearance,
                     board_edge_clearance=args.board_edge_clearance,
@@ -708,9 +719,14 @@ Examples:
                     # seeder.py. Without this the re-seat below would be free
                     # to put the part back into a declared keep-out while
                     # fixing its zone.
-                    keepouts=intent.keepouts)
-                blocks2, _p = floorplan.resolve_blocks(intent, pcb_cur,
-                                                       sources)
+                    keepouts=intent.keepouts,
+                    # #797: and the same for a declared exclusive zone --
+                    # without it this repair could move a part out of its
+                    # containment breach and straight into somebody's reserved
+                    # region, so `place_seed` would exit 4 on a board it had
+                    # just repaired. Resolved with `sources`, the same blocks
+                    # the grade below uses.
+                    exclusive_zones=floorplan.zone_entries(intent, blocks2))
                 zone_of = {}
                 for z in intent.blocks:
                     if z.rect is None:
@@ -719,6 +735,7 @@ Examples:
                         zone_of.setdefault(r, z)
                 seeded_pose = {p['reference']: p for p in result['placements']}
                 fixes = []
+                pinned = []
                 for ref in broke:
                     z = zone_of.get(ref)
                     sp = seeded_pose.get(ref)
@@ -728,6 +745,24 @@ Examples:
                     # of this repair silently inert on most boards.
                     if sp is None or ref not in st.parts:
                         continue
+                    # A KiCad-LOCKED part is not this repair's to move (#797).
+                    # `_try_place` does not consult `locked` -- it is a seat
+                    # search, and every OTHER caller filters its candidates
+                    # first -- so without this the repair silently relocates a
+                    # part the user pinned. Measured on glasgow_revC, which is
+                    # what found it: adding `zone_exclusive` to `_repairable`
+                    # made the loop reach two locked FIDUCIALS and move them,
+                    # FID3 from (122.000, 118.500) to (128.000, 92.500) -- a
+                    # 26mm move of an optical alignment target, which is a
+                    # manufacturing fact and not a placement opinion.
+                    #
+                    # The violation is REPORTED instead. A locked part inside
+                    # a declared zone is a contradiction between the file and
+                    # the intent, and only its author can say which one is
+                    # wrong; silently moving the part picks for them.
+                    if getattr(st.parts[ref], 'locked', False):
+                        pinned.append(ref)
+                        continue
                     clr = seeder._try_place(
                         st, ref, sp['new_x'], sp['new_y'], set(),
                         constraint=z.rect if z is not None else None,
@@ -736,6 +771,17 @@ Examples:
                         p2 = st.parts[ref]
                         fixes.append({'reference': ref, 'new_x': p2.x,
                                       'new_y': p2.y, 'new_rotation': p2.rot})
+                if pinned:
+                    # Named, never silent: a reader who sees the grade error
+                    # and no repair line would otherwise conclude the repair
+                    # is broken, when it declined on purpose.
+                    print(f"  NOT repaired, {', '.join(pinned)} "
+                          f"{'is' if len(pinned) == 1 else 'are'} "
+                          f"(locked yes) in the file: a pinned part inside a "
+                          f"declared {' / '.join(_rules)} is a contradiction "
+                          f"between the board and the intent, and only its "
+                          f"author can say which is wrong. Unlock it, or move "
+                          f"the claim off it")
                 if fixes:
                     print(f"  polish walked "
                           f"{', '.join(f['reference'] for f in fixes)} out of "
