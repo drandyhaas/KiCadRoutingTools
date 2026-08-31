@@ -2074,6 +2074,67 @@ class Corridor:
                 self.refused = still
             finally:
                 ctx.cfg = cfg0
+        if os.environ.get('ECON_RELAY',
+                          '1' if getattr(sched, 'two_page', False)
+                          else '0') == '1':
+            # ECONOMY RE-LAY (#622 K28 flank): the human trades LENGTH
+            # for vias -- the 4-via flank-joiners (SA8/SBA1/SDQ0/SRAS
+            # at K28) ride constant-B around the field in the human
+            # original at 2 vias each, +24% copper. Fanout-side tooth
+            # moves measured a dead end (0831 e1/e2: SDQ0 4->2 but ANY
+            # source perturbation flips SA4 open). So the trade is
+            # taken HERE, post-hoc, where it cannot break completion:
+            # rip one heavy lane, re-route it band-free against every
+            # other lane's REAL copper (rip-assist's bookkeeping),
+            # keep only a strictly-cheaper lane, restore exactly
+            # otherwise. Widest rung drops the window so the flank
+            # detour is inside the search. Default OFF.
+            import copy as _copy
+            cfg0 = ctx.cfg
+            big2 = _copy.copy(cfg0)
+            big2.max_iterations = 4 * max(cfg0.max_iterations, 50_000)
+            ctx.cfg = big2
+            try:
+                heavy = sorted((nm for nm in self.members
+                                if len(self.out_vias.get(nm) or ()) >= 3),
+                               key=lambda nm: -len(self.out_vias[nm]))
+                for nm in heavy:
+                    nid, _ = ctx.byname[nm]
+                    ids_s = {id(s) for s in self.out_segs[nm]}
+                    ids_v = {id(v) for v in self.out_vias[nm]}
+                    seg0 = list(ctx.pcb.segments)
+                    via0 = list(ctx.pcb.vias)
+                    ctx.pcb.segments = [s for s in seg0
+                                        if id(s) not in ids_s]
+                    ctx.pcb.vias = [v for v in via0
+                                    if id(v) not in ids_v]
+                    res = None
+                    for mg, wp in ((2.5, self.lane_xy[nm]),
+                                   (4.0, self.lane_xy[nm]),
+                                   (6.0, None)):
+                        r_ = cn.connect(ctx.pcb, nid, self.teeth[nm],
+                                        ctx.tooth_layer[nm],
+                                        self.stubs[nm],
+                                        ctx.dest_layer[nm], ctx.cfg,
+                                        band=None, margin=mg,
+                                        window_pts=wp)
+                        if r_ is not None \
+                                and len(r_[1]) < len(self.out_vias[nm]):
+                            res = r_
+                            break
+                    if res is None:
+                        ctx.pcb.segments = seg0
+                        ctx.pcb.vias = via0
+                        continue
+                    segs_o, vias_o = res
+                    ctx.pcb.segments.extend(segs_o)
+                    ctx.pcb.vias.extend(vias_o)
+                    log(f'    econ re-lay: {nm} '
+                        f'{len(self.out_vias[nm])} -> {len(vias_o)} '
+                        'via(s)')
+                    self.out_segs[nm], self.out_vias[nm] = segs_o, vias_o
+            finally:
+                ctx.cfg = cfg0
         self.sched = sched
         self.finish()
 
