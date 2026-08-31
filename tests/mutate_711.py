@@ -199,6 +199,18 @@ ROWS = [
     ('stage-one-drops-the-declared-window', 'sd',
      "            if _win is not None:",
      "            if False:",
+     (T706,), SURVIVED),
+    # The pair TOGETHER is load-bearing, and this is the row that proves it.
+    # Measured on splitflap_driver with two declared north connectors and
+    # `center_on_edge {tolerance_mm: 1.0}` on J17: both paths live -> x
+    # 121.92 (the centre); BOTH disabled -> x 91.44, which is frac 1/3, the
+    # even distribution. Either one alone still lands on the centre, which is
+    # why the two rows above are recorded survivors rather than deleted: they
+    # say WHICH redundancy exists, and this row says the redundancy is not
+    # dead code.
+    ('stage-one-ignores-the-declaration-entirely', 'sd',
+     "            _win = _declared_frac_window(c, _e_hi - _e_lo)",
+     "            _win = None; _dec = None",
      (T706,), KILLED),
 ]
 
