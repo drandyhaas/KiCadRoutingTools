@@ -452,9 +452,16 @@ def test_stage_one_honours_the_same_declaration():
     board = SPLIT
     pcb = parse_kicad_pcb(board)
     doc = fp.emit_intent(pcb, board, declare_classes=True)
+    # TWO connectors on the edge, and that is load-bearing. With ONE, the
+    # even distribution is (0+1)/(1+1) = 0.5 -- exactly what `center_on_edge`
+    # asks for -- so the fixture cannot tell the declaration from the default
+    # and the mutation battery caught it (`stage-one-ignores-the-declaration`
+    # SURVIVED). With two, the defaults are 1/3 and 2/3 and neither is 0.5.
     doc['edge_connectors'] = [{'ref': 'J17', 'edge': 'north',
                                'overhang_mm': {'min': 0.0, 'max': 1.0},
-                               'center_on_edge': {'tolerance_mm': 1.0}}]
+                               'center_on_edge': {'tolerance_mm': 1.0}},
+                              {'ref': 'J3', 'edge': 'north',
+                               'overhang_mm': {'min': 0.0, 'max': 1.0}}]
     intent = fp.intent_from_dict(doc, board)
     out = seeder.seed_from_intent(pcb, board, intent, random.Random(0))
     assert out, out
@@ -471,6 +478,8 @@ def test_stage_one_honours_the_same_declaration():
         part, st.board, 'north', e_lo, e_hi, (px - x0) / (x1 - x0))
     off_mm = (frac - 0.5) * (e_hi - e_lo)
     assert abs(off_mm) <= 1.0 + 1e-6, (frac, off_mm)
+    # ...and it is NOT merely where the even distribution would have put it.
+    assert abs(frac - 1.0 / 3.0) > 0.05 and abs(frac - 2.0 / 3.0) > 0.05, frac
     print(f"  PASS: stage 1 seated J17 with its courtyard centre at frac "
           f"{frac:.4f} ({off_mm:+.3f}mm), inside the declared 1.00mm "
           f"tolerance -- measured, not grepped")

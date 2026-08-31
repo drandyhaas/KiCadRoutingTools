@@ -184,9 +184,21 @@ ROWS = [
      'own rotation {was_rot:g}deg',
      'own rotation {part.rot:g}deg',
      (T706,), KILLED),
-    ('stage-one-ignores-the-declaration', 'sd',
-     '            frac = ((declared_to_ladder_frac(part, bounds, edge,',
-     '            _dec = None\n            frac = ((declared_to_ladder_frac(part, bounds, edge,',
+    # Stage 1 carries the declaration TWICE: `_dec` sets the preferred
+    # start, and the window clamp forces the result into the declared range.
+    # The clamp is what actually enforces it -- measured, neutering `_dec`
+    # alone changes nothing, because the clamp pulls the even-distribution
+    # fraction back into the window regardless. `_dec` is kept because it
+    # also arms the `_slide` ladder, and the redundancy is recorded rather
+    # than removed: a row that survives is a finding about the code, not a
+    # licence to delete the row.
+    ('stage-one-ignores-the-declared-start', 'sd',
+     "            _dec = _declared_frac(c)",
+     "            _dec = None",
+     (T706,), SURVIVED),
+    ('stage-one-drops-the-declared-window', 'sd',
+     "            if _win is not None:",
+     "            if False:",
      (T706,), KILLED),
 ]
 
