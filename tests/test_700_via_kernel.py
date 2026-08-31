@@ -23,6 +23,13 @@ sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 
 from fab_tiers import min_via_center_distance          # noqa: E402
 
+#: Modules the no-open-coded-copy guard scans. `escape.py` is here BEFORE it
+#: has a via term: the next copy of this rule will be written by the #700
+#: escape ledger, which is the whole reason the kernel was lifted out, and a
+#: guard that only covers where the copies WERE is guarding the past.
+GUARDED = ('py_router/add_gnd_vias.py', 'py_router/diff_pair_routing.py',
+           'py_placer/placement/escape.py', 'py_placer/placement/routability.py')
+
 
 def t_the_kernel_is_the_max_of_the_copper_and_drill_rules():
     """Both rules, over a grid wide enough that each one binds many times."""
@@ -95,21 +102,51 @@ def t_no_caller_still_open_codes_the_rule():
     comment quoting the old expression satisfies a grep and proves nothing,
     and this repo has shipped that mistake.
 
-    Matched by SHAPE, not by names. The rule is `max(<via + something>,
-    <drill + something>)` -- two ADDITIONS. Keying on "this max() mentions
-    both via_size and via_drill" is too broad and this test caught itself
-    doing it: `add_gnd_vias.py:148-149` is `max(via_drill / 2, via_size / 2 -
-    track_width / 2)`, a comparison of RADII for a clear-check scan, which is
-    a different quantity that must not be routed through this kernel.
+    Matched on shape AND names, and the boundaries of that are worth stating
+    because a first draft of this guard got both ends wrong.
+
+    TOO BROAD, caught by this test on itself: keying on "this max() mentions
+    via_size and via_drill" flags `add_gnd_vias.py:148-149`, which is
+    `max(via_drill / 2, via_size / 2 - track_width / 2)` -- a comparison of
+    RADII for a clear-check scan, a different quantity that must NOT be
+    routed through this kernel. Hence: both operands must be ADDITIONS, and
+    an operand containing a division is a radius form, not a pitch.
+
+    TOO NARROW, caught by the phase's verifier: reading only
+    `ast.Attribute` names let a re-introduction through locals survive every
+    case in this file --
+
+        via_size, clearance = config.via_size, config.clearance
+        via_drill, h2h = config.via_drill, config.hole_to_hole_clearance
+        d = max(via_size + clearance, via_drill + h2h)
+
+    -- so `ast.Name` ids count too.
+
+    WHAT IT STILL CANNOT SEE, stated rather than implied: operands named
+    `a`/`b`, a ternary, `np.maximum`, or a dict lookup. This is a
+    change-detector for the plausible re-introduction, not a proof. The
+    bounded half of the claim is `t_every_known_site_calls_the_kernel`,
+    which enumerates the sites instead of guessing at spellings.
     """
     def _addends(node):
-        """Attribute names appearing inside a top-level `+` operand."""
+        """Names in a top-level `+` operand -- attributes AND locals.
+
+        A `/` anywhere in the operand disqualifies it: this rule is a
+        centre-to-centre PITCH (diameter + gap), and every half-of-something
+        form in this repo is a radius comparison.
+        """
         if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Add):
             return set()
-        return {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)}
+        if any(isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div)
+               for n in ast.walk(node)):
+            return set()
+        return ({n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)}
+                | {n.id for n in ast.walk(node) if isinstance(n, ast.Name)})
 
-    for rel in ('py_router/add_gnd_vias.py', 'py_router/diff_pair_routing.py'):
+    for rel in GUARDED:
         path = os.path.join(ROOT, rel)
+        if not os.path.isfile(path):
+            continue
         tree = ast.parse(io.open(path, encoding='utf-8').read())
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Call)
@@ -120,14 +157,39 @@ def t_no_caller_still_open_codes_the_rule():
             drill = any('via_drill' in s for s in sums)
             assert not (copper and drill), (
                 f'{rel} still open-codes the via pitch rule: {sums}')
-    print("  PASS: no open-coded max(via+clr, drill+h2h) left in either module")
+    print(f"  PASS: no open-coded max(via+clr, drill+h2h) in {len(GUARDED)} "
+          f"modules")
+
+
+def t_every_known_site_calls_the_kernel():
+    """The bounded half: each site that needs the rule reaches it BY NAME.
+
+    The negative guard above cannot enumerate every way a copy could be
+    re-spelled -- a whitelist of spellings is where that kind of guard fails.
+    This one enumerates the SITES instead, which is a closed set, and asserts
+    the call is really there. A copy re-introduced beside a still-present
+    call would evade this, which is why both halves exist.
+    """
+    want = {'py_router/add_gnd_vias.py': 1,
+            'py_router/diff_pair_routing.py': 1}
+    for rel, least in want.items():
+        src = io.open(os.path.join(ROOT, rel), encoding='utf-8').read()
+        tree = ast.parse(src)
+        n = sum(1 for c in ast.walk(tree)
+                if isinstance(c, ast.Call)
+                and (getattr(c.func, 'id', None) == 'min_via_center_distance'
+                     or getattr(c.func, 'attr', None) == 'min_via_center_distance'))
+        assert n >= least, (
+            f'{rel} calls the shared kernel {n} time(s), expected >= {least}')
+    print("  PASS: every known site calls fab_tiers.min_via_center_distance")
 
 
 TESTS = (t_the_kernel_is_the_max_of_the_copper_and_drill_rules,
          t_the_491_case_still_answers_the_drill_rule,
          t_a_missing_hole_to_hole_is_zero_not_a_crash,
          t_the_adapter_agrees_with_the_kernel,
-         t_no_caller_still_open_codes_the_rule)
+         t_no_caller_still_open_codes_the_rule,
+         t_every_known_site_calls_the_kernel)
 
 
 def _every_case_is_registered():

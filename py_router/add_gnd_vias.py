@@ -128,10 +128,12 @@ def add_gnd_vias_to_existing_board(
     # Via-to-via minimum clearance (center-to-center) for batch placement: larger
     # of copper ring (via_size + clearance) and drill hole-to-hole (via_drill +
     # hole_to_hole_clearance), so a thin-ring via can't land inside the drill
-    # hole-to-hole minimum (issue #125). Same kernel as min_distance above.
-    via_via_min_dist = fab_tiers.min_via_center_distance(
-        config.via_size, config.clearance, config.via_drill,
-        config.hole_to_hole_clearance)
+    # hole-to-hole minimum (issue #125). Literally the same rule on the same
+    # config, so the same number as `min_distance` above -- kept as its own
+    # name because the two READ differently (signal-via-to-GND-via, versus
+    # GND-via-to-GND-via within one batch), and a reader tracing either should
+    # land on a name that says which question it answers.
+    via_via_min_dist = min_distance
 
     # Grid cells to check for via clearance
     # The obstacle map already expands tracks by track_width/2 + clearance.

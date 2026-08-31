@@ -221,16 +221,27 @@ def min_via_center_distance(via_diameter, clearance, via_drill,
     Lifted here from ``diff_pair_routing._min_via_center_distance`` so a
     stdlib-only, parser-free consumer can reach it. The placement escape ledger
     needs exactly this arithmetic, and importing ``diff_pair_routing`` from
-    ``placement/escape.py`` costs a measured +0.243s and +126 modules --
-    including the Rust ``grid_router``, numpy, ``kicad_parser`` and
-    ``obstacle_map`` -- into a module whose own docstring says "numpy only; no
-    networkx in the placement stack" and which ``board_brief`` and
-    ``routability.health`` import on every run. From here it is +0 modules:
-    ``list_nets`` (which the ledger already imports) imports this module.
+    ``placement/escape.py`` costs a measured **+126 modules** -- including the
+    Rust ``grid_router``, numpy, ``kicad_parser`` and ``obstacle_map`` -- into
+    a module whose own docstring says "numpy only; no networkx in the placement
+    stack" and which ``board_brief`` and ``routability.health`` import on every
+    run. (Roughly half a second, but the module count is the
+    machine-independent half, so that is the number quoted.) From here it is
+    +1 module / ~4ms from a bare ``placement.escape`` import, and +0 once
+    ``list_nets`` is loaded -- which the ledger's own ``lane_pitch`` does.
 
     VALUES IN, not a config object: ``py_placer`` has no ``GridRouteConfig`` to
     hand it, and a values-in signature is what lets both fronts share one rule
     rather than one of them re-deriving it.
+
+    ``hole_to_hole`` of ``None`` means NO DRILL RULE DECLARED and yields the
+    copper rule alone -- inherited verbatim from the adapter's long-standing
+    ``getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0``. Worth naming
+    because it is the permissive direction on the constraint this function
+    exists to enforce: every caller in the tree resolves the value through
+    ``list_nets.resolve_cli_floor`` or the GUI's floored spin control, and
+    ``GridRouteConfig.hole_to_hole_clearance`` defaults to 0.20, so no reachable
+    path passes None today. A future caller that can must pass a real floor.
     """
     return max(float(via_diameter) + float(clearance),
                float(via_drill) + float(hole_to_hole or 0.0))
