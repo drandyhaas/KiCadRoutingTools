@@ -762,17 +762,39 @@ class _Cap:
 
 
 def _candidate_positions(cap, max_disp, step, grid_step):
+    """Candidate cap centres, snapped on the OFFSET rather than the position.
+
+    Same #708 correction as `quench._candidate_positions`: snapping
+    `cap.seed_x + ix*step` to a lattice through board ORIGIN discards the
+    seed's residue and walks the part off whatever pitch the board was laid out
+    on, for nothing -- at every step this tool ships, the absolute snap removed
+    zero candidates.
+
+    Unlike quench, this site keeps the `grid_step` RASTER rather than the
+    board's inferred lattice, and that asymmetry is deliberate and measured.
+    This search IS the clearance repair: its whole job is to find the
+    sub-millimetre pose that clears a foreign via. At `step=0.2` the candidate
+    count is 81 on the raster, 29 on a 0.3175mm lattice and 9 on 0.635 -- so a
+    coarse lattice would starve exactly the search that must not be starved,
+    and the #313 via nudge downstream of it moves parts by as little as 0.6mm,
+    which a 1.27 lattice could not express at all.
+
+    The radius test now runs AFTER the snap, so `max_disp` is an exact cap. The
+    `grid_step*sqrt(2)/2` overshoot the via- and track-prune margins budget for
+    (see `_prune_vias` and the track channel note) is therefore gone rather
+    than merely bounded; both margins gain that much slack.
+    """
     seen = set()
     out = []
     n = int(max_disp / step)
     for ix in range(-n, n + 1):
         for iy in range(-n, n + 1):
-            cx = cap.seed_x + ix * step
-            cy = cap.seed_y + iy * step
-            if math.hypot(cx - cap.seed_x, cy - cap.seed_y) > max_disp + 1e-9:
+            dx = snap_to_grid(ix * step, grid_step)
+            dy = snap_to_grid(iy * step, grid_step)
+            if math.hypot(dx, dy) > max_disp + 1e-9:
                 continue
-            cx = snap_to_grid(cx, grid_step)
-            cy = snap_to_grid(cy, grid_step)
+            cx = cap.seed_x + dx
+            cy = cap.seed_y + dy
             key = (round(cx, 4), round(cy, 4))
             if key not in seen:
                 seen.add(key)

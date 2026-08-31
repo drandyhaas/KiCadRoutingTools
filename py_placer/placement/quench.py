@@ -45,6 +45,8 @@ from connectivity import compute_mst_edges
 from placement.parser import (courtyard_for_side, extract_courtyard_sides,
                               extract_locked_refs, warn_missing_courtyards)
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
+from placement.board_grid import (describe as describe_lattice,
+                                  resolve_snap_lattice)
 from placement import legality
 from placement.legality import (CONTAINER_RATIO, CONTAINMENT_FRAC,
                                 BoardOutlineGate, containment_frac,
@@ -2427,7 +2429,7 @@ class QuenchState:
             self._neighbors[ref] = lst
 
 
-def _group_offsets(state, refs, max_disp: float, step: float, grid_step: float):
+def _group_offsets(state, refs, max_disp: float, step: float, lattice: float):
     """Rigid (dx, dy) offsets a whole block may take (#459).
 
     The block translates as one body, so a single offset applies to every
@@ -2456,43 +2458,78 @@ def _group_offsets(state, refs, max_disp: float, step: float, grid_step: float):
         for iy in range(-n, n + 1):
             if ix == 0 and iy == 0:
                 continue
-            dx, dy = ix * step, iy * step
-            if math.hypot(dx, dy) > max_disp + 1e-9:
+            # Snap the OFFSET, so the block stays rigid: snapping each member
+            # independently would shear it by up to a lattice step. Snapping to
+            # the BOARD's lattice rather than the raster is #708: an offset
+            # that is a whole number of the designer's grid units carries every
+            # member from an on-lattice pose to another one.
+            sdx = snap_to_grid(ix * step, lattice)
+            sdy = snap_to_grid(iy * step, lattice)
+            if math.hypot(sdx, sdy) > max_disp + 1e-9:
                 continue
+            if (sdx, sdy) in seen or (sdx == 0.0 and sdy == 0.0):
+                continue
+            # Probe the pose that will actually be APPLIED. This used to snap
+            # the ABSOLUTE p.x + dx while the emitted offset was snap(dx), so
+            # the per-member seed cap -- the thing this docstring says keeps
+            # build_neighbor_lists' pruning exact and edges_near's cache valid
+            # -- was tested against a pose the block never takes. The gap was
+            # under 0.07mm at the raster and is under a lattice step now, but
+            # it was always the wrong quantity.
             ok = True
             for ref in refs:
                 p = state.parts[ref]
-                nx = snap_to_grid(p.x + dx, grid_step)
-                ny = snap_to_grid(p.y + dy, grid_step)
-                if math.hypot(nx - p.seed_x, ny - p.seed_y) > max_disp + 1e-9:
+                if math.hypot(p.x + sdx - p.seed_x,
+                              p.y + sdy - p.seed_y) > max_disp + 1e-9:
                     ok = False
                     break
             if not ok:
-                continue
-            # Snap the OFFSET, so the block stays rigid: snapping each member
-            # independently would shear it by up to a grid step.
-            sdx = snap_to_grid(dx, grid_step)
-            sdy = snap_to_grid(dy, grid_step)
-            if (sdx, sdy) in seen or (sdx == 0.0 and sdy == 0.0):
                 continue
             seen.add((sdx, sdy))
             yield sdx, sdy
 
 
 def _candidate_positions(part: _Part, max_disp: float, step: float,
-                         grid_step: float):
-    """Grid of candidate centers within max_disp of the seed position."""
+                         lattice: float):
+    """Grid of candidate centers within max_disp of the seed position.
+
+    The snap is on the OFFSET, not on the absolute position, and that
+    distinction is the whole of #708. `seed_x + ix*step` already carries
+    whatever phase the designer laid the board out on; snapping the SUM to a
+    lattice through board ORIGIN discards it, because seed_x is not generally a
+    multiple of anything. Snapping the offset instead inherits the seed's
+    phase, so a part on a 0.3175mm (12.5 mil) lattice is offered only poses on
+    that same lattice.
+
+    Two measurements behind this, both in `tests/measure_708_lattice.py`:
+
+      * the old absolute snap removed ZERO candidates at every step the tool
+        ships -- it was a pure translation of the whole set by the seed's
+        residue -- so nothing is lost by dropping it;
+      * snapping the offset to the RASTER would not be enough. At step=1.0 the
+        raster offsets are {0, +/-1.0, +/-2.0, ...} and 1.0 is not a multiple
+        of 0.3175, so only the zero offset lands back on the board's lattice.
+        Snapping to the lattice gives {0, +/-0.9525, +/-1.905, ...} and every
+        candidate stays on it, at 325 candidates against the raster's 317.
+
+    `lattice` is the board's own pitch when one can be read off it and the
+    `grid_step` raster otherwise, so a board with no inferable lattice keeps
+    exactly the offsets it has always had (see `placement/board_grid.py`).
+
+    The radius test runs AFTER the snap, so `max_disp` is an exact cap rather
+    than one overshot by up to lattice*sqrt(2)/2.
+    """
     seen = set()
     out = []
     n = int(max_disp / step)
     for ix in range(-n, n + 1):
         for iy in range(-n, n + 1):
-            cx = part.seed_x + ix * step
-            cy = part.seed_y + iy * step
-            if math.hypot(cx - part.seed_x, cy - part.seed_y) > max_disp + 1e-9:
+            dx = snap_to_grid(ix * step, lattice)
+            dy = snap_to_grid(iy * step, lattice)
+            if math.hypot(dx, dy) > max_disp + 1e-9:
                 continue
-            cx = snap_to_grid(cx, grid_step)
-            cy = snap_to_grid(cy, grid_step)
+            cx = part.seed_x + dx
+            cy = part.seed_y + dy
             key = (round(cx, 4), round(cy, 4))
             if key not in seen:
                 seen.add(key)
@@ -2666,6 +2703,18 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         corridor_specs=corridor_specs,
                         keepouts=(intent_gate or {}).get('keepouts'),
                         intent_zones=(intent_gate or {}).get('zones'))
+    # #708: the lattice candidate OFFSETS are multiples of. The board's own
+    # pitch when one can be read off it, the `grid_step` raster otherwise --
+    # which is exactly the granularity offsets have always had, so a board with
+    # no inferable lattice is unaffected by the choice. There is deliberately
+    # no flag: the fallback IS the off state and the board picks it.
+    lattice, lattice_evidence = resolve_snap_lattice(pcb_data, grid_step)
+    print(describe_lattice(lattice_evidence))
+
+    # Unchanged, and now conservative rather than exact: the offsets are
+    # snapped BEFORE the radius test, so a candidate is within max_displacement
+    # of its seed rather than up to a snap diagonal past it. The old
+    # `+ grid_step` slack covered that overshoot and now simply exceeds it.
     state.build_neighbor_lists(max_displacement + grid_step)
 
     before = state.total_cost()
@@ -2745,7 +2794,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
             base_cost = eval_group(0.0, 0.0)
             best = (base_cost, 0.0, 0.0)
             for ddx, ddy in _group_offsets(state, refs, max_displacement, step,
-                                           grid_step):
+                                           lattice):
                 if not state.group_move_valid(refs, ddx, ddy):
                     continue
                 c = eval_group(ddx, ddy)
@@ -2805,7 +2854,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
 
             best = (current_cost, part.x, part.y, part.rot)
             for cx, cy in _candidate_positions(part, max_displacement, step,
-                                               grid_step):
+                                               lattice):
                 for rot in rotations:
                     if (cx, cy, rot) == (part.x, part.y, part.rot):
                         continue
@@ -3002,6 +3051,13 @@ def quench(pcb_data: PCBData, pcb_file: str,
         metrics_out['before'] = dict(before)
         metrics_out['after'] = dict(after)
         metrics_out['legality'] = state.legality_metrics()
+        # #708: which lattice the candidate offsets were multiples of, and how
+        # that was decided. `source` distinguishes "the board declared one"
+        # from "it did not and we used the raster" -- without it, a run on a
+        # board with no lattice and a run where the inference was never wired
+        # report the same thing.
+        metrics_out['board_grid'] = dict(lattice_evidence,
+                                         resolved=lattice)
         # #702: what the declared-intent gate actually DID. Always present when
         # a gate was built, and `rejected: 0` is a real answer -- without this
         # key, "the gate refused nothing" and "the gate was never wired" are

@@ -194,9 +194,14 @@ def test_no_stranding_after_full_run():
         ref = placement['reference']
         ox, oy = orig[ref]
         dist = math.hypot(placement['new_x'] - ox, placement['new_y'] - oy)
-        # 0.1 = default grid_step: candidate positions snap to the grid, so a
-        # radius-capped candidate can end up at most one snap past the cap.
-        assert dist <= max_disp + 0.1 + 1e-6, \
+        # EXACT, with no snap slop, since #708. The old bound was
+        # `max_disp + 0.1` because `_candidate_positions` tested the radius on
+        # the UNSNAPPED candidate and snapped afterwards, so a final pose could
+        # sit up to grid_step*sqrt(2)/2 past the cap. It now snaps the offset
+        # first and tests the radius on that, so the cap is the cap. Measured
+        # on this fixture: the largest displacement is 2.8575mm -- 9 x 0.3175,
+        # the board's own lattice -- against a 3.0mm cap.
+        assert dist <= max_disp + 1e-6, \
             f"{ref} stranded {dist:.3f}mm from seed (cap {max_disp}mm)"
 
 
